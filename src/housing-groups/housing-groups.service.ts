@@ -8,6 +8,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
@@ -98,6 +100,7 @@ export class HousingGroupsService {
     // The poster is told what happened to their own submission, in-app plus
     // push (LOC-19). QueerPulse sends no email.
     private readonly notifications: NotificationsService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async listPublished(): Promise<HousingGroupDTO[]> {
@@ -507,6 +510,15 @@ export class HousingGroupsService {
         riskReasons: assessment.reasons,
         postedByUserId: userId,
       }),
+    );
+    // Every listing lands in `review` straight away (there is no draft
+    // state), so `createListing` IS the submit-for-review path. Tell whoever
+    // works the housing-group-listing queue that a new one landed. Awaited,
+    // but safe to await: `announce` catches everything internally, so a
+    // notification failure can never fail the poster's submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.HousingGroupListings,
+      saved.id,
     );
     // The poster's own view, so the 201 already carries `status: 'review'`.
     // Answering a submission with the public DTO left the client with nothing

@@ -1,6 +1,8 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { Profile } from '../users/entities/profile.entity';
 import {
   Partner,
@@ -41,6 +43,7 @@ describe('PartnersService', () => {
   // PRD-37. `notifyDecided` is documented as never throwing, so the default
   // stub resolves; the failure case is forced per-test.
   let submissionDecisions: { notifyDecided: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   const baseDto = {
     name: 'ILGA Portugal',
@@ -80,6 +83,9 @@ describe('PartnersService', () => {
     submissionDecisions = {
       notifyDecided: jest.fn().mockResolvedValue(undefined),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -89,6 +95,10 @@ describe('PartnersService', () => {
         {
           provide: SubmissionDecisionNotifier,
           useValue: submissionDecisions,
+        },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
         },
       ],
     }).compile();
@@ -297,6 +307,30 @@ describe('PartnersService', () => {
           },
         }),
       );
+    });
+
+    it('tells the partner-application queue with the saved row id', async () => {
+      await service.submitApplication('member-1', {
+        ...baseDto,
+        handle: 'ilga-portugal',
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.PartnerApplications,
+        'partner-1',
+      );
+    });
+
+    it('tells nobody when the application is never saved', async () => {
+      partners.save.mockRejectedValueOnce(new Error('write failed'));
+
+      await expect(
+        service.submitApplication('member-1', {
+          ...baseDto,
+          handle: 'ilga-portugal',
+        }),
+      ).rejects.toThrow('write failed');
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 

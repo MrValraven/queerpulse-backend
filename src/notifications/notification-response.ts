@@ -451,6 +451,14 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'overdueCount',
       'oldestItemHours',
     ],
+    // The queue this row is about, and nothing else. `source` rides in
+    // COMMON_PAYLOAD_KEYS and is what the deep link is built from.
+    //
+    // `itemId` is stored on the row for correlation and is deliberately NOT
+    // forwarded: the bell links to the QUEUE, and the item that landed is read
+    // behind the console's own authentication. This is the same line
+    // `ModerationQueueAlert` draws, for the same reason.
+    [NotificationType.AdminQueueItem]: ['queue'],
 
     // --- The four approval queues (LOC-19) ---------------------------------
     // Each carries the `decision` its copy branches on, the member's own

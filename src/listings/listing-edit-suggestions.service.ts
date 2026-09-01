@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MemberLookup } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -70,6 +72,7 @@ export class ListingEditSuggestionsService {
     private readonly suggestions: Repository<ListingEditSuggestion>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly notifications: NotificationsService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /**
@@ -124,6 +127,14 @@ export class ListingEditSuggestionsService {
         proposedValue,
         status: ListingEditSuggestionStatus.Pending,
       }),
+    );
+
+    // Tell whoever works the edit-suggestion queue that a suggestion landed.
+    // Awaited, but safe to await: `announce` catches everything internally,
+    // so a notification failure can never fail the member's submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.ListingEditSuggestions,
+      saved.id,
     );
 
     return { id: saved.id, status: saved.status };

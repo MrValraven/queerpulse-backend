@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { CreateStorySubmissionDto } from './dto/create-story-submission.dto';
 import {
   MagazineStorySubmission,
@@ -10,12 +12,16 @@ import { StorySubmissionsService } from './story-submissions.service';
 describe('StorySubmissionsService', () => {
   let service: StorySubmissionsService;
   let submissions: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     submissions = {
       create: jest.fn((input: Partial<MagazineStorySubmission>) => input),
       save: jest.fn(),
       find: jest.fn(),
+    };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -24,6 +30,10 @@ describe('StorySubmissionsService', () => {
         {
           provide: getRepositoryToken(MagazineStorySubmission),
           useValue: submissions,
+        },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
         },
       ],
     }).compile();
@@ -81,6 +91,49 @@ describe('StorySubmissionsService', () => {
         decidedAt: null,
         createdAt: '2026-07-15T12:00:00.000Z',
       });
+    });
+
+    it('tells the magazine-submission queue with the saved row id', async () => {
+      const dto: CreateStorySubmissionDto = {
+        format: 'Personal essay',
+        workingTitle: 'The city keeps changing around us',
+        pitch: 'A short pitch about displacement.',
+      };
+      submissions.save.mockResolvedValue({
+        id: 'sub-3',
+        userId: 'user-1',
+        format: dto.format,
+        workingTitle: dto.workingTitle,
+        pitch: dto.pitch,
+        deck: null,
+        body: null,
+        coverImageKey: null,
+        status: SubmissionStatus.Submitted,
+        decision: null,
+        decisionNote: null,
+        decidedAt: null,
+        createdAt: new Date('2026-07-15T12:00:00.000Z'),
+      });
+
+      await service.create('user-1', dto);
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.MagazineSubmissions,
+        'sub-3',
+      );
+    });
+
+    it('tells nobody when the submission is never saved', async () => {
+      submissions.save.mockRejectedValueOnce(new Error('write failed'));
+
+      await expect(
+        service.create('user-1', {
+          format: 'Opinion',
+          workingTitle: 'Why our archives cannot wait',
+          pitch: 'An argument for funding queer memory work now.',
+        }),
+      ).rejects.toThrow('write failed');
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
     it('normalises an absent deck/body/cover to null', async () => {

@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Not, Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { RoadmapItem, RoadmapColumn } from './entities/roadmap-item.entity';
 import { RoadmapIdea, RoadmapIdeaStatus } from './entities/roadmap-idea.entity';
@@ -34,6 +36,7 @@ export class RoadmapService {
     private readonly votes: Repository<RoadmapVote>,
     @InjectRepository(RoadmapSettings)
     private readonly settings: Repository<RoadmapSettings>,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   // Real member-vote counts for a batch of targets, keyed by targetId. A
@@ -194,7 +197,7 @@ export class RoadmapService {
       .createQueryBuilder('idea')
       .select('MAX(idea.sortOrder)', 'max')
       .getRawOne<{ max: number | null }>();
-    await this.ideas.save(
+    const savedIdea = await this.ideas.save(
       this.ideas.create({
         text: dto.text,
         status: RoadmapIdeaStatus.Pending,
@@ -202,6 +205,15 @@ export class RoadmapService {
         votes: 0,
         sortOrder: (maxOrder?.max ?? -1) + 1,
       }),
+    );
+    // Tell whoever works the roadmap queue that an idea landed. Awaited, but
+    // safe to await: `announce` catches everything internally, so a
+    // notification failure can never fail the member's submission. No
+    // transaction wraps this write, so the row is already committed by the
+    // time this call is reached.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.RoadmapIdeas,
+      savedIdea.id,
     );
     return { status: 'pending' };
   }

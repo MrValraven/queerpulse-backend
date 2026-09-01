@@ -1,6 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { Profile } from '../users/entities/profile.entity';
 import { ChangemakerNomination } from './entities/changemaker-nomination.entity';
 import { CreateChangemakerNominationDto } from './dto/create-changemaker-nomination.dto';
@@ -13,6 +15,7 @@ describe('ChangemakerNominationsService', () => {
   let repo: { create: jest.Mock; save: jest.Mock };
   /** Rows `MemberLookup.userIdsForSlugs` finds for this test. */
   let activeProfiles: { slug: string; userId: string }[];
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -34,12 +37,19 @@ describe('ChangemakerNominationsService', () => {
       getMany: jest.fn(() => Promise.resolve(activeProfiles)),
     };
     const profiles = { createQueryBuilder: jest.fn(() => queryBuilder) };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ChangemakerNominationsService,
         { provide: getRepositoryToken(ChangemakerNomination), useValue: repo },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(ChangemakerNominationsService);
@@ -110,6 +120,22 @@ describe('ChangemakerNominationsService', () => {
       expect(repo.create).toHaveBeenLastCalledWith(
         expect.objectContaining({ nomineeContact: null }),
       );
+    });
+
+    it('tells the changemaker-nomination queue with the saved row id', async () => {
+      await service.create('u1', dto);
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.ChangemakerNominations,
+        'cn-1',
+      );
+    });
+
+    it('tells nobody when the nomination is never saved', async () => {
+      repo.save.mockRejectedValueOnce(new Error('write failed'));
+
+      await expect(service.create('u1', dto)).rejects.toThrow('write failed');
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 });

@@ -19,6 +19,8 @@ import {
 } from '../common/queue-assignment';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { BulkDecideVerificationRequestsResultDTO } from './dto/bulk-decide-verification-requests.dto';
@@ -175,6 +177,7 @@ export class VerificationService {
     private readonly identityProvider: IdentityVerificationProvider,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /** The member's current level (email floor when no explicit row exists). */
@@ -951,6 +954,14 @@ export class VerificationService {
       actorUserId: userId,
       requestId: request.id,
     });
+
+    // Tell whoever works the verification queue that a request landed.
+    // Awaited, but safe to await: `announce` catches everything internally, so
+    // a notification failure can never fail the member's submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.Verification,
+      request.id,
+    );
 
     return request;
   }

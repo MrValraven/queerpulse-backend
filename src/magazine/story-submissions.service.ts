@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { CreateStorySubmissionDto } from './dto/create-story-submission.dto';
 import { MagazineStorySubmission } from './entities/magazine-story-submission.entity';
 import {
@@ -19,6 +21,7 @@ export class StorySubmissionsService {
   constructor(
     @InjectRepository(MagazineStorySubmission)
     private readonly submissions: Repository<MagazineStorySubmission>,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async create(
@@ -40,6 +43,13 @@ export class StorySubmissionsService {
         // blank key that `toImageUrl` would then have to defend against.
         coverImageKey: dto.coverImageKey?.trim() || null,
       }),
+    );
+    // Tell whoever works the magazine-submission queue that a story landed.
+    // Awaited, but safe to await: `announce` catches everything internally,
+    // so a notification failure can never fail the member's submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.MagazineSubmissions,
+      saved.id,
     );
     return toStorySubmissionResponse(saved);
   }

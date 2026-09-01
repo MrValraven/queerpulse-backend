@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { SubmissionsModule } from '../submissions/submissions.module';
@@ -29,6 +30,9 @@ import { PartnersService } from './partners.service';
     // in `NotificationsModule` only, nothing there reaches back here, so no
     // `forwardRef()`.
     SubmissionsModule,
+    // Tells whoever works the partner-application queue when a member's own
+    // application lands.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     PartnersController,

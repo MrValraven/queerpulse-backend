@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { IntakeSubmission } from './entities/intake-submission.entity';
 import { IntakesController } from './intakes.controller';
 import { IntakesService } from './intakes.service';
@@ -14,6 +15,7 @@ import { IntakesService } from './intakes.service';
   imports: [
     TypeOrmModule.forFeature([IntakeSubmission, Profile]),
     NotificationsModule,
+    AdminQueueNotificationsModule,
   ],
   controllers: [IntakesController],
   providers: [IntakesService],

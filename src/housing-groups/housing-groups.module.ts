@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { Connection } from '../connections/entities/connection.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -41,6 +42,9 @@ import { HousingGroupsService } from './housing-groups.service';
     // LOC-19: the poster of a group listing is told the review's outcome,
     // in-app plus push. No cycle — NotificationsModule does not import this one.
     NotificationsModule,
+    // `AdminQueueNotificationsService`: tells the housing-group-listing
+    // queue's reviewers when `createListing` lands a new listing in review.
+    AdminQueueNotificationsModule,
   ],
   controllers: [HousingGroupsController, AdminHousingGroupListingsController],
   providers: [HousingGroupsService],

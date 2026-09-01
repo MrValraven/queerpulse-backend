@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { UsersModule } from '../users/users.module';
 import { AdminVerificationController } from './admin-verification.controller';
 import { MemberVerification } from './entities/member-verification.entity';
@@ -40,6 +41,7 @@ import { VerificationService } from './verification.service';
     // Notifies the member when an admin overrides/downgrades their level
     // (Task 4 of the audit-trail phase — see NotificationsService).
     NotificationsModule,
+    AdminQueueNotificationsModule,
   ],
   controllers: [VerificationController, AdminVerificationController],
   providers: [

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -31,6 +32,9 @@ import { ChangemakerNomination } from './entities/changemaker-nomination.entity'
       Profile,
     ]),
     NotificationsModule,
+    // Tells whoever works the changemaker-nomination queue when a member's
+    // own nomination lands.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     ChangemakersController,

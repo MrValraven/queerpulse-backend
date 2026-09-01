@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -40,6 +41,9 @@ import { AdminRoadmapController } from './admin-roadmap.controller';
     // `NotificationsService` — tell a member their submitted idea's status
     // changed (published or dismissed).
     NotificationsModule,
+    // `AdminQueueNotificationsService`: tells the roadmap queue's staff that
+    // a submitted idea landed.
+    AdminQueueNotificationsModule,
   ],
   // `AdminRoadmapController` (`/admin/roadmap/*`) carries the staff routes
   // that used to live on `RoadmapController` under an `admin/*` path prefix —

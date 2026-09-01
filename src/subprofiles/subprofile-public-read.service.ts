@@ -541,7 +541,11 @@ export class SubprofilePublicReadService {
       linkedUserIds.length > 0
         ? this.profiles.find({
             where: { userId: In(linkedUserIds) },
-            select: ['userId', 'slug'],
+            // The name parts ride along for the card's "Owner Name | Poet"
+            // title on a persona still named after its profession — two extra
+            // columns on the query that already resolves `ownerSlug`, never a
+            // new read. Composed exactly like `SubprofileOwnerRef.name` above.
+            select: ['userId', 'slug', 'firstName', 'lastName'],
           })
         : Promise.resolve([]),
       // ONE batched crop lookup for every card's avatar on the page — never
@@ -553,6 +557,14 @@ export class SubprofilePublicReadService {
     const ownerSlugByUserId = new Map(
       ownerProfiles.map((profile) => [profile.userId, profile.slug]),
     );
+    // An owner with both name parts blank composes to "", which would title a
+    // card as " | Poet" — normalised to null so the persona keeps its bare name.
+    const ownerNameByUserId = new Map(
+      ownerProfiles.map((profile) => [
+        profile.userId,
+        `${profile.firstName} ${profile.lastName}`.trim() || null,
+      ]),
+    );
     return {
       items: rows.map((row) =>
         toCardDTO(
@@ -562,6 +574,7 @@ export class SubprofilePublicReadService {
           followerCountsById.get(row.id) ?? 0,
           ownerSlugByUserId.get(row.userId) ?? null,
           crops,
+          ownerNameByUserId.get(row.userId) ?? null,
         ),
       ),
       total,

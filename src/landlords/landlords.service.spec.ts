@@ -11,6 +11,8 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
@@ -197,6 +199,7 @@ describe('LandlordsService', () => {
   // the callback straight through with a sentinel manager.
   let dataSource: { transaction: jest.Mock };
   const transactionManager = { sentinel: 'entity-manager' };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     landlords = {
@@ -249,6 +252,9 @@ describe('LandlordsService', () => {
           runInTransaction(transactionManager),
       ),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -268,6 +274,10 @@ describe('LandlordsService', () => {
         { provide: NotificationsService, useValue: notifications },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: DataSource, useValue: dataSource },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(LandlordsService);
@@ -414,6 +424,34 @@ describe('LandlordsService', () => {
       );
       expect(result.slug).toBeDefined();
     });
+
+    it('tells the landlord-suggestion queue that a suggestion landed', async () => {
+      landlords.exists.mockResolvedValue(false);
+      landlords.save.mockImplementation((row: unknown) =>
+        Promise.resolve(
+          makeLandlord({ ...(row as object), id: 'landlord-new' }),
+        ),
+      );
+
+      await service.suggest('user-1', { name: 'New One' });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.LandlordSuggestions,
+        'landlord-new',
+      );
+    });
+
+    it('tells nobody when the affirming pledge has not been accepted', async () => {
+      affirmingPledge.requireAccepted.mockRejectedValue(
+        new Error('AFFIRMING_PLEDGE_REQUIRED'),
+      );
+
+      await expect(
+        service.suggest('user-1', { name: 'New One' }),
+      ).rejects.toThrow();
+      expect(landlords.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
   });
 
   describe('recommend', () => {
@@ -548,6 +586,38 @@ describe('LandlordsService', () => {
         id: 'intro-1',
         status: LandlordIntroRequestStatus.Pending,
       });
+    });
+
+    it('tells the landlord-intro-request queue that a request landed', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      introRequests.save.mockResolvedValue({
+        id: 'intro-1',
+        status: LandlordIntroRequestStatus.Pending,
+      });
+
+      await service.createIntroRequest('friendly-landlord', 'user-1', {
+        name: 'Sam',
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.LandlordIntroRequests,
+        'intro-1',
+      );
+    });
+
+    it('tells nobody when the verification step-up is refused', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      verification.requireLevel.mockRejectedValue(
+        new Error('VERIFICATION_REQUIRED'),
+      );
+
+      await expect(
+        service.createIntroRequest('friendly-landlord', 'user-1', {
+          name: 'Sam',
+        }),
+      ).rejects.toThrow();
+      expect(introRequests.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 

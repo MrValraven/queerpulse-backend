@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { Event } from '../events/entities/event.entity';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
@@ -130,6 +131,11 @@ import { ListingsService } from './listings.service';
     // controller and no entity, and imports `NotificationsModule` alone, which
     // never reaches back here.
     SubmissionsModule,
+    // Tells whoever works the listing-submission, listing-claim and
+    // edit-suggestion queues when a member's own action lands a new row.
+    // Shared by `ListingsService`, `ListingClaimsService` and
+    // `ListingEditSuggestionsService`, all providers of this module.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     // FIRST, and that is load-bearing rather than stylistic. Nest resolves

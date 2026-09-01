@@ -57,6 +57,7 @@ import { AdminTopicsModule } from './admin-topics/admin-topics.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminModerationHealthModule } from './admin-moderation-health/admin-moderation-health.module';
+import { AdminQueueNotificationsModule } from './admin-queue-notifications/admin-queue-notifications.module';
 import { AdminReportsModule } from './admin-reports/admin-reports.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
 import { MyMediaModule } from './my-media/my-media.module';
@@ -351,6 +352,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     // /admin/moderation/queue-health, which is why it is named here in its own
     // right rather than folded into AdminOverviewModule.
     AdminModerationHealthModule,
+    AdminQueueNotificationsModule,
     AdminReportsModule,
     AdminMediaModule,
     MyMediaModule,

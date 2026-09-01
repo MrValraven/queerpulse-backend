@@ -1010,6 +1010,25 @@ export enum NotificationType {
    * See migration `AddSubmissionAndReviewNotificationTypes1796400000000`.
    */
   ReviewReplied = 'review_replied',
+
+  /**
+   * Sent to the staff who can work an admin review queue when an item lands in
+   * it. One value for all twenty-six queues; which queue is in
+   * `payload.queue`, a key from `AdminQueueKey`.
+   *
+   * No actor, so no block or mute between the submitting member and whoever is
+   * on shift can swallow it, and the bell never names the submitter. No
+   * preference category: duty mail, always written. Absent from the push
+   * whitelist, matching `ModerationQueueAlert`.
+   *
+   * The one always-delivered type that BUNDLES. Its subject is the queue, so
+   * twelve invite requests inside the bundling window collapse into one unread
+   * row. See `notification-bundling.ts` for why that exception is sound here
+   * and nowhere else in this group.
+   *
+   * See migration `AddAdminQueueItemNotificationType1798000000000`.
+   */
+  AdminQueueItem = 'admin_queue_item',
 }
 
 @Entity('notifications')

@@ -227,6 +227,11 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // already deduplicated at source (one per queue per state change, not one
     // per hourly tick), so there is no volume here for a switch to control.
     NotificationType.ModerationQueueAlert,
+    // An item landing in an admin review queue (one value for all twenty-six
+    // queues; see `notification.entity.ts`). It is staff duty mail with no
+    // member-facing switch: a member can never receive one, so there is no
+    // volume here for a switch to control.
+    NotificationType.AdminQueueItem,
     // A community moderator handing platform staff a ban-evasion question
     // (PRD-31). Reaches platform `moderator`/`admin` accounts only (a member
     // can never receive one), and it is duty mail on a question somebody asked

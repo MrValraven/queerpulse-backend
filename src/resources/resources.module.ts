@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { SubmissionsModule } from '../submissions/submissions.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -38,6 +39,9 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
     // pulls in `NotificationsModule` only, and nothing there reaches back
     // here.
     SubmissionsModule,
+    // Tells whoever works the resource-suggestion queue when a member's own
+    // suggestion lands.
+    AdminQueueNotificationsModule,
 
     TypeOrmModule.forFeature([
       // Read-only, and only for `RolesOrStaffGuard` on this module's admin

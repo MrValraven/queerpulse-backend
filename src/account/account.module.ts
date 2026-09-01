@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { CompanyReview } from '../companies/entities/company-review.entity';
 import { CommunitiesModule } from '../communities/communities.module';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
@@ -96,6 +97,7 @@ import { DsarRequest } from './entities/dsar-request.entity';
     // `forwardRef`: `MediaReferencesModule` does not import `AccountModule`,
     // directly or transitively.
     MediaReferencesModule,
+    AdminQueueNotificationsModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,

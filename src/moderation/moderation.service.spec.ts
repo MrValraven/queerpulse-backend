@@ -33,6 +33,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 
 // Chainable query-builder stub whose terminal method resolves to a
 // configurable row list (mirrors `partners.service.spec.ts`'s `qbStub`,
@@ -170,6 +172,7 @@ describe('ModerationService', () => {
   let subjectResolver: { resolve: jest.Mock; resolveMany: jest.Mock };
   // TS-06: the raw `DataSource.query` behind the queue's subject clusters.
   let dataSourceQuery: jest.Mock;
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     reports = {
@@ -246,6 +249,10 @@ describe('ModerationService', () => {
     };
 
     dataSourceQuery = jest.fn().mockResolvedValue([]);
+
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     // Defaults to "nothing resolved", so a `warn` or a `suspend` on a content
     // report fails closed in every pre-existing test unless it opts in.
@@ -356,6 +363,10 @@ describe('ModerationService', () => {
             withdrawPendingHold: jest.fn().mockResolvedValue(false),
             expireDueHolds: jest.fn().mockResolvedValue([]),
           },
+        },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
         },
       ],
     }).compile();
@@ -1815,6 +1826,142 @@ describe('ModerationService', () => {
         ),
       ).toHaveLength(0);
     });
+
+    // The riskiest claim in the whole ban-ratifications wiring: bulk-banning
+    // one member across many reports must announce ONCE, on the report that
+    // opens the hold, never once per report. `banRatifications` in the outer
+    // `beforeEach` always answers `findOne` with `null`, which would make
+    // every report in a bulk selection look like it opens a fresh hold — that
+    // is not what real Postgres would do, since each report's transaction
+    // commits before the next one starts and the second `findOne` would see
+    // the first report's row. This stateful stub mirrors that: `save` records
+    // the hold it created against `targetUserId`, and `findOne` answers with
+    // whatever is on file for that target, so the mock actually enforces the
+    // real sequencing rather than asserting it by fiat.
+    describe('ban-ratification announce (TS-12 / admin-queue-notifications)', () => {
+      const statefulBanRatifications = () => {
+        const holdsByTarget = new Map<
+          string,
+          { id: string; expiresAt: Date }
+        >();
+        let nextHoldId = 1;
+        banRatifications.findOne.mockImplementation(
+          ({ where }: { where: { targetUserId: string } }) =>
+            Promise.resolve(holdsByTarget.get(where.targetUserId) ?? null),
+        );
+        banRatifications.save.mockImplementation(
+          (row: { targetUserId: string }) => {
+            const hold = {
+              id: `ratification-${nextHoldId++}`,
+              expiresAt: new Date(Date.now() + 72 * 60 * 60 * 1000),
+              ...row,
+            };
+            holdsByTarget.set(row.targetUserId, hold);
+            return Promise.resolve(hold);
+          },
+        );
+        return holdsByTarget;
+      };
+
+      const memberBanReport = (id: string, subjectId: string) =>
+        baseReport({
+          id,
+          subjectType: ReportSubjectType.Member,
+          subjectId,
+        });
+
+      it('announces once per hold when several reports name the SAME member, not once per report', async () => {
+        statefulBanRatifications();
+        reports.find.mockResolvedValue([
+          memberBanReport('report-1', 'reported-member'),
+          memberBanReport('report-2', 'reported-member'),
+          memberBanReport('report-3', 'reported-member'),
+        ]);
+        profiles.findOne.mockResolvedValue({
+          userId: 'user-1',
+          slug: 'reported-member',
+        });
+        users.findOne.mockResolvedValue({
+          id: 'user-1',
+          role: UserRole.Member,
+          status: UserStatus.Active,
+        });
+
+        const res = await service.bulkActOnReports('actor-1', {
+          ids: ['report-1', 'report-2', 'report-3'],
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        });
+
+        expect(res.updated).toEqual(['report-1', 'report-2', 'report-3']);
+        // Three reports opened/joined a hold; only the FIRST opened it.
+        expect(banRatifications.save).toHaveBeenCalledTimes(1);
+        expect(adminQueueNotifications.announce).toHaveBeenCalledTimes(1);
+        expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+          AdminQueueKey.BanRatifications,
+          'ratification-1',
+          ['actor-1'],
+        );
+      });
+
+      it('announces once per hold, per distinct member, when reports name TWO different members', async () => {
+        statefulBanRatifications();
+        reports.find.mockResolvedValue([
+          memberBanReport('report-1', 'member-one'),
+          memberBanReport('report-2', 'member-two'),
+          memberBanReport('report-3', 'member-one'),
+        ]);
+        // `resolveReportedProfile` queries with `where` as an ARRAY of
+        // alternatives (`[{ slug }, { userId }]` for a uuid-shaped subject id,
+        // `[{ slug }]` otherwise) — these fixture ids are plain strings, so
+        // it is always the single-element `[{ slug }]` form.
+        profiles.findOne.mockImplementation(
+          (opts: { where: Array<{ slug?: string }> }) => {
+            const slug = opts.where[0]?.slug;
+            if (slug === 'member-one') {
+              return Promise.resolve({ userId: 'user-1', slug: 'member-one' });
+            }
+            if (slug === 'member-two') {
+              return Promise.resolve({ userId: 'user-2', slug: 'member-two' });
+            }
+            return Promise.resolve(null);
+          },
+        );
+        users.findOne.mockImplementation((opts: { where: { id: string } }) =>
+          Promise.resolve({
+            id: opts.where.id,
+            role: UserRole.Member,
+            status: UserStatus.Active,
+          }),
+        );
+
+        const res = await service.bulkActOnReports('actor-1', {
+          ids: ['report-1', 'report-2', 'report-3'],
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        });
+
+        expect(res.updated).toEqual(['report-1', 'report-2', 'report-3']);
+        // Two distinct members: two holds opened (report-1 and report-2),
+        // report-3 joins report-1's already-open hold.
+        expect(banRatifications.save).toHaveBeenCalledTimes(2);
+        expect(adminQueueNotifications.announce).toHaveBeenCalledTimes(2);
+        expect(adminQueueNotifications.announce).toHaveBeenNthCalledWith(
+          1,
+          AdminQueueKey.BanRatifications,
+          'ratification-1',
+          ['actor-1'],
+        );
+        expect(adminQueueNotifications.announce).toHaveBeenNthCalledWith(
+          2,
+          AdminQueueKey.BanRatifications,
+          'ratification-2',
+          ['actor-1'],
+        );
+      });
+    });
   });
 
   /**
@@ -2087,6 +2234,32 @@ describe('ModerationService', () => {
       expect(appeals.create).toHaveBeenCalledWith(
         expect.objectContaining({ actionId: null, community: null }),
       );
+    });
+
+    it('tells the appeals queue that a new appeal landed', async () => {
+      auditLogs.findOne.mockResolvedValue(null);
+
+      await service.submitAppeal(APPELLANT_ID, {
+        reason: 'Nobody told me what I did and I want it reviewed.',
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.Appeals,
+        'appeal-1',
+      );
+    });
+
+    it('tells nobody when the filing is refused', async () => {
+      const longAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      auditLogs.findOne.mockResolvedValue(auditRow(longAgo));
+      dataSourceQuery.mockResolvedValue([]);
+
+      await expect(
+        service.submitAppeal(APPELLANT_ID, {
+          reason: 'This was a mistake and I would like it looked at again.',
+        }),
+      ).rejects.toThrow(/14 days/);
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 
@@ -2383,6 +2556,40 @@ describe('ModerationService', () => {
       });
 
       expect(revokeAllForUser).toHaveBeenCalledWith('user-1');
+    });
+
+    it('tells the ban-ratifications queue a hold is waiting, excluding the proposing moderator', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.BanRatifications,
+        'ratification-1',
+        ['actor-1'],
+      );
+    });
+
+    it('does not announce again when the ban joins an already-pending hold', async () => {
+      // A second report against the same member, resolved while the first
+      // report's hold is still live: `openBanHold` joins it rather than
+      // opening a second one, and a repeat notification about the same
+      // pending row would tell staff nothing new.
+      banRatifications.findOne.mockResolvedValue({
+        id: 'ratification-existing',
+        targetUserId: 'user-1',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
     // The audit's open gap: a warned/suspended/banned member was told nothing.

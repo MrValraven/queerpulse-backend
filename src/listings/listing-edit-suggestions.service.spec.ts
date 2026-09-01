@@ -3,6 +3,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
@@ -33,6 +35,7 @@ describe('ListingEditSuggestionsService', () => {
   };
   let profiles: { find: jest.Mock };
   let notifications: { create: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -48,6 +51,9 @@ describe('ListingEditSuggestionsService', () => {
     };
     profiles = { find: jest.fn() };
     notifications = { create: jest.fn() };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -59,6 +65,10 @@ describe('ListingEditSuggestionsService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: NotificationsService, useValue: notifications },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(ListingEditSuggestionsService);
@@ -104,6 +114,39 @@ describe('ListingEditSuggestionsService', () => {
         id: 'sugg-1',
         status: ListingEditSuggestionStatus.Pending,
       });
+    });
+
+    it('tells the edit-suggestion queue with the saved row id', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'galeria-lume',
+        ownerId: 'owner-1',
+      });
+      suggestions.save.mockResolvedValue({
+        id: 'sugg-1',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+
+      await service.submit('galeria-lume', 'member-1', dto);
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.ListingEditSuggestions,
+        'sugg-1',
+      );
+    });
+
+    it('tells nobody when the suggestion is refused as a self-suggestion', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'galeria-lume',
+        ownerId: 'owner-1',
+      });
+
+      await expect(
+        service.submit('galeria-lume', 'owner-1', dto),
+      ).rejects.toThrow(BadRequestException);
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
     it('rejects a message that is only whitespace after trimming', async () => {

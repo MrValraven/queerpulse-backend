@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { AdminCommissionInterestsController } from './admin-commission-interests.controller';
@@ -22,6 +23,9 @@ import { CommissionInterest } from './entities/commission-interest.entity';
       CommissionInterest,
       Profile,
     ]),
+    // Tells whoever works the commission-interest queue when a member's own
+    // interest lands.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     CommissionInterestsController,

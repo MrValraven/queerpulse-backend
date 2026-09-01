@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { Listing } from '../listings/entities/listing.entity';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
@@ -75,6 +76,7 @@ import { ReportSubjectResolverService } from './report-subject-resolver.service'
     // import) — the same cross-feature reuse `EventsModule`/`ForumModule`/
     // `VolunteeringModule` already lean on it for. Closes no cycle.
     CommunityMembershipModule,
+    AdminQueueNotificationsModule,
   ],
   // `AppealsController` (member-facing `POST /appeals`) shares `ModerationService`
   // with `ModerationController` (the mod/admin queue + review), so submitted

@@ -6,6 +6,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { resolveListingLocation, resolveListingTimezone } from './listing-city';
 import { toImageUrl } from '../common/image-url';
@@ -735,6 +737,7 @@ export class ListingsService {
     // nothing else, so there is no cycle back into this module and no
     // `forwardRef`.
     private readonly reviewReplies: ReviewReplyNotifier,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
@@ -745,6 +748,14 @@ export class ListingsService {
 
     const ref = await this.nextRef();
     const saved = await this.createWithUniqueSlug(ownerId, ref, dto);
+    // Tell whoever works the listing-submission queue that a listing landed
+    // for review. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the member's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.ListingSubmissions,
+      saved.id,
+    );
     // A "friendly" (unowned) or suggested listing needs a human to reach out to
     // the business so it can claim/correct the entry — enqueue that as a task in
     // the shared moderation queue (item #13). Best-effort: never fail the

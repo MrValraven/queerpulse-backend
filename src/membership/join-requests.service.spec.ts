@@ -18,6 +18,8 @@ import { JoinRequestsService } from './join-requests.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 
 const uniqueViolation = () =>
   new QueryFailedError('insert', [], {
@@ -76,6 +78,7 @@ describe('JoinRequestsService', () => {
   let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
   let manager: { getRepository: jest.Mock };
   let platformSettings: { get: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     qb = {
@@ -167,6 +170,9 @@ describe('JoinRequestsService', () => {
         registrationClosedMessage: null,
       }),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         JoinRequestsService,
@@ -174,6 +180,10 @@ describe('JoinRequestsService', () => {
         { provide: InvitesService, useValue: invites },
         { provide: DataSource, useValue: dataSource },
         { provide: PlatformSettingsService, useValue: platformSettings },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(JoinRequestsService);
@@ -266,6 +276,23 @@ describe('JoinRequestsService', () => {
       await expect(service.submit(dto())).rejects.toBeInstanceOf(
         ConflictException,
       );
+    });
+
+    it('tells the join-request rota that an application landed', async () => {
+      await service.submit(dto());
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.InviteRequests,
+        'r1',
+      );
+    });
+
+    it('tells nobody when the submission is refused', async () => {
+      platformSettings.get.mockResolvedValue({
+        joinRequestsEnabled: false,
+        registrationClosedMessage: null,
+      });
+      await expect(service.submit(dto())).rejects.toThrow();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
     describe('18+ gate', () => {

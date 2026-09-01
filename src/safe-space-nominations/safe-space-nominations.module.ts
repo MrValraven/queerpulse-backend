@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -58,6 +59,9 @@ import { SafeSpaceReviewSweeperService } from './safe-space-review-sweeper.servi
     ]),
     NotificationsModule,
     SafeSpaceVouchesModule,
+    // Tells whoever works the safe-space nomination and flag queues when a
+    // member's own action lands a new row.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     SafeSpaceNominationsController,

@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MemberLookup } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateChangemakerNominationDto } from './dto/create-changemaker-nomination.dto';
@@ -16,6 +18,7 @@ export class ChangemakerNominationsService {
     @InjectRepository(ChangemakerNomination)
     private readonly changemakerNominations: Repository<ChangemakerNomination>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async create(
@@ -31,6 +34,14 @@ export class ChangemakerNominationsService {
         nomineeUserId,
         nomineeContact: dto.nomineeContact?.trim() || null,
       }),
+    );
+    // Tell whoever works the changemaker-nomination queue that a nomination
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the member's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.ChangemakerNominations,
+      saved.id,
     );
     return toChangemakerNominationResponse(saved);
   }

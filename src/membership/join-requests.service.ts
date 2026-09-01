@@ -39,6 +39,8 @@ import {
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 
 const MIN_AGE_YEARS = 18;
 
@@ -136,6 +138,7 @@ export class JoinRequestsService {
     private readonly invitesService: InvitesService,
     private readonly dataSource: DataSource,
     private readonly platformSettings: PlatformSettingsService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /**
@@ -278,10 +281,17 @@ export class JoinRequestsService {
       statusTokenHash: hashStatusToken(statusToken),
     });
     try {
-      return toSubmittedJoinRequestView(
-        await this.joinRequests.save(request),
-        statusToken,
+      const savedRequest = await this.joinRequests.save(request);
+      // Tell whoever is on the join-request rota that somebody is waiting.
+      // Awaited rather than fired and forgotten so a slow bell shows up in
+      // this request's own latency instead of as an unhandled rejection, and
+      // safe to await because `announce` catches everything: a notification
+      // failure can never fail an applicant's submission.
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.InviteRequests,
+        savedRequest.id,
       );
+      return toSubmittedJoinRequestView(savedRequest, statusToken);
     } catch (err) {
       // The pre-check above races with a concurrent submit; the partial unique
       // index UQ_join_requests_pending_email is the real backstop. Map 23505 to

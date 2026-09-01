@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import {
   DEFAULT_LIST_LIMIT,
@@ -69,6 +71,7 @@ export class ListingClaimsService {
     // transaction (`revokeAllForOwnershipTransfer`). Injected rather than
     // reached through `ListingsService`, which this file does not depend on.
     private readonly coManagers: ListingCoManagersService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /**
@@ -112,6 +115,13 @@ export class ListingClaimsService {
           note: note ?? null,
           status: ListingClaimStatus.Pending,
         }),
+      );
+      // Tell whoever works the listing-claim queue that a claim landed.
+      // Awaited, but safe to await: `announce` catches everything internally,
+      // so a notification failure can never fail the member's submission.
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.ListingClaims,
+        saved.id,
       );
       return this.buildDTO(saved, listing);
     } catch (error) {

@@ -351,7 +351,7 @@ describe('SubprofilePublicReadService', () => {
       );
     });
 
-    it('feeds each card the REAL batched follower/social/tags/ownerSlug reads, never a per-card query', async () => {
+    it('feeds each card the REAL batched follower/social/tags/owner reads, never a per-card query', async () => {
       const unlinkedRow = makeSubprofile({
         id: 'sp-a',
         handle: 'nightform',
@@ -383,7 +383,12 @@ describe('SubprofilePublicReadService', () => {
         { subprofileId: 'sp-a', tags: ['queer', 'art'] },
       ]);
       profiles.find.mockResolvedValue([
-        { userId: 'owner-2', slug: 'starlet-owner' },
+        {
+          userId: 'owner-2',
+          slug: 'starlet-owner',
+          firstName: 'Ana',
+          lastName: 'Reis',
+        },
       ]);
 
       const result = await service.directory({}, 'viewer-1');
@@ -395,10 +400,12 @@ describe('SubprofilePublicReadService', () => {
         'sp-a',
         'sp-b',
       ]);
-      // Owner-slug resolution is batched over ONLY the linked rows' userIds.
+      // Owner identity resolution is batched over ONLY the linked rows'
+      // userIds, and pulls the name parts on the SAME query as the slug — the
+      // card's "Owner Name | Poet" title must never cost an extra read.
       expect(profiles.find).toHaveBeenCalledWith({
         where: { userId: In(['owner-2']) },
-        select: ['userId', 'slug'],
+        select: ['userId', 'slug', 'firstName', 'lastName'],
       });
 
       const nightformCard = result.items.find(
@@ -410,6 +417,7 @@ describe('SubprofilePublicReadService', () => {
       // Never leaked for an unlinked persona, even though `profiles.find`
       // only ever resolves linked rows.
       expect(nightformCard?.ownerSlug).toBeNull();
+      expect(nightformCard?.ownerName).toBeNull();
 
       const starletCard = result.items.find(
         (card) => card.displayName === 'Starlet',
@@ -418,6 +426,9 @@ describe('SubprofilePublicReadService', () => {
       expect(starletCard?.socialCount).toBe(0); // missing from the batched map
       expect(starletCard?.tags).toEqual([]);
       expect(starletCard?.ownerSlug).toBe('starlet-owner');
+      // Composed from the profile's name parts, exactly like the public DTO's
+      // `SubprofileOwnerRef.name`.
+      expect(starletCard?.ownerName).toBe('Ana Reis');
     });
   });
 });

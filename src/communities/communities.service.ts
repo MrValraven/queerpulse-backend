@@ -14,7 +14,11 @@ import {
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
-import { countCommunityTagFacets } from './community-tag-facets';
+import {
+  BUSY_THRESHOLD,
+  countCommunityTagFacets,
+  countCommunityToggleFacets,
+} from './community-browse-facets';
 import { escapeLikeTerm } from '../common/like-escape';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { ConnectionsService } from '../connections/connections.service';
@@ -34,6 +38,8 @@ import { toStoredPlainTextOrNull } from './community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
@@ -239,6 +245,14 @@ export interface CommunityListQuery {
   // Matches `communities.is_online`. Undefined applies no filter, so both
   // `true` and `false` are real, expressible answers.
   online?: boolean;
+  // `true` narrows to communities at or above `BUSY_THRESHOLD` active members
+  // this week. One-way on purpose, unlike `online`: "quiet this week" is not a
+  // thing anyone browses for, so `false` and absent are the same answer.
+  //
+  // Server-side because `communities.active_this_week` is a denormalised,
+  // indexed counter — the frontend used to drain every remaining page into the
+  // browser to apply this cut itself.
+  busy?: boolean;
 }
 
 /** Body of `freeze`. `note` is the moderator's optional short PUBLIC line
@@ -347,6 +361,9 @@ export class CommunitiesService {
     // no cycle: `CommunityBanRatificationService` depends only on repositories,
     // the governance log and notifications, and never on this service.
     private readonly banRatifications: CommunityBanRatificationService,
+    // Tells whoever works the community-tag-request queue that a new
+    // suggestion landed (`createTagRequest` below).
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   private readonly logger = new Logger(CommunitiesService.name);
@@ -618,13 +635,17 @@ export class CommunitiesService {
    *
    * `skip` lifts one filter group so that group's own availability counts can
    * be taken from everything else (the member directory's
-   * `directoryBaseQuery(q, viewer, skip)` is the same contract). Only `tags`
-   * carries counts today.
+   * `directoryBaseQuery(q, viewer, skip)` is the same contract).
    */
   private browseBaseQuery(
     viewerId: string,
     query: CommunityListQuery,
-    skip?: 'tags',
+    // Which filter group's own predicate to leave OFF, so this query can be
+    // reused to count that group's facets. 'toggles' lifts BOTH scalar toggles
+    // (`access` and `busy`) at once — `countCommunityToggleFacets` re-applies
+    // the other one inline, which costs one scan for two numbers rather than a
+    // lifted base and a scan per toggle.
+    skip?: 'tags' | 'toggles',
   ): SelectQueryBuilder<Community> {
     const filter = query.filter ?? 'discover';
 
@@ -657,7 +678,7 @@ export class CommunitiesService {
     if (query.type) {
       communitiesQuery.andWhere('c.type = :type', { type: query.type });
     }
-    if (query.access) {
+    if (skip !== 'toggles' && query.access) {
       communitiesQuery.andWhere('c.access_tier = :access', {
         access: query.access,
       });
@@ -700,6 +721,14 @@ export class CommunitiesService {
     if (query.online !== undefined) {
       communitiesQuery.andWhere('c.is_online = :isOnline', {
         isOnline: query.online,
+      });
+    }
+    // "Busy this week", straight off the indexed `active_this_week` counter
+    // (`IDX_communities_active_this_week`). Lifted with the access filter when
+    // this query is the one counting the toggle facets.
+    if (skip !== 'toggles' && query.busy) {
+      communitiesQuery.andWhere('c.activeThisWeek >= :busyThreshold', {
+        busyThreshold: BUSY_THRESHOLD,
       });
     }
     // Curated tag filter. Plain array-overlap against the GIN-indexed
@@ -756,9 +785,12 @@ export class CommunitiesService {
       communitiesQuery.orderBy('c.createdAt', 'DESC');
     }
 
-    // The page and the tag aggregate are independent reads of the same
-    // committed snapshot, so they go out together rather than in series.
-    const [pageOfCards, tags] = await Promise.all([
+    // The page and the two facet aggregates are independent reads of the same
+    // committed snapshot, so they go out together rather than in series. Two
+    // aggregates and not three: the toggles share a scan (see
+    // `countCommunityToggleFacets`), the tags cannot join them because their
+    // lifted base is a different one.
+    const [pageOfCards, tags, toggles] = await Promise.all([
       paginate(communitiesQuery, page, async (rows) => {
         if (!rows.length) return [];
         const communityIds = rows.map((community) => community.id);
@@ -775,8 +807,12 @@ export class CommunitiesService {
         );
       }),
       countCommunityTagFacets(this.browseBaseQuery(viewerId, query, 'tags')),
+      countCommunityToggleFacets(
+        this.browseBaseQuery(viewerId, query, 'toggles'),
+        query,
+      ),
     ]);
-    return { ...pageOfCards, facets: { tags } };
+    return { ...pageOfCards, facets: { tags, ...toggles } };
   }
 
   /**
@@ -1975,6 +2011,13 @@ export class CommunitiesService {
         label: dto.label.trim(),
         note: dto.note?.trim() ? dto.note.trim() : null,
       }),
+    );
+    // Tell whoever works the community-tag-request queue that a suggestion
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail this write.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.CommunityTagRequests,
+      saved.id,
     );
     return toCommunityTagRequestResponse(saved);
   }

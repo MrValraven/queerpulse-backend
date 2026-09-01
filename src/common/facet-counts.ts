@@ -22,21 +22,30 @@ import { type ObjectLiteral, type SelectQueryBuilder } from 'typeorm';
  * community/viewer pair); `NOT EXISTS` visibility gates are predicates, not
  * joins, and are always safe.
  *
- * Shared by `countDirectoryFacets` (member directory) and
- * `countCommunityTagFacets` (communities browse) so the two cannot drift into
- * counting differently.
+ * `clause` is handed the option alongside its parameter name, so a group whose
+ * options are not variations of one predicate (the browse toggles: an access
+ * tier and an activity threshold) can still share this one scan instead of
+ * paying a second aggregate round-trip. Parameters beyond the per-option one
+ * survive — set them on the builder before calling.
+ *
+ * Shared by `countDirectoryFacets` (member directory) and the communities
+ * browse facets (`countCommunityTagFacets`, `countCommunityToggleFacets`) so
+ * they cannot drift into counting differently.
  */
 export async function countByFilterClauses<E extends ObjectLiteral>(
   qb: SelectQueryBuilder<E>,
   options: readonly string[],
-  clause: (param: string) => string,
+  clause: (param: string, option: string) => string,
   parameterFor: (option: string) => unknown,
 ): Promise<Record<string, number>> {
   if (!options.length) return {};
   qb.select([]);
   options.forEach((option, index) => {
     const param = `facetOption${index}`;
-    qb.addSelect(`COUNT(*) FILTER (WHERE ${clause(param)})`, `f${index}`);
+    qb.addSelect(
+      `COUNT(*) FILTER (WHERE ${clause(param, option)})`,
+      `f${index}`,
+    );
     qb.setParameter(param, parameterFor(option));
   });
   const row = await qb.getRawOne<Record<string, string | number | null>>();

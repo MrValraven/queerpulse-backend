@@ -518,6 +518,29 @@ describe('toCardDTO', () => {
     expect(card.socialCount).toBe(3);
     expect(card.tags).toEqual(['ambient']);
   });
+
+  // The owner's NAME rides the same linked-only rule as `ownerSlug`: it feeds
+  // the FE's "Owner Name | Poet" title for a persona still named after its
+  // profession, so leaking it for an unlinked (pseudonymous) persona would
+  // undo that persona's anonymity.
+  it('exposes the owner name for a LINKED persona', () => {
+    const sp = makeSubprofile({
+      handle: 'starlet',
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    const card = toCardDTO(sp, 0, [], 0, 'ana', new Map(), 'Ana Reis');
+    expect(card.ownerName).toBe('Ana Reis');
+  });
+
+  it('never exposes the owner name for an UNLINKED persona, even when passed one', () => {
+    const sp = makeSubprofile({
+      handle: 'nightform',
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    const card = toCardDTO(sp, 0, [], 0, 'ana', new Map(), 'Ana Reis');
+    expect(card.ownerName).toBeNull();
+    expect(card.ownerSlug).toBeNull();
+  });
 });
 
 // --- typed mock helpers ------------------------------------------------------

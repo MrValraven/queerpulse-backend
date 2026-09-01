@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { Listing, SafeSpaceStatus } from '../listings/entities/listing.entity';
 import {
@@ -53,6 +55,7 @@ export class SafeSpaceFlagsService {
     private readonly badges: SafeSpaceBadgeService,
     private readonly audits: SafeSpaceAuditService,
     private readonly notifier: SafeSpaceNotifierService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /**
@@ -123,6 +126,16 @@ export class SafeSpaceFlagsService {
       }
       throw error;
     }
+
+    // Tell whoever works the flag queue that a new flag landed. Awaited, but
+    // safe to await: `announce` catches everything internally, so a
+    // notification failure can never fail the member's submission. Not sent
+    // on the idempotent branches above, since those return an existing flag
+    // rather than raising a new one.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.SafeSpaceFlags,
+      flag.id,
+    );
 
     await this.audits.record({
       subjectType: 'flag',

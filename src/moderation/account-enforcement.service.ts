@@ -7,6 +7,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
@@ -111,6 +113,7 @@ export class AccountEnforcementService {
     // ban-evasion module can keep correlation material for the invite
     // review queue.
     private readonly eventEmitter: EventEmitter2,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   // PATCH /mod/users/:userId/suspension — lift a suspension or ban.
@@ -346,6 +349,13 @@ export class AccountEnforcementService {
     kind: 'suspend' | 'ban' | 'restrict' | 'ban_pending';
     /** Only on `ban_pending`: the hold a second moderator has to act on. */
     ratificationId?: string;
+    /**
+     * Only on `ban_pending`: whether this call OPENED the hold rather than
+     * joining an existing one. Callers use it to decide whether to announce
+     * the arrival on the ban-ratifications admin queue: a report that joins
+     * an already-pending hold has nothing new to tell staff.
+     */
+    isNewBanHold?: boolean;
   } | null> {
     if (
       dto.action !== 'suspend' &&
@@ -471,7 +481,7 @@ export class AccountEnforcementService {
     // and staff carve-outs and the duration validation refuse a bad ban before
     // any hold is opened.
     if (dto.action === 'ban') {
-      const hold = await this.openBanHold(manager, {
+      const { hold, isNewHold } = await this.openBanHold(manager, {
         targetUserId: userId,
         reportId: report.id,
         requestedBy: actorId ?? null,
@@ -501,6 +511,7 @@ export class AccountEnforcementService {
         suspendedUntil: hold.expiresAt,
         kind: 'ban_pending',
         ratificationId: hold.id,
+        isNewBanHold: isNewHold,
       };
     }
 
@@ -556,7 +567,7 @@ export class AccountEnforcementService {
       reasonCode: string | null;
       now: Date;
     },
-  ): Promise<BanRatification> {
+  ): Promise<{ hold: BanRatification; isNewHold: boolean }> {
     const repo = manager.getRepository(BanRatification);
     const existing = await repo.findOne({
       where: {
@@ -565,7 +576,12 @@ export class AccountEnforcementService {
       },
     });
     if (existing && existing.expiresAt.getTime() > input.now.getTime()) {
-      return existing;
+      // JOINED, not opened. `isNewHold: false` tells every caller not to
+      // announce a second time: staff already heard about this hold, and a
+      // repeat notification about the same pending row tells them nothing
+      // new. See `AdminQueueNotificationsService`'s call-after-commit
+      // contract.
+      return { hold: existing, isNewHold: false };
     }
     if (existing) {
       await repo.update(
@@ -584,7 +600,7 @@ export class AccountEnforcementService {
       ? `${profile.firstName} ${profile.lastName}`.trim()
       : null;
 
-    return repo.save(
+    const hold = await repo.save(
       repo.create({
         targetUserId: input.targetUserId,
         targetName,
@@ -597,6 +613,7 @@ export class AccountEnforcementService {
         status: BanRatificationStatus.Pending,
       }),
     );
+    return { hold, isNewHold: true };
   }
 
   /**
@@ -712,52 +729,79 @@ export class AccountEnforcementService {
     // have made the whole control theatre: a compromised staff account would
     // simply use this door instead. So a `ban` here opens the same hold, and
     // the member is suspended for its length rather than removed.
-    const holdExpiresAt = await this.dataSource.transaction(
-      async (manager): Promise<Date | null> => {
-        const hold =
-          dto.action === 'ban'
-            ? await this.openBanHold(manager, {
-                targetUserId: userId,
-                reportId: null,
-                requestedBy: actorId,
-                note: dto.note,
-                reasonCode: dto.reasonCode,
-                now,
-              })
-            : null;
-        const persistedUntil = hold ? hold.expiresAt : suspendedUntil;
+    const { holdExpiresAt, isNewHold, ratificationId } =
+      await this.dataSource.transaction(
+        async (
+          manager,
+        ): Promise<{
+          holdExpiresAt: Date | null;
+          isNewHold: boolean;
+          ratificationId: string | null;
+        }> => {
+          const openedHold =
+            dto.action === 'ban'
+              ? await this.openBanHold(manager, {
+                  targetUserId: userId,
+                  reportId: null,
+                  requestedBy: actorId,
+                  note: dto.note,
+                  reasonCode: dto.reasonCode,
+                  now,
+                })
+              : null;
+          const hold = openedHold?.hold ?? null;
+          const persistedUntil = hold ? hold.expiresAt : suspendedUntil;
 
-        await manager.update(
-          User,
-          { id: userId },
-          {
-            ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
-            suspendedUntil: persistedUntil,
-          },
-        );
-        await this.syncDeactivationPreviousStatus(
-          manager,
-          userId,
-          UserStatus.Suspended,
-        );
-        // Report-less audit row (reportId = null): this action answers to no
-        // particular report. It surfaces in the global `GET /mod/audit` feed but
-        // not `GET /mod/reports/audit`, which filters by report. A pending ban
-        // is recorded as pending, carrying the hold's expiry, for the same
-        // reason the report path records it that way: the trail must not say
-        // someone was removed while a second moderator has yet to agree.
-        await this.audit.writeAuditLog(
-          null,
-          actorId,
-          hold ? BAN_PENDING_AUDIT_ACTION : dto.action,
-          dto.reasonCode,
-          dto.note,
-          hold ? hold.expiresAt.toISOString() : dto.duration,
-          manager,
-        );
-        return hold ? hold.expiresAt : null;
-      },
-    );
+          await manager.update(
+            User,
+            { id: userId },
+            {
+              ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
+              suspendedUntil: persistedUntil,
+            },
+          );
+          await this.syncDeactivationPreviousStatus(
+            manager,
+            userId,
+            UserStatus.Suspended,
+          );
+          // Report-less audit row (reportId = null): this action answers to no
+          // particular report. It surfaces in the global `GET /mod/audit` feed but
+          // not `GET /mod/reports/audit`, which filters by report. A pending ban
+          // is recorded as pending, carrying the hold's expiry, for the same
+          // reason the report path records it that way: the trail must not say
+          // someone was removed while a second moderator has yet to agree.
+          await this.audit.writeAuditLog(
+            null,
+            actorId,
+            hold ? BAN_PENDING_AUDIT_ACTION : dto.action,
+            dto.reasonCode,
+            dto.note,
+            hold ? hold.expiresAt.toISOString() : dto.duration,
+            manager,
+          );
+          return {
+            holdExpiresAt: hold ? hold.expiresAt : null,
+            isNewHold: openedHold?.isNewHold ?? false,
+            ratificationId: hold ? hold.id : null,
+          };
+        },
+      );
+
+    // TS-12. Tell the ban-ratifications queue a hold is waiting, but only when
+    // this call OPENED it: a restrict that joined an already-pending hold has
+    // nothing new to tell staff. Post-commit and best effort, same as the
+    // `ACCOUNT_REMOVED` emit just below: `announce` catches everything
+    // internally, so a notification failure can never undo the restriction.
+    // The proposing moderator (`actorId`) is excluded: they cannot be the
+    // hold's second signature, so telling them it is waiting is noise.
+    if (dto.action === 'ban' && isNewHold && ratificationId) {
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.BanRatifications,
+        ratificationId,
+        [actorId],
+      );
+    }
 
     // Ban evasion (TS-05), same contract as the report-driven path in
     // `ModerationService.actOnReport`: post-commit, best effort, and never able

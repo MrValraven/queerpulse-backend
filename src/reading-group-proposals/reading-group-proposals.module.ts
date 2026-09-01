@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { CommunitiesModule } from '../communities/communities.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -33,6 +34,9 @@ import { ReadingGroupProposalsService } from './reading-group-proposals.service'
     // `NotificationsService` — the proposer is told the outcome of their own
     // submission, in-app and on their phone. Same no-cycle argument.
     NotificationsModule,
+    // `AdminQueueNotificationsService`: tells the reading-group-proposal
+    // queue's reviewers when a member submits a new proposal.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     ReadingGroupProposalsController,

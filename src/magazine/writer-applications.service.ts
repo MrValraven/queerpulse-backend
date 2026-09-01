@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CreateWriterApplicationDto } from './dto/create-writer-application.dto';
@@ -27,6 +29,7 @@ export class WriterApplicationsService {
     private readonly applications: Repository<MagazineWriterApplication>,
     @InjectRepository(UserStaffRole)
     private readonly staffRoles: Repository<UserStaffRole>,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async create(
@@ -56,6 +59,14 @@ export class WriterApplicationsService {
           sampleText,
           sampleLink,
         }),
+      );
+      // Tell whoever works the writer-application queue that an application
+      // landed. Awaited, but safe to await: `announce` catches everything
+      // internally, so a notification failure can never fail the member's
+      // submission.
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.WriterApplications,
+        saved.id,
       );
       return toWriterApplicationDTO(saved);
     } catch (err) {

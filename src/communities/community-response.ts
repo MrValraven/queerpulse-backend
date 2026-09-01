@@ -87,6 +87,16 @@ export interface CommunityBrowseFacetCounts {
    * this map means "not counted", which must never be rendered as a 0.
    */
   tags: Record<string, number>;
+  /**
+   * How many communities are open to all (`AccessTier.Public`) — the count
+   * behind the browse's "Open to all" pill.
+   */
+  openToAll: number;
+  /**
+   * How many communities are at or above `BUSY_THRESHOLD` active members this
+   * week — the count behind the "Busy this week" pill.
+   */
+  busy: number;
 }
 
 export interface CommunityCardDTO {

@@ -34,6 +34,8 @@ import {
 import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import {
@@ -243,6 +245,7 @@ export class ModerationService {
     // `/mod/ratifications`, and withdraws a hold when an appeal overturns the
     // ban it was for.
     private readonly banRatification: BanRatificationService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   // The two actions whose whole point is to change the target content's
@@ -575,6 +578,25 @@ export class ModerationService {
         removedAt: new Date(),
       };
       this.eventEmitter.emit(ACCOUNT_REMOVED, removed);
+    }
+
+    // TS-12. Tell the ban-ratifications queue a hold is waiting, but only when
+    // this report OPENED it: `enforceAgainstUser` is idempotent per member, so
+    // a report that joined an already-pending hold has nothing new to tell
+    // staff. Post-commit and best effort: `announce` catches everything
+    // internally, so a notification failure can never undo the enforcement.
+    // The proposing moderator (`actorId`) is excluded: they cannot be the
+    // hold's second signature, so telling them it is waiting is noise.
+    if (
+      enforceResult?.kind === 'ban_pending' &&
+      enforceResult.isNewBanHold &&
+      enforceResult.ratificationId
+    ) {
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.BanRatifications,
+        enforceResult.ratificationId,
+        [actorId],
+      );
     }
 
     await this.notifyReporterOfOutcomeBestEffort(saved, actorId);
@@ -1002,6 +1024,8 @@ export class ModerationService {
         userId: string;
         suspendedUntil: Date | null;
         kind: 'suspend' | 'ban' | 'restrict' | 'ban_pending';
+        ratificationId?: string;
+        isNewBanHold?: boolean;
       } | null;
     }> = [];
 
@@ -1107,6 +1131,26 @@ export class ModerationService {
       .filter((userId): userId is string => Boolean(userId));
     for (const userId of new Set(suspendedUserIds)) {
       await this.auth.revokeAllForUser(userId);
+    }
+
+    // TS-12. Same rule as the single-report path: announce a ban-ratification
+    // hold only for the report that OPENED it. `enforceAgainstUser` is
+    // idempotent per member and this loop runs the reports sequentially (each
+    // in its own committed transaction above), so of thirty reports about the
+    // same member exactly one carries `isNewBanHold: true` and the other
+    // twenty-nine correctly announce nothing.
+    for (const { enforceResult } of outcomes) {
+      if (
+        enforceResult?.kind === 'ban_pending' &&
+        enforceResult.isNewBanHold &&
+        enforceResult.ratificationId
+      ) {
+        await this.adminQueueNotifications.announce(
+          AdminQueueKey.BanRatifications,
+          enforceResult.ratificationId,
+          [actorId],
+        );
+      }
     }
 
     // Notify each sanctioned member of the outcome — one row per report, so a
@@ -1534,6 +1578,13 @@ export class ModerationService {
           slaDueAt: appealDecisionDueAt(now),
           decidedAt: null,
         }),
+      );
+      // Tell whoever works the appeals queue that one landed. Awaited, but
+      // safe to await: `announce` catches everything internally, so a
+      // notification failure can never fail the appellant's submission.
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.Appeals,
+        saved.id,
       );
       return toSubmittedAppealDTO(saved);
     } catch (error) {

@@ -4,6 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { In, IsNull, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
@@ -124,6 +126,7 @@ export class PartnersService {
     // was built to close, and `SubmissionKind.PartnerApplication` already
     // exists there with its copy shipped in both languages.
     private readonly submissionDecisions: SubmissionDecisionNotifier,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   // Public directory: approved partners only, optionally filtered by region.
@@ -161,6 +164,13 @@ export class PartnersService {
     dto: CreatePartnerApplicationInput,
   ): Promise<PartnerApplicationDTO> {
     const saved = await this.createWithUniqueSlug(memberId, dto);
+    // Tell whoever works the partner-application queue that an application
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.PartnerApplications,
+      saved.id,
+    );
     return this.buildApplication(saved);
   }
 

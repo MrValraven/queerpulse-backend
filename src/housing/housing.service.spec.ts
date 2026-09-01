@@ -1,6 +1,8 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import {
@@ -100,6 +102,7 @@ describe('HousingService', () => {
     createQueryBuilder: jest.Mock;
   };
   let affirmingPledge: { requireAccepted: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     coops = {
@@ -118,6 +121,9 @@ describe('HousingService', () => {
     affirmingPledge = {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -128,6 +134,10 @@ describe('HousingService', () => {
           useValue: joinRequests,
         },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
 
@@ -166,6 +176,40 @@ describe('HousingService', () => {
         ),
       ).rejects.toThrow(NotFoundException);
       expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('tells the co-op join-request queue that an application landed', async () => {
+      coops.findOne.mockResolvedValue(makeCoop());
+      joinRequests.save.mockResolvedValue({ id: 'request-9' });
+
+      await service.createJoinRequest(
+        'rainbow-commons',
+        { name: 'Sam', householdSize: '2', note: 'excited' },
+        'user-1',
+      );
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.HousingCoopJoinRequests,
+        'request-9',
+      );
+    });
+
+    it('tells nobody when the affirming pledge has not been accepted', async () => {
+      coops.findOne.mockResolvedValue(makeCoop());
+      affirmingPledge.requireAccepted.mockRejectedValue(
+        new Error('AFFIRMING_PLEDGE_REQUIRED'),
+      );
+
+      await expect(
+        service.createJoinRequest(
+          'rainbow-commons',
+          { name: 'Sam', householdSize: '2' },
+          'user-1',
+        ),
+      ).rejects.toThrow();
+      expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
     it('persists a Pending request against the resolved co-op and returns its id', async () => {

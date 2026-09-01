@@ -18,6 +18,8 @@ import {
 import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ListIntakesQuery } from './dto/list-intakes.query';
 import { IntakeSubmission } from './entities/intake-submission.entity';
 import {
@@ -43,6 +45,7 @@ export class IntakesService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly notifications: NotificationsService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /** Batch-resolve a set of user-ids — submitters AND triaging admins — to
@@ -96,6 +99,17 @@ export class IntakesService {
         // than a playlist submission, and the queue should say so.
         dueAt: intakeDueAt(rawKind, new Date()),
       }),
+    );
+
+    // `governance_concern` has its own console (/admin/concerns) and its own
+    // reviewers; every other intake kind is worked in /admin/intakes. The
+    // branch is here rather than in the registry because one method feeds two
+    // queues.
+    await this.adminQueueNotifications.announce(
+      saved.kind === 'governance_concern'
+        ? AdminQueueKey.Concerns
+        : AdminQueueKey.Intakes,
+      saved.id,
     );
 
     return toIntakeAckDTO(saved);

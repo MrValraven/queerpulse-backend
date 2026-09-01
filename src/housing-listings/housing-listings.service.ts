@@ -16,6 +16,8 @@ import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { CreateHousingEnquiryDto } from './dto/create-housing-enquiry.dto';
 import { CreateHousingListingDto } from './dto/create-housing-listing.dto';
@@ -199,6 +201,7 @@ export class HousingListingsService {
     private readonly messaging: MessagingService,
     private readonly verification: VerificationService,
     private readonly affirmingPledge: AffirmingPledgeService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async create(
@@ -216,6 +219,21 @@ export class HousingListingsService {
     const level = await this.verification.levelForUser(ownerId);
     const ref = await this.nextRef();
     const saved = await this.createWithUniqueSlug(ownerId, ref, dto, level);
+    // Every listing lands in `review` (see `HousingListingStatus`'s
+    // docstring), so `create` IS the submit-for-review path. Tell whoever
+    // works the housing-listing queue that a new one landed. Awaited, but
+    // safe to await: `announce` catches everything internally, so a
+    // notification failure can never fail the lister's submission.
+    //
+    // Deliberately NOT wired on `update`: an owner PATCH that touches a
+    // moderated field also returns a listing to `review`
+    // (`moderatedHousingFingerprint`), but paging staff on every typo fix
+    // would drown a genuine new arrival in edit noise, so that transition is
+    // left silent.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.HousingListings,
+      saved.id,
+    );
     return this.buildDTO(saved);
   }
 

@@ -10,6 +10,8 @@ import {
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -247,6 +249,7 @@ describe('ListingsService', () => {
     isActiveCoManager: jest.Mock;
     listingIdsCoManagedBy: jest.Mock;
   };
+  let adminQueueNotifications: { announce: jest.Mock };
   // The stub `EntityManager` every `dataSource.transaction(...)` call in a
   // given test is handed — see `buildTransactionManager`'s doc comment for
   // why this must be a single instance rather than built fresh per call.
@@ -263,9 +266,14 @@ describe('ListingsService', () => {
       create: jest.fn((v: object) => v),
       // Synthesizes generated columns so a mapper reading them off a
       // `save()` result never sees `undefined` (mirrors
-      // `partners.service.spec.ts`'s identical precedent).
+      // `partners.service.spec.ts`'s identical precedent). `id` defaults to
+      // 'listing-new' only when `v` does not already carry one (every call
+      // outside `create` passes an already-loaded entity with a real id),
+      // which is what proves the admin-queue announce below fires with the
+      // row `save()` actually produced rather than one it started with.
       save: jest.fn((v: object) =>
         Promise.resolve({
+          id: 'listing-new',
           createdAt: new Date('2026-01-01T00:00:00.000Z'),
           updatedAt: new Date('2026-01-01T00:00:00.000Z'),
           ...v,
@@ -321,6 +329,9 @@ describe('ListingsService', () => {
       isActiveCoManager: jest.fn().mockResolvedValue(false),
       listingIdsCoManagedBy: jest.fn().mockResolvedValue([]),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
     transactionManager = buildTransactionManager(listings);
     dataSource = {
       query: jest.fn().mockResolvedValue([{ seq: '1' }]),
@@ -373,6 +384,10 @@ describe('ListingsService', () => {
         // deliberately.
         { provide: ListingCoManagersService, useValue: coManagers },
         { provide: ReviewReplyNotifier, useValue: reviewReplies },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(ListingsService);
@@ -428,6 +443,24 @@ describe('ListingsService', () => {
       } as CreateListingDto);
       expect(result.slug).toBeDefined();
       expect(listings.exists).toHaveBeenCalledTimes(2);
+    });
+
+    it('tells the listing-submission queue with the saved row id', async () => {
+      await service.create('owner-1', { name: 'Lux Café' } as CreateListingDto);
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.ListingSubmissions,
+        'listing-new',
+      );
+    });
+
+    it('tells nobody when the listing is never saved', async () => {
+      listings.save.mockRejectedValueOnce(new Error('write failed'));
+
+      await expect(
+        service.create('owner-1', { name: 'Lux Café' } as CreateListingDto),
+      ).rejects.toThrow('write failed');
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 

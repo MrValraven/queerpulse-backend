@@ -1,5 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { WriterApplicationsService } from './writer-applications.service';
 import {
@@ -51,12 +53,25 @@ function makeStaffRolesRepo(alreadyWriter = false): Repository<UserStaffRole> {
   } as unknown as Repository<UserStaffRole>;
 }
 
+/** A minimal `AdminQueueNotificationsService` double: `announce` is the only
+ * member `create` calls. Returned un-cast so a test can assert on it
+ * directly. */
+function makeAdminQueueNotifications(): {
+  service: AdminQueueNotificationsService;
+  announce: jest.Mock;
+} {
+  const announce = jest.fn(async () => undefined);
+  const service = { announce } as unknown as AdminQueueNotificationsService;
+  return { service, announce };
+}
+
 describe('WriterApplicationsService', () => {
   describe('create', () => {
     it('rejects when neither sampleText nor sampleLink is given', async () => {
       const service = new WriterApplicationsService(
         makeApplicationsRepo().repository,
         makeStaffRolesRepo(),
+        makeAdminQueueNotifications().service,
       );
       await expect(
         service.create('user-1', { pitchNote: 'Hi' }),
@@ -67,6 +82,7 @@ describe('WriterApplicationsService', () => {
       const service = new WriterApplicationsService(
         makeApplicationsRepo().repository,
         makeStaffRolesRepo(true),
+        makeAdminQueueNotifications().service,
       );
       await expect(
         service.create('user-1', { sampleText: 'A paragraph.' }),
@@ -87,6 +103,7 @@ describe('WriterApplicationsService', () => {
       const service = new WriterApplicationsService(
         repository,
         makeStaffRolesRepo(),
+        makeAdminQueueNotifications().service,
       );
       await expect(
         service.create('user-1', { sampleText: 'A paragraph.' }),
@@ -98,6 +115,7 @@ describe('WriterApplicationsService', () => {
       const service = new WriterApplicationsService(
         repository,
         makeStaffRolesRepo(),
+        makeAdminQueueNotifications().service,
       );
       const dto = await service.create('user-1', {
         pitchNote: '  Why I want to write  ',
@@ -113,6 +131,44 @@ describe('WriterApplicationsService', () => {
       );
       expect(dto.status).toBe('pending');
     });
+
+    it('tells the writer-application queue with the saved row id', async () => {
+      const { repository } = makeApplicationsRepo();
+      const { service: adminQueueNotifications, announce } =
+        makeAdminQueueNotifications();
+      const service = new WriterApplicationsService(
+        repository,
+        makeStaffRolesRepo(),
+        adminQueueNotifications,
+      );
+
+      await service.create('user-1', { sampleText: 'A paragraph.' });
+
+      expect(announce).toHaveBeenCalledWith(
+        AdminQueueKey.WriterApplications,
+        'app-1',
+      );
+    });
+
+    it('tells nobody when the application is never saved', async () => {
+      const { repository } = makeApplicationsRepo({
+        save: jest.fn(async () => {
+          throw new Error('write failed');
+        }),
+      });
+      const { service: adminQueueNotifications, announce } =
+        makeAdminQueueNotifications();
+      const service = new WriterApplicationsService(
+        repository,
+        makeStaffRolesRepo(),
+        adminQueueNotifications,
+      );
+
+      await expect(
+        service.create('user-1', { sampleText: 'A paragraph.' }),
+      ).rejects.toThrow('write failed');
+      expect(announce).not.toHaveBeenCalled();
+    });
   });
 
   describe('getMine', () => {
@@ -120,6 +176,7 @@ describe('WriterApplicationsService', () => {
       const service = new WriterApplicationsService(
         makeApplicationsRepo().repository,
         makeStaffRolesRepo(),
+        makeAdminQueueNotifications().service,
       );
       expect(await service.getMine('user-1')).toBeNull();
     });
@@ -142,6 +199,7 @@ describe('WriterApplicationsService', () => {
       const service = new WriterApplicationsService(
         repository,
         makeStaffRolesRepo(),
+        makeAdminQueueNotifications().service,
       );
       const dto = await service.getMine('user-1');
       expect(dto?.id).toBe('app-1');

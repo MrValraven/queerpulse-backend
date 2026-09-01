@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { CreateResourceSuggestionDto } from './dto/create-resource-suggestion.dto';
 import { ResourceSuggestion } from './entities/resource-suggestion.entity';
 import {
@@ -21,6 +23,7 @@ export class ResourceSuggestionsService {
   constructor(
     @InjectRepository(ResourceSuggestion)
     private readonly suggestions: Repository<ResourceSuggestion>,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async create(
@@ -37,6 +40,14 @@ export class ResourceSuggestionsService {
         email: dto.email?.trim() ? dto.email.trim() : null,
         website: dto.website?.trim() ? dto.website.trim() : null,
       }),
+    );
+    // Tell whoever works the resource-suggestion queue that a suggestion
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the member's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.ResourceSuggestions,
+      saved.id,
     );
     return toResourceSuggestionResponse(saved);
   }

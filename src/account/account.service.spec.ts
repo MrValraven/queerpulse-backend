@@ -12,6 +12,8 @@ import { DataSource } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AccountExportService } from './account-export.service';
 import { AccountService } from './account.service';
 import { DAY_MS, EXPORT_LINK_EXPIRY_DAYS } from './account.constants';
@@ -64,6 +66,7 @@ describe('AccountService', () => {
   // deactivate/delete flows are never the last-admin case; the guard's own
   // test drops the count to one.
   let usersService: { countAdmins: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let events: { emit: jest.Mock };
 
@@ -142,6 +145,9 @@ describe('AccountService', () => {
 
     users = { u1: { id: 'u1', status: UserStatus.Active } };
     usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     // Deactivation/deletion must drop live sockets too — the access token still
     // carries `status: 'active'` until it expires, so the gateway needs telling.
@@ -241,6 +247,10 @@ describe('AccountService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: events },
         { provide: UsersService, useValue: usersService },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
 
@@ -934,6 +944,39 @@ describe('AccountService', () => {
       const dueBy = new Date(result.dueBy).getTime();
       const submittedAt = new Date(result.submittedAt).getTime();
       expect(dueBy - submittedAt).toBe(30 * 24 * 60 * 60 * 1000);
+    });
+
+    it('tells the DSAR queue that a request landed', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+      await service.submitDsar('u1', {
+        article: 17,
+        scopes: ['profile', 'messages'],
+        details: 'erase me',
+        reauthToken: 'tok',
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.Dsar,
+        'dsar-1',
+      );
+    });
+
+    it('tells nobody when the submission is refused', async () => {
+      await expect(
+        service.submitDsar('u1', {
+          article: 15,
+          scopes: ['profile'],
+          details: 'give me my data',
+          reauthToken: 'bogus',
+        }),
+      ).rejects.toThrow();
+
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
     it('listDsar returns the caller history', async () => {

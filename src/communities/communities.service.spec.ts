@@ -12,6 +12,8 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -167,6 +169,7 @@ describe('CommunitiesService', () => {
   // (`COMMUNITY_MEMBER_JOINED` / `COMMUNITY_MEMBER_LEFT`).
   let eventEmitter: { emit: jest.Mock };
   let banRatifications: { proposePermanentBar: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
   // The transaction manager `createWithUniqueRef` runs inside; `query` is the
   // raw `SELECT nextval('communities_ref_seq')` ref allocation.
   let manager: { query: jest.Mock; getRepository: jest.Mock };
@@ -270,6 +273,9 @@ describe('CommunitiesService', () => {
         expiresAt: new Date('2026-01-04T00:00:00.000Z'),
       }),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
     // `@InjectRepository` tokens use, so `communities.save`/`members.save`
@@ -339,6 +345,10 @@ describe('CommunitiesService', () => {
         {
           provide: CommunityBanRatificationService,
           useValue: banRatifications,
+        },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
         },
       ],
     }).compile();
@@ -2189,6 +2199,49 @@ describe('CommunitiesService', () => {
       expect(members.save).not.toHaveBeenCalledWith(
         expect.objectContaining({ id: 'm1' }),
       );
+    });
+  });
+
+  describe('createTagRequest', () => {
+    const community = { id: 'c1', slug: 'x' };
+
+    it('tells the community-tag-request queue that a suggestion landed', async () => {
+      communities.findOne.mockResolvedValue(community);
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Mod,
+        userId: 'mod-1',
+      });
+      tagRequests.save.mockResolvedValue({
+        id: 'tag-request-1',
+        communityId: 'c1',
+        requestedByUserId: 'mod-1',
+        label: 'polyamory',
+      });
+
+      await service.createTagRequest('x', 'mod-1', {
+        label: 'polyamory',
+        note: undefined,
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.CommunityTagRequests,
+        'tag-request-1',
+      );
+    });
+
+    it('tells nobody when the requester is not an owner or mod', async () => {
+      communities.findOne.mockResolvedValue(community);
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.createTagRequest('x', 'outsider-1', {
+          label: 'polyamory',
+          note: undefined,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(tagRequests.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 });

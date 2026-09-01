@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -52,6 +53,9 @@ import { HousingListing } from './entities/housing-listing.entity';
     // Exports HousingViewingsService — the address-privacy gate ALSO unlocks the
     // exact point/address to an enquirer with a lister-accepted viewing.
     HousingViewingsModule,
+    // `AdminQueueNotificationsService`: tells the housing-listing queue's
+    // reviewers when `create` lands a new listing in review.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     HousingListingsController,

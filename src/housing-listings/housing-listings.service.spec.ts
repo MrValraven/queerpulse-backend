@@ -7,6 +7,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import {
   resetImageUrlBaseForTesting,
@@ -130,6 +132,7 @@ describe('HousingListingsService', () => {
   };
   let affirmingPledge: { requireAccepted: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -158,6 +161,9 @@ describe('HousingListingsService', () => {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
     };
     eventEmitter = { emit: jest.fn() };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -169,6 +175,10 @@ describe('HousingListingsService', () => {
         { provide: VerificationService, useValue: verification },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
         { provide: EventEmitter2, useValue: eventEmitter },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
 
@@ -331,6 +341,32 @@ describe('HousingListingsService', () => {
         ForbiddenException,
       );
       expect(listings.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('tells the housing-listing queue that a listing landed in review', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+
+      await service.create('owner-1', CREATE_DTO);
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.HousingListings,
+        'listing-1',
+      );
+    });
+
+    it('tells nobody when the verification step-up is refused', async () => {
+      verification.requireLevel.mockRejectedValue(
+        new ForbiddenException('VERIFICATION_REQUIRED'),
+      );
+
+      await expect(service.create('owner-1', CREATE_DTO)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(listings.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 

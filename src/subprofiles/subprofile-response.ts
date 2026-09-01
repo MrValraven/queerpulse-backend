@@ -223,6 +223,13 @@ export interface SubprofileCardView {
   // `toPublicDTO`'s linked-only `ownerSlug` rule: never expose the owner tie
   // for an unlinked (pseudonymous) persona.
   ownerSlug: string | null;
+  // The owner member's display name — LINKED rows only, else null, on exactly
+  // the same rule as `ownerSlug` above. Lets the FE title a persona still named
+  // after its profession as "Owner Name | Poet" (`personaTitleName`); an
+  // unlinked persona gets null and keeps its bare name, since anonymity
+  // outranks a nicer title. Batched from the SAME per-page owner-profile query
+  // that already resolves `ownerSlug` — one extra column, never a new query.
+  ownerName: string | null;
   // The persona's per-owner slug (for the `/members/:ownerSlug/:slug` route).
   slug: string;
 }
@@ -450,6 +457,7 @@ export function toCardDTO(
   ownerSlug: string | null = null,
   // Pre-loaded crop lookup — see `toSubprofileDTO`'s param doc.
   crops: Map<string, CropRect> = new Map(),
+  ownerName: string | null = null,
 ): SubprofileCardView {
   return {
     handle: subprofile.handle ?? '',
@@ -471,6 +479,10 @@ export function toCardDTO(
     ownerSlug:
       subprofile.linkVisibility === SubprofileLinkVisibility.Linked
         ? ownerSlug
+        : null,
+    ownerName:
+      subprofile.linkVisibility === SubprofileLinkVisibility.Linked
+        ? ownerName
         : null,
   };
 }

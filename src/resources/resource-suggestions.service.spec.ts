@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ResourceListingCategory } from './entities/resource-listing.entity';
 import {
   ResourceSuggestion,
@@ -13,6 +15,7 @@ const now = new Date('2026-08-20T12:00:00.000Z');
 describe('ResourceSuggestionsService', () => {
   let service: ResourceSuggestionsService;
   let repo: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -30,10 +33,17 @@ describe('ResourceSuggestionsService', () => {
       ),
       find: jest.fn().mockResolvedValue([]),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ResourceSuggestionsService,
         { provide: getRepositoryToken(ResourceSuggestion), useValue: repo },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(ResourceSuggestionsService);
@@ -70,6 +80,22 @@ describe('ResourceSuggestionsService', () => {
       website: null,
       createdAt: now.toISOString(),
     });
+  });
+
+  it('tells the resource-suggestion queue with the saved row id', async () => {
+    await service.create('u1', dto);
+
+    expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+      AdminQueueKey.ResourceSuggestions,
+      'rs-1',
+    );
+  });
+
+  it('tells nobody when the suggestion is never saved', async () => {
+    repo.save.mockRejectedValueOnce(new Error('write failed'));
+
+    await expect(service.create('u1', dto)).rejects.toThrow('write failed');
+    expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
   });
 
   describe('listMine (PRD-45)', () => {

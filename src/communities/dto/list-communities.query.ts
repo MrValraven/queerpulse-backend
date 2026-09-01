@@ -90,6 +90,16 @@ export class ListCommunitiesQuery {
   @IsBoolean()
   online?: boolean;
 
+  // `?busy=true` narrows to communities at or above `BUSY_THRESHOLD` active
+  // members this week. Deliberately one-way, unlike `online` just above:
+  // "quiet this week" is not something anyone browses for, so `false` and
+  // absent mean the same thing and `toOptionalQueryBoolean`'s tri-state would
+  // only invent an answer the product does not have.
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  busy?: boolean;
+
   // Comma-separated curated tag ids, e.g. ?tags=trans-nonbinary,book-club.
   // Filters `communities.tags`; see `CommunitiesService.list` and
   // `src/communities/community-tags.ts` for the accepted vocabulary.

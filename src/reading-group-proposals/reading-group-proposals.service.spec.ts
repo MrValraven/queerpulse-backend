@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import {
   ReadingGroupProposal,
   ReadingGroupProposalFormat,
@@ -12,6 +14,7 @@ const now = new Date('2026-07-15T12:00:00.000Z');
 describe('ReadingGroupProposalsService', () => {
   let service: ReadingGroupProposalsService;
   let repo: { create: jest.Mock; save: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -24,10 +27,17 @@ describe('ReadingGroupProposalsService', () => {
         } as ReadingGroupProposal),
       ),
     };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ReadingGroupProposalsService,
         { provide: getRepositoryToken(ReadingGroupProposal), useValue: repo },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
+        },
       ],
     }).compile();
     service = module.get(ReadingGroupProposalsService);
@@ -79,6 +89,23 @@ describe('ReadingGroupProposalsService', () => {
       const result = await service.create('u1', withoutWhy);
 
       expect(result.why).toBeNull();
+    });
+
+    it('tells the reading-group-proposal queue that a proposal landed', async () => {
+      await service.create('u1', dto);
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.ReadingGroupProposals,
+        'rgp-1',
+      );
+    });
+
+    it('tells nobody when the proposal is not persisted', async () => {
+      repo.save.mockRejectedValueOnce(new Error('database unavailable'));
+
+      await expect(service.create('u1', dto)).rejects.toThrow();
+
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 });

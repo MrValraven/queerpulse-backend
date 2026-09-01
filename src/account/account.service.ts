@@ -23,6 +23,8 @@ import {
 } from '../chat/session.events';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AccountExportService } from './account-export.service';
 import {
   DeletionRequestResponse,
@@ -94,6 +96,7 @@ export class AccountService {
     // `AdminMembersService.updateRole` uses against demotion, reused here
     // against self-deactivation/self-deletion.
     private readonly usersService: UsersService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   // --- Step-up re-authentication -------------------------------------------
@@ -543,6 +546,10 @@ export class AccountService {
       dueBy,
       respondedAt: null,
     });
+    // Tell whoever works the DSAR queue that a request landed. Awaited, but
+    // safe to await: `announce` catches everything internally, so a
+    // notification failure can never fail the member's submission.
+    await this.adminQueueNotifications.announce(AdminQueueKey.Dsar, saved.id);
     return toDsarResponse(saved);
   }
 

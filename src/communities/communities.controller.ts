@@ -73,20 +73,23 @@ export class CommunitiesController {
   @ApiOperation({
     summary:
       'List communities (discover or mine), paginated, filterable by type, ' +
-      'access tier, tags, city, language and online, and sortable by ' +
+      'access tier, tags, city, language, online and busy, and sortable by ' +
       'newest/name/active.',
     description:
       '`sort=active` orders by `communities.active_this_week`, the indexed, ' +
       'hourly-refreshed count of distinct members who posted or replied in ' +
-      'the trailing week. Each card carries that number too, so a "busy this ' +
-      'week" treatment needs no second call.',
+      'the trailing week, and `busy=true` narrows to the ones at or above ' +
+      'the busy threshold off the same counter. Each card carries that ' +
+      'number too, so a "busy this week" treatment needs no second call.',
   })
   @ApiOkResponse({
     description:
-      'A paginated page of community cards, plus `facets.tags` — how many ' +
-      'communities each curated tag would yield under the rest of this ' +
-      "request's filters (its own `tags` filter lifted), so the browse can " +
-      'number the tag chips and grey out the ones that lead nowhere.',
+      'A paginated page of community cards, plus `facets` — how many ' +
+      'communities each curated tag (`facets.tags`), the open-to-all filter ' +
+      '(`facets.openToAll`) and the busy filter (`facets.busy`) would yield ' +
+      "under the rest of this request's filters, each with its own predicate " +
+      'lifted, so the browse can number its chips and toggles and grey out ' +
+      'the ones that lead nowhere.',
   })
   list(
     @CurrentUser() user: CurrentUserData,

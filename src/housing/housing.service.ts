@@ -7,6 +7,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { normalizePage } from '../common/pagination';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import {
   CoopJoinRequest,
   JoinRequestStatus,
@@ -43,6 +45,7 @@ export class HousingService {
     @InjectRepository(CoopJoinRequest)
     private readonly joinRequests: Repository<CoopJoinRequest>,
     private readonly affirmingPledge: AffirmingPledgeService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   async listPublished(): Promise<HousingCoopDTO[]> {
@@ -79,6 +82,14 @@ export class HousingService {
         userId,
         status: JoinRequestStatus.Pending,
       }),
+    );
+    // Tell whoever works the co-op join-request queue that an application
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the applicant's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.HousingCoopJoinRequests,
+      saved.id,
     );
     return { id: saved.id };
   }

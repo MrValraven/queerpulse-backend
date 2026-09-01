@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
@@ -31,6 +32,9 @@ import { LandlordsService } from './landlords.service';
     // is told what staff decided. No cycle — NotificationsModule does not
     // import this one.
     NotificationsModule,
+    // `AdminQueueNotificationsService`: tells the landlord-intro-request
+    // queue's reviewers when `createIntroRequest` lands a new request.
+    AdminQueueNotificationsModule,
   ],
   controllers: [LandlordsController, AdminLandlordsController],
   providers: [LandlordsService],

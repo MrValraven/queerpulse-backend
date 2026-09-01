@@ -52,9 +52,20 @@ export const NOTIFICATION_BUNDLE_KEY_MAX_LENGTH = 200;
  * absences are load-bearing:
  *  - **`Mention`** never bundles. Being named is directed at you personally,
  *    and "Ana and 3 others mentioned you" hides three separate asks.
- *  - **Every always-delivered type** (moderation, account, governance,
- *    decisions) never bundles, because each is a distinct outcome and there is
- *    no shared subject to collapse onto in the first place.
+ *  - **Every always-delivered type except `AdminQueueItem`** (moderation,
+ *    account, governance, decisions) never bundles, because each is a distinct
+ *    outcome and there is no shared subject to collapse onto in the first
+ *    place: a ban, a decision, a security alert is its own fact, not a
+ *    repetition of the last one.
+ *
+ *    **`AdminQueueItem` is the one exception**, and it is reasoned about
+ *    rather than overlooked. Unlike an outcome, a queue IS a shared subject:
+ *    twelve invite requests landing in the same queue inside the bundling
+ *    window are not twelve distinct facts, they are the same fact, "there are
+ *    more", said twelve times. Collapsing them onto the queue is exactly what
+ *    bundling exists for, and it costs nothing an outcome type would lose,
+ *    because nobody reads "the queue got another item" as a report on any one
+ *    item in it.
  *
  * The key must identify the SUBJECT, never the actor: it is what makes two
  * events "the same thing happening again". A type whose payload is missing its
@@ -104,6 +115,18 @@ function subjectFor(
         stringField(payload, 'subprofileId') ??
         stringField(payload, 'personaId')
       );
+    // An admin queue's arrivals collapse onto the QUEUE.
+    //
+    // This is the one always-delivered type that bundles, which the docstring
+    // above otherwise rules out. The reason that rule holds elsewhere is that
+    // an outcome (a ban, a decision, a security alert) has no shared subject
+    // to collapse onto: each is its own distinct fact. A queue does have one,
+    // and it is the queue itself. A second arrival in the same queue says only
+    // "there are more", which is exactly what a bundle is for. Twelve invite
+    // requests then read as one row rather than twelve, and once the row is
+    // read the next arrival opens a fresh one.
+    case NotificationType.AdminQueueItem:
+      return stringField(payload, 'queue');
     default:
       return null;
   }

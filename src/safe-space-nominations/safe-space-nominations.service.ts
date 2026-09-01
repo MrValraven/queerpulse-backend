@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { Listing, SafeSpaceStatus } from '../listings/entities/listing.entity';
 import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
 import { AdminNominationsQuery } from './dto/admin-nominations.query';
@@ -75,6 +77,7 @@ export class SafeSpaceNominationsService {
     private readonly badges: SafeSpaceBadgeService,
     private readonly audits: SafeSpaceAuditService,
     private readonly notifier: SafeSpaceNotifierService,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /** Record a member's nomination. Always lands in the `pending` queue, which
@@ -93,6 +96,14 @@ export class SafeSpaceNominationsService {
       status: 'pending',
     });
     const saved = await this.nominations.save(nomination);
+    // Tell whoever works the safe-space nomination queue that a nomination
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the member's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.SafeSpaceNominations,
+      saved.id,
+    );
     return toSafeSpaceNominationResponse(saved);
   }
 

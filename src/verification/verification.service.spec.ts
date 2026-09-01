@@ -4,6 +4,8 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { In } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { MemberVerification } from './entities/member-verification.entity';
@@ -56,6 +58,7 @@ describe('VerificationService', () => {
   let profileRepo: { find: jest.Mock };
   let userRepo: { findOne: jest.Mock };
   let notifications: { create: jest.Mock };
+  let adminQueueNotifications: { announce: jest.Mock };
   let configValues: Record<string, string | undefined>;
 
   /** Chainable `Repository.createQueryBuilder()` stand-in for
@@ -152,11 +155,14 @@ describe('VerificationService', () => {
       // method still uses. Defaults empty so a test that doesn't touch
       // `bulkDecide` never has to mock it.
       find: jest.fn().mockResolvedValue([]),
-      // Real TypeORM assigns the uuid PK on `create`/`save`; the mock needs to
-      // do the same so `submitRequest`'s "carries the new requestId" test can
-      // assert against a real, defined id rather than `undefined`.
-      create: jest.fn((value: object) => ({ id: 'new-request-id', ...value })),
-      save: jest.fn((value: unknown) => Promise.resolve(value)),
+      // Real TypeORM assigns the uuid PK on `save`, not on `create` (`create`
+      // only builds the in-memory entity); the mock mirrors that so
+      // `submitRequest`'s announce-after-commit tests are actually
+      // load-bearing rather than passing against an unsaved entity's id.
+      create: jest.fn((value: object) => value),
+      save: jest.fn((value: object) =>
+        Promise.resolve({ id: 'new-request-id', ...value }),
+      ),
       // `computeSignals`'s `priorRejections` count — 0 rejections by
       // default so the many tests that don't care about this signal never
       // have to mock it explicitly.
@@ -174,6 +180,9 @@ describe('VerificationService', () => {
     // `user === undefined` fallback.
     userRepo = { findOne: jest.fn().mockResolvedValue(fakeUser()) };
     notifications = { create: jest.fn().mockResolvedValue(null) };
+    adminQueueNotifications = {
+      announce: jest.fn().mockResolvedValue(undefined),
+    };
     // Default: automated elevation OFF (Phase 2 manual-first default).
     configValues = { VERIFICATION_AUTOMATED_ELEVATION: undefined };
 
@@ -204,6 +213,10 @@ describe('VerificationService', () => {
         {
           provide: ConfigService,
           useValue: { get: jest.fn((key: string) => configValues[key]) },
+        },
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: adminQueueNotifications,
         },
       ],
     }).compile();
@@ -509,6 +522,31 @@ describe('VerificationService', () => {
         priorRejections: 1,
         duplicateProviderRef: null,
       });
+    });
+
+    it('tells the verification queue that a request landed', async () => {
+      requestRepo.findOne.mockResolvedValue(null);
+
+      await service.submitRequest(userId, {
+        requestedLevel: VerificationLevel.IdVerified,
+      });
+
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.Verification,
+        'new-request-id',
+      );
+    });
+
+    it('tells nobody when the submission is refused', async () => {
+      requestRepo.findOne.mockResolvedValue(fakeRequest());
+
+      await expect(
+        service.submitRequest(userId, {
+          requestedLevel: VerificationLevel.IdVerified,
+        }),
+      ).rejects.toThrow();
+
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
   });
 

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { EventsModule } from '../events/events.module';
@@ -178,6 +179,9 @@ import { MeCommunitiesController } from './me-communities.controller';
     EventsModule,
     ForumModule,
     VolunteeringModule,
+    // `AdminQueueNotificationsService`: tells the community-tag-request
+    // queue's reviewers when `createTagRequest` lands a new suggestion.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     CommunitiesController,

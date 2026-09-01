@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { RecognitionEntitlementsModule } from '../recognition/recognition-entitlements.module';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { Invite } from './entities/invite.entity';
 import { PlatformJoinRequest } from './entities/join-request.entity';
 import { InvitesController } from './invites.controller';
@@ -22,6 +23,7 @@ import { JoinRequestsService } from './join-requests.service';
     // this module, and `RecognitionModule` reaches `ProfilesModule` /
     // `NotificationsModule`, so the full module would risk a cycle.
     RecognitionEntitlementsModule,
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     InvitesController,

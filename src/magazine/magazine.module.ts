@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminMembersModule } from '../admin-members/admin-members.module';
+import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -82,6 +83,9 @@ import { WriterApplicationsService } from './writer-applications.service';
     // grants `magazine_writer` through the same mechanism the manual admin
     // role-assignment screen uses (see `AdminWriterApplicationsService`).
     AdminMembersModule,
+    // Tells whoever works the magazine-submission and writer-application
+    // queues when a member's own story or application lands.
+    AdminQueueNotificationsModule,
   ],
   controllers: [
     MagazineController,

@@ -8,6 +8,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import {
@@ -109,6 +111,7 @@ export class LandlordsService {
     // moderation service's action transaction, so a caller outside that
     // transaction has to open one of its own.
     private readonly dataSource: DataSource,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   // A landlord entry is reported (and taken down) under the `landlord` subject
@@ -260,6 +263,14 @@ export class LandlordsService {
       LandlordStatus.Review,
       userId,
     );
+    // Tell whoever works the landlord-suggestion queue that a suggestion
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the member's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.LandlordSuggestions,
+      saved.id,
+    );
     return this.detailFromEntity(saved);
   }
 
@@ -385,6 +396,14 @@ export class LandlordsService {
         note: dto.note ?? null,
         contactEmail: dto.contactEmail ?? null,
       }),
+    );
+    // Tell whoever works the landlord-intro-request queue that a request
+    // landed. Awaited, but safe to await: `announce` catches everything
+    // internally, so a notification failure can never fail the member's
+    // submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.LandlordIntroRequests,
+      saved.id,
     );
     return { id: saved.id, status: saved.status };
   }
