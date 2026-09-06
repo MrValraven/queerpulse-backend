@@ -31,6 +31,9 @@ export interface FeaturedCommunityRefView {
   /** Resolved (`toImageUrl`) cover-image URL, or null when the community has
    *  no cover — the card letterhead's ground. */
   coverImageUrl: string | null;
+  /** Resolved (`toImageUrl`) square identity mark, or null when the community
+   *  has not set one. Optional on the card shell: absent draws nothing. */
+  avatarImageUrl: string | null;
   /** The community's denormalised weekly activity count
    *  (`communities.active_this_week`), as the discover card shows it. */
   activeThisWeek: number;

@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import {
   CoopJoinRequest,
@@ -96,12 +97,14 @@ describe('HousingService', () => {
     delete: jest.Mock;
   };
   let joinRequests: {
+    find: jest.Mock;
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let affirmingPledge: { requireAccepted: jest.Mock };
+  let notifications: { create: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
 
   beforeEach(async () => {
@@ -113,6 +116,7 @@ describe('HousingService', () => {
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     joinRequests = {
+      find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((row: unknown) => row),
       save: jest.fn((row: unknown) => Promise.resolve(row)),
@@ -120,6 +124,9 @@ describe('HousingService', () => {
     };
     affirmingPledge = {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
+    };
+    notifications = {
+      create: jest.fn().mockResolvedValue(null),
     };
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
@@ -134,6 +141,7 @@ describe('HousingService', () => {
           useValue: joinRequests,
         },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
+        { provide: NotificationsService, useValue: notifications },
         {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,

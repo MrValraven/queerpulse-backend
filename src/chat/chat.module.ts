@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { ConnectionsModule } from '../connections/connections.module';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingModule } from '../messaging/messaging.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { UsersModule } from '../users/users.module';
@@ -27,7 +28,15 @@ import { PresenceService } from './presence.service';
     // for entities other modules own. Importing `AuthModule` instead would pull
     // membership, vouch, connections and media-crops into the chat graph for
     // one `exists` query.
-    TypeOrmModule.forFeature([RefreshToken]),
+    //
+    // ConversationParticipant, also read-side only: `ChatGateway`'s ENG-160
+    // per-recipient fan-out (`fanOutConversationMessage`) needs a
+    // conversationId-indexed participant list to reach members who haven't
+    // joined the conversation's socket room. Same read-side registration
+    // pattern as `RefreshToken` above (and `PushMessageListener`'s identical
+    // registration in `push.module.ts` for the same entity/query shape) rather
+    // than importing the owning module for one query.
+    TypeOrmModule.forFeature([RefreshToken, ConversationParticipant]),
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

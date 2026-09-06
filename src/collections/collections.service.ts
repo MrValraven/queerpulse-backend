@@ -7,9 +7,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
-import { SavedItem } from '../saved/entities/saved-item.entity';
+import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
+import { SavedAvailabilityService } from '../saved/saved-availability.service';
 import { parseSavedRef, toSavedId } from '../saved/saved-ref.util';
-import { SavedItemDTO, toSavedItemDTO } from '../saved/saved-response';
+import {
+  ResolvedSavedItemDTO,
+  toResolvedSavedItemDTO,
+} from '../saved/saved-response';
 import { CreateCollectionDto } from './dto/create-collection.dto';
 import { UpdateCollectionDto } from './dto/update-collection.dto';
 import {
@@ -48,6 +52,9 @@ export class CollectionsService {
     private readonly collectionItems: Repository<CollectionItem>,
     @InjectRepository(SavedItem)
     private readonly savedItems: Repository<SavedItem>,
+    // Shared with the saved module rather than reimplemented: one visibility
+    // rule per subject kind, batched one query per kind on the page.
+    private readonly availability: SavedAvailabilityService,
   ) {}
 
   /**
@@ -107,7 +114,18 @@ export class CollectionsService {
     }
   }
 
-  /** One collection with its items hydrated from the owner's saved snapshots. */
+  /**
+   * One collection with its items hydrated from the owner's saved snapshots,
+   * each with the availability question answered (PRD-169).
+   *
+   * The viewer IS the owner here, and that is not an assumption: a collection
+   * is hardcoded owner-private (there is no visibility column, no share token
+   * and no public read on `CollectionsController`), and `mustOwn` 404s anyone
+   * else before this line. So `ownerId` is both the row's owner and the
+   * requesting member, and availability is resolved through their eyes. That is
+   * what keeps a private community's thread from being hidden from the one
+   * person entitled to see it.
+   */
   async getOne(ownerId: string, id: string): Promise<CollectionDetailDTO> {
     const collection = await this.mustOwn(ownerId, id);
     const items = await this.collectionItems.find({
@@ -227,38 +245,61 @@ export class CollectionsService {
   }
 
   /**
-   * Turns join rows into `SavedItemDTO`s by matching each `(subjectKind,
+   * Turns join rows into `ResolvedSavedItemDTO`s by matching each `(subjectKind,
    * subjectId)` against the owner's `saved_item` snapshot (one `IN` query, no
-   * N+1). An item whose underlying save was since removed still renders — with a
-   * minimal fallback DTO keyed off the reference — so a collection never
-   * silently loses rows.
+   * N+1), then answering the availability question for the whole page in one
+   * batch (PRD-169).
+   *
+   * A collection item is the same polymorphic reference a saved item is, and it
+   * had the same silent dead link: the snapshot was returned verbatim, so a
+   * filed thread that was deleted, a listing taken down or a community turned
+   * private still rendered as a live card whose `href` answers 404. The page's
+   * snapshot-backed refs go through `SavedAvailabilityService.availableRefs`
+   * ONCE (it groups by kind internally and runs the kinds concurrently), and an
+   * item that no longer resolves keeps its stored title and loses its `href`.
+   *
+   * An item whose underlying save was since removed still renders, with a
+   * minimal fallback DTO keyed off the reference, so a collection never
+   * silently loses rows. That fallback carries no `href` to begin with, so it is
+   * `unavailable` by construction: there is nowhere to send the member.
    */
   private async hydrateItems(
-    ownerId: string,
+    viewerId: string,
     items: CollectionItem[],
-  ): Promise<SavedItemDTO[]> {
+  ): Promise<ResolvedSavedItemDTO[]> {
     if (items.length === 0) return [];
 
     const saved = await this.savedItems.find({
       where: {
-        userId: ownerId,
+        userId: viewerId,
         subjectId: In([...new Set(items.map((item) => item.subjectId))]),
       },
     });
     const snapshotByRef = new Map(
       saved.map((row) => [toSavedId(row.subjectType, row.subjectId), row]),
     );
+    // One call for the whole page, on the snapshot rows only: a ref with no
+    // snapshot has no href to protect and is reported unavailable below without
+    // costing a lookup.
+    const availableRefs = await this.availability.availableRefs(
+      saved,
+      viewerId,
+    );
 
     return items.map((item) => {
       const ref = `${item.subjectKind}:${item.subjectId}`;
       const snapshot = snapshotByRef.get(ref);
-      if (snapshot) return toSavedItemDTO(snapshot);
-      // Save was removed after filing: keep the row visible with a bare title.
+      if (snapshot)
+        return toResolvedSavedItemDTO(snapshot, availableRefs.has(ref));
+      // Save was removed after filing: keep the row visible with a bare title,
+      // and say plainly that there is nothing to open.
       return {
         id: ref,
-        kind: item.subjectKind as SavedItemDTO['kind'],
+        kind: item.subjectKind as SavedKind,
         title: item.subjectId,
+        href: null,
         savedAt: item.createdAt.toISOString(),
+        availability: 'unavailable',
       };
     });
   }

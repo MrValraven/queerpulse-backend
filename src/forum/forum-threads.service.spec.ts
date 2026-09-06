@@ -7,10 +7,11 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { TopicPostLinkService } from '../content/topic-post-link.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { ModAuditService } from '../moderation/mod-audit.service';
 import { AccessTier } from '../communities/entities/community.entity';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
@@ -44,6 +45,13 @@ interface QbStub {
   select: jest.Mock<QbStub, unknown[]>;
   addSelect: jest.Mock<QbStub, unknown[]>;
   groupBy: jest.Mock<QbStub, unknown[]>;
+  // `paginateTop` probes how many threads fall inside the recency window on a
+  // clone of the fully-filtered builder (PRD-161), so the stub has to answer
+  // both. `clone` returns the SAME stub: the assertions care about which
+  // predicates were folded on, and one shared call log is easier to read than
+  // two.
+  clone: jest.Mock<QbStub, unknown[]>;
+  getCount: jest.Mock<Promise<number>, []>;
   getMany: jest.Mock<Promise<ForumThread[]>, []>;
   getRawMany: jest.Mock<Promise<unknown[]>, []>;
 }
@@ -60,6 +68,8 @@ function qbStub(rows: ForumThread[] = []): QbStub {
     select: jest.fn<QbStub, unknown[]>(),
     addSelect: jest.fn<QbStub, unknown[]>(),
     groupBy: jest.fn<QbStub, unknown[]>(),
+    clone: jest.fn<QbStub, unknown[]>(),
+    getCount: jest.fn<Promise<number>, []>(),
     getMany: jest.fn<Promise<ForumThread[]>, []>(),
     getRawMany: jest.fn<Promise<unknown[]>, []>(),
   };
@@ -73,6 +83,10 @@ function qbStub(rows: ForumThread[] = []): QbStub {
   qb.select.mockReturnValue(qb);
   qb.addSelect.mockReturnValue(qb);
   qb.groupBy.mockReturnValue(qb);
+  qb.clone.mockReturnValue(qb);
+  // Default: too few threads inside the `top` window, so `paginateTop` falls
+  // through to the unwindowed set. Tests that want the window opt in.
+  qb.getCount.mockResolvedValue(0);
   qb.getMany.mockResolvedValue(rows);
   qb.getRawMany.mockResolvedValue([]);
   return qb;
@@ -109,6 +123,8 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   replyCount: 0,
   lastActivityAt: new Date('2026-01-01T00:00:00.000Z'),
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  deletedAt: null,
+  deletedById: null,
   ...overrides,
 });
 
@@ -153,7 +169,7 @@ describe('ForumThreadsService', () => {
     update: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
-    manager: { createQueryBuilder: jest.Mock };
+    manager: { createQueryBuilder: jest.Mock; query: jest.Mock };
   };
   let posts: {
     createQueryBuilder: jest.Mock;
@@ -173,6 +189,31 @@ describe('ForumThreadsService', () => {
     isBlockedEitherWay: jest.Mock;
   };
   let mentions: { notify: jest.Mock };
+  // PRD-167 — the thread card's `excerpt` has to know whether a moderator took
+  // the OP down. Default: nothing moderated.
+  let contentModeration: { statesForAnyType: jest.Mock };
+  // BE-COM-19's staff audit trail, which `deleteThread` appends to when a
+  // moderator takes down a thread they did not write (PRD-160).
+  let modAudit: { writeAuditLog: jest.Mock };
+  // SOC-13 following plus the C7/PRD-170 watermark. Hoisted so the read-watermark
+  // tests can assert that opening a thread stamps but never subscribes.
+  let subscriptions: {
+    isSubscribed: jest.Mock;
+    subscribedThreadIds: jest.Mock;
+    subscribe: jest.Mock;
+    subscribeQuietly: jest.Mock;
+    unsubscribe: jest.Mock;
+    markRead: jest.Mock;
+  };
+  // The `EntityManager` `dataSource.transaction` hands its callback — hoisted
+  // so `deleteThread`'s two `update` calls can be asserted on.
+  let manager: {
+    increment: jest.Mock;
+    update: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    getRepository: jest.Mock;
+  };
 
   beforeEach(async () => {
     threads = {
@@ -188,6 +229,10 @@ describe('ForumThreadsService', () => {
       // that don't opt into a Private community aren't affected.
       manager: {
         createQueryBuilder: jest.fn(() => communityAccessQbStub(false)),
+        // C7/PRD-170 — `unreadReplyCountsByThread` is one grouped raw query per
+        // page. Default: no watermark for anybody, so every card comes back
+        // with `unreadReplyCount: null`.
+        query: jest.fn().mockResolvedValue([]),
       },
     };
     posts = {
@@ -216,6 +261,10 @@ describe('ForumThreadsService', () => {
     };
     // `create` fires a mention scan on the OP body; return no notified users.
     mentions = { notify: jest.fn().mockResolvedValue(new Set<string>()) };
+    contentModeration = {
+      statesForAnyType: jest.fn().mockResolvedValue(new Map<string, unknown>()),
+    };
+    modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
 
     // Runs the transaction callback against a manager whose `getRepository`
     // resolves to the *same* mocked repos the test configures — mirrors
@@ -244,7 +293,7 @@ describe('ForumThreadsService', () => {
       increment: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue(undefined),
     };
-    const manager = {
+    manager = {
       ...txManager,
       // `updateThreadTitle` writes the edit snapshot + OP + thread through the
       // manager directly (not via a repo), so it needs `create`/`save` too.
@@ -262,6 +311,17 @@ describe('ForumThreadsService', () => {
       transaction: jest.fn(
         async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
       ),
+    };
+
+    subscriptions = {
+      isSubscribed: jest.fn().mockResolvedValue(false),
+      subscribedThreadIds: jest.fn().mockResolvedValue(new Set()),
+      subscribe: jest.fn(),
+      subscribeQuietly: jest.fn(),
+      unsubscribe: jest.fn(),
+      // C7/PRD-170 — the read watermark, written by
+      // `POST /forum/threads/:slug/read`.
+      markRead: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -288,18 +348,16 @@ describe('ForumThreadsService', () => {
           provide: TopicPostLinkService,
           useValue: { linkThread: jest.fn() },
         },
-        { provide: ModAuditService, useValue: { writeAuditLog: jest.fn() } },
+        { provide: ModAuditService, useValue: modAudit },
+        {
+          provide: ContentModerationService,
+          useValue: contentModeration,
+        },
         // SOC-13 thread following — the service resolves `isSubscribed` on
         // every read path and auto-subscribes an author on create.
         {
           provide: ForumSubscriptionsService,
-          useValue: {
-            isSubscribed: jest.fn().mockResolvedValue(false),
-            subscribedThreadIds: jest.fn().mockResolvedValue(new Set()),
-            subscribe: jest.fn(),
-            subscribeQuietly: jest.fn(),
-            unsubscribe: jest.fn(),
-          },
+          useValue: subscriptions,
         },
       ],
     }).compile();
@@ -609,13 +667,125 @@ describe('ForumThreadsService', () => {
   });
 
   describe('list sort', () => {
-    it('orders by op_vote_count DESC for sort=top', async () => {
+    // PRD-161 — `top` used to order `op_vote_count DESC, id DESC` with no
+    // second sort key and no time bound, so every zero-vote thread (nearly all
+    // of them on a young forum) came back in uuid order.
+    it('orders by op_vote_count, then recency, then id for sort=top', async () => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
       await service.list('viewer-1', undefined, undefined, undefined, 'top');
 
       expect(qb.orderBy).toHaveBeenCalledWith('"t"."op_vote_count"', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith(
+        '"t"."last_activity_at"',
+        'DESC',
+      );
+      expect(qb.addOrderBy).toHaveBeenCalledWith('t.id', 'DESC');
+    });
+
+    it('drops the top window when too few threads fall inside it', async () => {
+      const qb = qbStub([baseThread()]);
+      qb.getCount.mockResolvedValue(3);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined, 'top');
+
+      // The probe ran against a clone carrying every filter already folded on,
+      // and its answer was "not enough", so the real query is unwindowed.
+      expect(qb.clone).toHaveBeenCalled();
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        't.created_at >= :topWindowStart',
+        expect.anything(),
+      );
+    });
+
+    it('applies the 30-day top window once enough threads fall inside it', async () => {
+      const qb = qbStub([baseThread()]);
+      qb.getCount.mockResolvedValue(200);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined, 'top');
+
+      const windowCall = qb.andWhere.mock.calls.find(
+        ([sql]) => sql === 't.created_at >= :topWindowStart',
+      );
+      expect(windowCall).toBeDefined();
+      const params = windowCall?.[1] as { topWindowStart: Date };
+      const daysBack =
+        (Date.now() - params.topWindowStart.getTime()) / (24 * 60 * 60 * 1000);
+      expect(daysBack).toBeGreaterThan(29.9);
+      expect(daysBack).toBeLessThan(30.1);
+    });
+
+    it('seeks past the cursor on all three top columns as one tuple', async () => {
+      const first = qbStub([baseThread({ id: 'a', opVoteCount: 4 })]);
+      // `limit + 1` rows come back so the page reports `hasMore` and mints a
+      // cursor.
+      first.getMany.mockResolvedValue([
+        baseThread({ id: 'a', opVoteCount: 4 }),
+        baseThread({ id: 'b', opVoteCount: 4 }),
+      ]);
+      threads.createQueryBuilder.mockReturnValue(first);
+
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        1,
+        'top',
+      );
+      expect(page.pageInfo.hasMore).toBe(true);
+      const cursor = page.pageInfo.nextCursor ?? '';
+      expect(cursor).not.toBe('');
+
+      const second = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(second);
+      await service.list('viewer-1', undefined, cursor, 1, 'top');
+
+      const seek = second.andWhere.mock.calls.find(([sql]) =>
+        String(sql).includes('("t"."op_vote_count", "t"."last_activity_at"'),
+      );
+      expect(seek).toBeDefined();
+      expect(seek?.[1]).toEqual(
+        expect.objectContaining({ topVoteCount: 4, topId: 'a' }),
+      );
+    });
+
+    it('inherits the window decision from the cursor instead of re-counting', async () => {
+      const first = qbStub([]);
+      first.getCount.mockResolvedValue(200);
+      first.getMany.mockResolvedValue([
+        baseThread({ id: 'a' }),
+        baseThread({ id: 'b' }),
+      ]);
+      threads.createQueryBuilder.mockReturnValue(first);
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        1,
+        'top',
+      );
+
+      // The forum has gone quiet by page two: a fresh count would now say
+      // "unwindowed" and silently change what the scroll is paging through.
+      const second = qbStub([]);
+      second.getCount.mockResolvedValue(0);
+      threads.createQueryBuilder.mockReturnValue(second);
+      await service.list(
+        'viewer-1',
+        undefined,
+        page.pageInfo.nextCursor ?? undefined,
+        1,
+        'top',
+      );
+
+      expect(second.getCount).not.toHaveBeenCalled();
+      expect(second.andWhere).toHaveBeenCalledWith(
+        't.created_at >= :topWindowStart',
+        expect.anything(),
+      );
     });
 
     it('orders by last_activity_at DESC for sort=active', async () => {
@@ -647,7 +817,7 @@ describe('ForumThreadsService', () => {
       expect(qb.orderBy).toHaveBeenCalledWith('"t"."created_at"', 'DESC');
     });
 
-    it('uses the default created_at keyset for sort=new (and when omitted)', async () => {
+    it('uses the default created_at keyset for sort=new', async () => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
@@ -658,10 +828,25 @@ describe('ForumThreadsService', () => {
         't.accepted_post_id IS NULL',
       );
     });
+
+    // PRD-161 — an omitted sort used to mean `new` on the server while the
+    // frontend defaulted to `top`, so an unparameterised call answered a
+    // question nobody asked. It now means `active`, and the frontend matches.
+    it('defaults to the active keyset when no sort is given', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined);
+
+      expect(qb.orderBy).toHaveBeenCalledWith('"t"."last_activity_at"', 'DESC');
+      expect(qb.orderBy).not.toHaveBeenCalledWith('"t"."created_at"', 'DESC');
+    });
   });
 
   describe('list q/tag filters', () => {
-    it('folds an escaped title ILIKE for q', async () => {
+    // C9/PRD-164 — `q` used to be `title ILIKE` alone, so the forum's own search
+    // box returned nothing for a question that was answered in a reply.
+    it('matches the title OR any visible reply body for q', async () => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
@@ -675,9 +860,48 @@ describe('ForumThreadsService', () => {
         '  rent  ',
       );
 
-      expect(qb.andWhere).toHaveBeenCalledWith('t.title ILIKE :q', {
-        q: '%rent%',
-      });
+      const searchCall = qb.andWhere.mock.calls.find(([sql]) =>
+        String(sql).includes('t.title ILIKE :forumSearchPattern'),
+      );
+      expect(searchCall).toBeDefined();
+      const sql = String(searchCall?.[0]);
+      // A correlated EXISTS, never a join: a join would multiply the thread row
+      // once per matching reply and break the keyset page.
+      expect(sql).toContain('EXISTS');
+      expect(sql).toContain('"__search_post"."thread_id" = t.id');
+      expect(sql).toContain('"__search_post"."body" ILIKE :forumSearchPattern');
+      // A tombstoned post keeps its body only so it can be restored, and a
+      // moderated one was deliberately taken down. Either matching would turn
+      // this filter into an oracle for what a removed post said.
+      expect(sql).toContain('"__search_post"."deleted_at" IS NULL');
+      expect(sql).toContain('content_moderation');
+      expect(searchCall?.[1]).toEqual(
+        expect.objectContaining({ forumSearchPattern: '%rent%' }),
+      );
+    });
+
+    it('escapes LIKE metacharacters once, for both branches', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        '50%_off',
+      );
+
+      const searchCall = qb.andWhere.mock.calls.find(([sql]) =>
+        String(sql).includes('t.title ILIKE :forumSearchPattern'),
+      );
+      expect(searchCall?.[1]).toEqual(
+        expect.objectContaining({
+          forumSearchPattern: String.raw`%50\%\_off%`,
+        }),
+      );
     });
 
     it('normalizes a filter tag and matches it against the tags array', async () => {
@@ -712,10 +936,11 @@ describe('ForumThreadsService', () => {
         '   ',
       );
 
-      expect(qb.andWhere).not.toHaveBeenCalledWith(
-        't.title ILIKE :q',
-        expect.anything(),
-      );
+      expect(
+        qb.andWhere.mock.calls.some(([sql]) =>
+          String(sql).includes('ILIKE :forumSearchPattern'),
+        ),
+      ).toBe(false);
       expect(qb.andWhere).not.toHaveBeenCalledWith(
         ':tag = ANY(t.tags)',
         expect.anything(),
@@ -823,12 +1048,35 @@ describe('ForumThreadsService', () => {
 
       await service.counts('viewer-1', 'rent', '#Housing');
 
-      expect(qb.andWhere).toHaveBeenCalledWith('t.title ILIKE :q', {
-        q: '%rent%',
-      });
+      // Identical narrowing to `list()` — that shared helper is the whole point:
+      // a badge counting threads the list will not draw promises a row that
+      // never arrives (C9/PRD-164).
+      const searchCall = qb.andWhere.mock.calls.find(([sql]) =>
+        String(sql).includes('t.title ILIKE :forumSearchPattern'),
+      );
+      expect(searchCall).toBeDefined();
+      expect(String(searchCall?.[0])).toContain(
+        '"__search_post"."body" ILIKE :forumSearchPattern',
+      );
+      expect(searchCall?.[1]).toEqual(
+        expect.objectContaining({ forumSearchPattern: '%rent%' }),
+      );
       expect(qb.andWhere).toHaveBeenCalledWith(':tag = ANY(t.tags)', {
         tag: 'housing',
       });
+    });
+
+    // PRD-160 — the badges and the list must admit the same set.
+    it('excludes withdrawn threads for a member and keeps them for staff', async () => {
+      const memberQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(memberQb);
+      await service.counts('viewer-1', undefined, undefined);
+      expect(memberQb.andWhere).toHaveBeenCalledWith('t.deleted_at IS NULL');
+
+      const staffQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(staffQb);
+      await service.counts('mod-1', undefined, undefined, true);
+      expect(staffQb.andWhere).not.toHaveBeenCalledWith('t.deleted_at IS NULL');
     });
   });
 
@@ -1453,6 +1701,351 @@ describe('ForumThreadsService', () => {
       await service.searchByText('viewer-1', 'sao', 6);
 
       expect(qb.offset).toHaveBeenCalledWith(0);
+    });
+
+    it('keeps withdrawn threads out of global search', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 6);
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.deleted_at IS NULL');
+    });
+  });
+
+  // PRD-160 — the thread's own delete, distinct from the OP post's tombstone.
+  describe('deleteThread', () => {
+    const authored = () =>
+      baseThread({ authorId: 'member-1', slug: 'hello-world' });
+
+    it('lets the author withdraw their own thread and tombstones the OP', async () => {
+      threads.findOne.mockResolvedValue(authored());
+
+      const dto = await service.deleteThread('hello-world', member);
+
+      expect(dto.isDeleted).toBe(true);
+      const threadUpdate = manager.update.mock.calls.find(
+        ([entity]) => entity === ForumThread,
+      ) as [unknown, unknown, { deletedAt: Date; deletedById: string }];
+      expect(threadUpdate[2].deletedAt).toBeInstanceOf(Date);
+      expect(threadUpdate[2].deletedById).toBe('member-1');
+
+      const postUpdate = manager.update.mock.calls.find(
+        ([entity]) => entity === ForumPost,
+      ) as [
+        unknown,
+        { threadId: string; isOp: boolean; deletedAt: unknown },
+        { deletedAt: Date; deletedById: string },
+      ];
+      // The OP only, never the replies: they are other people's words.
+      expect(postUpdate[1]).toEqual(
+        expect.objectContaining({ threadId: 'thread-1', isOp: true }),
+      );
+      // An OP a moderator already took down keeps its own actor, so the author
+      // cannot lift a staff takedown by deleting and restoring their thread.
+      expect(postUpdate[1].deletedAt).toBeDefined();
+      expect(postUpdate[2].deletedById).toBe('member-1');
+    });
+
+    it('lets a moderator take down a thread they did not write, and audits it', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ authorId: 'someone' }));
+
+      await service.deleteThread('hello-world', moderator);
+
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'mod-1',
+        'thread_deleted',
+        undefined,
+        expect.stringContaining('hello-world'),
+      );
+    });
+
+    it('writes no audit row when an author withdraws their own thread', async () => {
+      threads.findOne.mockResolvedValue(authored());
+
+      await service.deleteThread('hello-world', member);
+
+      // Members changing their minds is not a moderation trail.
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('403s a stranger on a live thread', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ authorId: 'someone' }));
+
+      await expect(
+        service.deleteThread('hello-world', member),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('404s a stranger on an already-withdrawn thread', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ authorId: 'someone', deletedAt: new Date() }),
+      );
+
+      // A 403 here would confirm the thread exists and was withdrawn, which is
+      // exactly the fact the delete retracted.
+      await expect(
+        service.deleteThread('hello-world', member),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('is idempotent: a second delete writes nothing', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ authorId: 'member-1', deletedAt: new Date() }),
+      );
+
+      const dto = await service.deleteThread('hello-world', member);
+
+      expect(dto.isDeleted).toBe(true);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('withdrawn threads in the read paths (PRD-160)', () => {
+    it('404s a member reading a withdrawn thread by slug', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ deletedAt: new Date() }));
+
+      await expect(
+        service.getBySlug('hello-world', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('still serves it to a moderator, flagged', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ deletedAt: new Date() }));
+
+      const dto = await service.getBySlug('hello-world', 'mod-1', true);
+
+      expect(dto.isDeleted).toBe(true);
+    });
+
+    it('filters the browse list for a member and not for staff', async () => {
+      const memberQb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(memberQb);
+      await service.list('viewer-1', undefined, undefined, undefined);
+      expect(memberQb.andWhere).toHaveBeenCalledWith('t.deleted_at IS NULL');
+
+      const staffQb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(staffQb);
+      await service.list(
+        'mod-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      expect(staffQb.andWhere).not.toHaveBeenCalledWith('t.deleted_at IS NULL');
+    });
+
+    it('filters the pinned bucket for a member', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listPinned('viewer-1', undefined, false);
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.deleted_at IS NULL');
+    });
+
+    it('does not let a withdrawn thread hold a pin slot', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await service.setPinned('hello-world', moderator, true);
+
+      expect(threads.count).toHaveBeenCalledWith({
+        where: { isPinned: true, deletedAt: IsNull() },
+      });
+    });
+  });
+
+  // C8/PRD-163 — a mis-filed thread used to be mis-filed forever.
+  describe('category move', () => {
+    it('lets the author move their own thread inside the 24-hour window', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ authorId: 'member-1', createdAt: new Date() }),
+      );
+
+      const dto = await service.updateThread(
+        'hello-world',
+        member,
+        undefined,
+        undefined,
+        'health',
+      );
+
+      expect(dto.category).toBe('health');
+    });
+
+    it('refuses the author once the window has closed', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({
+          authorId: 'member-1',
+          createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
+        }),
+      );
+
+      await expect(
+        service.updateThread(
+          'hello-world',
+          member,
+          undefined,
+          undefined,
+          'health',
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('lets a moderator re-file an old thread they did not write', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({
+          authorId: 'someone',
+          createdAt: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000),
+        }),
+      );
+
+      const dto = await service.updateThread(
+        'hello-world',
+        moderator,
+        undefined,
+        undefined,
+        'health',
+      );
+
+      expect(dto.category).toBe('health');
+    });
+
+    it('refuses a category move from a stranger', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ authorId: 'someone', createdAt: new Date() }),
+      );
+
+      await expect(
+        service.updateThread(
+          'hello-world',
+          member,
+          undefined,
+          undefined,
+          'health',
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('writes no edit revision for a category-only move', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ authorId: 'someone', createdAt: new Date() }),
+      );
+      posts.findOne.mockResolvedValue({
+        id: 'post-1',
+        body: 'body',
+        editedAt: null,
+      });
+
+      await service.updateThread(
+        'hello-world',
+        moderator,
+        undefined,
+        undefined,
+        'health',
+      );
+
+      // Re-filing a thread changed nothing about the post's words, so an
+      // "edited" mark would be false on its face.
+      expect(edits.create).not.toHaveBeenCalled();
+    });
+
+    it('400s a patch that sends nothing at all', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ authorId: 'member-1' }));
+
+      await expect(
+        service.updateThread('hello-world', member),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  // --- C7 / PRD-170: the read watermark ------------------------------------
+  // The forum had no unread marker of any kind. Someone following five threads
+  // got notifications but, on the list itself, could not see which threads had
+  // moved and had to reopen each one to find out.
+  describe('read watermark', () => {
+    it('stamps a watermark WITHOUT following the thread', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await expect(service.markRead('hello-world', member)).resolves.toEqual({
+        ok: true,
+      });
+
+      expect(subscriptions.markRead).toHaveBeenCalledWith(
+        'thread-1',
+        'member-1',
+      );
+      // Opening a thread must never sign anybody up for a notification per
+      // reply for the rest of its life.
+      expect(subscriptions.subscribe).not.toHaveBeenCalled();
+    });
+
+    it('refuses to stamp a watermark on a thread the member cannot read', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ deletedAt: new Date() }));
+
+      await expect(
+        service.markRead('hello-world', member),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('counts unread replies for the page in ONE query, never one per row', async () => {
+      const qb = qbStub([baseThread(), baseThread({ id: 'thread-2' })]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      threads.manager.query.mockResolvedValue([
+        { thread_id: 'thread-2', unread_count: '4' },
+      ]);
+
+      const page = await service.list(
+        'member-1',
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      expect(threads.manager.query).toHaveBeenCalledTimes(1);
+      // Absent from the result = no watermark, which is `null` (no unread
+      // information), never 0.
+      expect(page.data[0]?.unreadReplyCount).toBeNull();
+      expect(page.data[1]?.unreadReplyCount).toBe(4);
+    });
+
+    it('never counts against a thread the viewer has never opened', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.list(
+        'member-1',
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      // The SQL only joins rows whose `last_read_at IS NOT NULL`, so a
+      // never-opened thread produces no group and reads as null here.
+      const [sql] = threads.manager.query.mock.calls[0] as [string];
+      expect(sql).toContain('"watermark"."last_read_at" IS NOT NULL');
+      expect(page.data[0]?.unreadReplyCount).toBeNull();
+    });
+
+    it('excludes the viewer own replies, tombstones, and blocked or muted authors', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('member-1', undefined, undefined, undefined);
+
+      const [sql] = threads.manager.query.mock.calls[0] as [string];
+      // Each exclusion exists so the badge cannot promise a reply the thread
+      // page will not draw.
+      expect(sql).toContain('"p"."author_id" <> $1');
+      expect(sql).toContain('"p"."deleted_at" IS NULL');
+      expect(sql).toContain('"p"."is_op" = false');
+      expect(sql).toContain('"__unread_block"');
+      expect(sql).toContain('"__unread_mute"');
     });
   });
 });

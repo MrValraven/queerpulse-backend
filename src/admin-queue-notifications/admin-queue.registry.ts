@@ -4,14 +4,21 @@ import { StaffRoleId } from '../users/staff-roles.registry';
 /**
  * Every admin review queue an item can LAND in, as one stable vocabulary.
  *
- * A queue is here when a member's own action creates a row somebody on staff
- * then has to answer. Consoles and libraries are absent on purpose, because
- * nothing lands in them unbidden: /admin/media, /admin/topics,
- * /admin/settings, /admin/governance, /admin/press-kit,
- * /admin/landing, /admin/status-incidents, /admin/org-tiers, /admin/staff,
- * /admin/invites, /admin/mod-response-templates, /admin/bots,
- * /admin/communities, /admin/housing-groups, /admin/resource-guides,
- * /admin/resource-listings, /admin/changemakers. Also absent for the same
+ * A queue is here when something arrives that somebody on staff then has to
+ * answer. That is USUALLY a member's own action, and it was exclusively so
+ * until PRD-270 added `guide_reviews`, where the arrival is made by time: a
+ * guide's `review_due_on` passing is work landing on a curator's desk as
+ * surely as a submission is, and the guides that have never been reviewed at
+ * all are invisible to the public until one is opened. So /admin/resource-guides
+ * is a queue in the only sense this file cares about, even though nobody
+ * submitted anything.
+ *
+ * Consoles and libraries are still absent, because nothing lands in them
+ * unbidden: /admin/media, /admin/topics, /admin/settings, /admin/governance,
+ * /admin/press-kit, /admin/landing, /admin/status-incidents, /admin/org-tiers,
+ * /admin/staff, /admin/invites, /admin/mod-response-templates, /admin/bots,
+ * /admin/communities, /admin/housing-groups, /admin/resource-listings,
+ * /admin/changemakers. Also absent for the same
  * reason, though each looks like a queue at a glance, are
  * /admin/volunteer-hours and /admin/guide-feedback: an attested hours total
  * and a helpful/not-helpful tally are both reports nobody decides, not rows
@@ -56,6 +63,13 @@ export enum AdminQueueKey {
   PartnerApplications = 'partner_applications',
   ChangemakerNominations = 'changemaker_nominations',
   RoadmapIdeas = 'roadmap_ideas',
+  /**
+   * PRD-270. The one queue here whose arrivals are made by TIME rather than by
+   * a member, and the exception the docstring above now names: a guide whose
+   * `review_due_on` has passed, or that has never been reviewed at all.
+   * `ResourceReviewSweeperService` announces them once per overdue period.
+   */
+  GuideReviews = 'guide_reviews',
 }
 
 /** The lowest account tier that may work a queue. */
@@ -234,6 +248,19 @@ export const ADMIN_QUEUE_REGISTRY: Record<AdminQueueKey, AdminQueueMeta> = {
     route: '/admin/roadmap',
     tier: UserRole.Admin,
     capabilities: [],
+  },
+  [AdminQueueKey.GuideReviews]: {
+    // Same access shape as `ResourceSuggestions`, and for the same reason.
+    // `AdminResourcesController` is `@Roles(Moderator, Admin)` on the
+    // backend, but `/admin/resource-guides` is absent from the frontend's
+    // `MOD_ACCESSIBLE_ADMIN_PATTERNS` and appears only in
+    // `CAPABILITY_ELEVATED_PATTERNS` under `resource_curator`. A plain
+    // moderator following this deep link would be bounced by the route gate,
+    // so the tier here is narrower than the controller's own guard — the
+    // `RoadmapIdeas` precedent directly above.
+    route: '/admin/resource-guides',
+    tier: UserRole.Admin,
+    capabilities: ['resource_curator'],
   },
 };
 

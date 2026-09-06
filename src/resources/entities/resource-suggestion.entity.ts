@@ -11,12 +11,22 @@ import { ResourceListingCategory } from './resource-listing.entity';
  * Admin decision lifecycle for a member-submitted resource suggestion.
  * `pending` is the state every new suggestion is created in; an
  * admin/moderator then approves, declines, or archives it from the review
- * queue, stamping `decidedAt`/`decidedBy`. Approving does NOT auto-create a
- * `ResourceListing` — see `AdminResourceSuggestionsService.approve` — an
- * admin who has actually verified the organisation creates the real listing
- * by hand, using the suggestion as a reference. Crisis-adjacent content
- * (legal aid, health testing) needs that human verification step; a wrong
- * phone number or a defunct clinic has real cost.
+ * queue, stamping `decidedAt`/`decidedBy`.
+ *
+ * Approving DOES create the `ResourceListing` (PRD-269), in the same
+ * transaction as the status flip, and records it on `createdListingId`. The
+ * human verification crisis-adjacent content needs — legal aid, health
+ * testing, where a wrong phone number or a defunct clinic has real cost — did
+ * not go away: it moved INTO the approval, which now requires the reviewing
+ * admin to confirm or correct every field of the listing body before the
+ * status flips, instead of publishing the member's unverified words. What
+ * went away is the silent second step, where the member was told "accepted"
+ * and nothing reached the directory until somebody remembered to retype the
+ * organisation by hand in a different console.
+ *
+ * `approved` is therefore TERMINAL in a way the other two are not: a second
+ * approve on an already-approved row is refused rather than restamped, since
+ * it would mean a second listing for the same organisation.
  */
 export enum ResourceSuggestionStatus {
   Pending = 'pending',
@@ -87,6 +97,16 @@ export class ResourceSuggestion {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   decisionNote!: string | null;
+
+  // The `resource_listing` row this suggestion's approval produced (PRD-269),
+  // or NULL for anything not approved and for the approvals decided before
+  // the transition created one. No FK, on the same reasoning as `decidedBy`:
+  // a listing that closes down is deleted outright, and the record that this
+  // suggestion was once approved and published has to outlive that. A partial
+  // unique index (see the migration) makes the duplicate guard in
+  // `AdminResourceSuggestionsService.approve` hold under concurrency.
+  @Column({ type: 'uuid', nullable: true })
+  createdListingId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

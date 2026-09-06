@@ -52,11 +52,21 @@ export class MentionNotificationService {
    * got one here, instead of double-notifying them. Declared outside the
    * `try` so a mid-loop failure still returns whatever was actually notified
    * before the error, rather than silently discarding it.
+   *
+   * `excludeUserIds` (PRD-221): additional ids to drop, same treatment as the
+   * author — never a recipient, and never counted in `notifiedUserIds`.
+   * `MessagesService.sendMessage` passes a 1:1 DM's own counterpart here,
+   * since mentioning the one person a direct message could possibly be to is
+   * always the same fact the message's own delivery already told them; a
+   * GROUP mention passes none (see that call site's own comment for why the
+   * two cases differ). Default `[]` — every other `notify()` caller
+   * (community posts, forum threads) is unaffected.
    */
   async notify(
     body: string,
     authorUserId: string,
     payloadBase: Record<string, unknown>,
+    excludeUserIds: string[] = [],
   ): Promise<Set<string>> {
     const notifiedUserIds = new Set<string>();
     try {
@@ -167,8 +177,9 @@ export class MentionNotificationService {
       }
 
       // One notification per recipient per post: the first (highest-priority)
-      // group that names a user wins; the author is never notified.
-      const claimed = new Set<string>([authorUserId]);
+      // group that names a user wins; the author is never notified, and
+      // neither is anyone in `excludeUserIds` (PRD-221's DM-counterpart case).
+      const claimed = new Set<string>([authorUserId, ...excludeUserIds]);
       for (const group of groups) {
         const recipients = group.recipients.filter(
           (userId) => !!userId && !claimed.has(userId),

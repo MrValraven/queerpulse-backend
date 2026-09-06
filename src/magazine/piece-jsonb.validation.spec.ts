@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import {
+  briefWithFiledWords,
   validatePieceBrief,
   validatePieceCare,
 } from './piece-jsonb.validation';
@@ -174,5 +175,31 @@ describe('validatePieceCare', () => {
         },
       }),
     ).toThrow(BadRequestException);
+  });
+});
+
+describe('briefWithFiledWords (PRD-127)', () => {
+  it('sets filedWords while keeping every other brief field', () => {
+    const result = briefWithFiledWords(VALID_BRIEF, 1742);
+
+    // The whole reason this helper exists: `brief` is ONE jsonb blob, so a
+    // write that does not spread drops the angle, the wants, the rate, the
+    // kill fee and the commission record in a single save.
+    expect(result).toEqual({ ...VALID_BRIEF, filedWords: 1742 });
+  });
+
+  it('still records the count on a piece that has no brief at all', () => {
+    const result = briefWithFiledWords(null, 900);
+
+    expect(result.filedWords).toBe(900);
+    expect(result.angle).toBe('');
+    expect(result.wants).toEqual([]);
+    expect(result.wordCount).toBeNull();
+  });
+
+  it('produces a blob the brief validator accepts', () => {
+    expect(() =>
+      validatePieceBrief(briefWithFiledWords(null, 0)),
+    ).not.toThrow();
   });
 });

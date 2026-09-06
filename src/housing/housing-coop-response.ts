@@ -99,6 +99,36 @@ export function toAdminJoinRequestDTO(
 }
 
 /**
+ * The APPLICANT's own view of a co-op join request (PRD-242).
+ *
+ * Deliberately a different shape from `AdminJoinRequestDTO` beside it rather
+ * than a reuse: that one is the reviewer's row and carries the triage material
+ * (`householdSize`, the free-text `note`) that belongs to the console. What the
+ * applicant needs is which co-op they asked to join and where their request
+ * stands, so that is all this carries. The raw `coopId`/`userId` FK columns and
+ * the embedded `HousingCoop` entity never ride along.
+ */
+export interface MyCoopJoinRequestDTO {
+  id: string;
+  status: JoinRequestStatus;
+  createdAt: Date;
+  coop: CoopReferenceDTO | null;
+}
+
+export function toMyCoopJoinRequestDTO(
+  request: CoopJoinRequest,
+): MyCoopJoinRequestDTO {
+  return {
+    id: request.id,
+    status: request.status,
+    createdAt: request.createdAt,
+    coop: request.coop
+      ? { slug: request.coop.slug, name: request.coop.name }
+      : null,
+  };
+}
+
+/**
  * One page of the co-op join-request triage queue (ENG-41). The same envelope as
  * the shared `Paginated<T>` and as the sibling `AdminGroupJoinRequestsPageDTO`:
  * `total` is the size of the whole filtered queue, not of this page, so the

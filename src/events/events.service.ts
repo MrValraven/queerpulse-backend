@@ -17,7 +17,6 @@ import {
   EntityManager,
   In,
   MoreThan,
-  MoreThanOrEqual,
   Not,
   Repository,
   SelectQueryBuilder,
@@ -63,7 +62,7 @@ import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
-import { EventInvite } from './entities/event-invite.entity';
+import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { isAttendanceCleared } from './event-attendance-window';
@@ -78,6 +77,7 @@ import {
   EventVenueConfirmation,
   EventVisibility,
 } from './entities/event.entity';
+import { toCsvRow } from '../common/csv';
 import { RsvpService } from './rsvp.service';
 
 /** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
@@ -984,37 +984,89 @@ export class EventsService {
     }
 
     // Fan out AFTER the status is committed; mirrors EventRemindersService.
-    for (const occurrence of cancelled) {
-      await this.notifyEventCancelled(occurrence, userId);
-    }
+    // ONE notification for the whole cancellation, however many occurrences it
+    // took off the calendar (ENG-141). This used to loop, writing a row and
+    // firing a push per occurrence per attendee: a regular of a weekly group
+    // cancelled thirty weeks out received thirty "Event cancelled" pushes in a
+    // burst, and `EventCancelled` has no bundle key so nothing collapsed them.
+    // Bundling alone would not have fixed it either — the push hangs off the
+    // WRITE, and thirty writes are thirty pushes whether or not the rows merge.
+    // Cancelling a series is one act, so it is one message.
+    await this.notifyEventCancelled(cancelled, userId);
 
     return this.buildDetail(event, userId);
   }
 
-  // Tell attendees one occurrence is off. Recipients = anyone with a live RSVP
-  // (going/maybe/waitlisted), minus the organizer who just cancelled it.
+  /**
+   * Tell everyone with a stake in a cancellation that it is off.
+   *
+   * `occurrences` is the whole set the cancel took down — one event for a
+   * standalone gathering, the series tail for `scope=future`. Recipients are
+   * the UNION across all of them, de-duplicated, so a regular who had RSVP'd
+   * to every week gets one row rather than one per week.
+   *
+   * Recipients are anyone holding a live RSVP (going/maybe/waitlisted) OR a
+   * standing invite, minus the organizer who just cancelled it. Invitees used
+   * to be left out entirely (PRD-185): the invite stayed in their list, they
+   * were never told, and accepting it handed them a confused 400 on the
+   * follow-up RSVP. An invitation is a commitment the platform asked them to
+   * answer, so its withdrawal is owed to them exactly as much as to somebody
+   * who already said yes.
+   *
+   * The payload describes the FIRST (soonest) occurrence and carries
+   * `occurrenceCount` so a series cancellation can say how many dates went
+   * with it, rather than naming one date and leaving the other twenty-nine
+   * unexplained.
+   */
   private async notifyEventCancelled(
-    event: Event,
+    occurrences: Event[],
     userId: string,
   ): Promise<void> {
-    const rsvps = await this.rsvps.find({
-      where: {
-        eventId: event.id,
-        status: In([RsvpStatus.Going, RsvpStatus.Maybe, RsvpStatus.Waitlisted]),
-      },
-    });
-    const recipientIds = rsvps
-      .map((r) => r.userId)
-      .filter((id) => id !== userId);
+    const [first] = occurrences;
+    if (!first) return;
+    const eventIds = occurrences.map((occurrence) => occurrence.id);
+    const [rsvps, invites] = await Promise.all([
+      this.rsvps.find({
+        where: {
+          eventId: In(eventIds),
+          status: In([
+            RsvpStatus.Going,
+            RsvpStatus.Maybe,
+            RsvpStatus.Waitlisted,
+          ]),
+        },
+      }),
+      this.invites.find({
+        where: {
+          eventId: In(eventIds),
+          status: EventInviteStatus.Pending,
+        },
+      }),
+    ]);
+    const recipientIds = [
+      ...new Set([
+        ...rsvps.map((rsvp) => rsvp.userId),
+        ...invites.map((invite) => invite.inviteeId),
+      ]),
+    ].filter((recipientId) => recipientId !== userId);
+    if (recipientIds.length === 0) return;
     await this.notifications.createForRecipients(
       recipientIds,
       NotificationType.EventCancelled,
       {
-        eventId: event.id,
+        eventId: first.id,
         // Carried so the MyEvents panel can deep-link the row (client keys by slug).
-        eventSlug: event.slug,
-        title: event.title,
-        startAt: event.startAt.toISOString(),
+        eventSlug: first.slug,
+        title: first.title,
+        startAt: first.startAt.toISOString(),
+        // The series this cancellation belongs to, when it is one. Also the
+        // bundle subject (`notification-bundling.ts`), so if some other path
+        // ever cancels occurrences one at a time again, their rows collapse
+        // onto the series instead of stacking.
+        ...(first.seriesId ? { seriesId: first.seriesId } : {}),
+        // How many dates came off. 1 for a plain gathering, which is what
+        // every reader of this payload assumed before series existed.
+        occurrenceCount: occurrences.length,
       },
     );
   }
@@ -1462,6 +1514,36 @@ export class EventsService {
     const rsvpStatus =
       status === 'waitlisted' ? RsvpStatus.Waitlisted : RsvpStatus.Going;
 
+    // The host turned off "Show attendee count" (ENG-140).
+    //
+    // The toggle used to hide only the NUMBER, on the detail card and in the
+    // 8-person preview (`buildGoingAttendeesPreview` honours it). This route
+    // did not, and the detail page calls it for every viewer, so a host who
+    // had switched "who is coming" off was still handing each passer-by the
+    // first page of their guest list — names and avatars. On a platform where
+    // "who went" can out someone, that is the more serious half of the
+    // promise, so the same flag now withholds the roster AND the counts here.
+    // Organisers are unaffected: this is their own operational picture, and
+    // the toggle only ever governed what OTHERS see.
+    //
+    // Withheld as an empty page with zeroed counts rather than a 403: the
+    // event is public and the viewer is entitled to read it, they are simply
+    // not entitled to the roster. A refusal would make a readable gathering
+    // look broken.
+    if (!event.showAttendeeCount && !isOrganizer) {
+      return {
+        items: [],
+        total: 0,
+        page: normalizedPage,
+        pageSize: PAGE_SIZE,
+        capacity: event.capacity,
+        goingCount: 0,
+        seatsTaken: 0,
+        waitlistCount: 0,
+        checkedInCount: 0,
+      };
+    }
+
     const qb = this.rsvps
       .createQueryBuilder('r')
       .where('r.event_id = :eventId', { eventId: event.id })
@@ -1520,6 +1602,77 @@ export class EventsService {
       // surface renders this field.
       checkedInCount: isOrganizer ? counts.checkedInCount : 0,
     };
+  }
+
+  /**
+   * The door list, as a CSV an organiser can take offline (PRD-190).
+   *
+   * A host running a door with no signal, or handing the list to whoever is
+   * on the desk, had no way to get it off the phone: the manage tab's
+   * "Export" button fired a toast and nothing else. This is the real thing.
+   *
+   * ORGANISERS ONLY, enforced here rather than left to the route: the file
+   * carries names, pronouns and the attendee's own declared access and
+   * dietary needs, which is the most sensitive block this domain holds. It is
+   * exactly the set `attendees()` already discloses to an organiser, in the
+   * same order, so no reader gains anything from this route they could not
+   * already read in the dashboard.
+   *
+   * NOT paginated, deliberately — a door list with page two missing is not a
+   * door list. Bounded at `ATTENDEE_EXPORT_LIMIT` rows so a runaway gathering
+   * cannot stream unboundedly; a truncated file is far better than a request
+   * that never finishes, and the cap is well past any real Lisbon room.
+   *
+   * Every field goes through `toCsvField`, which quotes, escapes and
+   * neutralizes spreadsheet formula injection — attendee-authored free text
+   * (an access note) lands in a cell an organiser opens in Excel.
+   */
+  async attendeesCsv(slug: string, viewerId: string): Promise<string> {
+    const event = await this.loadEventOr404(slug);
+    await this.assertOrganizer(event.id, viewerId);
+
+    const rows = await this.rsvps.find({
+      where: {
+        eventId: event.id,
+        status: In([RsvpStatus.Going, RsvpStatus.Waitlisted]),
+      },
+      order: { status: 'ASC', waitlistPosition: 'ASC', createdAt: 'ASC' },
+      take: EventsService.ATTENDEE_EXPORT_LIMIT,
+    });
+    const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
+
+    const table = [
+      [
+        'name',
+        'pronouns',
+        'status',
+        'waitlist position',
+        'guests',
+        'rsvped at',
+        'checked in at',
+        'access needs',
+        'dietary needs',
+      ],
+      ...rows
+        // Drop profile-less ghost rows, exactly as `attendees()` does — an
+        // erased account leaves an RSVP row with nobody behind it.
+        .filter((row) => profiles.has(row.userId))
+        .map((row) => {
+          const profile = profiles.get(row.userId)!;
+          return [
+            `${profile.firstName} ${profile.lastName}`.trim(),
+            profile.pronouns ?? '',
+            row.status,
+            row.waitlistPosition === null ? '' : String(row.waitlistPosition),
+            String(row.guestCount ?? 0),
+            row.createdAt.toISOString(),
+            row.checkedInAt ? row.checkedInAt.toISOString() : '',
+            row.accessNeeds ?? '',
+            row.dietaryNeeds ?? '',
+          ];
+        }),
+    ];
+    return table.map((row) => toCsvRow(row)).join('\n');
   }
 
   /**
@@ -1599,70 +1752,70 @@ export class EventsService {
 
   /**
    * `GET /communities/:slug/pulse`'s events lane — a community's own
-   * upcoming (published, future-dated) gatherings, soonest-first. Unlike
-   * `list('upcoming', ...)`, this is scoped to one community by id (not the
-   * viewer's own audience-gated browse), so it skips `audienceGate` and
-   * `excludeModeratedEvents` entirely: a community's own page showing its
-   * own tagged events isn't the public discovery surface those two guard.
-   * Card shaping (`toEventSummary`) is reused as-is; `myRsvpStatus` and
-   * `isBookmarked` are viewer-less here (always `null`/`false`) since this
-   * method isn't called with a specific viewer in mind — see
-   * `CommunityPulseService`, which calls this once per pulse request.
+   * upcoming (published, future-dated) gatherings, soonest-first.
+   *
+   * AUDIENCE-GATED, like every other read of a gathering. It used not to be:
+   * the original reasoning was that "a community's own page showing its own
+   * tagged events isn't the public discovery surface `audienceGate` guards",
+   * and that is wrong for the three narrowing tiers. `invite_only`, `network`
+   * and `extended_network` exist precisely to make an audience SMALLER than
+   * the room a gathering is filed in, so a plain roster member was reading
+   * gatherings that were never addressed to them — a house party invited to
+   * eleven people, listed to four hundred. `community` visibility is the one
+   * tier this lane can admit freely, and `filterViewable` admits it for a
+   * member of that community anyway, so nothing legitimate is lost.
+   *
+   * `filterViewable` (not the cheaper `scopedVisibilityWhere` browse
+   * predicate) because this is a fetched SET, not a paginated browse, and it
+   * is the method that knows about invited members, second-degree viewers and
+   * the organizer bypass. It batches every lookup it needs for the whole page.
+   *
+   * OVER-FETCH THEN SLICE. Filtering happens after the fetch, so asking for
+   * exactly `limit` rows would hand back a short lane whenever any of them
+   * were narrowed. `OVER_FETCH_FACTOR` rows are read and the survivors are
+   * cut back to `limit`. A community whose next twenty gatherings are all
+   * invite-only can still return fewer than `limit`, which is the honest
+   * answer: those gatherings are not this member's to see.
+   *
+   * Moderator takedowns are excluded here too — the pulse had no such filter,
+   * so a gathering a moderator had removed still surfaced on the community's
+   * own page.
+   *
+   * Card shaping (`toEventSummary`) is reused as-is, now with the viewer, so
+   * `myRsvpStatus` and `isBookmarked` are real rather than always
+   * `null`/`false` — see `CommunityPulseService`, which has the caller's id
+   * and simply was not passing it on.
    */
   async listUpcomingByCommunity(
     communityId: string,
+    viewerId: string,
     limit = 5,
   ): Promise<EventSummary[]> {
     const now = new Date();
-    const events = await this.events.find({
-      where: {
-        communityId,
-        status: EventStatus.Published,
-        startAt: MoreThanOrEqual(now),
-      },
-      order: { startAt: 'ASC' },
-      take: limit,
-    });
+    const qb = this.events
+      .createQueryBuilder('e')
+      .where('e.community_id = :communityId', { communityId })
+      .andWhere('e.status = :status', { status: EventStatus.Published })
+      .andWhere('e.start_at >= :now', { now });
+    this.excludeModeratedEvents(qb);
+    const candidates = await qb
+      .orderBy('e.start_at', 'ASC')
+      .take(limit * EventsService.PULSE_OVER_FETCH_FACTOR)
+      .getMany();
+    if (!candidates.length) return [];
+
+    const events = (
+      await this.audienceGate.filterViewable(candidates, viewerId)
+    ).slice(0, limit);
     if (!events.length) return [];
 
-    const eventIds = events.map((e) => e.id);
-    const goingRows = await this.rsvps
-      .createQueryBuilder('r')
-      .select('r.event_id', 'eventId')
-      .addSelect('COUNT(*)', 'count')
-      .addSelect('COUNT(*) + COALESCE(SUM(r.guest_count), 0)', 'seats')
-      .where('r.event_id IN (:...ids)', { ids: eventIds })
-      .andWhere('r.status = :status', { status: RsvpStatus.Going })
-      .groupBy('r.event_id')
-      .getRawMany<{ eventId: string; count: string; seats: string }>();
-    const goingByEvent = new Map(
-      goingRows.map((row) => [row.eventId, Number(row.count)]),
-    );
-    const seatsByEvent = new Map(
-      goingRows.map((row) => [row.eventId, Number(row.seats)]),
-    );
-    const crops = await this.mediaCropService.getMany(
-      events.flatMap((e) => (e.coverImageUrl ? [e.coverImageUrl] : [])),
-    );
-    const hostProfiles = await this.profilesByUserIds(
-      // NULL for a gathering whose host erased their account
-      // (`SetNullContentAuthorFksOnUserErasure1794610000000`); the row stays,
-      // and `toOrganizerView(undefined)` renders `host: null`.
-      presentActorIds(events.map((e) => e.hostId)),
-    );
-
-    return events.map((e) =>
-      toEventSummary(
-        e,
-        goingByEvent.get(e.id) ?? 0,
-        null,
-        false,
-        crops,
-        toOrganizerView(actorFromLookup(hostProfiles, e.hostId)),
-        undefined,
-        seatsByEvent.get(e.id) ?? 0,
-      ),
-    );
+    // `summarize`, not a hand-rolled copy of it. This lane used to inline its
+    // own going-count, crop and host-profile lookups purely because it had no
+    // viewer to compute `myRsvpStatus`/`isBookmarked` with, and that copy had
+    // already fallen behind: it hardcoded both to `null`/`false`, so a member
+    // reading their own community's pulse could not see they were already
+    // going to one of its gatherings.
+    return this.summarize(events, viewerId);
   }
 
   async isOrganizer(eventId: string, userId: string): Promise<boolean> {
@@ -1961,7 +2114,13 @@ export class EventsService {
     return {
       ...summary,
       description: event.description,
-      onlineUrl: event.onlineUrl,
+      // The join link rides the SAME gate as the street address (PRD-182):
+      // organisers and confirmed attendees only. A video link handed to every
+      // reader of a public page is a room anyone can walk into.
+      onlineUrl: seesExactLocation ? event.onlineUrl : null,
+      // Organiser-facing edit age (PRD-191). Harmless to every other reader,
+      // and the manage dashboard is the only surface that renders it.
+      updatedAt: event.updatedAt,
       address: seesExactLocation ? event.address : null,
       arrivalNotes: seesExactLocation ? event.arrivalNotes : null,
       locationPrecision:
@@ -2012,6 +2171,19 @@ export class EventsService {
   // a small pre-RSVP "safety in numbers" glance, not the full guest list
   // (that's `attendees()`, paginated, organizer-facing).
   private static readonly ATTENDEE_PREVIEW_LIMIT = 8;
+
+  // Row cap on the organiser's CSV door list (`attendeesCsv`). Not a page
+  // size — a door list missing its second half is not a door list — but a
+  // ceiling, so an uncapped public gathering that accumulated an absurd
+  // roster cannot stream unboundedly. Well past any room in Lisbon.
+  private static readonly ATTENDEE_EXPORT_LIMIT = 2000;
+
+  // How far past `limit` the community-pulse events lane reads before the
+  // audience gate filters it (`listUpcomingByCommunity`). The gate runs after
+  // the fetch, so asking for exactly `limit` returns a short lane whenever any
+  // of those rows turn out to be narrowed to an audience the viewer is not in.
+  // Four is generous for a five-item lane and still one bounded query.
+  private static readonly PULSE_OVER_FETCH_FACTOR = 4;
 
   /**
    * MSG-12 — `EventDetail.goingAttendeesPreview`'s query. Two privacy layers,

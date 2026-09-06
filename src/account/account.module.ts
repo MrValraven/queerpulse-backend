@@ -10,6 +10,7 @@ import { Community } from '../communities/entities/community.entity';
 import { Connection } from '../connections/entities/connection.entity';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventInvite } from '../events/entities/event-invite.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
 import { Event } from '../events/entities/event.entity';
@@ -132,6 +133,11 @@ import { DsarRequest } from './entities/dsar-request.entity';
       // entities above.
       EventCohost,
       EventSeries,
+      // Pending invitations to a cancelled gathering. A standing invite is a
+      // decision the platform asked somebody to make, so its withdrawal is
+      // owed to them exactly as much as it is to somebody who already said
+      // yes — see `ContentOwnerErasureService.notifyAttendeesCancelled`.
+      EventInvite,
       // Open postings the erased member left behind, closed by
       // `ContentOwnerErasureService` so nobody applies into a void.
       Job,

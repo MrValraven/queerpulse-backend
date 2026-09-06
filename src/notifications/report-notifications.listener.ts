@@ -11,6 +11,7 @@ import { Community } from '../communities/entities/community.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Event as Gathering } from '../events/entities/event.entity';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
+import { formatReportReference } from '../reports/report-reference';
 import { REPORT_CREATED, ReportCreatedEvent } from '../reports/report.events';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
@@ -77,9 +78,13 @@ interface EventPhotoSubject {
  *     fan-out is dropped from this one, so a moderator who also runs a
  *     community is told once, on the channel that carries the SLA.
  *
- * Three people are never notified, whatever role they hold: the member who
- * filed the report (nobody needs paging about their own filing), the member
- * the report is about, and anyone a fan-out already reached. The reporter is
+ * Three people are never reached by EITHER responder fan-out, whatever role
+ * they hold: the member who filed the report (nobody needs paging about their
+ * own filing), the member the report is about, and anyone a fan-out already
+ * reached. The reporter's exclusion from the responder channels is permanent
+ * and is not what PRD-289 changed: they now get their own separate
+ * `ReportReceived` receipt (`notifyReporter`), which carries their case
+ * reference and nothing a responder is told. The reporter is
  * also never NAMED: no notification here carries an actor id, so the bell
  * reads as the platform speaking whether or not the report was filed
  * anonymously, and no block or mute between a reporter and a moderator can
@@ -116,8 +121,18 @@ export class ReportNotificationsListener {
 
   @OnEvent(REPORT_CREATED)
   async onReportCreated(event: ReportCreatedEvent): Promise<void> {
+    const report = await this.loadReport(event.reportId);
+    if (!report) return;
+
+    // TWO INDEPENDENT FAN-OUTS, each behind its own guard, because they answer
+    // to different people: the reporter's receipt (PRD-289) and the responders'
+    // duty mail. One shared `try` would let whichever ran first swallow the
+    // other, and "the reporter heard nothing because a community roster query
+    // failed" is exactly the silence PRD-289 exists to end.
+    await this.notifyReporter(report);
+
     try {
-      await this.notifyResponders(event);
+      await this.notifyResponders(event, report);
     } catch (error) {
       // Best-effort by the event's contract: a notification failure must never
       // surface to the reporter or fail the filing that produced this event.
@@ -127,12 +142,81 @@ export class ReportNotificationsListener {
     }
   }
 
-  private async notifyResponders(event: ReportCreatedEvent): Promise<void> {
-    const report = await this.reports.findOne({
-      where: { id: event.reportId },
-    });
-    if (!report) return;
+  /**
+   * The report row both fan-outs read, loaded once. A lookup failure is
+   * swallowed on the same best-effort terms as everything else here: the
+   * filing has already committed and nothing this listener does may surface to
+   * the member who filed it.
+   */
+  private async loadReport(reportId: string): Promise<Report | null> {
+    try {
+      return await this.reports.findOne({ where: { id: reportId } });
+    } catch (error) {
+      this.logger.warn(
+        `report notification lookup failed for report ${reportId}: ${String(error)}`,
+      );
+      return null;
+    }
+  }
 
+  /**
+   * PRD-289: the reporter's own receipt, and the ONLY row in this file that
+   * goes to the person who filed.
+   *
+   * Before this, filing produced a submit confirmation and nothing else. The
+   * two responder fan-outs below deliberately exclude the reporter (they are
+   * duty mail, and nobody needs paging about their own filing), so a reporter
+   * who dismissed that confirmation had no durable record until a moderator
+   * closed the case and `report_resolved` arrived, which on the low band is
+   * seven days. This writes the record at filing time, carrying the same
+   * display reference the reporter already sees on `GET /reports/mine`.
+   *
+   * THREE THINGS IT IS CAREFUL ABOUT:
+   *
+   *  1. NO ACCOUNT, NO ROW. `reports.reporter_id` is nullable, and since
+   *     `POST /reports` became public a signed-out filing leaves it null.
+   *     `notifications.user_id` carries a foreign key to `users(id)`, so a row
+   *     for nobody is a referential failure rather than a notification.
+   *  2. ANONYMOUS STILL GETS ITS RECEIPT. `reports.anonymous` shields the
+   *     reporter from moderators and from the reported party
+   *     (`ModerationService.toReporterDTO` returns `{ anonymous: true }`); it
+   *     has never governed what the reporter may see about their own report,
+   *     and `report_resolved` already reads it that way. Suppressing the
+   *     receipt on that flag would punish the members who most need to know
+   *     the platform has their case.
+   *  3. NO ACTOR ARGUMENT. Like the responder fan-outs and like
+   *     `report_resolved`, this is the platform speaking, so it must not be
+   *     filterable by a block or a mute, and the payload names nobody.
+   *
+   * The payload carries no `detail` and nothing about the reported party: the
+   * reporter wrote the detail and the report is theirs to re-read behind
+   * `GET /reports/mine`.
+   */
+  private async notifyReporter(report: Report): Promise<void> {
+    if (!report.reporterId) return;
+    try {
+      await this.notifications.create(
+        report.reporterId,
+        NotificationType.ReportReceived,
+        {
+          source: 'report',
+          reportId: report.id,
+          reference: formatReportReference(report),
+          subjectType: report.subjectType,
+          severity: report.severity,
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `report receipt failed for report ${report.id}: ${String(error)}`,
+      );
+    }
+  }
+
+  private async notifyResponders(
+    event: ReportCreatedEvent,
+    report: Report,
+  ): Promise<void> {
     // One lookup, read once and handed to both resolvers below: a photo report
     // needs the uploader (to leave out of the fan-out) and the gathering's
     // community (to fan out TO), and both live on the same row. Resolving it

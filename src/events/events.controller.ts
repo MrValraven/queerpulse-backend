@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -322,6 +323,37 @@ export class EventsController {
       query.status ?? 'going',
       query.page,
     );
+  }
+
+  /**
+   * The organiser's door list as a downloadable CSV (PRD-190).
+   *
+   * A LITERAL segment (`attendees.csv`), so it can never be shadowed by the
+   * `:slug/attendees/:memberSlug` param route above — the same reason the
+   * roadmap admin controller separates `audit` from `audit.csv`.
+   *
+   * Organiser-only, enforced in the service: the file carries names, pronouns
+   * and each attendee's own declared access and dietary needs.
+   */
+  @Get(':slug/attendees.csv')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header(
+    'Content-Disposition',
+    'attachment; filename="gathering-attendees.csv"',
+  )
+  @ApiOperation({
+    summary: 'Download the full attendee list of an event you organize as CSV.',
+  })
+  @ApiOkResponse({ description: 'A CSV body: going first, then the waitlist.' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  attendeesCsv(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.eventsService.attendeesCsv(slug, user.userId);
   }
 
   @Post(':slug/cohosts')

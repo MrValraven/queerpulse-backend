@@ -48,9 +48,11 @@ export interface IssueContentsResponse {
  *  - the issue itself must have published (CON-18), so an embargoed number
  *    404s here instead of returning its title and date;
  *  - only entries the editor marked `on` are read at all;
- *  - an entry is dropped unless its piece resolved to a PUBLISHED article or
- *    deck. A commissioned-but-unpublished piece has a title the desk has not
- *    put in front of readers yet, and a curated blurb is no reason to.
+ *  - an entry is dropped unless its piece resolved to an article or deck that
+ *    is published AND already due (`published_at <= now`, ENG-100). A
+ *    commissioned-but-unpublished piece has a title the desk has not put in
+ *    front of readers yet, and so does one scheduled for next week; a curated
+ *    blurb is no reason to print either.
  * Both together mean a curated issue that has not shipped renders an empty
  * panel rather than tomorrow's contents.
  *
@@ -129,6 +131,16 @@ export class MagazineIssueContentsService {
       ).map((deck) => [deck.id, deck]),
     );
 
+    // ENG-100 — "published" here means published AND already due, the same
+    // `published_at <= now` gate `MagazineFrontService` and
+    // `MagazineService.getArticleBySlug` run. A non-null `publishedAt` alone
+    // admits a piece SCHEDULED for next week: the panel printed tomorrow's
+    // headline and blurb, and the link 404'd on the article read, which
+    // enforces the full gate.
+    const now = new Date();
+    const isLive = (publishedAt: Date | null): boolean =>
+      publishedAt !== null && publishedAt <= now;
+
     const entries: IssueContentsEntry[] = [];
     for (const item of curated) {
       const piece = pieceById.get(item.pieceId);
@@ -142,7 +154,7 @@ export class MagazineIssueContentsService {
       const article = piece.articleId
         ? articleById.get(piece.articleId)
         : undefined;
-      if (article?.publishedAt) {
+      if (article && isLive(article.publishedAt)) {
         entries.push({
           title: article.title,
           blurb: item.blurb,
@@ -153,7 +165,7 @@ export class MagazineIssueContentsService {
         continue;
       }
       const deck = piece.deckId ? deckById.get(piece.deckId) : undefined;
-      if (deck?.publishedAt) {
+      if (deck && isLive(deck.publishedAt)) {
         entries.push({
           title: deck.title,
           blurb: item.blurb,

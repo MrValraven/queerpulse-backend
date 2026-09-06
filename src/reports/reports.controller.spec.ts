@@ -1,7 +1,10 @@
+import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ReportSubjectType } from './entities/report.entity';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
+
+const CLIENT_IP = '203.0.113.9';
 
 describe('ReportsController', () => {
   let controller: ReportsController;
@@ -26,13 +29,18 @@ describe('ReportsController', () => {
         subjectId: 'user-2',
         reasonCode: 'harassment',
       },
+      CLIENT_IP,
     );
 
-    expect(service.create).toHaveBeenCalledWith('user-1', {
-      subjectType: ReportSubjectType.Member,
-      subjectId: 'user-2',
-      reasonCode: 'harassment',
-    });
+    expect(service.create).toHaveBeenCalledWith(
+      'user-1',
+      {
+        subjectType: ReportSubjectType.Member,
+        subjectId: 'user-2',
+        reasonCode: 'harassment',
+      },
+      CLIENT_IP,
+    );
   });
 
   it('creates an anonymous report with evidence and a contact email', async () => {
@@ -48,17 +56,74 @@ describe('ReportsController', () => {
         contactEmail: 'reporter@example.com',
         evidence: [{ type: 'url', value: 'https://example.com/proof' }],
       },
+      CLIENT_IP,
     );
 
-    expect(service.create).toHaveBeenCalledWith('user-1', {
-      subjectType: ReportSubjectType.Post,
-      subjectId: 'post-1',
-      reasonCode: 'doxxing',
-      detail: 'Shared my address in a reply.',
-      anonymous: true,
-      contactEmail: 'reporter@example.com',
-      evidence: [{ type: 'url', value: 'https://example.com/proof' }],
-    });
+    expect(service.create).toHaveBeenCalledWith(
+      'user-1',
+      {
+        subjectType: ReportSubjectType.Post,
+        subjectId: 'post-1',
+        reasonCode: 'doxxing',
+        detail: 'Shared my address in a reply.',
+        anonymous: true,
+        contactEmail: 'reporter@example.com',
+        evidence: [{ type: 'url', value: 'https://example.com/proof' }],
+      },
+      CLIENT_IP,
+    );
+  });
+
+  // PRD-280: the route is public, so `OptionalJwtAuthGuard` hands the handler
+  // `undefined` rather than a principal. The service is then told there is no
+  // reporter, which is what selects the anonymous flood caps and the
+  // contact-email rule inside it.
+  it('files with a null reporter when the caller is signed out', async () => {
+    service.create.mockResolvedValue({ id: 'report-3' });
+    await controller.create(
+      undefined,
+      {
+        subjectType: ReportSubjectType.Member,
+        subjectId: 'user-2',
+        reasonCode: 'harassment',
+        contactEmail: 'stranger@example.com',
+      },
+      CLIENT_IP,
+    );
+
+    expect(service.create).toHaveBeenCalledWith(
+      null,
+      {
+        subjectType: ReportSubjectType.Member,
+        subjectId: 'user-2',
+        reasonCode: 'harassment',
+        contactEmail: 'stranger@example.com',
+      },
+      CLIENT_IP,
+    );
+  });
+
+  // `@Public()` makes the class-level `ActiveMemberGuard` step aside, so the
+  // active-member rule is re-stated in the handler for a caller who IS signed
+  // in. A suspended account must not file under its own id.
+  it('refuses a signed-in caller who is not an active member', async () => {
+    expect(() =>
+      controller.create(
+        {
+          userId: 'user-1',
+          email: 'a@b.com',
+          status: 'suspended',
+          role: 'member',
+        },
+        {
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'user-2',
+          reasonCode: 'harassment',
+        },
+        CLIENT_IP,
+      ),
+    ).toThrow(ForbiddenException);
+    expect(service.create).not.toHaveBeenCalled();
   });
 
   it('delegates the reason catalogue to the service', () => {

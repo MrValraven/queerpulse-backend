@@ -214,12 +214,30 @@ export interface SafeSpaceAuditResponse {
   actorId: string | null;
   reason: string | null;
   metadata: Record<string, unknown>;
+  /**
+   * True when this row is a badge awarded BELOW the published
+   * independent-visit bar, on a written override.
+   *
+   * Derived here rather than left for a reader to dig out of `metadata`. An
+   * overridden award and a clean one both carry `action: 'nomination_awarded'`,
+   * so without this the exception is auditable by query
+   * (`metadata->>'hasMetVisitBar' = 'false'`) and invisible to anyone simply
+   * reading the trail. That gap is the same shape as the defect this whole
+   * change fixes, where the bar was computed, recorded, and never consulted.
+   *
+   * False on every row that is not an award, and on an award that cleared the
+   * bar. Rows written before the bar was enforced carry no `hasMetVisitBar`
+   * key at all and are reported false, which is honest: nothing was overridden,
+   * because nothing was enforced.
+   */
+  isVisitBarOverride: boolean;
   createdAt: string;
 }
 
 export function toSafeSpaceAuditResponse(
   audit: SafeSpaceDecisionAudit,
 ): SafeSpaceAuditResponse {
+  const metadata = audit.metadata ?? {};
   return {
     id: audit.id,
     subjectType: audit.subjectType,
@@ -228,7 +246,14 @@ export function toSafeSpaceAuditResponse(
     action: audit.action,
     actorId: audit.actorId,
     reason: audit.reason,
-    metadata: audit.metadata ?? {},
+    metadata,
+    // Both halves are required deliberately. `hasMetVisitBar === false` alone
+    // would also flag a row from before enforcement; the override reason is
+    // what says a human was asked and answered.
+    isVisitBarOverride:
+      metadata.hasMetVisitBar === false &&
+      typeof metadata.belowVisitBarReason === 'string' &&
+      metadata.belowVisitBarReason.trim().length > 0,
     createdAt: audit.createdAt.toISOString(),
   };
 }

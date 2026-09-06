@@ -93,15 +93,19 @@ export class FilesController {
   private static readonly VALIDATED_KEY_CACHE_LIMIT = 5000;
   private static readonly validatedKeys = new Set<string>();
 
-  // True when a message referencing this `message-image` key lives in a
-  // conversation the requester participates in. A left member keeps a
-  // participant row (see `ConversationParticipant.leftAt`) and retains read
-  // access to history, so mere row existence is the correct grant; a
-  // soft-deleted message is excluded (its image is gone from the timeline). The
-  // stored `attachment.url` is the BARE key (the send path normalises it via
+  // True when a message referencing this `message-image` OR `message-document`
+  // key lives in a conversation the requester participates in. Shared by both
+  // kinds (see the `message-document` branch in `serve()`) since both store
+  // their attachment key under the SAME `message.attachment ->> 'url'` jsonb
+  // path — a document is not merely as protected as an image here, it goes
+  // through the IDENTICAL query. A left member keeps a participant row (see
+  // `ConversationParticipant.leftAt`) and retains read access to history, so
+  // mere row existence is the correct grant; a soft-deleted message is
+  // excluded (its attachment is gone from the timeline). The stored
+  // `attachment.url` is the BARE key (the send path normalises it via
   // `storageKeyFromImageUrl`); the `/files/<key>` form is matched too as a
   // defensive belt against any legacy row that stored the resolved URL.
-  private async isMessageImageParticipant(
+  private async isMessageAttachmentParticipant(
     storageKey: string,
     userId: string,
   ): Promise<boolean> {
@@ -124,13 +128,16 @@ export class FilesController {
       .getExists();
   }
 
-  // Verify the object's real bytes match the image type its key declares before
-  // it is ever served (security review M2), memoising passes. On a definite
-  // `mismatch` the object is refused with the same 404 as any other unresolvable
-  // key (no existence leak). On `indeterminate` (a transient storage/read error)
-  // this FAILS OPEN and serves: the bytes are inert, the presigned GET already
-  // forces the correct `image/*` content type, and blanking every image on a
-  // blip of the bucket is a worse failure than deferring one validation.
+  // Verify the object's real bytes match the content type its key declares
+  // before it is ever served (security review M2; covers both an image and a
+  // `message-document` key — see `magicBytesMatchContentType`), memoising
+  // passes. On a definite `mismatch` the object is refused with the same 404 as
+  // any other unresolvable key (no existence leak). On `indeterminate` (a
+  // transient storage/read error) this FAILS OPEN and serves: the bytes are
+  // inert either way (an image is never executed; a document is opened by the
+  // browser's own PDF/text viewer, never as script), the presigned GET already
+  // forces the correct content type, and blanking every object on a blip of the
+  // bucket is a worse failure than deferring one validation.
   private async assertServableBytes(storageKey: string): Promise<void> {
     if (FilesController.validatedKeys.has(storageKey)) {
       return;
@@ -205,15 +212,23 @@ export class FilesController {
       if (!user) {
         throw new UnauthorizedException();
       }
-      if (kindSpec === UPLOAD_KIND_SPECS['message-image']) {
-        // A DM image attachment (security review M7). Unlike the uploader-only
-        // kinds below, its whole point is that the RECIPIENT must load it too,
-        // so it is scoped to conversation PARTICIPANTS: serve only when the
-        // requester participates in a conversation holding a (non-deleted)
-        // message that references this key. A caller who merely holds the URL
-        // (leaked via referrer, proxy log, forwarded link) is not a participant
-        // and gets the same 404 as any unresolvable key.
-        if (!(await this.isMessageImageParticipant(storageKey, user.userId))) {
+      if (
+        kindSpec === UPLOAD_KIND_SPECS['message-image'] ||
+        kindSpec === UPLOAD_KIND_SPECS['message-document']
+      ) {
+        // A DM image OR document attachment (security review M7; documents
+        // get the IDENTICAL treatment — see `isMessageAttachmentParticipant`'s
+        // own doc for why a document is never treated as less sensitive).
+        // Unlike the uploader-only kinds below, the whole point is that the
+        // RECIPIENT must load it too, so it is scoped to conversation
+        // PARTICIPANTS: serve only when the requester participates in a
+        // conversation holding a (non-deleted) message that references this
+        // key. A caller who merely holds the URL (leaked via referrer, proxy
+        // log, forwarded link) is not a participant and gets the same 404 as
+        // any unresolvable key.
+        if (
+          !(await this.isMessageAttachmentParticipant(storageKey, user.userId))
+        ) {
           throw new NotFoundException();
         }
       } else if (storageKeyOwnerId(storageKey) !== user.userId) {

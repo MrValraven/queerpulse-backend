@@ -1103,22 +1103,17 @@ export class AuthService {
   /**
    * Revoke every live refresh token for a user (global sign-out).
    *
-   * NO MEMBER-FACING HTTP ROUTE REACHES THIS. `POST /auth/logout-all`, the
-   * "sign out everywhere including this device" route, was removed on
-   * 2026-08-26 for having no caller. The session control that did ship is
-   * `DELETE /account/sessions`, and it is a different act: it revokes every
-   * session EXCEPT the presenting one, so the caller stays signed in here, and
-   * it clears no cookies. It runs through `AccountService.revokeOtherSessions`
-   * and never comes through this method.
+   * The member-facing route is `POST /auth/logout-all`, restored 2026-09-06 to
+   * back the sessions page's "sign out everywhere" control. It clears this
+   * device's auth and CSRF cookies on the way out, which is the part
+   * `DELETE /account/sessions` deliberately does not do: that route is a
+   * different act, revoking every session EXCEPT the presenting one so the
+   * caller stays signed in here. It runs through
+   * `AccountService.revokeOtherSessions` and never comes through this method.
    *
-   * So every caller today is the platform acting ON a member rather than a
-   * member acting on themselves: refresh-token reuse detection, the under-18
+   * Every other caller is the platform acting ON a member rather than a member
+   * acting on themselves: refresh-token reuse detection, the under-18
    * disclosure lockout, and the moderation suspend/ban paths.
-   *
-   * KEEP THIS METHOD. If a genuine "sign out everywhere" control is ever built,
-   * this is the thing to wire it to. The route would need to clear this
-   * device's auth and CSRF cookies on the way out too, which is the part
-   * `DELETE /account/sessions` deliberately does not do.
    */
   async revokeAllForUser(userId: string): Promise<void> {
     await this.revokeAllUserSessions(userId, 'sign-out-everywhere');
@@ -1133,10 +1128,10 @@ export class AuthService {
    *
    * `reason` is a LOG LABEL only. It is never persisted: `RefreshToken` has no
    * reason column, and the value reaches nothing but the `logger.warn` below.
-   * It was `'logout-all'` until 2026-08-26, named after the `POST
-   * /auth/logout-all` route that has since been removed. Renamed to
-   * `'sign-out-everywhere'` because the surviving callers are reuse detection,
-   * the under-18 lockout, and moderation, and none of them is a logout.
+   * It was `'logout-all'` until 2026-08-26, named after the route. It reads
+   * `'sign-out-everywhere'` now because the label has to cover reuse detection,
+   * the under-18 lockout and moderation as well as the member's own
+   * `POST /auth/logout-all`, and only the last of those is a logout.
    */
   private async revokeAllUserSessions(
     userId: string,

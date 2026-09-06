@@ -15,6 +15,7 @@ import { DataSource } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ConnectionsService } from '../connections/connections.service';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -29,6 +30,10 @@ import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityBanRatificationService } from './community-ban-ratification.service';
 import { COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS } from './community-ban-ratification-window';
 import { CommunityBan } from './entities/community-ban.entity';
+import {
+  CommunityInvite,
+  CommunityInviteStatus,
+} from './entities/community-invite.entity';
 import {
   COMMUNITY_BAN_AUDIT_ACTION,
   COMMUNITY_REMOVAL_AUDIT_ACTION,
@@ -103,6 +108,29 @@ const insertQbStub = () => {
   return qb;
 };
 
+// `community_invites` is driven through BOTH chains: `create`/`invite` insert
+// pending rows (`.insert().into().values().orIgnore().execute()`) and
+// `acceptInvite` claims one (`.update().set().where().execute()`). One stub
+// answers both, so a test never has to know which the path under test picks.
+const inviteQbStub = () => {
+  const qb: Record<string, jest.Mock> = {};
+  for (const method of [
+    'insert',
+    'into',
+    'values',
+    'orIgnore',
+    'update',
+    'set',
+    'where',
+  ]) {
+    qb[method] = jest.fn().mockReturnValue(qb);
+  }
+  qb.execute = jest
+    .fn()
+    .mockResolvedValue({ affected: 1, raw: [], generatedMaps: [] });
+  return qb;
+};
+
 // The `.update().set().where().execute()` chain `triageJoinRequest` uses for
 // its atomic conditional claim (flip pending -> approved/declined only while
 // still pending). Defaults to `affected: 1` — the claim succeeded — so the
@@ -141,6 +169,7 @@ describe('CommunitiesService', () => {
     find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    delete: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let profiles: {
@@ -168,6 +197,14 @@ describe('CommunitiesService', () => {
     createQueryBuilder: jest.Mock;
   };
   let tagRequests: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  // The door gate for the `private` and `invite` tiers (PRD-140/PRD-141).
+  // Default: nobody holds an invitation, which is the ordinary case and the
+  // one every pre-existing test below was written against.
+  let invites: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   // Fire-and-forget roster-membership domain events
   // (`COMMUNITY_MEMBER_JOINED` / `COMMUNITY_MEMBER_LEFT`).
   let eventEmitter: { emit: jest.Mock };
@@ -217,6 +254,9 @@ describe('CommunitiesService', () => {
           ...(v as object),
         }),
       ),
+      // `withdrawMyJoinRequest` deletes the caller's own pending row and reads
+      // `affected` back. Default: one row went, the ordinary withdrawal.
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => updateQbStub()),
     };
     profiles = {
@@ -265,6 +305,11 @@ describe('CommunitiesService', () => {
       save: jest.fn((v: unknown) => Promise.resolve(v)),
       find: jest.fn().mockResolvedValue([]),
     };
+    invites = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn(() => inviteQbStub()),
+    };
     eventEmitter = { emit: jest.fn() };
     // PRD-25. A permanent bar opens a hold for a second owner, co-owner or
     // moderator. The DEFAULT here is "this community has somebody else who
@@ -298,6 +343,7 @@ describe('CommunitiesService', () => {
         if (entity === Community) return communities;
         if (entity === CommunityMember) return members;
         if (entity === CommunityJoinRequest) return joinRequests;
+        if (entity === CommunityInvite) return invites;
         if (entity === Profile) return profiles;
         throw new Error(
           `unexpected entity in getRepository: ${String(entity)}`,
@@ -326,6 +372,7 @@ describe('CommunitiesService', () => {
           useValue: tagRequests,
         },
         { provide: getRepositoryToken(CommunityBan), useValue: bans },
+        { provide: getRepositoryToken(CommunityInvite), useValue: invites },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
@@ -644,6 +691,87 @@ describe('CommunitiesService', () => {
       members.findOne.mockResolvedValue({ role: RosterRole.Member });
       const detail = await service.getBySlug('p', 'u2');
       expect(detail.myRole).toBe(RosterRole.Member);
+    });
+
+    // PRD-140. The invitation is the only thing that opens a private
+    // community to somebody who is not on its roster, and what it opens is
+    // the SAME detail a non-member of a `request`-tier community already
+    // receives. Without this the invitee tapped their notification and was
+    // bounced to `/communities` with no explanation.
+    it('shows a private community to a non-member holding a pending invitation, and dates it', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Private,
+        ownerId: 'owner-1',
+        name: 'Priv',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue({
+        id: 'inv-1',
+        communityId: 'c1',
+        invitedUserId: 'u2',
+        status: CommunityInviteStatus.Pending,
+        createdAt: new Date('2026-02-02T00:00:00.000Z'),
+      });
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(detail.myRole).toBeNull();
+      expect(detail.invitedAt).toBe('2026-02-02T00:00:00.000Z');
+    });
+
+    // PRD-143. The owner-facing archive copy promises the community "stays
+    // visible as read-only", and the archive notification every member gets
+    // deep-links straight here. Gating this on staff took every post and
+    // resource a member wrote there away from them.
+    it('shows an archived community to a plain member, flagged archived', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Public,
+        archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+        ownerId: 'owner-1',
+        name: 'Closed',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(detail.archived).toBe(true);
+      expect(detail.myRole).toBe(RosterRole.Member);
+    });
+
+    it('404s an archived community for a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Public,
+        archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(service.getBySlug('p', 'u2')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     it('404s an unknown slug', async () => {
@@ -1119,6 +1247,161 @@ describe('CommunitiesService', () => {
         NotFoundException,
       );
       expect(members.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    // PRD-140. A pending invitation admits its holder straight to the roster
+    // and is spent doing it: without this a `private` community could never
+    // gain a second member, because every other door into it 404s.
+    it('admits a private-tier invitee at once and marks the invitation accepted', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Private,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue({
+        id: 'inv-1',
+        communityId: 'c1',
+        invitedUserId: 'u1',
+        status: CommunityInviteStatus.Pending,
+        createdAt: new Date('2026-02-02T00:00:00.000Z'),
+      });
+      const claimQb = inviteQbStub();
+      invites.createQueryBuilder.mockReturnValue(claimQb);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(res).toEqual({
+        outcome: 'joined',
+        role: RosterRole.Member,
+        request: null,
+      });
+      // The flip is a GUARDED update: a revoke landing between the read and
+      // this write must win, never be overwritten.
+      expect(claimQb.where).toHaveBeenCalledWith(
+        'id = :id AND status = :pending',
+        { id: 'inv-1', pending: CommunityInviteStatus.Pending },
+      );
+      expect(insertQb.values).toHaveBeenCalledWith({
+        communityId: 'c1',
+        userId: 'u1',
+        role: RosterRole.Member,
+      });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    // The invitation was revoked between the read and the write, so the claim
+    // matches nothing. A private community must answer exactly as it answers
+    // anybody uninvited rather than quietly honouring a withdrawn invitation.
+    it('404s a private-tier caller whose invitation was revoked mid-join', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Private,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue({
+        id: 'inv-1',
+        communityId: 'c1',
+        invitedUserId: 'u1',
+        status: CommunityInviteStatus.Pending,
+      });
+      const claimQb = inviteQbStub();
+      claimQb.execute!.mockResolvedValue({ affected: 0, raw: [] });
+      invites.createQueryBuilder.mockReturnValue(claimQb);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(insertQb.execute).not.toHaveBeenCalled();
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    // PRD-141. The `invite` tier used to create an ordinary pending request
+    // from anyone, so "only people you've invited can get in" gated nothing
+    // and behaved exactly like `request`. The tier is publicly listed, so the
+    // refusal names its reason instead of 404ing.
+    it('refuses an uninvited caller on the invite tier with invite_required, writing no request', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Invite,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue(null);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(res).toEqual({
+        outcome: 'invite_required',
+        role: null,
+        request: null,
+      });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+
+    it('admits an invite-tier invitee at once', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Invite,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue({
+        id: 'inv-2',
+        communityId: 'c1',
+        invitedUserId: 'u1',
+        status: CommunityInviteStatus.Pending,
+      });
+      members.createQueryBuilder.mockReturnValue(insertQbStub());
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(res.outcome).toBe('joined');
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    // An invitation opens a door. It is not a way past a ban, a takedown, a
+    // freeze or the house rules, every one of which still binds an invitee.
+    it('still refuses an invitee of a frozen community', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Invite,
+        archivedAt: null,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue({
+        id: 'inv-2',
+        communityId: 'c1',
+        invitedUserId: 'u1',
+        status: CommunityInviteStatus.Pending,
+      });
+
+      await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(invites.createQueryBuilder).not.toHaveBeenCalled();
     });
 
     it('is idempotent for an already-existing member: resolves joined, never throws', async () => {
@@ -1997,6 +2280,106 @@ describe('CommunitiesService', () => {
     });
   });
 
+  // PRD-143. Archiving closes a room and leaves everything written in it
+  // standing. `getBySlug` now serves it to everybody on the roster, which is
+  // only safe because every write into it is refused — for its staff as much
+  // as for its members.
+  describe('an archived community is read-only', () => {
+    const archived = {
+      id: 'c1',
+      slug: 'x',
+      ownerId: 'owner-1',
+      accessTier: AccessTier.Public,
+      archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+      rules: [],
+      rulesVersion: 1,
+    };
+
+    it('refuses a role change', async () => {
+      communities.findOne.mockResolvedValue(archived);
+      members.findOne.mockResolvedValue({ id: 'm1', role: RosterRole.Owner });
+
+      await expect(
+        service.setMemberRole('x', 'owner-1', 'jo', RosterRole.Mod),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses to triage a join request left in the queue', async () => {
+      communities.findOne.mockResolvedValue(archived);
+      members.findOne.mockResolvedValue({ id: 'm1', role: RosterRole.Owner });
+
+      await expect(
+        service.triageJoinRequest('x', 'jr-1', 'owner-1', {
+          action: 'approve',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(joinRequests.findOne).not.toHaveBeenCalled();
+    });
+
+    it('refuses a tag request', async () => {
+      communities.findOne.mockResolvedValue(archived);
+      members.findOne.mockResolvedValue({ id: 'm1', role: RosterRole.Owner });
+
+      await expect(
+        service.createTagRequest('x', 'owner-1', { label: 'book club' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tagRequests.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a staff removal', async () => {
+      communities.findOne.mockResolvedValue(archived);
+      const profilesQb = qbStub();
+      profilesQb.getMany!.mockResolvedValue([{ slug: 'jo', userId: 'u1' }]);
+      profiles.createQueryBuilder.mockReturnValue(profilesQb);
+      members.findOne.mockResolvedValue({
+        id: 'm1',
+        role: RosterRole.Member,
+        userId: 'u1',
+      });
+
+      await expect(
+        service.removeMember('x', 'owner-1', 'jo'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(members.delete).not.toHaveBeenCalled();
+    });
+
+    // The one write that stays open, deliberately: walking out is always the
+    // member's own to do, and a community they can no longer leave would be a
+    // room that closed with them still listed in it.
+    it('still lets a member leave', async () => {
+      communities.findOne.mockResolvedValue(archived);
+      const profilesQb = qbStub();
+      profilesQb.getMany!.mockResolvedValue([{ slug: 'jo', userId: 'u1' }]);
+      profiles.createQueryBuilder.mockReturnValue(profilesQb);
+      members.findOne.mockResolvedValue({
+        id: 'm1',
+        role: RosterRole.Member,
+        userId: 'u1',
+      });
+
+      await service.removeMember('x', 'u1', 'jo');
+
+      expect(members.delete).toHaveBeenCalledWith({ id: 'm1' });
+    });
+
+    // The same exception, for the same reason: an applicant queued outside a
+    // room that has since closed is exactly the person this endpoint exists
+    // for, and taking back your own request writes nothing the archive is
+    // protecting (PRD-148).
+    it('still lets an applicant take back their own join request', async () => {
+      communities.findOne.mockResolvedValue(archived);
+
+      await service.withdrawMyJoinRequest('x', 'applicant-1');
+
+      expect(joinRequests.delete).toHaveBeenCalledWith({
+        communityId: 'c1',
+        userId: 'applicant-1',
+        status: JoinRequestStatus.Pending,
+      });
+    });
+  });
+
   describe('unfreeze', () => {
     const community = {
       id: 'c1',
@@ -2250,6 +2633,206 @@ describe('CommunitiesService', () => {
 
       expect(tagRequests.save).not.toHaveBeenCalled();
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+  });
+
+  // PRD-150. The owner who filed a suggestion could see nothing at all
+  // afterwards; this is the read that closes that loop. Reading it still
+  // changes no vocabulary: `COMMUNITY_TAGS` stays a hardcoded array.
+  describe('listTagRequests', () => {
+    const community = {
+      id: 'c1',
+      slug: 'x',
+      archivedAt: null,
+      accessTier: AccessTier.Request,
+    };
+    const requestRow = {
+      id: 'tag-request-1',
+      communityId: 'c1',
+      requestedByUserId: 'mod-1',
+      label: 'polyamory',
+      note: 'three of us asked for it',
+      status: CommunityTagRequestStatus.Resolved,
+      createdAt: new Date('2026-08-01T00:00:00.000Z'),
+      resolvedAt: new Date('2026-08-04T00:00:00.000Z'),
+      resolvedByUserId: 'admin-1',
+    };
+
+    it('returns the log for this community only, newest first and capped', async () => {
+      communities.findOne.mockResolvedValue(community);
+      members.findOne.mockResolvedValue({
+        role: RosterRole.CoOwner,
+        userId: 'co-owner-1',
+      });
+      tagRequests.find.mockResolvedValue([requestRow]);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'mod-1',
+          slug: 'ines',
+          firstName: 'Ines',
+          lastName: 'Rocha',
+          pronouns: 'ela/dela',
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+
+      const result = await service.listTagRequests('x', 'co-owner-1');
+
+      expect(tagRequests.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { communityId: 'c1' },
+          order: { createdAt: 'DESC', id: 'DESC' },
+          take: DEFAULT_LIST_LIMIT,
+        }),
+      );
+      expect(result.items).toEqual([
+        {
+          id: 'tag-request-1',
+          label: 'polyamory',
+          note: 'three of us asked for it',
+          status: CommunityTagRequestStatus.Resolved,
+          createdAt: '2026-08-01T00:00:00.000Z',
+          resolvedAt: '2026-08-04T00:00:00.000Z',
+          requestedBy: {
+            slug: 'ines',
+            firstName: 'Ines',
+            lastName: 'Rocha',
+            pronouns: 'ela/dela',
+            avatarUrl: null,
+          },
+        },
+      ]);
+    });
+
+    it('resolves every requester in ONE lookup, never one per row', async () => {
+      communities.findOne.mockResolvedValue(community);
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Mod,
+        userId: 'mod-1',
+      });
+      tagRequests.find.mockResolvedValue([
+        requestRow,
+        { ...requestRow, id: 'tag-request-2', requestedByUserId: 'mod-2' },
+        { ...requestRow, id: 'tag-request-3', requestedByUserId: 'mod-1' },
+      ]);
+
+      await service.listTagRequests('x', 'mod-1');
+
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a plain member', async () => {
+      communities.findOne.mockResolvedValue(community);
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Member,
+        userId: 'member-1',
+      });
+
+      await expect(
+        service.listTagRequests('x', 'member-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(tagRequests.find).not.toHaveBeenCalled();
+    });
+  });
+
+  // PRD-148. A request filed by mistake used to be unleavable: the hero showed
+  // a disabled "Requested" button, and the only way out was a decline that
+  // would have written a 30 or 180 day reapply lock.
+  describe('withdrawMyJoinRequest', () => {
+    const community = {
+      id: 'c1',
+      slug: 'x',
+      accessTier: AccessTier.Request,
+      archivedAt: null,
+    };
+
+    it('deletes only the pending row belonging to the caller, and tells nobody', async () => {
+      communities.findOne.mockResolvedValue(community);
+
+      await service.withdrawMyJoinRequest('x', 'applicant-1');
+
+      expect(joinRequests.delete).toHaveBeenCalledWith({
+        communityId: 'c1',
+        userId: 'applicant-1',
+        status: JoinRequestStatus.Pending,
+      });
+      // Silent by design: nobody acted on the request, so there is nothing to
+      // retract and no reason to tell the room she changed her mind.
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    // The point of deleting rather than adding a fourth status: a withdrawal
+    // writes no `reapplyAfter`, so the member may apply again at once.
+    it('leaves no reapply lock behind', async () => {
+      communities.findOne.mockResolvedValue(community);
+
+      await service.withdrawMyJoinRequest('x', 'applicant-1');
+
+      expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(joinRequests.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('answers a second tap with 204 rather than an error', async () => {
+      communities.findOne.mockResolvedValue(community);
+      joinRequests.delete.mockResolvedValue({ affected: 0 });
+      members.findOne.mockResolvedValue(null);
+      joinRequests.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.withdrawMyJoinRequest('x', 'applicant-1'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('says so when the request was approved first', async () => {
+      communities.findOne.mockResolvedValue(community);
+      joinRequests.delete.mockResolvedValue({ affected: 0 });
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Member,
+        userId: 'applicant-1',
+      });
+      joinRequests.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.withdrawMyJoinRequest('x', 'applicant-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('says so when a decline landed first, and carries the reapply date', async () => {
+      communities.findOne.mockResolvedValue(community);
+      joinRequests.delete.mockResolvedValue({ affected: 0 });
+      members.findOne.mockResolvedValue(null);
+      joinRequests.findOne.mockResolvedValue({
+        id: 'jr-1',
+        status: JoinRequestStatus.Declined,
+        reapplyAfter: new Date('2026-10-01T00:00:00.000Z'),
+      });
+
+      await expect(
+        service.withdrawMyJoinRequest('x', 'applicant-1'),
+      ).rejects.toMatchObject({
+        response: {
+          code: 'JOIN_REQUEST_ALREADY_ANSWERED',
+          reapplyAfter: '2026-10-01T00:00:00.000Z',
+        },
+      });
+    });
+
+    // The existence posture `getBySlug` draws: a private community is never
+    // confirmed to somebody with no standing in it.
+    it('404s a private community for a caller with no request and no roster row', async () => {
+      communities.findOne.mockResolvedValue({
+        ...community,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      joinRequests.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.withdrawMyJoinRequest('x', 'stranger-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(joinRequests.delete).not.toHaveBeenCalled();
     });
   });
 });

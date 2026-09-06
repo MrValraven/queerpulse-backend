@@ -1660,8 +1660,22 @@ export class DirectoryService {
     const verified: SafeSpaceCardDTO[] = [];
     const removed: RemovedSpaceCardDTO[] = [];
     let reviewTotal = 0;
+    // The newest badge date on the page, so the hub can say when this list was
+    // last checked instead of printing a hardcoded month. Taken over VERIFIED
+    // rows only: a removed space's date records when its badge was last good,
+    // which is the opposite of evidence that the list is current. `date`
+    // columns arrive as `YYYY-MM-DD`, which sorts lexicographically, so a
+    // string comparison is the whole of the arithmetic.
+    let lastReVerifiedAt: string | null = null;
     for (const listing of rows) {
       if (listing.safeSpaceStatus === SafeSpaceStatus.Verified) {
+        const reVerifiedAt = listing.safeSpaceReVerifiedAt;
+        if (
+          reVerifiedAt &&
+          (!lastReVerifiedAt || reVerifiedAt > lastReVerifiedAt)
+        ) {
+          lastReVerifiedAt = reVerifiedAt;
+        }
         // `toSafeSpaceCard` derives `rating`/`reviews` from the passed array;
         // we feed it `[]` (yielding the score '0' / count 0 baseline) and then
         // overwrite exactly those two fields from the aggregate. No other card
@@ -1685,6 +1699,7 @@ export class DirectoryService {
         verified: verified.length,
         reviews: reviewTotal,
         removed: removed.length,
+        lastReVerifiedAt,
       },
     };
   }

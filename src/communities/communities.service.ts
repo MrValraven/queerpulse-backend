@@ -22,7 +22,13 @@ import {
 import { escapeLikeTerm } from '../common/like-escape';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { ConnectionsService } from '../connections/connections.service';
-import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
+import {
+  DataSource,
+  In,
+  MoreThan,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -89,6 +95,10 @@ import {
 import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityBanRatification } from './entities/community-ban-ratification.entity';
 import {
+  CommunityInvite,
+  CommunityInviteStatus,
+} from './entities/community-invite.entity';
+import {
   CommunityJoinRequest,
   CommunityJoinRequestDeclineKind,
   CommunityJoinRequestInvolvement,
@@ -99,8 +109,11 @@ import { CreateCommunityTagRequestDto } from './dto/create-community-tag-request
 import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import {
   CommunityTagRequestResponseDTO,
+  CommunityTagRequestsResponseDTO,
   toCommunityTagRequestResponse,
+  toCommunityTagRequest,
 } from './community-tag-request-response';
+import { resolveStaffCommunity } from './community-staff-access';
 import {
   CommunityMember,
   RosterRole,
@@ -325,6 +338,13 @@ export class CommunitiesService {
     // READ live here; listing and lifting bans is a separate surface.
     @InjectRepository(CommunityBan)
     private readonly bans: Repository<CommunityBan>,
+    // The DOOR GATE for the `private` and `invite` tiers (PRD-140, PRD-141).
+    // `getBySlug` reads it to decide whether a non-member may see a private
+    // community at all, and `join` reads it to decide whether they may come
+    // in. Written by `CommunityInvitesService` and, at founding time, by
+    // `create` below. Never a roster add: see `CommunityInvite`'s docstring.
+    @InjectRepository(CommunityInvite)
+    private readonly invites: Repository<CommunityInvite>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     // For the house-account guardrail on `transferOwnership` (a `User.isSystem`
     // account can never be handed a community). The repo is available via
@@ -499,6 +519,18 @@ export class CommunitiesService {
       communityId: saved.id,
       userId: ownerId,
     } satisfies CommunityMemberJoinedEvent);
+
+    // The durable half of every founding-time invitation, written BEFORE the
+    // bells that announce them (PRD-140). Without these rows a community
+    // founded `private` could never gain a second member: its invitees tapped
+    // a notification, `getBySlug` 404ed them, and the room stayed a roster of
+    // one. Stewards are invited on the same footing, since being asked to
+    // moderate is no use to somebody who cannot reach the community. Neither
+    // list is a roster add: see `resolveInvitees`.
+    await this.recordInvites(saved.id, ownerId, [
+      ...invitedUserIds,
+      ...stewardUserIds,
+    ]);
 
     // Best-effort, after the create transaction has committed — see
     // `notifyInvitees`.
@@ -782,7 +814,15 @@ export class CommunitiesService {
         .addOrderBy('c.createdAt', 'DESC')
         .addOrderBy('c.id', 'ASC');
     } else {
-      communitiesQuery.orderBy('c.createdAt', 'DESC');
+      // `created_at` is NOT unique (seeded rows share one, and any two
+      // communities founded inside the same transaction can too), so it is not
+      // a total order on its own: an OFFSET page boundary that falls inside a
+      // tie can repeat a community on page 2 or drop it entirely. `id` makes
+      // the order total, the same tiebreak the 'name' and 'active' branches
+      // above already carry, and the same defect `listJoinRequests` was fixed
+      // for. `IDX_communities_created_at` still serves the leading key, so
+      // this needs no new index.
+      communitiesQuery.orderBy('c.createdAt', 'DESC').addOrderBy('c.id', 'ASC');
     }
 
     // The page and the two facet aggregates are independent reads of the same
@@ -1081,8 +1121,26 @@ export class CommunitiesService {
   async getBySlug(slug: string, viewerId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     const role = await this.myRole(community.id, viewerId);
-    // Private + non-member -> 404, not 403, so existence isn't leaked.
-    if (community.accessTier === AccessTier.Private && !role) {
+    // PRD-140. A non-member's standing invitation, loaded once and carried
+    // into `buildDetail` for `invitedAt`. Only a non-member can hold one that
+    // still means anything, so a member costs no query here.
+    const pendingInvite = role
+      ? null
+      : await this.pendingInviteFor(community.id, viewerId);
+    // Private + non-member -> 404, not 403, so existence isn't leaked. An
+    // INVITED non-member is the one exception, and it is the whole point of
+    // the invitation: without this the invitee tapped their notification and
+    // was bounced to `/communities` with no explanation, so a private
+    // community could never grow past its founder. What they receive is
+    // `buildDetail` unchanged, which is exactly what a non-member of a
+    // `request`-tier community already gets from this same function. Being
+    // invited opens the door; it does not hand anyone more of the room than
+    // an uninvited passer-by would see on the tier next door.
+    if (
+      community.accessTier === AccessTier.Private &&
+      !role &&
+      !pendingInvite
+    ) {
       throw new NotFoundException('Community not found');
     }
     // A moderator takedown 404s the detail for everyone but the community's own
@@ -1097,14 +1155,26 @@ export class CommunitiesService {
     ) {
       throw new NotFoundException('Community not found');
     }
-    // An archived community 404s for everyone but its own owner/mods — same
-    // "don't leak existence" posture as the private-tier and takedown gates.
-    // Staff still get the detail (with `archived: true`) so the mod panel can
-    // render the archived state rather than "not found".
-    if (community.archivedAt != null && !CommunitiesService.isStaffRole(role)) {
+    // An archived community 404s for everyone but its own ROSTER — same
+    // "don't leak existence" posture as the private-tier and takedown gates,
+    // drawn at membership rather than at staff (PRD-143). The owner-facing
+    // archive copy promises the community "stays visible as read-only", and
+    // the archive notification every member receives deep-links straight to
+    // this detail: gating it on `isStaffRole` made both of those a lie and
+    // took every post and resource a member wrote there away from them the
+    // moment an owner archived it. Read-only is enforced on the write paths
+    // (see `assertNotArchived`), never by hiding the room from the people who
+    // built it. A non-member still gets nothing.
+    if (community.archivedAt != null && role == null) {
       throw new NotFoundException('Community not found');
     }
-    return this.buildDetail(community, viewerId, role, moderation);
+    return this.buildDetail(
+      community,
+      viewerId,
+      role,
+      moderation,
+      pendingInvite,
+    );
   }
 
   /**
@@ -1595,11 +1665,15 @@ export class CommunitiesService {
     return this.buildDetail(saved, actorId, RosterRole.Mod);
   }
 
-  // `public` joins land on the roster instantly; every other tier
-  // (`request`/`invite`/`private`) creates a pending `CommunityJoinRequest`
-  // for an owner/mod to triage. Idempotent either way: already being on the
-  // roster short-circuits to `joined` regardless of tier, so a repeat call
-  // (or a UI double-click) never 500s.
+  // `public` joins land on the roster instantly; `request` creates a pending
+  // `CommunityJoinRequest` for an owner/mod to triage. The two invitation
+  // tiers gate on a pending `CommunityInvite` (PRD-140, PRD-141): a holder is
+  // admitted at once and their invitation flips to `accepted`, and anybody
+  // else is refused — 404 for `private` (which never confirms it exists) and
+  // `invite_required` for `invite` (which is publicly listed, so refusing
+  // loudly leaks nothing). Idempotent throughout: already being on the roster
+  // short-circuits to `joined` regardless of tier, so a repeat call (or a UI
+  // double-click) never 500s.
   async join(
     slug: string,
     userId: string,
@@ -1631,9 +1705,21 @@ export class CommunitiesService {
     if (community.archivedAt != null) {
       throw new NotFoundException('Community not found');
     }
-    if (community.accessTier === AccessTier.Private) {
-      // No membership (checked above) and the tier is invitation-only —
-      // exactly the case `getBySlug` refuses to confirm the existence of.
+    // The caller's standing invitation, read once for both invitation tiers.
+    // Loaded here rather than at the top because every gate above it is
+    // cheaper and refuses more people, and an invitation overrides none of
+    // them: it is not a way past a ban, a takedown, a freeze or the house
+    // rules, only a way through the door those gates leave shut.
+    const pendingInvite =
+      community.accessTier === AccessTier.Private ||
+      community.accessTier === AccessTier.Invite
+        ? await this.pendingInviteFor(community.id, userId)
+        : null;
+    if (community.accessTier === AccessTier.Private && !pendingInvite) {
+      // No membership (checked above), no invitation, and the tier is
+      // invitation-only — exactly the case `getBySlug` refuses to confirm the
+      // existence of. Refused HERE, before the moderation/freeze gates below,
+      // so that a private community can never be inferred from a 403 either.
       throw new NotFoundException('Community not found');
     }
     const moderation = await this.contentModeration.stateFor(
@@ -1663,12 +1749,53 @@ export class CommunitiesService {
     // rules has nothing to accept and this is a no-op.
     CommunitiesService.assertRulesAccepted(community, dto.acceptedRulesVersion);
 
+    // The invitation is spent here, and it admits its holder straight to the
+    // roster. Deliberately placed AFTER every gate above: the invitation is
+    // the community's answer to "may this person come in", and it says
+    // nothing about the ban, the takedown, the freeze, the reapply window or
+    // the house rules, all of which still bind an invitee exactly as they
+    // bind anybody else.
+    //
+    // A `requiresSecondVouch` community admits an invitee without a platform
+    // vouch, and that is deliberate. The gate asks for one current member to
+    // stand behind the applicant; an invitation can only have been sent by an
+    // owner, co-owner or moderator of this community, each of them a member
+    // by definition, and each of them naming this person on purpose. That is
+    // the assurance the gate is asking for, given by somebody the community
+    // trusts more than an arbitrary member. Routing an invitee into a review
+    // queue the same staff would then approve would only add a wait.
+    if (pendingInvite) {
+      const wasAccepted = await this.acceptInvite(pendingInvite, community);
+      if (wasAccepted) {
+        this.eventEmitter.emit(COMMUNITY_MEMBER_JOINED, {
+          communityId: community.id,
+          userId,
+        } satisfies CommunityMemberJoinedEvent);
+        return { outcome: 'joined', role: RosterRole.Member, request: null };
+      }
+      // The invitation was revoked or declined between the read above and the
+      // write. Fall through and answer exactly as an uninvited caller would
+      // have been answered, so a withdrawn invitation is not quietly honoured.
+      if (community.accessTier === AccessTier.Private) {
+        throw new NotFoundException('Community not found');
+      }
+    }
+
+    // The `invite` tier's refusal (PRD-141). Until now this tier created an
+    // ordinary pending request from anyone, so "only people you've invited can
+    // get in" behaved exactly like `request` and the setting gated nothing.
+    // The community is publicly listed, so naming the reason leaks nothing and
+    // saves the caller waiting on a review that was never coming.
+    if (community.accessTier === AccessTier.Invite) {
+      return { outcome: 'invite_required', role: null, request: null };
+    }
+
     // Second-vouch gate: a community that requires a vouch to join can only
     // instant-admit an applicant a current member has vouched for. An un-vouched
     // applicant to an otherwise-public community is routed to a reviewable
     // request rather than silently turned away — a mod (themselves a member)
-    // can vouch, then approve. Request/invite/private tiers already create a
-    // request; the same gate is enforced again at approval in `triageJoinRequest`.
+    // can vouch, then approve. The `request` tier already creates a request;
+    // the same gate is enforced again at approval in `triageJoinRequest`.
     const instantJoinAllowed =
       community.accessTier === AccessTier.Public &&
       (!community.requiresSecondVouch ||
@@ -1701,7 +1828,8 @@ export class CommunitiesService {
       return { outcome: 'joined', role: RosterRole.Member, request: null };
     }
 
-    // request | invite | private, or a second-vouch-gated public join -> pending.
+    // request, or a second-vouch-gated public join -> pending. The two
+    // invitation tiers never reach here: they were answered above.
     return this.createJoinRequest(community, slug, userId, dto);
   }
 
@@ -1747,6 +1875,211 @@ export class CommunitiesService {
       }
       throw err;
     }
+  }
+
+  /**
+   * `DELETE /communities/:slug/join-requests/mine`: the applicant takes their
+   * own pending request back (PRD-148).
+   *
+   * APPLICANT-SIDE ONLY. The row is found by the CALLER'S own user id, so a
+   * moderator cannot reach anybody else's request through this route: giving
+   * a request an answer is `triageJoinRequest`'s job, and taking one back is
+   * the applicant's own act, which is why the two are separate doors.
+   *
+   * ## The row is deleted, not moved to a fourth status
+   *
+   * `JoinRequestStatus` has exactly three values, and a `withdrawn` fourth
+   * would need an `ALTER TYPE ... ADD VALUE` migration plus a new state that
+   * every reader of the enum has to learn (`myJoinRequestStatus` on the
+   * detail, the triage queue, the invite skip check, the admin surfaces),
+   * all to record that nothing happened. A withdrawn request IS the absence
+   * of a request: no moderator acted on it, so there is no decision being
+   * erased and no audit trail being lost. The only history a kept row would
+   * carry is "this person changed their mind", which is precisely the thing
+   * this endpoint exists to keep out of the community's view.
+   *
+   * Deleting is also what makes the member whole immediately, which is the
+   * whole point of the row:
+   *  - `UQ_community_join_requests_pending` is free the moment the row goes,
+   *    so they can apply again in the same breath.
+   *  - `assertReapplyWindowPassed` reads the most recent DECLINED request's
+   *    `reapplyAfter`. A withdrawal touches no declined row, so it can neither
+   *    leave a 30/180 day lock behind nor launder one away: only a `pending`
+   *    row is ever deleted here, so a declined request (the row that carries a
+   *    lock) cannot be withdrawn at all.
+   *  - `buildDetail` reads the newest request of any status, so with the
+   *    pending row gone the hero falls back to offering "Ask to join" again.
+   *
+   * ## Nobody is told
+   *
+   * No notification, deliberately. `notifyStaffOfJoinRequest` rang the
+   * community's staff when the request was filed and the queue is read live,
+   * so a withdrawn request simply stops appearing there: there is no decision
+   * to retract and no work to undo. A second bell saying a member changed her
+   * mind about a survivors' or coming-out group tells moderators something
+   * about her they have no use for and she never offered. Same posture as
+   * `CommunityInvitesService.revoke` and `declineMine`. Please do not "fix"
+   * this by adding one.
+   */
+  async withdrawMyJoinRequest(slug: string, userId: string): Promise<void> {
+    const community = await this.loadOr404(slug);
+
+    // Existence posture, drawn exactly where `getBySlug` draws it: a `private`
+    // community is confirmed only to somebody on its roster or holding a
+    // request here. Anyone else gets the same 404 an unknown slug returns, so
+    // this route can never be used to probe for one. Read only at that tier,
+    // because every other tier's existence is already served by `getBySlug`
+    // to any authenticated caller.
+    if (community.accessTier === AccessTier.Private) {
+      const [membership, anyRequest] = await Promise.all([
+        this.members.findOne({ where: { communityId: community.id, userId } }),
+        this.joinRequests.findOne({
+          where: { communityId: community.id, userId },
+        }),
+      ]);
+      if (!membership && !anyRequest) {
+        throw new NotFoundException('Community not found');
+      }
+    }
+
+    // NO `assertNotArchived` HERE, deliberately, and it is the same exception
+    // `removeMember` already makes for a self-leave: walking out is always the
+    // member's own to do, and a room that closed with them still queued
+    // outside it is the very complaint this endpoint answers. Nothing the
+    // archive protects is touched by taking back your own request: no roster
+    // row moves, no governance entry is written, no notification is sent, and
+    // the community sees only one fewer name in a queue nobody can work.
+    // Blocking it would leave the request standing until the archive is
+    // reversed, at which point a moderator could decline it and write the
+    // 30/180 day lock this whole method exists to spare them.
+
+    // One guarded DELETE does the whole job atomically: `status = 'pending'`
+    // in the criteria is what makes an already-answered request unwithdrawable
+    // without a read-modify-write, and what makes a double-tap safe.
+    const withdrawal = await this.joinRequests.delete({
+      communityId: community.id,
+      userId,
+      status: JoinRequestStatus.Pending,
+    });
+    if (withdrawal.affected) return;
+
+    // Nothing pending. Two of those cases are materially different from a
+    // withdrawal and must be said out loud rather than answered with a
+    // cheerful 204:
+    const [membership, liveDecline] = await Promise.all([
+      this.members.findOne({ where: { communityId: community.id, userId } }),
+      this.joinRequests.findOne({
+        where: {
+          communityId: community.id,
+          userId,
+          status: JoinRequestStatus.Declined,
+          reapplyAfter: MoreThan(new Date()),
+        },
+        order: { createdAt: 'DESC' },
+      }),
+    ]);
+    // 1. They are on the roster. A request approved between opening the
+    //    dialog and confirming it put them in the room, and telling them they
+    //    withdrew would hide a membership they now hold.
+    if (membership) {
+      throw new ConflictException(
+        'You are already a member of this community.',
+      );
+    }
+    // 2. A decline with a LIVE reapply window. `assertReapplyWindowPassed`
+    //    refuses a new request while such a window stands, so a live lock
+    //    cannot predate the request being withdrawn: it can only mean a
+    //    moderator declined this very request first. The date is in the body
+    //    for the same reason it is in that refusal, so the client can say when
+    //    rather than an unexplained no.
+    if (liveDecline) {
+      throw new ConflictException({
+        code: 'JOIN_REQUEST_ALREADY_ANSWERED',
+        message: `This request was answered before you took it back. You can apply again on ${liveDecline.reapplyAfter?.toISOString().slice(0, 10)}.`,
+        reapplyAfter: liveDecline.reapplyAfter?.toISOString() ?? null,
+      });
+    }
+    // Everything else (a double-tap, a request already withdrawn in another
+    // tab, an old decline whose window has lapsed, no request ever filed)
+    // leaves the caller in exactly the state a successful withdrawal leaves
+    // them in: no pending request and free to apply again. Answering 204 is
+    // therefore the truth, and it is what keeps a double-click from raising an
+    // error at somebody who did nothing wrong.
+  }
+
+  /**
+   * This member's standing invitation to this community, or null. One indexed
+   * lookup against `UQ_community_invites_pending`, which is unique over
+   * exactly this predicate, so there can never be a second row to choose
+   * between.
+   */
+  private async pendingInviteFor(
+    communityId: string,
+    userId: string,
+  ): Promise<CommunityInvite | null> {
+    return this.invites.findOne({
+      where: {
+        communityId,
+        invitedUserId: userId,
+        status: CommunityInviteStatus.Pending,
+      },
+    });
+  }
+
+  /**
+   * Spend an invitation: flip it to `accepted` and put its holder on the
+   * roster, or report that it was no longer there to spend.
+   *
+   * Both writes live in ONE transaction, and the flip goes first as a GUARDED
+   * update (`... AND status = 'pending'`), the same shape
+   * `triageJoinRequest`'s claim uses and for the same reason: the pre-read in
+   * `join` is a fast path, and without the guard a revoke landing between that
+   * read and this write would be overwritten and the caller admitted to a
+   * community that had just withdrawn its invitation. `affected === 0` means
+   * somebody else got there first (a revoke, a decline, or a second concurrent
+   * join), and nothing is inserted. The roster insert then carries `orIgnore`
+   * so an applicant who is somehow already a member cannot 500 on the roster's
+   * unique constraint.
+   */
+  private async acceptInvite(
+    invite: CommunityInvite,
+    community: Community,
+  ): Promise<boolean> {
+    return this.dataSource.transaction(async (manager) => {
+      const invitesRepo = manager.getRepository(CommunityInvite);
+      const membersRepo = manager.getRepository(CommunityMember);
+
+      const claim = await invitesRepo
+        .createQueryBuilder()
+        .update(CommunityInvite)
+        .set({
+          status: CommunityInviteStatus.Accepted,
+          respondedAt: () => 'now()',
+        })
+        .where('id = :id AND status = :pending', {
+          id: invite.id,
+          pending: CommunityInviteStatus.Pending,
+        })
+        .execute();
+      if (claim.affected === 0) return false;
+
+      await membersRepo
+        .createQueryBuilder()
+        .insert()
+        .into(CommunityMember)
+        .values({
+          communityId: community.id,
+          userId: invite.invitedUserId,
+          role: RosterRole.Member,
+          // The invitee agreed to the rules at the door like everyone else:
+          // `join` ran `assertRulesAccepted` before this was reached. See
+          // `rulesAcceptanceStamp`.
+          ...CommunitiesService.rulesAcceptanceStamp(community),
+        })
+        .orIgnore()
+        .execute();
+      return true;
+    });
   }
 
   /**
@@ -2003,6 +2336,10 @@ export class CommunitiesService {
   ): Promise<CommunityTagRequestResponseDTO> {
     const community = await this.loadOr404(slug);
     await this.assertOwnerOrMod(community.id, actorId);
+    // Nothing is left to tag on a closed room, and the queue that answers
+    // these is worked by people, whose time it would spend on a community
+    // nobody can post in.
+    CommunitiesService.assertNotArchived(community);
 
     const saved = await this.tagRequests.save(
       this.tagRequests.create({
@@ -2020,6 +2357,70 @@ export class CommunitiesService {
       saved.id,
     );
     return toCommunityTagRequestResponse(saved);
+  }
+
+  /**
+   * `GET /communities/:slug/tag-requests`: this community's own suggestion
+   * log, newest first, for the owner, a co-owner or a moderator (PRD-150).
+   *
+   * Filing a suggestion used to be the end of it: the request went to the
+   * admin inbox, an admin resolved it, and the owner who sent it had nowhere
+   * to look and nothing to read. This is that missing half. It shows what was
+   * asked for and where each ask stands, so nobody files the same tag three
+   * times wondering whether the first one arrived.
+   *
+   * STILL INFORMATIONAL ONLY. Reading this changes nothing and resolving a
+   * request adds nothing to `COMMUNITY_TAGS` or to `Community.tags`: the
+   * vocabulary is a hardcoded, code-reviewed array by deliberate product
+   * decision (see `CommunityTagRequest`'s docstring), and `resolved` means an
+   * admin has read the suggestion, never that the tag now exists.
+   *
+   * Authorization is `resolveStaffCommunity`, the same gate the invites,
+   * resources and bans routes use, so a CO-OWNER is admitted here exactly as
+   * they are there. It 404s an archived community, which is the standing
+   * posture of every route built on it.
+   *
+   * BOUNDED BY A CAP rather than paginated, the `DEFAULT_LIST_LIMIT` idiom
+   * this codebase uses for whole-array responses. A suggestion is free text
+   * typed by hand by one of a single community's handful of staff, so 200 of
+   * them is far past anything real, and newest-first means the rows that would
+   * fall off a full log are the oldest and longest-settled. This is why it is
+   * safe here and was NOT safe on `listJoinRequests`, whose cap hid the newest
+   * arrivals in an oldest-first work queue.
+   */
+  async listTagRequests(
+    slug: string,
+    actorId: string,
+  ): Promise<CommunityTagRequestsResponseDTO> {
+    const { community } = await resolveStaffCommunity(
+      this.communities,
+      this.members,
+      slug,
+      actorId,
+    );
+
+    const requests = await this.tagRequests.find({
+      where: { communityId: community.id },
+      // `id` breaks a `created_at` tie deterministically, so two suggestions
+      // filed in the same statement cannot swap places between two reads of
+      // the same log.
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    if (!requests.length) return { items: [] };
+
+    // One lookup for the whole log, never one per row.
+    const requesterRefs = await new MemberLookup(this.profiles).byUserIds([
+      ...new Set(requests.map((request) => request.requestedByUserId)),
+    ]);
+    return {
+      items: requests.map((request) =>
+        toCommunityTagRequest(
+          request,
+          requesterRefs.get(request.requestedByUserId) ?? null,
+        ),
+      ),
+    };
   }
 
   /**
@@ -2202,6 +2603,13 @@ export class CommunitiesService {
     const { action } = input;
     const community = await this.loadOr404(slug);
     await this.assertOwnerOrMod(community.id, actorId);
+    // Approving somebody into an archived community would walk them into a
+    // room they cannot post in, and `join` has refused every new applicant
+    // since it was archived. Declines are refused with it: a request left in
+    // the queue when the room closed is answered by the archive itself, and a
+    // decline would write a reapply window against a community nobody can
+    // apply to.
+    CommunitiesService.assertNotArchived(community);
 
     const request = await this.joinRequests.findOne({
       where: { id, communityId: community.id },
@@ -2465,6 +2873,14 @@ export class CommunitiesService {
 
     const isSelfLeave = actorId === targetUserId;
     if (!isSelfLeave) {
+      // A staff removal is a write over somebody else, and an archived
+      // community takes none (PRD-143): it would cost that member the
+      // read-only history they are entitled to and write a bar against a room
+      // nobody can enter. A SELF-LEAVE stays open at every stage of a
+      // community's life. Walking out is always the member's own to do, and
+      // an archived community they can no longer leave would be a room that
+      // closed with them still listed in it.
+      CommunitiesService.assertNotArchived(community);
       const actorMembership = await this.assertOwnerOrMod(
         community.id,
         actorId,
@@ -2867,6 +3283,10 @@ export class CommunitiesService {
     role: AssignableRole,
   ): Promise<MemberRoleDTO> {
     const community = await this.loadOr404(slug);
+    // An archived community's roster is a record of who was there. Handing
+    // somebody moderator standing over a room that takes no writes changes
+    // nothing anybody can act on, so it is refused with every other write.
+    CommunitiesService.assertNotArchived(community);
 
     // 1. actor is owner/mod
     const actorMembership = await this.assertOwnerOrMod(community.id, actorId);
@@ -2975,6 +3395,23 @@ export class CommunitiesService {
     return membership;
   }
 
+  /**
+   * An archived community is READ-ONLY, for its staff as much as for its
+   * members (PRD-143). Archiving is how an owner closes a room while leaving
+   * everything written in it standing, so the room still opens for everybody
+   * on its roster (see `getBySlug`) and takes no writes from anybody. The two
+   * exceptions are deliberate and live elsewhere: `archive` itself is
+   * idempotent, and a platform admin can reverse the archive through
+   * `AdminCommunitiesService.unarchive`.
+   */
+  private static assertNotArchived(community: Community): void {
+    if (community.archivedAt != null) {
+      throw new ConflictException(
+        'This community has been archived. It is read-only.',
+      );
+    }
+  }
+
   /** Tier 3 of the permission model (see `isStaffRole`): the owner-only gate,
    * read from `Community.ownerId` (the source of truth for ownership — a
    * roster row can never contradict it). Used by the two community-level
@@ -3009,6 +3446,67 @@ export class CommunitiesService {
       throw new NotFoundException('Member profile not found');
     }
     return ref;
+  }
+
+  /**
+   * Write one pending `CommunityInvite` per named member, ignoring anybody
+   * who already holds one (`UQ_community_invites_pending`). The same
+   * `ON CONFLICT DO NOTHING` idiom the roster insert in `join` uses, which is
+   * what makes a double-submit and two moderators inviting the same person at
+   * the same moment both harmless.
+   */
+  private async recordInvites(
+    communityId: string,
+    inviterUserId: string,
+    invitedUserIds: string[],
+  ): Promise<void> {
+    if (!invitedUserIds.length) return;
+    await this.invites
+      .createQueryBuilder()
+      .insert()
+      .into(CommunityInvite)
+      .values(
+        invitedUserIds.map((invitedUserId) => ({
+          communityId,
+          invitedUserId,
+          invitedByUserId: inviterUserId,
+          status: CommunityInviteStatus.Pending,
+        })),
+      )
+      .orIgnore()
+      .execute();
+  }
+
+  /**
+   * Community rows -> the ordinary `CommunityCardDTO` the discover grid
+   * renders, keyed by community id, with the stats and the viewer's own role
+   * resolved in two batched queries however many communities are passed.
+   *
+   * Public because `CommunityInvitesService` renders the same card on the
+   * invitee's own invitations shelf (`GET /me/community-invites`) and must not
+   * run a stats query per row to do it. Every other caller in this service
+   * builds its cards the same way inline.
+   */
+  async cardsByCommunityId(
+    communities: Community[],
+    viewerId: string,
+  ): Promise<Map<string, CommunityCardDTO>> {
+    if (!communities.length) return new Map();
+    const communityIds = communities.map((community) => community.id);
+    const [stats, myRoles] = await Promise.all([
+      this.statsForMany(communityIds),
+      this.myRoleByCommunity(communityIds, viewerId),
+    ]);
+    return new Map(
+      communities.map((community) => [
+        community.id,
+        toCommunityCard(
+          community,
+          stats.get(community.id) ?? EMPTY_STATS,
+          myRoles.get(community.id) ?? null,
+        ),
+      ]),
+    );
   }
 
   private async myRoleByCommunity(
@@ -3094,8 +3592,15 @@ export class CommunitiesService {
     viewerId: string,
     myRole?: RosterRole | null,
     moderation?: ContentModerationState,
+    // The viewer's standing invitation, when the caller already resolved one
+    // (`getBySlug` does, to decide whether to serve a private community at
+    // all). Omitted elsewhere, in which case it is looked up here for a
+    // viewer with no known roster role and skipped entirely for a caller that
+    // named one: only a non-member can hold an invitation that still means
+    // anything.
+    pendingInvite?: CommunityInvite | null,
   ): Promise<CommunityDetailDTO> {
-    const [membership, stats, ownerProfile, myJoinRequest, crops] =
+    const [membership, stats, ownerProfile, myJoinRequest, crops, invite] =
       await Promise.all([
         // The viewer's own roster row, loaded even when the caller already
         // knows their role: `rulesVersionAccepted` lives on it, and it is what
@@ -3119,6 +3624,9 @@ export class CommunitiesService {
         this.mediaCropService.getMany(
           community.coverImageUrl ? [community.coverImageUrl] : [],
         ),
+        pendingInvite !== undefined || myRole
+          ? Promise.resolve(pendingInvite ?? null)
+          : this.pendingInviteFor(community.id, viewerId),
       ]);
     // The caller's `myRole` still wins when it passed one (it may describe a
     // role this request just wrote and the row above predates).
@@ -3132,6 +3640,7 @@ export class CommunitiesService {
       moderation,
       crops,
       membership?.rulesVersionAccepted ?? null,
+      invite?.createdAt ?? null,
     );
   }
 
@@ -3471,6 +3980,11 @@ export class CommunitiesService {
       actorId: inviterId,
       source: 'community',
       communitySlug: community.slug,
+      // PRD-140. The bell says which community, so the row reads as an
+      // invitation rather than as an unnamed nudge. The slug beside it is the
+      // deep link; the name is the only part a person can read. Forwarded by
+      // `PAYLOAD_ALLOWLIST`, which strips everything not named there.
+      communityName: community.name,
     };
     try {
       if (invitedUserIds.length) {

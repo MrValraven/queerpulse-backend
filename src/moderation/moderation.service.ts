@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -54,7 +53,10 @@ import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
-import { enforcementTargetUnresolved } from './enforcement-refusals';
+import {
+  appealWindowClosed,
+  enforcementTargetUnresolved,
+} from './enforcement-refusals';
 import {
   COMMUNITY_BAN_AUDIT_ACTION,
   COMMUNITY_REMOVAL_AUDIT_ACTION,
@@ -1385,9 +1387,17 @@ export class ModerationService {
           source: 'moderation',
           action,
           reasonCode: dto.reasonCode,
-          // Always a string (never omitted) so the client's `{note}` copy token
-          // resolves to "" rather than rendering the literal placeholder — a
-          // bulk action may carry no note.
+          // KEPT, and unreachable by construction since PRD-287. Every action
+          // that gets this far is in `OUTCOME_ACTIONS` (nothing else resolves
+          // an outcome target above), and `RequiresMemberFacingNote` on both
+          // `ModActionDto` and `ModBulkActionDto` refuses those without a
+          // note of at least `MIN_MEMBER_FACING_NOTE_LENGTH` characters, so
+          // `dto.note` is a real sentence here on both paths. The fallback
+          // stays because the parameter type is still `note?: string` and a
+          // future caller could be added: if one ever is, the member gets an
+          // empty `{note}` token rather than the literal placeholder string,
+          // which is the less bad of two bad renderings. It is a type guard,
+          // and no longer a behaviour anyone should be able to reach.
           note: dto.note ?? '',
           ...(target.expiresAt
             ? { expiresAt: target.expiresAt.toISOString() }
@@ -1547,14 +1557,21 @@ export class ModerationService {
     // taken, so it has no honest basis for saying the member is late. Refusing
     // one on an invented deadline would turn a gap in our own record into a
     // refusal aimed at the member.
+    //
+    // PRD-286: the refusal is TYPED. It used to be a bare `BadRequestException`
+    // carrying one prose sentence, which left the appeal form nothing to render
+    // but that sentence or a generic failure. It now carries
+    // `code: 'APPEAL_WINDOW_CLOSED'` plus the window length, the instant the
+    // clock started and the instant it shut, so the screen can say which
+    // deadline passed and when, in the member's own language and date format.
     if (target) {
       const closesAt = appealFilingWindowClosesAt(target.actionAt);
       if (!isWithinAppealFilingWindow(target.actionAt, now)) {
-        throw new BadRequestException(
-          `Appeals are open for ${APPEAL_FILING_WINDOW_DAYS} days after a decision, and the window for this one closed on ` +
-            `${closesAt.toISOString().slice(0, 10)}. If something has changed since, or you could not reach this form in time, ` +
-            'write to the moderation team and ask them to look again.',
-        );
+        throw appealWindowClosed({
+          windowDays: APPEAL_FILING_WINDOW_DAYS,
+          decisionTakenAt: target.actionAt,
+          closedAt: closesAt,
+        });
       }
     }
 

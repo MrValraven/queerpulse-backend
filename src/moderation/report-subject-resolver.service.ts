@@ -289,6 +289,14 @@ export class ReportSubjectResolverService {
       case ReportSubjectType.Company:
         return this.queryBySlug(COMPANY_SQL, subjectIds);
 
+      // ONE volunteering opportunity, by slug. `job` sits two arms above and
+      // is the neighbour to keep it distinct from: that is a slug in the paid
+      // work directory (`jobs`), a different table, so a shared arm would
+      // silently resolve a volunteering report against a job of the same slug
+      // or against nothing at all.
+      case ReportSubjectType.Volunteering:
+        return this.queryBySlug(VOLUNTEER_OPPORTUNITY_SQL, subjectIds);
+
       case ReportSubjectType.Landlord:
         return this.queryBySlug(LANDLORD_SQL, subjectIds);
 
@@ -794,6 +802,19 @@ const JOB_SQL = `
   WHERE j.slug = ANY($1::text[])
 `;
 
+// The poster is who wrote the listing. Nullable for the same reason
+// `LANDLORD_SQL`'s submitter is: an admin-created opportunity, or one whose
+// poster has since been erased, still has to resolve for a moderator.
+const VOLUNTEER_OPPORTUNITY_SQL = `
+  SELECT vo.slug      AS key,
+         vo.poster_id AS author_user_id,
+         COALESCE(NULLIF(vo.role, ''), NULLIF(vo."desc", ''), NULLIF(vo.org, ''))
+                      AS excerpt,
+         vo.community_id AS community_id
+  FROM volunteer_opportunities vo
+  WHERE vo.slug = ANY($1::text[])
+`;
+
 const COMPANY_SQL = `
   SELECT co.slug     AS key,
          co.owner_id AS author_user_id,
@@ -838,16 +859,43 @@ const LANDLORD_SQL = `
  *
  * A landlord entry belongs to no community, hence the constant NULL.
  *
- * NOT AUTHOR-AMBIGUOUS, and the statement therefore does not name that column.
- * The row is `(landlord_id, author_user_id, stars, text, created_at)`: there is
- * no reply field and no second contributor, so unlike a review the reported
- * words can only be the one author's.
+ * AUTHOR-AMBIGUOUS SINCE PRD-249, and this comment used to say the opposite.
+ * The row carried `(landlord_id, author_user_id, stars, text, created_at)` and
+ * nothing else, so the reported words could only ever be the one author's. It
+ * now also carries `landlord_reply_text`: the named landlord's single public
+ * answer, published by staff on their behalf because a landlord holds no
+ * account here. That is the same shape `listing_reviews.owner_reply_text` and
+ * `housing_reviews.lister_reply_text` have, and it is handled the same way, for
+ * the same two safety reasons.
+ *
+ *  1. The excerpt SHOWS THE REPLY when there is one. The report control on the
+ *     card sits under both halves, so a moderator reading only the tenant's
+ *     words is judging half an exchange, and the half they cannot see may be
+ *     exactly what the reporter meant.
+ *  2. `is_author_ambiguous` is TRUE when a reply stands. `author_user_id` stays
+ *     the recommending member, because the drawer has to name somebody and they
+ *     opened the exchange; the flag is what stops `restrict`/`suspend`/`ban`
+ *     landing on a TENANT for words their landlord wrote. That failure would be
+ *     the worst version of it available on this platform: the reported party is
+ *     the one with power over the reporter's home, and the sanction would fall
+ *     on the person warning others about them.
+ *
+ * A blank or absent reply is not two authors, so the flag is false there and
+ * the ordinary case (a recommendation nobody has answered) stays fully
+ * actionable.
  */
 const LANDLORD_RECOMMENDATION_SQL = `
-  SELECT lrec.id::text             AS key,
-         lrec.author_user_id       AS author_user_id,
-         NULLIF(btrim(lrec.text), '') AS excerpt,
-         NULL::uuid                AS community_id
+  SELECT lrec.id::text       AS key,
+         lrec.author_user_id AS author_user_id,
+         CASE
+           WHEN NULLIF(btrim(lrec.landlord_reply_text), '') IS NULL
+             THEN NULLIF(btrim(lrec.text), '')
+           ELSE concat_ws(' ', NULLIF(btrim(lrec.text), ''), '/ reply:',
+                          lrec.landlord_reply_text)
+         END                 AS excerpt,
+         NULL::uuid          AS community_id,
+         (NULLIF(btrim(lrec.landlord_reply_text), '') IS NOT NULL)
+                             AS is_author_ambiguous
   FROM landlord_recommendations lrec
   WHERE lrec.id = ANY($1::uuid[])
 `;

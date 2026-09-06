@@ -77,6 +77,7 @@ describe('ProfilesService.getBySlug visibility', () => {
   let profiles: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let connections: { areConnected: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
+  let handles: { rename: jest.Mock; previousProfileOwnerOf: jest.Mock };
   const findEmpty = () => ({ find: jest.fn().mockResolvedValue([]) });
 
   const profile = (overrides = {}): Profile =>
@@ -110,6 +111,12 @@ describe('ProfilesService.getBySlug visibility', () => {
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       excludeBlocked: jest.fn((qb: unknown) => qb),
+    };
+    handles = {
+      rename: jest.fn(),
+      // PRD-204: a missing slug asks the handle ledger whether it was renamed
+      // away from. No reservation by default.
+      previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
     };
     const groupMemberships = {
       ...findEmpty(),
@@ -159,7 +166,7 @@ describe('ProfilesService.getBySlug visibility', () => {
             excludeHiddenFrom: jest.fn((qb: unknown) => qb),
           },
         },
-        { provide: HandlesService, useValue: { rename: jest.fn() } },
+        { provide: HandlesService, useValue: handles },
         {
           provide: StorageService,
           useValue: { deleteObjectByReference: jest.fn() },
@@ -208,6 +215,42 @@ describe('ProfilesService.getBySlug visibility', () => {
     await expect(service.getBySlug('nope', 'v1')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  describe('PRD-204 renamed-username forwarding', () => {
+    it('answers PROFILE_MOVED with the current slug for a handle still in its reclaim cooldown', async () => {
+      // First lookup is by the old slug (gone), second is the former owner by
+      // userId.
+      profiles.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(profile({ slug: 'jo-new' }));
+      handles.previousProfileOwnerOf.mockResolvedValue('owner-1');
+      await expect(service.getBySlug('jo', 'viewer')).rejects.toMatchObject({
+        response: { code: 'PROFILE_MOVED', slug: 'jo-new' },
+      });
+      expect(handles.previousProfileOwnerOf).toHaveBeenCalledWith('jo');
+    });
+
+    it('gives the plain 404 once the cooldown has lapsed or someone else holds the name', async () => {
+      // `previousProfileOwnerOf` is the single place that decision is made, and
+      // it answers null in both cases.
+      profiles.findOne.mockResolvedValue(null);
+      handles.previousProfileOwnerOf.mockResolvedValue(null);
+      await expect(service.getBySlug('jo', 'viewer')).rejects.toMatchObject({
+        response: { message: 'Profile not found' },
+      });
+    });
+
+    it('never reveals a move to a viewer the former owner has blocked', async () => {
+      profiles.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(profile({ slug: 'jo-new' }));
+      handles.previousProfileOwnerOf.mockResolvedValue('owner-1');
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+      await expect(service.getBySlug('jo', 'viewer')).rejects.toMatchObject({
+        response: { message: 'Profile not found' },
+      });
+    });
   });
 
   it('returns the full profile for an open profile to any viewer', async () => {
@@ -900,7 +943,15 @@ describe('ProfilesService replace-list endpoints', () => {
             excludeHiddenFrom: jest.fn((qb: unknown) => qb),
           },
         },
-        { provide: HandlesService, useValue: { rename: jest.fn() } },
+        {
+          provide: HandlesService,
+          useValue: {
+            rename: jest.fn(),
+            // PRD-204: a missing slug asks the handle ledger whether it was
+            // renamed away from. No reservation by default.
+            previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
+          },
+        },
         {
           provide: StorageService,
           useValue: { deleteObjectByReference: jest.fn() },

@@ -160,6 +160,27 @@ export class Partner extends QueueAssignmentColumns {
   @Column({ type: 'uuid' })
   submittedById!: string;
 
+  /**
+   * The member account that MAINTAINS this partner's public profile (PRD-263).
+   *
+   * Deliberately separate from `submittedById`, which is the immutable record
+   * of who filed the application and who the decision notification was
+   * addressed to. This one is a live permission: staff can move it when the
+   * person who applied leaves the organisation, without rewriting the history
+   * of who asked.
+   *
+   * NULL means STAFF-EDITABLE ONLY, and it is null in three real cases: the
+   * row is still a pending application (nothing public to maintain yet), it
+   * was refused, or the owning account was erased — the FK is
+   * `ON DELETE SET NULL`, so erasing a member de-links the profile rather than
+   * deleting the partner. `triage` stamps it from `submittedById` on the
+   * transition into `approved`, and the migration backfilled every already
+   * approved row the same way.
+   */
+  @Index('IDX_partners_owner_user_id')
+  @Column({ type: 'uuid', nullable: true })
+  ownerUserId!: string | null;
+
   @Column({ type: 'text', nullable: true })
   reviewNote!: string | null;
 

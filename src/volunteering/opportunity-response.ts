@@ -65,7 +65,22 @@ export interface OpportunityDetailDTO extends OpportunityCardDTO {
   team: MemberRef[];
   applyRole: string;
   poster: MemberRef | null;
-  isPoster: boolean;
+  /**
+   * The applicant-review tier, resolved exactly as
+   * `VolunteeringService.canManageApplicants` resolves it for the roster and
+   * the accept/decline routes: the poster, OR an owner/mod of the community
+   * this opportunity is attributed to. Reveals the applicant roster and the
+   * manage entry point, and withdraws the "apply" offer — a community
+   * organiser reviewing their own posting is not an applicant to it.
+   */
+  canReviewApplicants: boolean;
+  /**
+   * Poster-only, matching `update()`/`close()`'s own guard. Editing and
+   * closing speak for the posting itself, so the community's standing roster
+   * reviews applicants without inheriting either. Deliberately a separate
+   * flag from `canReviewApplicants`: one boolean cannot carry two tiers.
+   */
+  canEditOpportunity: boolean;
   mySignup: boolean;
 }
 
@@ -132,7 +147,8 @@ export function toOpportunityDetail(
   spotsFilled: number,
   team: MemberRef[],
   poster: MemberRef | null,
-  isPoster: boolean,
+  canReviewApplicants: boolean,
+  canEditOpportunity: boolean,
   mySignup: boolean,
 ): OpportunityDetailDTO {
   return {
@@ -145,7 +161,8 @@ export function toOpportunityDetail(
     team,
     applyRole: opportunity.applyRole,
     poster,
-    isPoster,
+    canReviewApplicants,
+    canEditOpportunity,
     mySignup,
   };
 }

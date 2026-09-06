@@ -1,12 +1,18 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { LessThanOrEqual } from 'typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineCorrection } from './entities/magazine-correction.entity';
-import { MagazineDeck } from './entities/magazine-deck.entity';
+import { DeckSlide, MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
+import { MagazinePiece } from './entities/magazine-piece.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -75,6 +81,51 @@ function makeArticlesQueryBuilder(): ArticlesQueryBuilderMock {
   return queryBuilder;
 }
 
+/**
+ * PRD-111 — `listAuthors` now filters the DIRECTORY down to bylines with at
+ * least one published, already-due piece, through an EXISTS subquery on
+ * `magazine_article`. That makes it a query builder rather than
+ * `authors.find`, so the stub below is what the directory tests drive.
+ */
+type AuthorsQueryBuilderMock = {
+  where: jest.Mock;
+  orderBy: jest.Mock;
+  getMany: jest.Mock;
+};
+
+function makeAuthorsQueryBuilder(
+  rows: MagazineAuthor[],
+): AuthorsQueryBuilderMock {
+  const queryBuilder = {} as AuthorsQueryBuilderMock;
+  queryBuilder.where = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.orderBy = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+  return queryBuilder;
+}
+
+/** PRD-106 — the `getOpenIssue` builder (`select`/`where`/`orderBy`/`limit`). */
+type IssuesQueryBuilderMock = {
+  select: jest.Mock;
+  where: jest.Mock;
+  orderBy: jest.Mock;
+  addOrderBy: jest.Mock;
+  limit: jest.Mock;
+  getOne: jest.Mock;
+};
+
+function makeIssuesQueryBuilder(
+  row: MagazineIssue | null,
+): IssuesQueryBuilderMock {
+  const queryBuilder = {} as IssuesQueryBuilderMock;
+  queryBuilder.select = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.where = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.orderBy = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.addOrderBy = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.limit = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.getOne = jest.fn().mockResolvedValue(row);
+  return queryBuilder;
+}
+
 const AUTHOR: MagazineAuthor = {
   id: 'author-1',
   slug: 'sofia',
@@ -134,8 +185,16 @@ describe('MagazineService', () => {
     createQueryBuilder: jest.Mock;
     findOne: jest.Mock;
   };
-  let authors: { find: jest.Mock; findOne: jest.Mock };
-  let issues: { find: jest.Mock; findOne: jest.Mock };
+  let authors: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let issues: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let sections: { find: jest.Mock };
   // CON-02 published corrections on the public article read.
   let corrections: { createQueryBuilder: jest.Mock };
@@ -146,15 +205,28 @@ describe('MagazineService', () => {
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    delete: jest.Mock;
   };
+  // ENG-112/PRD-131 — deck delete checks for a desk piece still pointing at
+  // the deck, and the "With issue" read resolves the deck's issue through
+  // that same piece.
+  let pieces: { findOne: jest.Mock };
 
   beforeEach(async () => {
     articles = {
       createQueryBuilder: jest.fn(() => makeArticlesQueryBuilder()),
       findOne: jest.fn(),
     };
-    authors = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
-    issues = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
+    authors = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(),
+      createQueryBuilder: jest.fn(() => makeAuthorsQueryBuilder([])),
+    };
+    issues = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(),
+      createQueryBuilder: jest.fn(() => makeIssuesQueryBuilder(null)),
+    };
     sections = { find: jest.fn().mockResolvedValue([]) };
     // CON-02 — the article read joins published corrections through the staff
     // piece record. Default: this article has never been corrected.
@@ -172,7 +244,9 @@ describe('MagazineService', () => {
       // service's ownership check has run before anything is persisted.
       create: jest.fn((entity: Partial<MagazineDeck>) => entity),
       save: jest.fn(async (entity: Partial<MagazineDeck>) => entity),
+      delete: jest.fn(async () => ({ affected: 1 })),
     };
+    pieces = { findOne: jest.fn().mockResolvedValue(null) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -190,6 +264,7 @@ describe('MagazineService', () => {
           useValue: corrections,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: getRepositoryToken(MagazinePiece), useValue: pieces },
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
@@ -447,18 +522,127 @@ describe('MagazineService', () => {
 
   describe('listAuthors', () => {
     it('maps each row to AuthorResponse verbatim', async () => {
-      authors.find.mockResolvedValue([AUTHOR]);
+      authors.createQueryBuilder.mockReturnValue(
+        makeAuthorsQueryBuilder([AUTHOR]),
+      );
       await expect(service.listAuthors()).resolves.toEqual([
         {
           slug: 'sofia',
           name: 'Sofia Andrade',
           bio: 'Writes about queer life in Lisbon.',
           avatarUrl: 'https://example.com/sofia.jpg',
-          // CON-11: unlinked byline (`userId` null) and no published pieces.
+          // CON-11: unlinked byline (`userId` null). `pieceCount` is 0 here
+          // only because the default articles builder counts nothing back;
+          // the EXISTS gate below is what keeps a genuinely empty byline out.
           memberSlug: null,
           pieceCount: 0,
         },
       ]);
+    });
+
+    // PRD-111 — the directory advertised bylines the desk had minted when a
+    // draft was opened: a "0 pieces" card leading to an author page that said
+    // they had not published yet.
+    it('gates the directory on an already-due published piece', async () => {
+      const queryBuilder = makeAuthorsQueryBuilder([]);
+      authors.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await expect(service.listAuthors()).resolves.toEqual([]);
+
+      const [sql, parameters] = queryBuilder.where.mock.calls[0] as [
+        string,
+        { now: Date },
+      ];
+      expect(sql).toContain('EXISTS');
+      expect(sql).toContain('magazine_article');
+      expect(sql).toContain('article.published_at IS NOT NULL');
+      expect(sql).toContain('article.published_at <= :now');
+      expect(parameters.now).toBeInstanceOf(Date);
+    });
+
+    // The gate must not become a join: an ORDER BY on a joined column is the
+    // shape this repo's pagination trap lives in.
+    it("orders by the author's own column, with no join", async () => {
+      const queryBuilder = makeAuthorsQueryBuilder([]);
+      authors.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.listAuthors();
+
+      // The stub exposes no `innerJoin`/`leftJoin`, so a join would throw
+      // before this assertion is ever reached.
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith('author.name', 'ASC');
+    });
+
+    // A byline with no published work is still readable by direct link: the
+    // author page, the member "Writing" surface and article bylines all go
+    // through `getAuthorBySlug`/`getAuthorForUser`, which are untouched.
+    it('still serves an unadvertised byline by slug', async () => {
+      authors.createQueryBuilder.mockReturnValue(makeAuthorsQueryBuilder([]));
+      authors.findOne.mockResolvedValue(AUTHOR);
+
+      await expect(service.listAuthors()).resolves.toEqual([]);
+      await expect(service.getAuthorBySlug('sofia')).resolves.toMatchObject({
+        slug: 'sofia',
+        pieceCount: 0,
+      });
+    });
+  });
+
+  // PRD-106 — which issue is open for submissions, derived from the issues
+  // that have not published yet. The submit-story form used to print a
+  // hardcoded issue number and a deadline that had passed.
+  describe('getOpenIssue', () => {
+    const OPEN_ISSUE: MagazineIssue = {
+      number: '27',
+      title: 'On work.',
+      publishedOn: '2026-10-01',
+      submissionDeadline: '2026-09-15',
+    } as MagazineIssue;
+
+    it('returns null when every issue has already published', async () => {
+      issues.createQueryBuilder.mockReturnValue(makeIssuesQueryBuilder(null));
+      await expect(service.getOpenIssue()).resolves.toBeNull();
+    });
+
+    it('maps only number, title, publish date and deadline', async () => {
+      issues.createQueryBuilder.mockReturnValue(
+        makeIssuesQueryBuilder(OPEN_ISSUE),
+      );
+      await expect(service.getOpenIssue()).resolves.toEqual({
+        number: '27',
+        title: 'On work.',
+        publishedOn: '2026-10-01',
+        submissionDeadline: '2026-09-15',
+      });
+    });
+
+    it('carries a null deadline through rather than inventing one', async () => {
+      issues.createQueryBuilder.mockReturnValue(
+        makeIssuesQueryBuilder({
+          ...OPEN_ISSUE,
+          submissionDeadline: null,
+        }),
+      );
+      await expect(service.getOpenIssue()).resolves.toMatchObject({
+        submissionDeadline: null,
+      });
+    });
+
+    it('asks for unpublished issues soonest first, unscheduled last', async () => {
+      const queryBuilder = makeIssuesQueryBuilder(null);
+      issues.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getOpenIssue();
+
+      const [sql] = queryBuilder.where.mock.calls[0] as [string];
+      expect(sql).toContain('issue.published_on IS NULL');
+      expect(sql).toContain('issue.published_on > :today');
+      expect(queryBuilder.orderBy).toHaveBeenCalledWith(
+        'issue.published_on',
+        'ASC',
+        'NULLS LAST',
+      );
+      expect(queryBuilder.limit).toHaveBeenCalledWith(1);
     });
   });
 
@@ -572,6 +756,189 @@ describe('MagazineService', () => {
           service.updateDeck('deck-1', { cover: FOREIGN_KEY }, REQUESTER_ID),
         ).rejects.toBeInstanceOf(ForbiddenException);
         expect(decks.save).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  // PRD-131 (server-side publish readiness, real scheduling) and ENG-112
+  // (deck deletion brought in line with `deletePiece`).
+  describe('deck publishing and deletion', () => {
+    const EDITOR_ID = '11111111-2222-3333-4444-555555555555';
+    const READY_SLIDE: DeckSlide = { layout: 'text', body: 'A slide.' };
+
+    function makeDeck(overrides: Partial<MagazineDeck> = {}): MagazineDeck {
+      return {
+        id: 'deck-1',
+        slug: 'a-deck',
+        title: 'A deck',
+        kicker: '',
+        section: '',
+        byline: '',
+        role: null,
+        authorBio: '',
+        cover: '',
+        coverDesc: '',
+        readTime: '',
+        tags: [],
+        related: [],
+        slides: [READY_SLIDE],
+        publishedAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+        ...overrides,
+      };
+    }
+
+    describe('updateDeck publish readiness', () => {
+      it('refuses to publish a deck with no slides', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ slides: [] }));
+        await expect(
+          service.updateDeck('deck-1', { published: true }, EDITOR_ID),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses to publish when an image slide has blank alt text', async () => {
+        // Reaches the readiness check only because the row is already stored
+        // this way: `validateDeckSlides` would reject the same slides on the
+        // way in, which is exactly the gap the second check closes.
+        decks.findOne.mockResolvedValue(
+          makeDeck({
+            slides: [
+              {
+                layout: 'image',
+                src: 'https://x/a.jpg',
+                alt: '  ',
+                tint: 'coral',
+              },
+            ],
+          }),
+        );
+        await expect(
+          service.updateDeck('deck-1', { published: true }, EDITOR_ID),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('publishes a ready deck and stamps publishedAt', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        const response = await service.updateDeck(
+          'deck-1',
+          { published: true },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).not.toBeNull();
+      });
+
+      it('accepts a slides payload that fixes readiness in the same PATCH', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ slides: [] }));
+        const response = await service.updateDeck(
+          'deck-1',
+          { slides: [READY_SLIDE], published: true },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).not.toBeNull();
+      });
+
+      it('never gates unpublishing, whatever shape the deck is in', async () => {
+        decks.findOne.mockResolvedValue(
+          makeDeck({ slides: [], publishedAt: new Date() }),
+        );
+        const response = await service.updateDeck(
+          'deck-1',
+          { published: false },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).toBeNull();
+      });
+
+      it('schedules at a future instant when publishedAt is sent', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        const scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
+        const response = await service.updateDeck(
+          'deck-1',
+          { publishedAt: scheduledAt },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).toEqual(scheduledAt);
+      });
+
+      it('lets publishedAt win over the boolean when both are sent', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ publishedAt: new Date() }));
+        const response = await service.updateDeck(
+          'deck-1',
+          { published: true, publishedAt: null },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).toBeNull();
+      });
+
+      it('leaves the publish state alone when neither control is sent', async () => {
+        const publishedAt = new Date('2026-02-02T00:00:00.000Z');
+        decks.findOne.mockResolvedValue(makeDeck({ publishedAt }));
+        const response = await service.updateDeck(
+          'deck-1',
+          { title: 'Renamed' },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).toEqual(publishedAt.toISOString());
+      });
+    });
+
+    describe('deleteDeck', () => {
+      it('404s on an unknown deck', async () => {
+        decks.findOne.mockResolvedValue(null);
+        await expect(service.deleteDeck('deck-1')).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        expect(decks.delete).not.toHaveBeenCalled();
+      });
+
+      it('refuses to hard-delete a published deck (unpublish first)', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ publishedAt: new Date() }));
+        await expect(service.deleteDeck('deck-1')).rejects.toBeInstanceOf(
+          ConflictException,
+        );
+        expect(decks.delete).not.toHaveBeenCalled();
+      });
+
+      it('refuses to orphan a desk piece that still points at the deck', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue({ id: 'piece-1' });
+        await expect(service.deleteDeck('deck-1')).rejects.toBeInstanceOf(
+          ConflictException,
+        );
+        expect(decks.delete).not.toHaveBeenCalled();
+      });
+
+      it('deletes a standalone draft deck', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue(null);
+        await expect(service.deleteDeck('deck-1')).resolves.toBeUndefined();
+        expect(decks.delete).toHaveBeenCalledWith('deck-1');
+      });
+    });
+
+    describe('getDeckIssueLink', () => {
+      it('returns nulls when no piece links the deck', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue(null);
+        await expect(service.getDeckIssueLink('deck-1')).resolves.toEqual({
+          pieceId: null,
+          issueNumber: null,
+          issueTitle: null,
+        });
+      });
+
+      it('names the issue the linked piece is filed under', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue({ id: 'piece-1', issueId: 'issue-1' });
+        issues.findOne.mockResolvedValue({ number: '27', title: 'On work.' });
+        await expect(service.getDeckIssueLink('deck-1')).resolves.toEqual({
+          pieceId: 'piece-1',
+          issueNumber: '27',
+          issueTitle: 'On work.',
+        });
       });
     });
   });

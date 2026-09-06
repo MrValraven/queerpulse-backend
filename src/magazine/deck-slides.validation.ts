@@ -185,3 +185,33 @@ export function validateDeckSlides(slides: unknown): DeckSlide[] {
 
   return slides as DeckSlide[];
 }
+
+/**
+ * Whether a deck holds the minimum an editor must fill in before a fresh
+ * publish. Mirrors the REQUIRED items of the frontend's
+ * `desk/deck/deckPublishChecklist.ts` exactly, so the client-side checklist
+ * and this server-side gate can never disagree: at least one slide (the
+ * checklist's "Cover slide set" row) and alt text on every image slide. The
+ * stat-slide source line is in that checklist too but flagged optional
+ * there, so it is deliberately absent here.
+ *
+ * The alt rule is also enforced by `validateImageSlide` on every write, so a
+ * deck saved through the API today cannot fail it. It is re-checked anyway
+ * for two reasons: rows written before that validator existed, and keeping
+ * this function a faithful mirror of the checklist so a future checklist
+ * change has one obvious place to land.
+ *
+ * This is the deck's `isArticlePublishReady` (see
+ * `magazine-piece-response.ts`). It gates only a null -> set `publishedAt`
+ * transition in `MagazineService.updateDeck`; unpublishing a live deck is
+ * never blocked by it, because an editor must always be able to pull
+ * something down whatever shape it is in.
+ */
+export function isDeckPublishReady(slides: readonly DeckSlide[]): boolean {
+  if (slides.length === 0) {
+    return false;
+  }
+  return slides.every(
+    (slide) => slide.layout !== 'image' || slide.alt.trim() !== '',
+  );
+}

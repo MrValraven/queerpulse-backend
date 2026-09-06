@@ -1,9 +1,12 @@
 import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import type { CropRect } from '../media-crops/crop-rect';
 import { Profile } from '../users/entities/profile.entity';
 import { ConversationRole } from './entities/conversation-participant.entity';
 import {
+  DocumentAttachment,
   GifAttachment,
+  isDocumentAttachment,
   Message,
   MessageKind,
   SystemEvent,
@@ -27,23 +30,33 @@ export interface MessageView {
   forwarded: boolean;
   kind: MessageKind;
   systemEvent: SystemEvent | null;
-  attachment: GifAttachment | null;
+  attachment: GifAttachment | DocumentAttachment | null;
 }
 
 /**
- * Resolves a stored `GifAttachment`'s `url`/`previewUrl` through `toImageUrl`
- * before it ever reaches the client. A no-op for a `kind:'gif'` message (its
- * `url` is already an absolute `https://` provider URL — `toImageUrl` passes
- * those through unchanged); for a `kind:'image'` message it turns the private
- * storage KEY the upload minted into a fetchable `GET /files/<key>` URL, the
- * same way every other image field in this app resolves at read time. `null`
- * in → `null` out.
+ * Resolves a stored attachment's storage key(s) through `toImageUrl` before it
+ * ever reaches the client. For a `GifAttachment`: a no-op for a `kind:'gif'`
+ * message (its `url`/`previewUrl` are already absolute `https://` provider
+ * URLs — `toImageUrl` passes those through unchanged); for a `kind:'image'`
+ * message it turns the private storage KEY the upload minted into a fetchable
+ * `GET /files/<key>` URL, the same way every other image field in this app
+ * resolves at read time. For a `DocumentAttachment` (`kind:'document'`) only
+ * `url` exists to resolve — there is no `previewUrl`. `null` in → `null` out.
  */
 export function resolveAttachment(
-  attachment: GifAttachment | null,
-): GifAttachment | null {
+  attachment: GifAttachment | DocumentAttachment | null,
+): GifAttachment | DocumentAttachment | null {
   if (!attachment) {
     return null;
+  }
+  if (isDocumentAttachment(attachment)) {
+    const url = toImageUrl(attachment.url);
+    // See the `GifAttachment` branch below for why a resolution failure blanks
+    // the attachment entirely rather than serving a broken `url`.
+    if (!url) {
+      return null;
+    }
+    return { ...attachment, url };
   }
   const url = toImageUrl(attachment.url);
   const previewUrl = toImageUrl(attachment.previewUrl);
@@ -194,10 +207,11 @@ export interface MessageResponse {
     deleted: boolean;
   } | null;
   /** `user` (an ordinary bubble), `system` (a rendered event pill), `gif` (a
-   *  picked provider GIF), or `image` (a member-uploaded photo). Present on
-   *  every message; a DM's messages are all `user`, so the client's existing
-   *  bubble path is unchanged. */
-  kind: 'user' | 'system' | 'gif' | 'image';
+   *  picked provider GIF), `image` (a member-uploaded photo), or `document`
+   *  (a member-uploaded PDF/spreadsheet/text file, PRD-226). Present on every
+   *  message; a DM's messages are all `user`, so the client's existing bubble
+   *  path is unchanged. */
+  kind: 'user' | 'system' | 'gif' | 'image' | 'document';
   /** Resolved system event for a `system` message, else null. Actor/target are
    *  resolved to DISPLAY NAMES server-side (the client only renders bilingual
    *  templates, never user ids). `value` carries a scalar the event needs (e.g. a
@@ -208,12 +222,15 @@ export interface MessageResponse {
     targetName: string | null;
     value: string | null;
   } | null;
-  /** The media attachment for a `kind:'gif'` or `kind:'image'` message, else
-   *  null. The client renders it as an inline image; `body` carries a
-   *  "GIF"/"Photo" text fallback so previews/notifications keep working.
-   *  `url`/`previewUrl` are always resolved, fetchable URLs here (see
+  /** The media attachment for a `kind:'gif'`/`kind:'image'`
+   *  (`url`/`previewUrl`/`width`/`height`/`provider`) or `kind:'document'`
+   *  (`url`/`fileName`/`byteSize`/`contentType`/`provider`) message, else
+   *  null. The client renders a gif/image inline and a document as a
+   *  file-card bubble (name, format, size, a download link); `body` carries a
+   *  "GIF"/"Photo"/"Document" text fallback so previews/notifications keep
+   *  working. Every `url` here is always a resolved, fetchable URL (see
    *  `resolveAttachment`) — never a bare storage key. */
-  attachment: GifAttachment | null;
+  attachment: GifAttachment | DocumentAttachment | null;
 }
 
 /**
@@ -319,6 +336,20 @@ export interface ConversationResponse {
   /** The other participant's user id — used only client-side to correlate
    *  presence (`presence` events key by userId). Null for official/group. */
   otherParticipantId: string | null;
+  /**
+   * True for a DIRECT, non-official DM where the two participants are NOT
+   * accepted connections (PRD-220) — the state a housing/flatmate enquiry
+   * (`MessageRequestsService.deliverEnquiry`) leaves a thread in once its one
+   * free message has been delivered. `MessagesService.sendMessage`'s ordinary
+   * connection gate refuses every message in a thread like this from EITHER
+   * side, so without this flag the composer had no way to know a normal send
+   * would 403 and rendered as if nothing were wrong. Reuses the exact name and
+   * semantics of `EnquiryContactability.replyRequiresConnection` (see
+   * `message-requests.service.ts`) rather than inventing a second concept for
+   * the same fact. Always false for group/official threads, where the
+   * connection gate does not apply.
+   */
+  replyRequiresConnection: boolean;
   /** `direct` (1:1 DM / official) or `group` (member-created, titled,
    *  multi-participant). The client branches its header/inbox/attribution on
    *  this; DMs stay `direct` and render exactly as before. */
@@ -352,6 +383,14 @@ export interface ConversationResponse {
    *  path). NULL = not archived. Auto-cleared server-side the instant a new
    *  message lands — see `ConversationParticipant.archivedAt`'s own doc. */
   archivedAt?: string | null;
+  /** When THIS caller explicitly marked the thread unread from the inbox row
+   *  menu (PRD-225), present only where a participant row was loaded (the
+   *  list path). NULL = not manually marked unread. Independent of
+   *  `unreadCount` — a genuinely-read thread can still carry this flag until
+   *  the caller re-opens it (`ConversationParticipant.markedUnreadAt`'s own
+   *  doc). The client ORs it with `unreadCount > 0` to decide the row's
+   *  unread state. */
+  markedUnreadAt?: string | null;
   /** THIS caller's own unsent composer text for the thread, synced from
    *  whichever device last wrote it (present only where a participant row was
    *  loaded — the list path). NULL = no stored draft. The client's
@@ -446,7 +485,11 @@ function authorSummaryFrom(profile: Profile): AuthorSummary {
   return {
     handle: profile.slug,
     displayName: `${profile.firstName} ${profile.lastName}`.trim(),
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    // The `photoVisible` gate, through the one shared spelling. A DM thread is
+    // not an exemption from "Show your photo": the member hid their face from
+    // the feed and the forum with the same switch, and a conversation they may
+    // have opened before things went wrong is the last place it should persist.
+    avatarUrl: toVisibleAvatarUrl(profile),
   };
 }
 

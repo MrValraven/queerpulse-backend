@@ -14,6 +14,12 @@ const WEBP = Uint8Array.from([
 ]);
 // HTML masquerading as an image ("<!DOCTYPE" -> 3C 21 44 4F ...).
 const HTML = Uint8Array.from([0x3c, 0x21, 0x44, 0x4f, 0x43, 0x54]);
+// PDF header: "%PDF-".
+const PDF = Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+// XLSX (OOXML) is a ZIP: local-file-header signature.
+const XLSX_ZIP = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
+const XLSX_CONTENT_TYPE =
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 describe('contentTypeForStorageKey', () => {
   it.each([
@@ -21,6 +27,10 @@ describe('contentTypeForStorageKey', () => {
     ['work/u/f.png', 'image/png'],
     ['story-covers/u/f.webp', 'image/webp'],
     ['message-images/u/f.gif', 'image/gif'],
+    ['message-documents/u/f.pdf', 'application/pdf'],
+    ['message-documents/u/f.txt', 'text/plain'],
+    ['message-documents/u/f.csv', 'text/csv'],
+    ['message-documents/u/f.xlsx', XLSX_CONTENT_TYPE],
   ])('maps %s -> %s', (key, expected) => {
     expect(contentTypeForStorageKey(key)).toBe(expected);
   });
@@ -61,5 +71,25 @@ describe('magicBytesMatchContentType', () => {
 
   it('rejects a null content type outright', () => {
     expect(magicBytesMatchContentType(JPEG, null)).toBe(false);
+  });
+
+  it('accepts a PDF header and rejects a mismatched one', () => {
+    expect(magicBytesMatchContentType(PDF, 'application/pdf')).toBe(true);
+    expect(magicBytesMatchContentType(HTML, 'application/pdf')).toBe(false);
+  });
+
+  it('accepts an XLSX (ZIP local-file-header) signature', () => {
+    expect(magicBytesMatchContentType(XLSX_ZIP, XLSX_CONTENT_TYPE)).toBe(true);
+    expect(magicBytesMatchContentType(PDF, XLSX_CONTENT_TYPE)).toBe(false);
+  });
+
+  it('accepts plain text/CSV bytes and rejects a NUL-containing binary payload', () => {
+    const TEXT = new TextEncoder().encode('name,email\nAna,ana@example.com');
+    expect(magicBytesMatchContentType(TEXT, 'text/plain')).toBe(true);
+    expect(magicBytesMatchContentType(TEXT, 'text/csv')).toBe(true);
+    const BINARY_WITH_NUL = Uint8Array.from([0x41, 0x00, 0x42, 0x00]);
+    expect(magicBytesMatchContentType(BINARY_WITH_NUL, 'text/plain')).toBe(
+      false,
+    );
   });
 });

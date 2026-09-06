@@ -61,6 +61,23 @@ export enum GovernanceLogAction {
   MemberBanRatified = 'member_ban_ratified',
   MemberBanDeclined = 'member_ban_declined',
   MemberBanHoldExpired = 'member_ban_hold_expired',
+  // PRD-147. Written by `CommunityPostsService.deletePost`/`deleteReply` when
+  // a community's owner/co-owner/mod takes down somebody ELSE'S post or reply.
+  // An author tombstoning their own writes nothing here: there is no
+  // governance decision in a member deleting their own words, and a log full
+  // of them would bury the decisions that are.
+  //
+  // `targetUserId` is the AUTHOR whose content was removed, and `metadata`
+  // carries the post/reply id, the moderator's member-facing `reason`, their
+  // moderator-only `internalNote`, and the house-rule snapshot where one was
+  // cited.
+  //
+  // Two actions rather than one with a flag, for the reason `MemberBanned` vs
+  // `MemberRemoved` already gives on this enum: this log is read to answer
+  // "what happened here", and "they removed a whole post" and "they removed a
+  // reply inside somebody else's thread" are different answers.
+  PostRemoved = 'post_removed',
+  ReplyRemoved = 'reply_removed',
   // Written by `AdminCommunitySupportService.create` when platform staff offer
   // a struggling community help (OPS-05), and by
   // `CommunitySupportOffersService.respond` when the community answers. Kept
@@ -73,9 +90,10 @@ export enum GovernanceLogAction {
 }
 
 /**
- * An immutable audit trail of governance actions taken against a community's
- * roster/lifecycle — role changes, removals, ownership transfers (manual or
- * automatic), and archive/freeze/unfreeze. Written via
+ * An immutable audit trail of governance actions taken inside a community:
+ * role changes, removals, ownership transfers (manual or automatic),
+ * archive/freeze/unfreeze, and (PRD-147) a moderator's takedown of a member's
+ * post or reply. Written via
  * `CommunityGovernanceLogService.log()`; nothing else should insert into this
  * table directly, so every entry goes through one typed call site.
  *

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import {
   Notification,
   NotificationType,
@@ -94,7 +94,13 @@ export class MentionsInboxService {
         : Promise.resolve([] as Profile[]),
       threadSlugs.length
         ? this.threads.find({
-            where: { slug: In(threadSlugs) },
+            // A withdrawn thread's title never resolves here (PRD-160). The
+            // mention row survives its thread, so without this the inbox went
+            // on rendering the title of a thread its author had retracted, to
+            // exactly the person named in it. An unresolved slug falls through
+            // `toMentionResponse`'s existing "no source label" path, which is
+            // what a mention whose source is gone should read as.
+            where: { slug: In(threadSlugs), deletedAt: IsNull() },
             select: { slug: true, title: true },
           })
         : Promise.resolve([] as ForumThread[]),

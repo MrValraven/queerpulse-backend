@@ -29,6 +29,7 @@ import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileInvitesService } from './subprofile-invites.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
+import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofilesService } from './subprofiles.service';
 
 @Module({
@@ -84,6 +85,9 @@ import { SubprofilesService } from './subprofiles.service';
     SubprofileEndorsementsService,
     SubprofileFollowersService,
     SubprofileInvitesService,
+    // "A persona you follow published something new" (PRD-208): the section
+    // diff and the capped follower fan-out.
+    SubprofileUpdatesService,
   ],
   // Exported for the cross-entity SearchModule (standalone-persona search).
   // `SubprofileEndorsementsService` is also exported: `PublicEligibilityModule`

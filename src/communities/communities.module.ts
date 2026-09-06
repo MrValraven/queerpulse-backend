@@ -41,6 +41,7 @@ import { CommunityPreferencesService } from './community-preferences.service';
 import { CommunityPublicController } from './community-public.controller';
 import { CommunityPublicService } from './community-public.service';
 import { MeCommunityDigestController } from './me-community-digest.controller';
+import { MeCommunityInvitesController } from './me-community-invites.controller';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityInsightsController } from './community-insights.controller';
 import { CommunityInsightsService } from './community-insights.service';
@@ -56,6 +57,7 @@ import { CommunityGovernanceLog } from './entities/community-governance-log.enti
 import { CommunityOwnerReviewRequest } from './entities/community-owner-review-request.entity';
 import { CommunityResource } from './entities/community-resource.entity';
 import { CommunitySupportOffer } from './entities/community-support-offer.entity';
+import { CommunityInvite } from './entities/community-invite.entity';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostEdit } from './entities/community-post-edit.entity';
@@ -78,6 +80,12 @@ import { MeCommunitiesController } from './me-communities.controller';
       CommunityPostEdit,
       CommunityPostReplyEdit,
       CommunityJoinRequest,
+      // PRD-140/PRD-141. A standing invitation to one community, written by
+      // `CommunityInvitesService` and read as the DOOR GATE by
+      // `CommunitiesService.getBySlug`/`join` for the `private` and `invite`
+      // tiers, neither of which could admit an invited member before it
+      // existed. Never a roster add: see `CommunityInvite`'s docstring.
+      CommunityInvite,
       // The owner/mod "suggest a tag" feedback inbox
       // (`CommunitiesService.createTagRequest`) — read+written here on the
       // member side; `AdminCommunitiesModule` registers its own `forFeature`
@@ -201,6 +209,10 @@ import { MeCommunitiesController } from './me-communities.controller';
     // `GET /me/communities/digest`, the live weekly digest across every
     // community the caller belongs to.
     MeCommunityDigestController,
+    // PRD-140. The invitee's own side of an invitation: the shelf of pending
+    // invites and the decline. The community-facing half (staff list, revoke)
+    // rides on `CommunityInvitesController` above.
+    MeCommunityInvitesController,
     // `GET /communities/:slug/public`, the only signed-out-reachable
     // community surface. Deliberately its own controller with NO class-level
     // `ActiveMemberGuard`, matching `DirectoryController` and

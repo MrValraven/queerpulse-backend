@@ -15,6 +15,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { Feature } from '../common/feature.decorator';
@@ -38,9 +39,28 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-// Public directory: approved partners only. Any active member can browse it,
-// but there's no ownership/authorship concept here (unlike companies/jobs),
-// so there's no CurrentUser-gated variant of these routes.
+// Public directory: approved partners only, and public in the literal sense —
+// both reads carry `@Public()` and answer a logged-out visitor.
+//
+// `/about/partners` and `/about/partners/:slug` are deliberately ungated in
+// the frontend's `authGate.ts`: the directory IS the proof that organisations
+// stand with the platform, and a page whose whole job is to be shown to people
+// who have not joined cannot be readable only by people who have. While these
+// reads sat behind the class guard, every such visitor got a "could not load,
+// retry" panel instead.
+//
+// `@Public()` on the handler is sufficient even though `ActiveMemberGuard` is
+// bound at class level: the guard reads the same `IS_PUBLIC_KEY` as the global
+// `JwtAuthGuard` and returns true for a public handler, so the binding stays
+// as the default for anything added here later.
+//
+// Nothing here is caller-specific — there is no ownership/authorship concept
+// on a partner (unlike companies/jobs), so no `CurrentUser`-gated variant of
+// these routes exists and the anonymous response is byte-for-byte the member
+// one. `PartnerContact` is the organisation's own published contact block, the
+// same details it prints on its own site. Applying to become a partner
+// (`PartnerApplicationsController`) and editing one (`AdminPartnersController`)
+// are unchanged and stay gated.
 @Feature('partners')
 @ApiTags('Partners')
 @ApiCookieAuth()
@@ -49,20 +69,20 @@ import {
 export class PartnersController {
   constructor(private readonly partnersService: PartnersService) {}
 
+  @Public()
   @Get()
-  @ApiOperation({ summary: 'List approved partners' })
+  @ApiOperation({ summary: 'List approved partners (unauthenticated)' })
   @ApiOkResponse({ description: 'A paginated page of approved partners.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an active member account.' })
   list(@Query() query: ListPartnersQuery) {
     return this.partnersService.list(query);
   }
 
+  @Public()
   @Get(':slug')
-  @ApiOperation({ summary: 'Get an approved partner by slug' })
+  @ApiOperation({
+    summary: 'Get an approved partner by slug (unauthenticated)',
+  })
   @ApiOkResponse({ description: 'The partner detail.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an active member account.' })
   @ApiNotFoundResponse({ description: 'No approved partner with that slug.' })
   getBySlug(@Param('slug') slug: string) {
     return this.partnersService.getBySlug(slug);

@@ -50,16 +50,65 @@ import {
   AdminGroupListingsPageDTO,
   GroupListingDTO,
   HousingGroupDTO,
+  MyGroupJoinRequestDTO,
   MyGroupListingDTO,
   toAdminGroupJoinRequestDTO,
   toAdminGroupListingDTO,
   toGroupListingDTO,
   toHousingGroupDTO,
+  toMyGroupJoinRequestDTO,
   toMyGroupListingDTO,
 } from './housing-groups-response';
 
 /** One page of the moderator's group-listing review queue (LOC-19). */
 export const GROUP_LISTING_QUEUE_PAGE_SIZE = 20;
+
+/**
+ * Emitted in the 403 body when somebody reaches for the inside of an
+ * access-gated group that has not let them in: posting a room (ENG-171) or
+ * reading the rooms already there (ENG-172). Mirrors the
+ * `AFFIRMING_PLEDGE_REQUIRED` and `VERIFICATION_REQUIRED` seams the same method
+ * already gates on, so a client can catch the code, open the
+ * join-with-screening modal, and retry once a steward has decided.
+ */
+export const GROUP_MEMBERSHIP_REQUIRED_CODE = 'GROUP_MEMBERSHIP_REQUIRED';
+
+/**
+ * The caller's standing with a group, carried in that 403 so the client can
+ * tell "your request is still being read" from "you never asked" from "you were
+ * turned down". Only ever describes the caller's OWN join requests, so it
+ * discloses nothing about the group's roster.
+ */
+export type GroupMembershipStanding = 'pending' | 'declined' | 'none';
+
+/** What each standing is told when they try to POST a room into a gated group.
+ * Separate sentences because the next step differs: wait, ask, or accept the
+ * answer. Passed explicitly to `requireGroupMembership`, which decides
+ * membership once and lets each surface say its own thing about it. */
+const GROUP_LISTING_POST_REFUSAL_MESSAGE: Record<
+  GroupMembershipStanding,
+  string
+> = {
+  pending:
+    'Your request to join this group is still with its stewards. You can share a room here once it is approved.',
+  declined:
+    'Your request to join this group was not approved, so you cannot share a room here.',
+  none: 'This group screens the people who share rooms in it. Ask to join first, and share a room once a steward approves you.',
+};
+
+/** The same three standings, told what a READ of a gated group's rooms means
+ * for them (ENG-172). The refusal says what is behind the gate and how to get
+ * in, and it names nothing that is behind it: no count, no titles, no rents. */
+const GROUP_LISTINGS_READ_REFUSAL_MESSAGE: Record<
+  GroupMembershipStanding,
+  string
+> = {
+  pending:
+    'Your request to join this group is still with its stewards. The rooms shared here open up once it is approved.',
+  declined:
+    'Your request to join this group was not approved, so the rooms shared here stay inside the group.',
+  none: 'This group keeps the rooms shared in it for the people it has let in. Ask to join, and a steward will decide.',
+};
 
 /** One page of the moderator's group join-request triage queue (ENG-41). Same
  * size as the listing queue beside it, so the two halves of the same console
@@ -74,6 +123,23 @@ type GroupListingRiskFields = Pick<
   GroupListing,
   'title' | 'description' | 'neighbourhood' | 'priceEuros' | 'accessibilityInfo'
 >;
+
+/**
+ * One answer to `GET /housing-groups/:slug/listings`, plus whether that answer
+ * is the same for every caller (ENG-172).
+ *
+ * `isCallerAgnostic` is true only for an OPEN group, where the read has always
+ * been public and anonymous. On an access-gated group the same URL answers 200
+ * to a member and 403 to everyone else, so the controller has to keep the
+ * response out of every shared cache. The service states the fact and the
+ * controller decides the header, which keeps HTTP out of here and keeps the
+ * cache decision from being re-derived from a flag the controller would have to
+ * fetch a second time.
+ */
+export interface GroupListingsReadResult {
+  listings: GroupListingDTO[];
+  isCallerAgnostic: boolean;
+}
 
 @Injectable()
 export class HousingGroupsService {
@@ -120,18 +186,47 @@ export class HousingGroupsService {
   }
 
   /**
-   * The group's PUBLIC listings. Two independent filters, both required
+   * The group's visible listings. Two independent filters, both required
    * (BE-HSG-01): `status = live` is the pre-publication gate (a listing awaiting
    * or failing moderator review has never been public), and `hidden = false` is
    * the post-publication norm-violation takedown. Before the status column
    * existed this read returned every non-hidden row, which meant a brand-new
    * unreviewed listing was live to anonymous visitors the moment it was posted.
+   *
+   * WHO MAY READ IT (ENG-172). An OPEN group (`isAccessGated: false`) is an
+   * open reading room and this stays a fully public, anonymous, shared-cacheable
+   * read. An ACCESS-GATED group answers only a member, using the same approved
+   * `GroupJoinRequest` that ENG-171 made the post gate: a group described to the
+   * community as vetted, whose members answered its own screening questions, had
+   * every room inside it readable by anyone holding the slug, along with the
+   * rents and how many there were. The whole endpoint refuses rather than
+   * returning an emptied list with a count, which was the alternative: a count is
+   * itself information about the inside of a screened group, and an empty list
+   * would read as "this group has no rooms", which is a lie the client cannot
+   * tell from the truth.
+   *
+   * The refusal is a 403 with the caller's own standing, never a 404. The group,
+   * its blurb and its norms are public and deliberately discoverable, so hiding
+   * the listings behind a 404 would conceal nothing that the group page does not
+   * already show, and would leave the client no way to say what to do next.
    */
-  async listVisibleListings(slug: string): Promise<GroupListingDTO[]> {
+  async listVisibleListings(
+    slug: string,
+    viewerId: string | null,
+  ): Promise<GroupListingsReadResult> {
     const group = await this.groups.findOne({
       where: { slug, published: true },
     });
     if (!group) throw new NotFoundException('Group not found');
+    // Before the rows are read at all, so a refused caller's request never
+    // touches the listings table.
+    if (group.isAccessGated) {
+      await this.requireGroupMembership(
+        group,
+        viewerId,
+        GROUP_LISTINGS_READ_REFUSAL_MESSAGE,
+      );
+    }
     const listings = await this.listings.find({
       where: {
         groupId: group.id,
@@ -141,7 +236,10 @@ export class HousingGroupsService {
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    return listings.map(toGroupListingDTO);
+    return {
+      listings: listings.map(toGroupListingDTO),
+      isCallerAgnostic: !group.isAccessGated,
+    };
   }
 
   async listAllForAdmin(): Promise<HousingGroupDTO[]> {
@@ -437,7 +535,76 @@ export class HousingGroupsService {
     const [mutual] = [
       ...(await this.computeMutualConnections([updated!])).values(),
     ];
+    await this.notifyJoinDecided(updated!);
     return toAdminGroupJoinRequestDTO(updated!, mutual ?? null);
+  }
+
+  /**
+   * Tell the applicant what was decided about their own application (PRD-242).
+   *
+   * Best-effort and never throws, for the same reason as
+   * `notifyListingDecided` below: the decision has already committed by the
+   * time this runs, and a notification failure must not turn a completed
+   * triage into a 500 the reviewer retries into a second decision.
+   *
+   * Silently skipped when there is nobody to tell. `userId` is null both for a
+   * non-member who applied by name (the access-gated group model lets a
+   * non-member ask to be let in) and for a request whose account was erased
+   * (`ON DELETE SET NULL`). No actor is passed: the bell says the outcome
+   * without naming which reviewer reached it, matching
+   * `HousingListingDecision`.
+   *
+   * `Approved` maps to the payload's `accepted`: the two housing surfaces spell
+   * the same outcome differently in their own enums (`GroupJoinRequestStatus`
+   * vs `JoinRequestStatus`) and the bell reads ONE word for both.
+   */
+  private async notifyJoinDecided(request: GroupJoinRequest): Promise<void> {
+    if (!request.userId || !request.group) return;
+    try {
+      await this.notifications.create(
+        request.userId,
+        NotificationType.HousingJoinDecided,
+        {
+          source: 'housing',
+          kind: 'group',
+          slug: request.group.slug,
+          name: request.group.name,
+          decision:
+            request.status === GroupJoinRequestStatus.Approved
+              ? 'accepted'
+              : 'declined',
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Group join decision notification failed for ${request.id}: ${String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The caller's OWN group applications, across every group (PRD-242).
+   *
+   * The counterpart to the bell row above: a decision that opens a page with no
+   * trace of the application on it is still a dead end. Flat rather than
+   * per-slug so it matches the co-op read beside it
+   * (`HousingService.listMyJoinRequests`) and so one call can also answer "what
+   * did I apply to" across the whole surface; the group detail page picks its
+   * own row out by slug.
+   *
+   * Ownership is the `user_id` match itself, so it cannot be widened by a
+   * caller: an anonymous application carries a null `user_id`, and SQL equality
+   * never matches null, which is what keeps a by-name request unreadable by
+   * anyone but the reviewers.
+   */
+  async listMyJoinRequests(userId: string): Promise<MyGroupJoinRequestDTO[]> {
+    const requests = await this.joinRequests.find({
+      where: { userId },
+      relations: { group: true },
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    return requests.map(toMyGroupJoinRequestDTO);
   }
 
   /**
@@ -456,16 +623,28 @@ export class HousingGroupsService {
   }
 
   /**
-   * Share a housing listing into a group. Carries the SAME three gates the
-   * sibling member-listing surface forces (`HousingListingsService.create`) —
-   * before BE-HSG-01 this path had only the first of them, so any member who
-   * had ticked the pledge could publish an unreviewed advert straight to
-   * anonymous visitors:
+   * Share a housing listing into a group. Four gates, the last three of them
+   * the SAME ones the sibling member-listing surface forces
+   * (`HousingListingsService.create`). Before BE-HSG-01 this path had only the
+   * pledge, so any member who had ticked it could publish an unreviewed advert
+   * straight to anonymous visitors:
    *
+   *  0. group membership, when the group is access-gated (`requireGroupMembership`),
    *  1. the mandatory LGBTQ+ affirming pledge (the universal baseline),
    *  2. a phone-verification step-up, because the result is publicly browsable,
    *  3. the deterministic `assessHousingRisk` pass (which includes the
    *     discriminatory-language scan), stored for the moderation queue.
+   *
+   * Gate 0 is ENG-171, and it is what finally makes `isAccessGated` mean
+   * something: the flag has been on the entity, documented as "joining requires
+   * an approved GroupJoinRequest" and defaulted to true, while no service path
+   * read it. A group is described to the community as vetted, its members are
+   * screened with its own questions, and until now ANY member of the platform
+   * could put a room into ANY published group's queue and, once a moderator
+   * cleared it, onto that group's public page. Moderation bounded the damage:
+   * no group listing has ever reached a group page before a human approved it.
+   * What gate 0 closes is a stranger reaching a screened group's page, and its
+   * reviewers' time, without ever passing its screening.
    *
    * And, like the sibling, it lands in `review` — never public until a human
    * clears it. The risk score deliberately does NOT refuse a submission on its
@@ -482,6 +661,22 @@ export class HousingGroupsService {
       where: { slug, published: true },
     });
     if (!group) throw new NotFoundException('Group not found');
+    // Gate 0, FIRST of the four on purpose: "you cannot post here at all" has
+    // to come before "accept the pledge" and "verify your phone". Sending
+    // somebody through a phone verification and only then refusing them is a
+    // worse refusal than the honest one.
+    //
+    // An OPEN group (`isAccessGated: false`) stays open to every active member,
+    // which is exactly what the flag is documented to mean on the entity: "when
+    // false the group is an open reading room". So this stays a per-group
+    // setting a steward already controls.
+    if (group.isAccessGated) {
+      await this.requireGroupMembership(
+        group,
+        userId,
+        GROUP_LISTING_POST_REFUSAL_MESSAGE,
+      );
+    }
     // `userId` is typed nullable to mirror `createJoinRequest`'s anonymous
     // path, but the only caller (`POST /housing-groups/:slug/listings`) is
     // `ActiveMemberGuard`-gated, so in practice it is always a member.
@@ -524,6 +719,83 @@ export class HousingGroupsService {
     // Answering a submission with the public DTO left the client with nothing
     // to show but a title, and no honest way to say what happens next.
     return toMyGroupListingDTO(saved, group);
+  }
+
+  /**
+   * The caller must hold an APPROVED `GroupJoinRequest` for this group before
+   * they may reach inside it: put a room in (ENG-171) or read the rooms already
+   * there (ENG-172). Called only for a group whose `isAccessGated` is true.
+   *
+   * ONE definition of membership, two surfaces. `refusalMessages` is the only
+   * thing that varies, because what a refused caller should do next is the same
+   * (wait, ask, or accept the answer) while what they were reaching for is not.
+   * The standing, the code and the shape of the body are identical, so a client
+   * reads both refusals the same way.
+   *
+   * Why approved join requests are the roster: there is no `group_members`
+   * table. `computeMutualConnections` and `refreshMemberCount` both already read
+   * membership exactly this way, and `housing_groups.member_count` (the public
+   * "N members" figure) is a COUNT of these rows. Reading it a third way here
+   * would be a second definition of the same thing, free to drift. If a
+   * dedicated roster table ever lands, all three move together.
+   *
+   * WHY A 403 AND NOT A 404. The group, its blurb and its norms are `@Public()`
+   * and deliberately discoverable: the join flow depends on a stranger finding
+   * the group and asking. Hiding it from someone who can already read it would
+   * conceal nothing and would leave the client with no way to say what to do
+   * next. The typed `code` plus the caller's own standing gives it one.
+   *
+   * NO STAFF EXEMPTION, and no owner exemption, because there is no owner.
+   * `HousingGroup` carries no owner or steward column: groups are created and
+   * triaged entirely from the admin console (`AdminHousingGroupsController`,
+   * `AdminHousingGroupListingsController`), which has a queue and a status
+   * endpoint and no create-a-listing endpoint at all. So there is no existing
+   * staff workflow this refuses, and inventing a role bypass here would mean
+   * injecting staff-role lookups into a service that reads no auth context
+   * today. A steward who genuinely wants a room of their own in a group they
+   * run approves their own join request, which is a visible roster entry rather
+   * than an invisible bypass.
+   */
+  private async requireGroupMembership(
+    group: HousingGroup,
+    userId: string | null,
+    refusalMessages: Record<GroupMembershipStanding, string>,
+  ): Promise<void> {
+    // Two columns only: this decides a yes/no and must never hydrate the
+    // applicant's screening prose to do it.
+    const requests = userId
+      ? await this.joinRequests.find({
+          where: { groupId: group.id, userId },
+          select: { id: true, status: true },
+        })
+      : [];
+    if (
+      requests.some(
+        (request) => request.status === GroupJoinRequestStatus.Approved,
+      )
+    ) {
+      return;
+    }
+
+    // Nothing prevents a member from asking twice, so read the BEST standing
+    // they hold: a pending re-application is live news, an old decline is not.
+    const standing: GroupMembershipStanding = requests.some(
+      (request) => request.status === GroupJoinRequestStatus.Pending,
+    )
+      ? 'pending'
+      : requests.length > 0
+        ? 'declined'
+        : 'none';
+
+    throw new ForbiddenException({
+      statusCode: 403,
+      error: 'Forbidden',
+      message: refusalMessages[standing],
+      code: GROUP_MEMBERSHIP_REQUIRED_CODE,
+      groupSlug: group.slug,
+      // The caller's OWN standing, so no part of the group's roster leaks.
+      membershipStanding: standing,
+    });
   }
 
   /**

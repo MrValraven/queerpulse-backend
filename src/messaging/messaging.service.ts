@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConversationRole } from './entities/conversation-participant.entity';
-import { GifAttachment } from './entities/message.entity';
+import { AttachmentInput } from './entities/message.entity';
 import { MessageReactionKey } from './entities/message-reaction.entity';
 import {
   ConversationResponse,
@@ -130,6 +130,30 @@ export class MessagingService {
     return this.conversationsService.setDraft(conversationId, userId, draft);
   }
 
+  setMarkedUnread(
+    conversationId: string,
+    userId: string,
+    markedUnread: boolean,
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.setMarkedUnread(
+      conversationId,
+      userId,
+      markedUnread,
+    );
+  }
+
+  hideMessageForMe(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<{ ok: true }> {
+    return this.messageAnnotationsService.hideMessageForMe(
+      conversationId,
+      messageId,
+      userId,
+    );
+  }
+
   isParticipant(conversationId: string, userId: string): Promise<boolean> {
     return this.conversationsService.isParticipant(conversationId, userId);
   }
@@ -194,8 +218,8 @@ export class MessagingService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image',
-    attachment?: GifAttachment,
+    kind?: 'user' | 'gif' | 'image' | 'document',
+    attachment?: AttachmentInput,
   ): Promise<MessageResponse> {
     return this.messagesService.sendMessage(
       conversationId,

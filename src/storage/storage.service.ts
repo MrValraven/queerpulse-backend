@@ -17,7 +17,10 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
-import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
+import {
+  DOCUMENT_UPLOAD_TYPES,
+  IMAGE_UPLOAD_TYPES,
+} from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { isStorageKey } from './storage-key';
 import {
@@ -63,12 +66,26 @@ export class StorageService {
 
   constructor(private readonly config: ConfigService) {}
 
+  // Kinds whose bytes are a DOCUMENT rather than an image — currently only
+  // `message-document` (PRD-226). Kept as a tiny lookup rather than a naming
+  // convention so a future document kind is one line here, not a guess based
+  // on its prefix string.
+  private static readonly DOCUMENT_KINDS: ReadonlySet<UploadKind> = new Set([
+    'message-document',
+  ]);
+
   // Upload policy lives here (not in `UploadsController`): resolve the kind's
   // storage-key prefix + byte cap, validate the requested content type against
-  // the image whitelist, reject an over-cap declared `byteSize` before any
+  // the image OR document whitelist (whichever `kind` calls for — see
+  // `DOCUMENT_KINDS`), reject an over-cap declared `byteSize` before any
   // signature is minted, then build a user-scoped unguessable object key and
   // presign the PUT. The controller passes already-authenticated params through
   // (the caller's `userId` + the validated DTO fields) and owns none of this.
+  //
+  // Named `presignImageUpload` for history — it predates document uploads —
+  // and kept unrenamed for the same reason `GifAttachment` on a `Message`
+  // stayed named after its history: renaming here would touch every call site
+  // and spec file in `src/storage/` for a purely cosmetic diff.
   //
   // `byteSize` is typed optional here defensively — every current caller
   // (avatar, work-image, and the unified `/presign` route) requires it at the
@@ -82,7 +99,10 @@ export class StorageService {
     byteSize?: number;
   }): Promise<PresignedUpload> {
     const { kind, userId, contentType, byteSize } = params;
-    const typeSpec = IMAGE_UPLOAD_TYPES[contentType];
+    const contentTypeTable = StorageService.DOCUMENT_KINDS.has(kind)
+      ? DOCUMENT_UPLOAD_TYPES
+      : IMAGE_UPLOAD_TYPES;
+    const typeSpec = contentTypeTable[contentType];
     if (!typeSpec) {
       throw new BadRequestException(`Unsupported content type: ${contentType}`);
     }

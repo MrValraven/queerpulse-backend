@@ -21,6 +21,12 @@ export enum MessageKind {
    *  `POST /uploads/presign` (`kind: 'message-image'`) the same way every
    *  other image upload in the app is — never a bespoke messaging-only path. */
   Image = 'image',
+  /** A member-uploaded document attachment (PRD-226): a PDF, a spreadsheet, or
+   *  plain text — never a video/audio/voice format, which is out of scope.
+   *  Presigned through the same `POST /uploads/presign` (`kind:
+   *  'message-document'`), mirroring how `Image` reuses the app's ordinary
+   *  upload path rather than inventing a messaging-only one. */
+  Document = 'document',
 }
 
 /** The kinds of system event a `system` message can carry. `member_added` /
@@ -75,6 +81,80 @@ export interface GifAttachment {
   provider: string;
 }
 
+/**
+ * A document attachment on a `kind:'document'` message (PRD-226: a lease PDF,
+ * a flyer, a spreadsheet, plain text). This is exactly the "adding another
+ * attachment source later" case `GifAttachment`'s own doc comment anticipated
+ * — it shares the SAME `attachment` jsonb column, no migration needed — but it
+ * is its own interface rather than a widened `GifAttachment` because a
+ * document carries no pixel dimensions to reserve a box for; `fileName`/
+ * `byteSize`/`contentType` are what the bubble states instead (name, format,
+ * size — the house requirement for a document bubble).
+ *
+ * `fileName` is the ORIGINAL, member-supplied file name — DISPLAY ONLY. It is
+ * never used to derive the storage key (that's a server-minted
+ * `<prefix>/<uploaderId>/<uuid>.<ext>`, exactly like an image) and never baked
+ * into a served `Content-Disposition` header (see `served-object.ts`'s
+ * `inlineContentDispositionForStorageKey` doc) — so it can carry arbitrary
+ * member text without becoming a header- or path-injection vector. It IS
+ * still sanitized before persisting (see
+ * `MessagingCoreService`'s `sanitizeDisplayFileName`) purely to keep a
+ * pathological value (embedded newlines, control characters, absurd length)
+ * out of the bubble's rendered text.
+ *
+ * `url` is always a private `message-document` storage key, resolved through
+ * `toImageUrl` -> `GET /files/<key>` at read time exactly like an uploaded
+ * image's `url` (see `resolveAttachment`) — the `toImageUrl` naming predates
+ * documents and stays unrenamed for the same reason `GifAttachment` did.
+ */
+export interface DocumentAttachment {
+  url: string;
+  fileName: string;
+  byteSize: number;
+  contentType: string;
+  /** Mirrors `GifAttachment.provider` — always `"upload"` today, kept
+   *  free-form for the same forward-compatibility reason. */
+  provider: string;
+}
+
+/**
+ * Discriminates the two shapes the `attachment` jsonb column can hold, purely
+ * structurally (there is no stored `type` tag): a `DocumentAttachment` is the
+ * only one of the two that carries `fileName`. Used wherever a stored
+ * attachment must be handled differently per shape (`resolveAttachment`,
+ * `MessagingCoreService.postMessage`'s write-path validation) instead of
+ * trusting the message's `kind` alone, since `kind` and `attachment` are two
+ * separate columns a caller could in principle mismatch.
+ */
+export function isDocumentAttachment(
+  attachment: GifAttachment | DocumentAttachment,
+): attachment is DocumentAttachment {
+  return 'fileName' in attachment;
+}
+
+/**
+ * The loosely-typed WIRE shape of an attachment on a `POST .../messages` send
+ * (`MessagingCoreService.postMessage`'s `attachment` parameter), before it has
+ * been validated against the specific fields the sender's `kind` requires and
+ * narrowed to a strict `GifAttachment`/`DocumentAttachment` to persist. Every
+ * field beyond `url`/`provider` is optional here because ONE DTO class
+ * (`send-message.dto.ts`'s `GifAttachmentDto`) carries the union of every
+ * attachment kind's fields — see that class's own doc for why it isn't three
+ * separate DTOs. `postMessage` is what turns this into an honest,
+ * fully-populated `GifAttachment` or `DocumentAttachment` before it ever
+ * reaches `messages.create(...)`.
+ */
+export interface AttachmentInput {
+  url: string;
+  provider: string;
+  previewUrl?: string;
+  width?: number;
+  height?: number;
+  fileName?: string;
+  byteSize?: number;
+  contentType?: string;
+}
+
 @Entity('messages')
 // Composite (conversation_id, created_at DESC) — backs the newest-N-per-
 // conversation reads (`lastMessagesByConversation`'s DISTINCT ON, and the
@@ -125,12 +205,15 @@ export class Message {
   systemEvent!: SystemEvent | null;
 
   /**
-   * The media attachment for a `kind:'gif'` or `kind:'image'` message (else
-   * NULL). `body` still carries a "GIF"/"Photo" text fallback for
-   * push/notification/last-message previews.
+   * The media attachment for a `kind:'gif'`, `kind:'image'`, or
+   * `kind:'document'` message (else NULL). `body` still carries a
+   * "GIF"/"Photo"/"Document" text fallback for push/notification/last-message
+   * previews. `DocumentAttachment` is exactly the "another attachment source"
+   * this column's original `GifAttachment` doc comment predicted — no
+   * migration was needed to add it, only a widened TypeScript union.
    */
   @Column({ type: 'jsonb', nullable: true })
-  attachment!: GifAttachment | null;
+  attachment!: GifAttachment | DocumentAttachment | null;
 
   @Index('IDX_messages_reply_to_id')
   @Column({ type: 'uuid', nullable: true })

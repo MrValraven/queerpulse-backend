@@ -29,8 +29,16 @@ const IMAGE_CROPS = ['16:9', '4:5', '1:1'] as const;
 // well above any real piece (the longest published article in the archive is a
 // few hundred paragraphs of a few kilobytes each) purely to stop a runaway or
 // hostile payload.
-const MAX_BLOCKS_PER_ARTICLE = 400;
-const MAX_BLOCK_HTML_LENGTH = 20_000;
+// These two are EXPORTED because a caller that builds blocks rather than
+// receiving them has to stay inside the ceilings by construction:
+// `AdminStorySubmissionsService` converts an accepted reader story into blocks,
+// and this validator would REJECT the result with a 400 if the conversion went
+// over. It used to keep its own copies of both numbers, which is two versions
+// of one rule that diverge silently the first time either moves. This module
+// stays the authority; it is pure and has no side effects, so importing from it
+// costs nothing.
+export const MAX_BLOCKS_PER_ARTICLE = 400;
+export const MAX_BLOCK_HTML_LENGTH = 20_000;
 const MAX_BLOCK_TEXT_LENGTH = 500;
 const MAX_STATS_ITEMS = 12;
 

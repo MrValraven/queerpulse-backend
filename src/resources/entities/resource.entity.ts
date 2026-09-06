@@ -115,6 +115,17 @@ export class Resource {
   @Column({ type: 'varchar', length: 120, nullable: true })
   reviewedBy!: string | null;
 
+  // PRD-270. The day `ResourceReviewSweeperService` last announced this guide
+  // into the `guide_reviews` admin queue, so the daily sweep tells staff once
+  // per overdue period instead of every morning forever. NULL means nobody
+  // has been told about the guide's current review debt; the sweep treats
+  // `reviewDueOn > reviewOverdueNotifiedOn` as a NEW lapse, and
+  // `AdminResourcesService.review` clears it back to NULL the moment a guide
+  // is actually reviewed. A `date` to match the two columns above it: the
+  // comparison is day-grained.
+  @Column({ type: 'date', nullable: true })
+  reviewOverdueNotifiedOn!: string | null;
+
   // Staff account that last wrote this row. No FK: an audit trail that must
   // outlive a deleted staff account (mirrors `ResourceListing.updatedBy`).
   @Column({ type: 'uuid', nullable: true })

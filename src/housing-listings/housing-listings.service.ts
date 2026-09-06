@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -9,7 +10,11 @@ import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
-import { toStoredPlainText } from '../communities/community-plain-text';
+import {
+  toStoredPlainText,
+  toStoredPlainTextOrNull,
+} from '../communities/community-plain-text';
+import { GeocodeService } from '../geocode/geocode.service';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -60,13 +65,32 @@ function toStoredArray(values: string[]): string[] {
     .filter((value) => value.length > 0);
 }
 
+/**
+ * The stored form of the PRIVATE street address. Markup is stripped at the same
+ * write boundary as every other member-typed field, and a value that strips (or
+ * trims) to nothing becomes NULL rather than `''`, so "this lister has not put
+ * an address on file" is a single state the read side can branch on. Sending
+ * `""` is therefore how an owner clears an address they had added.
+ */
+function toStoredAddressLine(value: string): string | null {
+  return toStoredPlainTextOrNull(value);
+}
+
 /** Applies only the fields present on a PATCH body (mirrors
  * `ListingsService.applyUpdate`'s conditional-spread idiom).
  *
  * `city`/`area` are the one pair that is NOT applied verbatim: they go through
  * `resolveHousingLocation` together, so a PATCH can never put a neighbourhood
  * in the city column (see `housing-city.ts`). Passing the listing's stored
- * `area` as the fallback keeps a city-only PATCH from wiping the area. */
+ * `area` as the fallback keeps a city-only PATCH from wiping the area.
+ *
+ * `addressLine` is the other exception: the stored `latitude`/`longitude` are
+ * DERIVED from it, so any PATCH that changes the address drops them here and
+ * now. Leaving them would keep a precise pin on the previous home pointing at
+ * an address the listing no longer claims, which is exactly the disclosure the
+ * privacy gate exists to prevent. The caller re-derives them afterwards
+ * (`scheduleAddressGeocode`); until that lands the listing honestly reports
+ * area precision. */
 function applyUpdate(
   listing: HousingListing,
   dto: UpdateHousingListingDto,
@@ -79,14 +103,24 @@ function applyUpdate(
       })
     : null;
 
+  const nextAddressLine =
+    dto.addressLine !== undefined ? toStoredAddressLine(dto.addressLine) : null;
+  const isAddressChanged =
+    dto.addressLine !== undefined && nextAddressLine !== listing.addressLine;
+
   Object.assign(listing, {
     ...(dto.type !== undefined ? { type: dto.type } : {}),
+    ...(dto.addressLine !== undefined ? { addressLine: nextAddressLine } : {}),
+    ...(isAddressChanged ? { latitude: null, longitude: null } : {}),
     ...(dto.title !== undefined ? { title: toStoredPlainText(dto.title) } : {}),
     ...(dto.blurb !== undefined ? { blurb: toStoredPlainText(dto.blurb) } : {}),
     ...(location !== null
       ? { city: location.city, area: location.area ?? '' }
       : {}),
     ...(dto.rentEuros !== undefined ? { rentEuros: dto.rentEuros } : {}),
+    ...(dto.depositEuros !== undefined
+      ? { depositEuros: dto.depositEuros }
+      : {}),
     ...(dto.bedrooms !== undefined ? { bedrooms: dto.bedrooms } : {}),
     ...(dto.billsIncluded !== undefined
       ? { billsIncluded: dto.billsIncluded }
@@ -132,6 +166,26 @@ function applyUpdate(
  * reachable from this DTO at all — they move through `markFilled`/
  * `markAvailable`/`extend`, which stay unaffected on purpose so an owner can
  * always take their own home off browse without waiting for a moderator.
+ *
+ * `addressLine` is EXCLUDED too, for a different and more deliberate reason.
+ * The set above is defined by what a moderator reviewed BECAUSE THE PUBLIC SEES
+ * IT, and the street address is the one field the public never sees: it is
+ * emitted only behind the `precise` gate. Including it would mean that
+ * correcting a door number pulls a live listing out of browse until a human
+ * clears it again, and re-approval re-fires the saved-search go-live alert to
+ * everyone matching it. That is a real cost paid by every renter watching that
+ * search, charged for a change none of them can see, and it makes accuracy
+ * expensive: a lister who notices a typo in their own address is better off
+ * leaving it wrong, which is the opposite of what this field is for.
+ *
+ * What stands in for review instead: the value is stripped of markup at the
+ * write boundary like every other member-typed field, capped at 200
+ * characters, and carried on `AdminHousingListingDTO`, so a moderator reads it
+ * whenever the listing is in the queue for any other reason. If an address
+ * ever needs to be reviewable in its own right, the honest fix is to feed it
+ * to `assessHousingRisk` (which already scans text for contact details and
+ * off-platform payment language) so it moves the queue ORDER, rather than to
+ * add it here and take the listing off browse.
  */
 const MODERATED_HOUSING_FIELDS = [
   'type',
@@ -140,6 +194,14 @@ const MODERATED_HOUSING_FIELDS = [
   'city',
   'area',
   'rentEuros',
+  // Deposit is IN, alongside the rent, because it is the other money term and
+  // the one an advance-payment scam actually asks for. Leaving it out would
+  // open a bypass: keep the approved rent honest, then patch a €4,000 deposit
+  // onto a live, already-verified listing without a moderator ever seeing it.
+  // It costs what a rent edit costs today (back to review, and a fresh
+  // saved-search alert fan-out on re-approval), which is the right price for a
+  // field that can carry the ask.
+  'depositEuros',
   'bedrooms',
   'billsIncluded',
   'accessibilityInfo',
@@ -176,6 +238,32 @@ export interface ListMyHousingQueryInput {
 // is neither).
 const DEFAULT_LISTING_LIFETIME_DAYS = 60;
 
+/**
+ * PRD-244: how far ahead of `expiresAt` the owner is told their listing is
+ * about to lapse.
+ *
+ * Seven days, for two reasons. It has to be long enough that the owner can
+ * actually act: the only action is `PATCH :ref/extend`, which is one tap, so
+ * the constraint is the owner opening the app at all, and a week covers a
+ * normal weekly rhythm including someone who only checks at the weekend. And
+ * it has to be short enough to still be news: on a 60-day term, a warning at
+ * T-30 arrives while the listing is barely half-way through and reads as
+ * noise, which is the failure mode that trains people to ignore the bell.
+ *
+ * Deliberately shorter than `CARD_EXPIRY_WARNING_LEAD_DAYS` (30): a membership
+ * card's renewal can need a community owner's action, a listing's does not.
+ *
+ * Exported so `HousingListingExpirySweeperService` warns on exactly the window
+ * this file documents, and so a change here moves both halves at once.
+ */
+export const LISTING_EXPIRY_WARNING_LEAD_DAYS = 7;
+
+export const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+/** The lead window in milliseconds, so the sweeper does not restate the maths. */
+export const LISTING_EXPIRY_WARNING_LEAD_MS =
+  LISTING_EXPIRY_WARNING_LEAD_DAYS * DAY_IN_MILLISECONDS;
+
 /** Exported for `HousingListingModerationService`: a listing that sat in the
  * review queue past its own expiry would otherwise be approved into a state
  * where browse already withholds it, so approval refreshes the window. */
@@ -202,7 +290,13 @@ export class HousingListingsService {
     private readonly verification: VerificationService,
     private readonly affirmingPledge: AffirmingPledgeService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
+    // Turns the lister's private street address into the precise pin behind the
+    // address-privacy gate. Used strictly off the request path — see
+    // `scheduleAddressGeocode`.
+    private readonly geocode: GeocodeService,
   ) {}
+
+  private readonly logger = new Logger(HousingListingsService.name);
 
   async create(
     ownerId: string,
@@ -234,6 +328,10 @@ export class HousingListingsService {
       AdminQueueKey.HousingListings,
       saved.id,
     );
+    // Best-effort and deliberately NOT awaited: see `scheduleAddressGeocode`.
+    // The listing is already saved; a geocoder that is slow, rate-limited or
+    // down must never fail or delay posting a home.
+    this.scheduleAddressGeocode(saved);
     return this.buildDTO(saved);
   }
 
@@ -265,6 +363,10 @@ export class HousingListingsService {
     // from a PATCH that re-sends the same values (which must not bounce a
     // listing back into the queue for nothing).
     const before = moderatedHousingFingerprint(listing);
+    // Snapshot the address too, so a re-geocode is scheduled only when the
+    // address actually moved. `addressLine` is NOT in the moderated set (see
+    // `MODERATED_HOUSING_FIELDS`), so it needs its own before/after.
+    const addressBefore = listing.addressLine;
     // Runs BEFORE any mutation (`HousingListingsController.update` is on
     // `SHARED_UPLOAD_HANDLERS`, so the interceptor's foreign-upload check is
     // exempted for this handler): a co-lister may re-save the gallery whoever
@@ -309,6 +411,11 @@ export class HousingListingsService {
       listing.status = HousingListingStatus.Review;
     }
     const saved = await this.listings.save(listing);
+    if (saved.addressLine !== addressBefore) {
+      // `applyUpdate` has already dropped the stale coordinates; this re-derives
+      // them for the new address, off the request path.
+      this.scheduleAddressGeocode(saved);
+    }
     return this.buildDTO(saved);
   }
 
@@ -335,6 +442,10 @@ export class HousingListingsService {
     listing.filledAt = null;
     if (listing.expiresAt.getTime() <= Date.now()) {
       listing.expiresAt = computeExpiry();
+      // A fresh term earns its own warning (PRD-244). Without this the listing
+      // silently lapses a second time with no bell, because the marker still
+      // says "already warned" about a window that no longer exists.
+      listing.expiryWarningSentAt = null;
     }
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
@@ -343,10 +454,16 @@ export class HousingListingsService {
   /** Owner self-service "renew" (HSG-3) — refreshes `expiresAt` to a fresh
    * `DEFAULT_LISTING_LIFETIME_DAYS`-day window. Deliberately does not touch
    * `filledAt`: extending a listing the owner marked filled on purpose
-   * shouldn't silently un-hide it from browse — call `markAvailable` for that. */
+   * shouldn't silently un-hide it from browse — call `markAvailable` for that.
+   *
+   * Clears `expiryWarningSentAt` (PRD-244): the new term earns its own
+   * warning, so an owner who extends is told again when THAT window runs down.
+   * Without this the pre-expiry bell is a one-shot per listing, which is the
+   * exact failure the marker column would otherwise cause. */
   async extend(ref: string, userId: string): Promise<HousingListingDTO> {
     const listing = await this.loadOwnedOr404(ref, userId);
     listing.expiresAt = computeExpiry();
+    listing.expiryWarningSentAt = null;
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
   }
@@ -417,6 +534,55 @@ export class HousingListingsService {
       throw new NotFoundException('Housing listing not found');
     }
     return listing;
+  }
+
+  /**
+   * Derives `latitude`/`longitude` from a listing's private street address,
+   * AFTER the listing row is committed and WITHOUT the caller waiting for it.
+   *
+   * Why it is deferred rather than awaited inside `create`/`update`:
+   * `GeocodeService` makes an outbound call to Nominatim behind a process-wide
+   * one-request-per-second gate (`nominatim-rate-limiter.ts`, max ~8s queued
+   * before it sheds load with a 503) on top of a 5s fetch timeout. Awaiting
+   * that would make posting a home take seconds, serialise concurrent listing
+   * creates behind a shared bucket, and let a third party's outage turn into a
+   * failed listing submission. So the geocode is a refinement of a row that is
+   * already saved.
+   *
+   * Every failure is swallowed with a warning: an unplaceable address, a
+   * geocoder timeout, a saturated queue and a lost race with a concurrent edit
+   * all leave the row with null coordinates, which the read side already
+   * renders honestly as area precision (`toHousingListingDTO`).
+   *
+   * The final write is conditional on the address STILL being the one that was
+   * geocoded, so a lister who corrects their address while a lookup is in
+   * flight cannot have the older result land on top of the newer address.
+   */
+  private scheduleAddressGeocode(listing: HousingListing): void {
+    const addressLine = listing.addressLine;
+    if (addressLine === null || addressLine.length === 0) return;
+    // Nominatim resolves a bare street line far better with its neighbourhood,
+    // city and country attached, and housing is Lisbon-only, so the city is a
+    // real constraint rather than a guess.
+    const query = [addressLine, listing.area, listing.city, 'Portugal']
+      .filter((part) => part.length > 0)
+      .join(', ');
+    const listingId = listing.id;
+    void (async () => {
+      try {
+        const point = await this.geocode.resolveAddress(query);
+        await this.listings.update(
+          { id: listingId, addressLine },
+          { latitude: point.latitude, longitude: point.longitude },
+        );
+      } catch (error) {
+        // The address itself is private, so it is never logged. The ref is
+        // enough to find the row.
+        this.logger.warn(
+          `Housing listing geocode failed for ${listing.ref}: ${String(error)}`,
+        );
+      }
+    })();
   }
 
   private async mapRows(rows: HousingListing[]): Promise<HousingListingDTO[]> {
@@ -565,7 +731,17 @@ export class HousingListingsService {
             blurb: stored.blurb,
             city: location.city,
             area: location.area ?? '',
+            // PRIVATE (see the entity + `CreateHousingListingDto`). Stored
+            // here; the precise coordinates it derives are filled in after the
+            // commit by `scheduleAddressGeocode`, so the row is never held up
+            // by an outbound geocoder.
+            addressLine: toStoredAddressLine(dto.addressLine ?? ''),
+            latitude: null,
+            longitude: null,
             rentEuros: dto.rentEuros,
+            // Omitted stays NULL ("not stated"), which is what the deposit
+            // filter excludes. Never coerced to 0.
+            depositEuros: dto.depositEuros ?? null,
             bedrooms: dto.bedrooms ?? null,
             billsIncluded: dto.billsIncluded ?? false,
             // BE-HSG-07: hard-set, never read from the submission. Posting a

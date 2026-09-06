@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -75,6 +76,12 @@ import { UpdateOperatingStateDto } from './dto/update-operating-state.dto';
 import { ReplyToReviewDto } from './dto/reply-to-review.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
+import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
+import {
+  SAFE_SPACE_REQUIRED_INDEPENDENT_VISITS,
+  SAFE_SPACE_VISIT_BAR_NOT_MET_CODE,
+  SAFE_SPACE_VISIT_BAR_OVERRIDE_FORBIDDEN_CODE,
+} from '../safe-space-nominations/safe-space-policy';
 import {
   ListingModerationAction,
   ListingModerationEvent,
@@ -738,6 +745,12 @@ export class ListingsService {
     // `forwardRef`.
     private readonly reviewReplies: ReviewReplyNotifier,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
+    // The independent-visit tally behind the published three-visit guarantee,
+    // read by `setSafeSpace` before a listing may become `verified`.
+    // `SafeSpaceVouchesModule` imports no module of this domain (it registers
+    // `Listing` and `ListingCoManager` as entities only), so the dependency
+    // runs one way and there is no cycle to break here.
+    private readonly safeSpaceVisits: SafeSpaceVisitsService,
   ) {}
 
   async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
@@ -2526,8 +2539,58 @@ export class ListingsService {
   async setSafeSpace(
     ref: string,
     dto: UpdateSafeSpaceDto,
+    // A real `moderator`/`admin` account tier, rather than the additive
+    // `directory_moderator` grant this endpoint also admits. Only the former
+    // may waive the published independent-visit bar; see the same narrowing on
+    // `SafeSpaceNominationsService.decide`.
+    isPlatformStaff = false,
   ): Promise<ListingDTO> {
     const listing = await this.loadOr404(ref);
+
+    // The independent-visit bar, on the SECOND door to a badge. The reviewed
+    // path (`SafeSpaceNominationsService.decide`) enforces the same rule; this
+    // endpoint is the direct mark the console keeps for a listing with no
+    // nomination to hang it on. Gating only the reviewed path would have left
+    // the published three-visit guarantee with an unguarded bypass sitting
+    // beside it in the same console.
+    //
+    // Only a move INTO `verified` is gated. Clearing, removing and editing the
+    // sub-fields of a badge that already stands are untouched, and re-saving a
+    // listing that is already verified does not re-litigate its award.
+    const isBecomingVerified =
+      dto.status === SafeSpaceStatus.Verified &&
+      listing.safeSpaceStatus !== SafeSpaceStatus.Verified;
+    if (isBecomingVerified) {
+      const tally = await this.safeSpaceVisits.tallyForListing(listing.id);
+      const belowVisitBarReason = dto.belowVisitBarReason?.trim();
+      if (!tally.hasMetVisitBar && belowVisitBarReason && !isPlatformStaff) {
+        throw new ForbiddenException({
+          statusCode: 403,
+          error: 'Forbidden',
+          code: SAFE_SPACE_VISIT_BAR_OVERRIDE_FORBIDDEN_CODE,
+          independentVisitCount: tally.independentVisitCount,
+          requiredVisitCount: tally.requiredVisitCount,
+          message:
+            'Badging below the independent-visit bar is limited to platform ' +
+            'moderators and admins. Ask one of them to take this decision.',
+        });
+      }
+      if (!tally.hasMetVisitBar && !belowVisitBarReason) {
+        throw new BadRequestException({
+          statusCode: 400,
+          error: 'Bad Request',
+          code: SAFE_SPACE_VISIT_BAR_NOT_MET_CODE,
+          independentVisitCount: tally.independentVisitCount,
+          requiredVisitCount: tally.requiredVisitCount,
+          notIndependentVouchCount: tally.notIndependentVouchCount,
+          message:
+            `This listing has ${tally.independentVisitCount} of ` +
+            `${tally.requiredVisitCount} independent member visits. Badging ` +
+            'below the bar needs a written reason, and the reviewed ' +
+            'nomination queue is the better route where there is one.',
+        });
+      }
+    }
 
     listing.safeSpaceStatus = dto.status;
 
@@ -2671,8 +2734,23 @@ export class ListingsService {
     return this.buildManagedDTO(listing, isOwner);
   }
 
-  /** Moderator/admin-only: every live listing plus its current safe-space
-   * status, for the admin toggle UI's candidate picker. */
+  /**
+   * Moderator/admin-only: every live listing plus its current safe-space
+   * status, for the admin toggle UI's candidate picker.
+   *
+   * Each row now carries its independent-visit tally. Two things need it. A
+   * moderator about to badge a listing directly should see the count BEFORE
+   * they act rather than discover it in a 400, and a badge that already stands
+   * below the bar has to be visible SOMEWHERE: enforcement only binds new
+   * awards, so legacy badges granted before the bar was enforced would
+   * otherwise be invisible to everyone. They are reported here rather than
+   * revoked, because auto-revoking a safe-space badge removes a place people
+   * rely on, on the strength of a count that may only reflect vouches never
+   * having been filed.
+   *
+   * The tally is batched (`tallyForListings` is three queries whatever the page
+   * size), so this stays two round trips rather than one per listing.
+   */
   async listSafeSpaceCandidates(): Promise<
     {
       ref: string;
@@ -2680,6 +2758,11 @@ export class ListingsService {
       name: string;
       hood: string;
       safeSpaceStatus: SafeSpaceStatus;
+      visits: {
+        independentVisitCount: number;
+        requiredVisitCount: number;
+        hasMetVisitBar: boolean;
+      };
     }[]
   > {
     const liveListings = await this.listings.find({
@@ -2690,13 +2773,29 @@ export class ListingsService {
       // entire live-listings table.
       take: DEFAULT_LIST_LIMIT,
     });
-    return liveListings.map((listing) => ({
-      ref: listing.ref,
-      slug: listing.slug,
-      name: listing.name,
-      hood: listing.hood,
-      safeSpaceStatus: listing.safeSpaceStatus,
-    }));
+    // No nominator is passed: this endpoint has no nomination in hand, so the
+    // tally excludes owners and co-managers but cannot also exclude a
+    // nominator. That can only ever OVERSTATE the count, never understate it,
+    // so a listing this reports as under the bar is genuinely under it.
+    const tallies = await this.safeSpaceVisits.tallyForListings(
+      new Map(liveListings.map((listing) => [listing.id, null])),
+    );
+    return liveListings.map((listing) => {
+      const tally = tallies.get(listing.id);
+      return {
+        ref: listing.ref,
+        slug: listing.slug,
+        name: listing.name,
+        hood: listing.hood,
+        safeSpaceStatus: listing.safeSpaceStatus,
+        visits: {
+          independentVisitCount: tally?.independentVisitCount ?? 0,
+          requiredVisitCount:
+            tally?.requiredVisitCount ?? SAFE_SPACE_REQUIRED_INDEPENDENT_VISITS,
+          hasMetVisitBar: tally?.hasMetVisitBar ?? false,
+        },
+      };
+    });
   }
 
   // --- internals ---

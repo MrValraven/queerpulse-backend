@@ -6,6 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { createHash, randomBytes } from 'node:crypto';
 import { Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
@@ -29,11 +30,53 @@ import {
 } from './intake-kinds';
 import { intakeDueAt } from './intake-sla';
 import {
+  ConcernStatusDTO,
   IntakeAckDTO,
   IntakeSubmissionDTO,
+  toConcernStatusDTO,
   toIntakeAckDTO,
   toIntakeSubmissionDTO,
 } from './intakes-response';
+
+/**
+ * PRD-261. Width of the reference code minted for a governance concern. 32
+ * bytes of `randomBytes` is 256 bits, the same size
+ * `JoinRequestsService.STATUS_TOKEN_BYTES` uses, and base64url-encodes to 43
+ * characters. Guessing is not what the throttle on the lookup defends against;
+ * the entropy is.
+ */
+const CONCERN_STATUS_TOKEN_BYTES = 32;
+
+/**
+ * The stored form of a reference code. Sha256 hex, matching
+ * `AuthService.hashToken` and the join-request status tokens: the column holds
+ * this, the submitter holds the plaintext, and the two only ever meet inside a
+ * lookup.
+ */
+function hashConcernStatusToken(statusToken: string): string {
+  return createHash('sha256').update(statusToken).digest('hex');
+}
+
+/**
+ * PRD-261. The status moves a concern submitter is told about, in-app and via
+ * their reference code.
+ *
+ * `reviewing` is here alongside the two terminal states because "somebody has
+ * picked this up" is the single most useful thing a person waiting on a report
+ * about harm can learn, and it is the transition the form's own promise ("a
+ * confirmation within 48 hours") was really about. Before this, the first and
+ * only signal was the outcome, which for a concern under the 3-day SLA window
+ * meant days of silence indistinguishable from the report being dropped.
+ */
+type NotifiedIntakeStatus = 'reviewing' | 'resolved' | 'dismissed';
+
+function isNotifiedIntakeStatus(
+  status: AdminTriageStatus,
+): status is NotifiedIntakeStatus {
+  return (
+    status === 'reviewing' || status === 'resolved' || status === 'dismissed'
+  );
+}
 
 @Injectable()
 export class IntakesService {
@@ -88,6 +131,16 @@ export class IntakesService {
       );
     }
 
+    // PRD-261. A concern is the one kind with a submitter-facing worklist, so
+    // it is the one kind that mints a reference code. Minted HERE because this
+    // response is the only delivery channel that will ever exist for it: the
+    // platform sends no email, so a code generated any later than the 201 could
+    // never reach the person who needs it. Only the hash is persisted.
+    const statusToken =
+      rawKind === 'governance_concern'
+        ? randomBytes(CONCERN_STATUS_TOKEN_BYTES).toString('base64url')
+        : undefined;
+
     const saved = await this.submissions.save(
       this.submissions.create({
         kind: rawKind,
@@ -98,6 +151,9 @@ export class IntakesService {
         // `intake-sla.ts` — a governance concern is owed an answer far sooner
         // than a playlist submission, and the queue should say so.
         dueAt: intakeDueAt(rawKind, new Date()),
+        statusTokenHash: statusToken
+          ? hashConcernStatusToken(statusToken)
+          : null,
       }),
     );
 
@@ -112,7 +168,40 @@ export class IntakesService {
       saved.id,
     );
 
-    return toIntakeAckDTO(saved);
+    return toIntakeAckDTO(saved, statusToken);
+  }
+
+  /**
+   * PRD-261. Where one concern stands, for whoever holds its reference code.
+   *
+   * PUBLIC AND UNAUTHENTICATED BY DESIGN: the person this answers usually has
+   * no account, which is the whole point of an anonymous reporting form. The
+   * code is the entire credential.
+   *
+   * Three properties make that safe, and all three are load-bearing:
+   *
+   *  1. Looked up BY HASH. The plaintext is never stored, so this is the only
+   *     way a code can resolve, and the unique index makes it at most one row.
+   *  2. Scoped to `governance_concern`. A code minted for some other kind
+   *     (there are none today, and there must be none tomorrow either) could
+   *     not be walked into this reader.
+   *  3. Returns null for every miss, which the controller turns into ONE
+   *     indistinguishable 404. Nothing here reports whether a code exists,
+   *     whether a concern exists, or whether a given person filed one.
+   *
+   * Read-only, unlike `JoinRequestsService.getPublicStatus`, which latches a
+   * deadline on first read. A concern has no clock the submitter starts.
+   */
+  async getConcernStatus(
+    statusToken: string,
+  ): Promise<ConcernStatusDTO | null> {
+    const submission = await this.submissions.findOne({
+      where: {
+        statusTokenHash: hashConcernStatusToken(statusToken),
+        kind: 'governance_concern',
+      },
+    });
+    return submission ? toConcernStatusDTO(submission) : null;
   }
 
   /** Admin triage list, newest first, optionally filtered by kind/status. */
@@ -234,10 +323,11 @@ export class IntakesService {
     submission.reviewedAt = new Date();
     const saved = await this.submissions.save(submission);
 
-    if (
-      previousStatus !== status &&
-      (status === 'resolved' || status === 'dismissed')
-    ) {
+    // PRD-261. `reviewing` joins the two terminal states here: for the one kind
+    // that walks a real worklist, "somebody has picked this up" is news the
+    // person waiting actually needs, and it used to reach nobody. The eleven
+    // other kinds never enter `reviewing`, so nothing else changes.
+    if (previousStatus !== status && isNotifiedIntakeStatus(status)) {
       await this.notifySubmitter(saved, status);
     }
 
@@ -255,11 +345,13 @@ export class IntakesService {
   }
 
   /**
-   * Tell the submitter their concern reached an outcome, in-app, when the
-   * submission is tied to an account. QueerPulse delivers no email, so a
-   * concern submitted anonymously with only an email address gets NO outbound
-   * update at all: the outcome is recorded on the submission and nothing
-   * reaches the address. Best-effort: the status change is already committed,
+   * Tell the submitter their concern moved, in-app, when the submission is
+   * tied to an account. QueerPulse delivers no email, so an anonymous
+   * submitter still gets nothing pushed to them — what they get instead
+   * (PRD-261) is the reference code from their own 201 and the public
+   * `GET /intakes/concerns/status` lookup it opens, which reports exactly the
+   * transitions this method notifies on. Best-effort: the status change is
+   * already committed,
    * so a flaky notifier is logged, never fatal (mirrors `RoadmapAdminService`).
    * No `actorId`: an admin decision is the platform's word, so block/mute must
    * not suppress it.
@@ -274,7 +366,7 @@ export class IntakesService {
    */
   private async notifySubmitter(
     submission: IntakeSubmission,
-    status: 'resolved' | 'dismissed',
+    status: NotifiedIntakeStatus,
   ): Promise<void> {
     const rawCategory = submission.payload.category;
     const category = typeof rawCategory === 'string' ? rawCategory : undefined;

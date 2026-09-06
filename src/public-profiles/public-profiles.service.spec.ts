@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { SelectQueryBuilder } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { HandlesService } from '../handles/handles.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Activity } from '../profiles/entities/activity.entity';
 import { ActivityVisibilityService } from '../profiles/activity-visibility.service';
@@ -88,9 +89,26 @@ class FakeQueryBuilder {
       ?.params.slug;
   }
 
+  /**
+   * The moved-username path (PRD-204) resolves the previous owner's CURRENT
+   * profile by user id instead of by slug, and it must clear the same three
+   * gates. Modelled here so a test can tell "forwards" apart from "forwards to
+   * a page the member has since turned off".
+   */
+  private get requestedPreviousOwnerUserId(): unknown {
+    return this.wheres.find((w) =>
+      /p\.user_id\s*=\s*:previousOwnerUserId/.test(w.condition),
+    )?.params.previousOwnerUserId;
+  }
+
   getOne(): Promise<Profile | null> {
+    const previousOwnerUserId = this.requestedPreviousOwnerUserId;
     const match = this.rows.find((row) => {
-      if (row.profile.slug !== this.requestedSlug) return false;
+      if (previousOwnerUserId === undefined) {
+        if (row.profile.slug !== this.requestedSlug) return false;
+      } else if (row.profile.userId !== previousOwnerUserId) {
+        return false;
+      }
       if (this.gatesOnActiveStatus && row.status !== UserStatus.Active) {
         return false;
       }
@@ -130,6 +148,11 @@ describe('PublicProfilesService', () => {
       bio: 'Long-form bio.',
       location: 'Lisbon',
       avatarUrl: 'https://cdn.example/a.png',
+      // The published avatar is gated on this, so the default fixture states
+      // it rather than leaving it undefined: an omitted column reads as
+      // "photo hidden" and would make the projection assertion pass against a
+      // null it never meant to test.
+      photoVisible: true,
       visibility: ProfileVisibility.Open,
       openTo: [{ kind: 'preset', id: 'mentoring' }],
       identities: ['Trans', 'Disabled or chronically ill'],
@@ -212,6 +235,15 @@ describe('PublicProfilesService', () => {
             statesForAnyType: jest.fn().mockResolvedValue(new Map()),
           },
         },
+        {
+          // The handle registry, read-only and only for PRD-204 forwarding. No
+          // reservation by default, so every existing gate test still takes the
+          // plain not-found path.
+          provide: HandlesService,
+          useValue: {
+            previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
+          },
+        },
       ],
     }).compile();
 
@@ -283,6 +315,23 @@ describe('PublicProfilesService', () => {
       for (const key of forbidden) {
         expect(result).not.toHaveProperty(key);
       }
+    });
+
+    // ENG-151. Publishing the page and showing a face are two separate
+    // decisions, and the open web is the least privileged audience of all, so
+    // it cannot keep a photo that signed-in members have already lost. The
+    // cost of getting this one wrong is one-way: a crawled face stays indexed
+    // long after the toggle flips.
+    it('withholds the avatar once the member turns photoVisible off, and publishes everything else', async () => {
+      fixtures = [published({ photoVisible: false })];
+
+      const result = await service.getBySlug('ada');
+
+      expect(result.avatarUrl).toBeNull();
+      // The rest of the page still publishes: hiding a photo is not
+      // un-publishing the profile.
+      expect(result.displayName).toBe('Ada Lovelace');
+      expect(result.bio).toBe('Long-form bio.');
     });
 
     it('never serialises the raw first/last name as separate fields', async () => {
@@ -414,6 +463,79 @@ describe('PublicProfilesService', () => {
 
       expect(repos.socialLinks.find).not.toHaveBeenCalled();
       expect(repos.workItems.find).not.toHaveBeenCalled();
+    });
+  });
+
+  // PRD-204. This is the address a member prints on a card or leaves in a bio,
+  // so it is the link most likely to be old, and the person who hits the wall
+  // is a stranger with no account and no way to search for anybody.
+  describe('a username its owner renamed away from', () => {
+    const internals = () =>
+      service as unknown as {
+        handles: { previousProfileOwnerOf: jest.Mock };
+        contentModeration: { statesForAnyType: jest.Mock };
+      };
+
+    const reservedFor = (userId: string) => {
+      internals().handles.previousProfileOwnerOf.mockResolvedValue(userId);
+    };
+
+    const bodyOf = async (slug: string): Promise<unknown> => {
+      try {
+        await service.getBySlug(slug);
+        throw new Error('expected a NotFoundException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(NotFoundException);
+        return (err as NotFoundException).getResponse();
+      }
+    };
+
+    it('forwards to the current username while the reclaim cooldown runs', async () => {
+      fixtures = [published({ slug: 'ada-l' })];
+      reservedFor('u1');
+
+      expect(await bodyOf('ada')).toEqual({
+        code: 'PROFILE_MOVED',
+        message: 'That username has moved',
+        slug: 'ada-l',
+      });
+    });
+
+    // The oracle guard. An anonymous caller learning that an account still
+    // exists is a disclosure in itself, and a member who renamed AND turned
+    // their public page off has said no twice.
+    it('gives the plain 404 when the former owner has un-published their page', async () => {
+      fixtures = [{ ...published({ slug: 'ada-l' }), publicEnabled: false }];
+      reservedFor('u1');
+
+      const unpublished = await bodyOf('ada');
+
+      internals().handles.previousProfileOwnerOf.mockResolvedValue(null);
+      fixtures = [];
+      expect(unpublished).toEqual(await bodyOf('no-such-slug'));
+    });
+
+    it('gives the plain 404 when a takedown stands against the former owner', async () => {
+      fixtures = [published({ slug: 'ada-l' })];
+      reservedFor('u1');
+      internals().contentModeration.statesForAnyType.mockResolvedValue(
+        new Map([['u1', { hidden: true, removed: false }]]),
+      );
+
+      const takenDown = await bodyOf('ada');
+
+      internals().handles.previousProfileOwnerOf.mockResolvedValue(null);
+      internals().contentModeration.statesForAnyType.mockResolvedValue(
+        new Map(),
+      );
+      fixtures = [];
+      expect(takenDown).toEqual(await bodyOf('no-such-slug'));
+    });
+
+    it('gives the plain 404 when no reservation holds the name', async () => {
+      fixtures = [published({ slug: 'ada-l' })];
+
+      expect(await bodyOf('ada')).toEqual(await bodyOf('no-such-slug'));
     });
   });
 });

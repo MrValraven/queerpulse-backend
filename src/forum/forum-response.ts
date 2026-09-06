@@ -1,3 +1,4 @@
+import { toPlainTextExcerpt } from '../communities/community-plain-text';
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import { ForumPost } from './entities/forum-post.entity';
@@ -125,6 +126,78 @@ export interface ForumThreadResponse {
   // Whether the viewer is following this thread (SOC-13). Defaults to false on
   // the echoes that don't resolve it.
   isSubscribed: boolean;
+  // Whether the whole thread has been withdrawn by its author or taken down by
+  // staff (PRD-160, mirror of `ForumThread.deletedAt`). Only ever `true` in a
+  // platform moderator's view: every member-facing read path filters deleted
+  // threads out of the result set entirely, and a direct read of one 404s.
+  isDeleted: boolean;
+  // A short plain-text taste of the opening post, so the forum list row and the
+  // feed's forum card can show what a thread is actually about instead of a
+  // title and nothing (PRD-167). HTML-stripped, whitespace-collapsed, cut on a
+  // word boundary at `THREAD_EXCERPT_LENGTH` with a trailing ellipsis when the
+  // body ran past it.
+  //
+  // Null whenever the OP has nothing showable behind it: no OP resolved on this
+  // echo, an OP tombstoned by its author, or an OP a moderator hid or removed.
+  // That last case is why the excerpt is worth its own guard rather than
+  // reading `opPost.body` directly: the thread list never carried any of the
+  // body before, so a takedown had nothing to leak through here, and this field
+  // is exactly the leak it would open.
+  excerpt: string | null;
+  // How many replies have landed in this thread since the viewer last opened it
+  // (C7/PRD-170). The forum had no unread marker of any kind: a member
+  // following five threads got notifications, but the list itself gave them no
+  // way to see which threads had moved, so catching up meant reopening each one
+  // and scrolling for something they might already have read.
+  //
+  // Null, deliberately, in three cases that are all "there is no watermark to
+  // count against" rather than "nothing is new": an anonymous/neutral viewer, a
+  // thread the member has never opened, and the write echoes that do not
+  // resolve it. Zero means the opposite thing (opened, and nothing has landed
+  // since), so a card can render a badge on a positive number and nothing at
+  // all on null without having to guess which it is holding.
+  //
+  // Counts non-deleted replies by somebody else, capped at
+  // `UNREAD_REPLY_COUNT_CAP` — see
+  // `ForumThreadsService.unreadReplyCountsByThread` for the query and the
+  // block/mute rule it applies, which is what keeps the badge from promising a
+  // reply the thread page will never draw.
+  unreadReplyCount: number | null;
+}
+
+/**
+ * Ceiling on `ForumThreadResponse.unreadReplyCount`. A badge is a nudge, not a
+ * tally: past this the exact number tells a reader nothing they cannot get from
+ * "a lot", and counting it exactly is the one part of the query that has to
+ * touch every row rather than stopping early.
+ */
+export const UNREAD_REPLY_COUNT_CAP = 99;
+
+// Characters of opening-post body a thread card carries. Enough to tell a
+// housing ask from a health question at a glance; short enough that a list row
+// stays a row. The trailing ellipsis a truncated excerpt ends on is the
+// truncation marker and sits on top of this window.
+const THREAD_EXCERPT_LENGTH = 180;
+
+/**
+ * The OP body as a thread card should show it: markup stripped, newlines
+ * collapsed to single spaces, cut on a word boundary, ellipsis when cut.
+ *
+ * Stripping happens HERE, at the read boundary, rather than at the write
+ * boundary this repo usually normalises plain text at (`toStoredPlainText`).
+ * `forum_post.body` is the post's real, editable content and is rendered in
+ * full on the thread page; rewriting it on write to suit a list row would be
+ * the list row deciding what a member's post says. Only the derived excerpt is
+ * flattened, and only for the surfaces that ask for one.
+ *
+ * Returns null for a body that strips down to nothing at all (an image-only
+ * post, say), so consumers get one "there is no excerpt" value rather than an
+ * empty string every render site would then have to special-case anyway.
+ */
+function toThreadExcerpt(body: string): string | null {
+  const { text, isTruncated } = toPlainTextExcerpt(body, THREAD_EXCERPT_LENGTH);
+  if (!text) return null;
+  return isTruncated ? `${text}…` : text;
 }
 
 // The viewer of a thread card — their id plus whether they hold a moderator
@@ -142,9 +215,22 @@ export interface ForumThreadViewer {
  * OP still returns a well-formed object — with the OP moderation flags off.
  *
  * The `canDelete`/`canRestore`/`canViewHistory` flags mirror
- * `toForumPostResponse`'s logic applied to the OP post (moderation-table state
- * isn't consulted on this path, so a merely author-tombstoned OP is the only
- * "blanked" case here); `canLock`/`canPin` are plain moderator checks.
+ * `toForumPostResponse`'s logic applied to the OP post (a merely
+ * author-tombstoned OP is the only "blanked" case they consider);
+ * `canLock`/`canPin` are plain moderator checks.
+ *
+ * `opModeration` is the OP's `content_moderation` state, supplied by the read
+ * paths that resolve it (`ForumThreadsService.toThreadResponses` batches it for
+ * a page; `resolveOp` point-loads it for the single-thread echoes). It exists
+ * for ONE job: keeping a hidden or removed OP's words out of `excerpt`. Left
+ * undefined by the write echoes, which either just created the OP or are
+ * answering the author about their own post, and where a moderation lookup
+ * would buy nothing.
+ *
+ * `unreadReplyCount` is supplied by the same two read paths, batched one query
+ * per page (C7/PRD-170). It defaults to null, which is the honest answer for
+ * every echo that does not resolve a watermark: "no unread information here",
+ * never "nothing is new".
  */
 export function toForumThreadResponse(
   thread: ForumThread,
@@ -153,11 +239,21 @@ export function toForumThreadResponse(
   opPost: ForumPost | null = null,
   myVote = 0,
   isSubscribed = false,
+  opModeration?: ForumPostModeration,
+  unreadReplyCount: number | null = null,
 ): ForumThreadResponse {
   const opTombstoned = opPost?.deletedAt != null;
   const isThreadAuthor = thread.authorId === viewer.userId;
   const opIsAuthor = opPost != null && opPost.authorId === viewer.userId;
   const canModerateOp = opIsAuthor || viewer.isModerator;
+  // Everything that makes the OP body unshowable, in one place. Mirrors
+  // `toForumPostResponse`'s `blanked`: an author tombstone, a `remove_content`
+  // takedown and a `hide_content` takedown all mean the same thing to a card
+  // that wants a taste of the post.
+  const isOpBlanked =
+    opTombstoned ||
+    (opModeration?.removed ?? false) ||
+    (opModeration?.hidden ?? false);
   return {
     id: thread.id,
     slug: thread.slug,
@@ -185,6 +281,10 @@ export function toForumThreadResponse(
     acceptedPostId: thread.acceptedPostId,
     canAcceptAnswer: isThreadAuthor || viewer.isModerator,
     isSubscribed,
+    isDeleted: thread.deletedAt != null,
+    excerpt:
+      opPost == null || isOpBlanked ? null : toThreadExcerpt(opPost.body),
+    unreadReplyCount,
   };
 }
 
@@ -232,6 +332,19 @@ export interface ForumPostResponse {
   // and the server-side ordering that hoists the accepted reply to the top of
   // the replies (see `ForumPostsService.listPosts`).
   isAccepted: boolean;
+  // Whether this post is the thread's genuine OPENING post (C5/ENG-130), read
+  // straight off `ForumPost.isOp` rather than inferred from position.
+  //
+  // The thread page used to take the first post of page one AS the OP. That is
+  // an assumption about ordering, and the server broke it in two ordinary
+  // cases: the OP is dropped from the page when its author is muted by the
+  // viewer, and again when a moderator hid it and the viewer is not staff. In
+  // both, the first REPLY slid into the OP card and was rendered as the
+  // question, wearing its own author, timestamps and edit affordances, while
+  // disappearing from the reply list underneath. Nothing in the payload let the
+  // client notice. This flag, plus `opAvailable` on the posts envelope, is what
+  // lets it: a page whose first post is not `isOp` has no OP in it.
+  isOp: boolean;
 }
 
 export function toForumPostResponse(
@@ -286,6 +399,11 @@ export function toForumPostResponse(
     // the answer.
     isAccepted:
       !blanked && acceptedPostId != null && acceptedPostId === post.id,
+    // Deliberately NOT gated on `blanked`, unlike `isAccepted`: a tombstoned
+    // opening post is still the opening post, and the thread page has to keep
+    // rendering it in the OP slot as a tombstone rather than promoting a reply
+    // into that slot behind it.
+    isOp: post.isOp,
   };
 }
 

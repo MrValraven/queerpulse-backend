@@ -13,6 +13,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
+import { VouchService } from '../vouch/vouch.service';
 import { MemberSuggestionDismissal } from './entities/member-suggestion-dismissal.entity';
 import {
   compareSuggestions,
@@ -116,6 +117,10 @@ export class MemberSuggestionsService {
     private readonly blockFilter: BlockFilterService,
     private readonly hiddenFrom: HiddenFromService,
     private readonly contentModeration: ContentModerationService,
+    // The platform's one definition of "active vouches received", blocks
+    // honoured. Shared with the directory so a suggestion card and a
+    // directory card never print two different numbers for one member.
+    private readonly vouchService: VouchService,
   ) {}
 
   /**
@@ -230,15 +235,28 @@ export class MemberSuggestionsService {
       return first.profile.slug.localeCompare(second.profile.slug);
     });
 
-    return scored
-      .slice(0, limit)
-      .map((entry) =>
-        toSuggestedMember(
-          entry.profile,
-          entry.scored.reason!,
-          entry.scored.score,
-        ),
-      );
+    const offered = scored.slice(0, limit);
+    // One batched, block-aware count for the handful of people actually being
+    // offered, taken after the slice so the query never sees more than
+    // `MAX_SUGGESTION_LIMIT` ids. The card used to print
+    // `profile.vouchCount`, the denormalized column, which no block or
+    // unblock ever touches: a member the candidate had blocked still counted
+    // towards the number on their card here, while the same card served by
+    // the directory already excluded them. `getVouchCounts` omits a member
+    // with no active vouches entirely, so the `?? 0` is the real answer for
+    // them and not a fallback.
+    const vouchCountsByUserId = await this.vouchService.getVouchCounts(
+      offered.map((entry) => entry.profile.userId),
+    );
+
+    return offered.map((entry) =>
+      toSuggestedMember(
+        entry.profile,
+        entry.scored.reason!,
+        entry.scored.score,
+        vouchCountsByUserId.get(entry.profile.userId) ?? 0,
+      ),
+    );
   }
 
   /**

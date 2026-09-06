@@ -12,14 +12,24 @@ import { ForumThreadSubscription } from './entities/forum-thread-subscription.en
 const MAX_NOTIFIED_SUBSCRIBERS = 500;
 
 /**
- * Thread following (SOC-13): who hears about new replies on a forum thread.
+ * Thread following AND the read watermark (SOC-13, then C7/PRD-170): who hears
+ * about new replies on a forum thread, and where each member had read to.
  *
- * Following is idempotent and binary — a row exists or it does not (see
- * `ForumThreadSubscription`). Every write here is best-effort from the caller's
- * point of view: a follow that fails must never take a reply or a thread
- * creation down with it, so `subscribeQuietly` swallows and logs. The explicit
- * Follow/Unfollow toggle uses `subscribe`/`unsubscribe`, which do surface their
- * errors — a member who taps Follow deserves to be told it did not work.
+ * Following used to be a bare existence check — a row exists or it does not.
+ * It is now the row's `is_following` flag, because the same table also carries
+ * `last_read_at` and a member who merely OPENED a thread must not come out of
+ * it subscribed to every reply (see `ForumThreadSubscription`). Two
+ * consequences run through every method here:
+ *
+ *  - every read filters `is_following = true`, never `EXISTS`;
+ *  - `unsubscribe` clears the flag instead of deleting the row, so unfollowing
+ *    does not also throw away where the member had read to.
+ *
+ * Every write is still best-effort from the caller's point of view: a follow
+ * that fails must never take a reply or a thread creation down with it, so
+ * `subscribeQuietly` swallows and logs. The explicit Follow/Unfollow toggle
+ * uses `subscribe`/`unsubscribe`, which do surface their errors — a member who
+ * taps Follow deserves to be told it did not work.
  */
 @Injectable()
 export class ForumSubscriptionsService {
@@ -30,10 +40,15 @@ export class ForumSubscriptionsService {
     private readonly subscriptions: Repository<ForumThreadSubscription>,
   ) {}
 
-  /** Is this member following this thread? */
+  /**
+   * Is this member following this thread? `is_following`, not existence: a row
+   * can now be a read watermark on a thread the member never followed.
+   */
   async isSubscribed(threadId: string, userId: string): Promise<boolean> {
     if (!userId) return false;
-    return this.subscriptions.exists({ where: { threadId, userId } });
+    return this.subscriptions.exists({
+      where: { threadId, userId, isFollowing: true },
+    });
   }
 
   /**
@@ -48,15 +63,22 @@ export class ForumSubscriptionsService {
   ): Promise<Set<string>> {
     if (!userId || !threadIds.length) return new Set();
     const rows = await this.subscriptions.find({
-      where: { userId, threadId: In(threadIds) },
+      where: { userId, threadId: In(threadIds), isFollowing: true },
       select: ['threadId'],
     });
     return new Set(rows.map((row) => row.threadId));
   }
 
   /**
-   * Follow a thread. Idempotent: a repeat follow is an `ON CONFLICT DO NOTHING`
-   * insert, never a read-then-write race between two tabs.
+   * Follow a thread. Idempotent: a repeat follow writes the same value it
+   * already holds, never a read-then-write race between two tabs.
+   *
+   * `ON CONFLICT DO UPDATE`, not `DO NOTHING`, since the watermark landed
+   * (C7/PRD-170): a member who has only ever OPENED this thread already has a
+   * row, carrying `is_following = false`. `DO NOTHING` would leave that row
+   * exactly as it was and the Follow tap would do nothing at all. Only the flag
+   * is written on conflict, so following a thread never disturbs the watermark
+   * underneath it.
    *
    * Takes an optional `EntityManager` so an auto-subscribe can commit inside
    * the same transaction as the reply that triggered it.
@@ -73,8 +95,28 @@ export class ForumSubscriptionsService {
       .createQueryBuilder()
       .insert()
       .into(ForumThreadSubscription)
-      .values({ threadId, userId })
-      .orIgnore()
+      .values({ threadId, userId, isFollowing: true })
+      .orUpdate(['is_following'], ['thread_id', 'user_id'])
+      .execute();
+  }
+
+  /**
+   * Stamp the member's read watermark on this thread (C7/PRD-170) — "I have
+   * seen the thread as it stands right now".
+   *
+   * Creates the row when there is none, and this is the ONE write here that
+   * must not sign anybody up for anything: `is_following` is written `false` on
+   * INSERT and left completely alone on conflict. Opening a thread is not
+   * asking to be notified about it, and a watermark that quietly subscribed
+   * would turn reading five threads into five threads' worth of bell.
+   */
+  async markRead(threadId: string, userId: string): Promise<void> {
+    await this.subscriptions
+      .createQueryBuilder()
+      .insert()
+      .into(ForumThreadSubscription)
+      .values({ threadId, userId, isFollowing: false, lastReadAt: new Date() })
+      .orUpdate(['last_read_at'], ['thread_id', 'user_id'])
       .execute();
   }
 
@@ -96,9 +138,19 @@ export class ForumSubscriptionsService {
     }
   }
 
-  /** Unfollow a thread. A no-op when there was no subscription. */
+  /**
+   * Unfollow a thread. A no-op when there was no row.
+   *
+   * Clears the flag rather than deleting the row (C7/PRD-170): the row also
+   * carries `last_read_at`, and deleting it would reset the member's unread
+   * badge on a thread they merely stopped wanting notifications about, so
+   * everything posted before the unfollow would come back as new.
+   */
   async unsubscribe(threadId: string, userId: string): Promise<void> {
-    await this.subscriptions.delete({ threadId, userId });
+    await this.subscriptions.update(
+      { threadId, userId },
+      { isFollowing: false },
+    );
   }
 
   /**
@@ -112,7 +164,7 @@ export class ForumSubscriptionsService {
     excludeUserId: string,
   ): Promise<string[]> {
     const rows = await this.subscriptions.find({
-      where: { threadId },
+      where: { threadId, isFollowing: true },
       select: ['userId'],
       order: { createdAt: 'ASC' },
       take: MAX_NOTIFIED_SUBSCRIBERS + 1,

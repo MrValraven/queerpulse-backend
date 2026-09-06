@@ -14,6 +14,7 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
+import { VouchService } from '../vouch/vouch.service';
 import { ConnectionsService } from '../connections/connections.service';
 import { SubprofileEndorsementsService } from '../subprofiles/subprofile-endorsements.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -164,6 +165,13 @@ describe('PublicEligibilityService', () => {
         {
           provide: ContentModerationService,
           useValue: { statesForAnyType: async () => new Map() },
+        },
+        {
+          // The INBOUND vouch total now comes from here, block-severed, and
+          // no longer off `profile.vouchCount`. Same 3 the profile fixture
+          // above carries, so every threshold assertion below is unchanged.
+          provide: VouchService,
+          useValue: { getVouchCount: async () => 3 },
         },
         ...overrides,
       ],

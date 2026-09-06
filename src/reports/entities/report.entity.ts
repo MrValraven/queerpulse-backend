@@ -76,6 +76,26 @@ export enum ReportSubjectType {
   //
   // Backed by `AddPhotoAndRecommendationReportSubjects1797700000000`.
   LandlordRecommendation = 'landlord_recommendation',
+  // ONE volunteering opportunity (`volunteer_opportunities`), addressed by the
+  // opportunity's SLUG — the same handle `GET /volunteering/:slug` and the
+  // public opportunity page use, so what a reporter's browser already holds is
+  // what the report carries.
+  //
+  // The grain problem here is that there was no grain at all: nothing in this
+  // taxonomy reached the volunteering directory, so the only way to raise a
+  // scam posting, an unsafe placement or a host org that is not affirming was
+  // the Contact form, which is a different queue with no subject attached.
+  // `Job` is the nearest-looking neighbour and it is the wrong one: a `job`
+  // subject is a slug in the PAID-work directory (`src/companies`), a
+  // different table entirely, so a moderator acting on one would have been
+  // acting on nothing. An opportunity asks a member to hand a stranger their
+  // unpaid time and often to turn up somewhere in person, which is exactly the
+  // kind of ask that has to be reportable.
+  //
+  // Backed by
+  // `AddVolunteeringReportSubjectAndAnonymousFloodKey1813000000000` (adds the
+  // value to `reports_subject_type_enum`).
+  Volunteering = 'volunteering',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union
@@ -130,6 +150,30 @@ export enum ReportSeverity {
     where: `"status" = 'open'`,
   },
 )
+// The rolling anonymous flood caps (`ReportsService
+// .assertAnonymousReportingWindowIsClear`) run TWO counts on the filing path,
+// and this is what keeps both off a full table scan. Shaped exactly like
+// `IDX_reports_reporter_created_at`, which does the same job for the per-member
+// caps: the daily count is a clean range scan over (key, created_at), and the
+// per-subject count reuses the same range and filters the subject columns over
+// what the daily cap has already bounded to a couple of hundred tuples at the
+// very worst. A subject-bearing index of its own would buy nothing over that.
+//
+// PARTIAL (`WHERE "anonymous_reporter_key" IS NOT NULL`) because the column is
+// NULL on every signed-in report and those rows are the bulk of the table:
+// including them would cost an index entry per insert and serve no read.
+//
+// NOT unique. Two anonymous filings under one key are exactly what the caps
+// count, so they have to be allowed to exist in order to be counted, and
+// collapsing them would silently discard one stranger's report into another's
+// (see `ReportsService.create` on why the anonymous path does not dedupe).
+//
+// Backed by `AddVolunteeringReportSubjectAndAnonymousFloodKey1813000000000`.
+@Index(
+  'IDX_reports_anonymous_reporter_key',
+  ['anonymousReporterKey', 'createdAt'],
+  { where: `"anonymous_reporter_key" IS NOT NULL` },
+)
 export class Report {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -157,9 +201,42 @@ export class Report {
   @Column({ type: 'boolean', default: false })
   anonymous!: boolean;
 
-  // Only for anonymous follow-up when the reporter has no account.
+  // An off-platform address a SIGNED-OUT reporter chose to leave, so a human
+  // on the safety team can decide to reach out by hand. Nothing sends to it:
+  // QueerPulse delivers no email and never will, so this is a note in a
+  // moderator's file rather than an address in a queue.
+  //
+  // Only ever populated when `reporterId` is NULL, and the rule is enforced on
+  // the WRITE path (`ReportsService.create`), never left to the client. A
+  // signed-in member is already reachable through the notification bell, and
+  // `GET /reports/mine` shows them their own report's status without anyone
+  // contacting them at all, so an address stored beside their account buys
+  // nothing and costs a second copy of their personal data sitting on a
+  // moderation row. A signed-in filing that carries `contactEmail` therefore
+  // stores NULL here; the field is accepted and dropped rather than refused,
+  // because the report itself is the thing that matters.
   @Column({ type: 'varchar', nullable: true })
   contactEmail!: string | null;
+
+  /**
+   * The durable flood-cap key for a SIGNED-OUT filing: an HMAC-SHA256 digest
+   * of the reporter's client IP under a server-held pepper, never the address
+   * itself. See `../anonymous-reporter-key.ts` for how it is derived and
+   * `../report-flood-limits.ts` for what it bounds and how weak it is.
+   *
+   * NULL on every signed-in report, because those are capped per MEMBER off
+   * `reporterId` and nothing here would add to that. NULL is also what a
+   * signed-out filing stores when no client address could be read at all, and
+   * the caps treat that as "uncapped by this layer" rather than refusing: a
+   * report from somebody the server cannot key is still a report.
+   *
+   * Served by the PARTIAL index `IDX_reports_anonymous_reporter_key` declared
+   * on the class below. Partial because the column is NULL on every signed-in
+   * row, and those are the overwhelming majority: indexing them would be dead
+   * weight on every insert for no read.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  anonymousReporterKey!: string | null;
 
   // `ReportEvidence[]` as sent by the frontend (`{type:'url',value} |
   // {type:'screenshot',uploadId}`), stored verbatim. Typed `unknown[]` (not

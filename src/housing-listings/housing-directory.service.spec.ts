@@ -52,6 +52,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     city: 'Lisbon',
     area: 'Arroios',
     rentEuros: 500,
+    depositEuros: null,
     // Null = bedroom count not specified (additive nullable column; old rows
     // never backfilled).
     bedrooms: null,
@@ -77,6 +78,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     decisionReason: null,
     decidedById: null,
     decidedAt: null,
+    firstLiveAt: null,
     // Null = lister added no virtual-tour link.
     virtualTourUrl: null,
     // Null = still looking / still live to the public (owner hasn't marked it
@@ -87,6 +89,8 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // listing for everyone but its owner, so a hardcoded date silently turns
     // every "live listing" test red once the wall clock passes it.
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    // PRD-244: not yet warned about this term.
+    expiryWarningSentAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,

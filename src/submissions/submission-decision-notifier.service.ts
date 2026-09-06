@@ -3,6 +3,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   SUBMISSION_KIND_NOTIFICATION,
+  SubmissionDeepLinkSource,
   SubmissionKind,
   SubmissionOutcome,
 } from './submission-kinds';
@@ -51,6 +52,19 @@ export interface SubmissionDecisionNotice {
    * caller cannot smuggle a slug onto a row that has nowhere to point.
    */
   deepLinkSlug?: string | null;
+  /**
+   * A destination for THIS decision, instead of the kind's usual one.
+   *
+   * Honoured only when the kind's `alternateDeepLinkSources` lists it; any
+   * other value is ignored and the kind's own `deepLinkSource` is written, so
+   * a caller still cannot invent a destination the config never agreed to.
+   * Omit it, as two of the three kinds always do, and nothing changes.
+   *
+   * PRD-269 is the reason it exists: an approved resource suggestion now
+   * publishes a real directory listing, and "accepted" should open the page
+   * that listing is on rather than the index the member sent it from.
+   */
+  deepLinkSource?: SubmissionDeepLinkSource | null;
 }
 
 /**
@@ -114,7 +128,18 @@ export class SubmissionDecisionNotifier {
     const reviewNote = config.isReviewNoteDelivered
       ? truncate(notice.reviewNote, MAX_REVIEW_NOTE_LENGTH)
       : '';
-    const deepLinkSlug = config.deepLinkSource
+    // The kind's own destination, unless this decision named one the kind
+    // explicitly allows it to. An unrecognised override is dropped rather than
+    // rejected: the decision it reports has already committed, and a bell row
+    // pointing at the index is a far better outcome than no row at all.
+    const isAllowedOverride = Boolean(
+      notice.deepLinkSource &&
+        config.alternateDeepLinkSources?.includes(notice.deepLinkSource),
+    );
+    const deepLinkSource: SubmissionDeepLinkSource | null = isAllowedOverride
+      ? (notice.deepLinkSource ?? null)
+      : config.deepLinkSource;
+    const deepLinkSlug = deepLinkSource
       ? truncate(notice.deepLinkSlug, MAX_SUBJECT_LABEL_LENGTH)
       : '';
 
@@ -130,7 +155,13 @@ export class SubmissionDecisionNotifier {
           // string it would interpolate as a gap in the sentence.
           ...(subjectLabel ? { subjectLabel } : {}),
           ...(reviewNote ? { reviewNote } : {}),
-          ...(config.deepLinkSource ? { source: config.deepLinkSource } : {}),
+          ...(deepLinkSource ? { source: deepLinkSource } : {}),
+          // `listingSlug` is the generic slug slot the deep link is built
+          // from (it rides in `COMMON_PAYLOAD_KEYS`, so it survives the
+          // response allowlist). For `resource_directory` the value is the
+          // listing's CATEGORY, since the resource directory has no
+          // per-listing page; the frontend adapter reads it from the same
+          // field either way.
           ...(deepLinkSlug ? { listingSlug: deepLinkSlug } : {}),
         },
       );

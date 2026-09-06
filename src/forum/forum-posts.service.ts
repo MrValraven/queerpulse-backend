@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository, SelectQueryBuilder } from 'typeorm';
+import { EntityManager, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
@@ -23,6 +23,14 @@ import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
+import {
+  DEFAULT_REPLY_SORT,
+  ReplySort,
+  applyReplyOrder,
+  applyTopReplySeek,
+  encodeTopRepliesCursor,
+  keysetForReplySort,
+} from './forum-reply-sort';
 import { AccessTier } from '../communities/entities/community.entity';
 import {
   FORUM_POST_SEARCH_FIELDS,
@@ -42,6 +50,29 @@ const DEFAULT_LIMIT = 20;
 
 /** How many characters of a matching reply the search card shows. */
 const SEARCH_EXCERPT_LENGTH = 160;
+
+/**
+ * How deep the descendant walk in `loadSubtreeIds` follows `parent_post_id`.
+ *
+ * Purely a guard against corrupt data: a reply's parent must already exist when
+ * the reply is written (`loadReplyParentOr400`), so a chain can never close
+ * into a cycle and no honest thread comes close to this. Without the bound, one
+ * bad row would make the recursive CTE spin forever and take the request with
+ * it.
+ */
+const MAX_REPLY_DEPTH = 20;
+
+/**
+ * Ceiling on the descendant replies one page carries alongside its roots.
+ *
+ * A page is `limit` TOP-LEVEL replies plus everything nested under them, so its
+ * size is set by how deeply the thread's roots are nested rather than by
+ * `limit` alone. This is what keeps a single pathological root (one reply with
+ * hundreds of nested answers under it) from turning one page into the whole
+ * thread. Shallower replies are kept first, so if it ever binds it takes the
+ * deepest tail of the conversation, which is also the least-read part of it.
+ */
+const MAX_SUBTREE_POSTS_PER_PAGE = 300;
 
 /**
  * One reply-body hit for global search (SOC-08). Carries the THREAD's slug and
@@ -85,6 +116,28 @@ export interface VoteResult {
   myVote: number;
 }
 
+/**
+ * `GET /forum/threads/:slug/posts`' envelope: the ordinary `CursorPage` plus
+ * one thread-level fact the page itself cannot carry (C5/ENG-130).
+ */
+export interface ForumPostsPage extends CursorPage<ForumPostResponse> {
+  /**
+   * Is the thread's genuine opening post readable by THIS viewer?
+   *
+   * False in three cases, all of which mean "the OP card has nothing to draw":
+   * the viewer has muted its author (a muted member's posts stay silenced even
+   * though the thread itself is still reachable), a moderator hid it and the
+   * viewer is not staff, or the thread carries no `is_op` post at all.
+   *
+   * It exists because the thread page used to take the first post of page one
+   * as the OP. When the OP was filtered out, the first REPLY moved into the OP
+   * card and was read as the question, wearing that replier's name and
+   * permissions, while vanishing from the reply list. Carried on every page,
+   * not just the first, because it describes the thread rather than the page.
+   */
+  opAvailable: boolean;
+}
+
 const MODERATOR_ROLES: readonly string[] = [UserRole.Moderator, UserRole.Admin];
 
 function isModeratorRole(role: string): boolean {
@@ -93,6 +146,67 @@ function isModeratorRole(role: string): boolean {
 
 function viewerOf(user: CurrentUserData): ForumPostViewer {
   return { userId: user.userId, isModerator: isModeratorRole(user.role) };
+}
+
+/**
+ * Moves a thread's denormalized `replyCount` by `delta` when a reply is
+ * tombstoned or restored (ENG-132).
+ *
+ * THE BUG. `replyCount` was only ever incremented, by `markActivity` on each
+ * new reply. Deleting a reply never took it back, so a thread whose three
+ * replies had all been withdrawn went on advertising "3 replies" on /forum and
+ * in the reply bar, and opening it showed three tombstones.
+ *
+ * ONLY REPLIES. The opening post is not a reply and was never counted (`create`
+ * writes the thread with `replyCount: 0` and its OP in the same transaction),
+ * so tombstoning an OP must not decrement — which is also what keeps
+ * `deleteThread`, whose whole job is to tombstone the OP, from corrupting the
+ * count of a thread it is withdrawing.
+ *
+ * `GREATEST(..., 0)` rather than a plain `- 1`: the counter is denormalized and
+ * has drifted before (this is the drift `BackfillForumThreadReplyCount` repairs),
+ * so a decrement that finds it already at zero clamps instead of going negative
+ * and rendering "-1 replies" until somebody notices.
+ *
+ * `lastActivityAt` is deliberately NOT walked back. Recomputing it means an
+ * aggregate over the thread's surviving posts on every delete, and it is the
+ * `active` sort's keyset column: moving it BACKWARDS while readers hold cursors
+ * minted against its old value would drop or repeat whole blocks of threads
+ * mid-scroll, which is a worse failure than a withdrawn reply leaving a thread
+ * ranked as recently active for a while. The count is the number a reader
+ * actually checks, and it is now truthful.
+ */
+async function adjustReplyCount(
+  manager: EntityManager,
+  post: ForumPost,
+  delta: 1 | -1,
+): Promise<void> {
+  if (post.isOp) return;
+  await manager.update(
+    ForumThread,
+    { id: post.threadId },
+    {
+      replyCount: () =>
+        delta === 1 ? '"reply_count" + 1' : 'GREATEST("reply_count" - 1, 0)',
+    },
+  );
+}
+
+/**
+ * First occurrence of each post id wins. A page is assembled from three sources
+ * (the hoisted OP and accepted answer, the root stream, each root's subtree)
+ * and a nested accepted answer legitimately appears in two of them; rendering
+ * it twice would be worse than either place alone.
+ */
+function dedupePostsById(posts: ForumPost[]): ForumPost[] {
+  const seenIds = new Set<string>();
+  const unique: ForumPost[] = [];
+  for (const post of posts) {
+    if (seenIds.has(post.id)) continue;
+    seenIds.add(post.id);
+    unique.push(post);
+  }
+  return unique;
 }
 
 @Injectable()
@@ -173,7 +287,13 @@ export class ForumPostsService {
       .innerJoin(ForumThread, 't', 't.id = p.threadId')
       .where(`${searchVector} @@ ${searchTsQuery}`, { searchTerm: term })
       // A tombstoned post keeps its body for restore; it is not content.
-      .andWhere('p.deletedAt IS NULL');
+      .andWhere('p.deletedAt IS NULL')
+      // A reply inside a withdrawn thread is not a side door back into it
+      // (PRD-160): this row renders the THREAD's title and links to it, which
+      // is exactly what deleting the thread retracted. Same reasoning as the
+      // block and Private-community gates below, applied to the new
+      // thread-level tombstone.
+      .andWhere('t.deletedAt IS NULL');
 
     // Post author: blocked either way, or muted by the viewer.
     this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
@@ -245,98 +365,301 @@ export class ForumPostsService {
     }));
   }
 
-  // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
-  // `cursorPaginate`'s default keyset is hard-wired to a newest-first
-  // `(createdAt, id) DESC` ordering, which doesn't fit this endpoint's
-  // contract ("OP is the first post, oldest-first" — see forum.api.ts).
-  // `paginateOldestFirst` below still goes through `cursorPaginate`, but via
-  // its alternate-keyset path (`CursorKeyset`) so it can swap in an ASC
-  // direction on the raw `created_at` column. `ForumPost.createdAt` is
-  // `timestamptz(3)` (see
-  // `1787600000000-NarrowForumPostCreatedAtPrecision.ts`), so the raw column
-  // already matches the millisecond-resolution cursor and needs no
-  // `date_trunc(...)` wrapper — ordering/filtering rides
-  // `IDX_forum_post_thread_id_created_at_id` directly instead of forcing a
-  // Sort on every page.
+  /**
+   * GET /forum/threads/:slug/posts — the opening post plus a page of replies.
+   *
+   * SHAPE OF A PAGE. Three parts, concatenated:
+   *
+   *  1. the thread's OP, on the first page only, when this viewer can see it
+   *     (see `resolveOpForViewer` and `opAvailable`);
+   *  2. the accepted answer, on the first page only, hoisted out of the stream;
+   *  3. `limit` TOP-LEVEL replies in the requested sort, plus every reply
+   *     nested underneath them.
+   *
+   * WHY `limit` COUNTS TOP-LEVEL REPLIES, NOT POSTS (C6/PRD-162). Replies are
+   * rendered as a TREE (`buildReplyTree`, keyed on `parentPostId`), and a flat
+   * page of a tree is only well-formed if every reply arrives at or after its
+   * parent. Oldest-first gave that for free, which is why it was the only
+   * ordering the endpoint had. `newest` inverts it exactly: a child is always
+   * newer than its parent, so a flat newest-first page would deliver children
+   * before the parents they belong under and the client would draw them
+   * stranded at the root until some later page happened to bring the parent
+   * back. Paginating the ROOTS and shipping each root's whole subtree with it
+   * keeps every page a complete set of subtrees, in any ordering, which is what
+   * makes "Newest" mean "the newest conversations, each still whole" rather
+   * than "the newest posts, torn out of their threads".
+   *
+   * ORDER WITHIN THE ARRAY. Roots come in sort order, then the descendants in
+   * the same sort order. The client groups by `parentPostId` and inherits that
+   * relative order inside each sibling bucket, so siblings read in the
+   * requested order at every depth. The array is a bag of posts to be
+   * re-nested, and any consumer that renders it flat will read the roots and
+   * then their children, never a strict global ordering.
+   *
+   * WHY THE ACCEPTED ANSWER IS LIFTED OUT AND RE-INSERTED. It is excluded from
+   * the root stream on EVERY page (not just the first) and put back at the top
+   * of page one, so it is never rendered twice across a "Load more" session.
+   * Excluding it everywhere is what makes that safe: the keyset stays a plain
+   * seek, which an `ORDER BY (id = :accepted) DESC, ...` could never be. That
+   * property holds identically in all three sorts, which is why the exclusion
+   * lives here rather than inside any one of them. This is the server-side
+   * ordering that replaced the old client-side "most helpful" heuristic, which
+   * only ever ranked the replies that happened to have loaded (SOC-13).
+   *
+   * THE CURSOR IS SORT-SPECIFIC. `oldest`/`newest` seek on
+   * `(created_at, id)` through `cursorPaginate`'s alternate-keyset path;
+   * `top` seeks on `(vote_count, created_at, id)` through its own predicate
+   * (`applyTopReplySeek`). A cursor minted under one sort decodes to nonsense
+   * under another, so the client must drop its cursor when the member changes
+   * the sort, exactly as the thread list does.
+   */
   async listPosts(
     threadSlug: string,
     user: CurrentUserData,
     cursor: string | undefined,
     limit: number | undefined,
-  ): Promise<CursorPage<ForumPostResponse>> {
-    const thread = await this.threadsService.loadOr404(threadSlug, user.userId);
-
-    const acceptedPostId = thread.acceptedPostId;
-
-    const qb = this.posts
-      .createQueryBuilder('p')
-      .where('p.threadId = :threadId', { threadId: thread.id });
-    // The accepted answer is lifted OUT of the ordinary oldest-first stream and
-    // re-inserted at the top of the first page below, so it is never rendered
-    // twice across a "Load more" session. Excluding it on every page (not just
-    // the first) is what makes that safe: the cursor keyset stays a plain
-    // `(created_at, id)` seek, which an `ORDER BY (id = :accepted) DESC, ...`
-    // could not be. This is the server-side ordering that replaces the old
-    // client-side "most helpful" heuristic, which only ever ranked the replies
-    // that happened to have loaded (SOC-13).
-    if (acceptedPostId) {
-      qb.andWhere('p.id != :acceptedPostId', { acceptedPostId });
-    }
-    // Posts by a blocked (either way) or muted author are dropped in-query, so
-    // the keyset page below fills to `limit` with visible posts instead of
-    // coming back short (see `BlockFilterService.excludeHidden`). NB: this can
-    // hide the OP itself when the thread author is only *muted* — a muted
-    // author's thread is still reachable by direct navigation (see
-    // `ForumThreadsService.loadOr404`), but their posts stay silenced, which is
-    // exactly what a mute means.
-    this.blockFilter.excludeHidden(qb, user.userId, '"p"."author_id"');
-
-    const { rows, nextCursor, hasMore } = await this.paginateOldestFirst(
-      qb,
-      cursor,
-      limit ?? DEFAULT_LIMIT,
-      'p',
+    sort: ReplySort = DEFAULT_REPLY_SORT,
+  ): Promise<ForumPostsPage> {
+    const thread = await this.threadsService.loadOr404(
+      threadSlug,
+      user.userId,
+      {
+        // A withdrawn thread's posts 404 for members and stay readable for staff
+        // (PRD-160), matching what `ForumThreadsService.getBySlug` admits — a
+        // moderator who can open the thread detail has to be able to read the
+        // thread.
+        includeDeleted: isModeratorRole(user.role),
+      },
     );
 
-    const orderedRows =
-      cursor || !acceptedPostId
-        ? rows
-        : await this.hoistAcceptedPost(rows, acceptedPostId, user);
+    const acceptedPostId = thread.acceptedPostId;
+    const { opPost, isOpVisible } = await this.resolveOpForViewer(thread, user);
+    const isFirstPage = !cursor;
+
+    const rootsQb = this.posts
+      .createQueryBuilder('p')
+      .where('p.threadId = :threadId', { threadId: thread.id });
+    // The OP is hoisted explicitly below, so it never competes for a slot in
+    // the paginated stream.
+    rootsQb.andWhere('p.isOp = false');
+    // "Top level" is a reply with no parent OR one parented directly to the
+    // opening post. The write path allows both (`loadReplyParentOr400` accepts
+    // any post in the thread, the OP included) and the client renders them
+    // identically, so treating only `parent_post_id IS NULL` as a root would
+    // strand every reply-to-the-OP as a descendant of a post that is never a
+    // root, i.e. drop it from the endpoint entirely.
+    if (opPost) {
+      rootsQb.andWhere(
+        '(p.parentPostId IS NULL OR p.parentPostId = :rootOpPostId)',
+        { rootOpPostId: opPost.id },
+      );
+    } else {
+      rootsQb.andWhere('p.parentPostId IS NULL');
+    }
+    if (acceptedPostId) {
+      rootsQb.andWhere('p.id != :acceptedPostId', { acceptedPostId });
+    }
+    // Posts by a blocked (either way) or muted author are dropped in-query, so
+    // the keyset page below fills to `limit` with visible roots instead of
+    // coming back short (see `BlockFilterService.excludeHidden`). NB: this is
+    // also what can hide the OP when the thread author is only *muted* — a
+    // muted author's thread is still reachable by direct navigation (see
+    // `ForumThreadsService.loadOr404`), but their posts stay silenced, which is
+    // exactly what a mute means, and `opAvailable` is how the client is told.
+    this.blockFilter.excludeHidden(rootsQb, user.userId, '"p"."author_id"');
+
+    const {
+      rows: rootRows,
+      nextCursor,
+      hasMore,
+    } = await this.paginateRoots(rootsQb, cursor, limit ?? DEFAULT_LIMIT, sort);
+
+    const descendantRows = await this.loadSubtree(
+      thread.id,
+      rootRows.map((root) => root.id),
+      user,
+      sort,
+    );
+
+    const hoisted: ForumPost[] = [];
+    if (isFirstPage && opPost && isOpVisible) {
+      hoisted.push(opPost);
+    }
+    if (isFirstPage && acceptedPostId) {
+      const accepted = await this.loadAcceptedPost(acceptedPostId, user);
+      if (accepted) hoisted.push(accepted);
+    }
+
+    // Deduped because the accepted answer can be a NESTED reply, in which case
+    // it arrives twice: once hoisted, once inside its root's subtree. The
+    // hoisted copy wins (it is first), which is what puts it at the top of the
+    // page; the client's tree builder re-nests it under its parent when that
+    // parent is also on the page, so nothing is lost either way.
+    const orderedRows = dedupePostsById([
+      ...hoisted,
+      ...rootRows,
+      ...descendantRows,
+    ]);
 
     return {
       data: await this.toPostResponses(orderedRows, user, acceptedPostId),
       pageInfo: { nextCursor, hasMore },
+      opAvailable: isOpVisible,
     };
   }
 
   /**
-   * Puts the thread's accepted answer at the top of the FIRST page of replies,
-   * immediately after the opening post.
+   * The thread's opening post and whether THIS viewer can see it (C5/ENG-130).
    *
-   * Runs only when there is no cursor (page one) — `listPosts` has already
-   * excluded the accepted post from the paginated stream, so this is the single
-   * place it enters the response. The post goes through the same block/mute
-   * filter as every other row: an accepted answer written by someone the viewer
-   * has since blocked or muted stays hidden, exactly as it would in the stream.
+   * Resolved on every page rather than only the first, because `opAvailable` is
+   * a fact about the thread: a client that loaded page three and knows the OP
+   * is unavailable can say so without refetching page one. Three small indexed
+   * reads, and the block/mute pair short-circuits to nothing when the viewer is
+   * the OP's own author (`hiddenUserIds` never reports a member hidden from
+   * themselves).
    *
-   * Index 1, not 0: the frontend contract is "the first post of the first page
-   * is the OP" (`threadDetail` destructures it that way), so the answer slots
-   * in behind it. If the first row is not the OP — a thread whose author the
-   * viewer has muted, so the OP itself was filtered out — the answer leads.
+   * The visibility rule is `partitionByModeration`'s, restated for one row: a
+   * hidden-but-not-removed post is withheld from ordinary members, while a
+   * REMOVED post survives as a tombstone for everyone. A tombstoned OP is
+   * therefore still "available" — the OP card renders it as `[deleted]`, which
+   * is the honest thing to show and is not the same as having no OP at all.
    */
-  private async hoistAcceptedPost(
-    rows: ForumPost[],
+  private async resolveOpForViewer(
+    thread: ForumThread,
+    user: CurrentUserData,
+  ): Promise<{ opPost: ForumPost | null; isOpVisible: boolean }> {
+    const opPost = await this.posts.findOne({
+      where: { threadId: thread.id, isOp: true },
+    });
+    if (!opPost) return { opPost: null, isOpVisible: false };
+
+    const [hiddenAuthorIds, moderationStates] = await Promise.all([
+      this.blockFilter.hiddenUserIds(user.userId, [opPost.authorId]),
+      this.contentModeration.statesForAnyType(ForumPostsService.SUBJECT_TYPES, [
+        opPost.id,
+      ]),
+    ]);
+    const moderation = moderationStates.get(opPost.id);
+    const isWithheldByModeration =
+      (moderation?.hidden ?? false) &&
+      !(moderation?.removed ?? false) &&
+      !isModeratorRole(user.role);
+
+    return {
+      opPost,
+      isOpVisible:
+        !hiddenAuthorIds.has(opPost.authorId) && !isWithheldByModeration,
+    };
+  }
+
+  /**
+   * One page of TOP-LEVEL replies in the requested sort.
+   *
+   * `oldest`/`newest` are one column plus the `id` tie-break in a single
+   * direction, so they go through `cursorPaginate`'s alternate-keyset path
+   * unchanged. `top` sorts votes descending and then falls back to the oldest
+   * reply, which no row-constructor comparison can express, so it carries its
+   * own seek and its own cursor codec (`forum-reply-sort.ts` explains both).
+   */
+  private async paginateRoots(
+    qb: SelectQueryBuilder<ForumPost>,
+    cursor: string | undefined,
+    limit: number,
+    sort: ReplySort,
+  ): Promise<{
+    rows: ForumPost[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }> {
+    const keyset = keysetForReplySort(sort);
+    if (keyset) {
+      // `false` for the millisecond-precision flag is ignored on the keyset
+      // path, which always compares the raw column — safe here because
+      // `ForumPost.createdAt` is already `timestamptz(3)`, see `CursorKeyset`.
+      return cursorPaginate(qb, cursor, limit, 'p', false, keyset);
+    }
+
+    applyTopReplySeek(qb, cursor);
+    const rows = await qb.take(limit + 1).getMany();
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const lastRow = page[page.length - 1];
+    return {
+      rows: page,
+      nextCursor: hasMore && lastRow ? encodeTopRepliesCursor(lastRow) : null,
+      hasMore,
+    };
+  }
+
+  /**
+   * Every reply nested underneath this page's roots, at any depth.
+   *
+   * Two queries. The recursive CTE walks `parent_post_id` down from the roots
+   * and returns ids only, bounded by `MAX_REPLY_DEPTH` and
+   * `MAX_SUBTREE_POSTS_PER_PAGE`; the second loads those rows through an
+   * ordinary query builder so they get the same block/mute filter and the same
+   * ORDER BY as the roots. Splitting it that way is what lets
+   * `BlockFilterService.excludeHidden` apply at all — it appends to a query
+   * builder, and a raw recursive CTE has nothing for it to append to.
+   *
+   * The walk runs BEFORE the block filter, so a hidden author's reply is
+   * dropped while the replies underneath it survive. That is deliberate and
+   * matches what the client already does with them: a reply whose parent is not
+   * on the page falls back to the root of the tree rather than disappearing
+   * with it, so muting one member never silently takes other people's answers
+   * with them.
+   */
+  private async loadSubtree(
+    threadId: string,
+    rootIds: string[],
+    user: CurrentUserData,
+    sort: ReplySort,
+  ): Promise<ForumPost[]> {
+    if (!rootIds.length) return [];
+
+    const rows = await this.posts.manager.query<Array<{ id: string }>>(
+      `WITH RECURSIVE "reply_subtree" AS (
+         SELECT "seed"."id", 1 AS "depth"
+         FROM "forum_post" "seed"
+         WHERE "seed"."thread_id" = $1
+           AND "seed"."parent_post_id" = ANY($2::uuid[])
+         UNION ALL
+         SELECT "child"."id", "parent"."depth" + 1
+         FROM "forum_post" "child"
+         JOIN "reply_subtree" "parent" ON "child"."parent_post_id" = "parent"."id"
+         WHERE "child"."thread_id" = $1 AND "parent"."depth" < $3
+       )
+       SELECT "id" FROM "reply_subtree" ORDER BY "depth" ASC LIMIT $4`,
+      [threadId, rootIds, MAX_REPLY_DEPTH, MAX_SUBTREE_POSTS_PER_PAGE],
+    );
+    const descendantIds = rows.map((row) => row.id);
+    if (!descendantIds.length) return [];
+
+    const qb = this.posts
+      .createQueryBuilder('p')
+      .where('p.id IN (:...descendantIds)', { descendantIds });
+    this.blockFilter.excludeHidden(qb, user.userId, '"p"."author_id"');
+    applyReplyOrder(qb, sort);
+    return qb.getMany();
+  }
+
+  /**
+   * The thread's accepted answer, loaded for the page-one hoist.
+   *
+   * Goes through the same block/mute filter as every other row: an accepted
+   * answer written by someone the viewer has since blocked or muted stays
+   * hidden, exactly as it would in the stream. Null when it is filtered out, or
+   * when the mark points at a row that no longer resolves.
+   */
+  private async loadAcceptedPost(
     acceptedPostId: string,
     user: CurrentUserData,
-  ): Promise<ForumPost[]> {
-    const acceptedQb = this.posts
+  ): Promise<ForumPost | null> {
+    const qb = this.posts
       .createQueryBuilder('p')
       .where('p.id = :acceptedPostId', { acceptedPostId });
-    this.blockFilter.excludeHidden(acceptedQb, user.userId, '"p"."author_id"');
-    const accepted = await acceptedQb.getOne();
-    if (!accepted) return rows;
-    const insertAt = rows[0]?.isOp ? 1 : 0;
-    return [...rows.slice(0, insertAt), accepted, ...rows.slice(insertAt)];
+    this.blockFilter.excludeHidden(qb, user.userId, '"p"."author_id"');
+    return qb.getOne();
   }
 
   // Resolves each post's moderation state and applies the read policy: a member
@@ -542,6 +865,15 @@ export class ForumPostsService {
   // Idempotent both ways: voting +1 twice or removing an absent vote is a
   // no-op rather than double-counting/going negative.
   //
+  // WHO MAY VOTE (ENG-133). This used to load the post by id and nothing else:
+  // no visibility check and no self-vote guard, on the one endpoint that moves
+  // a ranking. A blocked member could keep upvoting the person who blocked
+  // them, a non-member could vote inside a Private community's thread by
+  // holding a post id, and an author could upvote their own opening post to
+  // climb the forum's default sort — which `paginateTop` has since made a real
+  // ranked ordering rather than a shuffle, so the payoff for doing it went up.
+  // `assertCanVote` below closes all three, before the transaction opens.
+  //
   // Concurrency-safe by construction: the whole toggle runs in one
   // transaction, the insert is `ON CONFLICT DO NOTHING` (`.orIgnore()`) so a
   // racing duplicate upvote can't raise a 23505 unique violation, and the
@@ -566,6 +898,12 @@ export class ForumPostsService {
     userId: string,
     value: number,
   ): Promise<VoteResult> {
+    // Authorized OUTSIDE the transaction on purpose: every check here is a
+    // read, none of them touches the row the toggle locks, and holding a write
+    // transaction open across four lookups would widen the window in which two
+    // concurrent votes contend for nothing.
+    await this.assertCanVote(postId, userId);
+
     return this.posts.manager.transaction(async (manager) => {
       const post = await manager.findOne(ForumPost, { where: { id: postId } });
       if (!post) {
@@ -616,6 +954,61 @@ export class ForumPostsService {
         myVote: value,
       };
     });
+  }
+
+  /**
+   * The three gates `POST /forum/posts/:id/vote` never had (ENG-133).
+   *
+   * 1. THE POST MUST BE VISIBLE TO THE VOTER. Delegated to
+   *    `ForumThreadsService.loadByIdOr404`, which is the same helper every
+   *    thread read path goes through, so the rule cannot drift from it: a
+   *    withdrawn thread, a thread whose author has blocked the voter (or whom
+   *    the voter has blocked), and a Private community's thread read by
+   *    somebody off the roster all come back 404. Then the POST's own state: a
+   *    tombstoned post and a post under a moderator takedown are not content
+   *    anybody votes on, including the moderator who can still see it.
+   *
+   * 2. NO VOTING ACROSS A BLOCK. `loadByIdOr404` covers the THREAD's author;
+   *    this covers the post's, which on a reply is somebody else entirely. A
+   *    block is a hard severance in both directions, so it is checked in both.
+   *    Mute is deliberately NOT a bar: a mute is a soft silence that keeps
+   *    content out of lists (`BlockFilterService.isMutedBy`), and a member who
+   *    navigates to a muted person's reply and chooses to upvote it is doing
+   *    nothing a mute promised to prevent.
+   *
+   * 3. NO SELF-VOTES. Refused in both directions, so there is nothing to clear
+   *    either: `StripForumSelfVotes` deletes the ones already recorded, and
+   *    after it no author has a vote of their own left to remove. Voting for
+   *    your own post is the cheapest possible way to move the `top` sort, and
+   *    it is the one vote that carries no information at all.
+   *
+   * 404 rather than 403 wherever the post should not be reachable, so a member
+   * probing post ids cannot tell an existing private post from a missing one.
+   */
+  private async assertCanVote(postId: string, userId: string): Promise<void> {
+    const post = await this.loadPostOr404(postId);
+    if (post.deletedAt) {
+      throw new NotFoundException('Post not found');
+    }
+    await this.threadsService.loadByIdOr404(post.threadId, userId);
+
+    if (post.authorId === userId) {
+      throw new ForbiddenException('You cannot upvote your own post');
+    }
+
+    const [isBlocked, moderationStates] = await Promise.all([
+      this.blockFilter.isBlockedEitherWay(userId, post.authorId),
+      this.contentModeration.statesForAnyType(ForumPostsService.SUBJECT_TYPES, [
+        post.id,
+      ]),
+    ]);
+    if (isBlocked) {
+      throw new NotFoundException('Post not found');
+    }
+    const moderation = moderationStates.get(post.id);
+    if (moderation?.hidden || moderation?.removed) {
+      throw new NotFoundException('Post not found');
+    }
   }
 
   // PATCH /forum/posts/:id — author-only body edit. Snapshots the pre-edit
@@ -673,16 +1066,23 @@ export class ForumPostsService {
       // Stamped with the marker so `assertCanRestore` can tell an author's own
       // delete apart from a moderator takedown (BE-COM-01).
       post.deletedById = user.userId;
-      await this.posts.save(post);
-      // A tombstoned post is no longer an answer. The FK only clears on a HARD
-      // delete, so the soft-delete path has to release the mark itself, leaving
-      // the thread genuinely unanswered again rather than pointing at an empty
-      // tombstone (SOC-13).
-      await this.posts.manager.update(
-        ForumThread,
-        { id: post.threadId, acceptedPostId: post.id },
-        { acceptedPostId: null },
-      );
+      // One transaction over all three writes. The tombstone, the released
+      // answer mark and the reply count describe the same fact; a crash
+      // between any two of them leaves the thread advertising something that
+      // is no longer true.
+      await this.posts.manager.transaction(async (manager) => {
+        await manager.save(post);
+        // A tombstoned post is no longer an answer. The FK only clears on a HARD
+        // delete, so the soft-delete path has to release the mark itself, leaving
+        // the thread genuinely unanswered again rather than pointing at an empty
+        // tombstone (SOC-13).
+        await manager.update(
+          ForumThread,
+          { id: post.threadId, acceptedPostId: post.id },
+          { acceptedPostId: null },
+        );
+        await adjustReplyCount(manager, post, -1);
+      });
     }
     return this.mapOne(post, user);
   }
@@ -701,7 +1101,12 @@ export class ForumPostsService {
       // Cleared with the marker so a later delete/restore pair is judged on
       // its own actor, never a stale one.
       post.deletedById = null;
-      await this.posts.save(post);
+      // Same transaction argument as `tombstonePost`: the restored reply and
+      // the count that advertises it commit together or not at all.
+      await this.posts.manager.transaction(async (manager) => {
+        await manager.save(post);
+        await adjustReplyCount(manager, post, 1);
+      });
     }
     return this.mapOne(post, user);
   }
@@ -831,30 +1236,6 @@ export class ForumPostsService {
   }
 
   // --- internals ---
-
-  private async paginateOldestFirst(
-    qb: SelectQueryBuilder<ForumPost>,
-    cursor: string | undefined,
-    limit: number,
-    alias: string,
-  ): Promise<{
-    rows: ForumPost[];
-    nextCursor: string | null;
-    hasMore: boolean;
-  }> {
-    // `ForumPost.createdAt` is `timestamptz(3)`, matching the millisecond
-    // resolution of the JS `Date` cursor `cursorPaginate` builds — so the
-    // leading column can compare on the raw `created_at` value with no
-    // `date_trunc(...)` wrapper (see `CursorKeyset`'s precision contract and
-    // `1787600000000-NarrowForumPostCreatedAtPrecision.ts`). `id` stays the
-    // ASC tie-breaker, keeping the ordering total.
-    return cursorPaginate(qb, cursor, limit, alias, false, {
-      columnExpr: `"${alias}"."created_at"`,
-      direction: 'ASC',
-      kind: 'date',
-      getValue: (row) => row.createdAt,
-    });
-  }
 
   // Batched mapping for a page of posts: one `IN`-query each for authors and
   // the viewer's own votes across the whole page instead of N+1 per-post

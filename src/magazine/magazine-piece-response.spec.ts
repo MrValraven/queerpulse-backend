@@ -75,6 +75,7 @@ function makePitch(overrides: Partial<MagazinePitch> = {}): MagazinePitch {
     passNote: null,
     submitterId: null,
     storySubmissionId: null,
+    returnedAt: null,
     createdAt: new Date('2026-08-05T09:00:00Z'),
     ...overrides,
   };
@@ -193,6 +194,8 @@ describe('deriveWaitingOn', () => {
     sensitivity_read: 'you',
     layout: 'you',
     ready: 'nobody',
+    // Terminal (PRD-120): a published piece is owed to nobody.
+    published: 'nobody',
   };
 
   for (const [stage, expected] of Object.entries(expectedByStage)) {
@@ -315,14 +318,57 @@ describe('toPitchResponse', () => {
       id: 'pitch-1',
       title: 'Trans Elders Oral History',
       from: 'jordan@example.com',
+      submitterId: null,
       note: 'A multi-part oral history series.',
       tags: ['history', 'elders'],
       suggestFormat: 'article',
       status: 'waiting',
       fresh: true,
+      returnedAt: null,
     });
     expect(response).not.toHaveProperty('passTemplate');
     expect(response).not.toHaveProperty('passNote');
+  });
+
+  // PRD-123. An external pitch is free text the editor typed into `from`;
+  // there is nobody to resolve, and the stored string has to survive.
+  it('keeps the stored `from` for an external pitch with no submitter', () => {
+    const response = toPitchResponse(makePitch({ submitterId: null }));
+
+    expect(response.from).toBe('jordan@example.com');
+    expect(response.submitterId).toBeNull();
+  });
+
+  // The bug PRD-123 names: a pitch submitted from inside the platform stores
+  // `from: ''`, so without the resolved name the inbox printed a blank byline.
+  it("uses the resolved submitter name for an internal pitch's blank `from`", () => {
+    const response = toPitchResponse(
+      makePitch({ from: '', submitterId: 'writer-1' }),
+      'Sara Nunes',
+    );
+
+    expect(response.from).toBe('Sara Nunes');
+    expect(response.submitterId).toBe('writer-1');
+  });
+
+  // A submitter whose account could not be resolved must not blank out a
+  // stored `from` that does have something in it.
+  it('falls back to the stored `from` when the submitter cannot be resolved', () => {
+    const response = toPitchResponse(
+      makePitch({ from: 'jordan@example.com', submitterId: 'writer-1' }),
+      null,
+    );
+
+    expect(response.from).toBe('jordan@example.com');
+  });
+
+  // ENG-113 — the inbox marks a pitch that came back from a deleted commission.
+  it('exposes `returnedAt` as an ISO instant when the pitch came back', () => {
+    const response = toPitchResponse(
+      makePitch({ returnedAt: new Date('2026-09-02T08:30:00Z') }),
+    );
+
+    expect(response.returnedAt).toBe('2026-09-02T08:30:00.000Z');
   });
 });
 
@@ -659,7 +705,7 @@ describe('computePublishGate', () => {
     const gate = computePublishGate(care);
 
     expect(gate).toEqual(
-      expect.arrayContaining([{ label: 'Consent — Rui S.', done: true }]),
+      expect.arrayContaining([{ label: 'Consent: Rui S.', done: true }]),
     );
     expect(gate.some((item) => !item.done)).toBe(false);
   });
@@ -690,7 +736,7 @@ describe('computePublishGate', () => {
     const gate = computePublishGate(care);
 
     expect(gate).toEqual(
-      expect.arrayContaining([{ label: 'Consent — Dra. Câmara', done: false }]),
+      expect.arrayContaining([{ label: 'Consent: Dra. Câmara', done: false }]),
     );
     expect(gate.some((item) => !item.done)).toBe(true);
   });

@@ -8,6 +8,7 @@ import { In, IsNull, Not, Repository, SelectQueryBuilder } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
   AccessTier,
@@ -19,6 +20,7 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -45,6 +47,7 @@ import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
+import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 import {
   AffiliationView,
   CollaboratorView,
@@ -100,6 +103,10 @@ export class SubprofilePublicReadService {
     @InjectRepository(Handle)
     private readonly handleRegistry: Repository<Handle>,
     private readonly blockFilter: BlockFilterService,
+    // Read-only, and only for the two `previous*OwnerOf` reclaim lookups
+    // (PRD-204). Every WRITE against the namespace stays on `SubprofilesService`
+    // where it can share the publish/unpublish transaction.
+    private readonly handles: HandlesService,
     private readonly contentModeration: ContentModerationService,
     private readonly endorsementsService: SubprofileEndorsementsService,
     private readonly followersService: SubprofileFollowersService,
@@ -115,7 +122,9 @@ export class SubprofilePublicReadService {
   // a public surface with no per-viewer staff role, so (like the directory) a
   // takedown withholds it entirely. Owner-facing reads (`listMine`/`getOwned`)
   // don't re-check this state, so the owner still sees + manages their persona.
-  private static readonly SUBJECT_TYPE = 'subprofile';
+  // One spelling, shared with the follow/endorse write gates. See
+  // `subprofile-takedown.ts`.
+  private static readonly SUBJECT_TYPE = SUBPROFILE_MODERATION_SUBJECT_TYPE;
 
   // NOT EXISTS predicate dropping any persona under a `subprofile` takedown
   // (hidden OR removed) from a persona query builder (alias `sp`), in-query so
@@ -193,7 +202,30 @@ export class SubprofilePublicReadService {
       : [];
     // Drop any persona under a moderator takedown before it renders nested on
     // the profile.
-    const sps = await this.dropModeratedSubprofiles(linkedSps);
+    const visibleSps = await this.dropModeratedSubprofiles(linkedSps);
+    // A block by the persona's CREATOR severs it here too, and the check above
+    // only covers the profile being viewed. A co-owned persona lists on every
+    // co-owner's profile, so a creator who blocked this viewer still reached
+    // them through somebody else's page: the card carries that creator's name
+    // and slug (`ownerRefFor` below), and its link resolves against the
+    // creator alone, which `getBySlugForProfile` then refuses on this same
+    // block. Listing it advertised a member who had set a boundary and led
+    // nowhere.
+    //
+    // Only the creator is consulted, deliberately. A persona is partly the
+    // work of each owner, but the creator is the one this DTO names and
+    // addresses, while the other co-owners' identities never reach it. Hiding
+    // on ANY owner's block would let a single co-owner erase a shared persona
+    // from the creator's own profile for that viewer, which is a wider power
+    // than a block is meant to carry.
+    //
+    // Blocks are symmetric, so one batched `blockedUserIds` over the page's
+    // creators covers both directions, and it drops the viewer's own id.
+    const blockedCreatorIds = await this.blockFilter.blockedUserIds(
+      viewerId,
+      visibleSps.map((sp) => sp.userId),
+    );
+    const sps = visibleSps.filter((sp) => !blockedCreatorIds.has(sp.userId));
     const subprofileIds = sps.map((sp) => sp.id);
     // Every read below is mutually independent (each is its own batched query
     // keyed on the same `subprofileIds`) — fire them in one round trip instead
@@ -238,15 +270,58 @@ export class SubprofilePublicReadService {
     const viewerMemberIds = new Set(
       viewerMemberRows.map((row) => row.subprofileId),
     );
-    const owner = {
-      slug: profile.slug,
-      name: `${profile.firstName} ${profile.lastName}`.trim(),
+    // The owner ref is the persona's CREATOR (`sp.userId`), even though this
+    // list is keyed on a profile that may only CO-own it. `ownerSlug` is what
+    // the frontend builds `/members/:ownerSlug/:slug` from, and the nested
+    // route (`getBySlugForProfile`) resolves that pair against the creator's
+    // `userId` alone. Handing back the viewed profile's slug for a co-owned
+    // persona produced a link that 404s, and, when that co-owner happened to
+    // have a persona of their own under the same per-owner slug, a link that
+    // opened the OTHER persona: a wrong-person disclosure. One canonical URL
+    // per persona, under its creator, is also what the owner dashboard already
+    // builds (`personaPublicPathForOwner` + `usePersonaCreatorSlug`) and what
+    // `directory()` emits, so this brings the three into agreement.
+    //
+    // Resolved in ONE batched lookup over the page's distinct creator ids.
+    // Usually there are none to fetch: every persona this member created is
+    // already covered by `profile`, so the query only fires for genuinely
+    // co-owned rows.
+    const creatorProfileByUserId = new Map<string, Profile>([
+      [profile.userId, profile],
+    ]);
+    const coOwnedCreatorIds = [
+      ...new Set(
+        sps
+          .map((sp) => sp.userId)
+          .filter((userId) => userId !== profile.userId),
+      ),
+    ];
+    if (coOwnedCreatorIds.length) {
+      const creatorProfiles = await this.profiles.find({
+        where: { userId: In(coOwnedCreatorIds) },
+      });
+      for (const creatorProfile of creatorProfiles) {
+        creatorProfileByUserId.set(creatorProfile.userId, creatorProfile);
+      }
+    }
+    // `undefined` when a creator somehow has no profile row. `toPublicDTO`
+    // then omits `ownerSlug`/`ownerName` entirely rather than emitting a slug
+    // that routes to the wrong persona.
+    const ownerRefFor = (
+      creatorUserId: string,
+    ): SubprofileOwnerRef | undefined => {
+      const creatorProfile = creatorProfileByUserId.get(creatorUserId);
+      if (!creatorProfile) return undefined;
+      return {
+        slug: creatorProfile.slug,
+        name: `${creatorProfile.firstName} ${creatorProfile.lastName}`.trim(),
+      };
     };
     return sps.map((sp) =>
       toPublicDTO(
         sp,
         itemsById.get(sp.id) ?? [],
-        owner,
+        ownerRefFor(sp.userId),
         socialLinksById.get(sp.id) ?? [],
         endorsementCountsById.get(sp.id) ?? 0,
         viewerEndorsedIds.has(sp.id),
@@ -278,10 +353,123 @@ export class SubprofilePublicReadService {
       },
     });
     if (!sp) {
-      throw new NotFoundException('Subprofile not found');
+      // PRD-204: no live persona holds this handle, but the persona that used
+      // to may still be inside its reclaim cooldown. Always throws.
+      return this.throwPersonaMovedOrNotFound(handle, viewer);
     }
     // no owner ref → owner identity never leaks for an unlinked persona.
     return this.buildPublicView(sp, viewer, undefined);
+  }
+
+  /**
+   * PRD-204 for `/p/<handle>`. A persona handle is the address printed on a
+   * card, pasted into a bio and scanned off a QR code, and until now renaming
+   * one killed every copy of it at once. The reclaim ledger already knows which
+   * persona held the name, so a rename can forward instead of breaking.
+   *
+   * The forwarding is bounded by the same window that protects the name:
+   * `previousSubprofileOwnerOf` answers only while the reclaim cooldown is
+   * running and nothing holds the name in the live registry. Once either fails,
+   * this stops answering, so a stranger who legitimately claims the handle can
+   * never inherit traffic and trust meant for the persona that had it. That is
+   * also why the answer is computed per request rather than stored: the route's
+   * `AnonymousPublicCacheInterceptor` downgrades a moved answer to `no-store`
+   * so no shared cache can hold one past the boundary.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE FULL VISIBILITY GATE RUNS AGAIN, ON THE PERSONA IT RESOLVED
+   * ---------------------------------------------------------------------------
+   * This route answers anonymous callers, so "that handle moved to @new" is a
+   * disclosure in its own right: it says a persona still exists and names where
+   * it lives. A persona that was renamed AND unpublished, made private or
+   * network-only, removed, or taken down has said no, and must stay
+   * indistinguishable from a handle nobody ever held. So the resolved persona
+   * goes through `assertPublicViewVisible` — the very decision `buildPublicView`
+   * makes for a first-hand visit — and every one of its refusals, the 403s
+   * included, is flattened into the plain 404. A 403 here would itself be the
+   * oracle: it would confirm the persona exists and say why it is withheld,
+   * which is more than the new address would tell this viewer.
+   *
+   * Never returns. The caller treats it as a throw.
+   */
+  private async throwPersonaMovedOrNotFound(
+    handle: string,
+    viewer: CurrentUserData | undefined,
+  ): Promise<never> {
+    const previousOwnerSubprofileId =
+      await this.handles.previousSubprofileOwnerOf(handle);
+    if (!previousOwnerSubprofileId) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    const moved = await this.subprofiles.findOne({
+      where: { id: previousOwnerSubprofileId },
+    });
+    // A persona with no current handle has not moved anywhere: it released the
+    // name by unpublishing or by going linked, and there is no new address to
+    // send anyone to. Same plain 404.
+    if (
+      !moved ||
+      !moved.handle ||
+      moved.linkVisibility !== SubprofileLinkVisibility.Unlinked
+    ) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    await this.assertMovedTargetVisibleOrNotFound(
+      moved,
+      viewer,
+      'Subprofile not found',
+    );
+    // An application-level payload rather than an HTTP 301/308, matching
+    // `ProfilesService.throwMovedOrNotFound` so the SPA branch stays one shape.
+    // A 301/308 is permanently cacheable and this forwarding MUST expire with
+    // the reclaim cooldown; and `fetch` follows a redirect transparently, so
+    // the app would render the persona under the dead URL and never correct the
+    // address bar.
+    throw new NotFoundException({
+      code: 'PERSONA_MOVED',
+      message: 'That handle has moved',
+      handle: moved.handle,
+    });
+  }
+
+  /**
+   * Run `buildPublicView`'s own "may this viewer see it at all?" decision on a
+   * persona we are about to NAME rather than render, and collapse every refusal
+   * it can make into the plain 404.
+   *
+   * `assertPublicViewVisible` throws a 403 carrying `restrictedState` for
+   * private/members-only/removed, which is the right answer at an address the
+   * viewer asked for directly. At a MOVED address it would be an existence
+   * oracle, so the 403s and the 404s alike become the single plain 404. Any
+   * other failure (a database fault, say) is re-thrown untouched: a broken read
+   * must never be reported as an absence.
+   */
+  private async assertMovedTargetVisibleOrNotFound(
+    sp: Subprofile,
+    viewer: CurrentUserData | undefined,
+    // The message every refusal collapses onto. It is a parameter because each
+    // caller has to be indistinguishable from ITS OWN first miss, and the two
+    // misses read differently: an unknown handle answers `Subprofile not
+    // found`, an unknown owner slug answers `Profile not found`. Hard-coding
+    // one would let a client tell "moved, but withheld from you" apart from
+    // "never existed" by the message alone, which is the oracle this whole
+    // method exists to close.
+    notFoundMessage: string,
+  ): Promise<void> {
+    const isOwner = viewer
+      ? await this.membership.isMember(viewer.userId, sp.id)
+      : false;
+    try {
+      await this.assertPublicViewVisible(sp, viewer, isOwner);
+    } catch (err) {
+      if (
+        err instanceof ForbiddenException ||
+        err instanceof NotFoundException
+      ) {
+        throw new NotFoundException(notFoundMessage);
+      }
+      throw err;
+    }
   }
 
   // Single linked + published persona nested under a member's profile, by its
@@ -298,7 +486,10 @@ export class SubprofilePublicReadService {
       where: { slug: ownerSlug },
     });
     if (!profile) {
-      throw new NotFoundException('Profile not found');
+      // PRD-204, the second door onto the same defect: the persona handle here
+      // is a per-OWNER slug, so a nested persona dies when its owner renames
+      // even though the persona was never re-addressed. Always throws.
+      return this.throwOwnerMovedOrNotFound(ownerSlug, subslug, viewer);
     }
     const sp = await this.subprofiles.findOne({
       where: {
@@ -317,16 +508,139 @@ export class SubprofilePublicReadService {
     return this.buildPublicView(sp, viewer, owner);
   }
 
+  /**
+   * PRD-204 for `/members/<ownerSlug>/<subslug>`. The persona's own address
+   * never changed here: its OWNER renamed, and the lookup above resolves the
+   * owner by the live `profiles.slug` alone, so every shared nested-persona
+   * link died on a username change the persona had no part in. A member cannot
+   * tell that apart from the handle case, so it forwards the same way.
+   *
+   * The owner side of the answer comes from `previousProfileOwnerOf` verbatim,
+   * so the cooldown and live-registry conditions are the ones the username
+   * routes already enforce rather than a second spelling of them.
+   *
+   * What gates the disclosure is the PERSONA, and deliberately so. This route
+   * answers anonymous callers, and naming a member's new username is a
+   * disclosure about a member. It is emitted only when the persona at
+   * `/members/<newSlug>/<subslug>` is one this very viewer could already open
+   * first-hand, which makes the payload tell them nothing that address would
+   * not. A persona that is unpublished, private, network-only, removed or taken
+   * down gets the plain 404, and with it the owner's new username stays unsaid.
+   *
+   * Never returns. The caller treats it as a throw.
+   */
+  private async throwOwnerMovedOrNotFound(
+    ownerSlug: string,
+    subslug: string,
+    viewer: CurrentUserData | undefined,
+  ): Promise<never> {
+    const previousOwnerUserId =
+      await this.handles.previousProfileOwnerOf(ownerSlug);
+    if (!previousOwnerUserId) {
+      throw new NotFoundException('Profile not found');
+    }
+    const moved = await this.profiles.findOne({
+      where: { userId: previousOwnerUserId },
+    });
+    if (!moved) {
+      throw new NotFoundException('Profile not found');
+    }
+    const sp = await this.subprofiles.findOne({
+      where: {
+        slug: subslug,
+        userId: moved.userId,
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      },
+    });
+    if (!sp) {
+      throw new NotFoundException('Profile not found');
+    }
+    await this.assertMovedTargetVisibleOrNotFound(
+      sp,
+      viewer,
+      'Profile not found',
+    );
+    // Same payload the username routes emit, so the SPA reads one shape: the
+    // frontend rebuilds `/members/<slug>/<subslug>` by swapping the owner
+    // segment and leaving the persona segment where it was.
+    throw new NotFoundException({
+      code: 'PROFILE_MOVED',
+      message: 'That username has moved',
+      slug: moved.slug,
+    });
+  }
+
+  /**
+   * "May this viewer see this persona at all?", per the Shared Contract rule
+   * order (design plan Phase 1b Task 1). Returns for a viewer who may; throws
+   * for one who may not.
+   *
+   * An owner/co-owner sees the persona regardless of status/visibility
+   * (including a draft — `SubprofilePublicView.status` then reads `"draft"`,
+   * driving the frontend's draft banner). Everyone else is gated in order:
+   * `removedAt` set → 403 `removed`; not published → 404 (an unpublished draft
+   * is invisible to a non-owner, never a distinct restricted state); `private`
+   * → 403 `private`; `network` and the viewer isn't an authenticated active
+   * member → 403 `members_only`; a moderator takedown → 404; blocked either
+   * way → 404.
+   *
+   * Its own method because PRD-204's forwarding has to reach the SAME verdict
+   * before it will name a persona it is about to send someone to
+   * (`assertMovedTargetVisibleOrNotFound`). A second, hand-copied spelling of
+   * this order would be a visibility rule that could drift, and a drift here
+   * turns a moved address into a way to confirm a withheld persona exists.
+   */
+  private async assertPublicViewVisible(
+    sp: Subprofile,
+    viewer: CurrentUserData | undefined,
+    isOwner: boolean,
+  ): Promise<void> {
+    if (isOwner) {
+      return;
+    }
+    if (sp.removedAt) {
+      throw new ForbiddenException(restrictedAccessBody('removed'));
+    }
+    if (sp.status !== SubprofileStatus.Published) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    if (sp.visibility === SubprofileVisibility.Private) {
+      throw new ForbiddenException(restrictedAccessBody('private'));
+    }
+    if (
+      sp.visibility === SubprofileVisibility.Network &&
+      viewer?.status !== UserStatus.Active
+    ) {
+      throw new ForbiddenException(restrictedAccessBody('members_only'));
+    }
+    // Pre-existing moderator-takedown withhold — a SEPARATE mechanism from
+    // `removedAt` above (see the migration's comment / Non-goals): a
+    // hidden/removed `content_moderation` row still 404s for non-owners,
+    // the same withhold-entirely behaviour the directory/search reads
+    // share. Owner-facing reads don't re-check this state (mirrors
+    // `listMine`/`getOwned`), so the owner still sees + manages their
+    // persona even under a takedown.
+    const moderation = await this.contentModeration.stateFor(
+      SubprofilePublicReadService.SUBJECT_TYPE,
+      sp.slug,
+    );
+    if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    // Never surface the persona of someone the viewer has blocked (either
+    // way). Skipped entirely for an anonymous viewer — there is no account
+    // to have blocked anyone.
+    if (
+      viewer &&
+      (await this.blockFilter.isBlockedEitherWay(viewer.userId, sp.userId))
+    ) {
+      throw new NotFoundException('Subprofile not found');
+    }
+  }
+
   // Shared by `getByHandle` and `getBySlugForProfile`: resolves whether
-  // `viewer` may see `sp` at all (per the Shared Contract rule order — design
-  // plan Phase 1b Task 1), then assembles the full public DTO. Owner/co-owner
-  // sees the persona regardless of status/visibility (including a draft —
-  // `SubprofilePublicView.status` then reads `"draft"`, driving the frontend's
-  // draft banner); everyone else is gated in order: `removedAt` set → 403
-  // `removed`; not published → 404 (an unpublished draft is invisible to a
-  // non-owner, never a distinct restricted state); `private` → 403 `private`;
-  // `network` and the viewer isn't an authenticated active member → 403
-  // `members_only`; else the full DTO.
+  // `viewer` may see `sp` at all (`assertPublicViewVisible` above), then
+  // assembles the full public DTO.
   private async buildPublicView(
     sp: Subprofile,
     viewer: CurrentUserData | undefined,
@@ -336,46 +650,7 @@ export class SubprofilePublicReadService {
       ? await this.membership.isMember(viewer.userId, sp.id)
       : false;
 
-    if (!isOwner) {
-      if (sp.removedAt) {
-        throw new ForbiddenException(restrictedAccessBody('removed'));
-      }
-      if (sp.status !== SubprofileStatus.Published) {
-        throw new NotFoundException('Subprofile not found');
-      }
-      if (sp.visibility === SubprofileVisibility.Private) {
-        throw new ForbiddenException(restrictedAccessBody('private'));
-      }
-      if (
-        sp.visibility === SubprofileVisibility.Network &&
-        viewer?.status !== UserStatus.Active
-      ) {
-        throw new ForbiddenException(restrictedAccessBody('members_only'));
-      }
-      // Pre-existing moderator-takedown withhold — a SEPARATE mechanism from
-      // `removedAt` above (see the migration's comment / Non-goals): a
-      // hidden/removed `content_moderation` row still 404s for non-owners,
-      // the same withhold-entirely behaviour the directory/search reads
-      // share. Owner-facing reads don't re-check this state (mirrors
-      // `listMine`/`getOwned`), so the owner still sees + manages their
-      // persona even under a takedown.
-      const moderation = await this.contentModeration.stateFor(
-        SubprofilePublicReadService.SUBJECT_TYPE,
-        sp.slug,
-      );
-      if (moderation.hidden || moderation.removed) {
-        throw new NotFoundException('Subprofile not found');
-      }
-      // Never surface the persona of someone the viewer has blocked (either
-      // way). Skipped entirely for an anonymous viewer — there is no account
-      // to have blocked anyone.
-      if (
-        viewer &&
-        (await this.blockFilter.isBlockedEitherWay(viewer.userId, sp.userId))
-      ) {
-        throw new NotFoundException('Subprofile not found');
-      }
-    }
+    await this.assertPublicViewVisible(sp, viewer, isOwner);
 
     const viewerId = viewer?.userId ?? ANONYMOUS_VIEWER_ID;
     // These seven reads are mutually independent — fire them in one round trip
@@ -506,7 +781,14 @@ export class SubprofilePublicReadService {
     // fixes). `getCount()` ignores `orderBy`/`offset`/`limit`, so it is computed
     // here — before those are applied — purely for readability.
     const total = await qb.getCount();
+    // Display names are not unique, so an OFFSET page boundary landing inside a
+    // tie repeats or skips a persona. `sp.id` is unique and makes the total
+    // order deterministic across pages (same tiebreak as
+    // `CommunitiesService.list`'s 'name' sort). Both are entity property paths
+    // on the selected alias, never an `addSelect` alias, so TypeORM quotes the
+    // snake_case columns itself.
     qb.orderBy('sp.displayName', 'ASC')
+      .addOrderBy('sp.id', 'ASC')
       .offset((page - 1) * limit)
       .limit(limit);
     const rows = await qb.getMany();
@@ -889,7 +1171,14 @@ export class SubprofilePublicReadService {
           handle: handleRow.name,
           type: 'member',
           name: `${profile.firstName} ${profile.lastName}`.trim(),
-          avatarUrl: toImageUrl(profile.avatarUrl),
+          // A credited MEMBER's face honours their own `photoVisible` toggle,
+          // through the shared gate `toMemberRef` uses, so a credit agrees
+          // with feed and forum. `CollaboratorView` is a narrower shape than
+          // `MemberRef` (it also covers credited personas, which have no
+          // profile row), so it calls the gate directly. The persona branch
+          // below is unaffected: a persona avatar is the persona's own image,
+          // never a member's face.
+          avatarUrl: toVisibleAvatarUrl(profile),
           slug: profile.slug,
         });
       } else if (

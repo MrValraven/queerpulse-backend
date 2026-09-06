@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Activity } from '../profiles/entities/activity.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { SocialLink } from '../profiles/entities/social-link.entity';
@@ -47,6 +48,8 @@ export interface PublicProfileResponse {
   displayName: string;
   pronouns: string | null;
   tagline: string | null;
+  /** Null once the member has turned "Show your photo" off — the toggle binds
+   *  on the open web exactly as it does in-app. See the mapper. */
   avatarUrl: string | null;
   bio: string | null;
   socials: PublicSocialLinkView[];
@@ -125,7 +128,20 @@ export function toPublicProfile(
     displayName: `${profile.firstName} ${profile.lastName}`.trim(),
     pronouns: profile.pronouns,
     tagline: profile.tagline,
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    // `photoVisible` binds here too, and binds hardest here. Publishing the
+    // page is one decision ("people may find me"); showing a face is another
+    // ("people may recognise me"), and a member who turns "Show your photo"
+    // off has withdrawn the second from every signed-in member. The open web
+    // is the LEAST privileged audience — see the visibility composition rule
+    // in `PublicProfilesService.getBySlug` — so it cannot keep what signed-in
+    // members have lost. The cost of getting this wrong is one-way: a face on
+    // a crawlable page stays in an index long after the toggle flips.
+    //
+    // No owner-self exception, and none is possible: this endpoint is
+    // anonymous, so there is no viewer to be the owner. The member previews
+    // their own published page through `PublicProfileOwnPreview` (FE), which
+    // is a signed-in read of their own profile.
+    avatarUrl: toVisibleAvatarUrl(profile),
     bio: profile.bio,
     socials: socials.map((s) => ({
       platform: s.platform,

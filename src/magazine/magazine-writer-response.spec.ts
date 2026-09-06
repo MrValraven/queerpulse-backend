@@ -1,9 +1,11 @@
+import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazinePiece, PieceStage } from './entities/magazine-piece.entity';
 import { MagazinePitch, PitchStatus } from './entities/magazine-pitch.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import {
   WriterAssignmentResponse,
   toWriterAssignment,
+  toWriterDraft,
   toWriterPayment,
   toWriterPitch,
 } from './magazine-writer-response';
@@ -87,6 +89,7 @@ function makePitch(overrides: Partial<MagazinePitch> = {}): MagazinePitch {
     passNote: null,
     submitterId: 'writer-1',
     storySubmissionId: null,
+    returnedAt: null,
     createdAt: new Date('2026-07-12T09:00:00Z'),
     ...overrides,
   };
@@ -252,6 +255,42 @@ describe('toWriterPitch', () => {
     expect(result.state).toBe('Held for consideration');
   });
 
+  it.each<PitchStatus>(['waiting', 'maybe', 'passed', 'commissioned'])(
+    'carries the machine status "%s" so a client can say it in its own language',
+    (status) => {
+      const result = toWriterPitch(makePitch({ status }));
+
+      expect(result.status).toBe(status);
+    },
+  );
+
+  it('carries the editor pass note verbatim, apart from the composed state', () => {
+    const passNote = 'Not now, please pitch again in issue 16.';
+
+    const result = toWriterPitch(makePitch({ status: 'passed', passNote }));
+
+    expect(result.status).toBe('passed');
+    expect(result.passNote).toBe(passNote);
+  });
+
+  it('withholds a pass note left behind by a verdict that has since changed', () => {
+    // `triagePitch` clears neither `passTemplate` nor `passNote` when it moves
+    // a passed pitch to `maybe`, so the column outlives the verdict.
+    const result = toWriterPitch(
+      makePitch({ status: 'maybe', passNote: 'An older pass note.' }),
+    );
+
+    expect(result.passNote).toBeNull();
+  });
+
+  it('leaves passNote null on a pass with no note written', () => {
+    const result = toWriterPitch(
+      makePitch({ status: 'passed', passNote: null }),
+    );
+
+    expect(result.passNote).toBeNull();
+  });
+
   it('tone "no" and a state including the passNote for a passed pitch', () => {
     const result = toWriterPitch(
       makePitch({
@@ -262,7 +301,7 @@ describe('toWriterPitch', () => {
 
     expect(result.tone).toBe('no');
     expect(result.state).toBe(
-      'Passed — Not now, please pitch again in issue 16.',
+      'Passed: Not now, please pitch again in issue 16.',
     );
   });
 
@@ -285,15 +324,35 @@ describe('toWriterPitch', () => {
 });
 
 describe('toWriterPayment', () => {
-  it('maps title/issue/fee from the piece and payment', () => {
+  it('maps title/fee from the piece and payment', () => {
     const piece = makePiece();
     const payment = makePayment();
 
     const result = toWriterPayment(piece, payment);
 
     expect(result.title).toBe(piece.title);
-    expect(result.issue).toBe(piece.issueId);
     expect(result.fee).toBe('€420.00');
+  });
+
+  it('shows the issue DISPLAY number, never the issue row id', () => {
+    const piece = makePiece();
+
+    const result = toWriterPayment(piece, makePayment(), {
+      id: 'issue-14',
+      number: '14',
+      title: 'The body issue',
+    });
+
+    expect(result.issue).toBe('14');
+    expect(result.issueTitle).toBe('The body issue');
+    expect(result.issueId).toBe(piece.issueId);
+  });
+
+  it('leaves the issue number null when the caller loaded no issue', () => {
+    const result = toWriterPayment(makePiece(), makePayment());
+
+    expect(result.issue).toBeNull();
+    expect(result.issueTitle).toBeNull();
   });
 
   it('reports "Not yet agreed" when there is no payment row', () => {
@@ -301,32 +360,99 @@ describe('toWriterPayment', () => {
 
     expect(result.state).toBe('Not yet agreed');
     expect(result.fee).toBe('');
+    expect(result.status).toBeNull();
   });
 
-  it('reports paid state with the paid date', () => {
+  it('reports paid state with a readable paid date', () => {
     const result = toWriterPayment(
       makePiece(),
       makePayment({ status: 'paid', paidOn: '2026-06-14' }),
     );
 
-    expect(result.state).toBe('Paid 2026-06-14');
+    expect(result.state).toBe('Paid 14 Jun 2026');
+    expect(result.paidOn).toBe('2026-06-14');
   });
 
-  it('reports approved-unpaid state with the due date', () => {
+  it('reports approved-unpaid state with a readable due date', () => {
     const result = toWriterPayment(
       makePiece(),
       makePayment({ status: 'approved_unpaid', dueOn: '2026-08-19' }),
     );
 
-    expect(result.state).toBe('Approved, unpaid — due 2026-08-19');
+    expect(result.state).toBe('Approved, unpaid: due 19 Aug 2026');
+    expect(result.status).toBe('approved_unpaid');
+    expect(result.dueOn).toBe('2026-08-19');
   });
 
-  it('reports agreed state with the due date', () => {
+  it('reports agreed state with a readable due date', () => {
     const result = toWriterPayment(
       makePiece(),
       makePayment({ status: 'agreed', dueOn: '2026-08-19' }),
     );
 
-    expect(result.state).toBe('Agreed — due 2026-08-19');
+    expect(result.state).toBe('Agreed: due 19 Aug 2026');
+  });
+});
+
+/** Only the columns `toWriterDraft` reads: the rest of `MagazineArticle` is
+ *  editor furniture this mapper deliberately never projects. */
+function makeArticle(
+  overrides: Partial<MagazineArticle> = {},
+): MagazineArticle {
+  return {
+    id: 'article-1',
+    slug: 'what-we-owe-old-friends',
+    title: 'What we owe old friends (edited)',
+    standfirst: 'The friendships that outlast the reason for them.',
+    blocks: [{ id: 'block-1', kind: 'paragraph', html: 'Four words go here.' }],
+    version: 4,
+    publishedAt: null,
+    updatedAt: new Date('2026-07-21T09:00:00Z'),
+    ...overrides,
+  } as unknown as MagazineArticle;
+}
+
+describe('toWriterDraft', () => {
+  it('projects the draft body with the version to file against', () => {
+    const result = toWriterDraft(makePiece(), makeArticle());
+
+    expect(result.hasDraft).toBe(true);
+    expect(result.version).toBe(4);
+    expect(result.blocks).toHaveLength(1);
+    expect(result.words).toBe(4);
+    expect(result.updatedAt).toBe('2026-07-21T09:00:00.000Z');
+  });
+
+  it("prefers the article's edited headline over the piece title", () => {
+    const result = toWriterDraft(makePiece(), makeArticle());
+
+    expect(result.title).toBe('What we owe old friends (edited)');
+  });
+
+  it('answers hasDraft false at version 0 when the piece has no article yet', () => {
+    // The version a filing must declare for `ensureArticleForPiece`'s freshly
+    // created row to accept it. Answering anything else here would make the
+    // first filing on a new piece a guaranteed 409.
+    const result = toWriterDraft(makePiece({ articleId: null }), null);
+
+    expect(result.hasDraft).toBe(false);
+    expect(result.version).toBe(0);
+    expect(result.blocks).toEqual([]);
+    expect(result.words).toBe(0);
+    expect(result.title).toBe('What we owe old friends');
+    expect(result.updatedAt).toBeNull();
+  });
+
+  it('carries the brief target and the last filed count', () => {
+    const result = toWriterDraft(makePiece(), makeArticle());
+
+    expect(result.target).toBe(2800);
+    expect(result.filedWords).toBe(3140);
+  });
+
+  it('never projects the editor-only care record', () => {
+    const result = toWriterDraft(makePiece(), makeArticle());
+
+    expect(JSON.stringify(result)).not.toContain('Internal editor note');
   });
 });

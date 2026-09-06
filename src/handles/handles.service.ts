@@ -110,6 +110,100 @@ export class HandlesService {
     return { available: !taken, reason: taken ? 'taken' : null };
   }
 
+  /**
+   * PRD-204, the read half of the reclaim cooldown: "who used to hold this
+   * name, and is that still the honest answer?"
+   *
+   * Returns the previous PROFILE owner's `userId` for a released handle, and
+   * `null` for everything else. Three conditions all have to hold, and the
+   * second and third are the security property rather than a convenience:
+   *
+   * 1. a `handle_history` reservation exists for the normalized name;
+   * 2. its cooldown has NOT lapsed (`reclaimableAt` is still in the future), so
+   *    a forwarding answer can never outlive the window during which the name
+   *    is the previous owner's to reclaim;
+   * 3. nothing holds the name in the live `handles` registry.
+   *
+   * Condition 3 is belt-and-braces: `claim` already deletes the reservation as
+   * it writes the new row, so the two cannot normally coexist. Checking it here
+   * anyway means "a stranger who claimed this name inherits its old traffic" is
+   * impossible to reintroduce by changing `claim`, rather than being a property
+   * this method inherits from somewhere else.
+   *
+   * A subprofile-owned reservation returns `null`: personas resolve through
+   * their own read path, which owns its own answer.
+   */
+  async previousProfileOwnerOf(name: string): Promise<string | null> {
+    const normalized = normalizeHandle(name);
+    const manager = this.handles.manager;
+    const reservation = await manager.findOne(HandleHistory, {
+      where: { name: normalized },
+    });
+    if (
+      !reservation ||
+      reservation.previousOwnerKind !== HandleOwnerKind.Profile ||
+      !reservation.previousOwnerUserId ||
+      reservation.reclaimableAt <= new Date()
+    ) {
+      return null;
+    }
+    const live = await manager.findOne(Handle, {
+      where: { name: normalized },
+    });
+    if (live) {
+      return null;
+    }
+    return reservation.previousOwnerUserId;
+  }
+
+  /**
+   * PRD-204, the persona mirror of `previousProfileOwnerOf`: "which persona
+   * used to hold this handle, and is that still the honest answer?"
+   *
+   * Returns the previous SUBPROFILE owner's `subprofileId` for a released
+   * handle, and `null` for everything else. The three conditions are the same
+   * ones, in the same order, and they carry the same weight:
+   *
+   * 1. a `handle_history` reservation exists for the normalized name;
+   * 2. its cooldown has NOT lapsed (`reclaimableAt` is still in the future), so
+   *    a forwarding answer can never outlive the window during which the name
+   *    is the previous owner's to reclaim;
+   * 3. nothing holds the name in the live `handles` registry, so a stranger who
+   *    legitimately claimed the name inherits none of its old traffic — and
+   *    that stays true however `claim` is changed later.
+   *
+   * A profile-owned reservation returns `null`, the exact counterpart of the
+   * subprofile exclusion in `previousProfileOwnerOf`: the namespace is shared,
+   * so each read path answers only for its own owner kind and a released
+   * username can never forward a `/p/<handle>` visitor onto a member.
+   *
+   * The name is the same shared global namespace, so both methods deliberately
+   * read the same reservation row and disagree only about which owner kind they
+   * will speak for.
+   */
+  async previousSubprofileOwnerOf(name: string): Promise<string | null> {
+    const normalized = normalizeHandle(name);
+    const manager = this.handles.manager;
+    const reservation = await manager.findOne(HandleHistory, {
+      where: { name: normalized },
+    });
+    if (
+      !reservation ||
+      reservation.previousOwnerKind !== HandleOwnerKind.Subprofile ||
+      !reservation.previousOwnerSubprofileId ||
+      reservation.reclaimableAt <= new Date()
+    ) {
+      return null;
+    }
+    const live = await manager.findOne(Handle, {
+      where: { name: normalized },
+    });
+    if (live) {
+      return null;
+    }
+    return reservation.previousOwnerSubprofileId;
+  }
+
   // Inserts a registry row for `owner`. A PK collision (name already held by
   // anyone, in either namespace) surfaces as a 409 ConflictException.
   //

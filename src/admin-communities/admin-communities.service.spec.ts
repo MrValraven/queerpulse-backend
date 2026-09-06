@@ -118,6 +118,7 @@ function makeReport(overrides: Partial<Report> = {}): Report {
     detail: 'Repeated targeting in the thread.',
     anonymous: false,
     contactEmail: null,
+    anonymousReporterKey: null,
     evidence: null,
     severity: ReportSeverity.High,
     slaDueAt: daysAgo(1),

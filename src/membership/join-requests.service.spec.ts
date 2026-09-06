@@ -474,6 +474,10 @@ describe('JoinRequestsService', () => {
         inviteId: null,
         approvalSeenAt: null,
         inviteRefreshCount: 0,
+        // PRD-304. Null by default so each case opts in to a clock: a request
+        // stamped before OPS-04 existed carries none, and the applicant view
+        // has to stay silent rather than invent a promise.
+        dueAt: null,
         ...overrides,
       }) as PlatformJoinRequest;
 
@@ -500,6 +504,33 @@ describe('JoinRequestsService', () => {
         inviteCode: null,
         inviteStatus: null,
         inviteExpiresAt: null,
+        dueAt: null,
+      });
+    });
+
+    it('PRD-304: tells an undecided applicant the date the answer is owed by', async () => {
+      repo.findOne.mockResolvedValue(
+        storedRequest({ dueAt: new Date('2026-07-21T00:00:00.000Z') }),
+      );
+      await expect(service.getPublicStatus('t')).resolves.toMatchObject({
+        status: 'under_review',
+        dueAt: '2026-07-21T00:00:00.000Z',
+      });
+    });
+
+    it('PRD-304: drops the deadline once a decision has landed', async () => {
+      // The answer is the answer. A promised date the queue overshot says
+      // nothing beside `decidedAt`, so it is withheld rather than displayed.
+      repo.findOne.mockResolvedValue(
+        storedRequest({
+          status: PlatformJoinRequestStatus.Declined,
+          reviewedAt: new Date('2026-07-25T00:00:00.000Z'),
+          dueAt: new Date('2026-07-21T00:00:00.000Z'),
+        }),
+      );
+      await expect(service.getPublicStatus('t')).resolves.toMatchObject({
+        status: 'declined',
+        dueAt: null,
       });
     });
 
@@ -532,6 +563,7 @@ describe('JoinRequestsService', () => {
         inviteCode: null,
         inviteStatus: null,
         inviteExpiresAt: null,
+        dueAt: null,
       });
     });
 

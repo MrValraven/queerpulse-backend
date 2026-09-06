@@ -23,6 +23,7 @@ import { isStaffRoleId } from '../users/staff-roles.registry';
 import { AdminMembersService } from './admin-members.service';
 import { GrantStaffRoleDto } from './dto/grant-staff-role.dto';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
+import { RevokeStaffRoleDto } from './dto/revoke-staff-role.dto';
 import { UpdateInviteQuotaDto } from './dto/update-invite-quota.dto';
 import { UpdatePlatformMemberRoleDto } from './dto/update-member-role.dto';
 import {
@@ -115,9 +116,17 @@ export class AdminMembersController {
   // Grant/revoke an additive "staff role" (STAFF_ROLES) — orthogonal to the
   // moderator/admin tier above. Guardrails (house-account lock, idempotency)
   // live in the service, same split as updateRole.
+  //
+  // PRD-288: both halves now take a REQUIRED `reason`, recorded in the same
+  // `mod_audit_logs` trail the row already wrote to. A staff role is what
+  // gates a moderator's queues, and it was the one lever on this drawer that
+  // changed hands with nothing said about why while its neighbours
+  // (`updateRole`, restrict, invite revocation) all record one.
   @ApiOperation({ summary: 'Grant a staff role to a member.' })
   @ApiOkResponse({ description: "The member's updated staff roles." })
-  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed request body, or a missing or too-short reason.',
+  })
   @ApiForbiddenResponse({
     description: 'Requires the admin role, or the target is a house account.',
   })
@@ -128,12 +137,23 @@ export class AdminMembersController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: GrantStaffRoleDto,
   ) {
-    return this.adminMembers.grantStaffRole(currentUser.userId, id, body.role);
+    return this.adminMembers.grantStaffRole(
+      currentUser.userId,
+      id,
+      body.role,
+      body.reason,
+    );
   }
 
+  // The role stays in the path; only the reason is new, and it rides in a body
+  // so it never lands in an access log or browser history the way a query
+  // string does. `RevokeStaffRoleDto` explains the choice; `@Delete` + `@Body`
+  // is already used elsewhere in this codebase.
   @ApiOperation({ summary: 'Revoke a staff role from a member.' })
   @ApiOkResponse({ description: "The member's updated staff roles." })
-  @ApiBadRequestResponse({ description: 'Unknown staff role.' })
+  @ApiBadRequestResponse({
+    description: 'Unknown staff role, or a missing or too-short reason.',
+  })
   @ApiForbiddenResponse({
     description: 'Requires the admin role, or the target is a house account.',
   })
@@ -143,11 +163,17 @@ export class AdminMembersController {
     @CurrentUser() currentUser: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('role') role: string,
+    @Body() body: RevokeStaffRoleDto,
   ) {
     if (!isStaffRoleId(role)) {
       throw new BadRequestException('Unknown staff role.');
     }
-    return this.adminMembers.revokeStaffRole(currentUser.userId, id, role);
+    return this.adminMembers.revokeStaffRole(
+      currentUser.userId,
+      id,
+      role,
+      body.reason,
+    );
   }
 
   // Resource-limits lever, not a moderation action — no self-change or

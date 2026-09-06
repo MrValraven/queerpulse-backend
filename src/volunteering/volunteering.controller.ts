@@ -16,8 +16,10 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateOpportunityDto } from './dto/create-opportunity.dto';
 import { CompleteSignupDto } from './dto/complete-signup.dto';
@@ -40,6 +42,29 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+// The class guard is `ActiveMemberGuard`, so everything here is member-only
+// unless a handler says otherwise with `@Public()`. TWO reads do: the
+// opportunity LIST and the opportunity DETAIL.
+//
+// `/about/volunteer` and each opportunity's detail page are deliberately
+// public in the frontend's `authGate.ts` — anyone can see what the platform
+// needs help with, and that is the whole acquisition argument for the page.
+// The data behind them therefore has to answer an anonymous caller too:
+// `ActiveMemberGuard` rejected before the handler ran, so every logged-out
+// visitor got a "could not load, retry" panel that retrying never fixed.
+//
+// `@Public()` is enough on its own: `ActiveMemberGuard` reads the same
+// `IS_PUBLIC_KEY` the global `JwtAuthGuard` does (see its constructor comment)
+// and steps aside per handler, so a class-level binding does NOT have to be
+// unpicked. The detail read additionally carries `OptionalJwtAuthGuard`
+// because it is the one read here that is caller-specific: `isPoster` and
+// `mySignup` need `req.user` populated when there IS a session, and left
+// undefined when there is not.
+//
+// Everything that WRITES — posting, editing, closing, signing up, withdrawing,
+// deciding on an applicant, confirming a session — and every read of a
+// caller's own data (`mine`, `me/contribution`, `:slug/signups`) stays behind
+// the class guard.
 @Feature('volunteering')
 @ApiTags('Volunteering')
 @ApiCookieAuth()
@@ -48,11 +73,16 @@ import {
 export class VolunteeringController {
   constructor(private readonly volunteeringService: VolunteeringService) {}
 
+  @Public()
   @Get()
-  @ApiOperation({ summary: 'List volunteering opportunities' })
-  @ApiOkResponse({ description: 'Opportunity cards matching the query.' })
-  @ApiUnauthorizedResponse({
-    description: 'Not an authenticated active member.',
+  @ApiOperation({
+    summary: 'List volunteering opportunities (unauthenticated)',
+  })
+  @ApiOkResponse({
+    description:
+      'Opportunity cards matching the query. `OpportunityCardDTO` carries ' +
+      'no caller-specific field, so the anonymous and member responses are ' +
+      'identical.',
   })
   list(@Query() query: ListOpportunitiesQuery) {
     return this.volunteeringService.list(query);
@@ -89,15 +119,29 @@ export class VolunteeringController {
     return this.volunteeringService.myContribution(user.userId);
   }
 
+  // Public, with best-effort auth. The two caller-specific flags on the
+  // detail (`isPoster`, `mySignup`) come back false for an anonymous reader
+  // rather than crashing or, worse, being computed against an undefined id —
+  // see `VolunteeringService.buildDetail`, which skips the signup lookup
+  // entirely when there is no viewer.
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':slug')
-  @ApiOperation({ summary: 'Get one volunteering opportunity by slug' })
-  @ApiOkResponse({ description: 'The opportunity detail.' })
-  @ApiNotFoundResponse({ description: 'No opportunity with that slug.' })
-  @ApiUnauthorizedResponse({
-    description: 'Not an authenticated active member.',
+  @ApiOperation({
+    summary: 'Get one volunteering opportunity by slug (unauthenticated)',
   })
-  get(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.volunteeringService.getBySlug(slug, user.userId);
+  @ApiOkResponse({
+    description:
+      'The opportunity detail. `isPoster` and `mySignup` are both false for ' +
+      'an anonymous caller.',
+  })
+  @ApiNotFoundResponse({ description: 'No opportunity with that slug.' })
+  get(
+    // Populated best-effort by `OptionalJwtAuthGuard`; undefined when anonymous.
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Param('slug') slug: string,
+  ) {
+    return this.volunteeringService.getBySlug(slug, user?.userId ?? null);
   }
 
   @Post()

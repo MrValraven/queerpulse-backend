@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import {
@@ -51,22 +52,42 @@ import {
  *  (moderators and admins). */
 const PLATFORM_STAFF_ROLES = [UserRole.Moderator, UserRole.Admin];
 
-// Read-only controller serving the structured data behind `/about/governance`.
-// Both endpoints follow the "structure in the DB, words in i18n" model: they
-// return content keys, numbers, and non-translatable data (names/initials),
-// and the frontend resolves the translated prose from its i18n catalogs.
+// Controller serving the structured data behind `/about/governance`, plus the
+// member-facing proposal and motion routes.
+//
+// The two page-structure reads follow the "structure in the DB, words in i18n"
+// model: they return content keys, numbers, and non-translatable data
+// (names/initials), and the frontend resolves the translated prose from its
+// i18n catalogs.
 //   • `GET /governance/overview` — the non-financial page structure (health
 //     snapshot, moderation steps, advisory council, principles, decision log).
 //   • `GET /governance/finances` — the quarterly financial-transparency
 //     snapshot (stats/income/expense/eventNotes) plus the reserve + partner
 //     disclosures rendered alongside it.
-
+//
+// BOTH of those are `@Public()`, for the reason `TransparencyController` gives
+// in its own header: a governance page the collective only shows its own
+// members is not a governance page. `/about/governance` is ungated in the
+// frontend's `authGate.ts`, so while these reads sat behind the class guard a
+// logged-out visitor got a "could not load, retry" panel where the health
+// snapshot, the moderation ladder and the quarterly accounts should have been.
+// Neither response carries anything caller-specific: the council seats and the
+// finance disclosures are published figures, and every string is an i18n key.
+//
+// `@Public()` on the handler is enough despite the class-level
+// `ActiveMemberGuard`: that guard reads the same `IS_PUBLIC_KEY` as the global
+// `JwtAuthGuard` and steps aside per handler, so the class binding remains the
+// default for everything else declared here.
+//
+// The proposal and motion routes below are NOT public and stay behind the
+// class guard. They are member deliberation, and a `council_removal` proposal
+// names the member whose seat is in question (`targetMember`); publishing that
+// to the open web is a different decision from publishing the accounts, and
+// not one this change makes. `@ApiUnauthorizedResponse` therefore moved from
+// the class down onto each of those handlers.
 @Feature('governance')
 @ApiTags('Governance')
 @ApiCookieAuth('access_token')
-@ApiUnauthorizedResponse({
-  description: 'Not authenticated as an active member.',
-})
 @Controller('governance')
 @UseGuards(ActiveMemberGuard)
 export class GovernanceController {
@@ -81,17 +102,23 @@ export class GovernanceController {
     private readonly users: Repository<User>,
   ) {}
 
+  @Public()
   @Get('overview')
-  @ApiOperation({ summary: 'Get the non-financial governance page structure' })
+  @ApiOperation({
+    summary:
+      'Get the non-financial governance page structure (unauthenticated)',
+  })
   @ApiOkResponse({ description: 'The governance overview snapshot.' })
   @ApiNotFoundResponse({ description: 'No governance overview is configured.' })
   getOverview() {
     return this.governanceOverviewService.getOverview();
   }
 
+  @Public()
   @Get('finances')
   @ApiOperation({
-    summary: 'Get the quarterly financial-transparency snapshot',
+    summary:
+      'Get the quarterly financial-transparency snapshot (unauthenticated)',
   })
   @ApiOkResponse({ description: 'The finance report for the quarter.' })
   @ApiNotFoundResponse({
@@ -108,6 +135,9 @@ export class GovernanceController {
   // `governance_votes`, modeled on `RoadmapController`'s vote routes.
 
   @Post('proposals')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin)
   @ApiOperation({ summary: 'Open a new governance proposal for a member vote' })
@@ -121,6 +151,9 @@ export class GovernanceController {
   }
 
   @Get('proposals')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @ApiOperation({
     summary: 'List every governance proposal, open and resolved',
   })
@@ -132,6 +165,9 @@ export class GovernanceController {
   }
 
   @Get('proposals/:id')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @ApiOperation({ summary: 'Get one governance proposal with its live tally' })
   @ApiOkResponse({
     description: 'The proposal, its tally, and the caller’s own vote.',
@@ -151,6 +187,9 @@ export class GovernanceController {
   // class-level `ActiveMemberGuard` alone would let them through), which is
   // exactly why this narrower guard is layered on top here.
   @Post('proposals/:id/vote')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Cast a for/against vote, or change it while voting is still open',
@@ -196,6 +235,9 @@ export class GovernanceController {
   // the class-level `ActiveMemberGuard` alone would let them file and sign.
 
   @Post('motions')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'File a member motion and start its co-signature drive',
@@ -221,6 +263,9 @@ export class GovernanceController {
   }
 
   @Post('proposals/:id/cosign')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Co-sign a member motion so it reaches staff screening',
@@ -249,6 +294,9 @@ export class GovernanceController {
   }
 
   @Delete('proposals/:id/cosign')
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @UseGuards(NotRestrictedGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Withdraw the caller’s co-signature from a motion' })

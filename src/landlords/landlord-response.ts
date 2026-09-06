@@ -34,16 +34,53 @@ function memberName(member: MemberRef | null): string {
   return `${member.firstName} ${member.lastName}`.trim();
 }
 
-/** Aggregate star rating: mean to one decimal + count. Mirrors `listings`
- * `ratingFromReviews`. */
-export function ratingFromRecommendations(recs: LandlordRecommendation[]): {
+/**
+ * The headline number on a landlord card, and what it is actually made of.
+ *
+ * PRD-249. `score` is the mean of self-attested, unverified member ratings of a
+ * named third party who has no account here. It is still computed and still
+ * shown, because a reader who has to open every recommendation to learn that
+ * four people said the same thing is worse served than one who is told. What
+ * changed is that it may never be presented as a BARE number: `attestedCount`
+ * is served alongside it precisely so no surface can print "4.5" without also
+ * being able to say how many of those ratings carry a tenancy attestation
+ * behind them, and every rendering of it is labelled self-reported.
+ *
+ * `attestedCount` is at most `count`, and is lower on any landlord with
+ * recommendations written before the attestation existed.
+ */
+export interface LandlordRatingDTO {
   score: string;
   count: number;
-} {
-  if (recs.length === 0) return { score: '0', count: 0 };
-  const total = recs.reduce((sum, rec) => sum + rec.stars, 0);
-  return { score: (total / recs.length).toFixed(1), count: recs.length };
+  /**
+   * How many of the `count` recommendations carry an author attestation that
+   * they rented from this landlord. Always `<= count`; the difference is the
+   * historic rows nobody was ever asked about.
+   */
+  attestedCount: number;
 }
+
+/** Aggregate star rating: mean to one decimal + count. Mirrors `listings`
+ * `ratingFromReviews`, plus the PRD-249 attested tally. */
+export function ratingFromRecommendations(
+  recs: LandlordRecommendation[],
+): LandlordRatingDTO {
+  if (recs.length === 0) return { score: '0', count: 0, attestedCount: 0 };
+  const total = recs.reduce((sum, rec) => sum + rec.stars, 0);
+  return {
+    score: (total / recs.length).toFixed(1),
+    count: recs.length,
+    attestedCount: recs.filter((rec) => rec.attestedAt !== null).length,
+  };
+}
+
+/** The empty rating, spelled once so no caller has to remember the third
+ *  field. */
+export const EMPTY_LANDLORD_RATING: LandlordRatingDTO = {
+  score: '0',
+  count: 0,
+  attestedCount: 0,
+};
 
 export interface LandlordCardDTO {
   slug: string;
@@ -54,12 +91,25 @@ export interface LandlordCardDTO {
   hood: string;
   note: string;
   tagline: string;
-  rating: { score: string; count: number };
+  rating: LandlordRatingDTO;
+  /**
+   * PRD-249. Always `true`, and served on every card and every detail read so
+   * no surface can render the rating without it in hand.
+   *
+   * A CONSTANT rather than a computed flag, deliberately. It is not a property
+   * of one landlord that could come out false on another: this entire directory
+   * rates real third parties who have no account here, from claims the platform
+   * cannot check. Serving it as a field rather than leaving it to each client
+   * to remember is what stops a new surface from quietly shipping a bare star
+   * count. It becomes something other than a constant on the day a rating here
+   * can be verified, which is not a day anyone has designed.
+   */
+  isRatingSelfReported: true;
 }
 
 export function toLandlordCardDTO(
   landlord: Landlord,
-  rating: { score: string; count: number },
+  rating: LandlordRatingDTO,
 ): LandlordCardDTO {
   return {
     slug: landlord.slug,
@@ -71,6 +121,9 @@ export function toLandlordCardDTO(
     note: landlord.note,
     tagline: landlord.tagline,
     rating,
+    // PRD-249. Never omitted, on any card, so no client can render the score
+    // above without the label that qualifies it.
+    isRatingSelfReported: true,
   };
 }
 
@@ -108,6 +161,60 @@ export interface RecommendationDTO {
   stars: number;
   text: string;
   createdAt: string;
+  /**
+   * PRD-249. Always `true`, on every recommendation, historic ones included.
+   *
+   * A CONSTANT, exactly like `LandlordCardDTO.isRatingSelfReported`, and served
+   * as a field for the same reason: so a client cannot render one of these
+   * without the label in hand. What varies row to row is `attestation` below,
+   * which says whether the author was ever asked to back the claim up. What
+   * never varies is that nothing on this platform has checked it.
+   */
+  isSelfAttested: true;
+  /**
+   * The author's own claim that they rented from this landlord, and roughly
+   * when. `null` on a recommendation written before the platform asked, which
+   * is a weaker row than an attested one and reads as such on the page.
+   */
+  attestation: RecommendationAttestationDTO | null;
+  /**
+   * The named landlord's published answer to this recommendation, or `null`
+   * when there is none. Transcribed and published by staff, because a landlord
+   * here has no account. See `LandlordsService.publishLandlordReply`.
+   */
+  landlordReply: LandlordReplyDTO | null;
+}
+
+/**
+ * What the author attested to, and nothing more. There is no `verifiedBy`,
+ * no `proof` and no `source` field here, and there must never be one until
+ * something on this platform actually checks a tenancy.
+ */
+export interface RecommendationAttestationDTO {
+  /** `YYYY-MM`. Month precision: see `tenancy-month.ts`. */
+  tenancyStartedOn: string;
+  /** `YYYY-MM`, or `null` when the author says they still rent from them. */
+  tenancyEndedOn: string | null;
+  /** When the attestation was made (which is when the recommendation was last
+   *  written). */
+  attestedAt: string;
+}
+
+/**
+ * One published landlord reply. `publishedByStaff` is always `true` and is
+ * there to be rendered: a reader has to be able to tell that these words
+ * reached the page through a staff member rather than from an account the
+ * landlord holds, because the landlord holds none.
+ *
+ * The publishing admin's user id is deliberately NOT here. It is on the row for
+ * the audit trail and belongs behind the staff guard, and naming an individual
+ * moderator beside a public reply about a housing dispute puts a target on
+ * them.
+ */
+export interface LandlordReplyDTO {
+  text: string;
+  publishedAt: string;
+  publishedByStaff: true;
 }
 
 export function toRecommendationDTO(
@@ -129,6 +236,43 @@ export function toRecommendationDTO(
     stars: rec.stars,
     text: rec.text,
     createdAt: rec.createdAt.toISOString(),
+    isSelfAttested: true,
+    attestation: toAttestationDTO(rec),
+    landlordReply: toLandlordReplyDTO(rec),
+  };
+}
+
+/**
+ * The attestation block, or `null` for a row written before the platform asked.
+ *
+ * `attestedAt` is the discriminator, and `tenancyStartedOn` is checked
+ * alongside it rather than assumed: a row can only carry one without the other
+ * through a hand-written database edit, and the honest answer to a half-written
+ * attestation is "there is no attestation on this one", never a window with a
+ * missing end.
+ */
+function toAttestationDTO(
+  rec: LandlordRecommendation,
+): RecommendationAttestationDTO | null {
+  if (!rec.attestedAt || !rec.tenancyStartedOn) return null;
+  return {
+    tenancyStartedOn: rec.tenancyStartedOn,
+    tenancyEndedOn: rec.tenancyEndedOn,
+    attestedAt: rec.attestedAt.toISOString(),
+  };
+}
+
+/** The published landlord reply, or `null`. Both columns are required for a
+ *  reply to exist: text with no timestamp is a half-written row, and the page
+ *  needs the date to say when the answer came. */
+function toLandlordReplyDTO(
+  rec: LandlordRecommendation,
+): LandlordReplyDTO | null {
+  if (!rec.landlordReplyText || !rec.landlordReplyPublishedAt) return null;
+  return {
+    text: rec.landlordReplyText,
+    publishedAt: rec.landlordReplyPublishedAt.toISOString(),
+    publishedByStaff: true,
   };
 }
 
@@ -144,6 +288,17 @@ export function toRecommendationDTO(
  */
 export interface AdminRecommendationDTO extends RecommendationDTO {
   moderation: RecommendationModerationDTO;
+  /**
+   * PRD-249. The staff `users.id` who published the landlord's reply on this
+   * recommendation, `null` when there is no reply.
+   *
+   * STAFF-ONLY, which is why it is here and deliberately absent from
+   * `LandlordReplyDTO`. Publishing a named third party's words about a housing
+   * dispute is an act somebody has to be answerable for, so the audit key is
+   * kept; naming the individual moderator to every member reading the page
+   * would point a dispute at them personally.
+   */
+  landlordReplyPublishedBy: string | null;
 }
 
 /**
@@ -169,6 +324,7 @@ export function toAdminRecommendationDTO(
   return {
     ...toRecommendationDTO(rec, member, verificationLevel),
     moderation,
+    landlordReplyPublishedBy: rec.landlordReplyPublishedBy,
   };
 }
 
@@ -183,7 +339,7 @@ export interface LandlordDetailDTO extends LandlordCardDTO {
 export function toLandlordDetailDTO(
   landlord: Landlord,
   recommendations: RecommendationDTO[],
-  rating: { score: string; count: number },
+  rating: LandlordRatingDTO,
 ): LandlordDetailDTO {
   return {
     ...toLandlordCardDTO(landlord, rating),
@@ -220,7 +376,7 @@ export interface AdminLandlordDTO extends LandlordCardDTO {
 
 export function toAdminLandlordDTO(
   landlord: Landlord,
-  rating: { score: string; count: number },
+  rating: LandlordRatingDTO,
   submittedBy: MemberRef | null,
 ): AdminLandlordDTO {
   return {

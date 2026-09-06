@@ -213,6 +213,13 @@ export class AdminResourcesService {
     resource.lastReviewedOn = dto.lastReviewedOn ?? todayIsoDate();
     resource.reviewedBy = dto.reviewedBy.trim();
     if (dto.reviewDueOn !== undefined) resource.reviewDueOn = dto.reviewDueOn;
+    // PRD-270. The review debt this guide was announced for is now settled,
+    // so clear the "staff have been told" stamp and let
+    // `ResourceReviewSweeperService` announce the NEXT lapse. Cleared here
+    // rather than relying on the sweep's `reviewDueOn > reviewOverdueNotifiedOn`
+    // comparison alone, which would stay silent for a guide re-reviewed with
+    // a due date earlier than the day the last reminder went out.
+    resource.reviewOverdueNotifiedOn = null;
     resource.updatedBy = adminUserId;
     return toAdminResourceResponse(await this.resources.save(resource));
   }

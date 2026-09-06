@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { gatheringPath } from '../events/event-paths';
 
 /** RFC 5545 text escaping: backslash, semicolon, comma, then newlines —
  *  mirrors the FE's own `escapeText` (`myEvents.ics.ts`) so both ICS
@@ -135,7 +136,10 @@ export class CalendarFeedService {
       if (location) lines.push(`LOCATION:${escapeText(location)}`);
       if (frontendUrl) {
         // Mirrors the reminder push's own deep link (`event-reminders.service.ts`).
-        lines.push(`URL:${frontendUrl}/events/${event.slug}`);
+        // `/gatherings/<slug>`, never `/events/<slug>`: the latter is not a route,
+        // so this line used to 404 whoever opened the entry from Google or Apple
+        // Calendar (PRD-180).
+        lines.push(`URL:${frontendUrl}${gatheringPath(event.slug)}`);
       }
       lines.push('END:VEVENT');
     }

@@ -1,4 +1,4 @@
-import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
 
@@ -134,7 +134,11 @@ export function toConnectionListItem(
       slug: otherProfile?.slug ?? '',
       firstName: otherProfile?.firstName ?? '',
       lastName: otherProfile?.lastName ?? '',
-      avatarUrl: toImageUrl(otherProfile?.avatarUrl),
+      // Both faces on this card go through the shared `photoVisible` gate. A
+      // connection is a relationship, and it is not consent to a photo the
+      // member has since switched off; the introducer never consented to this
+      // card at all, they only made a mutual introduction.
+      avatarUrl: toVisibleAvatarUrl(otherProfile),
       pronouns: otherProfile?.pronouns ?? null,
       tagline: otherProfile?.tagline ?? null,
     },
@@ -145,7 +149,7 @@ export function toConnectionListItem(
           slug: introducerProfile.slug,
           firstName: introducerProfile.firstName,
           lastName: introducerProfile.lastName,
-          avatarUrl: toImageUrl(introducerProfile.avatarUrl),
+          avatarUrl: toVisibleAvatarUrl(introducerProfile),
           pronouns: introducerProfile.pronouns ?? null,
           tagline: introducerProfile.tagline ?? null,
         }

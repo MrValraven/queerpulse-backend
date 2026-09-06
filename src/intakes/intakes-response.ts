@@ -87,6 +87,49 @@ export function toIntakeSubmitterDTO(
 export interface IntakeAckDTO {
   id: string;
   status: IntakeStatus;
+  /**
+   * PRD-261. The plaintext reference code for a `governance_concern`, present
+   * ONLY in this response and never again: the column holds its sha256 hash
+   * and QueerPulse delivers no email, so this field is the entire delivery
+   * mechanism. Absent for the eleven other intake kinds, which have no
+   * submitter-facing status lookup.
+   */
+  statusToken?: string;
+  /** ISO 8601. When the submission was recorded, so the confirmation screen
+   *  and the status page can both date it without a second read. */
+  submittedAt: string;
+}
+
+/**
+ * PRD-261. What a concern submitter is allowed to see with nothing but their
+ * reference code: where their own concern stands, and when.
+ *
+ * DELIBERATELY THREE FIELDS. The code is a bearer credential on a public read,
+ * so this shape is the blast radius of a leaked or shoulder-surfed code. It
+ * carries no id (nothing to enumerate), no category, no description, no
+ * submitter email, no reviewer name and no staff note — none of which the
+ * person holding the code needs in order to learn that their concern is being
+ * looked at, was resolved, or was closed without action. Everything they wrote
+ * is already theirs; everything staff wrote is not theirs to read here.
+ */
+export interface ConcernStatusDTO {
+  status: IntakeStatus;
+  /** ISO 8601 — when the concern was submitted. */
+  submittedAt: string;
+  /** ISO 8601 — when staff last moved it; null while it is still untouched. */
+  updatedAt: string | null;
+}
+
+export function toConcernStatusDTO(
+  submission: IntakeSubmission,
+): ConcernStatusDTO {
+  return {
+    status: submission.status,
+    submittedAt: submission.createdAt.toISOString(),
+    updatedAt: submission.reviewedAt
+      ? submission.reviewedAt.toISOString()
+      : null,
+  };
 }
 
 /** Map a resolved member reference to the compact reviewer shape. */
@@ -131,6 +174,18 @@ export function toIntakeSubmissionDTO(
   };
 }
 
-export function toIntakeAckDTO(submission: IntakeSubmission): IntakeAckDTO {
-  return { id: submission.id, status: submission.status };
+/**
+ * `statusToken` is passed in rather than read off the row, because the row
+ * only ever holds its hash. Undefined for every kind that mints no code.
+ */
+export function toIntakeAckDTO(
+  submission: IntakeSubmission,
+  statusToken?: string,
+): IntakeAckDTO {
+  return {
+    id: submission.id,
+    status: submission.status,
+    ...(statusToken ? { statusToken } : {}),
+    submittedAt: submission.createdAt.toISOString(),
+  };
 }

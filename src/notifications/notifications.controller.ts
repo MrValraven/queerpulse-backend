@@ -1,5 +1,6 @@
 import {
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -73,5 +74,24 @@ export class NotificationsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.notificationsService.markRead(id, user.userId);
+  }
+
+  /**
+   * PRD-224. Clear one row from the caller's own bell. Scoped to
+   * `{ id, userId }` in the service, so a row belonging to anybody else is a
+   * 404 and nobody can dismiss someone else's notification.
+   */
+  @Delete(':id')
+  @ApiOperation({ summary: 'Dismiss a single notification' })
+  @ApiOkResponse({ description: 'The notification was dismissed.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiNotFoundResponse({
+    description: 'The notification does not exist, or is not yours.',
+  })
+  dismiss(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.notificationsService.dismiss(id, user.userId);
   }
 }

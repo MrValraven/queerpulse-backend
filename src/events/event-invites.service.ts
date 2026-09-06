@@ -129,12 +129,27 @@ export class EventInvitesService {
     ]);
     const eventsById = new Map(events.map((e) => [e.id, e]));
     const profilesByUserId = new Map(profiles.map((p) => [p.userId, p]));
-    return invites.map((invite) =>
-      toPendingEventInviteView(
-        invite,
-        eventsById.get(invite.eventId) ?? null,
-        profilesByUserId.get(invite.inviterId),
-      ),
+    return (
+      invites
+        // A cancelled gathering's invite is not a decision anyone still has to
+        // make (PRD-185). It used to stay in the list looking answerable: the
+        // invitee was never told the gathering was off, accepting it was not
+        // refused, and the follow-up RSVP then failed with a 400 they had no
+        // way to read. `EventsService.cancel` now notifies pending invitees;
+        // this stops the stale row from sitting in their list either way.
+        // An invite whose event row has gone entirely is dropped for the same
+        // reason — there is nothing left to accept.
+        .filter((invite) => {
+          const event = eventsById.get(invite.eventId);
+          return event !== undefined && event.status !== EventStatus.Cancelled;
+        })
+        .map((invite) =>
+          toPendingEventInviteView(
+            invite,
+            eventsById.get(invite.eventId) ?? null,
+            profilesByUserId.get(invite.inviterId),
+          ),
+        )
     );
   }
 
@@ -152,6 +167,20 @@ export class EventInvitesService {
     }
     if (invite.status !== EventInviteStatus.Pending) {
       throw new ConflictException('This invite has already been answered');
+    }
+    // Accepting a cancelled gathering is not a thing that can happen (PRD-185).
+    // It used to be allowed: the invite flipped to `accepted`, the client then
+    // called RSVP, and the RSVP answered 400 "Event is not open for RSVPs" —
+    // an error about a state nothing had told the invitee about. Refused here,
+    // in words that name the actual reason. DECLINING stays allowed: clearing
+    // a dead invite off your own list is always yours to do.
+    if (action === 'accept') {
+      const event = await this.events.findOne({
+        where: { id: invite.eventId },
+      });
+      if (!event || event.status === EventStatus.Cancelled) {
+        throw new ConflictException('This gathering has been cancelled');
+      }
     }
     invite.status =
       action === 'accept'

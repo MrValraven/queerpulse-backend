@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -15,7 +16,10 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { Profile } from '../users/entities/profile.entity';
 import { UpdateAuthorDto } from './dto/update-author.dto';
-import { validateDeckSlides } from './deck-slides.validation';
+import {
+  isDeckPublishReady,
+  validateDeckSlides,
+} from './deck-slides.validation';
 import { CreateDeckDto } from './dto/create-deck.dto';
 import { UpdateDeckDto } from './dto/update-deck.dto';
 import {
@@ -40,6 +44,7 @@ import {
   DeckListItemResponse,
   DeckResponse,
   IssueResponse,
+  OpenIssueResponse,
   SectionResponse,
   toArticleListItem,
   toArticleResponse,
@@ -48,6 +53,7 @@ import {
   toDeckListItem,
   toDeckResponse,
   toIssueResponse,
+  toOpenIssueResponse,
   toSectionResponse,
 } from './magazine-response';
 
@@ -72,6 +78,18 @@ export interface ListArticlesInput {
 export interface ListDecksInput {
   tag?: string;
   page?: number;
+}
+
+/**
+ * PRD-131 — `GET /magazine/admin/decks/:id/issue-link`. What the deck
+ * editor's "With issue" publish timing resolves to: the desk piece that owns
+ * this deck and the issue that piece is filed under, each `null` when the
+ * link does not exist yet. Hand-mapped like every other magazine response.
+ */
+export interface DeckIssueLinkResponse {
+  pieceId: string | null;
+  issueNumber: string | null;
+  issueTitle: string | null;
 }
 
 /**
@@ -101,6 +119,13 @@ export class MagazineService {
     // profile slug/name/avatar the author reads expose.
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    // ENG-112 — deck deletion has to know whether a desk piece still points
+    // at the deck (`magazine_piece.deck_id` is a plain uuid column with no
+    // FK, so nothing at the database level stops a hard delete from
+    // orphaning the piece), and the deck editor's "With issue" affordance
+    // has to resolve the deck's issue through that same link.
+    @InjectRepository(MagazinePiece)
+    private readonly pieces: Repository<MagazinePiece>,
     // Batched crop lookup (`MediaCropService.getMany`) for an issue's
     // `coverUrl` sibling `crop`.
     private readonly mediaCropService: MediaCropService,
@@ -182,6 +207,41 @@ export class MagazineService {
     return toIssueResponse(issue, crops);
   }
 
+  /**
+   * PRD-106 — the issue currently open for submissions, or `null` when the
+   * desk has nothing open. Consume with `apiGetNullable` on the FE.
+   *
+   * Derived, never configured: it is the next issue that has NOT published
+   * yet, which is the same set `listIssues` above excludes. Dated ones come
+   * first, soonest first; an issue with no date yet (a number the desk has
+   * opened but not scheduled) sorts last and is still a real answer, because
+   * that is genuinely where a pitch sent today would land.
+   *
+   * This is the ONE public read that reaches past the CON-18 embargo, so it
+   * is scoped hard: `toOpenIssueResponse` maps four fields, and the cover,
+   * dek, theme, coverlines, running order and digest all stay behind the
+   * desk's staff-guarded routes. A member pitching a story learns which
+   * number is open and when it closes, and nothing else about it.
+   */
+  async getOpenIssue(): Promise<OpenIssueResponse | null> {
+    const issue = await this.issues
+      .createQueryBuilder('issue')
+      .select([
+        'issue.number',
+        'issue.title',
+        'issue.publishedOn',
+        'issue.submissionDeadline',
+      ])
+      .where('(issue.published_on IS NULL OR issue.published_on > :today)', {
+        today: this.todayIsoDate(),
+      })
+      .orderBy('issue.published_on', 'ASC', 'NULLS LAST')
+      .addOrderBy('issue.number', 'ASC')
+      .limit(1)
+      .getOne();
+    return issue ? toOpenIssueResponse(issue) : null;
+  }
+
   async listArticles(
     query: ListArticlesInput,
   ): Promise<Paginated<ArticleListItem>> {
@@ -206,6 +266,12 @@ export class MagazineService {
         'article.slug',
         'article.title',
         'article.dek',
+        // PRD-102 — the desk's own kicker and section. Without them the reader
+        // adapter derived a kicker from the issue label and a section from
+        // `tags[0]`, so a card printed "Issue 09" where the editor wrote a
+        // kicker and a tag where the section belongs.
+        'article.kicker',
+        'article.section',
         'article.tags',
         'article.readMinutes',
         'article.publishedAt',
@@ -353,6 +419,12 @@ export class MagazineService {
         'article.slug',
         'article.title',
         'article.dek',
+        // PRD-102, and the reason this list must stay identical to the one
+        // above: a substituted translation maps through `toListItems` too, so
+        // dropping either column here would print a derived kicker on exactly
+        // the rows a Portuguese reader sees.
+        'article.kicker',
+        'article.section',
         'article.tags',
         'article.readMinutes',
         'article.publishedAt',
@@ -565,8 +637,43 @@ export class MagazineService {
       .getMany();
   }
 
+  /**
+   * PRD-111 — the public authors DIRECTORY, and only bylines a reader can
+   * actually read something by.
+   *
+   * `magazine_author` rows are created by the desk, not by publication:
+   * `MagazinePieceService.resolveAuthorId` mints one the first time a draft
+   * article is opened for a byline. Listing every row therefore advertised
+   * commissioned-but-unpublished writers, each card reading "0 pieces" and
+   * each author page saying they have not published yet. The row still gets
+   * created at draft time (the desk needs it) and `getAuthorBySlug` still
+   * serves it, so a direct link, a member's own "Writing" surface and an
+   * article byline all keep working. It just stops being ADVERTISED here.
+   *
+   * The gate is an EXISTS subquery rather than a join, deliberately: a join
+   * would put a second table in the FROM list under an ORDER BY on
+   * `author.name`, which is the shape this repo's pagination trap lives in.
+   * There is no pagination on this read at all, and an EXISTS keeps it that
+   * way: one row per author, ordered by the author's own column.
+   */
   async listAuthors(): Promise<AuthorResponse[]> {
-    const rows = await this.authors.find({ order: { name: 'ASC' } });
+    const rows = await this.authors
+      .createQueryBuilder('author')
+      .where(
+        `EXISTS (
+           SELECT 1
+             FROM magazine_article article
+            WHERE article.author_id = author.id
+              AND article.published_at IS NOT NULL
+              AND article.published_at <= :now
+         )`,
+        { now: new Date() },
+      )
+      .orderBy('author.name', 'ASC')
+      .getMany();
+    if (rows.length === 0) {
+      return [];
+    }
     // TWO batched lookups for the whole directory (member links, piece
     // counts), never one pair per card.
     const [links, counts] = await Promise.all([
@@ -970,14 +1077,28 @@ export class MagazineService {
       deck.slides = incomingSlides;
     }
 
-    if (dto.published !== undefined) {
-      // Re-publishing an already-published deck keeps its original
-      // `publishedAt` (first-publish date); only a null -> true transition
-      // stamps "now". Unpublishing always clears it.
-      deck.publishedAt = dto.published
-        ? (deck.publishedAt ?? new Date())
-        : null;
+    // PRD-131 — resolve the publish instant from whichever of the two
+    // controls the caller sent, then gate the transition. `publishedAt` wins
+    // over `published` because it can express something the boolean cannot
+    // (a future instant, which schedules the deck: the public reads already
+    // filter on `published_at <= now`, so no separate column is needed).
+    // Both omitted leaves the current state alone.
+    const nextPublishedAt = this.resolveDeckPublishedAt(deck, dto);
+
+    // The readiness bar, re-checked server-side (PRD-131). It mirrors the
+    // REQUIRED items of the editor's own checklist (see `isDeckPublishReady`),
+    // so a direct request cannot do what the UI refuses to: publish an empty
+    // deck, or one with an image slide missing its alt text. Checked against
+    // the slides this request will STORE, so a payload that both fills the
+    // gap and publishes in one PATCH passes. Only a draft -> live/scheduled
+    // transition is gated; pulling a live deck back down never is.
+    const isGoingLive = nextPublishedAt !== null && deck.publishedAt === null;
+    if (isGoingLive && !isDeckPublishReady(deck.slides)) {
+      throw new BadRequestException(
+        'Deck is not ready to publish: at least one slide and alt text on every image slide are required.',
+      );
     }
+    deck.publishedAt = nextPublishedAt;
 
     Object.assign(deck, {
       ...(dto.slug !== undefined ? { slug: dto.slug } : {}),
@@ -998,11 +1119,116 @@ export class MagazineService {
     return toDeckResponse(deck);
   }
 
+  /**
+   * The `publishedAt` a PATCH leaves the deck with, from whichever publish
+   * control it carried (PRD-131).
+   *
+   * - `publishedAt: <iso>` publishes at exactly that instant, past or
+   *   future. A future one schedules the deck, since `listDecks` and
+   *   `getDeckBySlug` both already require `published_at <= now`.
+   * - `publishedAt: null` pulls it back to draft.
+   * - `published: true` publishes now, keeping an already-published deck's
+   *   original first-publish date; `published: false` pulls it back to draft.
+   * - Neither field sent leaves the stored value untouched.
+   */
+  private resolveDeckPublishedAt(
+    deck: MagazineDeck,
+    dto: UpdateDeckDto,
+  ): Date | null {
+    if (dto.publishedAt !== undefined) {
+      return dto.publishedAt === null ? null : new Date(dto.publishedAt);
+    }
+    if (dto.published !== undefined) {
+      return dto.published ? (deck.publishedAt ?? new Date()) : null;
+    }
+    return deck.publishedAt;
+  }
+
+  /**
+   * ENG-112 — deck deletion, brought in line with
+   * `MagazinePieceService.deletePiece`, which refused exactly the cases this
+   * used to wave through.
+   *
+   * Two refusals, both 409:
+   *
+   * 1. A PUBLISHED deck. One confirm used to make live reader-facing content
+   *    disappear with no take-down step in between. Unpublishing first is one
+   *    click in the same editor and keeps the destructive act explicit,
+   *    which is the same trade `deletePiece` makes.
+   * 2. A deck a desk PIECE still points at. `magazine_piece.deck_id` carries
+   *    no foreign key, so the delete succeeded and left the piece pointing at
+   *    a row that no longer exists: the piece record's "Open the draft" then
+   *    linked to `?id=<deleted>`. The piece owns the deck's lifecycle, so the
+   *    delete belongs there (`deletePiece` removes both in one transaction).
+   *
+   * What is left is what this endpoint was always for: a standalone deck the
+   * editor created here and no longer wants.
+   */
   async deleteDeck(id: string): Promise<void> {
-    const res = await this.decks.delete(id);
-    if (res.affected === 0) {
+    const deck = await this.decks.findOne({ where: { id } });
+    if (!deck) {
       throw new NotFoundException('Deck not found');
     }
+    if (deck.publishedAt !== null) {
+      throw new ConflictException(
+        'This deck is published. Unpublish it before deleting it.',
+      );
+    }
+    const linkedPiece = await this.pieces.findOne({
+      where: { deckId: id },
+      select: { id: true },
+    });
+    if (linkedPiece) {
+      throw new ConflictException(
+        'This deck belongs to a desk piece. Delete the piece instead, which removes the deck with it.',
+      );
+    }
+    await this.decks.delete(id);
+  }
+
+  /**
+   * PRD-131 — what the deck editor's "With issue" publish option resolves to
+   * for this deck: the issue whose ship will publish it, or `null` when no
+   * piece links the deck to an issue yet.
+   *
+   * `MagazinePieceService.shipIssue` publishes the deck of every past-gate
+   * piece filed under the issue, so "With issue" is already real underneath;
+   * this read is what lets the rail name the issue instead of showing a
+   * promise it cannot check. A deck with no issue gets `null`, and the rail
+   * says so rather than offering a timing that will never arrive.
+   *
+   * Deliberately its own small response rather than a field on
+   * `DeckResponse`: it is desk-only, it costs two extra lookups, and every
+   * public deck read shares that mapper.
+   */
+  async getDeckIssueLink(deckId: string): Promise<DeckIssueLinkResponse> {
+    const deck = await this.decks.findOne({
+      where: { id: deckId },
+      select: { id: true },
+    });
+    if (!deck) {
+      throw new NotFoundException('Deck not found');
+    }
+    const piece = await this.pieces.findOne({
+      where: { deckId },
+      select: { id: true, issueId: true },
+    });
+    if (!piece || piece.issueId === null) {
+      return {
+        pieceId: piece?.id ?? null,
+        issueNumber: null,
+        issueTitle: null,
+      };
+    }
+    const issue = await this.issues.findOne({
+      where: { id: piece.issueId },
+      select: { number: true, title: true },
+    });
+    return {
+      pieceId: piece.id,
+      issueNumber: issue?.number ?? null,
+      issueTitle: issue?.title ?? null,
+    };
   }
 
   // --- internals ---

@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -30,6 +32,7 @@ import { StorySubmissionsService } from './story-submissions.service';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
@@ -65,6 +68,28 @@ export class MagazineController {
   })
   listIssues() {
     return this.magazineService.listIssues();
+  }
+
+  // Declared BEFORE `issues/:number`: Nest matches routes in declaration
+  // order, so "open" would otherwise be swallowed as an issue number and 404.
+  @Get('issues/open')
+  @ApiOperation({
+    summary: 'The issue currently open for submissions, or null',
+  })
+  @ApiOkResponse({
+    description:
+      'PRD-106: the next issue that has not published yet (soonest date ' +
+      'first, an unscheduled number last), carrying only its display ' +
+      'number, title, publish date and submission deadline. `null` when the ' +
+      'desk has no open issue; `submissionDeadline` is `null` until an ' +
+      'editor sets one, and the submit-story form prints no deadline line ' +
+      'in that case rather than quoting a date nobody agreed to.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  getOpenIssue() {
+    return this.magazineService.getOpenIssue();
   }
 
   @Get('issues/:number')
@@ -145,8 +170,14 @@ export class MagazineController {
   }
 
   @Get('authors')
-  @ApiOperation({ summary: 'List magazine authors' })
-  @ApiOkResponse({ description: 'All authors.' })
+  @ApiOperation({ summary: 'List magazine authors with published work' })
+  @ApiOkResponse({
+    description:
+      'PRD-111: bylines carrying at least one published, already-due piece. ' +
+      'A byline the desk minted when a draft was opened is reachable by ' +
+      'direct link through `GET /magazine/authors/:slug`, but the directory ' +
+      'no longer advertises it with a "0 pieces" card.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -235,6 +266,44 @@ export class MagazineController {
   })
   listMySubmissions(@CurrentUser() user: CurrentUserData) {
     return this.storySubmissionsService.listMine(user.userId);
+  }
+
+  // Declared AFTER `submissions/mine` for the same reason `issues/current` sits
+  // ahead of `issues/:number`: Nest matches in declaration order, and `:id` here
+  // is `ParseUUIDPipe`-narrowed anyway, so "mine" could never be mistaken for
+  // one.
+  //
+  // This route lives on the MEMBER controller (`ActiveMemberGuard` alone), not
+  // on the magazine-writer workspace. A story submission is a plain member's
+  // row; `magazine_pitch` is the editor inbox's separate resource in a separate
+  // id space, and a member never has one.
+  @Post('submissions/:id/withdraw')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Withdraw one of the current member's own undecided story submissions",
+  })
+  @ApiOkResponse({
+    description:
+      'The withdrawn submission. It stops appearing in `GET /magazine/submissions/mine` ' +
+      'and in the desk queue; the row itself is kept.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed submission id.' })
+  @ApiNotFoundResponse({
+    description: 'No submission with that id belongs to this member.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The desk has already answered this story, so it can no longer be withdrawn.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  withdrawMySubmission(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.storySubmissionsService.withdrawMine(user.userId, id);
   }
 
   @Get('articles/:slug/comments')

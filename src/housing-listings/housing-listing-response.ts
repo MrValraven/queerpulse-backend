@@ -86,6 +86,11 @@ export interface HousingListingDTO {
   timezone: string;
   area: string;
   rentEuros: number;
+  /**
+   * Up-front deposit in whole euros, or null when the lister stated none.
+   * Null is UNKNOWN: render it as "not stated" rather than as no deposit.
+   */
+  depositEuros: number | null;
   /** Bedroom count (0 = studio), or null when the lister didn't set it. */
   bedrooms: number | null;
   billsIncluded: boolean;
@@ -124,6 +129,26 @@ export interface HousingListingDTO {
   preciseLongitude: number | null;
   addressLine: string | null;
   locationPrecision: 'area' | 'exact';
+  /**
+   * Whether THIS VIEWER has passed the address-privacy gate: they own the
+   * listing, they are mutually connected with the lister, or the lister
+   * accepted their viewing request.
+   *
+   * Separate from `locationPrecision` because the two answer different
+   * questions, and the client needs both. `locationPrecision` says what the
+   * client is HOLDING; this says what the viewer is ENTITLED to. Their
+   * disagreement is a real and common third state: an unlocked viewer looking
+   * at a listing whose lister never put an address on file gets
+   * `locationPrecision: 'area'` with `isLocationUnlocked: true`. Without this
+   * field a client cannot tell that case apart from a stranger's read, and
+   * every one of them showed the same "the exact address appears once you and
+   * the person are connected" note, re-making a promise to somebody who had
+   * already satisfied it and blaming them for the lister's blank field.
+   *
+   * Safe to disclose: it tells the viewer only about their own standing with
+   * the lister, which they already know, and says nothing about the listing.
+   */
+  isLocationUnlocked: boolean;
 }
 
 /**
@@ -199,6 +224,7 @@ export function toHousingListingDTO(
     timezone: HOUSING_TIMEZONE,
     area: listing.area,
     rentEuros: listing.rentEuros,
+    depositEuros: listing.depositEuros,
     bedrooms: listing.bedrooms,
     billsIncluded: listing.billsIncluded,
     lgbtqFriendly: listing.lgbtqFriendly,
@@ -222,6 +248,7 @@ export function toHousingListingDTO(
     preciseLongitude: hasExact ? listing.longitude : null,
     addressLine: precise ? listing.addressLine : null,
     locationPrecision: hasExact ? 'exact' : 'area',
+    isLocationUnlocked: precise,
   };
 }
 

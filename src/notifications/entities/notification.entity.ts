@@ -94,6 +94,35 @@ export enum NotificationType {
   // block/mute filtering applies like any member-driven type. See migration
   // `AddMagazinePieceMessageNotificationType1787300100000`.
   MagazinePieceMessage = 'magazine_piece_message',
+  /**
+   * PRD-121. Sent to a WRITER when an editor commissions a piece to them, or
+   * moves an existing piece onto them. Before this the desk told the writer
+   * nothing: commissioning, assigning and every stage change were silent, and
+   * a writer learned they had been given a piece only by opening
+   * `/magazine/writer` on a hunch.
+   *
+   * Carries the acting editor as the actor (`actorId`), like
+   * `MagazinePieceMessage`, so block/mute filtering applies. Never sent to
+   * yourself: an editor who commissions a piece to themselves (the desk's
+   * "I write this one", `writerId === editorId`) gets no row.
+   *
+   * See migration `AddMagazinePieceWriterNotificationTypes1806200000000`.
+   */
+  MagazinePieceCommissioned = 'magazine_piece_commissioned',
+  /**
+   * PRD-121. Sent to a piece's writer when an editor moves it to a new stage,
+   * so "your piece is in edit" reaches the person waiting on it. Same actor
+   * and same self-action rule as `MagazinePieceCommissioned`.
+   */
+  MagazinePieceStageChanged = 'magazine_piece_stage_changed',
+  /**
+   * PRD-121. Sent to a piece's writer the moment their article or deck
+   * actually goes live to readers, carrying the reader path so the bell can
+   * deep-link straight to the published piece. A SCHEDULE (a publish instant
+   * in the future) sends nothing: the notification fires on the transition to
+   * live, never on the transition to "pending".
+   */
+  MagazinePiecePublished = 'magazine_piece_published',
   // Sent to a safe space's listing OWNER when a member vouches for their space
   // (`SafeSpaceVouchesService.createVouch`) — before this, a safe-space vouch
   // notified no one. Carries the voucher (`voucherId`) as the actor so
@@ -361,6 +390,67 @@ export enum NotificationType {
   // moderator applied it; the payload carries the community name plus the
   // moderator's `reason` where one was given.
   CommunityBanned = 'community_banned',
+  /**
+   * PRD-147. Sent to the AUTHOR of a post or reply that a community's owner,
+   * co-owner or moderator has taken down. Appended to
+   * `notifications_type_enum` by migration
+   * `AddCommunityPostRemovedNotificationType1799010000000`.
+   *
+   * Only a MODERATOR takedown writes one. An author deleting their own post
+   * sends nothing: nobody needs telling what they just did. Before this, both
+   * cases looked identical from the outside, so somebody whose post was
+   * removed found a tombstone and could not tell whether they had broken a
+   * rule, which one, or whether anything had been decided about them at all.
+   * Unexplained removals are what make a later bar feel arbitrary.
+   *
+   * `reason` is MODERATOR-AUTHORED PROSE WRITTEN FOR THIS MEMBER TO READ, the
+   * same class of value `CommunityBanned.reason` already forwards and the same
+   * 500-character column posture. `ruleText`/`ruleIndex`/`ruleVersion` are the
+   * cited house rule snapshotted at the moment of the action, exactly as a ban
+   * carries it. The removed content's own body is NOT in the payload and never
+   * may be: the author is the one person who does not need it quoted back, and
+   * member-authored content reaches no bell anywhere on this platform. The
+   * moderators' `internalNote` is likewise absent; it stops at the community's
+   * own governance log.
+   *
+   * NO ACTOR ID, in the payload or as the block/mute argument, and the two
+   * absences are separate decisions:
+   *  - Out of the PAYLOAD, following `CommunityBanned`. Naming the moderator
+   *    who removed a post puts that moderator in front of whoever is angriest
+   *    about it. The bell names the community and the rule, which is what the
+   *    member needs, and the community's own staff know internally who acted
+   *    because the governance log records it.
+   *  - Out of the BLOCK GATE too, which is where this departs from
+   *    `CommunityBanned`. `NotificationsService.create` drops a notification
+   *    whose actor the recipient has blocked, and a member blocking the
+   *    moderator they are in conflict with is the ordinary case here, not an
+   *    exotic one. Passing the actor would mean the takedowns most in need of
+   *    explaining are exactly the ones delivered in silence, which is the
+   *    defect this type exists to close. `CommunityReportFiled` and
+   *    `CommunitySupportOffered` already leave the actor out for this reason.
+   *
+   * ALWAYS DELIVERED: no `NotificationPreferenceCategory`, listed under safety
+   * and moderation in `ALWAYS_DELIVERED_NOTIFICATION_TYPES`. It is the
+   * platform's word on an action taken against you, so no content-volume
+   * switch may swallow it, and the per-community `notificationLevel` cannot
+   * either (`COMMUNITY_LEVELS_WANTING` is a whitelist this type is absent
+   * from, so a muted community still delivers it).
+   *
+   * IN-APP ONLY. Deliberately absent from `PushNotificationListener`'s push
+   * whitelist, matching `CommunityBanned`, which is the heavier act: "your
+   * post in Trans Parents Lisboa was removed" on a lock screen outs the
+   * member's membership of that community to anyone stood next to them. And
+   * QueerPulse sends no email, so no copy for this type may say anything is on
+   * its way.
+   *
+   * DEEP LINK. A removed POST carries no `postId`, so the bell resolves to the
+   * community page: the post is a blank tombstone, and the community is where
+   * the house rules the notification cites can actually be read. A removed
+   * REPLY does carry the `postId` of the thread it sat in, because that thread
+   * still stands and is the context the member needs. Both targets render for
+   * the recipient, who is still on the roster: a takedown is not a removal.
+   */
+  CommunityPostRemoved = 'community_post_removed',
   // Sent to PLATFORM STAFF when a community's moderators file an owner-review
   // request (`community_owner_review_requests`), reporting an owner who has
   // gone unreachable. The same stamp
@@ -569,7 +659,14 @@ export enum NotificationType {
    *
    * System-driven, no actor: the bell never names which staff member decided.
    * Payload carries `{ decision, workingTitle }` — `decision`
-   * (`accepted | declined | commissioned`) branches the copy, and
+   * (`accepted | declined | commissioned | reopened`) branches the copy, and
+   * `reopened` is the odd one out: it CLEARS a verdict rather than recording
+   * one, fired when an admin puts a declined story back in the queue. It rides
+   * this type deliberately, so it inherits the same preference gate, no-actor
+   * rule and delivery, and needs no new Postgres enum label. The frontend
+   * formatter must branch on it explicitly; falling through to the flat copy
+   * would tell the member their story had been decided at the moment it
+   * stopped being decided.
    * `workingTitle` is the member's OWN headline read back to them so the row
    * says which story. The decider's reply note is deliberately absent: it is
    * staff-authored prose, and it belongs on the tracker card the member opens
@@ -1029,6 +1126,207 @@ export enum NotificationType {
    * See migration `AddAdminQueueItemNotificationType1798000000000`.
    */
   AdminQueueItem = 'admin_queue_item',
+  /**
+   * PRD-208. Sent to everyone FOLLOWING a persona when that persona publishes
+   * genuinely new work: one or more items added to a content section of a
+   * persona that is live (published + open visibility).
+   *
+   * This is the only thing a follower ever hears. Before it, following gave
+   * the follower nothing at all: the owner got one "you have a new follower"
+   * row and the follower got a pill, so the button taught members that a core
+   * affordance was decorative.
+   *
+   * WHAT IS DELIBERATELY NOT AN UPDATE: an edit to an existing item, a
+   * reorder, a change to the persona's own name/tagline/avatar, and anything
+   * in the `links` section. See `SubprofileUpdatesService`, which computes the
+   * diff and owns those exclusions.
+   *
+   * NO ACTOR IN THE PAYLOAD, ON PURPOSE. The fan-out passes the persona
+   * OWNER's user id to `createForRecipients` so block and mute still filter
+   * per recipient, but the owner appears under no key in `ACTOR_PAYLOAD_KEY`,
+   * so no owner identity is ever resolved onto the bell. An unlinked persona
+   * is pseudonymous, and a notification that named the human behind it would
+   * undo that for every follower at once.
+   *
+   * BUNDLES on `subprofileId`, so a persona uploading a whole section's worth
+   * of new work inside the bundling window is one unread row rather than
+   * twenty, and gated by the member's own `persona_follows` preference
+   * category in both channels.
+   *
+   * See migration `AddPersonaUpdateNotificationType1810000000000`.
+   */
+  PersonaUpdate = 'persona_update',
+  /**
+   * PRD-289. The REPORTER's own receipt, written to the member who filed a
+   * report at the moment they file it.
+   *
+   * WHY IT EXISTS. `ReportFiled` and `CommunityReportFiled` are duty mail for
+   * responders and explicitly EXCLUDE the reporter, so until this value the
+   * reporter's first in-app word about their own filing was `ReportResolved`,
+   * which arrives when a moderator closes the case: up to seven days later on
+   * the low band. A reporter who dismissed the submit confirmation had nothing
+   * left to look at. This is the durable half of that confirmation.
+   *
+   * WHO GETS IT. Exactly one person, `reports.reporter_id`, and only when that
+   * column holds an account. A signed-out filing (POST /reports is public)
+   * leaves it null and writes nothing: there is no bell to ring.
+   *
+   * ANONYMITY DOES NOT SUPPRESS IT. `reports.anonymous` shields the reporter
+   * from moderators and from the reported party; it says nothing about what the
+   * reporter may see about their own report. `ReportResolved` already reads the
+   * flag that way (`ModerationService.notifyReporterOfOutcomeBestEffort` skips
+   * only on a missing `reporterId`), and this value matches it.
+   *
+   * NO ACTOR, NO PREFERENCE CATEGORY, NO PUSH. It is the platform answering
+   * something the member themself did, so it passes no actor id (block and mute
+   * cannot swallow it) and sits in `ALWAYS_DELIVERED_NOTIFICATION_TYPES`. It is
+   * absent from the push whitelist, matching every other report type: the
+   * member is holding the phone that just filed it.
+   *
+   * IN-APP ONLY. QueerPulse sends no email and never will, so no copy for this
+   * type may describe a message going anywhere.
+   *
+   * See migration `AddReportReceivedNotificationType1813010000000`.
+   */
+  ReportReceived = 'report_received',
+
+  /**
+   * PRD-240. Sent to a housing listing's LISTER when a member asks to view the
+   * home (`HousingViewingsService.request`).
+   *
+   * WHY IT EXISTS. Until this value the entire viewing lifecycle was silent:
+   * `HousingViewingsService` held no `NotificationsService` at all, so the only
+   * way a lister learned somebody wanted to see their home was to open
+   * `/local/housing/viewings`, which is reachable from one small text link on
+   * the listing page. A request that nobody opens the page for expires unread.
+   *
+   * ACTOR: the requester, passed both in the payload and as `create`'s
+   * `actorId`, so a block between the two members suppresses it.
+   *
+   * PAYLOAD: `{ source: 'housing', slug, title, viewingId }`. The requester's
+   * MESSAGE never rides along: it is member-authored prose addressed to this
+   * recipient, and the row this links to already shows it.
+   *
+   * IN-APP and PUSH. A viewing request is time-boxed by the proposed slot, so
+   * it earns a phone buzz the way `HousingListingDecision` does.
+   *
+   * See migration `AddHousingLifecycleNotificationTypes1817000000000`.
+   */
+  HousingViewingRequested = 'housing_viewing_requested',
+
+  /**
+   * PRD-240. Sent to the OTHER party when one side answers a viewing proposal:
+   * accepted, declined, or a different time proposed back. `payload.decision`
+   * carries which, so one value covers all three rather than three
+   * near-identical enum members.
+   *
+   * THE RECIPIENT IS NOT A FIXED SIDE. It is tempting to write this down as
+   * "lister answers requester", and that is wrong. Each of `accept`, `propose`
+   * and `decline` is guarded by `if (viewing.proposedBy === role) throw`, so
+   * the acting party is always whoever did NOT make the proposal currently on
+   * the table: the lister on the first pass, and the REQUESTER once the lister
+   * has counter-proposed. The emit site computes the counterparty rather than
+   * assuming a direction, and the bell copy is direction-neutral for the same
+   * reason ("The viewing of X was declined", never "your request").
+   *
+   * WHY IT MATTERS MOST OF THE FIVE. Acceptance is the moment the exact address
+   * unlocks (`HousingViewingsService.hasUnlockedViewing` is one of the three
+   * gates in `housing-directory.service.ts`), so a requester who never learns
+   * they were accepted never learns the address was released to them either.
+   * PRD-241 fixes the address; this is what tells them to go and look. The copy
+   * does NOT say so, because on the counter-proposal path this row lands on the
+   * lister, to whom their own address is not news.
+   *
+   * ACTOR: whoever answered, so the bell shows their face and a block applies.
+   *
+   * PAYLOAD: `{ source: 'housing', slug, title, viewingId, decision }`, where
+   * `decision` is one of `accepted` | `declined` | `proposed`. No decline
+   * REASON rides along: the model does not collect one.
+   *
+   * IN-APP and PUSH, for the same time-sensitivity reason as the request.
+   *
+   * See migration `AddHousingLifecycleNotificationTypes1817000000000`.
+   */
+  HousingViewingDecided = 'housing_viewing_decided',
+
+  /**
+   * PRD-240. Sent to the OTHER participant when either side cancels a viewing
+   * that was already arranged. Whoever cancelled is the actor; the recipient is
+   * always the counterparty.
+   *
+   * Split from `HousingViewingDecided` because the recipient is not fixed: a
+   * decision always travels lister to requester, a cancellation travels in
+   * whichever direction the canceller did not.
+   *
+   * PAYLOAD: `{ source: 'housing', slug, title, viewingId }`.
+   *
+   * IN-APP and PUSH: somebody is otherwise about to travel to a viewing that is
+   * no longer happening.
+   *
+   * See migration `AddHousingLifecycleNotificationTypes1817000000000`.
+   */
+  HousingViewingCancelled = 'housing_viewing_cancelled',
+
+  /**
+   * PRD-242. Sent to an applicant when their request to join a housing co-op or
+   * a vetted housing group is accepted or declined.
+   *
+   * WHY IT EXISTS. Both triage methods (`HousingService.triageJoinRequest` and
+   * `HousingGroupsService.triageJoinRequest`) wrote the status, returned the
+   * ADMIN DTO and stopped, and neither controller exposed a "my join requests"
+   * read. So a member asked to join a vetted group, saw a success panel, and
+   * then nothing ever: no bell, and no page to check. The community tier has
+   * carried `JoinRequestApproved`/`JoinRequestDeclined` for this since launch;
+   * housing had no equivalent.
+   *
+   * ONE VALUE FOR BOTH SURFACES. `payload.kind` is `'coop' | 'group'` and
+   * `payload.decision` is `'accepted' | 'declined'`, so the copy names the
+   * right thing without four enum members for one idea.
+   *
+   * NO ACTOR. Triage is a staff action and the bell never names which admin
+   * decided, matching `HousingListingDecision`. It therefore also sits in
+   * `ALWAYS_DELIVERED_NOTIFICATION_TYPES`: a decision on something you
+   * personally applied for is always written.
+   *
+   * NULLABLE APPLICANT. Both `CoopJoinRequest.userId` and
+   * `GroupJoinRequest.userId` are nullable (`ON DELETE SET NULL`, and the co-op
+   * form accepts a non-member by name), so the emit site must skip a null
+   * recipient rather than assume one.
+   *
+   * PAYLOAD: `{ source: 'housing', kind, slug, name, decision }`.
+   *
+   * See migration `AddHousingLifecycleNotificationTypes1817000000000`.
+   */
+  HousingJoinDecided = 'housing_join_decided',
+
+  /**
+   * PRD-244. Sent to a housing listing's OWNER a week before the listing
+   * lapses, so they can extend it while it is still on the board.
+   *
+   * WHY IT EXISTS. Listings expire 60 days after they go live
+   * (`DEFAULT_LISTING_LIFETIME_DAYS`). `HousingDirectoryService.browse` and
+   * `.detail` already filter on `expires_at > now()`, so the home vanishes from
+   * public browse the moment it lapses, and the midnight sweep
+   * (`HousingListingExpirySweeperService`) only persists that state, silently.
+   * Every existing signal is either neutral (a flat "Expires {date}" line) or
+   * post-mortem (an "Expired" pill and hint), and all of them require the owner
+   * to open My Listings. There was no pre-expiry warning of any kind.
+   *
+   * FIRES ONCE PER LISTING LIFETIME, guarded by
+   * `housing_listings.expiry_warning_sent_at`, which `renew()` clears so an
+   * extended listing warns again at the end of its new term. Same
+   * once-per-lifetime shape as `membership_cards.expiry_warning_sent_at` and
+   * `events.nearly_full_notified_at`.
+   *
+   * NO ACTOR: the platform reporting the clock. Always delivered, because it is
+   * a deadline on the member's own content and there is no other channel.
+   *
+   * PAYLOAD: `{ source: 'housing', slug, title, expiresAt }`.
+   *
+   * See migration `AddHousingLifecycleNotificationTypes1817000000000` and
+   * `AddHousingListingExpiryWarningSentAt1817010000000`.
+   */
+  HousingListingExpiring = 'housing_listing_expiring',
 }
 
 @Entity('notifications')

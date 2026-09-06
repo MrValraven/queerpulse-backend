@@ -14,6 +14,24 @@ import { PieceStage } from '../entities/magazine-piece.entity';
 import { CreatePieceDto } from './create-piece.dto';
 import { DESK_SHORT_TEXT_MAX } from './desk-text-limits';
 
+/**
+ * The stages an editor may set by hand on `PATCH /magazine/admin/pieces/:id`.
+ *
+ * `'published'` is DELIBERATELY ABSENT and must stay absent, even though it is
+ * a valid `PieceStage`. A piece only reaches `published` as a side effect of a
+ * real publish (`POST pieces/:id/publish`, `PATCH pieces/:id/article/publish`
+ * or a ship), each of which first clears the consent and sensitivity gate.
+ * Accepting it here would let `PATCH pieces/:id {stage:'published'}` mark a
+ * piece live while a named subject's consent is still `pending`, reopening
+ * PRD-119 through a side door and breaking the gate card's promise that no one
+ * person can override it.
+ *
+ * So the asymmetry with `list-pieces.query.ts` (which DOES accept `'published'`,
+ * because filtering a list by it is harmless) is intentional. Do not "fix" it.
+ *
+ * TypeScript cannot catch a mistake here either way: the array is typed
+ * `PieceStage[]`, so both omitting and adding a member compiles.
+ */
 const PIECE_STAGES: PieceStage[] = [
   'commissioned',
   'drafting',

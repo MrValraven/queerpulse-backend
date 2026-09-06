@@ -120,6 +120,43 @@ export function validatePieceBrief(input: unknown): PieceBrief | null {
   return input as unknown as PieceBrief;
 }
 
+/**
+ * A `PieceBrief` with every field at its empty value. `MagazinePiece.brief` is
+ * nullable (a piece commissioned before the brief was written has none), so a
+ * writer-side update that has to record ONE field still needs a complete blob
+ * to write into. Kept beside the validator that defines the shape, so a new
+ * required brief field is added in one place and the compiler finds this.
+ */
+const EMPTY_PIECE_BRIEF: PieceBrief = {
+  angle: '',
+  wants: [],
+  avoid: '',
+  wordCount: null,
+  filedWords: null,
+  rate: '',
+  killFee: '',
+  commissionedBy: '',
+  commissionedOn: '',
+  art: '',
+};
+
+/**
+ * Returns `brief` with `filedWords` set, SPREADING whatever was already there
+ * (PRD-127). `brief` is a single jsonb blob: writing `{ filedWords }` over it
+ * would drop the angle, the wants, the rate, the kill fee and the commission
+ * record in one save, so the spread is the whole point of this helper existing
+ * rather than the two call sites doing it by hand.
+ *
+ * A piece with no brief at all gets `EMPTY_PIECE_BRIEF` as the base, so the
+ * filed word count is still recorded instead of being silently dropped.
+ */
+export function briefWithFiledWords(
+  brief: PieceBrief | null,
+  filedWords: number | null,
+): PieceBrief {
+  return { ...(brief ?? EMPTY_PIECE_BRIEF), filedWords };
+}
+
 function assertCareSubject(
   value: unknown,
   index: number,

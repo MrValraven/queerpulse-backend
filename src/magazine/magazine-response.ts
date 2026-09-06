@@ -70,10 +70,43 @@ export interface IssueResponse {
   crop?: CropRect;
 }
 
+/**
+ * PRD-106 — the issue the desk is currently taking pitches for, for the
+ * public submit-story form.
+ *
+ * Deliberately NOT `IssueResponse`. That shape describes a SHIPPED issue for
+ * the archive (dek, cover art, crop); this one describes an issue that has
+ * not published yet, so it carries only what the form is allowed to say out
+ * loud: which number is open, when it runs, and when submissions close.
+ * Nothing here is the desk's private production state.
+ *
+ * `publishedOn` is NULL while the issue is still unscheduled, and
+ * `submissionDeadline` is NULL until an editor sets one. Both nulls are
+ * meaningful: the form drops the line rather than inventing a date.
+ */
+export interface OpenIssueResponse {
+  number: string;
+  title: string;
+  /** `YYYY-MM-DD`, or `null` while the issue is still unscheduled. */
+  publishedOn: string | null;
+  /** `YYYY-MM-DD`, or `null` when the desk has set no deadline. */
+  submissionDeadline: string | null;
+}
+
 export interface ArticleListItem {
   slug: string;
   title: string;
   dek: string;
+  /**
+   * PRD-102 — the desk's own kicker and section, carried on the LIST row so a
+   * card can print what the editor wrote. Without these the reader adapter had
+   * nothing to show and derived a kicker from the issue label and a section
+   * from `tags[0]`, which also made the related rail's "same section" reason
+   * unreachable: both sides compared the same tag, so the tag branch always
+   * fired first.
+   */
+  kicker: string;
+  section: string;
   author: AuthorSummary;
   issueNumber: string | null;
   tags: string[];
@@ -241,6 +274,15 @@ export interface StorySubmissionResponse {
   decision: SubmissionDecision | null;
   decisionNote: string | null;
   decidedAt: string | null;
+  /**
+   * ISO instant the member withdrew this story (PRD-129), or `null` for every
+   * submission that is still open or already decided.
+   *
+   * `listMine` filters withdrawn rows out, so this is only ever non-null on the
+   * single row `POST /magazine/submissions/:id/withdraw` hands back, which is
+   * the client's confirmation that the write landed.
+   */
+  withdrawnAt: string | null;
   createdAt: string;
 }
 
@@ -301,6 +343,18 @@ export function toIssueResponse(
   };
 }
 
+/** PRD-106 — hand-mapped like every other response here; the issue row also
+ *  carries the desk's `runOrder`/`digest`/`coverlines`/`lastShip`, none of
+ *  which a member pitching a story may see. */
+export function toOpenIssueResponse(issue: MagazineIssue): OpenIssueResponse {
+  return {
+    number: issue.number,
+    title: issue.title,
+    publishedOn: issue.publishedOn,
+    submissionDeadline: issue.submissionDeadline,
+  };
+}
+
 export function toArticleListItem(
   article: MagazineArticle,
   author: MagazineAuthor,
@@ -310,6 +364,12 @@ export function toArticleListItem(
     slug: article.slug,
     title: article.title,
     dek: article.dek,
+    // PRD-102. Both are NOT NULL columns, but the same projected `select([...])`
+    // caveat as the columns below applies: a projection that predates them
+    // hands the mapper `undefined`, so each falls back to empty and the reader
+    // adapter keeps its derived label rather than printing "undefined".
+    kicker: article.kicker ?? '',
+    section: article.section ?? '',
     author: toAuthorSummary(author),
     issueNumber,
     tags: article.tags,
@@ -591,6 +651,9 @@ export function toStorySubmissionResponse(
     decision: submission.decision,
     decisionNote: submission.decisionNote,
     decidedAt: submission.decidedAt ? submission.decidedAt.toISOString() : null,
+    withdrawnAt: submission.withdrawnAt
+      ? submission.withdrawnAt.toISOString()
+      : null,
     createdAt: submission.createdAt.toISOString(),
   };
 }

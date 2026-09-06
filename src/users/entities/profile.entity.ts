@@ -132,6 +132,25 @@ export class Profile {
   // the backfill). Exists so `searchMembers`'s `MostVouched` sort can `ORDER
   // BY` this column directly instead of a correlated `COUNT(*) FROM vouches`
   // subquery evaluated per candidate row.
+  //
+  // BLOCK-BLIND, DELIBERATELY. THIS IS NOT THE MEMBER-FACING NUMBER.
+  //
+  // A vouch between two members with a block in either direction is severed:
+  // it disappears from the roster and from every count a member reads
+  // (`VouchService.activeVouchesReceivedBy`, and its consumers
+  // `getVouchCount` / `getVouchCounts` / `listVouchers`). A block or unblock
+  // does NOT move this column, and correctly maintaining it from the `blocks`
+  // table would mean writing it from four block/unblock paths across two
+  // modules while holding locks that a safety action must never fail on.
+  // So the column keeps its own simpler definition: "active vouches
+  // received, blocks ignored". Against that definition it is exactly right,
+  // and no reconciliation is owed.
+  //
+  // The rule that follows: anything a member or a gate reads must come from
+  // `VouchService`, never from here. This column serves ONE consumer, the
+  // `MostVouched` ordering, where it is a ranking hint whose error is bounded
+  // by how many of a member's own vouchers they have blocked. It is not a
+  // number to print, and it is not a number to score.
   @Column({ type: 'integer', default: 0 })
   vouchCount!: number;
 

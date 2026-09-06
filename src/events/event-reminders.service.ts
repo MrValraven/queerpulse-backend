@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, In, IsNull, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { gatheringPath } from './event-paths';
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PushService } from '../push/push.service';
@@ -262,7 +263,9 @@ export class EventRemindersService {
       title: event.title,
       body: 'Starting soon — tap to see the details.',
       tag: `event-reminder-${event.id}`,
-      data: { url: `/events/${event.slug}` },
+      // The SPA routes the detail page at `/gatherings/<slug>`; `/events` is
+      // the board and has no `:slug` child (PRD-180).
+      data: { url: gatheringPath(event.slug) },
       // English fallback stays above; the SW localizes the body via this key
       // (push:event.reminder.body in queerpulse/src/pushMessages.ts) when it
       // knows the recipient's language. The title is always the event's own

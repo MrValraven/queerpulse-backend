@@ -21,4 +21,18 @@ export interface HousingListingWentLiveEvent {
   listing: HousingListing;
   /** The server-derived "verified listing" state at publish time. */
   listingVerified: boolean;
+  /**
+   * True only on the listing's FIRST publication ever, false on every later
+   * re-approval (ENG-170).
+   *
+   * The event stays honest: a re-approval genuinely is a go-live, and a future
+   * consumer that has to run on every publication (a search reindex, a cache
+   * bust) must still be woken. What it must not do is repeat a one-time
+   * announcement, so consumers that broadcast to members gate on this flag.
+   *
+   * Computed at the emit site by a conditional UPDATE claim on
+   * `housing_listings.first_live_at`, so it is safe under two concurrent
+   * approvals and survives a process restart, unlike any in-memory marker.
+   */
+  isFirstGoLive: boolean;
 }

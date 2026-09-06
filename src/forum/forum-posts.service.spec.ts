@@ -11,6 +11,8 @@ function build() {
     authorId: 'author-1',
     body: 'original',
     voteCount: 0,
+    // A reply, not the opening post: only replies move `replyCount`.
+    isOp: false,
     createdAt: new Date(),
     editedAt: null as Date | null,
     deletedAt: null as Date | null,
@@ -20,11 +22,16 @@ function build() {
   // (not the `edits`/`posts` repos directly). The manager stub runs the
   // callback synchronously and records its writes via `managerSave`.
   const managerSave = jest.fn().mockImplementation((row: unknown) => row);
+  // `tombstonePost`/`restorePost` now run inside the same transaction too: the
+  // tombstone, the released accepted-answer mark and the thread's `replyCount`
+  // describe one fact and commit together (ENG-132).
+  const managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
   const manager = {
     create: jest
       .fn()
       .mockImplementation((_entity: unknown, row: unknown) => row),
     save: managerSave,
+    update: managerUpdate,
   };
   const posts = {
     findOne: jest.fn().mockResolvedValue(post),
@@ -69,7 +76,16 @@ function build() {
       subscriberIdsToNotify: jest.fn().mockResolvedValue([]),
     } as never,
   );
-  return { service, post, posts, edits, byUserIds, notifications, managerSave };
+  return {
+    service,
+    post,
+    posts,
+    edits,
+    byUserIds,
+    notifications,
+    managerSave,
+    managerUpdate,
+  };
 }
 
 const author = {
@@ -117,9 +133,9 @@ describe('ForumPostsService authorization', () => {
   });
 
   it('tombstonePost: moderator may delete another member post', async () => {
-    const { service, posts } = build();
+    const { service, managerSave } = build();
     await service.tombstonePost('p1', mod);
-    expect(posts.save).toHaveBeenCalledWith(
+    expect(managerSave).toHaveBeenCalledWith(
       expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
     );
   });
@@ -132,12 +148,75 @@ describe('ForumPostsService authorization', () => {
   });
 
   it('restorePost: clears the tombstone for staff', async () => {
-    const { service, post, posts } = build();
+    const { service, post, managerSave } = build();
     post.deletedAt = new Date();
     await service.restorePost('p1', mod);
-    expect(posts.save).toHaveBeenCalledWith(
+    expect(managerSave).toHaveBeenCalledWith(
       expect.objectContaining({ deletedAt: null }),
     );
+  });
+});
+
+// --- ENG-132: a tombstoned reply stops being counted -------------------------
+// `replyCount` was only ever incremented (by `markActivity` on each new reply),
+// so a thread whose three replies had all been withdrawn went on advertising
+// "3 replies" on /forum and in the reply bar while opening it showed three
+// tombstones.
+describe('ForumPostsService reply count on delete/restore', () => {
+  const replyCountUpdate = (
+    managerUpdate: jest.Mock,
+  ): [unknown, unknown, Record<string, unknown>] | undefined =>
+    (
+      managerUpdate.mock.calls as Array<
+        [unknown, unknown, Record<string, unknown>]
+      >
+    ).find((call) => 'replyCount' in call[2]);
+
+  it('decrements the thread reply count when a reply is tombstoned', async () => {
+    const { service, managerUpdate } = build();
+
+    await service.tombstonePost('p1', author);
+
+    const call = replyCountUpdate(managerUpdate);
+    expect(call).toBeDefined();
+    expect(call?.[1]).toEqual({ id: 't1' });
+    // Clamped, never a bare `- 1`: the counter is denormalized and has drifted
+    // before, and "-1 replies" is worse than a stale count.
+    expect(String((call?.[2].replyCount as () => string)())).toContain(
+      'GREATEST',
+    );
+  });
+
+  it('increments it again when the reply is restored', async () => {
+    const { service, post, managerUpdate } = build();
+    post.deletedAt = new Date();
+
+    await service.restorePost('p1', author);
+
+    const call = replyCountUpdate(managerUpdate);
+    expect(String((call?.[2].replyCount as () => string)())).toBe(
+      '"reply_count" + 1',
+    );
+  });
+
+  it('leaves the count alone when the tombstoned post is the OPENING post', async () => {
+    const { service, post, managerUpdate } = build();
+    // Withdrawing a whole thread tombstones its OP (`deleteThread`), and the OP
+    // has never been counted as a reply — decrementing there would corrupt the
+    // count of the thread being withdrawn.
+    post.isOp = true;
+
+    await service.tombstonePost('p1', author);
+
+    expect(replyCountUpdate(managerUpdate)).toBeUndefined();
+  });
+
+  it('tombstone and count move inside ONE transaction', async () => {
+    const { service, posts } = build();
+
+    await service.tombstonePost('p1', author);
+
+    expect(posts.manager.transaction).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -145,17 +224,27 @@ describe('ForumPostsService authorization', () => {
 // builder / increment / decrement / delete / update), so this harness stubs a
 // manager whose `increment`/`decrement` mutate the shared `post` object — the
 // re-read inside `vote()` then reflects the toggled count, exactly like the DB.
-function buildVote(options: { isOp: boolean; voteCount: number }) {
+function buildVote(options: {
+  isOp: boolean;
+  voteCount: number;
+  // ENG-133 overrides — every one of these used to be unchecked at this
+  // endpoint, so each has a test below proving it now refuses.
+  authorId?: string;
+  deletedAt?: Date | null;
+  isBlocked?: boolean;
+  moderation?: { hidden: boolean; removed: boolean };
+  threadVisible?: boolean;
+}) {
   const post = {
     id: 'p1',
     threadId: 't1',
-    authorId: 'author-1',
+    authorId: options.authorId ?? 'author-1',
     body: 'op',
     voteCount: options.voteCount,
     isOp: options.isOp,
     createdAt: new Date(),
     editedAt: null as Date | null,
-    deletedAt: null as Date | null,
+    deletedAt: options.deletedAt ?? (null as Date | null),
   };
   // Chainable stub for `.insert().into().values().orIgnore().execute()`; a
   // single `raw` row means "this call did the insert", so `vote()` increments.
@@ -190,27 +279,47 @@ function buildVote(options: { isOp: boolean; voteCount: number }) {
     update: threadUpdate,
   };
   const posts = {
+    // `assertCanVote` point-loads the post before the transaction opens.
+    findOne: jest.fn().mockResolvedValue(post),
     manager: {
       transaction: jest.fn(
         async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
       ),
     },
   };
+  // The thread-visibility gate: `loadByIdOr404` throws exactly as it does for a
+  // withdrawn thread, a blocked thread author or a Private community's thread
+  // read by somebody off the roster.
+  const loadByIdOr404 = jest.fn(() =>
+    options.threadVisible === false
+      ? Promise.reject(new NotFoundException('Thread not found'))
+      : Promise.resolve({ id: 't1' }),
+  );
+  const isBlockedEitherWay = jest
+    .fn()
+    .mockResolvedValue(options.isBlocked ?? false);
+  const statesForAnyType = jest
+    .fn()
+    .mockResolvedValue(
+      options.moderation
+        ? new Map([['p1', options.moderation]])
+        : new Map<string, unknown>(),
+    );
   const service = new ForumPostsService(
     posts as never,
     {} as never, // votes repo — unused by vote() (it deletes via the manager)
     {} as never, // profiles
-    { markActivity: jest.fn(), loadOr404: jest.fn() } as never,
-    { excludeHidden: jest.fn() } as never,
+    { markActivity: jest.fn(), loadOr404: jest.fn(), loadByIdOr404 } as never,
+    { excludeHidden: jest.fn(), isBlockedEitherWay } as never,
     {} as never, // edits
     {} as never, // mentions
-    { statesForAnyType: jest.fn() } as never,
+    { statesForAnyType } as never,
     {
       subscribe: jest.fn(),
       subscriberIdsToNotify: jest.fn().mockResolvedValue([]),
     } as never, // subscriptions
   );
-  return { service, post, threadUpdate };
+  return { service, post, threadUpdate, loadByIdOr404 };
 }
 
 describe('ForumPostsService vote → op_vote_count denorm', () => {
@@ -241,6 +350,96 @@ describe('ForumPostsService vote → op_vote_count denorm', () => {
       { id: 't1' },
       { opVoteCount: 0 },
     );
+  });
+});
+
+// --- ENG-133: the vote endpoint had no gates at all --------------------------
+// It loaded the post by id and voted. No visibility check, no self-vote guard,
+// on the one endpoint that moves a ranking — and `top` is a real ranked sort
+// now (PRD-161), so the payoff for abusing it went up.
+describe('ForumPostsService.vote authorization', () => {
+  it('refuses an author voting on their own post', async () => {
+    const { service } = buildVote({
+      isOp: true,
+      voteCount: 0,
+      authorId: 'author-1',
+    });
+
+    await expect(service.vote('p1', 'author-1', 1)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  it('refuses an author CLEARING a self-vote too, so nothing is left to clear', async () => {
+    const { service } = buildVote({
+      isOp: true,
+      voteCount: 1,
+      authorId: 'author-1',
+    });
+
+    await expect(service.vote('p1', 'author-1', 0)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  it('refuses a voter a block stands between, in either direction', async () => {
+    const { service } = buildVote({
+      isOp: true,
+      voteCount: 0,
+      isBlocked: true,
+    });
+
+    await expect(service.vote('p1', 'voter-1', 1)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('refuses a vote in a thread the voter cannot read', async () => {
+    // Withdrawn thread, blocked thread author, or a Private community the
+    // voter is not on the roster of: all one gate, `loadByIdOr404`.
+    const { service, loadByIdOr404 } = buildVote({
+      isOp: true,
+      voteCount: 0,
+      threadVisible: false,
+    });
+
+    await expect(service.vote('p1', 'voter-1', 1)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(loadByIdOr404).toHaveBeenCalledWith('t1', 'voter-1');
+  });
+
+  it('refuses a vote on a tombstoned post', async () => {
+    const { service } = buildVote({
+      isOp: false,
+      voteCount: 0,
+      deletedAt: new Date(),
+    });
+
+    await expect(service.vote('p1', 'voter-1', 1)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('refuses a vote on a post under a moderator takedown', async () => {
+    const { service } = buildVote({
+      isOp: false,
+      voteCount: 0,
+      moderation: { hidden: true, removed: false },
+    });
+
+    await expect(service.vote('p1', 'voter-1', 1)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('still lets an unrelated member vote on a visible post', async () => {
+    const { service } = buildVote({ isOp: false, voteCount: 0 });
+
+    await expect(service.vote('p1', 'voter-1', 1)).resolves.toEqual({
+      voteCount: 1,
+      myVote: 1,
+    });
   });
 });
 
@@ -414,5 +613,262 @@ describe('ForumPostsService.searchByText visibility', () => {
     const rows = await service.searchByText('viewer-1', 'Sao Bento', 6);
 
     expect(rows[0]?.excerpt).toContain('São Bento');
+  });
+});
+
+// --- C5 / ENG-130 + C6 / PRD-162: what a page of posts actually contains -----
+// The thread page took the first post of page one AS the opening post. The
+// server drops the OP from that page when its author is muted by the viewer, or
+// when a moderator hid it and the viewer is not staff — so the first REPLY slid
+// into the OP card and was read as the question, wearing that replier's name,
+// edit flags and permissions, while disappearing from the reply list.
+function buildListPosts(options: {
+  opPost?: Record<string, unknown> | null;
+  hiddenAuthorIds?: string[];
+  opModeration?: { hidden: boolean; removed: boolean };
+  rootRows?: Array<Record<string, unknown>>;
+  descendantIds?: string[];
+  descendantRows?: Array<Record<string, unknown>>;
+  acceptedPostId?: string | null;
+  role?: string;
+}) {
+  const makeRow = (row: Record<string, unknown>): Record<string, unknown> => ({
+    id: 'post-1',
+    parentPostId: null,
+    authorId: 'author-1',
+    body: 'text',
+    image: null,
+    voteCount: 0,
+    isOp: false,
+    threadId: 't1',
+    createdAt: new Date('2026-07-23T10:00:00.000Z'),
+    editedAt: null,
+    deletedAt: null,
+    deletedById: null,
+    ...row,
+  });
+
+  const opPost =
+    options.opPost === null
+      ? null
+      : makeRow({ id: 'op-1', isOp: true, ...(options.opPost ?? {}) });
+  const rootRows = (options.rootRows ?? []).map(makeRow);
+  const descendantRows = (options.descendantRows ?? []).map(makeRow);
+
+  // `getMany` answers in call order: the root stream first, then the descendant
+  // load. `getOne` answers the accepted-answer hoist.
+  const getManyQueue = [rootRows, descendantRows];
+  const queryBuilder: Record<string, jest.Mock> = {};
+  for (const method of [
+    'where',
+    'andWhere',
+    'orderBy',
+    'addOrderBy',
+    'take',
+    'limit',
+    'offset',
+  ]) {
+    queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+  }
+  queryBuilder.getMany = jest.fn(() =>
+    Promise.resolve(getManyQueue.shift() ?? []),
+  );
+  queryBuilder.getOne = jest.fn().mockResolvedValue(null);
+
+  const posts = {
+    createQueryBuilder: jest.fn(() => queryBuilder),
+    findOne: jest.fn().mockResolvedValue(opPost),
+    manager: {
+      query: jest
+        .fn()
+        .mockResolvedValue((options.descendantIds ?? []).map((id) => ({ id }))),
+    },
+  };
+  const votes = { find: jest.fn().mockResolvedValue([]) };
+  const blockFilter = {
+    excludeHidden: jest.fn(),
+    hiddenUserIds: jest
+      .fn()
+      .mockResolvedValue(new Set(options.hiddenAuthorIds ?? [])),
+  };
+  const contentModeration = {
+    statesForAnyType: jest
+      .fn()
+      .mockResolvedValue(
+        options.opModeration && opPost
+          ? new Map([[String(opPost.id), options.opModeration]])
+          : new Map<string, unknown>(),
+      ),
+  };
+  const loadOr404 = jest.fn().mockResolvedValue({
+    id: 't1',
+    slug: 'hello',
+    acceptedPostId: options.acceptedPostId ?? null,
+  });
+  jest.spyOn(MemberLookup.prototype, 'byUserIds').mockResolvedValue(new Map());
+
+  const service = new ForumPostsService(
+    posts as never,
+    votes as never,
+    {} as never,
+    { loadOr404, markActivity: jest.fn() } as never,
+    blockFilter as never,
+    {} as never,
+    {} as never,
+    contentModeration as never,
+    {} as never,
+  );
+  const viewer = {
+    userId: 'viewer-1',
+    email: '',
+    status: 'active',
+    role: options.role ?? 'member',
+  };
+  return { service, viewer, posts, queryBuilder };
+}
+
+describe('ForumPostsService.listPosts opening post', () => {
+  it('leads page one with the OP and reports it available', async () => {
+    const { service, viewer } = buildListPosts({
+      rootRows: [{ id: 'r1' }],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(true);
+    expect(page.data[0]?.id).toBe('op-1');
+    expect(page.data[0]?.isOp).toBe(true);
+    expect(page.data[1]?.isOp).toBe(false);
+  });
+
+  it('reports the OP unavailable when the viewer muted its author, and does not promote a reply into its place', async () => {
+    const { service, viewer } = buildListPosts({
+      hiddenAuthorIds: ['author-1'],
+      rootRows: [{ id: 'r1', authorId: 'someone-else' }],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(false);
+    // The first post of the page is a REPLY, and it says so.
+    expect(page.data[0]?.id).toBe('r1');
+    expect(page.data[0]?.isOp).toBe(false);
+  });
+
+  it('reports the OP unavailable to a member when a moderator hid it', async () => {
+    const { service, viewer } = buildListPosts({
+      opModeration: { hidden: true, removed: false },
+      rootRows: [],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(false);
+  });
+
+  it('still shows that same OP to a moderator', async () => {
+    const { service, viewer } = buildListPosts({
+      opModeration: { hidden: true, removed: false },
+      role: 'moderator',
+      rootRows: [],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(true);
+    expect(page.data[0]?.isOp).toBe(true);
+  });
+
+  it('keeps a REMOVED opening post available, as a tombstone', async () => {
+    // A removed post survives as `[removed]` for everyone; that is a different
+    // thing from having no opening post at all.
+    const { service, viewer } = buildListPosts({
+      opModeration: { hidden: false, removed: true },
+      rootRows: [],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(true);
+    expect(page.data[0]?.isOp).toBe(true);
+    expect(page.data[0]?.body).toBe('');
+  });
+
+  it('reports the OP unavailable when the thread carries no opening post at all', async () => {
+    const { service, viewer } = buildListPosts({ opPost: null, rootRows: [] });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(false);
+  });
+
+  it('does not hoist the OP onto a later page, but still reports availability', async () => {
+    const { service, viewer } = buildListPosts({ rootRows: [{ id: 'r1' }] });
+
+    const page = await service.listPosts('hello', viewer, 'cursor-1', 20);
+
+    expect(page.opAvailable).toBe(true);
+    expect(page.data.some((post) => post.isOp)).toBe(false);
+  });
+});
+
+describe('ForumPostsService.listPosts reply tree', () => {
+  it('ships each root reply with its whole subtree, so a child never arrives before its parent', async () => {
+    const { service, viewer, posts } = buildListPosts({
+      rootRows: [{ id: 'r1' }],
+      descendantIds: ['c1'],
+      descendantRows: [{ id: 'c1', parentPostId: 'r1' }],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(posts.manager.query).toHaveBeenCalledTimes(1);
+    expect(page.data.map((post) => post.id)).toEqual(['op-1', 'r1', 'c1']);
+  });
+
+  it('treats a reply parented to the OP as a root, never as an unreachable descendant', async () => {
+    const { service, viewer, queryBuilder } = buildListPosts({
+      rootRows: [{ id: 'r1', parentPostId: 'op-1' }],
+    });
+
+    await service.listPosts('hello', viewer, undefined, 20);
+
+    const rootPredicates = (
+      queryBuilder.andWhere as jest.Mock<unknown, unknown[]>
+    ).mock.calls.map((call) => String(call[0]));
+    expect(
+      rootPredicates.some((predicate) =>
+        predicate.includes('p.parentPostId = :rootOpPostId'),
+      ),
+    ).toBe(true);
+  });
+
+  it('never returns one post twice when the accepted answer is also a descendant', async () => {
+    const { service, viewer, queryBuilder } = buildListPosts({
+      acceptedPostId: 'c1',
+      rootRows: [{ id: 'r1' }],
+      descendantIds: ['c1'],
+      descendantRows: [{ id: 'c1', parentPostId: 'r1' }],
+    });
+    (queryBuilder.getOne as jest.Mock).mockResolvedValue({
+      id: 'c1',
+      parentPostId: 'r1',
+      authorId: 'author-1',
+      threadId: 't1',
+      body: 'answer',
+      image: null,
+      voteCount: 0,
+      isOp: false,
+      createdAt: new Date('2026-07-23T10:00:00.000Z'),
+      editedAt: null,
+      deletedAt: null,
+      deletedById: null,
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.data.filter((post) => post.id === 'c1')).toHaveLength(1);
+    // Hoisted: the accepted answer leads the replies, right behind the OP.
+    expect(page.data.map((post) => post.id)).toEqual(['op-1', 'c1', 'r1']);
   });
 });

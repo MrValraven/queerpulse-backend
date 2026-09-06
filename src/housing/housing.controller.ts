@@ -1,7 +1,19 @@
-import { Body, Controller, Get, Header, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Header,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
-import {} from '../auth/decorators/current-user.decorator';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateHousingJoinRequestDto } from './dto/create-join-request.dto';
 import { HousingService } from './housing.service';
@@ -24,16 +36,22 @@ import {
  *
  * Product decision (maintainer-approved): join requests must be submittable
  * by ANYONE, including anonymous non-members — the public marketing page
- * collects a `name` field for exactly this reason. So both routes are
- * `@Public()` and there is no auth guard on the join-request route.
+ * collects a `name` field for exactly this reason. So the public routes are
+ * `@Public()` and an anonymous applicant is never rejected.
  *
- * `userId` is therefore always `null` here rather than best-effort read from
- * `request.user`: the global `JwtAuthGuard` (see `app.module.ts` /
- * `src/auth/guards/jwt-auth.guard.ts`) returns `true` immediately when
- * `@Public()` is set, WITHOUT calling `super.canActivate()` (the Passport JWT
- * strategy that populates `request.user`). So on a `@Public()` route
- * `request.user` is never populated, even with a valid session cookie — there
- * is nothing to read.
+ * A `@Public()` route does NOT populate `request.user` on its own: the global
+ * `JwtAuthGuard` (see `app.module.ts` / `src/auth/guards/jwt-auth.guard.ts`)
+ * returns `true` immediately when `@Public()` is set, WITHOUT calling
+ * `super.canActivate()` (the Passport JWT strategy that fills `request.user`).
+ * `OptionalJwtAuthGuard` is what best-effort attaches the principal WHEN a
+ * valid session cookie is present, so a signed-in applicant's `userId` is
+ * recorded while an anonymous one still gets through. This is the same pairing
+ * the sibling `HousingGroupsController` uses on its own join-request route.
+ *
+ * PRD-242: recording the applicant is what makes the outcome reachable. Without
+ * a `userId` there is nobody to send the `HousingJoinDecided` bell row to and
+ * nothing for `GET /housing/coops/join-requests/mine` to return, so a member
+ * who applied had no way to ever learn what was decided.
  */
 @Feature('housing')
 @ApiTags('Housing')
@@ -54,10 +72,38 @@ export class HousingController {
     return this.housing.listPublished();
   }
 
+  // PRD-242. The applicant's own half of the admin triage queue: what happened
+  // to the applications THIS caller filed, across every co-op. The bell's
+  // `housing_join_decided` row deep-links to `/local/housing/coop`, which is a
+  // single page listing every co-op, so this is one flat read for the whole
+  // grid rather than a per-slug lookup repeated once per card.
+  //
+  // Signed-in callers only (no `@Public()`, so the global `JwtAuthGuard`
+  // applies) and no further guard: reading the outcome of your own application
+  // is not a member-privileged action, and gating it on active membership would
+  // hand the bell row a destination that answers its own recipient with a 403.
+  // Ownership is the `user_id` match in the service, which an anonymous
+  // by-name request can never satisfy.
+  //
+  // Member-private, so no cache header: this is one person's application state
+  // and must never reach a shared cache.
+  @Get('coops/join-requests/mine')
+  @ApiOperation({ summary: 'Your own co-op join requests, with their state' })
+  @ApiOkResponse({
+    description: "The caller's own co-op join requests, newest first.",
+  })
+  listMyJoinRequests(@CurrentUser() user: CurrentUserData) {
+    return this.housing.listMyJoinRequests(user.userId);
+  }
+
   // Anonymous public write: tightly throttled per IP so the co-op review queue
   // can't be flooded with junk join requests (the global bucket alone is too
   // loose for an unauthenticated create). A real applicant submits once.
+  //
+  // `@Public()` + `OptionalJwtAuthGuard` means an anonymous applicant is
+  // allowed and a signed-in one is identified, so the decision can reach them.
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post('coops/:slug/join-requests')
   @ApiOperation({
@@ -68,7 +114,8 @@ export class HousingController {
   submitJoinRequest(
     @Param('slug') slug: string,
     @Body() dto: CreateHousingJoinRequestDto,
+    @CurrentUser() user: CurrentUserData | undefined,
   ) {
-    return this.housing.createJoinRequest(slug, dto, null);
+    return this.housing.createJoinRequest(slug, dto, user?.userId ?? null);
   }
 }

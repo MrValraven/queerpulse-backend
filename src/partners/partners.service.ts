@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -27,13 +28,25 @@ import {
 } from '../submissions/submission-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
+import { toStoredPlainText } from '../communities/community-plain-text';
 import { partnerApplicationDueAt } from './partner-application-sla';
 import {
+  toStoredAtGlance,
+  toStoredJointWork,
+  toStoredLines,
+  toStoredPartnerContact,
+  toStoredSections,
+  toStoredStats,
+  toStoredTimeline,
+} from './partner-plain-text';
+import {
   MyPartnerApplicationDTO,
+  OwnedPartnerDTO,
   PartnerApplicationDTO,
   PartnerCardDTO,
   PartnerDetailDTO,
   toMyPartnerApplication,
+  toOwnedPartner,
   toPartnerApplication,
   toPartnerCard,
   toPartnerDetail,
@@ -96,7 +109,37 @@ export interface PartnerListQuery {
   featured?: boolean;
 }
 
-export interface UpdatePartnerAdminInput {
+/**
+ * The fields a partner may change about ITSELF (PRD-263). See
+ * `UpdatePartnerProfileDto` for the reasoning behind where the line falls.
+ */
+export interface UpdatePartnerProfileInput {
+  region?: PartnerRegion;
+  regionLabel?: string;
+  city?: string;
+  desc?: string;
+  tagline?: string;
+  logo?: string;
+  tags?: string[];
+  about?: string[];
+  stats?: PartnerStat[];
+  aboutMore?: PartnerSection[];
+  jointWork?: PartnerJointWork[];
+  timeline?: PartnerTimelineItem[];
+  how?: PartnerSection[];
+  funding?: string;
+  atGlance?: PartnerAtGlance[];
+  contact?: PartnerContactInput;
+}
+
+/** Everything a partner may change, plus the fields that are QueerPulse's to
+ *  set: the relationship claims (`tier`, `since`, `eyebrow`), the approved
+ *  identity (`name`), and the marketing surface (`featured` + testimonial). */
+export interface UpdatePartnerAdminInput extends UpdatePartnerProfileInput {
+  name?: string;
+  tier?: string;
+  since?: string;
+  eyebrow?: string;
   featured?: boolean;
   testimonialQuote?: string | null;
   testimonialAuthor?: string | null;
@@ -107,13 +150,75 @@ export interface UpdatePartnerAdminInput {
  * fully-populated `string | null` shape (mirrors `CompaniesService`'s
  * `normalizeWork`/`VolunteeringService`'s `normalizeDetail`). */
 function normalizeContact(contact?: PartnerContactInput): PartnerContact {
-  return {
+  return toStoredPartnerContact({
     phone: contact?.phone ?? null,
     phoneNote: contact?.phoneNote ?? null,
     email: contact?.email ?? null,
     website: contact?.website ?? null,
     address: contact?.address ?? null,
-  };
+  });
+}
+
+/**
+ * Copy the profile fields a caller actually sent onto the row, stripping
+ * markup on the way in (PRD-263).
+ *
+ * ONE write boundary, shared by the two paths that can reach these columns
+ * (the partner's own editor and the staff console), so a value cannot be
+ * laundered through whichever one was forgotten. `toStoredPlainText` and its
+ * per-shape wrappers live in `partner-plain-text.ts`; the reasoning for
+ * stripping here rather than at the render sites is the repo-wide one in
+ * `communities/community-plain-text.ts`.
+ *
+ * `undefined` means "not sent" and leaves the column alone (PATCH). `contact`
+ * is the deliberate exception: it is one jsonb document that the service keeps
+ * fully populated, so sending it replaces the whole block.
+ */
+/** `toStoredPlainText` for a nullable column: a value that strips to nothing
+ *  is stored as NULL rather than as an empty string every read site then has
+ *  to treat as empty anyway (same rule as `toStoredPlainTextOrNull`). */
+function toStoredNullableText(value: string | null): string | null {
+  if (value === null) return null;
+  const stored = toStoredPlainText(value);
+  return stored.length ? stored : null;
+}
+
+function applyProfileFields(
+  partner: Partner,
+  input: UpdatePartnerProfileInput,
+): void {
+  if (input.region !== undefined) partner.region = input.region;
+  if (input.regionLabel !== undefined) {
+    partner.regionLabel = toStoredPlainText(input.regionLabel);
+  }
+  if (input.city !== undefined) partner.city = toStoredPlainText(input.city);
+  if (input.desc !== undefined) partner.desc = toStoredPlainText(input.desc);
+  if (input.tagline !== undefined) {
+    partner.tagline = toStoredPlainText(input.tagline);
+  }
+  if (input.logo !== undefined) partner.logo = toStoredPlainText(input.logo);
+  if (input.tags !== undefined) partner.tags = toStoredLines(input.tags);
+  if (input.about !== undefined) partner.about = toStoredLines(input.about);
+  if (input.stats !== undefined) partner.stats = toStoredStats(input.stats);
+  if (input.aboutMore !== undefined) {
+    partner.aboutMore = toStoredSections(input.aboutMore);
+  }
+  if (input.jointWork !== undefined) {
+    partner.jointWork = toStoredJointWork(input.jointWork);
+  }
+  if (input.timeline !== undefined) {
+    partner.timeline = toStoredTimeline(input.timeline);
+  }
+  if (input.how !== undefined) partner.how = toStoredSections(input.how);
+  if (input.funding !== undefined) {
+    partner.funding = toStoredPlainText(input.funding);
+  }
+  if (input.atGlance !== undefined) {
+    partner.atGlance = toStoredAtGlance(input.atGlance);
+  }
+  if (input.contact !== undefined) {
+    partner.contact = normalizeContact(input.contact);
+  }
 }
 
 @Injectable()
@@ -295,6 +400,19 @@ export class PartnersService {
       partner.decidedAt = new Date();
     }
 
+    // PRD-263. Approval is the moment a row stops being an application and
+    // becomes a public profile somebody has to keep true, so it is also the
+    // moment the profile gets an owner: the member who applied.
+    //
+    // `??=`, never a plain assignment. A partner refused once, re-triaged and
+    // then approved may already have had its seat moved to somebody else by
+    // staff, and a second approve must not silently hand it back to the
+    // original applicant. Refusal deliberately leaves the column alone: a
+    // rejected row has no public profile to maintain.
+    if (action === 'approve') {
+      partner.ownerUserId ??= partner.submittedById;
+    }
+
     const saved = await this.partners.save(partner);
     if (isNewDecision) {
       await this.notifyApplicantOfDecisionBestEffort(saved, actorId);
@@ -350,10 +468,20 @@ export class PartnersService {
     return this.buildApplication(saved);
   }
 
-  // Admin edit of an approved partner's featured flag + testimonial. Only the
-  // provided fields change (PATCH). A quote with no author is rejected — the
-  // For Organisations card renders "<quote> — <author>, <role>" and a
-  // dangling quote would print an orphaned em-dash.
+  /**
+   * Staff edit of an approved partner (PRD-263).
+   *
+   * Was the featured flag and the testimonial and nothing else, which is why
+   * `tier`, `since` and `eyebrow` were frozen at whatever the application form
+   * defaulted them to and every partner in the directory showed the same tier.
+   * It now reaches the whole profile: everything the partner itself may change
+   * (`applyProfileFields`, one shared write boundary that strips markup) plus
+   * the four things that are QueerPulse's to say rather than the partner's.
+   *
+   * Only the provided fields change (PATCH). A quote with no author is
+   * rejected — the For Organisations card renders "<quote> — <author>, <role>"
+   * and a dangling quote would print an orphaned dash.
+   */
   async updateAdminFields(
     id: string,
     dto: UpdatePartnerAdminInput,
@@ -363,13 +491,24 @@ export class PartnersService {
       throw new NotFoundException('Partner not found');
     }
 
+    applyProfileFields(partner, dto);
+    // The slug is NOT recomputed from a new name: it is the address every
+    // inbound link, every volunteering opportunity's `partnerSlug` and every
+    // share already uses, and silently moving a live public page is a worse
+    // outcome than a slug that no longer matches the display name.
+    if (dto.name !== undefined) partner.name = toStoredPlainText(dto.name);
+    if (dto.tier !== undefined) partner.tier = toStoredPlainText(dto.tier);
+    if (dto.since !== undefined) partner.since = toStoredPlainText(dto.since);
+    if (dto.eyebrow !== undefined) {
+      partner.eyebrow = toStoredPlainText(dto.eyebrow);
+    }
     if (dto.featured !== undefined) partner.featured = dto.featured;
     if (dto.testimonialQuote !== undefined)
-      partner.testimonialQuote = dto.testimonialQuote;
+      partner.testimonialQuote = toStoredNullableText(dto.testimonialQuote);
     if (dto.testimonialAuthor !== undefined)
-      partner.testimonialAuthor = dto.testimonialAuthor;
+      partner.testimonialAuthor = toStoredNullableText(dto.testimonialAuthor);
     if (dto.testimonialRole !== undefined)
-      partner.testimonialRole = dto.testimonialRole;
+      partner.testimonialRole = toStoredNullableText(dto.testimonialRole);
 
     if (partner.testimonialQuote && !partner.testimonialAuthor) {
       throw new ConflictException('A testimonial quote requires an author');
@@ -377,6 +516,69 @@ export class PartnersService {
 
     const saved = await this.partners.save(partner);
     return this.buildApplication(saved);
+  }
+
+  /**
+   * The partner profiles this member MAINTAINS (PRD-263).
+   *
+   * Scoped by `ownerUserId` alone, so it can only ever return rows this caller
+   * is the owner of — the session decides, never the wire. An approved partner
+   * whose owning account was erased has `owner_user_id = NULL` (the FK is
+   * `ON DELETE SET NULL`) and correctly belongs to nobody: it comes back for
+   * no one and stays staff-editable until staff move the seat.
+   *
+   * Returns a list rather than a single row because one member can genuinely
+   * run two organisations, and because a member who runs none must get an
+   * empty list rather than a 404 the editor would have to special-case.
+   */
+  async listOwned(memberId: string): Promise<OwnedPartnerDTO[]> {
+    const rows = await this.partners.find({
+      where: { ownerUserId: memberId, status: PartnerStatus.Approved },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    return rows.map(toOwnedPartner);
+  }
+
+  /**
+   * A partner editing its OWN public profile (PRD-263).
+   *
+   * WHAT IT CAN REACH is decided by the type, not by a runtime check:
+   * `UpdatePartnerProfileInput` simply has no `tier`, `since`, `eyebrow`,
+   * `name`, `featured` or testimonial field, and the global validation pipe
+   * runs `forbidNonWhitelisted`, so sending one is a 400 rather than a
+   * silently ignored key. Nothing here needs re-review: every field is a fact
+   * about the organisation that the organisation is the only reliable source
+   * for, and a stale phone number on a public support page is a worse failure
+   * than a partner mistyping its own address.
+   *
+   * THREE REFUSALS, deliberately different:
+   *  - unknown id -> 404;
+   *  - a real partner this member does not own -> 404 as well, not 403. A 403
+   *    would confirm that a given id exists, which is exactly what the public
+   *    `getBySlug` refuses to do for non-approved rows;
+   *  - a partner they own that is no longer approved -> 403, because there is
+   *    nothing to hide (they already know the row) and "you cannot edit this
+   *    while it is not published" is the honest answer.
+   */
+  async updateOwnedProfile(
+    memberId: string,
+    id: string,
+    dto: UpdatePartnerProfileInput,
+  ): Promise<OwnedPartnerDTO> {
+    const partner = await this.partners.findOne({ where: { id } });
+    if (!partner || partner.ownerUserId !== memberId) {
+      throw new NotFoundException('Partner not found');
+    }
+    if (partner.status !== PartnerStatus.Approved) {
+      throw new ForbiddenException(
+        'Only an approved partner profile can be edited',
+      );
+    }
+
+    applyProfileFields(partner, dto);
+    const saved = await this.partners.save(partner);
+    return toOwnedPartner(saved);
   }
 
   // --- cross-domain accessors for VolunteeringService ---
@@ -501,27 +703,36 @@ export class PartnersService {
         return await this.partners.save(
           this.partners.create({
             slug,
-            name: dto.name,
-            logo: dto.logo,
+            // Every free-text field is stripped of markup HERE, on the way in
+            // (PRD-263), for the same reason the edit paths are: these strings
+            // land verbatim on two `@Public()` pages, and the write boundary
+            // is the one place that catches a crafted API call as well as the
+            // form. `email`/`website` inside `contact` are left alone by
+            // `normalizeContact` — their own validators already constrain them.
+            name: toStoredPlainText(dto.name),
+            logo: toStoredPlainText(dto.logo),
             region: dto.region,
-            regionLabel: dto.regionLabel,
-            city: dto.city,
-            desc: dto.desc,
-            tags: dto.tags ?? [],
-            tier: dto.tier,
-            since: dto.since,
-            eyebrow: dto.eyebrow,
-            tagline: dto.tagline,
-            about: dto.about ?? [],
-            stats: dto.stats ?? [],
-            aboutMore: dto.aboutMore ?? [],
-            jointWork: dto.jointWork ?? [],
-            timeline: dto.timeline ?? [],
-            how: dto.how ?? [],
-            funding: dto.funding ?? '',
-            atGlance: dto.atGlance ?? [],
+            regionLabel: toStoredPlainText(dto.regionLabel),
+            city: toStoredPlainText(dto.city),
+            desc: toStoredPlainText(dto.desc),
+            tags: toStoredLines(dto.tags ?? []),
+            tier: toStoredPlainText(dto.tier),
+            since: toStoredPlainText(dto.since),
+            eyebrow: toStoredPlainText(dto.eyebrow),
+            tagline: toStoredPlainText(dto.tagline),
+            about: toStoredLines(dto.about ?? []),
+            stats: toStoredStats(dto.stats ?? []),
+            aboutMore: toStoredSections(dto.aboutMore ?? []),
+            jointWork: toStoredJointWork(dto.jointWork ?? []),
+            timeline: toStoredTimeline(dto.timeline ?? []),
+            how: toStoredSections(dto.how ?? []),
+            funding: toStoredPlainText(dto.funding ?? ''),
+            atGlance: toStoredAtGlance(dto.atGlance ?? []),
             contact: normalizeContact(dto.contact),
             status: PartnerStatus.Pending,
+            // A pending application has no public profile to maintain, so it
+            // has no owner. `triage` stamps one on approval.
+            ownerUserId: null,
             submittedById: memberId,
             reviewNote: null,
             // OPS-04. Stamped once, from the single window in

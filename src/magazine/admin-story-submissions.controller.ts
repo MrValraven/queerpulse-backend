@@ -2,9 +2,12 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -34,7 +37,8 @@ import { ListAdminStorySubmissionsQuery } from './dto/list-admin-story-submissio
 
 /**
  * Admin oversight of magazine story submissions: every reader story, paginated
- * and optionally filtered by status, plus the editorial decision on one.
+ * and optionally filtered by status, the editorial decision on one, and the
+ * one route back from a decline.
  * Guarded exactly like `AdminWriterApplicationsController` — `ActiveMemberGuard`
  * + `RolesGuard` with `@Roles(Admin)`, the same bar as the sibling
  * writer-application triage. There is no Editor role in this product.
@@ -76,5 +80,33 @@ export class AdminStorySubmissionsController {
     @Body() dto: DecideStorySubmissionDto,
   ) {
     return this.adminStorySubmissions.decide(user.userId, id, dto);
+  }
+
+  /**
+   * Undo a decline. A separate route rather than a fourth `decision` value on
+   * `PATCH :id`, because this is the opposite of deciding: it clears the
+   * verdict instead of recording one, it takes no reply note, and the body of
+   * `decide` is guarded on the row being undecided while this one is guarded on
+   * the row being declined. Folding the two together would put both guards in
+   * one method where each is the other's exception.
+   *
+   * `@HttpCode(200)`: it returns the reopened row, and nothing is created.
+   */
+  @Post(':id/reopen')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reopen a declined story submission, returning it to the queue.',
+  })
+  @ApiOkResponse({ description: 'The reopened submission, back in the queue.' })
+  @ApiNotFoundResponse({ description: 'Submission not found.' })
+  @ApiConflictResponse({
+    description:
+      'Not a declined submission: it is undecided, withdrawn, or was accepted or commissioned and has a desk record behind it.',
+  })
+  reopen(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.adminStorySubmissions.reopen(user.userId, id);
   }
 }

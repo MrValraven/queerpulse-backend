@@ -7,7 +7,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
@@ -18,6 +19,7 @@ import {
   SubprofileVisibility,
 } from './entities/subprofile.entity';
 import { EndorserView } from './subprofile-response';
+import { isSubprofileUnderTakedown } from './subprofile-takedown';
 import {
   SUBPROFILE_ENDORSED,
   SubprofileEndorsedEvent,
@@ -50,6 +52,11 @@ export class SubprofileEndorsementsService {
     private readonly members: Repository<SubprofileMember>,
     private readonly blockFilter: BlockFilterService,
     private readonly eventEmitter: EventEmitter2,
+    // Read-only: `resolveEndorsablePersona` withholds a persona under a
+    // moderator takedown, the same state every public READ path already
+    // applies. `ContentModerationModule` is already imported by
+    // `SubprofilesModule` for `SubprofilePublicReadService`.
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   async endorse(
@@ -206,7 +213,10 @@ export class SubprofileEndorsementsService {
       return {
         slug: profile?.slug ?? '',
         name: `${profile?.firstName ?? ''} ${profile?.lastName ?? ''}`.trim(),
-        avatarUrl: toImageUrl(profile?.avatarUrl),
+        // Same `photoVisible` gate `toMemberRef` applies, called directly
+        // because `EndorserView` is a narrower shape than `MemberRef`: photo
+        // on -> the resolved url, photo off (or no profile row) -> null.
+        avatarUrl: toVisibleAvatarUrl(profile),
         note: row.note,
       };
     });
@@ -276,9 +286,9 @@ export class SubprofileEndorsementsService {
   }
 
   // Fetches a persona by id AND enforces it is publicly endorsable: published,
-  // Open visibility, and not block-either-way between `userId` (the
-  // endorser/viewer) and the persona's owner. Mirrors the gate `getByHandle`
-  // applies.
+  // Open visibility, not owner-removed, not under a moderator takedown, and not
+  // block-either-way between `userId` (the endorser/viewer) and the persona's
+  // owner. Mirrors the gate `getByHandle` applies.
   private async resolveEndorsablePersona(
     userId: string,
     id: string,
@@ -291,9 +301,21 @@ export class SubprofileEndorsementsService {
         id,
         status: SubprofileStatus.Published,
         visibility: SubprofileVisibility.Open,
+        // A removed persona is unreachable here too, exactly as it is in
+        // `directory()` and `listForProfile`. Without this, anyone holding the
+        // uuid from before the removal could keep endorsing it (notifying the
+        // owner each time) and keep reading the endorser list through
+        // `listEndorsers`, which funnels through this same gate.
+        removedAt: IsNull(),
       },
     });
     if (!persona) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    // A moderator takedown withholds the persona from every public read path
+    // (`dropModeratedSubprofiles` / `excludeModeratedSubprofiles`), so it has
+    // to close the write path too. Same predicate, one shared spelling.
+    if (await isSubprofileUnderTakedown(this.contentModeration, persona.slug)) {
       throw new NotFoundException('Subprofile not found');
     }
     if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {

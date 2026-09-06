@@ -35,7 +35,10 @@ export class HousingSavedSearchCriteriaDto {
   @IsOptional() @IsInt() @Min(0) bedroomsMin?: number;
   @IsOptional() @IsBoolean() billsIncluded?: boolean;
   @IsOptional() @IsBoolean() hasAccessibilityInfo?: boolean;
+  @IsOptional() @IsBoolean() furnished?: boolean;
+  @IsOptional() @IsBoolean() petsWelcome?: boolean;
   @IsOptional() @IsBoolean() verifiedOnly?: boolean;
+  @IsOptional() @IsInt() @Min(0) depositMax?: number;
   @IsOptional() @IsDateString() availableBy?: string;
 }
 

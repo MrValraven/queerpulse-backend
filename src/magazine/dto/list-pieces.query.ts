@@ -23,6 +23,7 @@ const PIECE_STAGES: PieceStage[] = [
   'sensitivity_read',
   'layout',
   'ready',
+  'published',
 ];
 
 export type SavedViewId = 'v-late' | 'v-art' | 'v-sens' | 'v-pay';

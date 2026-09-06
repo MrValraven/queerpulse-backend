@@ -6,6 +6,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
 import { Conversation } from './entities/conversation.entity';
+import { MessageHide } from './entities/message-hide.entity';
 import {
   MessageReaction,
   MessageReactionKey,
@@ -36,9 +37,11 @@ import { MessagingCoreService } from './messaging-core.service';
 
 /**
  * Annotations concern of the split `MessagingService`: per-message reactions,
- * SHARED conversation pins, and PRIVATE per-user stars. Thread/send/edit/
- * delete lives in `MessagesService`; conversation-level state lives in
- * `ConversationsService`.
+ * SHARED conversation pins, PRIVATE per-user stars, and PRIVATE per-user
+ * message hides ("delete for me", PRD-227 — distinct from the whole-thread
+ * `clearConversation` "delete for me" in `ConversationsService`). Thread/
+ * send/edit/delete-for-everyone lives in `MessagesService`; conversation-
+ * level state lives in `ConversationsService`.
  *
  * Every read here goes through `MessagingCoreService.requireParticipant` (for
  * the caller's `clearedAt` floor) and `toMessageResponses` — never a locally
@@ -60,6 +63,8 @@ export class MessageAnnotationsService {
     private readonly pins: Repository<ConversationPinnedMessage>,
     @InjectRepository(MessageStar)
     private readonly stars: Repository<MessageStar>,
+    @InjectRepository(MessageHide)
+    private readonly hides: Repository<MessageHide>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly core: MessagingCoreService,
     private readonly eventEmitter: EventEmitter2,
@@ -222,7 +227,21 @@ export class MessageAnnotationsService {
    * the original). Floored by the caller's `clearedAt` and excluding
    * soft-deleted messages — a pin whose message was cleared/deleted simply drops
    * out of the banner (the DB row lingers harmlessly until the message is hard
-   * deleted, which cascades it away).
+   * deleted, which cascades it away). Also excludes a message THIS caller hid
+   * (PRD-227 "delete for me") — the pin itself is SHARED, so the other
+   * participant's banner is unaffected.
+   *
+   * The `MAX_PINNED_MESSAGES` cap is applied AFTER all of the above filtering
+   * (inside the loop below), not on the initial `pins.find`. This shape can't
+   * filter and cap in one query the way `listStarredMessages` does (pins and
+   * messages are two separate `find()` calls, not one query builder), but the
+   * same principle applies: capping the PIN rows first, then filtering,
+   * would under-fill the banner whenever one of the newest pins happens to be
+   * hidden/cleared/left-ceilinged for this caller, even though older,
+   * eligible pins exist to fill the slot. Pin volume per conversation is an
+   * explicit per-message action and naturally small, so scanning every pin
+   * row for the thread (rather than only the newest `MAX_PINNED_MESSAGES`) is
+   * safe.
    */
   async listPinnedMessages(
     conversationId: string,
@@ -235,9 +254,6 @@ export class MessageAnnotationsService {
     const pinRows = await this.pins.find({
       where: { conversationId },
       order: { pinnedAt: 'DESC' },
-      // Bounded: the banner shows the newest pins; an unbounded scan of every
-      // pin a thread ever accrued is never needed.
-      take: MAX_PINNED_MESSAGES,
     });
     if (!pinRows.length) {
       return [];
@@ -248,12 +264,25 @@ export class MessageAnnotationsService {
     const messageById = new Map(
       messages.map((message) => [message.id, message]),
     );
+    const hiddenMessageIds = messageById.size
+      ? new Set(
+          (
+            await this.hides.find({
+              where: { userId, messageId: In([...messageById.keys()]) },
+            })
+          ).map((hide) => hide.messageId),
+        )
+      : new Set<string>();
     const ordered: Message[] = [];
     for (const pin of pinRows) {
+      // Cap AFTER filtering (see this method's own doc) — stop as soon as the
+      // banner has enough eligible pins, never before.
+      if (ordered.length >= MAX_PINNED_MESSAGES) break;
       const message = messageById.get(pin.messageId);
       // Drop a pin whose message is gone (soft-deleted / hard-removed) or falls
       // at-or-before the caller's clear floor — it doesn't exist for them.
       if (!message) continue;
+      if (hiddenMessageIds.has(pin.messageId)) continue;
       if (participant.clearedAt && message.createdAt <= participant.clearedAt) {
         continue;
       }
@@ -303,6 +332,51 @@ export class MessageAnnotationsService {
   ): Promise<{ ok: true }> {
     await this.core.requireParticipant(conversationId, userId);
     await this.stars.delete({ userId, messageId });
+    return { ok: true };
+  }
+
+  // ── Hides (PRIVATE, per-user "delete for me" on ONE message — PRD-227) ─────
+
+  /**
+   * Hide a single message from THIS user's own view only ("delete for me"),
+   * idempotent per (user, message). SITS BESIDE the existing author-or-staff
+   * "delete for everyone" tombstone (`MessagesService.deleteMessage`,
+   * `Message.deletedAt`) — the two never merge: a message can be hidden for
+   * one viewer, tombstoned for everyone, both, or neither, independently.
+   * Private by construction, exactly like `starMessage`: no event is
+   * emitted, so the other participant's view (and every OTHER participant's,
+   * for a group) is completely unaffected and never looks like a tombstone
+   * to them.
+   *
+   * Unlike reactions/pins/stars, this uses the lenient `requireParticipant`
+   * (not `requireActiveParticipant`): hiding something from your OWN view is
+   * harmless self-service that must stay possible even after leaving a group
+   * or being blocked — mirrors `unstarMessage`/`clearConversation`. A
+   * tombstoned message can still be hidden (`withDeleted: true`), so a
+   * member can clear even a "This message was deleted" placeholder out of
+   * their own view — no unhide is offered from the UI, matching
+   * WhatsApp/Telegram.
+   */
+  async hideMessageForMe(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<{ ok: true }> {
+    await this.core.requireParticipant(conversationId, userId);
+    const message = await this.messages.findOne({
+      where: { id: messageId, conversationId },
+      withDeleted: true,
+    });
+    if (!message) {
+      throw new NotFoundException('Message not found');
+    }
+    await this.hides
+      .createQueryBuilder()
+      .insert()
+      .into(MessageHide)
+      .values({ userId, messageId })
+      .orIgnore()
+      .execute();
     return { ok: true };
   }
 
@@ -364,6 +438,16 @@ export class MessageAnnotationsService {
             AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
         )`,
         { messageSubjectType: 'message' },
+      )
+      // PRD-227 "delete for me": a message THIS caller hid drops out of their
+      // own starred list too — their star row (private) lingers harmlessly,
+      // mirroring how a star on a deleted message already lingers.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "message_hides" "mh"
+          WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :userId
+        )`,
+        { userId },
       )
       // No `.withDeleted()`: the @DeleteDateColumn default filter drops tombstones.
       .orderBy('s.created_at', 'DESC')

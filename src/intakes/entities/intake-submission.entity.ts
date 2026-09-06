@@ -74,6 +74,30 @@ export class IntakeSubmission extends QueueAssignmentColumns {
   @Column({ type: 'timestamptz', nullable: true })
   reviewedAt!: Date | null;
 
+  /**
+   * PRD-261. SHA-256 (hex) of the opaque reference code minted at submit time
+   * for a `governance_concern`, which is what
+   * `GET /intakes/concerns/status?token=…` resolves.
+   *
+   * HASHED, never stored in the clear, for the same reason
+   * `PlatformJoinRequest.statusTokenHash` is: the plaintext is a bearer
+   * credential for a public, unauthenticated read, and the row behind it is a
+   * confidential report. A leaked database dump must not hand an attacker a
+   * working set of lookup codes. The plaintext exists exactly once, in the 201
+   * body of `POST /intakes/governance_concern`, and is never recoverable
+   * afterwards — the platform sends no email, so it cannot be re-delivered.
+   *
+   * NULL on every row that predates this column and on every non-concern kind:
+   * the other eleven forms have no submitter-facing worklist, so there is
+   * nothing for a code to look at. The unique index
+   * (`UQ_intake_submissions_status_token_hash`) guarantees one code resolves to
+   * at most one submission; Postgres does not treat NULLs as equal, so the
+   * codeless rows never collide with each other.
+   */
+  @Index('UQ_intake_submissions_status_token_hash', { unique: true })
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  statusTokenHash!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

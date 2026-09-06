@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import {
+  ApiBadRequestResponse,
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -42,7 +43,22 @@ export class AppealsController {
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post()
   @ApiOperation({ summary: 'Submit an appeal against a moderation decision' })
-  @ApiCreatedResponse({ description: 'The appeal was recorded.' })
+  @ApiCreatedResponse({
+    description:
+      'The appeal was recorded. The body carries `slaDueAt`, the date the ' +
+      'platform has undertaken to decide it by (the published decision ' +
+      'window, counted from this moment).',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Either the body failed validation, or the published filing window for ' +
+      'the decision being appealed has closed. The window case answers ' +
+      '`{ statusCode: 400, error: "Bad Request", code: "APPEAL_WINDOW_CLOSED", ' +
+      'windowDays: number, decisionTakenAt: string, closedAt: string, message: string }`. ' +
+      '`decisionTakenAt` and `closedAt` are ISO-8601 UTC instants and ' +
+      '`windowDays` is the published filing window. Branch on the presence of ' +
+      '`code === "APPEAL_WINDOW_CLOSED"`, never on message text.',
+  })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({
     description: 'The referenced moderation action is not one you can appeal.',

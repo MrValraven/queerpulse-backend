@@ -355,6 +355,42 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // ONE volunteering opportunity. Shaped on `Job`, the nearest neighbour, with
+  // four codes a paid-work ad does not carry.
+  //
+  // `not_affirming` is the load-bearing one, and it is why this entry could
+  // not simply reuse `Job`'s set. Volunteering is unpaid time handed to an
+  // organization on the strength of it being safe to be queer around, and the
+  // pledge is what that promise is made of, so breaking it is the central
+  // complaint this subject exists to carry.
+  //
+  // `venue_safety` is here because volunteering puts a member in a room with
+  // strangers at a real address on a stated date, which is a place where an
+  // incident happens. A directory listing is a page; a shift is somewhere you
+  // go.
+  //
+  // `outing` and `doxxing` are here for the reason they lead the housing
+  // subjects: the copy on an opportunity is the poster's prose about who is
+  // involved, and a page naming the people who run an HIV service or a trans
+  // support group outs them to everyone who reads it. Without these two the
+  // strongest thing a reporter could say about that page is `discrimination`,
+  // which tops out at Medium, and it belongs in the one-hour Emergency band.
+  //
+  // The rest are the directory family's usual set: `housing_scam` carries the
+  // "Scam or fake listing" label every fake posting files under, `harassment`
+  // targeted abuse in the posting, `spam` self-promotion abuse, and `other`
+  // (free-text) anything else.
+  [ReportSubjectType.Volunteering]: [
+    'outing',
+    'doxxing',
+    'not_affirming',
+    'discrimination',
+    'venue_safety',
+    'harassment',
+    'housing_scam',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

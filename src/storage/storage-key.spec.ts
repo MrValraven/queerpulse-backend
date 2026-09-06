@@ -8,6 +8,8 @@ const VALID_AVATAR_KEY =
   'avatars/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg';
 const VALID_GATHERING_KEY =
   'gathering-photos/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.webp';
+const VALID_MESSAGE_DOCUMENT_KEY =
+  'message-documents/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.pdf';
 
 describe('parseStorageKey', () => {
   it('resolves a public kind and reports it needs no session', () => {
@@ -20,6 +22,12 @@ describe('parseStorageKey', () => {
   it('resolves gathering photos as session-gated', () => {
     const spec = parseStorageKey(VALID_GATHERING_KEY);
     expect(spec?.prefix).toBe('gathering-photos');
+    expect(spec?.requiresSession).toBe(true);
+  });
+
+  it('resolves a message-document key (PRD-226) as session-gated', () => {
+    const spec = parseStorageKey(VALID_MESSAGE_DOCUMENT_KEY);
+    expect(spec?.prefix).toBe('message-documents');
     expect(spec?.requiresSession).toBe(true);
   });
 

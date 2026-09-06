@@ -21,9 +21,16 @@ import {
 
 /**
  * Admin CRUD over the Legal Aid / Sexual Health Testing resource directory
- * (CNT-14). Deliberately no auto-conversion path from `ResourceSuggestion`
- * here or anywhere else — an admin who has verified an organisation creates
- * the row by hand, using a suggestion only as a reference.
+ * (CNT-14). This is the console for listings that have no suggestion behind
+ * them, and for editing or retiring any listing once it exists.
+ *
+ * The other way a row gets here is `AdminResourceSuggestionsService.approve`
+ * (PRD-269), which writes a `ResourceListing` in the same transaction as the
+ * approval from a body the reviewing admin confirmed field by field. That is
+ * not an auto-conversion of the member's words: the verification step this
+ * console used to carry alone now happens at approval time, where the member
+ * is told the answer, instead of in a second hand-keyed entry somebody had to
+ * remember.
  */
 @Injectable()
 export class AdminResourceListingsService {

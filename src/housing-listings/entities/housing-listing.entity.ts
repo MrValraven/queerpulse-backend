@@ -138,9 +138,15 @@ export class HousingListing {
   // stranger — only to the owner or an accepted (mutually-connected) enquirer.
   // Pre-connection the client receives an APPROXIMATE neighbourhood-centroid pin
   // derived from `area`/`city` instead (see housing-listing-response.ts +
-  // housing-geo.ts). Nullable + additive so the migration is safe on old rows;
-  // a production geocoder populates them on write (today they stay null unless
-  // set out-of-band).
+  // housing-geo.ts). Nullable + additive so the migration is safe on old rows.
+  //
+  // Populated from `addressLine` by `HousingListingsService`, which hands the
+  // address to `GeocodeService` AFTER the row is committed and never on the
+  // request path: the geocoder is a rate-limited outbound call, so a listing
+  // must be able to save with these still null. They stay null for a listing
+  // with no address on file and for one whose address could not be placed, and
+  // they are cleared the moment `addressLine` changes so a stale pin can never
+  // point at a home the lister has moved out of.
   @Column({
     type: 'numeric',
     precision: 9,
@@ -166,6 +172,22 @@ export class HousingListing {
 
   @Column({ type: 'int' })
   rentEuros!: number;
+
+  /**
+   * Up-front deposit in EUROS, following `rentEuros` above: whole euros as an
+   * `int`, the same unit a renter compares against the rent, so the board can
+   * cap it without knowing a listing's rent. Months-of-rent was the tempting
+   * alternative and is worse: it is only comparable once you also hold the
+   * rent, and listers state deposits both ways ("one month", "€900") so the
+   * unit that survives translation to a filter is the money.
+   *
+   * NULLABLE, and null means UNKNOWN. Every row that exists today has no
+   * value, and an unstated deposit must never read as zero: the `depositMax`
+   * browse filter EXCLUDES a null rather than showing it under the cap, both
+   * in SQL and in the saved-search twin.
+   */
+  @Column({ type: 'int', nullable: true })
+  depositEuros!: number | null;
 
   // Bedroom count (0 = studio). Nullable + additive so the migration is safe on
   // old rows; powers the "beds" browse filter. Indexed (hot filter column).
@@ -239,6 +261,35 @@ export class HousingListing {
   @Column({ type: 'timestamptz', nullable: true })
   decidedAt!: Date | null;
 
+  /**
+   * When this listing was published for the FIRST time, or null while it never
+   * has been (ENG-170).
+   *
+   * The at-most-once claim behind the saved-search go-live alert. `status` alone
+   * cannot answer "has this ever been live": an owner PATCH to a moderated field
+   * knocks a live listing back to `review`
+   * (`HousingListingsService.moderatedHousingFingerprint`), so the moderator's
+   * next approval sees a non-live listing again and, before this column, fanned
+   * the same alert out to every matching saved search a second time. One typo
+   * fix plus one approval was a second platform-wide broadcast, and nothing
+   * downstream deduplicated it: the listener's `seen` set lives inside a single
+   * event, and `HousingListingMatch` has no bundling subject.
+   *
+   * Claimed with a conditional UPDATE (`first_live_at IS NULL`), the same shape
+   * `events.nearly_full_notified_at` and `membership_cards.expiry_warning_sent_at`
+   * use, so two concurrent approvals cannot both alert.
+   *
+   * NEVER cleared. Unlike `nearly_full_notified_at` (a gathering that empties and
+   * refills is genuinely nearly full again), "a home matching your search was
+   * published" is true about a given listing exactly once. A take-down and a
+   * re-approval months later is the same home the platform already announced, it
+   * is reachable from browse and from the member's own saved search, and
+   * re-alerting would turn a moderator's corrective action into a broadcast and
+   * hand a lister a take-down/re-approve loop that reaches every matching inbox.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  firstLiveAt!: Date | null;
+
   @Column({ type: 'date', nullable: true })
   availableFrom!: string | null;
 
@@ -284,6 +335,26 @@ export class HousingListing {
   // migration backfills existing rows with a fresh 60-day window from `now()`.
   @Column({ type: 'timestamptz' })
   expiresAt!: Date;
+
+  // PRD-244. When the pre-expiry warning was written for the CURRENT term of
+  // this listing. Null means "not warned yet for this term".
+  //
+  // The reason the column exists: the warning sweep is the same DAILY cron
+  // that soft-expires overdue listings, so without a marker every owner inside
+  // the seven-day window would be told again every morning for a week. Claimed
+  // with a conditional UPDATE whose WHERE still carries
+  // `expiry_warning_sent_at IS NULL`, the shape
+  // `membership_cards.expiry_warning_sent_at` and
+  // `deletion_request.final_warning_sent_at` both use, so two ticks racing
+  // cannot both send.
+  //
+  // Cleared back to null by every path that gives the listing a fresh term
+  // (`extend`, `markAvailable` when it refreshes a stale expiry, and moderator
+  // approval when it does the same), because the next term earns its own
+  // warning. The marker means "warned for this term", never "warned once,
+  // ever".
+  @Column({ type: 'timestamptz', nullable: true })
+  expiryWarningSentAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

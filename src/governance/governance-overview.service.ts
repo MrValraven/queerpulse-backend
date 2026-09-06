@@ -1,7 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { toStoredPlainText } from '../communities/community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
 import {
@@ -21,7 +26,11 @@ import { UpdateAdminOverviewDto } from './dto/update-admin-overview.dto';
 import {
   GOVERNANCE_OVERVIEW_ID,
   GovernanceOverview,
+  OverviewAuthoredText,
+  OverviewCouncilSeat,
+  OverviewDecision,
   OverviewHealthStat,
+  OverviewPrinciple,
 } from './entities/governance-overview.entity';
 import {
   GovernanceOverviewChange,
@@ -34,6 +43,113 @@ import {
 // `withLiveActiveMemberCount`/`updateOverview` below). `AdminGovernanceHealthEditor`
 // (frontend) matches this by disabling that one row's value field.
 const ACTIVE_MEMBERS_HEALTH_KEY = 'activeMembers';
+
+/**
+ * PRD-265. Sanitise one authored EN/PT pair for STORAGE.
+ *
+ * The write boundary is the only place this happens, per this repo's rule and
+ * the `sanitizeArticleHtml` / `toStoredPlainText` precedent: a value that
+ * reaches a public page is cleaned once, where it is persisted, never stripped
+ * again at each render site. That matters more than usual here, because the
+ * governance overview is read by an unauthenticated public page and its
+ * authored text is the one part of that page a human types.
+ *
+ * These fields are not rich text at all — a decision reads as a sentence — so
+ * the allowlist `toStoredPlainText` applies is empty: every tag is discarded
+ * and only its text survives, entity-encoded markup included.
+ *
+ * A field that strips to nothing is a 400, not an empty string quietly saved:
+ * a blank line on the platform's accountability record is worse than a refused
+ * save, and the editor is right there to fix it.
+ */
+function toStoredAuthoredText(
+  text: OverviewAuthoredText,
+  fieldName: string,
+): OverviewAuthoredText {
+  const en = toStoredPlainText(text.en);
+  const pt = toStoredPlainText(text.pt);
+  if (!en.length || !pt.length) {
+    throw new BadRequestException(
+      `${fieldName} needs real text in both English and Portuguese.`,
+    );
+  }
+  return { en, pt };
+}
+
+/** The same, for a field that is only present on an authored entry. */
+function toStoredAuthoredTextOrUndefined(
+  text: OverviewAuthoredText | undefined,
+  fieldName: string,
+): OverviewAuthoredText | undefined {
+  return text === undefined ? undefined : toStoredAuthoredText(text, fieldName);
+}
+
+/**
+ * PRD-265. Normalise one submitted section for storage: authored prose is
+ * sanitised, seeded entries pass through untouched, and the absent half of the
+ * exclusive-or is dropped rather than persisted as `undefined` (jsonb would
+ * keep the key with a null, and every reader would then have to tell "authored
+ * but empty" from "seeded").
+ *
+ * The DTO has already guaranteed the exclusive-or and the length caps, so these
+ * three only have to clean what is there.
+ */
+function toStoredDecisions(decisions: OverviewDecision[]): OverviewDecision[] {
+  return decisions.map((decision) =>
+    decision.key !== undefined
+      ? { key: decision.key }
+      : {
+          lead: toStoredAuthoredTextOrUndefined(
+            decision.lead,
+            'A decision lead',
+          ),
+          body: toStoredAuthoredTextOrUndefined(
+            decision.body,
+            'A decision body',
+          ),
+        },
+  );
+}
+
+function toStoredPrinciples(
+  principles: OverviewPrinciple[],
+): OverviewPrinciple[] {
+  return principles.map((principle) =>
+    principle.key !== undefined
+      ? { key: principle.key, icon: principle.icon }
+      : {
+          title: toStoredAuthoredTextOrUndefined(
+            principle.title,
+            'A principle title',
+          ),
+          text: toStoredAuthoredTextOrUndefined(
+            principle.text,
+            'A principle description',
+          ),
+          icon: principle.icon,
+        },
+  );
+}
+
+function toStoredCouncil(
+  council: OverviewCouncilSeat[],
+): OverviewCouncilSeat[] {
+  return council.map((seat) => {
+    // `name` and `initials` are typed by the same editor into the same public
+    // page, so they get the same strip. They are not part of the
+    // seeded/authored exclusive-or: every seat has them.
+    const name = toStoredPlainText(seat.name);
+    const initials = toStoredPlainText(seat.initials);
+    return seat.roleKey !== undefined
+      ? { name, initials, roleKey: seat.roleKey, tint: seat.tint }
+      : {
+          name,
+          initials,
+          role: toStoredAuthoredTextOrUndefined(seat.role, 'A council role'),
+          tint: seat.tint,
+        };
+  });
+}
 
 @Injectable()
 export class GovernanceOverviewService {
@@ -211,25 +327,33 @@ export class GovernanceOverviewService {
         );
         overview.moderationSteps = dto.moderationSteps;
       }
+      // PRD-265. The three sections that accept authored prose are normalised
+      // BEFORE the diff, not after: the audit row must record what was
+      // actually stored, or the history would show markup that the page never
+      // held. `recordIfChanged` then compares stored-shape to stored-shape, so
+      // re-saving text that only differed by a stripped tag writes no history.
       if (dto.council !== undefined) {
-        recordIfChanged(OverviewSection.Council, overview.council, dto.council);
-        overview.council = dto.council;
+        const council = toStoredCouncil(dto.council);
+        recordIfChanged(OverviewSection.Council, overview.council, council);
+        overview.council = council;
       }
       if (dto.principles !== undefined) {
+        const principles = toStoredPrinciples(dto.principles);
         recordIfChanged(
           OverviewSection.Principles,
           overview.principles,
-          dto.principles,
+          principles,
         );
-        overview.principles = dto.principles;
+        overview.principles = principles;
       }
       if (dto.decisions !== undefined) {
+        const decisions = toStoredDecisions(dto.decisions);
         recordIfChanged(
           OverviewSection.Decisions,
           overview.decisions,
-          dto.decisions,
+          decisions,
         );
-        overview.decisions = dto.decisions;
+        overview.decisions = decisions;
       }
 
       if (auditRows.length === 0) return;

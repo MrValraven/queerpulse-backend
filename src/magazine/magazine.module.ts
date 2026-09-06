@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminMembersModule } from '../admin-members/admin-members.module';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { SocialModule } from '../social/social.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -76,6 +77,14 @@ import { WriterApplicationsService } from './writer-applications.service';
     NotificationsModule,
     MediaCropsModule,
     ContentModerationModule,
+    // ENG-101 — reader comments were the one launched surface applying
+    // neither the block nor the mute filter, so a blocked pair met under a
+    // public article. `MagazineReaderCommentsService` now injects
+    // `BlockFilterService` for both the comment and reply queries and for the
+    // reply gate. Plain import, no `forwardRef`: `SocialModule` imports only
+    // `TypeOrmModule`, `UsersModule` and `ReportsModule`, none of which
+    // reaches `MagazineModule`.
+    SocialModule,
     // `NotificationsService` is already imported above for the piece/issue
     // bells; `AdminStorySubmissionsService` uses the same provider to tell a
     // submitter their story was accepted, declined, or commissioned.

@@ -22,10 +22,17 @@ import { ConversationPinnedMessage } from './entities/conversation-pinned-messag
 import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
-import { GifAttachment, Message, MessageKind } from './entities/message.entity';
+import {
+  AttachmentInput,
+  DocumentAttachment,
+  GifAttachment,
+  Message,
+  MessageKind,
+} from './entities/message.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { storageKeyFromImageUrl } from '../common/image-url';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
+import { DOCUMENT_UPLOAD_TYPES } from '../storage/upload-content-types';
 import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -56,6 +63,8 @@ function messageKindToResponseKind(kind: MessageKind): MessageResponse['kind'] {
       return 'gif';
     case MessageKind.Image:
       return 'image';
+    case MessageKind.Document:
+      return 'document';
     default:
       return 'user';
   }
@@ -274,9 +283,28 @@ export class MessagingCoreService {
     )`;
   }
 
-  /** Newest non-deleted message per conversation, in one DISTINCT ON pass. */
+  /**
+   * A `NOT EXISTS` SQL fragment (message alias `m`) that is TRUE only when
+   * `viewerId` has not "deleted for me" (PRD-227) this message. Shared by the
+   * message-counting/preview query builders below so a per-viewer hide is
+   * uniformly excluded from THIS viewer's preview/unread paths, without ever
+   * touching what the other participant sees. The caller must bind the
+   * `hiddenForUserId` parameter (`.setParameter('hiddenForUserId', viewerId)`).
+   */
+  private notHiddenForViewerPredicate(): string {
+    return `NOT EXISTS (
+      SELECT 1 FROM "message_hides" "mh"
+      WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hiddenForUserId
+    )`;
+  }
+
+  /** Newest message per conversation THIS viewer hasn't hidden (PRD-227), in
+   *  one DISTINCT ON pass — so a viewer's own "delete for me" on their most
+   *  recent message falls the inbox preview back to their own next-newest
+   *  visible one, exactly as clearing a whole conversation already does. */
   async lastMessagesByConversation(
     convoIds: string[],
+    viewerId: string,
   ): Promise<Map<string, Message>> {
     const rows = await this.messages
       .createQueryBuilder('m')
@@ -287,10 +315,12 @@ export class MessagingCoreService {
       // message rather than leaking a withheld body — the preview never passes
       // through `toMessageResponses`, so the filter has to live here.
       .andWhere(this.notModeratedPredicate())
+      .andWhere(this.notHiddenForViewerPredicate())
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
       )
+      .setParameter('hiddenForUserId', viewerId)
       // DISTINCT ON must lead its ORDER BY with the distinct column; the
       // (created_at DESC, id DESC) tail then selects the newest row per
       // conversation deterministically. Backed by the composite index
@@ -332,10 +362,14 @@ export class MessagingCoreService {
       // A moderator-taken-down message never counts toward unread — the viewer
       // can no longer see it, so it must not drive a badge.
       .andWhere(this.notModeratedPredicate())
+      // A message THIS viewer "deleted for me" (PRD-227) never counts toward
+      // their own unread badge either — it no longer exists for them.
+      .andWhere(this.notHiddenForViewerPredicate())
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
       )
+      .setParameter('hiddenForUserId', userId)
       .groupBy('m.conversation_id')
       .getRawMany<{ conversationId: string; count: string }>();
     return new Map(rows.map((r) => [r.conversationId, Number(r.count)]));
@@ -392,10 +426,14 @@ export class MessagingCoreService {
       )
       // A moderator-taken-down message never counts toward the unread badge.
       .andWhere(this.notModeratedPredicate())
+      // A message THIS viewer "deleted for me" (PRD-227) never counts toward
+      // their own unread badge either — see `unreadCountsByConversation`.
+      .andWhere(this.notHiddenForViewerPredicate())
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
       )
+      .setParameter('hiddenForUserId', userId)
       .getRawOne<{ count: string }>();
     return Number(raw?.count ?? 0);
   }
@@ -768,8 +806,8 @@ export class MessagingCoreService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image',
-    attachment?: GifAttachment,
+    kind?: 'user' | 'gif' | 'image' | 'document',
+    attachment?: AttachmentInput,
   ): Promise<{ view: MessageView; response: MessageResponse; isNew: boolean }> {
     if (clientMessageId) {
       const existing = await this.messages.findOne({
@@ -781,15 +819,47 @@ export class MessagingCoreService {
         return this.buildPostResult(existing, senderId, false);
       }
     }
-    if ((kind === 'gif' || kind === 'image') && !attachment) {
+    if (
+      (kind === 'gif' || kind === 'image' || kind === 'document') &&
+      !attachment
+    ) {
       throw new BadRequestException(
         `attachment is required for a ${kind} message`,
       );
     }
-    if (kind === 'gif' && attachment && !/^https:\/\//.test(attachment.url)) {
-      throw new BadRequestException('A gif attachment must be an https URL');
+    // Narrowed from the loose wire-level `AttachmentInput` (see its own doc —
+    // one DTO class carries every kind's fields, all but `url`/`provider`
+    // optional) to a fully-typed, ready-to-persist attachment once the branch
+    // below validates it against the specific fields ITS kind requires. Stays
+    // null for a plain text/system/gif-without-attachment send.
+    let resolvedAttachment: GifAttachment | DocumentAttachment | null = null;
+    if (kind === 'gif' && attachment) {
+      if (!/^https:\/\//.test(attachment.url)) {
+        throw new BadRequestException('A gif attachment must be an https URL');
+      }
+      if (
+        typeof attachment.previewUrl !== 'string' ||
+        typeof attachment.width !== 'number' ||
+        typeof attachment.height !== 'number'
+      ) {
+        throw new BadRequestException('Invalid gif attachment');
+      }
+      resolvedAttachment = {
+        url: attachment.url,
+        previewUrl: attachment.previewUrl,
+        width: attachment.width,
+        height: attachment.height,
+        provider: attachment.provider,
+      };
     }
     if (kind === 'image' && attachment) {
+      if (
+        typeof attachment.previewUrl !== 'string' ||
+        typeof attachment.width !== 'number' ||
+        typeof attachment.height !== 'number'
+      ) {
+        throw new BadRequestException('Invalid image attachment');
+      }
       // A forwarded image's `url`/`previewUrl` arrive as the ALREADY-RESOLVED
       // `GET /files/<key>` URL (the forwarded ChatMessage's attachment came
       // from a server response, which resolves keys at read time — see
@@ -799,19 +869,14 @@ export class MessagingCoreService {
       // other image field via `storageKeyFromImageUrl`), and this is also what
       // makes the ownership check below correct for a forward, not just a
       // fresh send.
-      attachment = {
-        ...attachment,
-        url: storageKeyFromImageUrl(attachment.url),
-        previewUrl: storageKeyFromImageUrl(attachment.previewUrl),
-      };
+      const url = storageKeyFromImageUrl(attachment.url);
+      const previewUrl = storageKeyFromImageUrl(attachment.previewUrl);
       // The attachment's `url` must be a well-formed `message-image` storage
       // key — otherwise any authenticated member could attach an arbitrary
       // key (an unrelated kind's, or a malformed string) to a message. 404-
       // style rejection posture doesn't apply here (unlike `FilesController`,
       // nothing is disclosed either way) — a plain 400 is correct.
-      if (
-        parseStorageKey(attachment.url) !== UPLOAD_KIND_SPECS['message-image']
-      ) {
+      if (parseStorageKey(url) !== UPLOAD_KIND_SPECS['message-image']) {
         throw new BadRequestException('Invalid image attachment');
       }
       // The attachment must be one this sender is entitled to send. Two
@@ -829,10 +894,11 @@ export class MessagingCoreService {
       // bypassed the ownership check, so any member who merely knew someone
       // else's `message-image` key could attach it by asserting the flag — the
       // flag is now non-authoritative and the server proves genuine access.
-      if (storageKeyOwnerId(attachment.url) !== senderId) {
+      if (storageKeyOwnerId(url) !== senderId) {
         const isGenuineForward = await this.senderCanForwardAttachment(
           senderId,
-          attachment.url,
+          url,
+          MessageKind.Image,
         );
         if (!isGenuineForward) {
           throw new ForbiddenException(
@@ -840,13 +906,83 @@ export class MessagingCoreService {
           );
         }
       }
+      resolvedAttachment = {
+        url,
+        previewUrl,
+        width: attachment.width,
+        height: attachment.height,
+        provider: attachment.provider,
+      };
+    }
+    if (kind === 'document' && attachment) {
+      if (
+        typeof attachment.fileName !== 'string' ||
+        typeof attachment.byteSize !== 'number' ||
+        typeof attachment.contentType !== 'string'
+      ) {
+        throw new BadRequestException('Invalid document attachment');
+      }
+      // Same URL-normalisation as the `image` branch above: a forward's
+      // attachment arrives already resolved to `GET /files/<key>` (see
+      // `resolveAttachment`), never a bare key. `storageKeyFromImageUrl` is
+      // format-agnostic (it only strips the app's own `/files/` prefix), so it
+      // applies unchanged to a document key.
+      const url = storageKeyFromImageUrl(attachment.url);
+      // The attachment's `url` must be a well-formed `message-document`
+      // storage key — same reasoning as the image branch's own check.
+      if (parseStorageKey(url) !== UPLOAD_KIND_SPECS['message-document']) {
+        throw new BadRequestException('Invalid document attachment');
+      }
+      // Same two-case ownership rule as an image: the sender's own fresh
+      // upload (key embeds their id), or a genuine forward of a document they
+      // provably had access to. Never trusts the client's `forwarded` flag —
+      // see the identical reasoning on the image branch above.
+      if (storageKeyOwnerId(url) !== senderId) {
+        const isGenuineForward = await this.senderCanForwardAttachment(
+          senderId,
+          url,
+          MessageKind.Document,
+        );
+        if (!isGenuineForward) {
+          throw new ForbiddenException(
+            'You may only attach a document you uploaded',
+          );
+        }
+      }
+      // Defence in depth beyond the presign-time cap: a forged attachment
+      // payload could claim a `byteSize`/`contentType` the presign step never
+      // actually enforced against THIS object. Re-assert both server-side
+      // rather than trusting whatever the client echoes back.
+      if (
+        attachment.byteSize > UPLOAD_KIND_SPECS['message-document'].maxBytes
+      ) {
+        throw new BadRequestException(
+          'Document attachment exceeds the size limit',
+        );
+      }
+      if (!(attachment.contentType in DOCUMENT_UPLOAD_TYPES)) {
+        throw new BadRequestException('Unsupported document content type');
+      }
+      resolvedAttachment = {
+        url,
+        // `fileName` is member-supplied, display-only text (never used to
+        // build the storage key or a served header — see `DocumentAttachment`'s
+        // own doc) but it IS rendered verbatim in the bubble, so bound its
+        // length and strip control/newline characters before persisting.
+        fileName: this.sanitizeDisplayFileName(attachment.fileName),
+        byteSize: attachment.byteSize,
+        contentType: attachment.contentType,
+        provider: attachment.provider,
+      };
     }
     const entityKind =
       kind === 'gif'
         ? MessageKind.Gif
         : kind === 'image'
           ? MessageKind.Image
-          : MessageKind.User;
+          : kind === 'document'
+            ? MessageKind.Document
+            : MessageKind.User;
     let saved: Message;
     try {
       saved = await this.messages.save(
@@ -858,10 +994,10 @@ export class MessagingCoreService {
           clientMessageId: clientMessageId ?? null,
           forwarded: forwarded ?? false,
           kind: entityKind,
-          // Only a gif/image message carries an attachment — never persist one
-          // onto a plain text send even if a client mistakenly supplies both.
-          attachment:
-            kind === 'gif' || kind === 'image' ? (attachment ?? null) : null,
+          // `resolvedAttachment` is only ever set inside a gif/image/document
+          // branch above (and only once every kind-specific field has been
+          // validated) — never persist a raw, unvalidated `attachment` here.
+          attachment: resolvedAttachment,
         }),
       );
     } catch (error) {
@@ -908,20 +1044,22 @@ export class MessagingCoreService {
   }
 
   /**
-   * True when `senderId` is entitled to FORWARD the image stored at
-   * `attachmentKey`: an existing image message carrying that exact attachment
-   * key lives in a conversation the sender is (or once was) a participant of.
-   * That proves the sender genuinely had access to the image, so a forward can
-   * safely skip the "must be your own upload" ownership check WITHOUT trusting
-   * any client-supplied flag or id — closing the client-controlled `forwarded`
-   * bypass. `attachmentKey` is the canonical bare storage key (callers collapse
-   * the resolved `/files/<key>` URL back to the key before this runs). A left
-   * (`leftAt`) participant still qualifies: they retain read access to history,
-   * so they genuinely saw the image and may forward it.
+   * True when `senderId` is entitled to FORWARD the attachment stored at
+   * `attachmentKey`: an existing message of `attachmentKind` (`Image` or
+   * `Document`) carrying that exact attachment key lives in a conversation the
+   * sender is (or once was) a participant of. That proves the sender genuinely
+   * had access to the attachment, so a forward can safely skip the "must be
+   * your own upload" ownership check WITHOUT trusting any client-supplied flag
+   * or id — closing the client-controlled `forwarded` bypass.
+   * `attachmentKey` is the canonical bare storage key (callers collapse the
+   * resolved `/files/<key>` URL back to the key before this runs). A left
+   * (`leftAt`) participant still qualifies: they retain read access to
+   * history, so they genuinely saw the attachment and may forward it.
    */
   private async senderCanForwardAttachment(
     senderId: string,
     attachmentKey: string,
+    attachmentKind: MessageKind.Image | MessageKind.Document,
   ): Promise<boolean> {
     const accessibleCount = await this.messages
       .createQueryBuilder('message')
@@ -931,12 +1069,39 @@ export class MessagingCoreService {
         'participant.conversation_id = message.conversation_id AND participant.user_id = :senderId',
         { senderId },
       )
-      .where('message.kind = :imageKind', { imageKind: MessageKind.Image })
+      .where('message.kind = :attachmentKind', { attachmentKind })
       .andWhere("message.attachment ->> 'url' = :attachmentKey", {
         attachmentKey,
       })
       .getCount();
     return accessibleCount > 0;
+  }
+
+  // The longest a document's displayed file name may be — generous for any
+  // real file name, tight enough that a pathological value can't bloat every
+  // response that echoes it back.
+  private static readonly MAX_DISPLAY_FILE_NAME_LENGTH = 200;
+
+  /**
+   * Bounds and cleans a document attachment's member-supplied `fileName`
+   * before it is ever persisted. This value is DISPLAY-ONLY (see
+   * `DocumentAttachment`'s own doc for why it can never become a header- or
+   * path-injection vector regardless), but it IS rendered verbatim as text in
+   * the message bubble, so control characters and newlines — which could
+   * otherwise make a bubble render oddly or carry an invisible payload — are
+   * stripped, and the length is capped. Falls back to a generic placeholder
+   * only when nothing displayable survives (an empty or all-control-character
+   * name), never silently drops the attachment itself.
+   */
+  private sanitizeDisplayFileName(fileName: string): string {
+    // eslint-disable-next-line no-control-regex -- deliberately matching C0/DEL control bytes to strip them.
+    const withoutControlCharacters = fileName.replace(/[\x00-\x1f\x7f]/g, '');
+    const trimmed = withoutControlCharacters.trim();
+    const bounded = trimmed.slice(
+      0,
+      MessagingCoreService.MAX_DISPLAY_FILE_NAME_LENGTH,
+    );
+    return bounded.length > 0 ? bounded : 'Document';
   }
 
   /**

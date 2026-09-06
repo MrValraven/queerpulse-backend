@@ -222,7 +222,10 @@ export class ProfilesController {
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
-  @ApiNotFoundResponse({ description: 'No profile with that slug.' })
+  @ApiNotFoundResponse({
+    description:
+      'No profile with that slug. When the slug is a username its owner renamed away from and the reclaim cooldown is still running, the body carries code PROFILE_MOVED and the current slug to redirect to.',
+  })
   @Get(':slug')
   @UseGuards(ActiveMemberGuard)
   getBySlug(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
@@ -242,7 +245,10 @@ export class ProfilesController {
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
-  @ApiNotFoundResponse({ description: 'No profile with that slug.' })
+  @ApiNotFoundResponse({
+    description:
+      'No profile with that slug. When the slug is a username its owner renamed away from and the reclaim cooldown is still running, the body carries code PROFILE_MOVED and the current slug to redirect to.',
+  })
   @Get(':slug/mutuals')
   @UseGuards(ActiveMemberGuard)
   async getMutuals(

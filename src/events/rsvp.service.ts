@@ -23,6 +23,7 @@ import { EventBan } from './entities/event-ban.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus } from './entities/event.entity';
+import { hasEnded } from './event-timing';
 
 // Raw row shape from the unlimited-capacity promotion UPDATE's RETURNING
 // clause — column names are the actual (snake_case) DB columns, not the
@@ -85,6 +86,16 @@ export class RsvpService {
       }
       if (event.status !== EventStatus.Published) {
         throw new BadRequestException('Event is not open for RSVPs');
+      }
+      // A gathering that has already happened takes no more RSVPs (PRD-183).
+      // Nothing checked the clock here, so the roster kept growing after the
+      // night: a member reading a past gathering's page could still press the
+      // button, the host's door list gained a name nobody saw, and the seat
+      // count for an event that is over went up. `hasEnded` reads `endAt` when
+      // the host set one and falls back to `startAt`, so a gathering with no
+      // stated end closes at its start time rather than staying open forever.
+      if (hasEnded(event)) {
+        throw new BadRequestException('This gathering has already happened');
       }
       await this.assertMayRsvp(manager, event, userId);
 

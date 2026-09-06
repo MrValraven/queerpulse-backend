@@ -6,18 +6,26 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
-import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
+import { PAGE_SIZE, Paginated, normalizePage } from '../common/pagination';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import {
+  SUBPROFILE_MODERATION_SUBJECT_TYPE,
+  isSubprofileUnderTakedown,
+} from './subprofile-takedown';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import {
   Subprofile,
+  SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
+import { FollowedPersonaView } from './subprofile-following-response';
 import { FollowerView } from './subprofile-response';
 import {
   SUBPROFILE_FOLLOWED,
@@ -47,6 +55,11 @@ export class SubprofileFollowersService {
     private readonly members: Repository<SubprofileMember>,
     private readonly blockFilter: BlockFilterService,
     private readonly eventEmitter: EventEmitter2,
+    // Read-only: `resolveFollowablePersona` withholds a persona under a
+    // moderator takedown, the same state every public READ path already
+    // applies. `ContentModerationModule` is already imported by
+    // `SubprofilesModule` for `SubprofilePublicReadService`.
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   async follow(
@@ -155,10 +168,153 @@ export class SubprofileFollowersService {
       return {
         slug: profile?.slug ?? '',
         name: `${profile?.firstName ?? ''} ${profile?.lastName ?? ''}`.trim(),
-        avatarUrl: toImageUrl(profile?.avatarUrl),
+        // Honours the follower's own `photoVisible` toggle through the shared
+        // gate `toMemberRef` uses, so this list agrees with feed and forum:
+        // photo on -> the resolved url, photo off (or no profile row at all)
+        // -> null. `FollowerView` is a narrower shape than `MemberRef`
+        // (slug/name/avatar only), so it calls the gate directly rather than
+        // building a whole ref. There is deliberately no owner-self exception:
+        // this list is owner-only, and a member who hid their face stays
+        // hidden on it.
+        avatarUrl: toVisibleAvatarUrl(profile),
       };
     });
     return { count, followers };
+  }
+
+  /**
+   * The other side of the follow: every persona THIS member follows, newest
+   * follow first, paginated.
+   *
+   * Following used to be write-only. A member tapped Follow, the owner got one
+   * notification, and the follower got a pill and nothing else: no list, no way
+   * back to a persona they had followed weeks earlier. This is the read that
+   * makes the button mean something (PRD-208).
+   *
+   * REPEATS THE PUBLIC-READ GATE, IN QUERY. A followed persona can be
+   * unpublished, made private, owner-removed, taken down by a moderator, or
+   * belong to somebody the viewer has since blocked, and a follow row survives
+   * all five. Every one of those states is filtered in SQL rather than after
+   * the fetch, so `total` and the page boundary count only rows the viewer may
+   * actually see; filtering post-fetch would report a total that includes
+   * withheld personas and hand back short pages. The predicates are the same
+   * five `resolveFollowablePersona` applies to the WRITE path, so a persona you
+   * can no longer follow is a persona you can no longer see here either.
+   *
+   * The takedown predicate is spelled here rather than borrowed from
+   * `SubprofilePublicReadService`, whose two variants are private to that
+   * service; it reads the same `content_moderation` rows through the same
+   * canonical subject type (`SUBPROFILE_MODERATION_SUBJECT_TYPE`), so there is
+   * one spelling of WHICH rows count even though there are two of the SQL.
+   *
+   * TWO STEPS, DELIBERATELY. The page is chosen by a projection over
+   * `subprofile_followers` (`offset`/`limit`, never `skip`/`take`: this query
+   * carries a join, and `skip`/`take` wraps a join in a DISTINCT subquery that
+   * pages wrongly), then the personas are loaded by id and put back into follow
+   * order. `ORDER BY created_at DESC` also takes an `id` tiebreak, or two
+   * follows saved in the same millisecond would let an offset boundary repeat
+   * one row and skip another.
+   */
+  async listFollowedPersonas(
+    viewerId: string,
+    page?: number,
+  ): Promise<Paginated<FollowedPersonaView>> {
+    const safePage = normalizePage(page);
+    const pageQuery = this.followers
+      .createQueryBuilder('sf')
+      .innerJoin(Subprofile, 'sp', 'sp.id = sf.subprofileId')
+      .where('sf.followerId = :viewerId', { viewerId })
+      .andWhere('sp.status = :publishedStatus', {
+        publishedStatus: SubprofileStatus.Published,
+      })
+      .andWhere('sp.visibility = :openVisibility', {
+        openVisibility: SubprofileVisibility.Open,
+      })
+      .andWhere('sp.removedAt IS NULL')
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "cm"
+          WHERE "cm"."subject_type" = :subprofileSubjectType
+            AND "cm"."subject_id" = sp.slug
+            AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+        )`,
+        { subprofileSubjectType: SUBPROFILE_MODERATION_SUBJECT_TYPE },
+      );
+    this.blockFilter.excludeBlocked(pageQuery, viewerId, '"sp"."user_id"');
+
+    const total = await pageQuery.getCount();
+    if (total === 0) {
+      return { items: [], total: 0, page: safePage, pageSize: PAGE_SIZE };
+    }
+
+    const pageRows = await pageQuery
+      .select('sf.subprofileId', 'subprofileId')
+      .addSelect('sf.createdAt', 'followedAt')
+      .orderBy('sf.createdAt', 'DESC')
+      .addOrderBy('sf.id', 'DESC')
+      .offset((safePage - 1) * PAGE_SIZE)
+      .limit(PAGE_SIZE)
+      .getRawMany<{ subprofileId: string; followedAt: Date }>();
+
+    const personaIds = pageRows.map((row) => row.subprofileId);
+    if (!personaIds.length) {
+      return { items: [], total, page: safePage, pageSize: PAGE_SIZE };
+    }
+
+    const [personas, followerCounts] = await Promise.all([
+      this.subprofiles.find({ where: { id: In(personaIds) } }),
+      this.loadFollowerCountsFor(personaIds),
+    ]);
+    const personaById = new Map(
+      personas.map((persona) => [persona.id, persona]),
+    );
+
+    // Only a LINKED persona's address needs its creator's profile slug, and
+    // only a linked persona may disclose one, so the lookup is narrowed to
+    // those owners before it runs: an unlinked persona's owner is never
+    // resolved here at all, which is the cheapest way to keep a pseudonymous
+    // persona pseudonymous.
+    const linkedOwnerIds = personas
+      .filter(
+        (persona) => persona.linkVisibility === SubprofileLinkVisibility.Linked,
+      )
+      .map((persona) => persona.userId);
+    const ownerProfiles = linkedOwnerIds.length
+      ? await this.profiles.find({ where: { userId: In(linkedOwnerIds) } })
+      : [];
+    const ownerSlugByUserId = new Map(
+      ownerProfiles.map((profile) => [profile.userId, profile.slug]),
+    );
+
+    const items = pageRows.flatMap<FollowedPersonaView>((row) => {
+      const persona = personaById.get(row.subprofileId);
+      if (!persona) return [];
+      const isLinked =
+        persona.linkVisibility === SubprofileLinkVisibility.Linked;
+      return [
+        {
+          id: persona.id,
+          displayName: persona.displayName,
+          kind: persona.kind,
+          tagline: persona.tagline,
+          avatarUrl: persona.avatarUrl,
+          accent: persona.accent,
+          slug: persona.slug,
+          // An unlinked persona is addressed by its handle; a linked one is
+          // addressed under its creator and its handle is not part of that
+          // address, so it is not shipped.
+          handle: isLinked ? null : persona.handle,
+          linkVisibility: persona.linkVisibility,
+          ownerSlug: isLinked
+            ? (ownerSlugByUserId.get(persona.userId) ?? null)
+            : null,
+          followerCount: followerCounts.get(persona.id) ?? 0,
+          followedAt: row.followedAt,
+        },
+      ];
+    });
+
+    return { items, total, page: safePage, pageSize: PAGE_SIZE };
   }
 
   // Batches the follower COUNT for many personas into ONE query (mirrors
@@ -198,9 +354,9 @@ export class SubprofileFollowersService {
   }
 
   // Fetches a persona by id AND enforces it is publicly followable: published,
-  // Open visibility, and not block-either-way between `userId` (the
-  // follower/viewer) and the persona's owner. Mirrors the gate `getByHandle`
-  // applies.
+  // Open visibility, not owner-removed, not under a moderator takedown, and not
+  // block-either-way between `userId` (the follower/viewer) and the persona's
+  // owner. Mirrors the gate `getByHandle` applies.
   private async resolveFollowablePersona(
     userId: string,
     id: string,
@@ -213,9 +369,20 @@ export class SubprofileFollowersService {
         id,
         status: SubprofileStatus.Published,
         visibility: SubprofileVisibility.Open,
+        // A removed persona is unreachable here too, exactly as it is in
+        // `directory()` and `listForProfile`. Without this, anyone who loaded
+        // the page before the removal kept the uuid and could go on following
+        // it, firing a notification at the owner each time.
+        removedAt: IsNull(),
       },
     });
     if (!persona) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    // A moderator takedown withholds the persona from every public read path
+    // (`dropModeratedSubprofiles` / `excludeModeratedSubprofiles`), so it has
+    // to close the write path too. Same predicate, one shared spelling.
+    if (await isSubprofileUnderTakedown(this.contentModeration, persona.slug)) {
       throw new NotFoundException('Subprofile not found');
     }
     if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {

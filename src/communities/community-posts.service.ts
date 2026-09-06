@@ -37,10 +37,15 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { resolveRuleSnapshot } from './community-bans-response';
+import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { toStoredPlainTextOrNull } from './community-plain-text';
 import {
   CommunityReportDTO,
   toCommunityReportDTO,
 } from './community-report-response';
+import { RemoveCommunityPostDto } from './dto/remove-community-post.dto';
+import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
   CommunityPostDTO,
   CommunityPostHistoryResponse,
@@ -163,6 +168,13 @@ export class CommunityPostsService {
     // through `createForRecipients`, the same path
     // `CommunitiesService.notifyRosterArchived` uses.
     private readonly notifications: NotificationsService,
+    // The community's own audit trail, for the moderator takedown of a post or
+    // reply (PRD-147, `recordTakedown`). Already a provider in
+    // `CommunitiesModule` alongside this service, so nothing about the module
+    // graph changes; it is the single write path into
+    // `community_governance_log` and nothing here inserts into that table
+    // directly.
+    private readonly governanceLog: CommunityGovernanceLogService,
     private readonly contentModeration: ContentModerationService,
     private readonly storage: StorageService,
     private readonly eventEmitter: EventEmitter2,
@@ -326,6 +338,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const membership = await this.assertMember(community.id, authorId);
+    this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
     CommunityPostsService.assertKindAllowed(dto.kind, membership.role);
 
@@ -381,6 +394,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, actorId);
+    this.assertNotArchived(community);
 
     if (dto.pinned !== undefined) {
       if (!CommunityPostsService.isStaffRole(membership.role)) {
@@ -410,6 +424,7 @@ export class CommunityPostsService {
     dto: UpdateFlatPostInput,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    await this.assertPostCommunityNotArchived(post.communityId);
     // Same announcement gate as the nested route (BE-COM-16). A GLOBAL post
     // (`communityId: null`) has no community to speak for, so there is no
     // staff voice to impersonate and `viewerRoleIn` is not consulted.
@@ -427,18 +442,62 @@ export class CommunityPostsService {
     );
   }
 
-  // DELETE /communities/:slug/posts/:id — soft tombstone. Author or owner/mod.
+  /**
+   * DELETE /communities/:slug/posts/:id — soft tombstone. Author or owner/mod.
+   *
+   * TWO DIFFERENT ACTS SHARE THIS ROUTE, and telling them apart is what
+   * PRD-147 is about.
+   *
+   * An AUTHOR deleting their own post is housekeeping. No reason is asked for,
+   * nothing is written to the governance log and no notification is sent: the
+   * only person who could be told is the person who just did it.
+   *
+   * A MODERATOR TAKEDOWN of somebody else's post is a governance decision, and
+   * it used to look identical from the outside. The author found a tombstone
+   * and could not tell whether they had broken a rule, which one, or that
+   * anyone had decided anything about them at all. It now leaves an entry in
+   * the community's own log and reaches the author with the moderator's own
+   * words (`recordTakedown`).
+   *
+   * `assertAuthorOrOwnerMod` has already established that a non-author actor
+   * is staff, so "the actor is not the author" is exactly "moderator takedown"
+   * by the time the branch below runs. Nothing is inferred from the body: a
+   * member cannot turn their own delete into a takedown by sending a reason,
+   * and a moderator who sends none still leaves the record.
+   */
   async deletePost(
     slug: string,
     postId: string,
     actorId: string,
+    takedown?: RemoveCommunityPostDto,
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, actorId);
+    this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
 
-    return this.tombstonePost(post, actorId, membership.role);
+    // Read BEFORE `tombstonePost`, which sets it: re-deleting a post that is
+    // already tombstoned is an idempotent no-op, and one decision must not
+    // write two log entries and two notifications because a client retried.
+    const wasAlreadyTombstoned = post.deletedAt != null;
+    const dto = await this.tombstonePost(post, actorId, membership.role);
+    if (
+      !wasAlreadyTombstoned &&
+      post.authorId !== null &&
+      post.authorId !== actorId
+    ) {
+      await this.recordTakedown({
+        community,
+        actorId,
+        authorId: post.authorId,
+        action: GovernanceLogAction.PostRemoved,
+        postId: post.id,
+        replyId: null,
+        takedown,
+      });
+    }
+    return dto;
   }
 
   // DELETE /community-posts/:id — the flat alias's own delete: author-only
@@ -449,6 +508,7 @@ export class CommunityPostsService {
     actorId: string,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    await this.assertPostCommunityNotArchived(post.communityId);
     this.assertAuthorOnly(post.authorId, actorId);
     return this.tombstonePost(
       post,
@@ -467,6 +527,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, actorId);
+    this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
     this.assertCanRestore(post.deletedById, actorId, membership.role);
 
@@ -488,6 +549,7 @@ export class CommunityPostsService {
     actorId: string,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    await this.assertPostCommunityNotArchived(post.communityId);
     const viewerRole = post.communityId
       ? await this.viewerRoleIn(post.communityId, actorId)
       : null;
@@ -542,6 +604,7 @@ export class CommunityPostsService {
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const membership = await this.assertMember(community.id, actorId);
+    this.assertNotArchived(community);
 
     const saved = await this.applyReplyTextEdit(reply, actorId, text);
     return this.mapReply(saved, actorId, membership.role);
@@ -558,6 +621,7 @@ export class CommunityPostsService {
     text: string,
   ): Promise<CommunityReplyDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    await this.assertPostCommunityNotArchived(post.communityId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const saved = await this.applyReplyTextEdit(reply, actorId, text);
     return this.mapReply(
@@ -567,20 +631,48 @@ export class CommunityPostsService {
     );
   }
 
-  // DELETE /communities/:slug/posts/:id/replies/:replyId — soft tombstone.
+  /**
+   * DELETE /communities/:slug/posts/:id/replies/:replyId — soft tombstone.
+   *
+   * The same two acts under one route as `deletePost`, and the same split: an
+   * author clearing their own reply is told nothing and logged nowhere, a
+   * moderator taking down somebody else's leaves a record and an explanation.
+   * A reply takedown was exactly as silent as a post takedown, and being
+   * silenced mid-conversation with no word about why is the same injury.
+   */
   async deleteReply(
     slug: string,
     postId: string,
     replyId: string,
     actorId: string,
+    takedown?: RemoveCommunityPostDto,
   ): Promise<CommunityReplyDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const membership = await this.assertMember(community.id, actorId);
+    this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
 
-    return this.tombstoneReply(reply, actorId, membership.role);
+    // Read before the tombstone is stamped, for the reason `deletePost` gives.
+    const wasAlreadyTombstoned = reply.deletedAt != null;
+    const dto = await this.tombstoneReply(reply, actorId, membership.role);
+    if (
+      !wasAlreadyTombstoned &&
+      reply.authorId !== null &&
+      reply.authorId !== actorId
+    ) {
+      await this.recordTakedown({
+        community,
+        actorId,
+        authorId: reply.authorId,
+        action: GovernanceLogAction.ReplyRemoved,
+        postId: post.id,
+        replyId: reply.id,
+        takedown,
+      });
+    }
+    return dto;
   }
 
   // DELETE /community-posts/:id/replies/:replyId — the flat alias's own
@@ -591,6 +683,7 @@ export class CommunityPostsService {
     actorId: string,
   ): Promise<CommunityReplyDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    await this.assertPostCommunityNotArchived(post.communityId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     this.assertAuthorOnly(reply.authorId, actorId);
     return this.tombstoneReply(
@@ -612,6 +705,7 @@ export class CommunityPostsService {
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const membership = await this.assertMember(community.id, actorId);
+    this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
     this.assertCanRestore(reply.deletedById, actorId, membership.role);
 
@@ -627,6 +721,7 @@ export class CommunityPostsService {
     actorId: string,
   ): Promise<CommunityReplyDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    await this.assertPostCommunityNotArchived(post.communityId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const viewerRole = post.communityId
       ? await this.viewerRoleIn(post.communityId, actorId)
@@ -926,6 +1021,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, userId);
+    this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
 
     // Idempotent per (post,user,key): `ON CONFLICT DO NOTHING` absorbs a
@@ -951,6 +1047,13 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, userId);
+    // Archived, but NOT frozen. The two gates say different things. A freeze
+    // halts new activity while moderators read reports, and taking your own
+    // reaction back is not new activity, so this path has never been
+    // freeze-gated. An archive closes the community's write side outright, and
+    // a row written into an archived community is a row written into a room
+    // that is over.
+    this.assertNotArchived(community);
 
     await this.reactions.delete({ postId: post.id, userId, key });
 
@@ -966,6 +1069,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, userId);
+    this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
 
     const saved = await this.replies.save(
@@ -1140,9 +1244,13 @@ export class CommunityPostsService {
       await this.assertFlatWriteAllowed(post.communityId, userId);
     } else if (post.communityId) {
       // Taking your OWN reaction back is not new activity — the slug-scoped
-      // `removeReaction` has never been freeze-gated either, so this stays a
-      // plain roster check rather than trapping a like inside a freeze.
-      await this.assertMember(post.communityId, userId);
+      // `removeReaction` has never been freeze-gated either, so this stays
+      // roster + archive rather than trapping a like inside a freeze. The
+      // archive half is not optional: an archived community's write side is
+      // shut, and `removeReaction` refuses for the same reason.
+      const community = await this.loadCommunityByIdOr404(post.communityId);
+      await this.assertMember(community.id, userId);
+      this.assertNotArchived(community);
     }
 
     if (liked) {
@@ -1487,8 +1595,8 @@ export class CommunityPostsService {
   /**
    * The community gate every flat (`/community-posts*`) WRITE runs, for a post
    * that belongs to a community: roster membership, the archive check, and the
-   * freeze check — the same three the slug-scoped routes have always applied.
-   * The flat aliases previously ran `assertMember` only, so a frozen community
+   * freeze check — the same three the slug-scoped routes apply. The flat
+   * aliases previously ran `assertMember` only, so a frozen community
    * (including one auto-frozen over an outing/doxxing report) still took new
    * posts, replies and reactions through `POST /community-posts*`, which is
    * exactly what a freeze exists to stop (BE-COM-02).
@@ -1501,12 +1609,7 @@ export class CommunityPostsService {
     userId: string,
   ): Promise<{ community: Community; membership: CommunityMember } | null> {
     if (!communityId) return null;
-    const community = await this.communities.findOne({
-      where: { id: communityId },
-    });
-    if (!community) {
-      throw new NotFoundException('Community not found');
-    }
+    const community = await this.loadCommunityByIdOr404(communityId);
     const membership = await this.assertMember(community.id, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
@@ -1514,11 +1617,73 @@ export class CommunityPostsService {
   }
 
   /**
-   * An archived community is down for everyone but its own owner/mods (see
-   * `Community.archivedAt`), so it takes no new content at all. Checked on the
-   * flat write paths alongside the freeze: the nested routes reach it through
-   * `CommunitiesService.getBySlug`'s own archived filter, the flat ones had no
-   * equivalent.
+   * The archive gate for the flat (`/community-posts*`) edit, delete and
+   * restore aliases, which carry no membership check of their own (they are
+   * author-scoped, or author-or-staff on restore) and so never reach
+   * `assertFlatWriteAllowed`.
+   *
+   * A GLOBAL post (`communityId: null`) belongs to no community and can never
+   * be archived, so this is a no-op for one.
+   */
+  private async assertPostCommunityNotArchived(
+    communityId: string | null,
+  ): Promise<void> {
+    if (!communityId) return;
+    this.assertNotArchived(await this.loadCommunityByIdOr404(communityId));
+  }
+
+  // The by-id counterpart of `loadCommunityOr404`, for the flat
+  // (`/community-posts*`) paths, which hold a post's `communityId` rather than
+  // a slug.
+  private async loadCommunityByIdOr404(
+    communityId: string,
+  ): Promise<Community> {
+    const community = await this.communities.findOne({
+      where: { id: communityId },
+    });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    return community;
+  }
+
+  /**
+   * An archived community's write side is SHUT, for everyone including its own
+   * owner and moderators (see `Community.archivedAt`). Nothing may be posted,
+   * replied to, reacted to, edited, deleted or restored inside it. Reading a
+   * closed room's history is what archiving leaves; adding to it, or quietly
+   * editing it afterwards, is what archiving takes away.
+   *
+   * THIS USED TO BE HALF-APPLIED. The gate was on the flat
+   * (`/community-posts*`) paths only, and the note here claimed the nested
+   * slug-scoped routes reached it through `CommunitiesService.getBySlug`'s own
+   * archived filter. They never did: `CommunityPostsService` resolves the
+   * community itself through `loadCommunityOr404`, a plain `findOne` by slug
+   * with no archived predicate, and the controller hands it the slug directly
+   * without going through `getBySlug` at all. So `POST /communities/:slug/
+   * posts` and every one of its siblings kept writing into archived
+   * communities. Every nested write path now runs this check.
+   *
+   * PRD-143 RAISED THE STAKES on that. `getBySlug` now deliberately serves an
+   * archived community to its whole roster, so the app's own screens reach
+   * these routes rather than a member having to call them by hand. The gate
+   * has to live here, on the server, because a route is directly callable
+   * whatever the UI chooses to render.
+   *
+   * READS STAY OPEN, and that is the point rather than an oversight.
+   * `listPosts` and `getPost` gate on `assertViewable`, which narrows the
+   * `private` tier alone, so an archived community's roster keeps reading
+   * everything that was said there. "Read-only" is a promise with two halves
+   * and this is the other one.
+   *
+   * AN AUTHOR DELETING THEIR OWN POST IS ALSO REFUSED. This one is a judgment
+   * call, so: an archive is a frozen record, and a record somebody can still
+   * quietly subtract from afterwards is not one. The community's members read
+   * back a conversation that happened, not the version of it its participants
+   * would prefer with hindsight. A member who wants their words gone from an
+   * archived community has the account-erasure path, which is the deliberate,
+   * whole-account act that this deserves to be rather than a one-tap edit to
+   * shared history.
    */
   private assertNotArchived(community: Community): void {
     if (community.archivedAt != null) {
@@ -1682,6 +1847,129 @@ export class CommunityPostsService {
       // did not ring is never worth losing a member's post over.
       this.logger.warn(
         `Community post fan-out failed for ${community.slug}/${post.id}: ${String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Everything a MODERATOR TAKEDOWN of a member's post or reply leaves behind
+   * (PRD-147): one entry in the community's own governance log, and one
+   * notification to the author carrying the moderator's reasons.
+   *
+   * Called only from `deletePost`/`deleteReply`, and only on the branch where
+   * the actor is not the author. A member deleting their own words reaches
+   * none of this.
+   *
+   * THE REASON IS WRITTEN FOR THE MEMBER. `reason` is modelled on
+   * `CommunityBan.reason`, the other moderator-authored note this platform
+   * sends to the person it is about: same 500-character ceiling, same posture,
+   * and it is forwarded to them verbatim. `internalNote` is the opposite half
+   * of the pair `CommunityJoinRequest` already draws between `declineReason`
+   * and `internalNote`: it goes to the governance log, which is
+   * owner/co-owner/mod only, and it appears in NO member-facing payload. The
+   * removed content's own body appears in neither: the author does not need
+   * their own words quoted back, and no member-authored content reaches a bell
+   * anywhere on this platform.
+   *
+   * Both are stripped to plain text at this write boundary
+   * (`toStoredPlainTextOrNull`), which is where this repo strips markup rather
+   * than at every render site.
+   *
+   * THE CITED RULE goes through `resolveRuleSnapshot`, the same helper a ban's
+   * citation uses, so the index, the rules version and the rule's exact
+   * wording are snapshotted together. `Community.rulesVersion` moves whenever
+   * an owner edits the rules, so an index on its own would come to point at a
+   * different rule than the one the moderator meant. An index outside the
+   * current rules resolves to null and is simply dropped: a citation pointing
+   * at a rule that does not exist is worse than none.
+   *
+   * NO ACTOR TRAVELS TO THE MEMBER, in the payload or as `create`'s block/mute
+   * argument. See `NotificationType.CommunityPostRemoved`'s docstring for both
+   * halves of that decision; the short of it is that the bell must not name
+   * the moderator, and a member's block of that moderator must not be able to
+   * swallow the one message explaining what happened to them. The governance
+   * log records who acted, for the people entitled to know.
+   *
+   * THE DEEP LINK differs by subject, and both targets render for a recipient
+   * who is still on the roster (a takedown is not a removal). A removed POST
+   * carries no `postId`, so `sourceHrefFromPayload` falls through to the
+   * community page: the post itself is a blank tombstone, and the community is
+   * where the cited house rule can be read. A removed REPLY carries the
+   * `postId` of the thread it sat in, which still stands and is the context
+   * the member needs.
+   *
+   * BEST EFFORT, in two independent try/catch blocks. The tombstone has
+   * already committed by the time this runs, so neither a failed log write nor
+   * a failed notification may surface to the moderator as a failed takedown,
+   * and one failing must not suppress the other.
+   */
+  private async recordTakedown(input: {
+    community: Community;
+    actorId: string;
+    authorId: string;
+    action: GovernanceLogAction;
+    postId: string;
+    replyId: string | null;
+    takedown?: RemoveCommunityPostDto;
+  }): Promise<void> {
+    const { community, actorId, authorId, action, postId, replyId } = input;
+    const reason = toStoredPlainTextOrNull(input.takedown?.reason);
+    const internalNote = toStoredPlainTextOrNull(input.takedown?.internalNote);
+    const rule = resolveRuleSnapshot(
+      community.rules,
+      community.rulesVersion,
+      input.takedown?.ruleIndex,
+    );
+
+    try {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId: actorId,
+        action,
+        targetUserId: authorId,
+        metadata: {
+          postId,
+          ...(replyId ? { replyId } : {}),
+          ...(reason ? { reason } : {}),
+          ...(internalNote ? { internalNote } : {}),
+          ...(rule
+            ? {
+                ruleIndex: rule.ruleIndex,
+                ruleVersion: rule.ruleVersion,
+                ruleText: rule.ruleText,
+              }
+            : {}),
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Takedown of ${replyId ?? postId} in ${community.slug} committed, but the governance log entry could not be written: ${String(error)}`,
+      );
+    }
+
+    try {
+      await this.notifications.create(
+        authorId,
+        NotificationType.CommunityPostRemoved,
+        {
+          source: 'community',
+          communitySlug: community.slug,
+          communityName: community.name,
+          // What was taken down, as a closed two-value vocabulary the client
+          // branches its copy on. One notification type covers both, the way
+          // `admin_queue_item` covers every queue.
+          subject: replyId ? 'reply' : 'post',
+          // Only a REPLY takedown deep-links to the thread. See the docstring.
+          ...(replyId ? { postId } : {}),
+          reason,
+          ruleIndex: rule?.ruleIndex ?? null,
+          ruleVersion: rule?.ruleVersion ?? null,
+          ruleText: rule?.ruleText ?? null,
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Takedown of ${replyId ?? postId} in ${community.slug} committed, but the author could not be notified: ${String(error)}`,
       );
     }
   }

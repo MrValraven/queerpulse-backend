@@ -1,5 +1,5 @@
 import { toImageUrl } from '../common/image-url';
-import { SavedItemDTO } from '../saved/saved-response';
+import { ResolvedSavedItemDTO } from '../saved/saved-response';
 import { Collection } from './entities/collection.entity';
 
 /**
@@ -21,9 +21,16 @@ export interface CollectionDTO {
   updatedAt: string;
 }
 
-/** A collection plus its filed items, hydrated from the owner's saved rows. */
+/**
+ * A collection plus its filed items, hydrated from the owner's saved rows.
+ *
+ * Every item carries `availability` and a nullable `href` (PRD-169): a filed
+ * subject that was deleted, taken down or turned private keeps its snapshot
+ * title so the owner can tell what they lost, and loses its link so nothing
+ * sends them to a 404.
+ */
 export interface CollectionDetailDTO extends CollectionDTO {
-  items: SavedItemDTO[];
+  items: ResolvedSavedItemDTO[];
 }
 
 export function toCollectionDTO(
@@ -49,7 +56,7 @@ export function toCollectionDTO(
 
 export function toCollectionDetailDTO(
   collection: Collection,
-  items: SavedItemDTO[],
+  items: ResolvedSavedItemDTO[],
 ): CollectionDetailDTO {
   return { ...toCollectionDTO(collection, items.length), items };
 }

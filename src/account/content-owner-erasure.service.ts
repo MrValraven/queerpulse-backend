@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, MoreThan, Not, Repository } from 'typeorm';
 import { EventCohost } from '../events/entities/event-cohost.entity';
+import {
+  EventInvite,
+  EventInviteStatus,
+} from '../events/entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
@@ -91,6 +95,8 @@ export class ContentOwnerErasureService {
     private readonly cohosts: Repository<EventCohost>,
     @InjectRepository(EventRsvp)
     private readonly rsvps: Repository<EventRsvp>,
+    @InjectRepository(EventInvite)
+    private readonly invites: Repository<EventInvite>,
     @InjectRepository(EventSeries)
     private readonly eventSeries: Repository<EventSeries>,
     @InjectRepository(Job)
@@ -234,34 +240,68 @@ export class ContentOwnerErasureService {
       { id: In(events.map((event) => event.id)) },
       { status: EventStatus.Cancelled },
     );
-    for (const event of events) {
-      await this.notifyAttendeesCancelled(event);
-    }
+    await this.notifyAttendeesCancelled(events);
   }
 
   /**
-   * Same recipients and same payload as `EventsService.notifyEventCancelled`:
-   * anyone with a live RSVP (going/maybe/waitlisted). Deliberately reuses the
-   * existing `EventCancelled` type, so the bell, the push channel and the
-   * MyEvents "what changed" panel all render it with no new plumbing.
+   * Tell everyone with a stake in these cancellations that they are off.
    *
-   * Best-effort per gathering: the cancellation itself has already committed,
-   * and a notification failure must not stop the remaining gatherings from
-   * being handled.
+   * Kept in lockstep with `EventsService.notifyEventCancelled`, which this
+   * mirrors. Two things it did not used to do, both fixed here so an erased
+   * host's attendees are not told less than a departing host's:
+   *
+   *  - **Invitees are recipients too** (PRD-185). It read RSVP rows only, so
+   *    somebody holding a standing invitation was never told, the invite
+   *    stayed in their list, and accepting it handed them a 400 they could not
+   *    read.
+   *  - **One message for the whole erasure, not one per gathering** (ENG-141).
+   *    It looped, writing a row and firing a push per gathering per recipient,
+   *    so a regular of an erased host's weekly group got one push per
+   *    remaining week in a burst. The recipients are now the union across all
+   *    of them, de-duplicated.
+   *
+   * The payload describes the SOONEST cancelled gathering and carries
+   * `occurrenceCount` so the copy can say how many dates went with it, exactly
+   * as `EventsService` does. Unlike that path these gatherings need not form
+   * one series (a host's calendar is whatever they were running), so no
+   * `seriesId` is claimed — the bundle key stays null and this single row
+   * stands on its own, which is correct for a single message.
+   *
+   * Best-effort: the cancellations have already committed, and a notification
+   * failure must not fail the erasure that produced them.
    */
-  private async notifyAttendeesCancelled(event: Event): Promise<void> {
+  private async notifyAttendeesCancelled(events: Event[]): Promise<void> {
+    if (!events.length) return;
+    // Soonest first, so the row names the gathering the recipient was about to
+    // turn up to rather than an arbitrary one from the middle of the set.
+    const ordered = [...events].sort(
+      (first, second) => first.startAt.getTime() - second.startAt.getTime(),
+    );
+    const [soonest] = ordered;
+    if (!soonest) return;
     try {
-      const rsvps = await this.rsvps.find({
-        where: {
-          eventId: event.id,
-          status: In([
-            RsvpStatus.Going,
-            RsvpStatus.Maybe,
-            RsvpStatus.Waitlisted,
-          ]),
-        },
-      });
-      const recipientIds = rsvps.map((rsvp) => rsvp.userId);
+      const eventIds = ordered.map((event) => event.id);
+      const [rsvps, invites] = await Promise.all([
+        this.rsvps.find({
+          where: {
+            eventId: In(eventIds),
+            status: In([
+              RsvpStatus.Going,
+              RsvpStatus.Maybe,
+              RsvpStatus.Waitlisted,
+            ]),
+          },
+        }),
+        this.invites.find({
+          where: { eventId: In(eventIds), status: EventInviteStatus.Pending },
+        }),
+      ]);
+      const recipientIds = [
+        ...new Set([
+          ...rsvps.map((rsvp) => rsvp.userId),
+          ...invites.map((invite) => invite.inviteeId),
+        ]),
+      ];
       if (!recipientIds.length) return;
       // No `actorId`: there is no acting member to name. The gathering was
       // cancelled by the platform because its host is gone.
@@ -269,16 +309,17 @@ export class ContentOwnerErasureService {
         recipientIds,
         NotificationType.EventCancelled,
         {
-          eventId: event.id,
-          eventSlug: event.slug,
-          title: event.title,
-          startAt: event.startAt.toISOString(),
+          eventId: soonest.id,
+          eventSlug: soonest.slug,
+          title: soonest.title,
+          startAt: soonest.startAt.toISOString(),
+          occurrenceCount: ordered.length,
         },
       );
     } catch (error) {
       this.logger.error(
-        `Gathering ${event.id} was cancelled for an erased host, but telling ` +
-          `its attendees failed: ` +
+        `${events.length} gathering(s) were cancelled for an erased host, but ` +
+          `telling their attendees failed: ` +
           `${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
       );
     }

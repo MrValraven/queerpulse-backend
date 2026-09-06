@@ -1,11 +1,12 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { normalizePage } from '../common/pagination';
+import { DEFAULT_LIST_LIMIT, normalizePage } from '../common/pagination';
 import { Repository } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
@@ -14,6 +15,8 @@ import {
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { HousingCoop } from './entities/housing-coop.entity';
 import { CreateCoopDto } from './dto/create-coop.dto';
 import { UpdateCoopDto } from './dto/update-coop.dto';
@@ -22,8 +25,10 @@ import {
   AdminJoinRequestDTO,
   AdminJoinRequestsPageDTO,
   HousingCoopDTO,
+  MyCoopJoinRequestDTO,
   toAdminJoinRequestDTO,
   toHousingCoopDTO,
+  toMyCoopJoinRequestDTO,
 } from './housing-coop-response';
 import { ListCoopJoinRequestsQuery } from './dto/list-coop-join-requests.query';
 
@@ -39,12 +44,17 @@ export const COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE = 20;
 
 @Injectable()
 export class HousingService {
+  private readonly logger = new Logger(HousingService.name);
+
   constructor(
     @InjectRepository(HousingCoop)
     private readonly coops: Repository<HousingCoop>,
     @InjectRepository(CoopJoinRequest)
     private readonly joinRequests: Repository<CoopJoinRequest>,
     private readonly affirmingPledge: AffirmingPledgeService,
+    // The applicant is told what a reviewer decided about their own
+    // application, in-app plus push (PRD-242). QueerPulse sends no email.
+    private readonly notifications: NotificationsService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
@@ -244,6 +254,68 @@ export class HousingService {
       where: { id },
       relations: { coop: true },
     });
+    await this.notifyJoinDecided(updated!);
     return toAdminJoinRequestDTO(updated!);
+  }
+
+  /**
+   * Tell the applicant what was decided about their own application (PRD-242).
+   *
+   * Best-effort and never throws: the decision has already committed by the
+   * time this runs, and a notification failure must not turn a completed
+   * triage into a 500 the reviewer retries into a second decision.
+   *
+   * Silently skipped when there is nobody to tell. `userId` is null both for a
+   * non-member who applied by name (the public co-op page collects a `name`
+   * for exactly that) and for a request whose account was erased
+   * (`ON DELETE SET NULL`). No actor is passed: the bell says the outcome
+   * without naming which reviewer reached it, matching
+   * `HousingListingDecision`.
+   */
+  private async notifyJoinDecided(request: CoopJoinRequest): Promise<void> {
+    if (!request.userId || !request.coop) return;
+    try {
+      await this.notifications.create(
+        request.userId,
+        NotificationType.HousingJoinDecided,
+        {
+          source: 'housing',
+          kind: 'coop',
+          slug: request.coop.slug,
+          name: request.coop.name,
+          decision:
+            request.status === JoinRequestStatus.Accepted
+              ? 'accepted'
+              : 'declined',
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Co-op join decision notification failed for ${request.id}: ${String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The caller's OWN co-op applications, across every co-op (PRD-242).
+   *
+   * The counterpart to the bell row above: a decision that opens a page with
+   * no trace of the application on it is still a dead end. `/local/housing/coop`
+   * is one page listing every co-op, so this is one flat read for the whole
+   * grid rather than a per-slug lookup repeated once per card.
+   *
+   * Ownership is the `user_id` match itself, so it cannot be widened by a
+   * caller: an anonymous application carries a null `user_id`, and SQL equality
+   * never matches null, which is what keeps a by-name request unreadable by
+   * anyone but the reviewers.
+   */
+  async listMyJoinRequests(userId: string): Promise<MyCoopJoinRequestDTO[]> {
+    const requests = await this.joinRequests.find({
+      where: { userId },
+      relations: { coop: true },
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    return requests.map(toMyCoopJoinRequestDTO);
   }
 }

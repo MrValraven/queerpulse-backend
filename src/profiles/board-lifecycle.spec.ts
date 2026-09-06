@@ -141,7 +141,15 @@ describe('ProfilesService board lifecycle', () => {
             excludeHiddenFrom: jest.fn((qb: unknown) => qb),
           },
         },
-        { provide: HandlesService, useValue: { rename: jest.fn() } },
+        {
+          provide: HandlesService,
+          useValue: {
+            rename: jest.fn(),
+            // PRD-204: a missing slug asks the handle ledger whether it was
+            // renamed away from. No reservation by default.
+            previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
+          },
+        },
         {
           provide: StorageService,
           useValue: { deleteObjectByReference: jest.fn() },

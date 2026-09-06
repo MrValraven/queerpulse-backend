@@ -4,8 +4,9 @@ import {
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
+import { HttpException } from '@nestjs/common';
 import { Request, Response } from 'express';
-import { Observable } from 'rxjs';
+import { Observable, catchError, throwError } from 'rxjs';
 import {
   PUBLIC_READ_CACHE,
   PUBLIC_READ_CDN_CACHE,
@@ -45,6 +46,30 @@ import {
 const AUTHENTICATED_CACHE_CONTROL = 'private, no-store';
 const VARY_ON_SESSION = 'Cookie';
 
+// PRD-204. A moved answer forwards an address its owner renamed away from, and
+// it is true only while the reclaim cooldown is running and nothing holds the
+// name in the live registry. It has to stop the instant either fails, which
+// means it can never be held anywhere. The anonymous branch above hands a
+// shared cache 60 seconds of freshness plus a five-minute stale window, and a
+// cache is free to store a 404 that is explicitly marked cacheable — so a
+// moved answer stored just before the boundary would keep forwarding visitors
+// for minutes after the handle became someone else's to claim. That is the
+// exact failure this forwarding was designed around, in miniature, so a moved
+// response is downgraded to `no-store` on both headers.
+const MOVED_CACHE_CONTROL = 'no-store';
+const MOVED_CODES = new Set(['PERSONA_MOVED', 'PROFILE_MOVED']);
+
+// Whether a thrown response is one of the forwarding payloads. The body is the
+// object handed to `NotFoundException`, so it reaches us before any exception
+// filter has serialized it.
+function isMovedResponse(err: unknown): boolean {
+  if (!(err instanceof HttpException)) return false;
+  const body = err.getResponse();
+  if (typeof body !== 'object' || body === null) return false;
+  const { code } = body as { code?: unknown };
+  return typeof code === 'string' && MOVED_CODES.has(code);
+}
+
 @Injectable()
 export class AnonymousPublicCacheInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -64,6 +89,19 @@ export class AnonymousPublicCacheInterceptor implements NestInterceptor {
       // `res.vary()` APPENDS rather than replacing, so the `Vary: Origin` the
       // CORS layer already set survives alongside it.
       response.vary(VARY_ON_SESSION);
+      // The headers above are set BEFORE the handler runs, so they land on a
+      // thrown response too. That is what the plain 404 wants. A moved 404
+      // wants the opposite, and this is the only place that holds both the
+      // response object and the thrown payload.
+      return next.handle().pipe(
+        catchError((err: unknown) => {
+          if (isMovedResponse(err)) {
+            response.setHeader('Cache-Control', MOVED_CACHE_CONTROL);
+            response.setHeader('CDN-Cache-Control', MOVED_CACHE_CONTROL);
+          }
+          return throwError(() => err);
+        }),
+      );
     }
     return next.handle();
   }

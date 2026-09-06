@@ -33,6 +33,7 @@ import { JoinCommunityDto } from './dto/join-community.dto';
 import { ListCommunitiesQuery } from './dto/list-communities.query';
 import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import { ReactionDto } from './dto/reaction.dto';
+import { RemoveCommunityPostDto } from './dto/remove-community-post.dto';
 import { RemoveMemberQuery } from './dto/remove-member.query';
 import { ReplyDto } from './dto/reply.dto';
 import { ListCommunityPostsQuery } from './dto/list-community-posts.query';
@@ -49,6 +50,7 @@ import {
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -214,6 +216,38 @@ export class CommunitiesController {
     @Body() dto: CreateCommunityTagRequestDto,
   ) {
     return this.communitiesService.createTagRequest(slug, user.userId, dto);
+  }
+
+  // PRD-150. The read half of the suggestion above, which used to be fire and
+  // forget: the owner who sent a tag suggestion had nowhere to look and
+  // nothing to read afterwards. STILL INFORMATIONAL: `resolved` means an admin
+  // has read the suggestion, never that the tag now exists. `COMMUNITY_TAGS`
+  // stays a hardcoded, code-reviewed array by deliberate product decision.
+  @Get(':slug/tag-requests')
+  @ApiOperation({
+    summary:
+      "This community's own tag suggestions and where each one stands (owner, co-owner or moderator).",
+  })
+  @ApiOkResponse({
+    description:
+      "An `{ items }` list of this community's tag suggestions, newest first, " +
+      "capped at 200. Each carries the `label` asked for, the requester's " +
+      '`note`, the `status` (`pending` or `resolved`), when it was filed and ' +
+      'when it was resolved, and the member who filed it. `resolved` means an ' +
+      'admin has read it: it never means the tag was added to the curated ' +
+      'vocabulary, which is code-reviewed and changes only by hand.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Owner, co-owner or moderator role required.',
+  })
+  @ApiNotFoundResponse({
+    description: 'Unknown slug, or an archived community.',
+  })
+  listTagRequests(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communitiesService.listTagRequests(slug, user.userId);
   }
 
   @Post(':slug/archive')
@@ -459,7 +493,18 @@ export class CommunitiesController {
   }
 
   @Delete(':slug/posts/:id')
-  @ApiOperation({ summary: 'Soft-delete a post (author or owner/mod).' })
+  @ApiOperation({
+    summary: 'Soft-delete a post (author or owner/mod).',
+    description:
+      'Two acts under one route. An AUTHOR deleting their own post sends no ' +
+      'body: nothing is logged and nobody is told, because the only person ' +
+      'who could be told is the one who did it. A MODERATOR taking down ' +
+      "somebody else's post may send a reason, a cited house rule and a " +
+      'moderator-only note; the takedown is written to the community ' +
+      'governance log and the author is notified with the reason and the ' +
+      'rule. The body is optional either way: a takedown blocked on a form is ' +
+      'a takedown that does not happen when it needs to.',
+  })
   @ApiOkResponse({ description: 'The post, now tombstoned.' })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
   @ApiForbiddenResponse({
@@ -470,8 +515,9 @@ export class CommunitiesController {
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto?: RemoveCommunityPostDto,
   ) {
-    return this.communityPostsService.deletePost(slug, id, user.userId);
+    return this.communityPostsService.deletePost(slug, id, user.userId, dto);
   }
 
   @Post(':slug/posts/:id/restore')
@@ -557,7 +603,14 @@ export class CommunitiesController {
   }
 
   @Delete(':slug/posts/:id/replies/:replyId')
-  @ApiOperation({ summary: 'Soft-delete a reply (author or owner/mod).' })
+  @ApiOperation({
+    summary: 'Soft-delete a reply (author or owner/mod).',
+    description:
+      'The same two acts under one route as the post delete above, and the ' +
+      'same optional takedown body. A reply takedown was exactly as silent ' +
+      'as a post takedown, and being silenced mid-conversation with no word ' +
+      'about why is the same injury.',
+  })
   @ApiOkResponse({ description: 'The reply, now tombstoned.' })
   @ApiBadRequestResponse({ description: 'Malformed id.' })
   @ApiForbiddenResponse({
@@ -569,12 +622,14 @@ export class CommunitiesController {
     @Param('slug') slug: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('replyId', ParseUUIDPipe) replyId: string,
+    @Body() dto?: RemoveCommunityPostDto,
   ) {
     return this.communityPostsService.deleteReply(
       slug,
       id,
       replyId,
       user.userId,
+      dto,
     );
   }
 
@@ -750,6 +805,43 @@ export class CommunitiesController {
       declineKind: dto.declineKind,
       declineReason: dto.declineReason,
     });
+  }
+
+  // PRD-148. The applicant's own half of the join-request pair above: taking a
+  // request back before anybody answers it. Scoped to the CALLER'S own row by
+  // the service (`mine`, never an id), so a moderator cannot reach somebody
+  // else's request through this door. Answering one is what the `@Patch` above
+  // is for. Nobody is notified: a request withdrawn before it was acted on is
+  // not news, and telling a room a member changed their mind about joining it
+  // is worse than saying nothing.
+  @Delete(':slug/join-requests/mine')
+  @UseGuards(NotRestrictedGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary:
+      'Withdraw your own pending join request. The community is not notified.',
+  })
+  @ApiNoContentResponse({
+    description:
+      'There is no pending request from you here any more. The row is deleted ' +
+      'outright, so no reapply window is left behind and you may apply again ' +
+      'at once. Answered for a caller who had nothing pending too (a second ' +
+      'tap, or a request already withdrawn in another tab), because that ' +
+      'leaves them in exactly the state a withdrawal leaves them in.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The request was answered before it could be withdrawn: either it was ' +
+      'approved and you are now a member, or it was declined and set a ' +
+      'reapply date (`code: "JOIN_REQUEST_ALREADY_ANSWERED"`, with ' +
+      '`reapplyAfter`).',
+  })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  withdrawMyJoinRequest(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communitiesService.withdrawMyJoinRequest(slug, user.userId);
   }
 
   // PRD-25: answers 200 with a `CommunityRemovalOutcomeDTO` rather than the

@@ -1,3 +1,7 @@
+import { MemberRef } from '../common/member-ref';
+import { CommunityCardDTO } from './community-response';
+import { CommunityInvite } from './entities/community-invite.entity';
+
 /**
  * Why one named member was passed over by
  * `POST /communities/:slug/invites`. Reported back per slug rather than
@@ -21,6 +25,14 @@ export enum CommunityInviteSkipReason {
   PendingJoinRequest = 'pending_request',
   /** Barred from this community (`community_bans`). */
   Banned = 'banned',
+  /**
+   * Already holds a pending invitation to this community
+   * (`UQ_community_invites_pending`). The invitation on file is the answer:
+   * re-inviting somebody does not send a second bell, because a nudge every
+   * time a moderator re-opens the invite panel is a nudge nobody consented
+   * to. See `CommunityInvite`'s docstring.
+   */
+  AlreadyInvited = 'already_invited',
 }
 
 export interface CommunityInviteSkipDTO {
@@ -46,4 +58,64 @@ export interface CommunityInvitesResponseDTO {
   skipped: CommunityInviteSkipDTO[];
   invitedCount: number;
   skippedCount: number;
+}
+
+/**
+ * One standing invitation, as its INVITEE sees it
+ * (`GET /me/community-invites`).
+ *
+ * The community is carried as the ordinary `CommunityCardDTO` the discover
+ * grid already renders, so an invitations shelf is the same card the rest of
+ * the app uses rather than a second, thinner shape nobody styles. This is the
+ * only place a `private` community's card reaches somebody who is not on its
+ * roster, and a pending invitation is exactly the standing that earns it.
+ *
+ * `invitedBy` is null when the moderator who sent it has since erased their
+ * account (the actor FK is `ON DELETE SET NULL`): the invitation still
+ * stands, it just no longer names a person.
+ */
+export interface MyCommunityInviteDTO {
+  id: string;
+  community: CommunityCardDTO;
+  invitedBy: MemberRef | null;
+  createdAt: string;
+}
+
+/**
+ * One standing invitation, as the community's OWN STAFF see it
+ * (`GET /communities/:slug/invites`). Pending only: an answered invitation is
+ * the invitee's business, and surfacing "she declined you" to a room's
+ * moderators is a pressure nobody invited.
+ */
+export interface CommunityPendingInviteDTO {
+  id: string;
+  member: MemberRef;
+  invitedBy: MemberRef | null;
+  createdAt: string;
+}
+
+export function toMyCommunityInvite(
+  invite: CommunityInvite,
+  community: CommunityCardDTO,
+  invitedBy: MemberRef | null,
+): MyCommunityInviteDTO {
+  return {
+    id: invite.id,
+    community,
+    invitedBy,
+    createdAt: invite.createdAt.toISOString(),
+  };
+}
+
+export function toCommunityPendingInvite(
+  invite: CommunityInvite,
+  member: MemberRef,
+  invitedBy: MemberRef | null,
+): CommunityPendingInviteDTO {
+  return {
+    id: invite.id,
+    member,
+    invitedBy,
+    createdAt: invite.createdAt.toISOString(),
+  };
 }

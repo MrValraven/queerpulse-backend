@@ -41,7 +41,33 @@ export class CreateHousingListingDto {
 
   @IsOptional() @IsString() @MaxLength(120) area?: string;
 
+  /**
+   * PRIVATE. The full street address of a real person's home, and the most
+   * sensitive field on this DTO.
+   *
+   * It is never returned on public browse or search: `toHousingListingDTO`
+   * emits it only behind the `precise` gate, which is the owner, a moderator, a
+   * mutually-connected member, or an enquirer whose viewing the lister accepted
+   * (`HousingDirectoryService.detail`). Optional, because a lister is free to
+   * publish an area-only home; a value that strips to nothing is stored as NULL
+   * so "no address on file" is one state rather than two.
+   *
+   * Length matches the column (`varchar(200)`), like `title`/`blurb`. Markup is
+   * stripped at the write boundary (`toStoredPlainTextOrNull`), so no trimming
+   * decorator is needed here, matching every other free-text field on this DTO.
+   */
+  @IsOptional() @IsString() @MaxLength(200) addressLine?: string;
+
   @IsInt() @Min(0) rentEuros!: number;
+
+  // Up-front deposit in whole euros, same unit as the rent. Optional: omitting
+  // it stores NULL, which the board reads as "not stated" and never as zero.
+  // Capped well above any honest Lisbon deposit so a typo'd amount is refused
+  // at the edge rather than stored and filtered on.
+  // `null` is accepted alongside an omitted field and means the same thing:
+  // the create form always sends the key, blank or not, because the same body
+  // builder feeds the PATCH where a blank has to clear a stored deposit.
+  @IsOptional() @IsInt() @Min(0) @Max(100000) depositEuros?: number | null;
 
   // Bedroom count (0 = studio). Optional; powers the "beds" browse filter.
   @IsOptional() @IsInt() @Min(0) @Max(20) bedrooms?: number;

@@ -4,11 +4,13 @@ import {
   IsArray,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { SafeSpaceStatus } from '../entities/listing.entity';
@@ -46,6 +48,24 @@ export class UpdateSafeSpaceDto {
   @IsString()
   @MaxLength(200)
   verifier?: string;
+
+  /**
+   * Why this listing is being badged below the independent-visit bar. Required
+   * to set `status: verified` under it, ignored otherwise.
+   *
+   * This endpoint is the SECOND door to a safe-space badge, beside the
+   * reviewed nomination path in `SafeSpaceNominationsService.decide`. It exists
+   * because a moderator sometimes has to correct a listing with no nomination
+   * to hang it on. Gating only the reviewed path would have left the published
+   * three-visit guarantee with an unguarded bypass in the same console, so the
+   * same rule and the same audited exception apply here.
+   */
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(20)
+  @MaxLength(2000)
+  belowVisitBarReason?: string;
 
   @IsOptional()
   @IsString()

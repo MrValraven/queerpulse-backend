@@ -28,6 +28,7 @@ import { EndorseDTO } from './dto/endorse.dto';
 import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
 import { ListAudienceQuery } from './dto/list-audience.query';
 import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
+import { ListFollowingQuery } from './dto/list-following.query';
 import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
@@ -94,6 +95,30 @@ export class SubprofilesController {
     return this.subprofilesService.directory(query, user.userId);
   }
 
+  // The viewer's OWN following list (PRD-208). A literal route, so it sits up
+  // here with `mine`/`directory` and is never swallowed by the `:id` param
+  // route further down. Reads only the caller's own follows: there is no
+  // `userId` parameter and no way to ask for somebody else's, because who a
+  // member follows is theirs alone (the owner-facing `:id/followers` list is
+  // the separate, co-owner-gated view of the same table).
+  @Get('following')
+  @ApiOperation({ summary: 'List the personas the current member follows' })
+  @ApiOkResponse({
+    description: 'One page of followed personas, newest follow first.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listFollowing(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListFollowingQuery,
+  ) {
+    return this.subprofilesService.listFollowedPersonas(
+      user.userId,
+      query.page,
+    );
+  }
+
   // Public, best-effort auth: `@Public()` lifts the global mandatory JWT guard
   // (and the class-level `ActiveMemberGuard` steps aside for it too) and
   // `OptionalJwtAuthGuard` attaches `req.user` when a valid session cookie is
@@ -120,7 +145,7 @@ export class SubprofilesController {
   })
   @ApiNotFoundResponse({
     description:
-      'No subprofile with that handle, or an unpublished draft viewed by a non-owner.',
+      'No subprofile with that handle, or an unpublished draft viewed by a non-owner. When the handle is one a persona renamed away from and the reclaim cooldown is still running, the body carries code PERSONA_MOVED and the current handle to redirect to.',
   })
   getByHandle(
     @CurrentUser() user: CurrentUserData | undefined,
@@ -709,7 +734,7 @@ export class ProfileSubprofilesController {
   })
   @ApiNotFoundResponse({
     description:
-      'No such member/persona, or an unpublished draft viewed by a non-owner.',
+      'No such member/persona, or an unpublished draft viewed by a non-owner. When the member slug is one its owner renamed away from and the reclaim cooldown is still running, the body carries code PROFILE_MOVED and the current slug to redirect to.',
   })
   getBySlug(
     @CurrentUser() user: CurrentUserData | undefined,

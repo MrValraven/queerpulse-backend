@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { HandlesService } from '../handles/handles.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Activity } from '../profiles/entities/activity.entity';
 import { ActivityVisibilityService } from '../profiles/activity-visibility.service';
@@ -40,6 +41,14 @@ export class PublicProfilesService {
     private readonly activities: Repository<Activity>,
     private readonly activityVisibility: ActivityVisibilityService,
     private readonly contentModeration: ContentModerationService,
+    // Read-only here, and only for `previousProfileOwnerOf` (PRD-204). The
+    // module's isolation note is about not reaching the authenticated PROFILE
+    // read path; the handle registry is a different thing, a namespace ledger
+    // that already decides who owns a username. Resolving a renamed-away-from
+    // username against a second, local spelling of that rule is how the two
+    // answers drift apart, and a drifted answer here forwards a stranger's
+    // traffic to the wrong member. Nothing in this file writes to the registry.
+    private readonly handles: HandlesService,
   ) {}
 
   // The public page shows the same short "Recent activity" window the
@@ -99,27 +108,13 @@ export class PublicProfilesService {
    * as-is anyway. Not-found is the honest answer.
    */
   async getBySlug(slug: string): Promise<PublicProfileResponse> {
-    // One query, all three gates. Written as joins rather than as fetch-then-
-    // check-in-JS so there is no intermediate state in which a profile row that
-    // fails a gate is sitting in a variable next to a response mapper, and no
-    // early-return path that a later edit could make leak a different error.
-    const profile = await this.profiles
-      .createQueryBuilder('p')
-      .innerJoin('p.user', 'u', 'u.status = :active', {
-        active: UserStatus.Active,
-      })
-      .innerJoin(
-        MemberPreferences,
-        'mp',
-        'mp.user_id = p.user_id AND mp.public_profile_enabled = true',
-      )
-      .where('p.slug = :slug', { slug })
-      .andWhere('p.visibility = :open', { open: ProfileVisibility.Open })
-      .getOne();
-
-    if (!profile) {
-      throw new NotFoundException(NOT_FOUND_MESSAGE);
-    }
+    // PRD-204: a slug with no published profile may be a username this member
+    // renamed away from and still holds the reclaim reservation for.
+    // `throwMovedOrNotFound` always throws, so the `??` branch never yields.
+    const profile =
+      (await this.publishedProfileQuery()
+        .andWhere('p.slug = :slug', { slug })
+        .getOne()) ?? (await this.throwMovedOrNotFound(slug));
 
     // Moderator takedown gate. An anonymous caller is never the owner and never
     // staff, so a `hide_content`/`remove_content` on this member is absolute
@@ -127,16 +122,7 @@ export class PublicProfilesService {
     // not-found answer as every other gate above, for the same reason: the
     // rejection must not distinguish "taken down" from "never existed". Checked
     // by slug OR userId, matching how a member is addressed in a report.
-    const subjectIds = [profile.slug, profile.userId];
-    const moderationStates = await this.contentModeration.statesForAnyType(
-      [PublicProfilesService.MEMBER_SUBJECT_TYPE],
-      subjectIds,
-    );
-    const takenDown = subjectIds.some((subjectId) => {
-      const state = moderationStates.get(subjectId);
-      return !!state && (state.hidden || state.removed);
-    });
-    if (takenDown) {
+    if (await this.isTakenDown([profile.slug, profile.userId])) {
       throw new NotFoundException(NOT_FOUND_MESSAGE);
     }
 
@@ -167,5 +153,111 @@ export class PublicProfilesService {
       await this.activityVisibility.filterVisible(activity);
 
     return toPublicProfile(profile, socials, work, visibleActivity);
+  }
+
+  /**
+   * THE GATE, as a builder, so every path that resolves a profile for the open
+   * web goes through the same three conditions. Read the long note on
+   * `getBySlug` for why each one is here.
+   *
+   * Factored out for the moved-username path below, which has to answer the
+   * same question about a DIFFERENT member (the one who used to hold the
+   * requested name) and must not answer it more loosely. Written as joins
+   * rather than as fetch-then-check-in-JS for the reason that has always
+   * applied: there is then no intermediate state in which a profile row that
+   * fails a gate is sitting in a variable next to a response mapper.
+   *
+   * The builder already holds the `where`, so callers add `andWhere`. A second
+   * `where` would RESET the clause and drop the visibility gate with it.
+   */
+  private publishedProfileQuery(): SelectQueryBuilder<Profile> {
+    return this.profiles
+      .createQueryBuilder('p')
+      .innerJoin('p.user', 'u', 'u.status = :active', {
+        active: UserStatus.Active,
+      })
+      .innerJoin(
+        MemberPreferences,
+        'mp',
+        'mp.user_id = p.user_id AND mp.public_profile_enabled = true',
+      )
+      .where('p.visibility = :open', { open: ProfileVisibility.Open });
+  }
+
+  /**
+   * Whether a moderator takedown stands against any of these subject ids. A
+   * member is addressed in a report by slug OR userId, so both are passed.
+   */
+  private async isTakenDown(subjectIds: string[]): Promise<boolean> {
+    const moderationStates = await this.contentModeration.statesForAnyType(
+      [PublicProfilesService.MEMBER_SUBJECT_TYPE],
+      subjectIds,
+    );
+    return subjectIds.some((subjectId) => {
+      const state = moderationStates.get(subjectId);
+      return !!state && (state.hidden || state.removed);
+    });
+  }
+
+  /**
+   * PRD-204, the anonymous half. This is the address a member prints on a card,
+   * puts in a bio, or hands to someone off the platform, so it is the link most
+   * likely to be old and least likely to be re-shared. Until now a rename broke
+   * every one of them, and the person who hit the wall was a stranger with no
+   * account and no way to search for anybody.
+   *
+   * The forwarding is bounded by the same window that protects the name:
+   * `previousProfileOwnerOf` answers only while the reclaim cooldown is running
+   * and nobody holds the name in the live registry. Once it lapses, or somebody
+   * else claims the name, this stops answering, so a new owner can never
+   * inherit traffic meant for the previous one. Nothing is cached, here or in
+   * the response: the controller sets `Cache-Control: no-store` before the
+   * lookup, so it lands on this 404 too.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE GATE RUNS AGAIN, ON THE OTHER MEMBER
+   * ---------------------------------------------------------------------------
+   * The caller is anonymous and a public profile is opt-in, so "that username
+   * moved" is a disclosure in its own right: it says an account still exists.
+   * A member who renamed AND turned their public page off has said no twice,
+   * and must be indistinguishable from a name nobody ever held. So the previous
+   * owner's CURRENT profile is resolved through `publishedProfileQuery` (the
+   * publication switch, `users.status = active`, `visibility = open`) and then
+   * through the takedown gate, exactly as a first-hand visit would be, before
+   * anything is emitted. Only a member whose page a stranger could already open
+   * at its new address can forward to it, which is why the payload discloses
+   * nothing that address does not.
+   *
+   * The old slug is checked for a takedown too, alongside the current one: a
+   * report filed against the name the member used to hold still names them.
+   *
+   * The payload is an application-level 404 rather than an HTTP 301/308, and
+   * the shape matches `ProfilesService.throwMovedOrNotFound` so the SPA branch
+   * stays one function. A 301/308 is permanently cacheable, and this forwarding
+   * MUST expire with the reclaim cooldown; and `fetch` follows a redirect
+   * transparently, so the app would render the profile under the dead URL and
+   * never correct the address bar.
+   *
+   * Never returns. The caller treats it as a throw.
+   */
+  private async throwMovedOrNotFound(slug: string): Promise<never> {
+    const previousOwnerUserId = await this.handles.previousProfileOwnerOf(slug);
+    if (!previousOwnerUserId) {
+      throw new NotFoundException(NOT_FOUND_MESSAGE);
+    }
+    const moved = await this.publishedProfileQuery()
+      .andWhere('p.user_id = :previousOwnerUserId', { previousOwnerUserId })
+      .getOne();
+    if (!moved) {
+      throw new NotFoundException(NOT_FOUND_MESSAGE);
+    }
+    if (await this.isTakenDown([slug, moved.slug, moved.userId])) {
+      throw new NotFoundException(NOT_FOUND_MESSAGE);
+    }
+    throw new NotFoundException({
+      code: 'PROFILE_MOVED',
+      message: 'That username has moved',
+      slug: moved.slug,
+    });
   }
 }

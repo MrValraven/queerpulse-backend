@@ -13,7 +13,8 @@ export type UploadKind =
   | 'listing-photo'
   | 'community-cover'
   | 'community-avatar'
-  | 'message-image';
+  | 'message-image'
+  | 'message-document';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -162,6 +163,27 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'message-image': {
     prefix: 'message-images',
     maxBytes: 8 * MB,
+    requiresSession: true,
+  },
+  // A message-composer DOCUMENT attachment (PRD-226): a lease PDF, a flyer, a
+  // spreadsheet, a plain-text file — never a video/audio/voice format, which
+  // stays out of scope. `requiresSession: true`, and — exactly like
+  // `message-image` above — `FilesController.serve()` special-cases this kind
+  // too: it does the SAME message-attachment ↔ conversation-participant
+  // lookup rather than the uploader-only ownership check, so a recipient can
+  // load the document while a bystander who merely holds the URL cannot. A
+  // document is MORE sensitive than a photo, not less — a lease PDF carries a
+  // name and a home address in the body text itself, not just in metadata —
+  // so it gets the identical participant-scoped treatment, never a weaker one.
+  //
+  // 20 MB, deliberately above the 8 MB image cap: a multi-page scanned lease
+  // (the named use case) routinely exceeds a single photo's size, and a
+  // document is never client-side re-encoded/downscaled the way an image is
+  // (there is no lossy "resize" for a PDF or a spreadsheet), so the cap has to
+  // accommodate the real, un-shrinkable file rather than a processed one.
+  'message-document': {
+    prefix: 'message-documents',
+    maxBytes: 20 * MB,
     requiresSession: true,
   },
 };

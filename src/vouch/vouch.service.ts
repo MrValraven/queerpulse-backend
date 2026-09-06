@@ -15,8 +15,10 @@ import {
   IsNull,
   Not,
   Repository,
+  SelectQueryBuilder,
 } from 'typeorm';
-import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import {
@@ -139,6 +141,7 @@ export class VouchService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async createVouch(
@@ -171,6 +174,15 @@ export class VouchService {
     const voucheeId = vouchee.userId;
     if (voucheeId === voucherId) {
       throw new BadRequestException('You cannot vouch for yourself');
+    }
+    // A block either way severs the possibility of a new vouch, exactly as it
+    // severs a connection request (`ConnectionsService.requestConnection`).
+    // Without this, someone the member had blocked could still vouch for them,
+    // raise their `vouch_count`, fire a `VOUCH_CREATED` notification at them,
+    // and put their own face in the member's voucher roster with no way for
+    // the member to take it down. Same symmetric check, same 403.
+    if (await this.blockFilter.isBlockedEitherWay(voucherId, voucheeId)) {
+      throw new ForbiddenException('You cannot vouch for this member');
     }
 
     // Empty/whitespace-only notes are stored as null, not "".
@@ -395,10 +407,12 @@ export class VouchService {
     if (!target) {
       throw new NotFoundException('Member not found');
     }
-    // `count` is the full tally; `rows` is the requested (bounded) page.
-    const count = await this.vouches.count({
-      where: { voucheeId: target.userId, withdrawnAt: IsNull() },
-    });
+    // `count` is the full tally; `rows` is the requested (bounded) page. Both
+    // run through `activeVouchesReceivedBy`, so the number and the roster are
+    // filtered identically: a filtered roster beside an unfiltered number is
+    // the "no vouches yet, 7 vouches" contradiction this endpoint already has
+    // in its `vouchersVisible` branch, and it must not be reproduced here.
+    const count = await this.activeVouchesReceivedBy(target.userId).getCount();
     // Names hidden: when the target has turned `vouchersVisible` off, a
     // non-owner viewer still gets the true `count` ("Names hidden — visitors
     // see the number only") but never the roster of who vouched — the owner
@@ -408,12 +422,14 @@ export class VouchService {
     if (!isOwner && !target.vouchersVisible) {
       return { count, vouchers: [] };
     }
-    const rows = await this.vouches.find({
-      where: { voucheeId: target.userId, withdrawnAt: IsNull() },
-      order: { createdAt: 'DESC' },
-      take: page?.limit ?? DEFAULT_PAGE_SIZE,
-      skip: page?.offset ?? 0,
-    });
+    // `id` tiebreaks `createdAt` so an OFFSET page boundary that lands inside
+    // a batch of same-instant vouches can't repeat or skip one.
+    const rows = await this.activeVouchesReceivedBy(target.userId)
+      .orderBy('v.createdAt', 'DESC')
+      .addOrderBy('v.id', 'DESC')
+      .offset(page?.offset ?? 0)
+      .limit(page?.limit ?? DEFAULT_PAGE_SIZE)
+      .getMany();
     // Anonymous vouchers are shielded: never resolve their profile (so an
     // identity can't leak) and emit a redacted view. Non-anonymous rows resolve
     // as usual.
@@ -433,6 +449,12 @@ export class VouchService {
     return { count, vouchers };
   }
 
+  /**
+   * The vouches the CALLER has given. Deliberately NOT block-filtered: this is
+   * the voucher's own record of what they did, and it is the only surface from
+   * which they can withdraw a vouch. Hiding a severed vouch here would take
+   * that away while the row still sat in the table.
+   */
   async listGiven(
     voucherId: string,
     page?: PageParams,
@@ -456,10 +478,13 @@ export class VouchService {
     );
   }
 
+  /**
+   * The member's headline "N vouches", block-severed. This is the number
+   * `toProfileCard` prints beside the roster `listVouchers` returns, so the two
+   * share `activeVouchesReceivedBy` rather than each writing their own filter.
+   */
   getVouchCount(userId: string): Promise<number> {
-    return this.vouches.count({
-      where: { voucheeId: userId, withdrawnAt: IsNull() },
-    });
+    return this.activeVouchesReceivedBy(userId).getCount();
   }
 
   async getVouchCounts(userIds: string[]): Promise<Map<string, number>> {
@@ -473,6 +498,21 @@ export class VouchService {
       .addSelect('COUNT(*)', 'count')
       .where('v.voucheeId IN (:...ids)', { ids: userIds })
       .andWhere('v.withdrawnAt IS NULL')
+      // The batched analogue of the `BlockFilterService.excludeBlocked`
+      // predicate `activeVouchesReceivedBy` applies. That method binds ONE
+      // actor id, and here the actor varies per row (it is the vouchee of the
+      // row being counted), so the severance is written pair-correlated
+      // instead. Same two directions, same symmetry: a block placed by either
+      // side drops the vouch. Kept in step with `getVouchCount` so a member's
+      // directory card and their profile page never print two different
+      // numbers.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "blocks" "__vouch_block"
+          WHERE ("__vouch_block"."blocker_id" = "v"."vouchee_id" AND "__vouch_block"."blocked_id" = "v"."voucher_id")
+             OR ("__vouch_block"."blocked_id" = "v"."vouchee_id" AND "__vouch_block"."blocker_id" = "v"."voucher_id")
+        )`,
+      )
       .groupBy('v.voucheeId')
       .getRawMany<{ voucheeId: string; count: string }>();
     for (const row of rows) {
@@ -499,11 +539,15 @@ export class VouchService {
    * The user ids who currently hold an ACTIVE, NON-ANONYMOUS vouch for
    * `voucheeId`, newest first and capped at `NAMED_VOUCHER_SCAN_CAP`.
    *
-   * Two exclusions carry the whole privacy contract of this read, and they live
-   * here rather than in the caller so no later caller can forget them:
+   * Three exclusions carry the whole privacy contract of this read, and they
+   * live here rather than in the caller so no later caller can forget them:
    *
    *  - `withdrawnAt IS NULL` — a withdrawn vouch is excluded everywhere else
    *    (see `getVouchCount`), and must be here too.
+   *  - block severance, via `activeVouchesReceivedBy`. A vouch from someone
+   *    the member has blocked (or who blocked them) does not exist on any
+   *    member-facing surface, so it must not feed the "members you know
+   *    vouched for them" cue either.
    *  - `anonymous = false` — an anonymous voucher is shielded from the vouchee
    *    in `listVouchers` and from the connections badge in
    *    `getVouchDirections`. Handing their id to a viewer-relative intersection
@@ -517,13 +561,14 @@ export class VouchService {
    * reads the same at 8 as at 80.
    */
   async getNamedVoucherIds(voucheeId: string): Promise<string[]> {
-    const rows = await this.vouches.find({
-      where: { voucheeId, withdrawnAt: IsNull(), anonymous: false },
-      select: { voucherId: true },
-      order: { createdAt: 'DESC' },
-      take: NAMED_VOUCHER_SCAN_CAP,
-    });
-    return rows.map((vouch) => vouch.voucherId);
+    const rows = await this.activeVouchesReceivedBy(voucheeId)
+      .andWhere('v.anonymous = false')
+      .select('v.voucherId', 'voucher_id')
+      .orderBy('v.createdAt', 'DESC')
+      .addOrderBy('v.id', 'DESC')
+      .limit(NAMED_VOUCHER_SCAN_CAP)
+      .getRawMany<{ voucher_id: string }>();
+    return rows.map((row) => row.voucher_id);
   }
 
   /**
@@ -534,6 +579,10 @@ export class VouchService {
    * roster) is trivially `false` — nobody can have vouched.
    */
   async hasActiveVouchFrom(
+    // Deliberately NOT block-filtered. This is an access decision (it admits an
+    // applicant to a community), and filtering it would mean blocking one
+    // member could silently cost you entry to a community you already
+    // qualified for. Flagged as an open call rather than changed here.
     voucherIds: string[],
     voucheeId: string,
   ): Promise<boolean> {
@@ -552,6 +601,12 @@ export class VouchService {
    * direction. One query loads every vouch in either direction across the set —
    * the same read the connections vouch badge used to run against the `Vouch`
    * repository directly.
+   *
+   * Not block-filtered, and it does not need to be: the only caller intersects
+   * this with the viewer's ACCEPTED connections, and `SocialService.blockMember`
+   * flips the pair's connection edge to `Blocked` in the same transaction as
+   * the block. A blocked pair therefore has no accepted connection to carry a
+   * badge.
    */
   async getVouchDirections(
     viewerUserId: string,
@@ -594,6 +649,40 @@ export class VouchService {
     return { youVouched, vouchedForYou };
   }
 
+  /**
+   * The one definition of "an active vouch this member has received": not
+   * withdrawn, and not severed by a block in either direction between the
+   * member and the voucher.
+   *
+   * The block filter is **target-relative**, deliberately, and carries no
+   * viewer: a block is a hard mutual severance placed between these two
+   * people, so the vouch stops existing for the member, for the voucher and
+   * for every visitor alike. That matches `SocialService.blockMember`, which
+   * flips the pair's connection edge to `Blocked` for everyone rather than
+   * hiding it from one side. A viewer-relative filter would have left the
+   * blocked voucher's face on the member's own profile, which is the whole
+   * complaint.
+   *
+   * Every member-facing count and roster is built from this, so the number and
+   * the list can never disagree. Reads that are NOT built from it, and why, are
+   * called out on each of them: `listGiven`/`getActiveVoucheeIds` (a voucher's
+   * own outgoing record, which they must still be able to withdraw),
+   * `getVouchDirections` and `hasActiveVouchFrom`.
+   */
+  private activeVouchesReceivedBy(
+    voucheeId: string,
+  ): SelectQueryBuilder<Vouch> {
+    const query = this.vouches
+      .createQueryBuilder('v')
+      .where('v.voucheeId = :voucheeId', { voucheeId })
+      .andWhere('v.withdrawnAt IS NULL');
+    // Raw-SQL column reference, snake_case and pre-quoted, matching the `v`
+    // alias and the `SnakeNamingStrategy` column name, per `excludeBlocked`'s
+    // contract. Called once per builder — it binds a fixed parameter name.
+    this.blockFilter.excludeBlocked(query, voucheeId, '"v"."voucher_id"');
+    return query;
+  }
+
   private async profilesByUserIds(
     userIds: string[],
   ): Promise<Map<string, Profile>> {
@@ -616,7 +705,16 @@ export class VouchService {
       slug: profile?.slug ?? '',
       firstName: profile?.firstName ?? '',
       lastName: profile?.lastName ?? '',
-      avatarUrl: toImageUrl(profile?.avatarUrl),
+      // Honours the voucher's own `photoVisible` toggle through the shared
+      // `toVisibleAvatarUrl` gate, the same one `toMemberRef` applies to every
+      // other cross-domain member reference (feed authors, gathering hosts).
+      // Without it a member who hid their photo still had their face rendered
+      // to every visitor of a profile they vouched for. No owner-self
+      // exception, matching that helper: this view carries no viewer identity,
+      // and the owner still sees their own photo on their full profile via
+      // `gateAvatarUrl`. `toVisibleAvatarUrl` absorbs the undefined-profile
+      // case, so it needs no `?.` of its own.
+      avatarUrl: toVisibleAvatarUrl(profile),
       note,
       createdAt,
       anonymous: false,

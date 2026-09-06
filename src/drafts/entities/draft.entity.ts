@@ -54,6 +54,38 @@ export interface DraftPayload {
 }
 
 /**
+ * One value a composer may park in {@link DraftMeta}.
+ *
+ * Deliberately flat and scalar (plus a list of strings for things like tags):
+ * a nested, free-form JSON tree accepted from a client is a depth bomb and an
+ * unbounded storage sink, and nothing any composer needs to remember about
+ * itself is more than a field value.
+ */
+export type DraftMetaValue = string | number | boolean | null | string[];
+
+/**
+ * A draft's composer state: the fields a surface needs to reopen exactly where
+ * the member left it, which the drafts-list payload has no room for.
+ *
+ * Kind-AGNOSTIC on purpose. `/me/drafts` already backs job applications,
+ * magazine pitches, grant applications and forum posts, so the forum's
+ * category / community / tags / photo reference must not become four columns
+ * on a table every other kind of draft shares. Each composer owns the keys it
+ * writes and ignores keys it does not recognise, exactly like a query string.
+ *
+ * The forum's new-thread composer writes `title`, `category`, `communitySlug`,
+ * `tags`, `imageKey` and `imagePreviewUrl` here (see the frontend's
+ * `forumDraftSnapshot.ts`). PRD-165: those used to live in the browser alone,
+ * so a post started on a phone came back on a laptop as a body with the
+ * category, community, tags and photo silently gone.
+ *
+ * Only a REFERENCE to an uploaded photo is ever stored here; the bytes stay in
+ * the bucket. A base64 image would be a member-controlled multi-megabyte write
+ * on every keystroke's autosave.
+ */
+export type DraftMeta = Record<string, DraftMetaValue>;
+
+/**
  * A user's work-in-progress content draft (job application, magazine pitch,
  * grant application, community post/reply, ...). `kind` is the free-form
  * display label the frontend renders verbatim (e.g. "JOB", "PITCH", "€",
@@ -83,6 +115,23 @@ export class Draft {
 
   @Column({ type: 'jsonb' })
   payload!: DraftPayload;
+
+  /**
+   * Composer state (see {@link DraftMeta}), or `null` for a draft whose surface
+   * keeps none.
+   *
+   * A column of its own rather than another key inside `payload`: `payload` is
+   * the drafts-LIST view-model (title, description, progress, status chip) and
+   * merges field by field on a patch, while `meta` is private to the composer
+   * and must replace WHOLESALE. A tag the member removed has to disappear, and
+   * a per-field merge would keep resurrecting it.
+   *
+   * Bounded before it ever reaches here: `@IsDraftMeta` caps the serialized
+   * size, the key count, and every key and value, so an autosaving client
+   * cannot turn a draft row into a storage sink.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  meta!: DraftMeta | null;
 
   /**
    * Optimistic-concurrency counter. A draft is an autosaving surface that a

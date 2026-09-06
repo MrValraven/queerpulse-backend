@@ -54,6 +54,7 @@ import {
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileCreditsService } from './subprofile-credits.service';
+import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
@@ -82,6 +83,8 @@ import {
   SubprofileView,
   toSubprofileDTO,
 } from './subprofile-response';
+import { Paginated } from '../common/pagination';
+import { FollowedPersonaView } from './subprofile-following-response';
 import { MemberView } from './subprofile-invite-response';
 import {
   SUBPROFILE_DELETED,
@@ -238,6 +241,7 @@ export class SubprofilesService {
     // Collaboration-credit diff + notification fan-out for `replaceSection`
     // (extracted).
     private readonly credits: SubprofileCreditsService,
+    private readonly updates: SubprofileUpdatesService,
     // Public/card read surface + shared batched resolvers (extracted).
     private readonly publicRead: SubprofilePublicReadService,
     // Batched crop lookup for `avatarUrl`/`coverUrl`/item `imageUrl` — see
@@ -865,6 +869,15 @@ export class SubprofilesService {
       collaboratorsByHandle,
     );
 
+    // "A persona you follow published something new" (PRD-208). Snapshotted
+    // BEFORE the write for the same reason the credit diff above is: the old
+    // rows are gone once the transaction commits, so "did this section grow,
+    // and by what?" can only be asked now. The answer is used post-commit.
+    const sectionTitlesBefore = await this.updates.snapshotSectionTitles(
+      id,
+      sectionEnum,
+    );
+
     await this.dataSource.transaction(async (manager) => {
       // Protect Your Work (revision history), Task 7: this used to be an
       // unconditional `manager.delete(...)` of every row in the section
@@ -1040,6 +1053,16 @@ export class SubprofilesService {
         // Intentionally ignored — the section save already committed.
       }
     }
+
+    // Followers, post-commit and best-effort on the same terms: the service
+    // swallows its own failures, so a bell that did not ring can never roll
+    // back or fail a save that already succeeded.
+    await this.updates.notifyFollowersOfNewItems(
+      sp,
+      sectionTitlesBefore,
+      items.map((item) => item.title),
+      sectionEnum,
+    );
 
     return this.ownerDTO(sp);
   }
@@ -1548,6 +1571,15 @@ export class SubprofilesService {
     limit?: number,
   ): Promise<{ count: number; followers: FollowerView[] }> {
     return this.followersService.listFollowers(viewerId, id, page, limit);
+  }
+
+  // The viewer's OWN following list — every persona they follow that is still
+  // publicly readable to them (PRD-208).
+  listFollowedPersonas(
+    viewerId: string,
+    page?: number,
+  ): Promise<Paginated<FollowedPersonaView>> {
+    return this.followersService.listFollowedPersonas(viewerId, page);
   }
 
   // ---- internals -----------------------------------------------------------

@@ -154,7 +154,21 @@ export type SubmissionDeepLinkSource =
    * slug, same reason. This is PRD-48's member-facing half and the reason two
    * of the three kinds below can point somewhere at all.
    */
-  | 'submission';
+  | 'submission'
+  /**
+   * The public resource directory page a newly published listing appears on:
+   * `/safety/legal` for `legal_aid`, `/resources/sexual-health` for
+   * `sexual_health_testing`. The slug carried alongside is the listing's
+   * CATEGORY rather than an id, because the directory has no per-listing page
+   * — `GET /resources/listings` returns a small curated set that the two
+   * category pages render inline.
+   *
+   * Only ever written for an ACCEPTED resource suggestion, and only once the
+   * approval has actually produced a listing (PRD-269), which is why it is an
+   * alternate rather than the kind's own destination below. A declined
+   * suggestion still points at `submission`, which is where its reason is.
+   */
+  | 'resource_directory';
 
 /** What the bell is allowed to say and where it is allowed to point, per kind. */
 export interface SubmissionKindNotificationConfig {
@@ -186,6 +200,30 @@ export interface SubmissionKindNotificationConfig {
    * `SubmissionDecisionNotifier` drop the note before it is ever written.
    */
   readonly isReviewNoteDelivered: boolean;
+  /**
+   * Destinations this kind may name PER DECISION, instead of `deepLinkSource`.
+   *
+   * Omitted (the default) means the kind has exactly one destination and a
+   * caller cannot change it, which is what every kind wanted until PRD-269.
+   * A resource suggestion is the first whose best destination depends on how
+   * the decision went: once approving actually publishes the organisation,
+   * "your suggestion was accepted" should open the directory page it is now
+   * on, while a declined one still belongs on the submissions index where its
+   * reason is.
+   *
+   * OPT-IN AND CLOSED, so the guarantee the field it overrides carries is not
+   * lost. `SubmissionDecisionNotifier` honours `SubmissionDecisionNotice.deepLinkSource`
+   * only when it appears in this list; anything else is ignored and the kind's
+   * own `deepLinkSource` is written. A caller still cannot invent a
+   * destination, it can only pick one this file already agreed to.
+   *
+   * OPTIONAL rather than required, unlike `deepLinkSource` beside it, and the
+   * asymmetry is deliberate. A missing `deepLinkSource` would hide a decision
+   * nobody made about where a member is sent; a missing alternates list is the
+   * restrictive answer, and a kind that has not thought about per-outcome
+   * destinations gets exactly the single-destination behaviour it had before.
+   */
+  readonly alternateDeepLinkSources?: readonly SubmissionDeepLinkSource[];
 }
 
 /**
@@ -221,8 +259,14 @@ export const SUBMISSION_KIND_NOTIFICATION: Record<
   // most for this kind, because an `archived` suggestion is closed with no
   // verdict and emits no notification at all, so the index is the only place
   // that state is ever visible.
+  //
+  // The one alternate on this file (PRD-269): an APPROVED suggestion now
+  // publishes a real directory listing in the same transaction as the
+  // decision, so its row opens the public page that listing is on. A declined
+  // one keeps the index, where the reviewer's reason is.
   [SubmissionKind.ResourceSuggestion]: {
     deepLinkSource: 'submission',
     isReviewNoteDelivered: true,
+    alternateDeepLinkSources: ['resource_directory'],
   },
 };

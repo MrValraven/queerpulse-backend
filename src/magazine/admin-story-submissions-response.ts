@@ -47,8 +47,24 @@ export interface AdminStorySubmissionDTO {
   decision: SubmissionDecision | null;
   decisionNote: string | null;
   decidedAt: string | null;
+  /** The staff member who last took a decline back and put this story in the
+   *  queue again, and when. Both null until that happens. Reopening CLEARS the
+   *  decision it undoes, so without these two the row would be back in the
+   *  queue looking as if it had never been decided, and the editor who wrote
+   *  the decline would have nothing telling them where it went. */
+  reopenedBy: AdminPersonDTO | null;
+  reopenedAt: string | null;
+  /** How many times this story has been declined and put back. `reopenedAt`
+   *  holds only the last one, and a story round the loop three times is a
+   *  different conversation from one reopened once. */
+  reopenCount: number;
   /** Set when a `commissioned` decision put this piece in the pitch inbox. */
   commissionedPitchId: string | null;
+  /** Set when an `accepted` decision created the desk piece for this story.
+   *  The admin surface links straight through to the desk record with it, so
+   *  an acceptance is something an editor can open rather than a status word
+   *  with nothing behind it. */
+  acceptedPieceId: string | null;
   createdAt: string;
 }
 
@@ -62,6 +78,11 @@ export interface AdminStorySubmissionsPageDTO {
 export function toAdminStorySubmissionDTO(
   submission: MagazineStorySubmission,
   submitter: MemberRef | null,
+  /** The staff member `submission.reopenedBy` points at, resolved by the
+   *  caller in the same batched lookup as the submitter. Required rather than
+   *  defaulted, so a new call site cannot quietly serve `null` on a row that
+   *  really was reopened. */
+  reopener: MemberRef | null,
 ): AdminStorySubmissionDTO {
   return {
     id: submission.id,
@@ -76,7 +97,13 @@ export function toAdminStorySubmissionDTO(
     decision: submission.decision,
     decisionNote: submission.decisionNote,
     decidedAt: submission.decidedAt ? submission.decidedAt.toISOString() : null,
+    reopenedBy: toAdminPerson(reopener),
+    reopenedAt: submission.reopenedAt
+      ? submission.reopenedAt.toISOString()
+      : null,
+    reopenCount: submission.reopenCount,
     commissionedPitchId: submission.commissionedPitchId,
+    acceptedPieceId: submission.acceptedPieceId,
     createdAt: submission.createdAt.toISOString(),
   };
 }

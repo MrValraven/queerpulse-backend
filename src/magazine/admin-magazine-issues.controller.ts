@@ -32,6 +32,7 @@ import { UpdateCoverDto } from './dto/update-cover.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
 import { UpdateIssueScheduleDto } from './dto/update-issue-schedule.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
+import { UpdateSubmissionDeadlineDto } from './dto/update-submission-deadline.dto';
 import { MagazineIssueCostsService } from './magazine-issue-costs.service';
 import { MagazinePieceService } from './magazine-piece.service';
 
@@ -120,6 +121,44 @@ export class AdminMagazineIssuesController {
     return this.issueCosts.getIssueCosts(number);
   }
 
+  // PRD-106 — the submission deadline, read and written on its own pair of
+  // routes. Two path segments, so neither competes with `:number` for a match.
+  @Get(':number/submission-deadline')
+  @ApiOperation({
+    summary: 'When submissions close for this issue.',
+  })
+  @ApiOkResponse({
+    description:
+      '`{ submissionDeadline }` as `YYYY-MM-DD`, or `null` when the desk has ' +
+      'set none. The public submit-story form prints its deadline line only ' +
+      'when a real date is stored here.',
+  })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  getSubmissionDeadline(@Param('number') number: string) {
+    return this.magazinePieces.getSubmissionDeadline(number);
+  }
+
+  @Patch(':number/submission-deadline')
+  @ApiOperation({
+    summary:
+      'Set, move, or clear when submissions close (`null` clears it, which ' +
+      'takes the deadline line off the public submit-story form).',
+  })
+  @ApiOkResponse({ description: 'The stored submission deadline.' })
+  @ApiBadRequestResponse({ description: 'The deadline is invalid.' })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  updateSubmissionDeadline(
+    @Param('number') number: string,
+    @Body() dto: UpdateSubmissionDeadlineDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.updateSubmissionDeadline(
+      number,
+      dto,
+      user.userId,
+    );
+  }
+
   @Get(':number')
   @ApiOperation({ summary: 'Get the issue production record.' })
   @ApiOkResponse({
@@ -187,9 +226,15 @@ export class AdminMagazineIssuesController {
   @Post(':number/ship')
   @ApiOperation({
     summary:
-      'Ship the issue: publish every past-gate piece linked to it. Pieces behind the gate are left unpublished.',
+      'Ship the issue: publish every linked piece that is ready, past its care gate, and format-complete. ' +
+      'Anything else holds and is reported.',
   })
-  @ApiOkResponse({ description: 'The updated issue production record.' })
+  @ApiOkResponse({
+    description:
+      'The updated issue production record. `lastShip` reports what this ship did: when it ran, when the ' +
+      'pieces go live (09:00 Europe/Lisbon on a future issue date, immediately otherwise), which pieces ' +
+      'published, and every held piece with its reasons.',
+  })
   @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
   shipIssue(
     @Param('number') number: string,

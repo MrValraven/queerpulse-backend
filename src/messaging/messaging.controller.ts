@@ -431,11 +431,11 @@ export class ConversationsController {
   }
 
   /**
-   * PATCH a conversation. `muted`/`pinned`/`favorite`/`archived` set this
-   * caller's per-conversation preferences (any thread); `draft` syncs this
-   * caller's own unsent composer text. `title`/`avatarUrl` edit a GROUP's info
-   * — owner/admin-gated in the service, which posts a `group_renamed` pill on a
-   * title change.
+   * PATCH a conversation. `muted`/`pinned`/`favorite`/`archived`/`markUnread`
+   * set this caller's per-conversation preferences (any thread); `draft`
+   * syncs this caller's own unsent composer text. `title`/`avatarUrl` edit a
+   * GROUP's info — owner/admin-gated in the service, which posts a
+   * `group_renamed` pill on a title change.
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Patch(':id')
@@ -472,6 +472,7 @@ export class ConversationsController {
       dto.pinned === undefined &&
       dto.favorite === undefined &&
       dto.archived === undefined &&
+      dto.markUnread === undefined &&
       dto.draft === undefined
     ) {
       throw new BadRequestException('Nothing to update');
@@ -499,6 +500,13 @@ export class ConversationsController {
         id,
         user.userId,
         dto.archived,
+      );
+    }
+    if (dto.markUnread !== undefined) {
+      result = await this.messagingService.setMarkedUnread(
+        id,
+        user.userId,
+        dto.markUnread,
       );
     }
     if (dto.draft !== undefined) {
@@ -552,6 +560,35 @@ export class ConversationsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.messagingService.deleteMessage(id, messageId, user.userId);
+  }
+
+  /**
+   * "Delete for me" (PRD-227): hide ONE message from the caller's own view
+   * only. Any participant may do this (not just the author) — SITS BESIDE
+   * the "for everyone" tombstone above and never touches it. The other
+   * participant's copy of the message, and the thread's shared pin state,
+   * are completely unaffected.
+   */
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Delete(':id/messages/:messageId/for-me')
+  @ApiOperation({
+    summary:
+      'Hide a message from the caller\'s own view only ("delete for me")',
+  })
+  @ApiOkResponse({
+    description:
+      "The message no longer exists in the caller's own view (idempotent). The other participant's view is unaffected.",
+  })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
+  deleteMessageForMe(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.messagingService.hideMessageForMe(id, messageId, user.userId);
   }
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })

@@ -44,6 +44,7 @@ function makeDraft(overrides: Partial<Draft> = {}): Draft {
       sortTitle: 'Application · Communications Manager',
       searchText: 'application communications manager',
     },
+    meta: null,
     version: 0,
     createdAt: now,
     updatedAt: now,
@@ -128,6 +129,7 @@ describe('DraftsService', () => {
             deadlineDays: 9,
             sortTitle: 'Application · Communications Manager',
             searchText: 'application communications manager',
+            meta: null,
             version: 0,
           },
         ],
@@ -188,6 +190,7 @@ describe('DraftsService', () => {
           sortTitle: 'Application · Communications Manager',
           searchText: 'application communications manager',
         },
+        meta: null,
         version: 0,
       });
       // INSERT, never `save` — `save` on an existing primary key is an UPDATE,
@@ -197,6 +200,32 @@ describe('DraftsService', () => {
       expect(repo.save).not.toHaveBeenCalled();
       expect(result.id).toBe('invite-1720000000');
       expect(result.kindVariant).toBe(DraftKindVariant.Job);
+    });
+
+    it('persists the composer bag so a draft reopens the same on another device (PRD-165)', async () => {
+      await service.create('u1', {
+        ...dto,
+        meta: { category: 'life', tags: ['lisboa'], imageKey: 'posts/abc.jpg' },
+      });
+
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          meta: {
+            category: 'life',
+            tags: ['lisboa'],
+            imageKey: 'posts/abc.jpg',
+          },
+        }),
+      );
+    });
+
+    it('normalizes an absent composer bag to null rather than undefined', async () => {
+      const result = await service.create('u1', dto);
+
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ meta: null }),
+      );
+      expect(result.meta).toBeNull();
     });
 
     it('409s instead of overwriting when the caller reuses an existing draft id', async () => {
@@ -279,6 +308,36 @@ describe('DraftsService', () => {
         { version: 5 },
       );
       expect(result.version).toBe(5);
+    });
+
+    it('replaces the composer bag WHOLESALE, so a removed tag does not come back', async () => {
+      repo.findOne.mockResolvedValue(
+        makeDraft({
+          meta: { tags: ['lisboa', 'porto'], communitySlug: 'sapa' },
+        }),
+      );
+
+      const result = await service.update('u1', 'd1', {
+        meta: { tags: ['lisboa'] },
+      });
+
+      expect(result.meta).toEqual({ tags: ['lisboa'] });
+    });
+
+    it('omitting the composer bag leaves the stored one in place', async () => {
+      repo.findOne.mockResolvedValue(makeDraft({ meta: { tags: ['lisboa'] } }));
+
+      const result = await service.update('u1', 'd1', { progress: 61 });
+
+      expect(result.meta).toEqual({ tags: ['lisboa'] });
+    });
+
+    it('an explicit `meta: null` clears the composer bag', async () => {
+      repo.findOne.mockResolvedValue(makeDraft({ meta: { tags: ['lisboa'] } }));
+
+      const result = await service.update('u1', 'd1', { meta: null });
+
+      expect(result.meta).toBeNull();
     });
 
     it('updates the `kind` column when provided', async () => {

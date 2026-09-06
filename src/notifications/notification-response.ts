@@ -90,6 +90,13 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.SubprofileInvite]: 'invitedByUserId',
   [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
   [NotificationType.MagazinePieceMessage]: 'authorId',
+  // PRD-121. The EDITOR who commissioned, moved or published the piece,
+  // resolved for the writer's bell so the desk has a face on it. The emit site
+  // (`MagazinePieceService.notifyWriterOfPiece`) passes the same id as
+  // `create`'s `actorId` argument, so block/mute filtering applies either way.
+  [NotificationType.MagazinePieceCommissioned]: 'actorId',
+  [NotificationType.MagazinePieceStageChanged]: 'actorId',
+  [NotificationType.MagazinePiecePublished]: 'actorId',
   // The host or co-host who posted the announcement, so the bell shows
   // whose gathering just changed and who said so (LOC-06).
   [NotificationType.EventAnnouncement]: 'actorId',
@@ -119,6 +126,18 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // notifier passes the real replier as `create`'s `actorId` argument through
   // its separate `blockGateActorId` field.
   [NotificationType.ReviewReplied]: 'actorId',
+  // PRD-240. The three member-driven halves of the viewing lifecycle: the
+  // requester on a request, the lister on a decision, and whoever cancelled on
+  // a cancellation. Each emit site passes the same id as `create`'s `actorId`
+  // argument, so block and mute apply either way.
+  //
+  // `HousingJoinDecided` and `HousingListingExpiring` are deliberately ABSENT:
+  // the first is a staff triage decision and the bell never names which admin
+  // made it (matching `HousingListingDecision`), the second is the platform
+  // reporting a clock. Both yield `actor: null` and read as the platform.
+  [NotificationType.HousingViewingRequested]: 'actorId',
+  [NotificationType.HousingViewingDecided]: 'actorId',
+  [NotificationType.HousingViewingCancelled]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -183,7 +202,26 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // rides along: a roster is read on the gathering's own page, under the
     // member's own authentication.
     [NotificationType.EventNearlyFull]: ['title', 'seatsRemaining'],
-    [NotificationType.Mention]: ['entityKind', 'entityRef'],
+    // PRD-221. `conversationId` + `messageId` are the two ids a mention written
+    // inside a DM or group thread needs to become a link to the message itself
+    // (`/messages?c=<conversationId>&m=<messageId>`, the deep-link contract
+    // `useMessageDeepLinks` already reads). Without them a `source: 'message'`
+    // mention row could build no destination at all and opened the sender's
+    // profile instead of the thing they were told about.
+    //
+    // Safe to forward, on the same reasoning as `ConnectionRequest`'s
+    // `connectionId`: both are opaque ids the recipient already holds a route
+    // to. A message mention only ever reaches a PARTICIPANT of that
+    // conversation (`MentionNotificationService.recipientsAllowedForSource`
+    // fails closed for a `message` source), so neither id discloses a room the
+    // recipient is not already in. The message's `excerpt` stays off this wire
+    // like every other content-bearing key.
+    [NotificationType.Mention]: [
+      'entityKind',
+      'entityRef',
+      'conversationId',
+      'messageId',
+    ],
     [NotificationType.ForumReply]: ['threadTitle'],
     [NotificationType.ForumThreadReply]: ['threadTitle'],
     [NotificationType.TopicNewPost]: ['topicSlug', 'topicLabel', 'threadTitle'],
@@ -238,11 +276,37 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.EventUpdated]: ['changes', 'title'],
     [NotificationType.EventCohostInvite]: ['title'],
     [NotificationType.XpLevelUp]: ['level', 'name'],
-    [NotificationType.BadgeEarned]: ['badgeName'],
+    // `badgeKey` is the badge's stable catalogue id, the same one persisted in
+    // `recognition_awards.badge_key`. The writer has always put it in the
+    // payload; this allowlist dropped it, so the bell was left with only
+    // `badgeName`, an English word from the backend catalogue that the client
+    // had no way to translate. Forwarding the id lets the client resolve the
+    // name itself and keeps `badgeName` as the fallback for an id its build
+    // does not know. Neither field is content-bearing: a badge and its name
+    // are the recipient's own, and already public on their badge case.
+    [NotificationType.BadgeEarned]: ['badgeKey', 'badgeName'],
     [NotificationType.SubprofileCredit]: [
       'subprofileName',
       'subprofileSlugOrHandle',
       'itemTitle',
+      'deepLink',
+    ],
+    // PRD-208, new work from a persona you follow. The persona's own public
+    // name and address, the title of the newest item, and how many items
+    // landed in this save (a NUMBER the copy is CLDR-pluralised on).
+    //
+    // `itemTitle` is the item's own heading, which is public on the persona
+    // page every recipient can already open, so it discloses nothing the link
+    // does not. The item's DESCRIPTION and every other body-bearing field stay
+    // off this wire like all content-bearing keys. So does the persona owner's
+    // identity: the fan-out passes the owner id to `createForRecipients` for
+    // block/mute filtering only, `PersonaUpdate` appears under no key in
+    // `ACTOR_PAYLOAD_KEY`, and an unlinked persona stays pseudonymous.
+    [NotificationType.PersonaUpdate]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'itemTitle',
+      'newItemCount',
       'deepLink',
     ],
     [NotificationType.SubprofileInvite]: [
@@ -271,6 +335,36 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'decision',
       'reason',
     ],
+    // PRD-240. The housing viewing lifecycle. `slug` deep-links the listing and
+    // `viewingId` the row on /local/housing/viewings; `title` is the listing's
+    // own public heading, so it discloses nothing the link does not.
+    //
+    // The requester's MESSAGE is deliberately absent from all three: it is
+    // member-authored prose written TO the recipient, the same class of value
+    // kept off the bell for `ListingPublicQuestionAnswered` and `ReviewReplied`,
+    // and it is already on the page this row opens.
+    [NotificationType.HousingViewingRequested]: ['title', 'slug', 'viewingId'],
+    // `decision` is the discriminator the frontend copy branches on:
+    // `accepted` | `declined` | `proposed`.
+    [NotificationType.HousingViewingDecided]: [
+      'title',
+      'slug',
+      'viewingId',
+      'decision',
+    ],
+    [NotificationType.HousingViewingCancelled]: ['title', 'slug', 'viewingId'],
+    // PRD-242. `kind` (`coop` | `group`) picks which noun the copy uses and
+    // which route the deep link builds; `decision` (`accepted` | `declined`)
+    // picks the sentence. `name` is the co-op or group's public display name.
+    [NotificationType.HousingJoinDecided]: [
+      'kind',
+      'slug',
+      'name',
+      'decision',
+    ],
+    // PRD-244. `expiresAt` is an ISO date the copy renders as a deadline. It is
+    // the member's OWN listing, so nothing here is another member's data.
+    [NotificationType.HousingListingExpiring]: ['title', 'slug', 'expiresAt'],
     [NotificationType.WriterApplicationApproved]: ['reviewNote'],
     [NotificationType.WriterApplicationDeclined]: ['reviewNote'],
     [NotificationType.ChangemakerNominationApproved]: [
@@ -298,6 +392,28 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // are desk-authored editorial headline text that went public the instant
     // the issue shipped, so neither is content this boundary has to withhold.
     [NotificationType.MagazineIssuePublished]: ['issueNumber', 'issueTitle'],
+    // PRD-121, the three writer-facing desk signals. `pieceId` is the deep
+    // link (the writer's own workspace, `/magazine/writer`), `title` is the
+    // piece's own working title, which the writer wrote or was commissioned
+    // with and already reads on every desk surface, and `stage` is the closed
+    // `PieceStage` vocabulary the copy branches on. `href` on the published
+    // row is the READER path the piece just went live at, so the bell can open
+    // the published piece itself.
+    //
+    // Nothing editorial rides along: the brief, the care record, the editor's
+    // notes and the draft body all appear in no entry here, so none of them
+    // can reach a bell.
+    [NotificationType.MagazinePieceCommissioned]: ['pieceId', 'title'],
+    [NotificationType.MagazinePieceStageChanged]: ['pieceId', 'title', 'stage'],
+    [NotificationType.MagazinePiecePublished]: ['pieceId', 'title', 'href'],
+    // `MagazinePieceMessage` predates the three rows above and had NO entry
+    // here at all, which meant `toClientPayload` kept only COMMON_PAYLOAD_KEYS
+    // and silently stripped its `pieceId`. The bell has therefore been unable
+    // to link an editor-to-writer message back to its piece since that type
+    // shipped, which is why the frontend rendered it as the generic unknown
+    // fallback. The message BODY stays absent on purpose: it is author-written
+    // prose, and this allowlist is the guarantee it can never reach a bell.
+    [NotificationType.MagazinePieceMessage]: ['pieceId'],
     // The business's own public name, for copy like "someone asked a question
     // about Lux Cafe". The question BODY and the ANSWER text are deliberately
     // absent: they are member- and owner-authored prose, this allowlist is the
@@ -362,6 +478,34 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'ruleIndex',
       'ruleVersion',
     ],
+    // PRD-147, to the AUTHOR of a post or reply a moderator took down. No
+    // actor field is listed, so the bell never names the moderator who acted.
+    //
+    // `reason` is moderator-authored prose written TO this recipient, the same
+    // class of value `CommunityBanned`'s `reason` forwards from a column with
+    // the same posture. `ruleText`/`ruleIndex`/`ruleVersion` are the cited
+    // house rule as it read at the moment of the action, and `subject`
+    // (`post` | `reply`) is the closed two-value vocabulary the copy branches
+    // on. Without the reason and the rule the bell can only say "something of
+    // yours was removed", which is the silence this type exists to end, and
+    // there is no other surface the member can read it from: QueerPulse sends
+    // no email and there is no way to message a community's moderators.
+    //
+    // The removed content's own body is in NO payload and must never be: the
+    // author is the one person who does not need it quoted back. The
+    // moderators' `internalNote` is likewise absent, it stops at the
+    // community's own governance log. `communitySlug` and `postId` ride in
+    // COMMON_PAYLOAD_KEYS and are what the deep link is built from; a post
+    // takedown deliberately writes no `postId`, so it resolves to the
+    // community page rather than a blank tombstone.
+    [NotificationType.CommunityPostRemoved]: [
+      'communityName',
+      'subject',
+      'reason',
+      'ruleText',
+      'ruleIndex',
+      'ruleVersion',
+    ],
     // The resource's own title, which is owner-authored and already public on
     // the community's shelf to anyone who can see this notification.
     [NotificationType.CommunityResourceAdded]: ['communityName', 'title'],
@@ -417,6 +561,25 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'severity',
       'reasonCode',
       'subjectType',
+    ],
+    // PRD-289. The reporter's OWN receipt for the report they just filed, so
+    // the bell can name the case instead of a bare "we got it". `reference` is
+    // the human-friendly code `formatReportReference` builds, which is the one
+    // string a reporter can quote back; `subjectType` and `severity` let the
+    // copy say what was reported and which review window it fell into.
+    //
+    // This is a strip-by-default boundary: a type absent from this map forwards
+    // only `COMMON_PAYLOAD_KEYS`, silently, with no type error. So the entry is
+    // required for the copy to interpolate at all.
+    //
+    // `reasonCode` is deliberately absent, unlike `ReportFiled` above. A
+    // responder needs it to triage; the reporter chose it and re-stating their
+    // own accusation in a bell row is not a receipt.
+    [NotificationType.ReportReceived]: [
+      'reportId',
+      'reference',
+      'subjectType',
+      'severity',
     ],
     // Same fields plus the community's own public name for the copy;
     // `communitySlug` already rides along in `COMMON_PAYLOAD_KEYS` and is what

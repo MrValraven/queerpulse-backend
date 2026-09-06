@@ -72,15 +72,12 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 // answer at `/v1/auth/...` — which is where the SPA's versioned API client
 // (src/shared/api/client.ts) sends `me`.
 //
-// This comment used to name `logout-all` here as well. That was wrong on both
-// counts: the SPA never called it, and the route itself was removed on
-// 2026-08-26.
-//
 // The exceptions carry `@Version(VERSION_NEUTRAL)` per-method and keep their
 // fixed, unversioned paths:
 //   - the Google OAuth callback URL is registered in Google Cloud, and the SPA
 //     hits `/auth/google` and `/auth/refresh` directly (unprefixed);
-//   - `logout` MUST answer at `/auth/logout`, not `/v1/auth/logout`. The refresh
+//   - `logout` and `logout-all` MUST answer at `/auth/logout` and
+//     `/auth/logout-all`, not `/v1/auth/...`. The refresh
 //     token cookie is scoped to `path=/auth` (see `auth-cookies.ts`), so a
 //     browser only attaches it to request paths under `/auth`. A versioned
 //     `/v1/auth/logout` never receives the cookie, so `revokeRefreshToken`
@@ -383,12 +380,59 @@ export class AuthController {
     return { ok: true };
   }
 
-  // REMOVED 2026-08-26: `POST /auth/logout-all` ("sign out everywhere,
-  // including this device"). It had no caller: nothing in the SPA ever hit it.
-  // `DELETE /account/sessions` is the member-facing session control that does
-  // ship, and it means something different (sign out my OTHER devices, keep
-  // this one). See the note on `AuthService.revokeAllForUser`, which survives
-  // and is what a real sign-out-everywhere control should call.
+  // "Sign out everywhere, including this device."
+  //
+  // Restored 2026-09-06 (it was removed on 2026-08-26 for having no caller).
+  // The caller now exists: the sessions page's one-shot control, which used to
+  // be two separate acts a member had to know to combine.
+  //
+  // How it differs from `DELETE /account/sessions`: that route signs out the
+  // member's OTHER devices and deliberately keeps this one, clearing no
+  // cookies. This one ends EVERY session, this device included, so it also has
+  // to clear this browser's auth and CSRF cookies on the way out.
+  //
+  // NOT `@Public()`, unlike `logout`. `revokeAllForUser` takes a user id, and
+  // the only identity a public request could offer here is the presenting
+  // refresh token — which would mean trusting an unauthenticated caller's
+  // cookie to name whose sessions to end. `logout` can be public because it
+  // revokes exactly the row it was handed and clears the caller's own cookies;
+  // ending a whole account's sessions is a different blast radius, so it goes
+  // through JwtAuthGuard and reads the id off the verified access token. The
+  // cost is that a member whose access token has already expired must let the
+  // client refresh first, which the SPA does automatically on 401.
+  //
+  // Unversioned for the same reason as `logout`: the refresh cookie is scoped
+  // to `path=/auth`, so a `/v1/auth/...` URL would never receive it and the
+  // cookie-clearing half would be operating on a request that never carried
+  // the cookie. Stays a POST behind the global CsrfGuard.
+  //
+  // `USER_SESSION_REVOKED` needs no emit here: `revokeAllForUser` delegates to
+  // `revokeAllUserSessions`, which emits it once per call, exactly as
+  // `AccountService.revokeOtherSessions` does for its narrower sweep.
+  @ApiOperation({
+    summary: 'Sign out every session including this one, and clear cookies.',
+  })
+  @ApiCookieAuth('access_token')
+  @ApiCreatedResponse({
+    description: 'Every session revoked; auth cookies cleared.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Version(VERSION_NEUTRAL)
+  @Post('logout-all')
+  async logoutAll(
+    @CurrentUser() current: CurrentUserData,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ ok: true }> {
+    try {
+      await this.authService.revokeAllForUser(current.userId);
+    } catch {
+      // Best-effort, matching `logout`: a failed revocation must not leave the
+      // member still signed in on this device. The cookies go regardless.
+    }
+    clearAuthCookies(res, this.cookieOpts());
+    clearCsrfCookie(res);
+    return { ok: true };
+  }
 
   @ApiOperation({ summary: 'Get the currently authenticated user.' })
   @ApiCookieAuth('access_token')

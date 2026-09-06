@@ -460,6 +460,25 @@ export const LEVEL_LADDER_DEF: readonly LevelDef[] = [
 ];
 
 /**
+ * A baseline capability named on a level's ladder row.
+ *
+ * `id` is the stable machine identifier the frontend resolves to its own
+ * words, in the same shape the badge catalogue and the level ladder already
+ * use. It is NOT persisted anywhere: only `PERK_CATALOG` keys reach the
+ * database, on `recognition_perk_claims.perk_key`, and a baseline capability
+ * is never claimable. The ids still have to stay distinct from every
+ * `PERK_CATALOG` key, because a ladder row mixes both in one list.
+ *
+ * `label` is the English the wire keeps carrying, so a frontend build that
+ * has not caught up with a new id renders readable English rather than an
+ * identifier.
+ */
+export interface BasePerkDef {
+  id: string;
+  label: string;
+}
+
+/**
  * Baseline capabilities folded into the perks-ladder row for a level,
  * alongside any `PERK_CATALOG` entries unlocking there. Purely descriptive,
  * never individually claimable.
@@ -471,17 +490,18 @@ export const LEVEL_LADDER_DEF: readonly LevelDef[] = [
  * ever applied (SUS-04). Higher rungs list what the perk catalogue actually
  * grants there, and nothing else.
  */
-export const BASE_PERKS_BY_LEVEL: Readonly<Record<number, readonly string[]>> =
-  {
-    1: [
-      'Browse the member directory',
-      'Join gatherings & RSVP',
-      'Message other members directly',
-      'Save articles & resources',
-      'Join communities',
-      'Host a gathering',
-    ],
-  };
+export const BASE_PERKS_BY_LEVEL: Readonly<
+  Record<number, readonly BasePerkDef[]>
+> = {
+  1: [
+    { id: 'browse-directory', label: 'Browse the member directory' },
+    { id: 'join-gatherings', label: 'Join gatherings & RSVP' },
+    { id: 'direct-messages', label: 'Message other members directly' },
+    { id: 'save-articles', label: 'Save articles & resources' },
+    { id: 'join-communities', label: 'Join communities' },
+    { id: 'host-gathering', label: 'Host a gathering' },
+  ],
+};
 
 export function levelDefByNumber(level: number): LevelDef | undefined {
   return LEVEL_LADDER_DEF.find((def) => def.level === level);

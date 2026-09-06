@@ -1,4 +1,4 @@
-import { toMemberRef } from './member-ref';
+import { toMemberRef, toVisibleAvatarUrl } from './member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import { resetImageUrlBaseForTesting, setImageUrlBase } from './image-url';
 
@@ -18,6 +18,29 @@ beforeEach(() => {
 
 afterEach(() => {
   resetImageUrlBaseForTesting();
+});
+
+// ENG-152. `toVisibleAvatarUrl` is the one spelling of the gate that the
+// mappers taking a raw `Profile` (DM author summaries, event attendees and
+// organisers, connection cards, the card issuer roster) call directly, so it
+// is asserted here rather than only through `toMemberRef`.
+describe('toVisibleAvatarUrl', () => {
+  it('resolves the avatar when photoVisible is on', () => {
+    expect(
+      toVisibleAvatarUrl({ avatarUrl: AVATAR_KEY, photoVisible: true }),
+    ).toBe(`https://api.test/files/${AVATAR_KEY}`);
+  });
+
+  it('returns null when photoVisible is off, even with a stored key', () => {
+    expect(
+      toVisibleAvatarUrl({ avatarUrl: AVATAR_KEY, photoVisible: false }),
+    ).toBeNull();
+  });
+
+  it('returns null for an unresolved profile', () => {
+    expect(toVisibleAvatarUrl(null)).toBeNull();
+    expect(toVisibleAvatarUrl(undefined)).toBeNull();
+  });
 });
 
 it('maps a profile to a ref and null to null', () => {

@@ -1,6 +1,9 @@
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
-import { ResourcesController } from './resources.controller';
+import {
+  GlossaryController,
+  ResourcesController,
+} from './resources.controller';
 
 /**
  * Route metadata only (same shape as `public-profiles.controller.spec.ts`).
@@ -13,6 +16,13 @@ import { ResourcesController } from './resources.controller';
  * "could not ask" and falls open to the hardcoded page, and the review gate
  * silently stops applying to anybody who is not signed in. Nothing else in the
  * suite would notice, so it is asserted here.
+ *
+ * `listListings` joined them (PRD-260) for a related reason: it backs the
+ * legal-aid and HIV/STI-testing directories on `/resources/legal` and
+ * `/resources/sexual-health`, two ungated pages, and while it was member-only
+ * every logged-out visitor got a load-error panel where the clinic and lawyer
+ * lists should have been. `GlossaryController`'s two reads are covered the
+ * same way, for `/resources/glossary`.
  */
 describe('ResourcesController route metadata', () => {
   const reflector = new Reflector();
@@ -24,10 +34,13 @@ describe('ResourcesController route metadata', () => {
     listIndex: ResourcesController.prototype.listIndex,
     list: ResourcesController.prototype.list,
     getBySlug: ResourcesController.prototype.getBySlug,
-  };
-  const memberOnlyWrites = {
-    createSuggestion: ResourcesController.prototype.createSuggestion,
     listListings: ResourcesController.prototype.listListings,
+    'glossary.list': GlossaryController.prototype.list,
+    'glossary.getBySlug': GlossaryController.prototype.getBySlug,
+  };
+  const memberOnly = {
+    createSuggestion: ResourcesController.prototype.createSuggestion,
+    listMySuggestions: ResourcesController.prototype.listMySuggestions,
   };
   /* eslint-enable @typescript-eslint/unbound-method */
 
@@ -38,9 +51,9 @@ describe('ResourcesController route metadata', () => {
     },
   );
 
-  // The gate opened exactly three reads. Anything that writes, or that serves
-  // a member-only directory, stays behind `ActiveMemberGuard`.
-  it.each(Object.entries(memberOnlyWrites))(
+  // The gate opened reads and only reads. Anything that writes, or that serves
+  // a caller their own rows, stays behind `ActiveMemberGuard`.
+  it.each(Object.entries(memberOnly))(
     'leaves %s behind the active-member guard',
     (_name, handler) => {
       expect(reflector.get(IS_PUBLIC_KEY, handler)).toBeUndefined();

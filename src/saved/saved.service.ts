@@ -6,9 +6,13 @@ import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
 import { SavedItem } from './entities/saved-item.entity';
+import { SavedAvailabilityService } from './saved-availability.service';
 import { SavedListsService } from './saved-lists.service';
 import { parseSavedRef } from './saved-ref.util';
-import { SavedItemDTO, toSavedItemDTO } from './saved-response';
+import {
+  ResolvedSavedItemDTO,
+  toResolvedSavedItemDTOs,
+} from './saved-response';
 
 @Injectable()
 export class SavedService {
@@ -21,6 +25,9 @@ export class SavedService {
     // still writes one `saved_item` row and additionally joins the member's
     // default list, so nothing they save can end up outside every list.
     private readonly savedLists: SavedListsService,
+    // Answers "is the thing this bookmark points at still there for you?" for
+    // a whole page at once (PRD-169).
+    private readonly availability: SavedAvailabilityService,
   ) {}
 
   // Page-number pagination (`{items,total,page,pageSize}`) — matches the
@@ -29,7 +36,7 @@ export class SavedService {
   async list(
     userId: string,
     query: ListSavedQuery,
-  ): Promise<Paginated<SavedItemDTO>> {
+  ): Promise<Paginated<ResolvedSavedItemDTO>> {
     const page = normalizePage(query.page);
     const qb = this.savedItems
       .createQueryBuilder('saved')
@@ -63,7 +70,16 @@ export class SavedService {
       );
     }
 
-    return paginate(qb, page, (rows) => rows.map(toSavedItemDTO));
+    // Availability is resolved AFTER the page is fetched, never as a filter on
+    // it. An item whose subject has gone still belongs in the member's saved
+    // list — they saved it, and they are owed the chance to see what it was and
+    // take it out themselves. Dropping those rows would also make `total`
+    // disagree with the page and silently shorten every page under an OFFSET,
+    // which is the failure `BlockFilterService.excludeHidden` documents.
+    return paginate(qb, page, async (rows) => {
+      const availableRefs = await this.availability.availableRefs(rows, userId);
+      return toResolvedSavedItemDTOs(rows, availableRefs);
+    });
   }
 
   // Upsert: PUT is idempotent per (user, subject) — re-saving the same

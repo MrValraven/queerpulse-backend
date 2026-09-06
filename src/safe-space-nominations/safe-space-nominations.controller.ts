@@ -198,9 +198,13 @@ export class AdminSafeSpaceNominationsController {
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: DecideNominationDto,
   ) {
+    // Computed once and used twice: it narrows who may OVERRIDE the
+    // independent-visit bar inside `decide`, and it narrows what the response
+    // shows a staff delegate.
+    const isPlatformStaff = isPlatformStaffTier(user.role);
     return toDirectoryModerationNominationResponse(
-      await this.nominations.decide(id, user.userId, dto),
-      isPlatformStaffTier(user.role),
+      await this.nominations.decide(id, user.userId, dto, isPlatformStaff),
+      isPlatformStaff,
     );
   }
 

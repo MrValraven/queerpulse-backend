@@ -307,9 +307,19 @@ export class VolunteeringService {
     });
   }
 
+  /**
+   * One opportunity by slug, for the public detail page.
+   *
+   * `viewerId` is NULL for a logged-out visitor (`GET /volunteering/:slug` is
+   * `@Public()` + `OptionalJwtAuthGuard`, so the page reaches anyone). The
+   * null case is handled explicitly in `buildDetail` rather than being passed
+   * through to the repository: a `where: { userId: undefined }` is silently
+   * DROPPED by TypeORM, which would have answered "has this viewer signed
+   * up?" with "has ANYBODY signed up?".
+   */
   async getBySlug(
     slug: string,
-    viewerId: string,
+    viewerId: string | null,
   ): Promise<OpportunityDetailDTO> {
     const opportunity = await this.loadOr404(slug);
     return this.buildDetail(opportunity, viewerId);
@@ -1039,9 +1049,17 @@ export class VolunteeringService {
     return result;
   }
 
+  /**
+   * `viewerId` is NULL for an anonymous reader of the public detail page. Both
+   * caller-specific flags then resolve to false WITHOUT a query: the signup
+   * lookup is skipped rather than run with an undefined `userId`, which
+   * TypeORM would drop from the WHERE clause and turn into "did anyone at all
+   * sign up?", and `isPoster` compares against a null that no `posterId` can
+   * equal.
+   */
   private async buildDetail(
     opportunity: VolunteerOpportunity,
-    viewerId: string,
+    viewerId: string | null,
   ): Promise<OpportunityDetailDTO> {
     const [
       spotsFilled,
@@ -1050,21 +1068,29 @@ export class VolunteeringService {
       mySignup,
       partnerRefs,
       communityRefs,
+      canReviewApplicants,
     ] = await Promise.all([
       this.spotsFilledFor(opportunity.id),
       this.team.find({ where: { opportunityId: opportunity.id } }),
       opportunity.posterId === null
         ? null
         : this.profiles.findOne({ where: { userId: opportunity.posterId } }),
-      this.signups.exists({
-        where: {
-          opportunityId: opportunity.id,
-          userId: viewerId,
-          status: In([SignupStatus.Pending, SignupStatus.Accepted]),
-        },
-      }),
+      viewerId === null
+        ? false
+        : this.signups.exists({
+            where: {
+              opportunityId: opportunity.id,
+              userId: viewerId,
+              status: In([SignupStatus.Pending, SignupStatus.Accepted]),
+            },
+          }),
       this.partnerRefsForMany([opportunity.partnerId]),
       this.communityRefsForMany([opportunity.communityId]),
+      // Same resolution the roster and accept/decline routes guard on, so the
+      // sidebar is never offered a control the server would refuse. Costs no
+      // extra query for the two common cases: the poster short-circuits, and
+      // so does an opportunity with no community attribution.
+      this.canManageApplicants(opportunity, viewerId),
     ]);
 
     const teamRefs = teamRows.length
@@ -1090,7 +1116,13 @@ export class VolunteeringService {
       spotsFilled,
       team,
       toMemberRef(posterProfile),
-      opportunity.posterId === viewerId,
+      canReviewApplicants,
+      // Edit and close stay poster-only, exactly as `update()`/`close()`
+      // guard them. `viewerId !== null` is load-bearing: `posterId` is
+      // nullable (an erased poster leaves the column null), so a bare
+      // equality would hand an anonymous reader the edit entry point on
+      // every orphaned opportunity.
+      viewerId !== null && opportunity.posterId === viewerId,
       mySignup,
     );
   }
@@ -1119,10 +1151,34 @@ export class VolunteeringService {
   }
 
   /**
-   * The applicant-review tier: the poster, or anyone with standing (owner,
-   * co-owner, mod) in the community the opportunity is attributed to. Shared
-   * by the signups roster and the accept/decline decision so the two can
-   * never drift. `action` completes the 403 message ("Only the poster or a
+   * The applicant-review tier as a plain predicate: the poster, or anyone
+   * with standing (owner, co-owner, mod) in the community the opportunity is
+   * attributed to. The single resolution of that rule — the roster route, the
+   * accept/decline decision and the detail DTO's `canReviewApplicants` all
+   * come through here, so what the sidebar is shown and what the server will
+   * actually allow can never drift apart. Mirrors `listMine`'s
+   * "posted by me OR attributed to a community I own or moderate" set, one
+   * opportunity at a time.
+   *
+   * An absent `userId` is answered `false` without a query: no viewer, no
+   * standing.
+   */
+  private async canManageApplicants(
+    opportunity: VolunteerOpportunity,
+    userId: string | null,
+  ): Promise<boolean> {
+    if (!userId) return false;
+    if (opportunity.posterId === userId) return true;
+    if (!opportunity.communityId) return false;
+    return this.communityMembership.isOwnerOrMod(
+      opportunity.communityId,
+      userId,
+    );
+  }
+
+  /**
+   * The throwing form of `canManageApplicants`, for the routes that guard a
+   * write. `action` completes the 403 message ("Only the poster or a
    * community organiser can <action> this opportunity").
    */
   private async assertCanManageApplicants(
@@ -1130,16 +1186,7 @@ export class VolunteeringService {
     userId: string,
     action: string,
   ): Promise<void> {
-    if (opportunity.posterId === userId) return;
-    if (
-      opportunity.communityId &&
-      (await this.communityMembership.isOwnerOrMod(
-        opportunity.communityId,
-        userId,
-      ))
-    ) {
-      return;
-    }
+    if (await this.canManageApplicants(opportunity, userId)) return;
     throw new ForbiddenException(
       `Only the poster or a community organiser can ${action} this opportunity`,
     );

@@ -98,7 +98,16 @@ export class ForumController {
     // `Record<string, number>` category tally — the frontend contract keeps
     // both shapes distinct instead of widening one to accommodate the other.
     const [counts, hasPosted] = await Promise.all([
-      this.threadsService.counts(user.userId, query.q, query.tag),
+      // The moderator flag rides through so the badges count exactly the
+      // threads this viewer's list can draw: staff still see withdrawn threads
+      // (PRD-160), everyone else does not, and a badge that disagrees with the
+      // list promises a row that never arrives.
+      this.threadsService.counts(
+        user.userId,
+        query.q,
+        query.tag,
+        isModeratorRole(user.role),
+      ),
       this.postsService.hasEverPosted(user.userId),
     ]);
     return { counts, hasPosted };
@@ -135,15 +144,28 @@ export class ForumController {
   }
 
   @Get('threads/:slug/posts')
-  @ApiOperation({ summary: 'List posts in a thread (cursor-paginated)' })
-  @ApiOkResponse({ description: 'A page of posts for the thread.' })
+  @ApiOperation({
+    summary:
+      'List posts in a thread (cursor-paginated; ?sort=oldest|newest|top)',
+  })
+  @ApiOkResponse({
+    description:
+      'The opening post plus a page of replies, with `opAvailable` saying ' +
+      'whether the opening post is readable by this viewer.',
+  })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   listPosts(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Query() query: ListPostsQuery,
   ) {
-    return this.postsService.listPosts(slug, user, query.cursor, query.limit);
+    return this.postsService.listPosts(
+      slug,
+      user,
+      query.cursor,
+      query.limit,
+      query.sort,
+    );
   }
 
   @Post('threads')
@@ -206,7 +228,13 @@ export class ForumController {
     description: 'Updated vote count and the caller vote.',
   })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
-  @ApiNotFoundResponse({ description: 'Post not found.' })
+  @ApiForbiddenResponse({ description: 'You cannot upvote your own post.' })
+  @ApiNotFoundResponse({
+    description:
+      'Post not found, deleted, taken down, in a withdrawn thread, in a ' +
+      'private community you are not a member of, or by someone a block ' +
+      'stands between.',
+  })
   vote(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -284,21 +312,54 @@ export class ForumController {
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
-      'Edit a thread title (author only) and/or its tags (author or moderator)',
+      'Edit a thread title (author only), its tags (author or moderator), ' +
+      'and/or its category (author within 24 hours, or moderator)',
   })
   @ApiOkResponse({ description: 'The updated thread.' })
   @ApiForbiddenResponse({
     description:
-      'Only the author can edit the title; only the author or a moderator can edit the tags.',
+      'Only the author can edit the title; only the author or a moderator can ' +
+      'edit the tags; the category can be moved by the author within the ' +
+      "thread's first 24 hours, or by a moderator at any time.",
   })
-  @ApiBadRequestResponse({ description: 'Neither a title nor tags were sent.' })
+  @ApiBadRequestResponse({
+    description: 'No title, tags or category were sent.',
+  })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   updateThread(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Body() dto: UpdateThreadDto,
   ) {
-    return this.threadsService.updateThread(slug, user, dto.title, dto.tags);
+    return this.threadsService.updateThread(
+      slug,
+      user,
+      dto.title,
+      dto.tags,
+      dto.category,
+    );
+  }
+
+  // Declared alongside the other `threads/:slug` routes. Distinct from
+  // `DELETE /forum/posts/:id`, which tombstones ONE post: that used to be the
+  // only delete the forum had, so deleting your opening post blanked its body
+  // and left the thread, its title and its link standing on /forum and in every
+  // member's feed (PRD-160). This withdraws the thread itself.
+  @Delete('threads/:slug')
+  @ApiOperation({
+    summary:
+      'Withdraw a whole thread (soft delete); its author or platform staff',
+  })
+  @ApiOkResponse({ description: 'The withdrawn thread.' })
+  @ApiForbiddenResponse({
+    description: 'Only the author or a moderator can delete this thread.',
+  })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  deleteThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.deleteThread(slug, user);
   }
 
   @Post('threads/:slug/accepted-answer')
@@ -344,6 +405,26 @@ export class ForumController {
     @Param('slug') slug: string,
   ) {
     return this.threadsService.setSubscribed(slug, user, false);
+  }
+
+  // Declared with the other `threads/:slug` routes. Distinct from
+  // `POST /forum/threads/:slug/follow`, deliberately: following asks to be
+  // notified about a thread, this only records that the member has seen it as
+  // it stands (C7/PRD-170). Opening a thread must never sign anybody up for a
+  // notification per reply, so the two stay separate routes writing separate
+  // fields of the same row.
+  @Post('threads/:slug/read')
+  @ApiOperation({
+    summary:
+      'Mark this thread read up to now (does NOT follow it; clears the unread badge)',
+  })
+  @ApiCreatedResponse({ description: 'Acknowledgement.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  markThreadRead(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.markRead(slug, user);
   }
 
   @Post('threads/:slug/lock')

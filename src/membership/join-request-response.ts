@@ -211,6 +211,27 @@ export interface PublicJoinRequestStatusView {
    * they learned about the clock was that it had run out.
    */
   inviteExpiresAt: string | null;
+  /**
+   * PRD-304. ISO 8601 date this request should have been answered by, stamped
+   * at submission from `JOIN_REQUEST_REVIEW_WINDOW_MS`, so the one person
+   * actually waiting is told the deadline the platform holds itself to. The
+   * admin queue has always had this (`JoinRequestView.dueAt`) and coloured a
+   * late request with it; the applicant had nothing, and past day three had no
+   * signal and nothing to quote when they wrote in.
+   *
+   * Present ONLY while the request is undecided. Once it is approved or
+   * declined the deadline says nothing: `decidedAt` is the real answer, and a
+   * date the platform overshot is noise beside an outcome that has arrived.
+   * Mirrors the `isDecided` gate `decidedAt` itself is behind.
+   *
+   * Null also means NO CLOCK, never overdue: requests submitted before OPS-04
+   * stamped one carry none, and the page must stay silent rather than invent a
+   * promise.
+   *
+   * No new disclosure: the holder of this token is the applicant, and this is
+   * a fact about their own request.
+   */
+  dueAt: string | null;
 }
 
 export function toJoinRequestView(
@@ -324,5 +345,8 @@ export function toPublicJoinRequestStatusView(
     inviteCode: approvedInvite?.status === 'valid' ? approvedInvite.code : null,
     inviteStatus: approvedInvite?.status ?? null,
     inviteExpiresAt: approvedInvite?.expiresAt?.toISOString() ?? null,
+    // PRD-304. Only while the answer is still owed. After a decision the
+    // deadline is spent, and `decidedAt` above is the fact that matters.
+    dueAt: !isDecided && request.dueAt ? request.dueAt.toISOString() : null,
   };
 }

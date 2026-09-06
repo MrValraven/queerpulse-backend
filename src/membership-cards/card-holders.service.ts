@@ -5,7 +5,7 @@ import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { Profile } from '../users/entities/profile.entity';
-import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { CardScanLogService } from './card-scan-log.service';
 import { effectiveCardStatus } from './card-status';
 import { CardProgramsService } from './card-programs.service';
@@ -124,7 +124,12 @@ export class CardHoldersService {
           holderName: profile
             ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
             : 'A member',
-          avatarUrl: profile?.avatarUrl ? toImageUrl(profile.avatarUrl) : null,
+          // The holder's `photoVisible` switch reaches the issuer roster too.
+          // This list is owner-or-mod gated, and that is a permission to
+          // administer cards, not a permission to see a face its owner has
+          // hidden from everyone else. The name, slug and role still identify
+          // the holder for every action an issuer takes.
+          avatarUrl: toVisibleAvatarUrl(profile),
           pronouns: profile?.pronouns ?? null,
           role: roleByUserId.get(card.userId) ?? 'member',
           token: this.tokenFor(card),

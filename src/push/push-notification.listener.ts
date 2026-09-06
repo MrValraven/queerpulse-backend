@@ -12,6 +12,7 @@ import { actorIdOf } from '../notifications/notification-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
+import { GATHERINGS_BOARD_PATH, gatheringPath } from '../events/event-paths';
 import { isStorageKey } from '../storage/storage-key';
 import { Profile } from '../users/entities/profile.entity';
 import { GENERIC_PUSH_COPY } from './generic-push-copy';
@@ -135,6 +136,12 @@ export class PushNotificationListener {
           return;
         case NotificationType.TopicNewPost:
           await this.pushTopicNewPost(userIds, notification);
+          return;
+        // A persona this member follows published new work (PRD-208). Gated by
+        // the member's own `PersonaFollows` category, so the push and the bell
+        // answer to one switch.
+        case NotificationType.PersonaUpdate:
+          await this.pushPersonaUpdate(userIds, notification);
           return;
         // Platform staff offering a struggling community help (OPS-05).
         // Always-on, no category gate, for the same reason as the types
@@ -348,11 +355,41 @@ export class PushNotificationListener {
     // via an extra event lookup. A missing title degrades to a neutral fallback.
     const title = this.payloadString(notification, 'title') ?? 'A gathering';
     const eventSlug = this.payloadString(notification, 'eventSlug');
-    const url = eventSlug ? `/events/${eventSlug}` : '/events';
+    // `/gatherings/<slug>` — the SPA's own detail route. This used to say
+    // `/events/<slug>`, which the frontend router has no match for, so every
+    // reminder and cancellation push landed the member on 404 (PRD-180).
+    const url = eventSlug ? gatheringPath(eventSlug) : GATHERINGS_BOARD_PATH;
+    // How many dates a cancellation took off the calendar (ENG-141). One
+    // message now covers a whole series, so the copy has to say so: naming a
+    // single Tuesday when thirty of them are gone leaves the other twenty-nine
+    // unexplained. Absent or 1 keeps the original single-gathering sentence,
+    // which is what every cancellation before series support said.
+    const occurrenceCount =
+      this.payloadNumber(notification, 'occurrenceCount') ?? 1;
+    const isSeries = isCancelled && occurrenceCount > 1;
+    // How many dates BESIDES the one named in the body.
+    const laterCount = occurrenceCount - 1;
+    // The service worker's catalog has no CLDR plurals — it interpolates
+    // `{token}` and nothing else — so the singular and plural are two separate
+    // keys and the SENDER picks, because the sender is the side that knows the
+    // count. A single "{count} later dates" string would render "1 later
+    // dates" for a two-date series. The English strings below are the plain
+    // fallback iOS renders directly, so they have to agree word for word with
+    // the keys they name.
+    const cancelledBody = !isSeries
+      ? `${title} has been cancelled.`
+      : laterCount === 1
+        ? `${title} has been cancelled, and so has the next date.`
+        : `${title} has been cancelled, and so have the next ${laterCount} dates.`;
+    const cancelledBodyKey = !isSeries
+      ? 'push:event.cancelled.body'
+      : laterCount === 1
+        ? 'push:event.cancelled.seriesBodyOne'
+        : 'push:event.cancelled.seriesBody';
     await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
       title: isCancelled ? 'Event cancelled' : 'Event updated',
       body: isCancelled
-        ? `${title} has been cancelled.`
+        ? cancelledBody
         : `${title} has new details — tap to see what changed.`,
       tag: `notification:${notification.id}`,
       data: { url },
@@ -360,10 +397,15 @@ export class PushNotificationListener {
         titleKey: isCancelled
           ? 'push:event.cancelled.title'
           : 'push:event.updated.title',
-        bodyKey: isCancelled
-          ? 'push:event.cancelled.body'
-          : 'push:event.updated.body',
-        params: { event: title },
+        bodyKey: isCancelled ? cancelledBodyKey : 'push:event.updated.body',
+        // `count` rides along only for the plural series body, the one string
+        // that interpolates it. A plain cancellation carries no `{count}`
+        // token, so sending `count: '0'` would put a number on the wire that
+        // no copy can render and that means nothing if it ever were rendered.
+        params: {
+          event: title,
+          ...(isSeries && laterCount > 1 ? { count: String(laterCount) } : {}),
+        },
       },
       timestamp: notification.createdAt.getTime(),
     });
@@ -555,6 +597,51 @@ export class PushNotificationListener {
         titleKey: 'push:topic.newPost.title',
         bodyKey: 'push:topic.newPost.body',
         params: { name, topic },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "A persona you follow published something new" (PRD-208).
+   *
+   * NAMES THE PERSONA, NEVER ITS OWNER. `resolveActor` is not called and no
+   * avatar rides along: `PersonaUpdate` carries no actor key, and a lock
+   * screen reading a pseudonymous persona's owner's name would undo the whole
+   * point of an unlinked persona. The copy is the persona's own public display
+   * name and the title of the newest item, both already readable by anyone who
+   * opens the link.
+   *
+   * Deep-links to the persona's own page through the `deepLink` the fan-out
+   * resolved, falling back to the persona directory rather than shipping an
+   * empty destination.
+   */
+  private async pushPersonaUpdate(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.PersonaFollows,
+    );
+    if (recipientUserIds.length === 0) return;
+    const persona =
+      this.payloadString(notification, 'subprofileName') ?? 'A persona';
+    const itemTitle = this.payloadString(notification, 'itemTitle');
+    const url = this.payloadString(notification, 'deepLink') ?? '/subprofiles';
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'New work from a persona you follow',
+      body: itemTitle
+        ? `${persona} published ${itemTitle}.`
+        : `${persona} published something new.`,
+      tag: `notification:${notification.id}`,
+      data: { url },
+      l10n: {
+        titleKey: 'push:personaUpdate.title',
+        bodyKey: itemTitle
+          ? 'push:personaUpdate.bodyWithTitle'
+          : 'push:personaUpdate.body',
+        params: { persona, itemTitle: itemTitle ?? '' },
       },
       timestamp: notification.createdAt.getTime(),
     });
@@ -810,13 +897,57 @@ export class PushNotificationListener {
       : {};
   }
 
-  /** `/thread/{slug}` for a forum mention/reply, else the notifications centre. */
+  /**
+   * Where a mention / reply / topic push opens: the SAME destination the bell
+   * row builds for that payload (`sourceHrefFromPayload` on the client), for
+   * every source a mention can be written from.
+   *
+   * PRD-222. This used to resolve `forum` and nothing else, so "Ana mentioned
+   * you" on a community post or in a DM landed on the notifications list, one
+   * tap short of the thing the member was told about, while the bell row for
+   * the identical payload opened the post permalink. The three sources
+   * `MentionNotificationService` is ever called with are `forum`
+   * (`ForumPostsService`/`ForumThreadsService`), `community`
+   * (`CommunityPostsService`, both the nested and the flat write paths) and
+   * `message` (`MessagesService.sendMessage`), and each is resolved here.
+   *
+   * `/notifications` stays the last resort rather than the default: a payload
+   * whose slug or id is missing has no page to open, and the notifications
+   * centre is the one destination that always reads.
+   */
   private threadUrl(notification: Notification): string {
     const source = this.payloadString(notification, 'source');
-    const threadSlug = this.payloadString(notification, 'threadSlug');
-    return source === 'forum' && threadSlug
-      ? `/thread/${threadSlug}`
-      : '/notifications';
+    if (source === 'forum') {
+      const threadSlug = this.payloadString(notification, 'threadSlug');
+      if (threadSlug) return `/thread/${threadSlug}`;
+    }
+    if (source === 'community') {
+      // The POST's own permalink, mirroring SOC-02 on the bell row: a
+      // community with no `postId` (a notification about the community itself)
+      // falls back to the community page rather than to the list.
+      const communitySlug = this.payloadString(notification, 'communitySlug');
+      if (communitySlug) {
+        const postId = this.payloadString(notification, 'postId');
+        return postId
+          ? `/community/${communitySlug}/post/${postId}`
+          : `/community/${communitySlug}`;
+      }
+    }
+    if (source === 'message') {
+      // `/messages?c=<conversationId>&m=<messageId>` is the deep-link contract
+      // `useMessageDeepLinks` already honours (open that thread, then scroll to
+      // and highlight that message). Same shape `push.listener.ts` uses for a
+      // plain new-message push, plus the message id a mention can name.
+      const conversationId = this.payloadString(notification, 'conversationId');
+      if (conversationId) {
+        const messageId = this.payloadString(notification, 'messageId');
+        const conversationParam = encodeURIComponent(conversationId);
+        return messageId
+          ? `/messages?c=${conversationParam}&m=${encodeURIComponent(messageId)}`
+          : `/messages?c=${conversationParam}`;
+      }
+    }
+    return '/notifications';
   }
 
   /** A string field from the notification payload, or `undefined`. */
@@ -826,5 +957,18 @@ export class PushNotificationListener {
   ): string | undefined {
     const value = notification.payload?.[key];
     return typeof value === 'string' && value ? value : undefined;
+  }
+
+  /** A finite number from the payload, or `undefined`. Same shape as
+   *  `payloadString`: a missing or malformed field degrades to the caller's
+   *  own fallback rather than reaching the copy as `NaN`. */
+  private payloadNumber(
+    notification: Notification,
+    key: string,
+  ): number | undefined {
+    const value = notification.payload?.[key];
+    return typeof value === 'number' && Number.isFinite(value)
+      ? value
+      : undefined;
   }
 }

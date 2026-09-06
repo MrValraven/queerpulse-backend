@@ -394,6 +394,34 @@ export class NotificationsService {
   }
 
   /**
+   * PRD-224. Clear one row from the member's own bell, for good and on every
+   * device: a real DELETE, scoped to `{ id, userId }` so the row has to belong
+   * to the caller. A row that is not theirs (or no longer exists) affects
+   * nothing and 404s, exactly like `markRead`, so the endpoint can never be
+   * used to probe or clear somebody else's notifications.
+   *
+   * A DELETE rather than a soft `dismissedAt` flag, deliberately. Deletion is
+   * already this table's normal end state: `NotificationRetentionService`
+   * hard-deletes read rows past the retention window, so nothing downstream
+   * treats a notification as a record of account. A soft flag would instead
+   * have to be honoured by every read path there is (`list`, `unreadCount`,
+   * both bundle-absorb lookups, the mentions inbox and its own count), and any
+   * one of them forgetting it would resurrect a row the member had explicitly
+   * cleared, which is the single failure this is meant to prevent.
+   *
+   * Deleting also frees the subject to notify again: a later event on the same
+   * thread writes a fresh row rather than being absorbed into a bundle the
+   * member has already dismissed.
+   */
+  async dismiss(id: string, userId: string): Promise<{ ok: true }> {
+    const result = await this.notifications.delete({ id, userId });
+    if (!result.affected) {
+      throw new NotFoundException('Notification not found');
+    }
+    return { ok: true };
+  }
+
+  /**
    * `true` when `actorId`'s actions must not reach `recipientId`: blocked in
    * either direction (hard severance), or muted by the recipient — mutes are
    * one-way and `BlockFilterService.isMutedBy`'s docstring names "notifications

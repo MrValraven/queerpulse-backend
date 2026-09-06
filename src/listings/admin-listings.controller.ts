@@ -313,9 +313,13 @@ export class AdminListingsController {
     @Param('ref') ref: string,
     @Body() dto: UpdateSafeSpaceDto,
   ) {
+    // Computed once and used twice: it narrows who may OVERRIDE the
+    // independent-visit bar inside `setSafeSpace`, and it narrows what the
+    // response shows a staff delegate.
+    const isPlatformStaff = isPlatformStaffTier(user.role);
     return toDirectoryModerationListingDTO(
-      await this.listingsService.setSafeSpace(ref, dto),
-      isPlatformStaffTier(user.role),
+      await this.listingsService.setSafeSpace(ref, dto, isPlatformStaff),
+      isPlatformStaff,
     );
   }
 

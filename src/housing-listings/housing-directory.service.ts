@@ -15,6 +15,11 @@ import {
   HousingListing,
   HousingListingStatus,
 } from './entities/housing-listing.entity';
+import {
+  HOUSING_FURNISHED_FEATURE,
+  HOUSING_PETS_WELCOME_FEATURE,
+  normalizeHousingFeature,
+} from './housing-features';
 import { HousingListerLookup } from './housing-lister-lookup';
 import { VERIFIED_LISTING_MAX_RISK } from './housing-verified';
 import {
@@ -58,6 +63,26 @@ export class HousingDirectoryService {
   // entirely. The owner still manages it through the owner-gated
   // `HousingListingsService` routes, which don't re-check this state.
   private static readonly SUBJECT_TYPE = 'housing';
+
+  /**
+   * "This listing's `features` array carries the chip bound to `parameter`",
+   * as SQL. `features` is a `text[]`, so this unnests it and compares each
+   * entry whole, case-insensitively: the exact contract
+   * `hasHousingFeature`/`normalizeHousingFeature` implement in memory for the
+   * saved-search alert fan-out. The two must keep agreeing, or an alert fires
+   * for a listing the board would not show.
+   *
+   * `= ANY(:array)` (the shape the `areas` multi-select uses) is deliberately
+   * NOT the operator here: that tests one scalar column against a list of
+   * candidate values, where this tests one candidate value against a list held
+   * in the column.
+   */
+  private featurePredicate(parameter: string): string {
+    return `EXISTS (
+      SELECT 1 FROM unnest(l.features) AS listing_feature
+      WHERE lower(btrim(listing_feature)) = :${parameter}
+    )`;
+  }
 
   // NOT EXISTS predicate dropping any listing under a `housing` takedown
   // (hidden OR removed) from a listing query builder (alias `l`), in-query so
@@ -127,6 +152,27 @@ export class HousingDirectoryService {
     }
     if (query.hasAccessibilityInfo) {
       qb.andWhere("l.accessibility_info <> ''");
+    }
+    if (query.furnished) {
+      qb.andWhere(this.featurePredicate('furnishedFeature'), {
+        furnishedFeature: normalizeHousingFeature(HOUSING_FURNISHED_FEATURE),
+      });
+    }
+    if (query.petsWelcome) {
+      qb.andWhere(this.featurePredicate('petsWelcomeFeature'), {
+        petsWelcomeFeature: normalizeHousingFeature(
+          HOUSING_PETS_WELCOME_FEATURE,
+        ),
+      });
+    }
+    if (query.depositMax !== undefined) {
+      // A listing with no stated deposit can't satisfy a deposit cap. Spelled
+      // out rather than left to SQL's NULL <= n, so the intent reads: an
+      // unstated deposit is UNKNOWN, never zero.
+      qb.andWhere(
+        '(l.deposit_euros IS NOT NULL AND l.deposit_euros <= :depositMax)',
+        { depositMax: query.depositMax },
+      );
     }
     if (query.verifiedOnly) {
       // The public "verified listing" derivation, expressed in-query: status is

@@ -95,13 +95,19 @@ function build() {
     createQueryBuilder: jest.fn(() => countQbStub([])),
   };
   const savedItems = { find: jest.fn().mockResolvedValue([]) };
+  // Availability resolution is shared with the saved module (PRD-169). Stubbed
+  // to "nothing resolves" by default so a test that cares has to say so.
+  const availability = {
+    availableRefs: jest.fn().mockResolvedValue(new Set<string>()),
+  };
 
   const service = new CollectionsService(
     collections as never,
     collectionItems as never,
     savedItems as never,
+    availability as never,
   );
-  return { service, collections, collectionItems, savedItems };
+  return { service, collections, collectionItems, savedItems, availability };
 }
 
 describe('CollectionsService', () => {
@@ -222,7 +228,13 @@ describe('CollectionsService', () => {
 
   describe('getOne hydration', () => {
     it('hydrates items from saved snapshots and keeps orphaned items with a fallback', async () => {
-      const { service, collections, collectionItems, savedItems } = build();
+      const {
+        service,
+        collections,
+        collectionItems,
+        savedItems,
+        availability,
+      } = build();
       collections.findOne.mockResolvedValue(collectionRow());
       collectionItems.find.mockResolvedValue([
         itemRow({ subjectId: 'coming-out-guide' }),
@@ -232,6 +244,9 @@ describe('CollectionsService', () => {
       savedItems.find.mockResolvedValue([
         savedRow({ subjectId: 'coming-out-guide' }),
       ]);
+      availability.availableRefs.mockResolvedValue(
+        new Set(['article:coming-out-guide']),
+      );
 
       const detail = await service.getOne('owner-1', 'col-1');
 
@@ -241,6 +256,93 @@ describe('CollectionsService', () => {
       // Orphan falls back to a bare title keyed off the subject id.
       expect(detail.items[1]!.title).toBe('orphaned-slug');
       expect(detail.itemCount).toBe(2);
+    });
+
+    it('resolves availability once for the whole page, through the owner (PRD-169)', async () => {
+      const {
+        service,
+        collections,
+        collectionItems,
+        savedItems,
+        availability,
+      } = build();
+      collections.findOne.mockResolvedValue(collectionRow());
+      collectionItems.find.mockResolvedValue([
+        itemRow({ subjectId: 'coming-out-guide' }),
+        itemRow({ subjectId: 'trans-healthcare' }),
+      ]);
+      savedItems.find.mockResolvedValue([
+        savedRow({ subjectId: 'coming-out-guide' }),
+        savedRow({ id: 'saved-2', subjectId: 'trans-healthcare' }),
+      ]);
+      availability.availableRefs.mockResolvedValue(
+        new Set(['article:coming-out-guide']),
+      );
+
+      const detail = await service.getOne('owner-1', 'col-1');
+
+      // One batched call for the page, never one per item.
+      expect(availability.availableRefs).toHaveBeenCalledTimes(1);
+      // A collection is owner-private, so the owner is the requesting viewer.
+      expect(availability.availableRefs).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ subjectId: 'coming-out-guide' }),
+        ]),
+        'owner-1',
+      );
+      expect(detail.items[0]).toEqual(
+        expect.objectContaining({
+          availability: 'available',
+          href: '/magazine/coming-out-guide',
+        }),
+      );
+    });
+
+    it('keeps the title but drops the href of an item whose subject is gone', async () => {
+      const {
+        service,
+        collections,
+        collectionItems,
+        savedItems,
+        availability,
+      } = build();
+      collections.findOne.mockResolvedValue(collectionRow());
+      collectionItems.find.mockResolvedValue([
+        itemRow({ subjectId: 'deleted-thread' }),
+      ]);
+      savedItems.find.mockResolvedValue([
+        savedRow({ subjectId: 'deleted-thread', title: 'Finding a GP' }),
+      ]);
+      availability.availableRefs.mockResolvedValue(new Set<string>()); // nothing resolves
+
+      const detail = await service.getOne('owner-1', 'col-1');
+
+      expect(detail.items[0]).toEqual(
+        expect.objectContaining({
+          title: 'Finding a GP',
+          href: null,
+          availability: 'unavailable',
+        }),
+      );
+    });
+
+    it('reports an orphaned item (save removed after filing) as unavailable', async () => {
+      const { service, collections, collectionItems, savedItems } = build();
+      collections.findOne.mockResolvedValue(collectionRow());
+      collectionItems.find.mockResolvedValue([
+        itemRow({ subjectId: 'orphaned-slug' }),
+      ]);
+      savedItems.find.mockResolvedValue([]);
+
+      const detail = await service.getOne('owner-1', 'col-1');
+
+      expect(detail.items[0]).toEqual(
+        expect.objectContaining({
+          title: 'orphaned-slug',
+          href: null,
+          availability: 'unavailable',
+        }),
+      );
     });
 
     it('bounds the item read with a take cap', async () => {

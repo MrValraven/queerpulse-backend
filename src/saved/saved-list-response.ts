@@ -1,5 +1,5 @@
 import { SavedList } from './entities/saved-list.entity';
-import { SavedItemDTO } from './saved-response';
+import { ResolvedSavedItemDTO } from './saved-response';
 
 /**
  * Wire shape of one of the caller's own lists. Hand-mapped from the entity like
@@ -45,7 +45,16 @@ export interface SavedListDTO {
 export interface SharedSavedListDTO {
   name: string;
   itemCount: number;
-  items: SavedItemDTO[];
+  /**
+   * Each item carries its own `availability` for THIS recipient (PRD-169). A
+   * shared list is the one place saved items are read by somebody who did not
+   * save any of them and cannot tell a live card from a stale one, so the
+   * payload says which of these they can actually open. Unavailable items stay
+   * in the list with their snapshot: the recipient was handed a curated set,
+   * and silently shrinking it would hide that the sender ever recommended the
+   * place.
+   */
+  items: ResolvedSavedItemDTO[];
 }
 
 export function toSavedListDTO(

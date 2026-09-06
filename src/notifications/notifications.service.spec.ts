@@ -29,6 +29,7 @@ describe('NotificationsService', () => {
     save: jest.Mock;
     find: jest.Mock;
     update: jest.Mock;
+    delete: jest.Mock;
     count: jest.Mock;
   };
   let profileRepo: { find: jest.Mock };
@@ -47,6 +48,7 @@ describe('NotificationsService', () => {
       save: jest.fn((value: unknown) => value),
       find: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
       count: jest.fn().mockResolvedValue(0),
     };
     profileRepo = { find: jest.fn().mockResolvedValue([]) };
@@ -542,6 +544,21 @@ describe('NotificationsService', () => {
     expect(repo.update).toHaveBeenCalledWith(
       { id: 'n1', userId: 'u1' },
       { read: true },
+    );
+  });
+
+  // PRD-224. Dismiss deletes the row for good, so the two things that matter
+  // are that it is scoped to the caller and that a miss is a 404 rather than a
+  // silent success somebody could probe with.
+  it('dismiss deletes the row, scoped to the owner', async () => {
+    await expect(service.dismiss('n1', 'u1')).resolves.toEqual({ ok: true });
+    expect(repo.delete).toHaveBeenCalledWith({ id: 'n1', userId: 'u1' });
+  });
+
+  it("dismiss 404s when the row is not the caller's", async () => {
+    repo.delete.mockResolvedValue({ affected: 0 });
+    await expect(service.dismiss('n1', 'someone-else')).rejects.toBeInstanceOf(
+      NotFoundException,
     );
   });
 });

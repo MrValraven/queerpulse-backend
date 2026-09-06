@@ -1,4 +1,7 @@
-import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
+import {
+  DOCUMENT_UPLOAD_TYPES,
+  IMAGE_UPLOAD_TYPES,
+} from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKindSpec } from './upload-kinds';
 
 // The single authority on what a storage key looks like. Both alternations are
@@ -19,6 +22,10 @@ const IMAGE_EXTENSIONS = Object.values(IMAGE_UPLOAD_TYPES).map(
   (spec) => spec.extension,
 );
 
+const DOCUMENT_EXTENSIONS = Object.values(DOCUMENT_UPLOAD_TYPES).map(
+  (spec) => spec.extension,
+);
+
 function escapeForRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -35,8 +42,10 @@ const UUID_SEGMENT =
 // `uploads.controller.ts`) is captured too — `storageKeyOwnerId` below reuses
 // this same pattern rather than duplicating it, so the ownership check can
 // never drift out of sync with what actually parses as a key.
+const KNOWN_EXTENSIONS = [...IMAGE_EXTENSIONS, ...DOCUMENT_EXTENSIONS];
+
 const STORAGE_KEY_PATTERN = new RegExp(
-  `^(${UPLOAD_PREFIXES.map(escapeForRegex).join('|')})/(${UUID_SEGMENT})/${UUID_SEGMENT}(${IMAGE_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+  `^(${UPLOAD_PREFIXES.map(escapeForRegex).join('|')})/(${UUID_SEGMENT})/${UUID_SEGMENT}(${KNOWN_EXTENSIONS.map(escapeForRegex).join('|')})$`,
 );
 
 const SPECS_BY_PREFIX = new Map<string, UploadKindSpec>(

@@ -62,6 +62,15 @@ export interface AdminResourceSuggestionDTO {
   status: ResourceSuggestionStatus;
   decidedAt: string | null;
   decisionNote: string | null;
+  /**
+   * The directory listing this suggestion's approval published (PRD-269), or
+   * null for everything else. Exposed on the ADMIN shape only, and only as an
+   * id: the console uses it to show that a row is already live and to keep
+   * the approve action off it, which is the same fact the `409` on a second
+   * approve states. `decidedBy` stays withheld beside it — who decided is
+   * still internal, what it produced is not.
+   */
+  createdListingId: string | null;
 }
 
 export interface AdminResourceSuggestionsPageDTO {
@@ -88,6 +97,7 @@ export function toAdminResourceSuggestionDTO(
     status: suggestion.status,
     decidedAt: suggestion.decidedAt ? suggestion.decidedAt.toISOString() : null,
     decisionNote: suggestion.decisionNote,
+    createdListingId: suggestion.createdListingId,
   };
 }
 

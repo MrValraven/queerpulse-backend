@@ -69,6 +69,18 @@ export class HousingSavedSearchAlertsListener {
     try {
       const { listing, listingVerified } = event;
 
+      // ONCE PER LISTING, EVER (ENG-170). A saved-search alert answers "a home
+      // you have not seen was published". A re-approval is the same home said
+      // twice: an owner PATCH to any moderated field knocks a live listing back
+      // to `review`, so the moderator's next approval re-fires this event, and
+      // nothing downstream would catch it. The `seen` set below dedupes within
+      // one event and is then discarded, and `HousingListingMatch` has no
+      // bundling subject, so `absorbIntoBundlesForRecipients` cannot collapse
+      // the repeat either. `isFirstGoLive` is claimed at the emit site off the
+      // listing's persisted `first_live_at`, so it survives a restart and two
+      // concurrent approvals cannot both pass it.
+      if (!event.isFirstGoLive) return;
+
       // Order-preserving de-dup across ALL batches. The lister is seeded in so
       // they are never alerted about their own listing.
       // `ownerId` is NULL for a listing whose lister erased their account

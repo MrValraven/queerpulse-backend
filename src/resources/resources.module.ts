@@ -24,6 +24,7 @@ import { AdminResourceListingsService } from './admin-resource-listings.service'
 import { AdminResourceSuggestionsController } from './admin-resource-suggestions.controller';
 import { AdminResourceSuggestionsService } from './admin-resource-suggestions.service';
 import { ResourceListingsService } from './resource-listings.service';
+import { ResourceReviewSweeperService } from './resource-review-sweeper.service';
 import { ResourceSuggestionsService } from './resource-suggestions.service';
 import { ResourcesService } from './resources.service';
 import { ResourceGuideRatingsService } from './resource-guide-ratings.service';
@@ -40,7 +41,8 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
     // here.
     SubmissionsModule,
     // Tells whoever works the resource-suggestion queue when a member's own
-    // suggestion lands.
+    // suggestion lands, and (PRD-270) whoever works the guide-review queue
+    // when a guide comes due.
     AdminQueueNotificationsModule,
 
     TypeOrmModule.forFeature([
@@ -78,6 +80,13 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
     AdminResourceSuggestionsService,
     AdminResourcesService,
     AdminGlossaryService,
+    // PRD-270: the daily `@Cron` that announces guides whose `review_due_on`
+    // has passed (and the never-reviewed ones, which are invisible to the
+    // public) into the `guide_reviews` admin queue. Registered as a plain
+    // provider: `ScheduleModule.forRoot()` is already wired app-wide in
+    // `AppModule`, so a `@Cron` provider only needs to appear here — same
+    // precedent as `SafeSpaceNominationsModule` and `GovernanceModule`.
+    ResourceReviewSweeperService,
   ],
   // Exported for the cross-entity SearchModule (resource search).
   exports: [ResourcesService],

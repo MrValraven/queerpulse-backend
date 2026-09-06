@@ -99,7 +99,7 @@ describe('ReportNotificationsListener', () => {
     authorIdForPost: jest.Mock;
     authorIdForReply: jest.Mock;
   };
-  let notifications: { createForRecipients: jest.Mock };
+  let notifications: { createForRecipients: jest.Mock; create: jest.Mock };
   let photoQueryBuilder: QueryBuilderStub;
 
   /** Every `createForRecipients` call, as its three declared arguments. A
@@ -142,6 +142,11 @@ describe('ReportNotificationsListener', () => {
     };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue([]),
+      // PRD-289. The reporter's own receipt goes through `create`, not the
+      // responder fan-out. Without it on the stub the receipt throws into the
+      // listener's own catch and every assertion here still passes, which is
+      // exactly the silence this row exists to end.
+      create: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({

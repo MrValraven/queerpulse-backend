@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
@@ -28,6 +29,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminResourceSuggestionsService } from './admin-resource-suggestions.service';
+import { ApproveResourceSuggestionDto } from './dto/approve-resource-suggestion.dto';
 import { DecideResourceSuggestionDto } from './dto/decide-resource-suggestion.dto';
 import { ListAdminResourceSuggestionsQuery } from './dto/list-admin-resource-suggestions.query';
 
@@ -66,15 +68,24 @@ export class AdminResourceSuggestionsController {
 
   @Post(':id/approve')
   @Roles(UserRole.Moderator, UserRole.Admin)
-  @ApiOperation({ summary: 'Approve a resource suggestion.' })
-  @ApiOkResponse({ description: 'The suggestion, now approved.' })
+  @ApiOperation({
+    summary:
+      'Approve a resource suggestion and publish it to the public directory.',
+  })
+  @ApiOkResponse({
+    description: 'The suggestion, now approved, with its listing published.',
+  })
   @ApiNotFoundResponse({ description: 'No suggestion with that id.' })
+  @ApiConflictResponse({
+    description:
+      'Already approved, or already published to the directory. Approval creates the listing exactly once.',
+  })
   approve(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
-    @Body() dto: DecideResourceSuggestionDto,
+    @Body() dto: ApproveResourceSuggestionDto,
   ) {
-    return this.adminResourceSuggestions.approve(id, user.userId, dto.note);
+    return this.adminResourceSuggestions.approve(id, user.userId, dto);
   }
 
   @Post(':id/decline')

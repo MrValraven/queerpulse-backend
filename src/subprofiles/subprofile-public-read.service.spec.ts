@@ -5,6 +5,7 @@ import { Community } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Event } from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
+import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -57,8 +58,8 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
 }
 
 // Stubs the fluent `createQueryBuilder('sp')` chain `directory()` builds:
-// every chained method (`select`/`where`/`andWhere`/`orderBy`/`offset`/
-// `limit`) returns the builder itself so calls compose exactly like the real
+// every chained method (`select`/`where`/`andWhere`/`orderBy`/`addOrderBy`/
+// `offset`/`limit`) returns the builder itself so calls compose exactly like the real
 // TypeORM `SelectQueryBuilder` — no real query builder is constructed, but
 // EVERY method the real `directory()` calls is implemented here (unlike the
 // former stub in `subprofiles.service.spec.ts`, which predated offset
@@ -78,6 +79,7 @@ interface DirectoryQueryBuilderStub {
     [string, Record<string, unknown>?]
   >;
   orderBy: jest.Mock<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>;
+  addOrderBy: jest.Mock<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>;
   offset: jest.Mock<DirectoryQueryBuilderStub, [number]>;
   limit: jest.Mock<DirectoryQueryBuilderStub, [number]>;
   getMany: jest.Mock<Promise<Subprofile[]>, []>;
@@ -98,6 +100,9 @@ function makeSubprofilesQueryBuilderStub(
     .fn<DirectoryQueryBuilderStub, [string, Record<string, unknown>?]>()
     .mockReturnValue(queryBuilder);
   queryBuilder.orderBy = jest
+    .fn<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.addOrderBy = jest
     .fn<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>()
     .mockReturnValue(queryBuilder);
   queryBuilder.offset = jest
@@ -197,6 +202,15 @@ describe('SubprofilePublicReadService', () => {
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         { provide: BlockFilterService, useValue: blockFilter },
+        {
+          // PRD-204 reclaim lookups. Both answer "nobody" by default, so every
+          // pre-existing not-found case here keeps its plain 404.
+          provide: HandlesService,
+          useValue: {
+            previousSubprofileOwnerOf: jest.fn().mockResolvedValue(null),
+            previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
+          },
+        },
         {
           provide: ContentModerationService,
           useValue: {

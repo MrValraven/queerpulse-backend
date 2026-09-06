@@ -50,6 +50,31 @@ describe('toClientPayload (M6 allowlist)', () => {
     });
   });
 
+  it("forwards a message mention's conversation and message ids, never its excerpt", () => {
+    const projected = toClientPayload(
+      notificationRow(NotificationType.Mention, {
+        actorId: 'u2',
+        source: 'message',
+        conversationId: 'conv-1',
+        messageId: 'msg-9',
+        entityKind: 'member',
+        entityRef: 'alice',
+        excerpt: 'something said in a private thread',
+      }),
+    );
+
+    // PRD-221: the two ids the bell row needs to link the message itself.
+    expect(projected).toEqual({
+      source: 'message',
+      conversationId: 'conv-1',
+      messageId: 'msg-9',
+      entityKind: 'member',
+      entityRef: 'alice',
+    });
+    // The private message body still never reaches the client.
+    expect(projected).not.toHaveProperty('excerpt');
+  });
+
   it('forwards only the common structural keys for a type with no allowlist entry', () => {
     const projected = toClientPayload(
       notificationRow(NotificationType.VouchReceived, {
@@ -63,11 +88,17 @@ describe('toClientPayload (M6 allowlist)', () => {
   it('keeps a type-specific display field while dropping anything unlisted', () => {
     const projected = toClientPayload(
       notificationRow(NotificationType.BadgeEarned, {
+        badgeKey: 'first-gathering',
         badgeName: 'Trailblazer',
         internalNote: 'do not ship',
       }),
     );
-    expect(projected).toEqual({ badgeName: 'Trailblazer' });
+    // `badgeKey` rides along so the client can translate the badge's name
+    // itself; `badgeName` stays as the fallback for an unmapped id.
+    expect(projected).toEqual({
+      badgeKey: 'first-gathering',
+      badgeName: 'Trailblazer',
+    });
   });
 });
 
@@ -87,5 +118,29 @@ describe('toNotificationResponse', () => {
       communitySlug: 'private-support',
     });
     expect(response.actor).toBeNull();
+  });
+
+  // A persona is PSEUDONYMOUS, and PRD-208 gave followers a notification when
+  // a persona they follow publishes. That notification must never name the
+  // human behind it. Today the property rests on three separate absences in
+  // three separate files: no `ACTOR_PAYLOAD_KEY` entry here, no user id in the
+  // allowlist entry, and no `resolveActor` call in the push handler. Nothing
+  // fails if a future contributor adds the missing entry for an unrelated
+  // reason, so this test is the tripwire that turns the convention into a
+  // rule. If it fails, do not "fix" it by updating the expectation.
+  it('never resolves an actor for a persona update, so a pseudonymous persona cannot be traced to its owner', () => {
+    const response = toNotificationResponse(
+      notificationRow(NotificationType.PersonaUpdate, {
+        subprofileName: 'Night Cartographer',
+        subprofileSlugOrHandle: 'night-cartographer',
+        itemTitle: 'Three routes home',
+        newItemCount: 3,
+        actorId: 'u2',
+      }),
+      { id: 'u2', firstName: 'Ana', lastName: 'Silva' } as never,
+    );
+    expect(response.actor).toBeNull();
+    expect(response.payload).not.toHaveProperty('actorId');
+    expect(JSON.stringify(response)).not.toContain('Ana');
   });
 });

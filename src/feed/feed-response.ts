@@ -1,5 +1,6 @@
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
+import { toPlainTextExcerpt } from '../communities/community-plain-text';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
@@ -13,8 +14,14 @@ import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 // `src/common`) — same idiom as `src/forum/forum-response.ts`, which notes no
 // shared `AuthorSummary` mapper exists yet.
 
+/**
+ * PRD-107 adds `article`: a published magazine piece. The magazine was the one
+ * thing the desk ships that never reached the home screen, so a piece an
+ * editor commissioned, edited and published was invisible to every member who
+ * did not go looking for it.
+ */
 export type FeedItemType =
-  'community_post' | 'forum_thread' | 'gathering' | 'new_member';
+  'community_post' | 'forum_thread' | 'gathering' | 'new_member' | 'article';
 
 export interface AuthorSummary {
   handle: string;
@@ -103,9 +110,65 @@ export interface FeedItem extends FeedItemSignals {
   // `tags` (ungated, same as `toProfileCard`).
   neighbourhood?: string | null;
   interests?: string[];
+  /**
+   * A plain-text preview of the item's own body (PRD-167). Carried for
+   * `forum_thread`, whose card used to be the only one in the feed with no
+   * content preview at all: members had to decide whether to open a thread
+   * from its title alone, which made threads the least clickable thing on the
+   * home screen. Null when the thread's opening post could not be read (it is
+   * tombstoned, or the thread has no flagged OP row).
+   *
+   * Undefined for every other item type, which already previews itself
+   * through `summary`.
+   */
+  excerpt?: string | null;
+  /**
+   * `article` (PRD-107) enrichment, undefined for every other item type. The
+   * card needs the magazine's own furniture: the kicker or section the piece
+   * runs under, the byline credit, the read time and the lead art, none of
+   * which the shared `title`/`summary`/`actor` triple can carry, because a
+   * magazine byline is a `magazine_author` row rather than a member account.
+   */
+  kicker?: string;
+  section?: string;
+  readMinutes?: number;
+  /** The piece's lead art, falling back to its social-share image, or null
+   *  when the desk set neither. Same precedence `MagazineFrontService` uses. */
+  imageUrl?: string | null;
+  /** The language of the row the card is actually showing, so a Portuguese
+   *  reader served the English original can be told so. */
+  locale?: string;
+  byline?: MagazineByline | null;
+}
+
+/**
+ * The magazine credit on an `article` item (PRD-107).
+ *
+ * Deliberately NOT folded into `actor`. `actor` is a member account: the feed
+ * block-filters on it, the frontend hides items whose `actor.handle` it has
+ * blocked, and its avatar links to `/members/:slug`. A magazine byline is a
+ * `magazine_author` row that may belong to no member at all (plenty of
+ * contributors are credited by name only), and its `slug` addresses
+ * `/magazine/author/:slug`. Sending it as `actor` would put a byline slug
+ * where a member handle is expected on both counts.
+ *
+ * `actor` is still filled in when the byline IS linked to a member
+ * (`MagazineAuthor.userId`), so the card can show their profile photo and the
+ * block filter has something to work with.
+ */
+export interface MagazineByline {
+  name: string;
+  /** Addresses `/magazine/author/:slug`, never a member profile. */
+  slug: string;
+  avatarUrl: string | null;
 }
 
 const SUMMARY_MAX = 220;
+
+/** Contract C4: the forum card's excerpt window, matching the thread
+ *  response's own excerpt (C3) so the same thread previews identically in the
+ *  feed and in the forum list. */
+const FORUM_EXCERPT_MAX = 180;
 
 /** Trims a body/description down to a feed-card-sized preview. */
 function truncate(text: string, max = SUMMARY_MAX): string {
@@ -143,29 +206,77 @@ export function communityPostToFeedItem(
 }
 
 /**
- * `summary` deliberately does NOT join the thread's OP post body — that
- * would mean an extra per-thread (or batched-but-still-nontrivial) query
- * against `forum_post` just to preview text already summarized by
- * `category`/`replyCount`. Keeps the aggregation a straightforward
- * per-source query + merge (see the module report for the tradeoff).
+ * What the feed knows about a thread that the thread ROW cannot tell it, read
+ * off `forum_post` in one batched query per page (see
+ * `FeedService.forumThreadCards`).
+ *
+ * Both fields exist because the denormalized `forum_thread` columns were
+ * lying. `replyCount` on the row is incremented when a reply is created and
+ * never decremented when one is tombstoned (ENG-132), so a thread whose three
+ * replies were all deleted still advertised "3 replies" on its card. And
+ * there was no preview at all (PRD-167): `summary` was `category` plus that
+ * same wrong count.
+ */
+export interface ForumThreadCard {
+  /** Contract C4: the opening post, HTML stripped and cut to 180 characters
+   *  on a word boundary. Null when there is no readable OP. */
+  excerpt: string | null;
+  /** Live count of the thread's non-deleted replies (the OP is not a reply,
+   *  matching `ForumThread.replyCount`'s own definition). */
+  replyCount: number;
+}
+
+/**
+ * Contract C4 (PRD-167): the thread's opening post as a feed-card preview.
+ *
+ * Goes through `toPlainTextExcerpt`, the same fixed-point strip-and-collapse
+ * the community moderation queue's excerpts use, so a body carrying markup
+ * (or entity-encoded markup) can never reach a card as anything but text. The
+ * ellipsis is appended here rather than inside the helper, which reports
+ * truncation separately so each caller draws its own affordance.
+ *
+ * A body that strips down to nothing at all (an image-only post) is null
+ * rather than an empty string, so the card renders no preview slot instead of
+ * an empty one.
+ */
+export function toForumExcerpt(body: string | null | undefined): string | null {
+  if (!body) return null;
+  const { text, isTruncated } = toPlainTextExcerpt(body, FORUM_EXCERPT_MAX);
+  if (!text.length) return null;
+  return isTruncated ? `${text}…` : text;
+}
+
+/**
+ * `summary` still names the category and the reply count, and PRD-167 adds
+ * the `excerpt` beside it: the OP's own words, which is what a member
+ * actually decides on. Both the count and the excerpt come from `card`, read
+ * live off `forum_post` for the whole page at once, because the thread row's
+ * `replyCount` counts tombstoned replies (ENG-132) and carries no body.
+ *
+ * `card` is optional so a caller with no `forum_post` read to hand still gets
+ * a correct card: it falls back to the thread's stored count and no excerpt,
+ * which is exactly the behaviour that shipped before.
  */
 export function forumThreadToFeedItem(
   thread: ForumThread,
   author: MemberRef | null,
+  card?: ForumThreadCard,
 ): FeedItem {
-  const replyWord = thread.replyCount === 1 ? 'reply' : 'replies';
+  const replyCount = card ? card.replyCount : thread.replyCount;
+  const replyWord = replyCount === 1 ? 'reply' : 'replies';
   return {
     id: thread.id,
     type: 'forum_thread',
     createdAt: thread.createdAt.toISOString(),
     title: thread.title,
-    summary: `${thread.category} · ${thread.replyCount} ${replyWord}`,
+    summary: `${thread.category} · ${replyCount} ${replyWord}`,
     link: `/thread/${thread.slug}`,
     actor: toAuthorSummary(author),
-    // Free: the thread row already maintains this counter. The feed card
-    // shows it as context; replying still happens in the thread itself,
-    // since a forum reply is a threaded post rather than a one-line note.
-    replyCount: thread.replyCount,
+    excerpt: card ? card.excerpt : null,
+    // The feed card shows the count as context; replying still happens in the
+    // thread itself, since a forum reply is a threaded post rather than a
+    // one-line note.
+    replyCount,
   };
 }
 
@@ -253,5 +364,66 @@ export function communityNewMemberToFeedItem(
     summary: community ? `Joined ${community.name}` : 'Joined a community',
     link: member ? `/profile/${member.slug}` : '/feed',
     actor: toAuthorSummary(member),
+  };
+}
+
+/**
+ * A published magazine piece (PRD-107).
+ *
+ * TWO article rows, on purpose. `canonical` is the piece as the archive knows
+ * it: the row with `translation_of_article_id IS NULL`, and the row whose
+ * `(published_at, id)` the whole feed merge orders and paginates on.
+ * `displayed` is the row whose WORDS the card shows: the reader-language
+ * translation when the desk has published one, and `canonical` itself
+ * otherwise. Splitting them is what stops one piece appearing twice on the
+ * home screen while still letting a Portuguese reader read it in Portuguese
+ * (see `FeedService`'s `magazine_article` candidate case).
+ *
+ * `createdAt` is the canonical piece's PUBLISH instant, not its `created_at`:
+ * a piece drafted in March and published today belongs at the top of today's
+ * feed, and `published_at` is what every public magazine read already orders
+ * by. It is also why the substitution never moves a row: a translation
+ * shipped a week later would otherwise jump the piece back to the top.
+ *
+ * `link` addresses the DISPLAYED row's slug, so a translated card opens the
+ * translation, which is a first-class article at its own address.
+ */
+export function magazineArticleToFeedItem(
+  canonical: { id: string; publishedAt: Date | null },
+  displayed: {
+    slug: string;
+    title: string;
+    dek: string;
+    kicker: string;
+    section: string;
+    readMinutes: number;
+    heroImageKey: string;
+    socialImage: string;
+    locale: string;
+  },
+  byline: MagazineByline | null,
+  actor: MemberRef | null,
+): FeedItem {
+  return {
+    id: canonical.id,
+    type: 'article',
+    // Non-null by construction: the candidate query admits only rows with
+    // `published_at IS NOT NULL AND published_at <= now`.
+    createdAt: (canonical.publishedAt ?? new Date()).toISOString(),
+    title: displayed.title,
+    summary: truncate(displayed.dek),
+    // `routeMap.ts#article` is `/magazine/article`, read by `?id=<slug>`.
+    link: `/magazine/article?id=${encodeURIComponent(displayed.slug)}`,
+    actor: toAuthorSummary(actor),
+    kicker: displayed.kicker,
+    section: displayed.section,
+    readMinutes: displayed.readMinutes,
+    // Lead art first, share image only as a fallback: they are two separate
+    // editorial decisions and the art on the page is the one this card shows.
+    // Mirrors `MagazineFrontService`'s precedence exactly.
+    imageUrl:
+      toImageUrl(displayed.heroImageKey) ?? toImageUrl(displayed.socialImage),
+    locale: displayed.locale,
+    byline,
   };
 }

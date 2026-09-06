@@ -47,6 +47,12 @@ export const RESERVED_HANDLES = [
   'p',
   'profile',
   'profiles',
+  // The opt-in anonymous page, `/public-profile/:slug`. Reserved for the same
+  // reason as its neighbours above, plus one specific to it: the moved-handle
+  // forwarding rebuilds a path by swapping the first path segment that equals
+  // the old slug, so a member actually holding the handle `public-profile`
+  // would have the ROUTE segment rewritten instead of their slug. PRD-204.
+  'public-profile',
   'settings',
   'subprofiles',
   // Impersonation: the platform's own voice.

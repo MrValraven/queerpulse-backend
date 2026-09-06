@@ -14,13 +14,17 @@ import { SavedListBodyDto } from './dto/saved-list-body.dto';
 import { SavedListEntry } from './entities/saved-list-entry.entity';
 import { SavedList } from './entities/saved-list.entity';
 import { SavedItem } from './entities/saved-item.entity';
+import {
+  SavedAvailabilityService,
+  SavedViewerId,
+} from './saved-availability.service';
 import { parseSavedRef } from './saved-ref.util';
 import {
   SavedListDTO,
   SharedSavedListDTO,
   toSavedListDTO,
 } from './saved-list-response';
-import { toSavedItemDTO } from './saved-response';
+import { toResolvedSavedItemDTOs } from './saved-response';
 
 /** Bytes of entropy behind a share link, hex-encoded to 64 characters —
  *  identical to `CalendarFeedTokenService`, for identical reasons. */
@@ -66,6 +70,9 @@ export class SavedListsService {
     @InjectRepository(SavedItem)
     private readonly savedItems: Repository<SavedItem>,
     private readonly dataSource: DataSource,
+    // Resolves the shared page's subjects in batch, through the RECIPIENT's
+    // eyes rather than the owner's (PRD-169).
+    private readonly availability: SavedAvailabilityService,
   ) {}
 
   /** Every list the caller owns, default first and then newest, each with a
@@ -274,7 +281,22 @@ export class SavedListsService {
    * Returns the list's name and its items and nothing about its owner — see
    * `SharedSavedListDTO`.
    */
-  async getShared(token: string): Promise<SharedSavedListDTO> {
+  async getShared(
+    token: string,
+    /**
+     * The RECIPIENT, not the owner: the id of the signed-in active member
+     * following the link, or `null` for somebody with no account (the common
+     * case, and the reason the route is `@Public()` at all).
+     *
+     * Availability is resolved through their eyes, which is the whole point of
+     * PRD-169 on this route. A shared list is the one place saved items are
+     * read by a person who did not save any of them and cannot tell a live card
+     * from a stale one, so a friend who has just moved to the city gets told
+     * which of these places they can actually open instead of discovering it
+     * one 404 at a time.
+     */
+    viewerId: SavedViewerId = null,
+  ): Promise<SharedSavedListDTO> {
     if (!SHARE_TOKEN_RE.test(token)) {
       throw new NotFoundException('This list is not available');
     }
@@ -296,10 +318,18 @@ export class SavedListsService {
       where: { id: In(entries.map((entry) => entry.savedItemId)) },
       order: { createdAt: 'DESC' },
     });
+    // One batched resolution for the whole list, at most one query per distinct
+    // kind on it. An unavailable item stays IN the list with its snapshot: the
+    // recipient was handed a curated set, and silently shrinking it would hide
+    // that the sender ever recommended the place.
+    const availableRefs = await this.availability.availableRefs(
+      items,
+      viewerId,
+    );
     return {
       name: list.name,
       itemCount: items.length,
-      items: items.map(toSavedItemDTO),
+      items: toResolvedSavedItemDTOs(items, availableRefs),
     };
   }
 

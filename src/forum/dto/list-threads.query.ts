@@ -18,10 +18,13 @@ export class ListThreadsQuery {
   @Max(100)
   limit?: number;
 
-  // Ordering of the page. `new` (default) → newest-first by `(createdAt, id)`;
-  // `top` → highest OP vote count; `active` → most-recently-active; `unanswered`
-  // → newest-first among threads with no replies. The service applies the sort
-  // (Wave 2); validated here so an unknown value is rejected up front.
+  // Ordering of the page. `active` (the DEFAULT when omitted) →
+  // most-recently-active; `new` → newest-first by `(createdAt, id)`; `top` →
+  // highest OP vote count among threads from the last 30 days, tie-broken by
+  // recency, falling back to the whole forum when the window is near-empty;
+  // `unanswered` → newest-first among threads with no accepted answer. The
+  // service applies the sort; validated here so an unknown value is rejected up
+  // front.
   @IsOptional()
   @IsIn(['new', 'top', 'active', 'unanswered'])
   sort?: 'new' | 'top' | 'active' | 'unanswered';
@@ -31,7 +34,9 @@ export class ListThreadsQuery {
   @IsString()
   tag?: string;
 
-  // Free-text search over the thread title (ILIKE), folded into the list query.
+  // Free-text search (ILIKE) over the thread title OR the body of any visible
+  // post in the thread, folded into the list query. See
+  // `ForumThreadsService.applyTextAndTagFilters`.
   @IsOptional()
   @IsString()
   q?: string;

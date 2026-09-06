@@ -106,11 +106,19 @@ export class ForumThread {
   // Denormalized copy of the OP post's `voteCount`, kept in sync by
   // `ForumPostsService.vote` when the voted post `is_op`. Lets the thread-list
   // card render upvotes and the `top` sort order threads without joining
-  // `forum_post` per row. Migration-owned keyset index
-  // `IDX_forum_thread_op_vote_count_id` (`op_vote_count DESC, id DESC`) backs
-  // that sort — the `id` tie-break is DESC (same direction as the leading
-  // column) so it matches `cursorPaginate`'s ORDER BY; a full DESC composite,
-  // so migration-only, not an `@Index` decorator.
+  // `forum_post` per row.
+  //
+  // The `top` sort's backing index is the migration-owned
+  // `IDX_forum_thread_top_keyset` (`op_vote_count DESC, last_activity_at DESC,
+  // id DESC`, `WHERE deleted_at IS NULL`), built by
+  // `AddForumThreadTopKeysetAndReplySearch`. All three columns descend, matching
+  // the ORDER BY `ForumThreadsService.paginateTop` emits, and the middle column
+  // is what stops a forum full of zero-vote threads from coming back in uuid
+  // order: `op_vote_count DESC, id DESC` alone (the older
+  // `IDX_forum_thread_op_vote_count_id`) tie-broke on a random uuid, so on a
+  // young forum the landing page was a shuffle that never changed as people
+  // posted (PRD-161). A full DESC composite with a partial predicate is not
+  // expressible as an `@Index` decorator, so it lives in the migration.
   @Column({ type: 'int', default: 0 })
   opVoteCount!: number;
 
@@ -142,4 +150,38 @@ export class ForumThread {
   // `common/cursor-pagination.ts`.
   @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt!: Date;
+
+  // Thread-level soft delete (PRD-160).
+  //
+  // Deliberately NOT the same thing as the opening post's own tombstone
+  // (`ForumPost.deletedAt`). Deleting the OP used to leave the THREAD standing:
+  // a member who withdrew a housing ask or a health question they regretted
+  // still had its full title on /forum, in every member's feed and behind a
+  // live link, with only the body blanked. Withdrawing the question has to
+  // withdraw the question. A stamped `deleted_at` takes the whole thread out of
+  // every browse, count, pinned bucket, search and detail read, for everyone
+  // except platform staff, who keep seeing it so a report filed against it
+  // stays actionable and an appeal has something to look at.
+  //
+  // Soft, never a row delete: the replies underneath are other people's words
+  // and stay intact (`ForumThreadsService.deleteThread` touches only the OP),
+  // and moderation history that points at this thread must not dangle.
+  //
+  // Every member-facing browse path carries `deleted_at IS NULL`, so the ONE
+  // new keyset index this release adds (`IDX_forum_thread_top_keyset`) is
+  // partial on that predicate: it then covers exactly the rows the sort can
+  // return, and shrinks rather than grows as threads are withdrawn. The
+  // pre-existing `created_at`/`last_activity_at` keyset indexes are left whole
+  // — they already serve their ORDER BY and there is no measurement saying the
+  // extra filter step costs anything worth an index rebuild.
+  @Column({ type: 'timestamptz', nullable: true })
+  deletedAt!: Date | null;
+
+  // WHO deleted the thread: its own author withdrawing it, or the platform
+  // moderator who took it down. The same split `ForumPost.deletedById` records
+  // and for the same reason (see `AddContentTombstoneActor`): "the author
+  // withdrew this" and "staff removed this" are different facts, and an appeal
+  // has to be able to tell them apart. NULL means the thread is not deleted.
+  @Column({ type: 'uuid', nullable: true })
+  deletedById!: string | null;
 }

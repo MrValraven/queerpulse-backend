@@ -153,14 +153,19 @@ const EXPECTED: Record<
     tier: UserRole.Admin,
     capabilities: [],
   },
+  [AdminQueueKey.GuideReviews]: {
+    route: '/admin/resource-guides',
+    tier: UserRole.Admin,
+    capabilities: ['resource_curator'],
+  },
 };
 
 describe('ADMIN_QUEUE_REGISTRY', () => {
   it('covers every key exactly once', () => {
-    // 27 as of RoadmapIdeas. The frontend mirror at adminQueueRoutes.ts
-    // carries the same 27 keys, and the two sides have to agree.
-    expect(ADMIN_QUEUE_KEYS).toHaveLength(27);
-    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(27);
+    // 28 as of GuideReviews. The frontend mirror at adminQueueRoutes.ts
+    // carries the same 28 keys, and the two sides have to agree.
+    expect(ADMIN_QUEUE_KEYS).toHaveLength(28);
+    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(28);
     expect(Object.keys(ADMIN_QUEUE_REGISTRY).sort()).toEqual(
       [...ADMIN_QUEUE_KEYS].sort(),
     );

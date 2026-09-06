@@ -37,6 +37,14 @@ const INTAKE_REVIEW_WINDOW_MS: Record<IntakeKind, number> = {
   culture_post_project: 14 * DAY_MS,
   culture_submit_work: 14 * DAY_MS,
   culture_submit_playlist: 14 * DAY_MS,
+  // PRD-249. Seven days, the same tier as the two calendar signups above and
+  // for a comparable reason: somebody is waiting on a clock they did not set.
+  // A named third party has been publicly rated by members of a platform they
+  // have no account on, and this form is the only way they can answer. Two
+  // weeks of silence while that rating stands is the wrong answer, and three
+  // days is a promise the queue cannot keep, because a human has to establish
+  // that the person writing is the person named before a word is published.
+  landlord_reply_request: 7 * DAY_MS,
 };
 
 /** The due date for a submission of `kind` received at `from`. */

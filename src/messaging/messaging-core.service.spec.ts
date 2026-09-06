@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, Repository } from 'typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
@@ -7,7 +7,11 @@ import { UsersService } from '../users/users.service';
 import { Conversation } from './entities/conversation.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
-import { GifAttachment, Message } from './entities/message.entity';
+import {
+  DocumentAttachment,
+  GifAttachment,
+  Message,
+} from './entities/message.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { MessagingCoreService } from './messaging-core.service';
@@ -29,12 +33,26 @@ const FOREIGN_KEY = `message-images/${OTHER_UPLOADER}/${ASSET_UUID}.jpg`;
 // A key the sender genuinely uploaded (embedded owner id === sender).
 const OWN_KEY = `message-images/${SENDER}/${ASSET_UUID}.jpg`;
 
+// PRD-226: the document twins of the two image keys above.
+const FOREIGN_DOCUMENT_KEY = `message-documents/${OTHER_UPLOADER}/${ASSET_UUID}.pdf`;
+const OWN_DOCUMENT_KEY = `message-documents/${SENDER}/${ASSET_UUID}.pdf`;
+
 function imageAttachment(key: string): GifAttachment {
   return {
     url: key,
     previewUrl: key,
     width: 10,
     height: 10,
+    provider: 'upload',
+  };
+}
+
+function documentAttachment(key: string): DocumentAttachment {
+  return {
+    url: key,
+    fileName: 'lease.pdf',
+    byteSize: 1024,
+    contentType: 'application/pdf',
     provider: 'upload',
   };
 }
@@ -152,5 +170,104 @@ describe('MessagingCoreService.postMessage — image attachment ownership (M8)',
     // Owner match short-circuits before any accessible-forward query runs.
     expect(messages.createQueryBuilder).not.toHaveBeenCalled();
     expect(buildPostResult).toHaveBeenCalledTimes(1);
+  });
+});
+
+// PRD-226: a document attachment goes through the IDENTICAL ownership/forward
+// rule as an image (see `MessagingCoreService.postMessage`'s `document`
+// branch) — mirrors the image suite above against `MessageKind.Document`.
+describe('MessagingCoreService.postMessage — document attachment ownership (PRD-226)', () => {
+  it('rejects a foreign document attachment when forwarded:true but no accessible source exists', async () => {
+    const { service, buildPostResult } = build(0);
+
+    await expect(
+      service.postMessage(
+        'conversation-1',
+        SENDER,
+        'here you go',
+        undefined,
+        undefined,
+        true, // client asserts forwarded — must NOT be trusted
+        'document',
+        documentAttachment(FOREIGN_DOCUMENT_KEY),
+      ),
+    ).rejects.toThrow(ForbiddenException);
+    expect(buildPostResult).not.toHaveBeenCalled();
+  });
+
+  it('allows a foreign document attachment ONLY when an accessible source message proves genuine access', async () => {
+    const { service, getCount, buildPostResult } = build(1);
+
+    await service.postMessage(
+      'conversation-1',
+      SENDER,
+      'forwarding this',
+      undefined,
+      undefined,
+      false,
+      'document',
+      documentAttachment(FOREIGN_DOCUMENT_KEY),
+    );
+
+    expect(getCount).toHaveBeenCalledTimes(1);
+    expect(buildPostResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the forward lookup entirely for the sender's own upload", async () => {
+    const { service, messages, buildPostResult } = build(0);
+
+    await service.postMessage(
+      'conversation-1',
+      SENDER,
+      'my own lease',
+      undefined,
+      undefined,
+      false,
+      'document',
+      documentAttachment(OWN_DOCUMENT_KEY),
+    );
+
+    expect(messages.createQueryBuilder).not.toHaveBeenCalled();
+    expect(buildPostResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a document attachment missing fileName/byteSize/contentType', async () => {
+    const { service, buildPostResult } = build(0);
+
+    await expect(
+      service.postMessage(
+        'conversation-1',
+        SENDER,
+        'my own lease',
+        undefined,
+        undefined,
+        false,
+        'document',
+        { url: OWN_DOCUMENT_KEY, provider: 'upload' } as never,
+      ),
+    ).rejects.toThrow(BadRequestException);
+    expect(buildPostResult).not.toHaveBeenCalled();
+  });
+
+  it('rejects a document attachment whose byteSize exceeds the message-document cap', async () => {
+    const { service, buildPostResult } = build(0);
+    const oversized = {
+      ...documentAttachment(OWN_DOCUMENT_KEY),
+      byteSize: 21 * 1024 * 1024, // over the 20 MB message-document cap
+    };
+
+    await expect(
+      service.postMessage(
+        'conversation-1',
+        SENDER,
+        'my own lease',
+        undefined,
+        undefined,
+        false,
+        'document',
+        oversized,
+      ),
+    ).rejects.toThrow(BadRequestException);
+    expect(buildPostResult).not.toHaveBeenCalled();
   });
 });

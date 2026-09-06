@@ -14,8 +14,10 @@ import {
 import {
   DraftCategory,
   DraftKindVariant,
+  DraftMeta,
   DraftStatus,
 } from '../entities/draft.entity';
+import { IsDraftMeta } from './is-draft-meta.decorator';
 
 export class CreateDraftDto {
   // Caller-supplied opaque id (see `Draft` entity doc) — not a uuid.
@@ -76,4 +78,23 @@ export class CreateDraftDto {
   @IsOptional() @IsString() @MaxLength(500) sortTitle?: string;
 
   @IsOptional() @IsString() @MaxLength(4000) searchText?: string;
+
+  /**
+   * Composer state (see `DraftMeta`): the fields a surface needs to reopen
+   * exactly where the member left it, which none of the columns above carry.
+   *
+   * PRD-165: the forum's new-thread composer had nowhere to put the category,
+   * community, tags and photo the member had already chosen, so it kept them in
+   * `localStorage` and a post started on a phone came back on a laptop with all
+   * four silently gone. `/me/drafts` is a server feature; a member is entitled
+   * to expect their draft to follow them.
+   *
+   * `null` explicitly clears the bag; `undefined` means "not sent" and leaves
+   * the stored one alone. Same convention as `deadlineDays`.
+   *
+   * Bounded by `@IsDraftMeta`, which caps the serialized size, the key count and
+   * every key and value. An unbounded JSON column written on a typing debounce
+   * is a storage-abuse vector, and this route is open to every active member.
+   */
+  @IsOptional() @IsDraftMeta() meta?: DraftMeta | null;
 }

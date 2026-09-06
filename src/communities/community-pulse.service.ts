@@ -37,6 +37,16 @@ function isSchemaNotReadyError(error: unknown): boolean {
  * each feature module's own new `listUpcomingByCommunity`/
  * `listRecentByCommunity`/`listOpenByCommunity` method in parallel and
  * combines the results.
+ *
+ * ROSTER MEMBERS ONLY, and it stays that way. Two of the three lanes here are
+ * member-only material (discussion threads, and the community's own
+ * volunteering board), so a non-member's safety must not come down to a flag
+ * this method is passed. A signed-in member looking at a community they have
+ * not joined reads its gatherings from `GET
+ * /communities/:slug/upcoming-gatherings`
+ * (`CommunityPublicService.listUpcomingGatherings`, PRD-145) instead: a
+ * separate response type with only gatherings on it, so there is no field for
+ * a post to travel in. Do not relax the gate below to serve that case.
  */
 @Injectable()
 export class CommunityPulseService {
@@ -66,8 +76,13 @@ export class CommunityPulseService {
     const [upcomingEvents, recentThreads, openOpportunities] =
       await Promise.all([
         this.safeList('upcomingEvents', () =>
+          // The caller's own id, so the events lane can audience-gate what it
+          // returns. It used to be omitted, and the lane skipped the gate
+          // entirely as a result: a plain roster member saw the community's
+          // invite_only / network / extended_network gatherings.
           this.eventsService.listUpcomingByCommunity(
             communityId,
+            userId,
             DEFAULT_LANE_LIMIT,
           ),
         ),

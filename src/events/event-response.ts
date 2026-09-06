@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Paginated } from '../common/pagination';
 import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
@@ -126,7 +127,25 @@ export function toEventSeriesView(
 
 export interface EventDetail extends EventSummary {
   description: string;
+  /**
+   * The video link for an online gathering — the online equivalent of
+   * `address`, and gated identically (PRD-182).
+   *
+   * `null` for anyone who is not an organiser or a confirmed 'going' attendee,
+   * exactly as the street address is. It used to be sent to every reader of
+   * the detail, which would have published a Zoom/Meet link on a public page
+   * the moment the frontend started rendering it — the same "a house party has
+   * to be listable without its door being public" rule, applied to the door
+   * that happens to be a URL.
+   */
   onlineUrl: string | null;
+  /**
+   * When the gathering was last edited. Organiser-facing: the manage
+   * dashboard's "last edited N days ago" line used to be computed from a MOCK
+   * constant (`LAST_EDITED_AT`), so every real host read a fabricated edit age
+   * that never moved when they edited (PRD-191).
+   */
+  updatedAt: Date;
   // The event's own community slug (or null) — resolved from `communityId`
   // via one extra lookup in `EventsService.buildDetail` (a single-event
   // fetch, not a hot list query), so the edit UI can offer the `community`
@@ -331,7 +350,13 @@ export function toEventBanView(
     slug: profile?.slug ?? '',
     firstName: profile?.firstName ?? '',
     lastName: profile?.lastName ?? '',
-    avatarUrl: toImageUrl(profile?.avatarUrl),
+    // Organiser-only is not the same as consented. A member barred from a
+    // gathering never agreed to have their face shown to the host who barred
+    // them, and this is the list where the subject is least likely to want it.
+    // The name is what identifies a person on a door list, so gating the photo
+    // costs the organiser nothing. ENG-152, extended to this mapper at the
+    // request of the gatherings owner.
+    avatarUrl: toVisibleAvatarUrl(profile),
     reason: ban.reason,
     createdAt: ban.createdAt,
   };
@@ -460,6 +485,12 @@ export function toLineupEntryView(
   return {
     slug: profile.slug,
     name: `${profile.firstName} ${profile.lastName}`.trim(),
+    // Deliberately OUTSIDE the `photoVisible` gate, unlike every other mapper
+    // in this file. The lineup is a published performance credit under a stage
+    // identity, and `photoVisible` answers a different question: whether
+    // strangers see this member's face on their member profile. Gating here
+    // would silently strip artwork from a credit the artist chose to publish.
+    // Decided with the gatherings owner alongside ENG-152.
     avatarUrl: toImageUrl(profile.avatarUrl),
     role: entry.role,
   };
@@ -473,7 +504,11 @@ export function toOrganizerView(
     slug: profile.slug,
     firstName: profile.firstName,
     lastName: profile.lastName,
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    // `common/member-ref.ts` already names "an event host" as a face the
+    // `photoVisible` gate exists to withhold, and the feed honours it for
+    // gathering actors through `toMemberRef`. This mapper is the one that
+    // reaches the event card and detail header, so it has to agree.
+    avatarUrl: toVisibleAvatarUrl(profile),
   };
 }
 
@@ -542,7 +577,13 @@ export function toAttendeeView(
     slug: profile?.slug ?? '',
     firstName: profile?.firstName ?? '',
     lastName: profile?.lastName ?? '',
-    avatarUrl: toImageUrl(profile?.avatarUrl),
+    // The attendee's `photoVisible` switch, through the one shared spelling.
+    // It applies at every `forOrganizer` level: whether the host may see the
+    // roster at all is already settled upstream by `event.showAttendeeCount`
+    // in `EventsService.attendees`, and this is the separate question of
+    // whether a member who hid their face still has it rendered to whoever is
+    // entitled to the list. Attending a gathering is not republishing a photo.
+    avatarUrl: toVisibleAvatarUrl(profile),
     status: rsvp.status,
     waitlistPosition: rsvp.waitlistPosition,
     checkedInAt: forOrganizer ? rsvp.checkedInAt : null,

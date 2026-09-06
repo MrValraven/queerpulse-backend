@@ -49,6 +49,10 @@ export class DraftsService {
       userId,
       kind: dto.kind,
       payload: toPayload(dto),
+      // Composer state (PRD-165). Normalised to `null` rather than left
+      // `undefined` so the entity the DTO is built from below already carries
+      // what the row will hold.
+      meta: dto.meta ?? null,
       // Set explicitly rather than left to the column default, so the returned
       // DTO carries the base version the client will send back on its first
       // patch instead of `undefined`.
@@ -99,6 +103,12 @@ export class DraftsService {
 
     const nextKind = dto.kind !== undefined ? dto.kind : draft.kind;
     const nextPayload = mergePayload(draft.payload, dto);
+    // `meta` replaces WHOLESALE, unlike the payload, which merges field by
+    // field. It is one composer's private bag, and a per-key merge would keep
+    // resurrecting the tag the member just removed. `undefined` still means
+    // "not sent" (a client saving only the body leaves the bag alone) and an
+    // explicit `null` clears it.
+    const nextMeta = dto.meta !== undefined ? dto.meta : draft.meta;
 
     const saved = await this.dataSource.transaction(async (manager) => {
       const draftRepository = manager.getRepository(Draft);
@@ -109,6 +119,7 @@ export class DraftsService {
       if (claim.affected === 0) return null;
       draft.kind = nextKind;
       draft.payload = nextPayload;
+      draft.meta = nextMeta;
       draft.version = baseVersion + 1;
       return await draftRepository.save(draft);
     });

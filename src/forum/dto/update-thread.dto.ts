@@ -3,15 +3,14 @@ import {
   IsArray,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
 
-// `PATCH /forum/threads/:slug` body — `editThreadTitle(slug, title)` plus an
-// optional `tags` replacement. Deliberately has no `category` field: a thread's
-// category is fixed at create time, so the reserved-`"all"` guard lives on
-// `CreateThreadDto` (the only path that sets a category) and there is nothing to
-// re-validate here.
+// `PATCH /forum/threads/:slug` body — an optional `title`, `tags` replacement
+// and `category` move, each carrying its own permission in the service (see
+// `ForumThreadsService.updateThread`).
 export class UpdateThreadDto {
   // Optional since SOC-13: the tag editor patches `{ tags }` alone, and a
   // moderator filing someone else's thread must not have to resend (and so
@@ -32,4 +31,24 @@ export class UpdateThreadDto {
   @IsString({ each: true })
   @MaxLength(24, { each: true })
   tags?: string[];
+
+  // Move the thread to another category (C8/PRD-163). A thread's category used
+  // to be fixed at creation with nothing able to change it, so a trans-health
+  // question filed under "General" stayed invisible to everyone filtering for
+  // it and the only remedy was to delete and repost, losing the replies.
+  //
+  // Validated with EXACTLY the rules `CreateThreadDto.category` carries, since
+  // this is now the second path that can set the column and a rule enforced on
+  // only one of them is not enforced. `"all"` stays reserved for the same reason
+  // it is there: `ThreadCategoryCounts` is a flat `{ all, ...perCategory }` map,
+  // so a category literally named `all` would overwrite the total.
+  //
+  // WHO may send it is the service's call, not the DTO's: the author within the
+  // thread's first 24 hours, a moderator at any time.
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(50)
+  @Matches(/^(?!all$).+/i, { message: '"all" is a reserved category' })
+  category?: string;
 }

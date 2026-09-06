@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, IsNull, QueryFailedError } from 'typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Vouch } from './entities/vouch.entity';
@@ -27,7 +28,15 @@ describe('VouchService', () => {
     find: jest.Mock;
     count: jest.Mock;
     update: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
+  // The builder every "vouches this member has RECEIVED" read now goes
+  // through (`activeVouchesReceivedBy`): withdrawn rows and block-severed rows
+  // are both excluded in SQL, so the count and the roster can never disagree.
+  let vouchesQuery: Record<string, jest.Mock>;
+  let activeVouchesCount: number;
+  let activeVouchesPage: unknown[];
+  let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
   let profiles: {
     findOne: jest.Mock;
     find: jest.Mock;
@@ -50,11 +59,34 @@ describe('VouchService', () => {
   let vouchesGivenToday: number;
 
   beforeEach(async () => {
+    activeVouchesCount = 0;
+    activeVouchesPage = [];
+    vouchesQuery = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      offset: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      getCount: jest.fn(() => Promise.resolve(activeVouchesCount)),
+      getMany: jest.fn(() => Promise.resolve(activeVouchesPage)),
+      getRawMany: jest.fn(() => Promise.resolve([])),
+    };
     vouches = {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(0),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      createQueryBuilder: jest.fn(() => vouchesQuery),
+    };
+    blockFilter = {
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      // Mirrors the real signature: it appends a predicate and hands the
+      // builder back for chaining.
+      excludeBlocked: jest.fn((query: unknown) => query),
     };
     profiles = {
       findOne: jest.fn(),
@@ -107,6 +139,7 @@ describe('VouchService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(VouchService);
@@ -125,6 +158,19 @@ describe('VouchService', () => {
       await expect(service.createVouch('u1', 'me')).rejects.toBeInstanceOf(
         BadRequestException,
       );
+    });
+
+    it('403s when a block runs either way between the two members', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+      await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('u1', 'u2');
+      // Refused before any write, so no row, no counter bump, no notification.
+      expect(manager.insert).not.toHaveBeenCalled();
+      expect(manager.increment).not.toHaveBeenCalled();
+      expect(emitter.emit).not.toHaveBeenCalled();
     });
 
     it('rejects a duplicate vouch found by the pre-check', async () => {
@@ -395,29 +441,36 @@ describe('VouchService', () => {
     });
   });
 
-  describe('listVouchers excludes withdrawn', () => {
+  describe('listVouchers excludes withdrawn and block-severed rows', () => {
     it('filters count and rows by withdrawnAt IS NULL', async () => {
       profiles.findOne.mockResolvedValue({
         userId: 'u2',
         slug: 'target',
         vouchersVisible: true,
       });
-      vouches.count.mockResolvedValue(0);
-      vouches.find.mockResolvedValue([]);
       await service.listVouchers('target');
-      expect(vouches.count).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            withdrawnAt: expect.anything() as unknown,
-          }) as unknown,
-        }),
+      expect(vouchesQuery.andWhere).toHaveBeenCalledWith(
+        'v.withdrawnAt IS NULL',
       );
-      expect(vouches.find).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            withdrawnAt: expect.anything() as unknown,
-          }) as unknown,
-        }),
+      expect(vouchesQuery.getCount).toHaveBeenCalled();
+      expect(vouchesQuery.getMany).toHaveBeenCalled();
+    });
+
+    it('applies the block severance to the count AND the roster, target-relative', async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'target',
+        vouchersVisible: true,
+      });
+      await service.listVouchers('target', undefined, 'some-other-viewer');
+      // Two builders (the count and the page), each severed against the
+      // TARGET, never the viewer — a block is mutual, so the vouch stops
+      // existing for everyone rather than being hidden from one side.
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledTimes(2);
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        vouchesQuery,
+        'u2',
+        '"v"."voucher_id"',
       );
     });
   });
@@ -436,17 +489,22 @@ describe('VouchService', () => {
         slug: 'them',
         vouchersVisible: true,
       });
-      vouches.count.mockResolvedValue(42);
-      vouches.find.mockResolvedValue([
+      activeVouchesCount = 42;
+      activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
-      ]);
+      ];
       profiles.find.mockResolvedValue([
-        { userId: 'v1', slug: 'val', firstName: 'Val', lastName: 'Reis' },
+        {
+          userId: 'v1',
+          slug: 'val',
+          firstName: 'Val',
+          lastName: 'Reis',
+          photoVisible: true,
+        },
       ]);
       const res = await service.listVouchers('them', { limit: 10, offset: 5 });
-      expect(vouches.find).toHaveBeenCalledWith(
-        expect.objectContaining({ take: 10, skip: 5 }),
-      );
+      expect(vouchesQuery.offset).toHaveBeenCalledWith(5);
+      expect(vouchesQuery.limit).toHaveBeenCalledWith(10);
       expect(res.count).toBe(42); // total, not page length
       expect(res.vouchers).toEqual([
         {
@@ -462,21 +520,48 @@ describe('VouchService', () => {
       ]);
     });
 
+    it("honours the voucher's own photoVisible toggle", async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: true,
+      });
+      activeVouchesCount = 1;
+      activeVouchesPage = [
+        { voucherId: 'v1', note: null, createdAt: new Date('2026-01-01') },
+      ];
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'v1',
+          slug: 'val',
+          firstName: 'Val',
+          lastName: 'Reis',
+          avatarUrl: 'uploads/val.jpg',
+          photoVisible: false,
+        },
+      ]);
+      const res = await service.listVouchers('them');
+      // The name still identifies the voucher (that is what a named vouch is);
+      // the face is the thing they turned off.
+      expect(res.vouchers[0]!.slug).toBe('val');
+      expect(res.vouchers[0]!.avatarUrl).toBeNull();
+    });
+
     it('shields anonymous vouchers — no identity leaks, only note/timestamp', async () => {
       profiles.findOne.mockResolvedValue({
         userId: 'u2',
         slug: 'them',
         vouchersVisible: true,
       });
-      vouches.count.mockResolvedValue(1);
-      vouches.find.mockResolvedValue([
+      activeVouchesCount = 1;
+      activeVouchesPage = [
         {
           voucherId: 'secret',
           note: 'quietly in your corner',
           createdAt: new Date('2026-03-03'),
           anonymous: true,
         },
-      ]);
+      ];
       // Even if a profile row exists, an anonymous voucher's identity must not
       // be resolved or emitted.
       profiles.find.mockResolvedValue([
@@ -507,9 +592,8 @@ describe('VouchService', () => {
         vouchersVisible: true,
       });
       await service.listVouchers('them');
-      expect(vouches.find).toHaveBeenCalledWith(
-        expect.objectContaining({ take: 20, skip: 0 }),
-      );
+      expect(vouchesQuery.offset).toHaveBeenCalledWith(0);
+      expect(vouchesQuery.limit).toHaveBeenCalledWith(20);
     });
   });
 
@@ -520,10 +604,10 @@ describe('VouchService', () => {
         slug: 'them',
         vouchersVisible: false,
       });
-      vouches.count.mockResolvedValue(7);
-      vouches.find.mockResolvedValue([
+      activeVouchesCount = 7;
+      activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
-      ]);
+      ];
       const res = await service.listVouchers(
         'them',
         undefined,
@@ -531,7 +615,7 @@ describe('VouchService', () => {
       );
       expect(res).toEqual({ count: 7, vouchers: [] });
       // The gate short-circuits before the page query even runs.
-      expect(vouches.find).not.toHaveBeenCalled();
+      expect(vouchesQuery.getMany).not.toHaveBeenCalled();
     });
 
     it('hides the roster for an unauthenticated/unknown viewer the same way', async () => {
@@ -540,7 +624,7 @@ describe('VouchService', () => {
         slug: 'them',
         vouchersVisible: false,
       });
-      vouches.count.mockResolvedValue(3);
+      activeVouchesCount = 3;
       const res = await service.listVouchers('them');
       expect(res).toEqual({ count: 3, vouchers: [] });
     });
@@ -551,12 +635,18 @@ describe('VouchService', () => {
         slug: 'them',
         vouchersVisible: false,
       });
-      vouches.count.mockResolvedValue(1);
-      vouches.find.mockResolvedValue([
+      activeVouchesCount = 1;
+      activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
-      ]);
+      ];
       profiles.find.mockResolvedValue([
-        { userId: 'v1', slug: 'val', firstName: 'Val', lastName: 'Reis' },
+        {
+          userId: 'v1',
+          slug: 'val',
+          firstName: 'Val',
+          lastName: 'Reis',
+          photoVisible: true,
+        },
       ]);
       const res = await service.listVouchers('them', undefined, 'u2');
       expect(res.count).toBe(1);
@@ -570,12 +660,18 @@ describe('VouchService', () => {
         slug: 'them',
         vouchersVisible: true,
       });
-      vouches.count.mockResolvedValue(1);
-      vouches.find.mockResolvedValue([
+      activeVouchesCount = 1;
+      activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
-      ]);
+      ];
       profiles.find.mockResolvedValue([
-        { userId: 'v1', slug: 'val', firstName: 'Val', lastName: 'Reis' },
+        {
+          userId: 'v1',
+          slug: 'val',
+          firstName: 'Val',
+          lastName: 'Reis',
+          photoVisible: true,
+        },
       ]);
       const res = await service.listVouchers(
         'them',

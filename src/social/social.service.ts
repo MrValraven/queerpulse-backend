@@ -138,15 +138,27 @@ export class SocialService {
     // given, doubles as the report's reason so moderators see the same
     // context the blocker gave.
     if (dto?.alsoReport) {
-      // `reasonCode` is now a closed, server-owned taxonomy (see
-      // `.superpowers/sdd/connect-FINAL-review.md` C2/C3) rather than the
-      // free string this used to accept — `other` plus the blocker's free
-      // text (if any) as `detail` preserves the same moderator-visible
-      // context without requiring the blocker to pick from the taxonomy.
+      // PRD-285. `reasonCode` is a closed, server-owned taxonomy (see
+      // `.superpowers/sdd/connect-FINAL-review.md` C2/C3) rather than the free
+      // string this used to accept, and the blocker may now pick from it.
+      //
+      // This used to hard-code `other`, which was the whole defect: `other`
+      // derives the LOW band and a 7-day SLA (`report-severity.ts`), and the
+      // block dialog is the only report path a member profile offers. So a
+      // member blocking someone for outing or doxxing filed the platform's
+      // most urgent kind of report into its slowest queue, with no code the
+      // emergency band or the transparency report could see. Passing the real
+      // code through makes the derived severity and SLA the true ones, because
+      // `ReportsService.create` derives both from exactly this value.
+      //
+      // `other` stays the fallback, so a client that sends nothing files the
+      // report it always filed. The blocker's free text still rides as
+      // `detail` either way, which is where a moderator reads the context the
+      // taxonomy cannot carry.
       await this.reportsService.create(actorId, {
         subjectType: ReportSubjectType.Member,
         subjectId: blockedId,
-        reasonCode: 'other',
+        reasonCode: dto.reasonCode ?? 'other',
         detail: dto.reason ?? 'Filed alongside a block.',
       });
     }

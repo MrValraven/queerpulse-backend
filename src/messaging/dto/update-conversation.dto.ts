@@ -33,6 +33,14 @@ export class UpdateConversationDto {
   @IsBoolean()
   archived?: boolean;
 
+  // Mark/unmark this conversation unread (PRD-225) — a WhatsApp/Telegram/
+  // Signal-style "come back to this" flag, independent of the read
+  // watermark. Re-opening the thread (a genuine `POST .../read`) is the only
+  // thing that clears it back.
+  @IsOptional()
+  @IsBoolean()
+  markUnread?: boolean;
+
   // This caller's own unsent composer text, or "" to clear it. Same cap as a
   // sent message body (`SendMessageDto.body`) — a draft can grow to exactly
   // what it would be allowed to send. Not trimmed: a draft mid-composition may

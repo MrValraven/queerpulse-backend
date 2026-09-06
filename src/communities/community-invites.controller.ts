@@ -1,11 +1,24 @@
-import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiConflictResponse,
   ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
+  ApiOkResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -25,10 +38,15 @@ import { CreateCommunityInvitesDto } from './dto/create-community-invites.dto';
  * nested path, the convention this module follows for `CommunityPulseController`
  * and `CommunityInsightsController`. See that controller's doc comment.
  *
- * One route, owner/co-owner/moderator only, throttled to `10 per 60s`. That
- * is tighter than the `20 per 60s` the post/reply writes carry, because each
- * accepted call already fans out to up to 25 people: the pair of limits is
- * what keeps this from becoming a way to page the member directory.
+ * Sending is owner/co-owner/moderator only and throttled to `10 per 60s`.
+ * That is tighter than the `20 per 60s` the post/reply writes carry, because
+ * each accepted call already fans out to up to 25 people: the pair of limits
+ * is what keeps this from becoming a way to page the member directory.
+ *
+ * The two routes beside it are the same door from the community's side
+ * (PRD-140, PRD-141): reading who is still standing outside with an
+ * invitation open, and withdrawing one. The invitee's own half lives on
+ * `MeCommunityInvitesController`.
  */
 @Feature('communities')
 @ApiTags('Communities')
@@ -67,5 +85,53 @@ export class CommunityInvitesController {
     @Body() dto: CreateCommunityInvitesDto,
   ) {
     return this.communityInvitesService.invite(slug, user.userId, dto);
+  }
+
+  @Get()
+  @ApiOperation({
+    summary:
+      "This community's standing invitations (owner, co-owner or moderator). Pending only.",
+  })
+  @ApiOkResponse({
+    description:
+      'The invitations still waiting for an answer, newest first. An invitee who has since joined by another door is not listed.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Owner, co-owner or moderator role required.',
+  })
+  @ApiNotFoundResponse({
+    description: 'Unknown slug, or an archived community.',
+  })
+  listPending(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communityInvitesService.listPending(slug, user.userId);
+  }
+
+  @Delete(':id')
+  @UseGuards(NotRestrictedGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary:
+      'Withdraw a standing invitation (owner, co-owner or moderator). The invitee is not notified.',
+  })
+  @ApiNoContentResponse({ description: 'The invitation was withdrawn.' })
+  @ApiForbiddenResponse({
+    description: 'Owner, co-owner or moderator role required.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Unknown slug, an archived community, or no such invitation here.',
+  })
+  @ApiConflictResponse({
+    description: 'The invitation has already been answered.',
+  })
+  revoke(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id') id: string,
+  ) {
+    return this.communityInvitesService.revoke(slug, id, user.userId);
   }
 }

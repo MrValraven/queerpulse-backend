@@ -9,6 +9,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { BlockFilterService } from '../social/block-filter.service';
 import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import { VouchService } from '../vouch/vouch.service';
 import { MemberSuggestionDismissal } from './entities/member-suggestion-dismissal.entity';
 import { MemberSuggestionsService } from './member-suggestions.service';
 
@@ -139,6 +140,7 @@ describe('MemberSuggestionsService', () => {
   let blockFilter: { excludeHidden: jest.Mock };
   let hiddenFrom: { excludeHiddenFrom: jest.Mock };
   let contentModeration: { statesForAnyType: jest.Mock };
+  let vouchService: { getVouchCounts: jest.Mock };
   let insertBuilder: InsertBuilderStub;
 
   /** The builder `visibleCandidates` used (the last one profiles handed out). */
@@ -168,6 +170,10 @@ describe('MemberSuggestionsService', () => {
     contentModeration = {
       statesForAnyType: jest.fn().mockResolvedValue(new Map()),
     };
+    // The card's vouch number now comes from here, block-severed, rather than
+    // from the block-blind `profile.vouch_count` column. An empty map is the
+    // real answer for a fixture whose members hold no active vouches.
+    vouchService = { getVouchCounts: jest.fn().mockResolvedValue(new Map()) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -187,6 +193,7 @@ describe('MemberSuggestionsService', () => {
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: HiddenFromService, useValue: hiddenFrom },
         { provide: ContentModerationService, useValue: contentModeration },
+        { provide: VouchService, useValue: vouchService },
       ],
     }).compile();
     service = module.get(MemberSuggestionsService);

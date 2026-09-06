@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -14,6 +15,8 @@ import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   HousingListing,
   HousingListingStatus,
@@ -50,6 +53,8 @@ import {
  */
 @Injectable()
 export class HousingViewingsService {
+  private readonly logger = new Logger(HousingViewingsService.name);
+
   constructor(
     @InjectRepository(HousingViewing)
     private readonly viewings: Repository<HousingViewing>,
@@ -60,6 +65,11 @@ export class HousingViewingsService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly verification: VerificationService,
     private readonly affirmingPledge: AffirmingPledgeService,
+    // PRD-240. The whole viewing lifecycle was silent before this: no bell for
+    // the lister when a request arrived, and none for the requester when they
+    // were accepted (which is also the moment the exact address unlocks, see
+    // `hasUnlockedViewing`).
+    private readonly notifications: NotificationsService,
   ) {}
 
   async request(
@@ -164,7 +174,16 @@ export class HousingViewingsService {
         responseNote: null,
       }),
     );
-    return this.buildOne(saved, requesterId);
+    const view = await this.buildOne(saved, requesterId);
+    // PRD-240. Tell the lister somebody wants to see the home. The listing row
+    // is already in hand, so its slug and title cost no extra query.
+    await this.notify(
+      listing.ownerId,
+      requesterId,
+      NotificationType.HousingViewingRequested,
+      { viewingId: saved.id, slug: listing.slug, title: listing.title },
+    );
+    return view;
   }
 
   /** Every viewing the caller is part of, either side, newest first. */
@@ -213,7 +232,12 @@ export class HousingViewingsService {
     await this.assertSlotFree(viewing, acceptedSlot);
     viewing.status = HousingViewingStatus.Accepted;
     viewing.acceptedSlot = acceptedSlot;
-    return this.saveAndBuild(viewing, userId);
+    const view = await this.saveAndBuild(viewing, userId);
+    // PRD-240. The single most important row of the five: acceptance is also
+    // the moment the exact address unlocks for the requester
+    // (`hasUnlockedViewing`), so without this they never learn to go and look.
+    await this.notifyDecision(viewing, userId, view, 'accepted');
+    return view;
   }
 
   async propose(
@@ -232,7 +256,13 @@ export class HousingViewingsService {
     viewing.proposedSlots = this.normalizeSlots(dto.slots);
     viewing.proposedBy = role;
     viewing.responseNote = dto.note ?? null;
-    return this.saveAndBuild(viewing, userId);
+    const view = await this.saveAndBuild(viewing, userId);
+    // PRD-240. A counter-proposal is a decision with `decision: 'proposed'`.
+    // Either side can make one (the guard above only forbids proposing twice in
+    // a row), so the recipient is computed from the caller rather than assumed
+    // to be the requester.
+    await this.notifyDecision(viewing, userId, view, 'proposed');
+    return view;
   }
 
   async decline(
@@ -251,7 +281,12 @@ export class HousingViewingsService {
     }
     viewing.status = HousingViewingStatus.Declined;
     viewing.responseNote = dto.note ?? null;
-    return this.saveAndBuild(viewing, userId);
+    const view = await this.saveAndBuild(viewing, userId);
+    // PRD-240. Usually the lister turning down the original request, but a
+    // requester can also decline the lister's counter-proposal, so the
+    // recipient is the party who did NOT decline.
+    await this.notifyDecision(viewing, userId, view, 'declined');
+    return view;
   }
 
   /** Either participant may cancel while still pending. */
@@ -259,7 +294,21 @@ export class HousingViewingsService {
     const viewing = await this.loadParticipant(id, userId);
     this.assertPending(viewing);
     viewing.status = HousingViewingStatus.Cancelled;
-    return this.saveAndBuild(viewing, userId);
+    const view = await this.saveAndBuild(viewing, userId);
+    // PRD-240. Either side may cancel, so the recipient is whichever
+    // participant did not. Somebody is otherwise about to keep a slot free, or
+    // travel, for a viewing that is no longer happening.
+    await this.notify(
+      this.counterpartyOf(viewing, userId),
+      userId,
+      NotificationType.HousingViewingCancelled,
+      {
+        viewingId: viewing.id,
+        slug: view.listingSlug,
+        title: view.listingTitle,
+      },
+    );
+    return view;
   }
 
   /** Mark an accepted viewing as having happened — the real recorded
@@ -289,6 +338,10 @@ export class HousingViewingsService {
       );
     }
     viewing.status = HousingViewingStatus.Completed;
+    // PRD-240 deliberately emits NOTHING here, and it is the only transition
+    // that does not. Completion can only be ticked once the agreed slot has
+    // passed, so both people were already there: a bell saying "the viewing
+    // happened" tells its recipient something they know better than the sender.
     return this.saveAndBuild(viewing, userId);
   }
 
@@ -419,6 +472,80 @@ export class HousingViewingsService {
     return viewing.requesterId === userId
       ? HousingViewingParty.Requester
       : HousingViewingParty.Lister;
+  }
+
+  /** The participant on this viewing who is NOT `actorId`. Every viewing bell
+   * goes to them, because the actor already knows what they just did. */
+  private counterpartyOf(viewing: HousingViewing, actorId: string): string {
+    return viewing.requesterId === actorId
+      ? viewing.listerId
+      : viewing.requesterId;
+  }
+
+  /**
+   * PRD-240. One `HousingViewingDecided` row for accept, propose and decline,
+   * discriminated by `decision` (the frontend branches its copy on it).
+   *
+   * The recipient is the counterparty rather than a fixed side. All three
+   * transitions are symmetric in the state machine: the guard on each is
+   * `viewing.proposedBy === role`, so the acting party is always whoever did
+   * not make the proposal on the table. That is the lister on the first pass,
+   * and the REQUESTER once the lister has counter-proposed. Hard-coding the
+   * requester as the recipient would send a lister's own accept back to them
+   * and leave the other side silent, which is the bug this row exists to fix.
+   */
+  private async notifyDecision(
+    viewing: HousingViewing,
+    actorId: string,
+    view: HousingViewingDTO,
+    decision: 'accepted' | 'declined' | 'proposed',
+  ): Promise<void> {
+    await this.notify(
+      this.counterpartyOf(viewing, actorId),
+      actorId,
+      NotificationType.HousingViewingDecided,
+      {
+        viewingId: viewing.id,
+        slug: view.listingSlug,
+        title: view.listingTitle,
+        decision,
+      },
+    );
+  }
+
+  /**
+   * Best-effort delivery of one viewing notification. The domain write is
+   * already committed by the time this runs, so a notification failure must
+   * never turn a completed transition into a 500 the member retries into a
+   * second one.
+   *
+   * `actorId` is passed as well as being implied by the payload allowlist's
+   * `actorId` key map: it is the block/mute gate, so a member who blocked their
+   * counterparty is not reached by the row.
+   */
+  private async notify(
+    recipientId: string | null,
+    actorId: string,
+    type: NotificationType,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    // Defensive: both participant columns are NOT NULL today, but an erasure
+    // sweep that starts setting them null must skip rather than throw.
+    if (!recipientId) return;
+    try {
+      await this.notifications.create(
+        recipientId,
+        type,
+        { source: 'housing', ...payload },
+        actorId,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Housing viewing notification ${type} failed for ${String(
+          payload.viewingId,
+        )}: ${String(error)}`,
+      );
+    }
   }
 
   private async saveAndBuild(

@@ -4,6 +4,12 @@ import { In, IsNull, Not, Repository } from 'typeorm';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { toImageUrl } from '../common/image-url';
 import {
+  Report,
+  ReportStatus,
+  ReportSubjectType,
+} from '../reports/entities/report.entity';
+import { isCommunityStaffRole } from './community-staff-access';
+import {
   CommunityDigestEntry,
   CommunityDigestExcerpt,
   CommunityDigestResponse,
@@ -11,6 +17,10 @@ import {
   DIGEST_EXCERPT_LENGTH,
   DIGEST_WINDOW_DAYS,
 } from './community-digest-response';
+import {
+  CommunityJoinRequest,
+  JoinRequestStatus,
+} from './entities/community-join-request.entity';
 import {
   CommunityMember,
   CommunityNotificationLevel,
@@ -39,13 +49,15 @@ interface ExcerptRow {
  *
  * The whole point of this service is that it is BATCHED. A member of eight
  * communities costs the same number of round trips as a member of one: the
- * roster read resolves every membership, and each of the four lanes (new
- * posts, new members, upcoming gatherings, representative excerpts) is a
- * single query over the whole id set, grouped or window-partitioned in
- * Postgres. Nothing in here loops over communities to query.
+ * roster read resolves every membership, and each of the six lanes (new posts,
+ * new members, upcoming gatherings, representative excerpts, pending join
+ * requests, open reports) is a single query over the whole id set, grouped or
+ * window-partitioned in Postgres. Nothing in here loops over communities to
+ * query.
  *
- * Query budget, fixed at six regardless of how many communities the caller
- * belongs to:
+ * Query budget, fixed regardless of how many communities the caller belongs
+ * to. Six for a caller who moderates none of them, eight for a caller who
+ * moderates any number of them:
  *   1. the caller's roster rows (not muted)
  *   2. the communities themselves, by id
  *   3. new posts per community, GROUP BY community_id
@@ -53,6 +65,14 @@ interface ExcerptRow {
  *   5. upcoming gatherings per community, GROUP BY community_id
  *   6. up to `DIGEST_EXCERPTS_PER_COMMUNITY` posts per community, via one
  *      ROW_NUMBER() window partitioned by community_id
+ *   7. pending join requests per community, GROUP BY community_id, over the
+ *      MODERATED subset of the ids only (skipped entirely when that subset is
+ *      empty, which is the common case)
+ *   8. open reports per community, GROUP BY community_id, over that same
+ *      moderated subset (skipped the same way)
+ *
+ * Lanes 7 and 8 carry moderation state, so they are gated on the caller's own
+ * roster role: see `staffCommunityIds` in `getDigest`.
  *
  * A standalone service (and its own controller) rather than a method on
  * `CommunitiesService`, following this module's convention: see
@@ -69,6 +89,15 @@ export class CommunityDigestService {
     private readonly posts: Repository<CommunityPost>,
     @InjectRepository(Event)
     private readonly events: Repository<Event>,
+    // Read-only, for the pending-join-request lane. Registered once in
+    // `CommunitiesModule`'s `forFeature`, shared with `CommunitiesService`.
+    @InjectRepository(CommunityJoinRequest)
+    private readonly joinRequests: Repository<CommunityJoinRequest>,
+    // Read-only, for the open-report lane. Same cross-module `forFeature`
+    // reuse `CommunityAutoFreezeService` and `CommunityPostsService` already
+    // have on this entity inside this module.
+    @InjectRepository(Report)
+    private readonly reports: Repository<Report>,
   ) {}
 
   async getDigest(userId: string): Promise<CommunityDigestResponse> {
@@ -103,30 +132,67 @@ export class CommunityDigestService {
     }
     const liveIds = communities.map((community) => community.id);
 
-    const [newPostRows, newMemberRows, upcomingGatheringRows, excerptRows] =
-      await Promise.all([
-        this.countNewPosts(liveIds, since),
-        this.countNewMembers(liveIds, since),
-        this.countUpcomingGatherings(liveIds, now),
-        this.loadExcerpts(liveIds, userId, since),
-      ]);
+    const membershipByCommunityId = new Map(
+      memberships.map((membership) => [membership.communityId, membership]),
+    );
+
+    // 3. The subset of those the caller actually MODERATES (owner, co-owner or
+    // moderator, the same tier `resolveStaffCommunity` gates every moderation
+    // route on). It is the only id set the two moderation lanes below are ever
+    // given, so a plain member's digest cannot carry a count that was never
+    // computed for them: how many people have applied to a room, and how many
+    // reports are open in it, are facts about the people in it, and belonging
+    // to a room is not a reason to be told them.
+    //
+    // Derived from the caller's OWN roster rows, already loaded above, so the
+    // gate costs no extra query.
+    const staffCommunityIds = liveIds.filter((communityId) => {
+      const membership = membershipByCommunityId.get(communityId);
+      return membership != null && isCommunityStaffRole(membership.role);
+    });
+    const isModeratingAnything = staffCommunityIds.length > 0;
+
+    const [
+      newPostRows,
+      newMemberRows,
+      upcomingGatheringRows,
+      excerptRows,
+      pendingJoinRequestRows,
+      openReportRows,
+    ] = await Promise.all([
+      this.countNewPosts(liveIds, since),
+      this.countNewMembers(liveIds, since),
+      this.countUpcomingGatherings(liveIds, now),
+      this.loadExcerpts(liveIds, userId, since),
+      isModeratingAnything
+        ? this.countPendingJoinRequests(staffCommunityIds)
+        : Promise.resolve<CountRow[]>([]),
+      isModeratingAnything
+        ? this.countOpenReports(staffCommunityIds)
+        : Promise.resolve<CountRow[]>([]),
+    ]);
 
     const newPostCounts = CommunityDigestService.toCountMap(newPostRows);
     const newMemberCounts = CommunityDigestService.toCountMap(newMemberRows);
     const upcomingCounts = CommunityDigestService.toCountMap(
       upcomingGatheringRows,
     );
+    const pendingJoinRequestCounts = CommunityDigestService.toCountMap(
+      pendingJoinRequestRows,
+    );
+    const openReportCounts = CommunityDigestService.toCountMap(openReportRows);
     const excerptsByCommunity =
       CommunityDigestService.groupExcerpts(excerptRows);
-
-    const membershipByCommunityId = new Map(
-      memberships.map((membership) => [membership.communityId, membership]),
-    );
 
     const entries: CommunityDigestEntry[] = [];
     for (const community of communities) {
       const membership = membershipByCommunityId.get(community.id);
       if (!membership) continue;
+      // The moderation counts are gated TWICE: the lanes above only ever saw
+      // the moderated ids, and this re-asserts the role at the point the
+      // number reaches the wire. Belt and braces on purpose, because the
+      // failure mode is leaking moderation state to a whole roster.
+      const isStaffHere = isCommunityStaffRole(membership.role);
       entries.push({
         slug: community.slug,
         name: community.name,
@@ -136,6 +202,12 @@ export class CommunityDigestService {
         newPostCount: newPostCounts.get(community.id) ?? 0,
         newMemberCount: newMemberCounts.get(community.id) ?? 0,
         upcomingGatheringCount: upcomingCounts.get(community.id) ?? 0,
+        pendingJoinRequestCount: isStaffHere
+          ? (pendingJoinRequestCounts.get(community.id) ?? 0)
+          : 0,
+        openReportCount: isStaffHere
+          ? (openReportCounts.get(community.id) ?? 0)
+          : 0,
         excerpts: excerptsByCommunity.get(community.id) ?? [],
       });
     }
@@ -253,6 +325,107 @@ export class CommunityDigestService {
          ) ranked
         WHERE ranked.row_number <= $4`,
       [communityIds, since, viewerId, DIGEST_EXCERPTS_PER_COMMUNITY],
+    );
+  }
+
+  /**
+   * Lane 5: people still waiting to be let in, one grouped query for the
+   * MODERATED ids.
+   *
+   * `pending` only. An approved or declined request has been dealt with, and
+   * a to-do list that keeps counting settled work is a to-do list nobody
+   * trusts. At most one request per (community, member) can be pending at a
+   * time (`UQ_community_join_requests_pending`), so this counts people rather
+   * than attempts.
+   */
+  private countPendingJoinRequests(
+    staffCommunityIds: string[],
+  ): Promise<CountRow[]> {
+    return this.joinRequests
+      .createQueryBuilder('request')
+      .select('request.community_id', 'communityId')
+      .addSelect('COUNT(*)', 'count')
+      .where('request.community_id IN (:...staffCommunityIds)', {
+        staffCommunityIds,
+      })
+      .andWhere('request.status = :pending', {
+        pending: JoinRequestStatus.Pending,
+      })
+      .groupBy('request.community_id')
+      .getRawMany<CountRow>();
+  }
+
+  /**
+   * Lane 6: open reports per community, one grouped query for the MODERATED
+   * ids.
+   *
+   * COUNTS EXACTLY WHAT THE COMMUNITY'S OWN QUEUE SHOWS. The three arms below
+   * mirror `CommunityPostsService.listCommunityReports` clause for clause:
+   * status `open`, on one of this community's posts, on a reply under one of
+   * them, or (TS-13) on a photograph in the album of a gathering this
+   * community hosts. A moderator who reads "3 reports" on the hub and opens
+   * the queue has to find three reports there, so there is one definition of
+   * open, and it is that one.
+   *
+   * Deliberately NOT `CommunityAutoFreezeService.openReportCount`, which is a
+   * different (wider) number for a different job: it also counts reports whose
+   * subject is the COMMUNITY ITSELF, because a community reported for what it
+   * is should not be able to unfreeze itself. Those never appear in the
+   * community's own queue (they are the platform moderation team's to answer,
+   * not the room's), so counting them here would send a moderator to a pane
+   * that cannot show them.
+   *
+   * Raw SQL, like the excerpt lane, because the count has to be grouped by a
+   * community id that `reports` does not carry: each arm resolves the owning
+   * community through the content it points at, and the three are UNIONed
+   * before the GROUP BY. The three arms are disjoint (a report has exactly one
+   * `subject_type`), so nothing is counted twice.
+   *
+   * `<content>.id::text = reports.subject_id` casts the uuid side rather than
+   * the varchar one, the same way both existing queue predicates do:
+   * `subject_id` carries slugs as well as uuids, so casting IT to uuid throws
+   * on a `community`-subject row.
+   */
+  private countOpenReports(staffCommunityIds: string[]): Promise<CountRow[]> {
+    return this.reports.query<CountRow[]>(
+      `SELECT scoped.community_id AS "communityId", COUNT(*) AS "count"
+         FROM (
+           SELECT scoped_post.community_id
+             FROM reports report
+             JOIN community_posts scoped_post
+               ON scoped_post.id::text = report.subject_id
+            WHERE report.status = $1
+              AND report.subject_type = $2
+              AND scoped_post.community_id = ANY($5::uuid[])
+           UNION ALL
+           SELECT scoped_reply_post.community_id
+             FROM reports report
+             JOIN community_post_replies scoped_reply
+               ON scoped_reply.id::text = report.subject_id
+             JOIN community_posts scoped_reply_post
+               ON scoped_reply_post.id = scoped_reply.post_id
+            WHERE report.status = $1
+              AND report.subject_type = $3
+              AND scoped_reply_post.community_id = ANY($5::uuid[])
+           UNION ALL
+           SELECT scoped_photo_event.community_id
+             FROM reports report
+             JOIN event_photos scoped_photo
+               ON scoped_photo.id::text = report.subject_id
+             JOIN events scoped_photo_event
+               ON scoped_photo_event.id = scoped_photo.event_id
+            WHERE report.status = $1
+              AND report.subject_type = $4
+              AND scoped_photo_event.community_id = ANY($5::uuid[])
+         ) scoped
+        GROUP BY scoped.community_id`,
+      [
+        ReportStatus.Open,
+        ReportSubjectType.Post,
+        ReportSubjectType.Reply,
+        ReportSubjectType.EventPhoto,
+        staffCommunityIds,
+      ],
     );
   }
 

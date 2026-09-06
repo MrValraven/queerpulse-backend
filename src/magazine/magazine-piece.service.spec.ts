@@ -10,7 +10,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
 import { CreateLetterDto } from './dto/create-letter.dto';
 import { CreatePieceDto } from './dto/create-piece.dto';
@@ -58,6 +58,9 @@ type RepositoryMock = {
    *  (`UPDATE ... WHERE id = :id AND version = :baseVersion`). Defaults to
    *  "claimed"; a test that wants the stale-write 409 makes it affect 0 rows. */
   update: jest.Mock;
+  /** `deletePiece` removes the piece and its article/versions/comments by
+   *  criteria rather than by entity, so the mock needs its own `delete`. */
+  delete: jest.Mock;
 };
 
 function makeRepositoryMock(): RepositoryMock {
@@ -70,6 +73,7 @@ function makeRepositoryMock(): RepositoryMock {
     count: jest.fn().mockResolvedValue(0),
     createQueryBuilder: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
+    delete: jest.fn().mockResolvedValue({ affected: 1 }),
   };
 }
 
@@ -164,6 +168,8 @@ const ISSUE: MagazineIssue = {
   title: 'The Belonging Issue',
   dek: '',
   publishedOn: '',
+  // PRD-106 — nullable by default; an editor sets it on the production page.
+  submissionDeadline: null,
   coverUrl: null,
   theme: 'Belonging',
   runOrder: [],
@@ -171,6 +177,8 @@ const ISSUE: MagazineIssue = {
   coverlines: [],
   digestSendOnPublish: false,
   digestSentAt: null,
+  // ENG-110 — this fixture issue has never shipped.
+  lastShip: null,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
   updatedAt: new Date('2026-08-01T00:00:00.000Z'),
 };
@@ -204,6 +212,7 @@ const PITCH: MagazinePitch = {
   passNote: null,
   submitterId: null,
   storySubmissionId: null,
+  returnedAt: null,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
 };
 
@@ -508,6 +517,175 @@ describe('MagazinePieceService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
       expect(pieces.save).not.toHaveBeenCalled();
       expect(pitches.save).not.toHaveBeenCalled();
+    });
+
+    // PRD-123 — the whole bug in one test. A pitch sent from inside the
+    // platform carries `submitterId` and an EMPTY `from`; commissioning used to
+    // hard-code `writerId: null` and copy that empty string onto the byline, so
+    // the piece never reached the pitcher's assignments and shipped nameless.
+    it('makes the submitter of an internal pitch the writer, with their resolved name as the byline', async () => {
+      const internalPitch = {
+        ...PITCH,
+        from: '',
+        submitterId: 'writer-9',
+      };
+      pitches.findOne.mockResolvedValue(internalPitch);
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'writer-9',
+          firstName: 'Sara',
+          lastName: 'Nunes',
+        }),
+      ]);
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: TriagePitchDto = {
+        verdict: 'commission',
+        editorId: 'editor-1',
+        section: 'Features',
+      };
+      await service.triagePitch('pitch-1', dto, 'editor-1');
+
+      expect(savedPiece?.writerId).toBe('writer-9');
+      expect(savedPiece?.byline).toBe('Sara Nunes');
+    });
+
+    // PRD-121 rides along: a writer only found out they had been commissioned
+    // by opening the workspace on a hunch.
+    it('rings the commissioned writer', async () => {
+      const internalPitch = {
+        ...PITCH,
+        from: '',
+        submitterId: 'writer-9',
+      };
+      pitches.findOne.mockResolvedValue(internalPitch);
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'writer-9',
+          firstName: 'Sara',
+          lastName: 'Nunes',
+        }),
+      ]);
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: TriagePitchDto = {
+        verdict: 'commission',
+        editorId: 'editor-1',
+        section: 'Features',
+      };
+      await service.triagePitch('pitch-1', dto, 'editor-1');
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'writer-9',
+        NotificationType.MagazinePieceCommissioned,
+        expect.objectContaining({ pieceId: 'piece-2', actorId: 'editor-1' }),
+        'editor-1',
+      );
+    });
+
+    // An external pitch has no account behind it, so it must keep behaving
+    // exactly as it did: no writer, and the free text the editor typed.
+    it('leaves an external pitch with no writer and its typed `from` as the byline', async () => {
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: TriagePitchDto = {
+        verdict: 'commission',
+        editorId: 'editor-1',
+        section: 'Features',
+      };
+      await service.triagePitch('pitch-1', dto, 'editor-1');
+
+      expect(savedPiece?.writerId).toBeNull();
+      expect(savedPiece?.byline).toBe(PITCH.from);
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listPitches', () => {
+    // PRD-123 — the inbox side of the same bug: the pitch list printed a blank
+    // byline for every pitch submitted from inside the platform.
+    it('resolves the submitter of an internal pitch into the displayed `from`', async () => {
+      pitches.find.mockResolvedValue([
+        { ...PITCH, from: '', submitterId: 'writer-9' },
+      ]);
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'writer-9',
+          firstName: 'Sara',
+          lastName: 'Nunes',
+        }),
+      ]);
+
+      const result = await service.listPitches();
+
+      expect(result[0]?.from).toBe('Sara Nunes');
+      expect(result[0]?.submitterId).toBe('writer-9');
+    });
+
+    // The common case is an inbox of external pitches. Resolving names there
+    // would load the whole editor directory for nothing.
+    it('runs no name lookup when no pitch has a submitter', async () => {
+      pitches.find.mockResolvedValue([{ ...PITCH }]);
+
+      const result = await service.listPitches();
+
+      expect(result[0]?.from).toBe(PITCH.from);
+      expect(profiles.find).not.toHaveBeenCalled();
+      expect(staffRoles.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deletePiece', () => {
+    // ENG-113. Deleting a mis-commissioned piece used to strand its pitch at
+    // `commissioned`, and `listPitches` returns only waiting/maybe, so the
+    // pitch left the inbox for good and could never be triaged again.
+    it('returns the originating pitch to the inbox and marks it as returned', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...PIECE,
+        articleId: null,
+        deckId: null,
+        pitchId: 'pitch-1',
+      });
+
+      await service.deletePiece('piece-1', 'editor-1');
+
+      expect(pitches.update).toHaveBeenCalledWith(
+        { id: 'pitch-1' },
+        expect.objectContaining({
+          status: 'waiting',
+          returnedAt: expect.any(Date) as unknown,
+        }),
+      );
+    });
+
+    it('touches no pitch when the piece was never commissioned from one', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...PIECE,
+        articleId: null,
+        deckId: null,
+        pitchId: null,
+      });
+
+      await service.deletePiece('piece-1', 'editor-1');
+
+      expect(pitches.update).not.toHaveBeenCalled();
     });
   });
 
@@ -1283,15 +1461,20 @@ describe('MagazinePieceService', () => {
     it('publishes only pieces past their publish gate, leaving the rest unpublished', async () => {
       issues.findOne.mockResolvedValue({ ...ISSUE, publishedOn: '2026-08-01' });
 
+      // ENG-110 — a ship now answers to the SAME bar as the Publish button:
+      // `stage: 'ready'`, a clear care gate, and format readiness (here, a
+      // standfirst). The gate alone is no longer enough.
       const readyPiece = {
         ...PIECE,
         id: 'piece-ready',
+        stage: 'ready' as const,
         articleId: 'article-ready',
         care: PAST_GATE_CARE,
       };
       const blockedPiece = {
         ...PIECE,
         id: 'piece-blocked',
+        stage: 'ready' as const,
         articleId: 'article-blocked',
         care: null,
       };
@@ -1300,11 +1483,13 @@ describe('MagazinePieceService', () => {
       const readyArticle = {
         ...ARTICLE,
         id: 'article-ready',
+        standfirst: 'A standfirst, which publish readiness requires.',
         publishedAt: null,
       };
       const blockedArticle = {
         ...ARTICLE,
         id: 'article-blocked',
+        standfirst: 'A standfirst, which publish readiness requires.',
         publishedAt: null,
       };
       articles.findOne.mockImplementation(
@@ -1332,6 +1517,31 @@ describe('MagazinePieceService', () => {
     });
   });
 
+  /** A payment row for the batched writer lists (ENG-114). Only the columns the
+   *  writer mappers read matter here. */
+  function makePaymentRow(
+    overrides: Partial<MagazinePayment> = {},
+  ): MagazinePayment {
+    return {
+      id: 'payment-1',
+      pieceId: 'piece-1',
+      currency: 'EUR',
+      feeAmount: '420.00',
+      feeText: null,
+      expensesAmount: null,
+      expensesText: null,
+      invoice: null,
+      filedOn: null,
+      terms: '21 days',
+      dueOn: null,
+      status: 'agreed',
+      paidOn: null,
+      createdAt: new Date('2026-08-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-01T00:00:00.000Z'),
+      ...overrides,
+    };
+  }
+
   describe('writer workspace (Magazine Desk Phase 6)', () => {
     describe('listMyAssignments', () => {
       it("returns only the writer's own pieces, excluding a piece assigned to someone else", async () => {
@@ -1352,7 +1562,7 @@ describe('MagazinePieceService', () => {
               ),
             ),
         );
-        payments.findOne.mockResolvedValue(null);
+        payments.find.mockResolvedValue([]);
 
         const result = await service.listMyAssignments('writer-1');
 
@@ -1364,6 +1574,39 @@ describe('MagazinePieceService', () => {
         expect(
           result.some((assignment) => assignment.id === 'piece-other'),
         ).toBe(false);
+      });
+
+      it('loads every payment in ONE query, never one per piece (ENG-114)', async () => {
+        const myPieces = [
+          { ...PIECE, id: 'piece-a', writerId: 'writer-1' },
+          { ...PIECE, id: 'piece-b', writerId: 'writer-1' },
+          { ...PIECE, id: 'piece-c', writerId: 'writer-1' },
+        ];
+        pieces.find.mockResolvedValue(myPieces);
+        payments.find.mockResolvedValue([
+          makePaymentRow({ pieceId: 'piece-b', status: 'paid' }),
+        ]);
+
+        const result = await service.listMyAssignments('writer-1');
+
+        expect(payments.findOne).not.toHaveBeenCalled();
+        expect(payments.find).toHaveBeenCalledTimes(1);
+        // Each row still gets its own payment, or none: the batch is an
+        // implementation detail, the per-piece answer must not change.
+        expect(result.map((assignment) => assignment.pay)).toEqual([
+          'agreed',
+          'paid',
+          'agreed',
+        ]);
+      });
+
+      it('fires no payment query at all for a writer with no assignments', async () => {
+        pieces.find.mockResolvedValue([]);
+
+        const result = await service.listMyAssignments('writer-1');
+
+        expect(result).toEqual([]);
+        expect(payments.find).not.toHaveBeenCalled();
       });
     });
 
@@ -1415,13 +1658,51 @@ describe('MagazinePieceService', () => {
     describe('listMyPayments', () => {
       it("scopes to the writer's own pieces", async () => {
         pieces.find.mockResolvedValue([{ ...PIECE, writerId: 'writer-1' }]);
-        payments.findOne.mockResolvedValue(null);
+        payments.find.mockResolvedValue([]);
 
         await service.listMyPayments('writer-1');
 
         expect(pieces.find).toHaveBeenCalledWith(
           expect.objectContaining({ where: { writerId: 'writer-1' } }),
         );
+      });
+
+      it('batches payments AND issues, one query each (ENG-114)', async () => {
+        pieces.find.mockResolvedValue([
+          { ...PIECE, id: 'piece-a', writerId: 'writer-1', issueId: 'issue-1' },
+          { ...PIECE, id: 'piece-b', writerId: 'writer-1', issueId: 'issue-1' },
+        ]);
+        payments.find.mockResolvedValue([
+          makePaymentRow({ pieceId: 'piece-a' }),
+          makePaymentRow({ id: 'payment-2', pieceId: 'piece-b' }),
+        ]);
+        issues.find.mockResolvedValue([ISSUE]);
+
+        const result = await service.listMyPayments('writer-1');
+
+        expect(payments.findOne).not.toHaveBeenCalled();
+        expect(payments.find).toHaveBeenCalledTimes(1);
+        // Both pieces sit in the same issue: the id list is deduplicated, so
+        // this stays one query however many pieces share an issue.
+        expect(issues.find).toHaveBeenCalledTimes(1);
+        expect(issues.find).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: In(['issue-1']) } }),
+        );
+        // The DISPLAY number, which is the whole point of loading the issue:
+        // this tab used to print the raw UUID, and then "Unscheduled".
+        expect(result.map((payment) => payment.issue)).toEqual(['05', '05']);
+      });
+
+      it('loads no issues for pieces that are all unscheduled', async () => {
+        pieces.find.mockResolvedValue([
+          { ...PIECE, id: 'piece-a', writerId: 'writer-1', issueId: null },
+        ]);
+        payments.find.mockResolvedValue([]);
+
+        const result = await service.listMyPayments('writer-1');
+
+        expect(issues.find).not.toHaveBeenCalled();
+        expect(result[0]?.issue).toBeNull();
       });
     });
 
@@ -1517,6 +1798,168 @@ describe('MagazinePieceService', () => {
         expect(pieceEvents.create).toHaveBeenCalledWith(
           expect.objectContaining({ action: 'filed' }),
         );
+      });
+    });
+
+    describe('fileDraft blocks (PRD-122b refile idempotency)', () => {
+      const FILED_BLOCKS: ArticleBlock[] = [
+        { id: 'client-1', kind: 'paragraph', html: 'The first paragraph.' },
+        { id: 'client-2', kind: 'paragraph', html: 'The second paragraph.' },
+      ];
+
+      /** The same text a client would send on a SECOND filing: the frontend
+       *  mints a fresh `crypto.randomUUID()` per block on every call, so the
+       *  ids differ and only the content is comparable. This is exactly what
+       *  defeated the old id-based dedup and doubled the article. */
+      function refiled(blocks: ArticleBlock[]): ArticleBlock[] {
+        return blocks.map((block, index) => ({
+          ...block,
+          id: `refiled-${index}`,
+        }));
+      }
+
+      function stubPieceWithArticle(article: MagazineArticle) {
+        const piece = {
+          ...PIECE,
+          writerId: 'writer-1',
+          stage: 'drafting' as const,
+          articleId: article.id,
+        };
+        pieces.findOne.mockResolvedValue(piece);
+        articles.findOne.mockResolvedValue(article);
+        payments.findOne.mockResolvedValue(null);
+        return piece;
+      }
+
+      it('appends the filed blocks to an empty draft', async () => {
+        const article = { ...ARTICLE, blocks: [] as ArticleBlock[] };
+        stubPieceWithArticle(article);
+
+        await service.fileDraft('writer-1', 'piece-1', {
+          blocks: FILED_BLOCKS,
+        });
+
+        expect(article.blocks).toHaveLength(2);
+      });
+
+      it('appends NOTHING when the same draft is filed a second time', async () => {
+        const article = { ...ARTICLE, blocks: [...FILED_BLOCKS] };
+        stubPieceWithArticle(article);
+
+        await service.fileDraft('writer-1', 'piece-1', {
+          blocks: refiled(FILED_BLOCKS),
+        });
+
+        expect(article.blocks).toHaveLength(2);
+        expect(articles.update).not.toHaveBeenCalled();
+      });
+
+      it('appends only the new tail when a refile adds paragraphs', async () => {
+        const article = { ...ARTICLE, blocks: [...FILED_BLOCKS] };
+        stubPieceWithArticle(article);
+
+        await service.fileDraft('writer-1', 'piece-1', {
+          blocks: refiled([
+            ...FILED_BLOCKS,
+            { id: 'client-3', kind: 'paragraph', html: 'A third paragraph.' },
+          ]),
+        });
+
+        expect(article.blocks).toHaveLength(3);
+        expect(article.blocks[2]).toEqual(
+          expect.objectContaining({ html: 'A third paragraph.' }),
+        );
+      });
+
+      it('replaces the whole body in replace mode, snapshotting first', async () => {
+        const article = { ...ARTICLE, blocks: [...FILED_BLOCKS] };
+        stubPieceWithArticle(article);
+
+        await service.fileDraft('writer-1', 'piece-1', {
+          mode: 'replace',
+          blocks: [
+            { id: 'client-9', kind: 'paragraph', html: 'A corrected draft.' },
+          ],
+        });
+
+        expect(article.blocks).toHaveLength(1);
+        // The pre-replace body has to be recoverable: a filing must never be
+        // the one write in this service that loses work irrecoverably.
+        expect(articleVersions.create).toHaveBeenCalledWith(
+          expect.objectContaining({ label: 'Before refile' }),
+        );
+      });
+
+      it('records the filed word count on the brief, spreading the rest of the blob (PRD-127)', async () => {
+        const article = { ...ARTICLE, blocks: [...FILED_BLOCKS] };
+        const piece = stubPieceWithArticle(article);
+        piece.brief = {
+          angle: 'Start at the waiting list.',
+          wants: ['scene setting'],
+          avoid: 'diagnosis talk',
+          wordCount: 1500,
+          filedWords: null,
+          rate: '€0.30/word',
+          killFee: '20%',
+          commissionedBy: 'Marta',
+          commissionedOn: '2026-07-01',
+          art: '',
+        };
+
+        const result = await service.fileDraft('writer-1', 'piece-1');
+
+        // "The first paragraph." + "The second paragraph." = 6 words.
+        expect(piece.brief?.filedWords).toBe(6);
+        expect(piece.brief?.angle).toBe('Start at the waiting list.');
+        expect(piece.brief?.wordCount).toBe(1500);
+        expect(piece.brief?.killFee).toBe('20%');
+        expect(result.words).toBe(6);
+      });
+    });
+
+    describe('getMyDraft (PRD-122a)', () => {
+      it("throws ForbiddenException for another contributor's piece", async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, writerId: 'writer-2' });
+
+        await expect(
+          service.getMyDraft('writer-1', 'piece-1'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('returns the draft body and the version to file against', async () => {
+        pieces.findOne.mockResolvedValue({
+          ...PIECE,
+          writerId: 'writer-1',
+          articleId: 'article-1',
+        });
+        articles.findOne.mockResolvedValue({
+          ...ARTICLE,
+          version: 7,
+          blocks: [
+            { id: 'block-1', kind: 'paragraph', html: 'Three words here.' },
+          ],
+        });
+
+        const result = await service.getMyDraft('writer-1', 'piece-1');
+
+        expect(result.hasDraft).toBe(true);
+        expect(result.version).toBe(7);
+        expect(result.blocks).toHaveLength(1);
+      });
+
+      it('never creates an article row on a read', async () => {
+        pieces.findOne.mockResolvedValue({
+          ...PIECE,
+          writerId: 'writer-1',
+          articleId: null,
+        });
+
+        const result = await service.getMyDraft('writer-1', 'piece-1');
+
+        expect(result.hasDraft).toBe(false);
+        expect(result.version).toBe(0);
+        expect(articles.save).not.toHaveBeenCalled();
+        expect(pieces.save).not.toHaveBeenCalled();
       });
     });
   });
@@ -2735,6 +3178,87 @@ describe('MagazinePieceService', () => {
         expect(pieceMessages.save).toHaveBeenCalled();
         expect(result.fromMe).toBe(true);
       });
+    });
+  });
+
+  /**
+   * PRD-106 — the issue's submission deadline. Before this, the public
+   * submit-story form printed a hardcoded "Submission deadline 15 August
+   * 2026" from a frontend constant, so by September every writer opening the
+   * form read a date three weeks in the past. Nothing on the desk could set a
+   * real one; these two methods are what an editor writes it through.
+   */
+  describe('submission deadline', () => {
+    it('404s an unknown issue number on read', async () => {
+      issues.findOne.mockResolvedValue(null);
+      await expect(service.getSubmissionDeadline('99')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('404s an unknown issue number on write', async () => {
+      issues.findOne.mockResolvedValue(null);
+      await expect(
+        service.updateSubmissionDeadline(
+          '99',
+          { submissionDeadline: '2026-10-01' },
+          'editor-1',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('reads back null when the desk has set no deadline', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, submissionDeadline: null });
+      await expect(service.getSubmissionDeadline('05')).resolves.toEqual({
+        submissionDeadline: null,
+      });
+    });
+
+    it('stores the date the editor set', async () => {
+      const issue = { ...ISSUE, submissionDeadline: null };
+      issues.findOne.mockResolvedValue(issue);
+
+      await expect(
+        service.updateSubmissionDeadline(
+          '05',
+          { submissionDeadline: '2026-10-01' },
+          'editor-1',
+        ),
+      ).resolves.toEqual({ submissionDeadline: '2026-10-01' });
+      expect(issues.save).toHaveBeenCalledWith(
+        expect.objectContaining({ submissionDeadline: '2026-10-01' }),
+      );
+    });
+
+    // `null` is a value here, not an omission: clearing the deadline is how
+    // an editor takes the line back off the public form.
+    it('clears the deadline on null', async () => {
+      const issue = { ...ISSUE, submissionDeadline: '2026-10-01' };
+      issues.findOne.mockResolvedValue(issue);
+
+      await expect(
+        service.updateSubmissionDeadline(
+          '05',
+          { submissionDeadline: null },
+          'editor-1',
+        ),
+      ).resolves.toEqual({ submissionDeadline: null });
+      expect(issues.save).toHaveBeenCalledWith(
+        expect.objectContaining({ submissionDeadline: null }),
+      );
+    });
+
+    // Nothing enforces an ordering against `publishedOn`: a desk reopens a
+    // number, and refusing that move would protect nobody.
+    it('accepts a deadline after the publish date', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, publishedOn: '2026-09-01' });
+      await expect(
+        service.updateSubmissionDeadline(
+          '05',
+          { submissionDeadline: '2026-12-01' },
+          'editor-1',
+        ),
+      ).resolves.toEqual({ submissionDeadline: '2026-12-01' });
     });
   });
 });

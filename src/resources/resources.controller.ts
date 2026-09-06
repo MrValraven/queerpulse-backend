@@ -33,13 +33,21 @@ import {
 } from '@nestjs/swagger';
 
 // Public resource directory (guides — health/legal/trans life/safety/
-// community/culture/finance). Any active member can browse it. The write
-// side lives on `AdminResourcesController` (CON-08), so this controller
-// stays read-only by design rather than for want of an authoring path. Also
-// hosts CNT-14's two additions: the real Legal Aid / Sexual Health Testing
-// listings directory (`GET /listings`) and the "suggest a resource"
+// community/culture/finance). Anyone can browse it, signed in or not: the four
+// reads that back the public pages carry `@Public()` and answer an anonymous
+// caller. The write side lives on `AdminResourcesController` (CON-08), so this
+// controller stays read-only by design rather than for want of an authoring
+// path. Also hosts CNT-14's two additions: the real Legal Aid / Sexual Health
+// Testing listings directory (`GET /listings`) and the "suggest a resource"
 // submission pathway (`POST /suggestions`) that feeds the admin review queue
 // (`AdminResourceSuggestionsController`).
+//
+// The class guard is still `ActiveMemberGuard`, and it is still the default:
+// `POST /suggestions` and `GET /suggestions/mine` are member-only, and
+// anything added here later inherits the gate unless it opts out. `@Public()`
+// on a handler is sufficient to override it — `ActiveMemberGuard` reads the
+// same `IS_PUBLIC_KEY` as the global `JwtAuthGuard` and returns true for a
+// public handler.
 @Feature('resources')
 @ApiTags('Resources')
 @ApiCookieAuth('access_token')
@@ -56,15 +64,26 @@ export class ResourcesController {
   // matches routes on the same controller in declaration order, and a
   // `:slug` wildcard registered first would swallow `/resources/listings` as
   // slug="listings" before this handler ever ran.
+  // `@Public()` for the same reason as the three guide reads below, and with
+  // more urgency: this is the legal-aid and HIV/STI-testing directory behind
+  // `/resources/legal` and `/resources/sexual-health`, both of them ungated
+  // pages. Somebody who needs a lawyer or a testing clinic must not be asked
+  // to sign up first, and while this read was member-only they were shown a
+  // "could not load, retry" panel that retrying never fixed.
+  //
+  // Nothing here is caller-specific. `ResourceListingResponseDTO` is an
+  // organisation's own published title, description, region and contact
+  // details — never `status`, `createdBy`/`updatedBy` or timestamps — so the
+  // anonymous response is identical to the member one.
+  @Public()
   @Get('listings')
   @ApiOperation({
-    summary: 'List active resource listings, optionally by category',
+    summary:
+      'List active resource listings, optionally by category (unauthenticated)',
   })
   @ApiOkResponse({
     description: 'Active Legal Aid / Sexual Health Testing listings.',
   })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   listListings(@Query() query: ListResourceListingsQuery) {
     return this.resourceListingsService.list(query.category);
   }
@@ -160,6 +179,15 @@ export class ResourcesController {
 // Split from `ResourcesController` (mirrors `PartnerApplicationsController`
 // being split from `PartnersController`) since the glossary is a distinct
 // resource under the same `resources` feature flag, sharing `ResourcesService`.
+//
+// Both reads are `@Public()`. `/resources/glossary` is ungated in the
+// frontend's `authGate.ts`, and a page whose purpose is to explain the words
+// to somebody who does not know them yet is precisely the page a stranger
+// arrives on. Neither response takes a caller into account: a glossary term is
+// a term, identical for everyone.
+//
+// The class guard stays bound so that anything added here later (an
+// authenticated "suggest a term", say) is member-only by default.
 @Feature('resources')
 @ApiTags('Resources')
 @ApiCookieAuth('access_token')
@@ -168,19 +196,19 @@ export class ResourcesController {
 export class GlossaryController {
   constructor(private readonly resourcesService: ResourcesService) {}
 
-  @ApiOperation({ summary: 'List glossary terms, optionally by category' })
+  @Public()
+  @ApiOperation({
+    summary: 'List glossary terms, optionally by category (unauthenticated)',
+  })
   @ApiOkResponse({ description: 'The matching glossary terms, alphabetical.' })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Get()
   list(@Query() query: ListGlossaryQuery) {
     return this.resourcesService.listGlossary(query.category);
   }
 
-  @ApiOperation({ summary: 'Get a glossary term by slug' })
+  @Public()
+  @ApiOperation({ summary: 'Get a glossary term by slug (unauthenticated)' })
   @ApiOkResponse({ description: 'The glossary term.' })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @ApiNotFoundResponse({ description: 'No glossary term with that slug.' })
   @Get(':slug')
   getBySlug(@Param('slug') slug: string) {

@@ -117,6 +117,36 @@ export function toAdminGroupJoinRequestDTO(
 }
 
 /**
+ * The APPLICANT's own view of a group join request (PRD-242).
+ *
+ * Deliberately a different shape from `AdminGroupJoinRequestDTO` above rather
+ * than a reuse: that one is the reviewer's row and carries the triage material
+ * (the `relationship` answer, the screening `answers`, the free-text `note`)
+ * plus the `mutualConnections` trust signal, none of which is the applicant's
+ * business to read back off a queue. What they need is which group they asked
+ * to join and where the request stands, so that is all this carries.
+ */
+export interface MyGroupJoinRequestDTO {
+  id: string;
+  status: GroupJoinRequestStatus;
+  createdAt: Date;
+  group: GroupReferenceDTO | null;
+}
+
+export function toMyGroupJoinRequestDTO(
+  request: GroupJoinRequest,
+): MyGroupJoinRequestDTO {
+  return {
+    id: request.id,
+    status: request.status,
+    createdAt: request.createdAt,
+    group: request.group
+      ? { slug: request.group.slug, name: request.group.name }
+      : null,
+  };
+}
+
+/**
  * One page of the group join-request triage queue (ENG-41). Same envelope as
  * `AdminGroupListingsPageDTO` and the shared `Paginated<T>`: `total` is the size
  * of the whole filtered queue, not of this page, so the console can say how many

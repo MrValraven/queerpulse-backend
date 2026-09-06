@@ -44,6 +44,7 @@ import {
   VouchGraphNodeDTO,
 } from './admin-members-response';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
+import { staffRoleAuditNote } from './dto/staff-role-reason';
 
 /** One page of the admin members list, everywhere this feature paginates. */
 export const ADMIN_MEMBERS_PAGE_SIZE = 20;
@@ -709,8 +710,9 @@ export class AdminMembersService {
    * `user_staff_roles` row and no second audit entry. Mirrors `updateRole`'s
    * house-account guardrail — the `isSystem` account can't hold staff roles
    * either. The change is recorded in `mod_audit_logs` with a NULL `reportId`
-   * and the role id as the `note`, the same shape `updateRole` uses for
-   * `role_changed`.
+   * and `<role id>: <reason>` as the `note` (`staffRoleAuditNote`), the same
+   * shape `updateRole` uses for `role_changed`. Rows written before PRD-288
+   * carry the bare role id and still read correctly.
    *
    * Also idempotent under a race: two concurrent grants of the same
    * `(userId, role)` can both pass the `alreadyHeld` check and race on the
@@ -728,6 +730,13 @@ export class AdminMembersService {
     actorUserId: string,
     idOrSlug: string,
     role: StaffRoleId,
+    // PRD-288. Required on the HTTP surface (`GrantStaffRoleDto.reason`) and
+    // optional HERE, for one caller: `AdminWriterApplicationsService.review`
+    // grants `magazine_writer` when an editor approves a writer application,
+    // and that grant's "why" already lives in the application row it came out
+    // of. Every path a human drives sends one. Recorded in `mod_audit_logs`
+    // alongside the role id (`staffRoleAuditNote`).
+    reason?: string,
   ): Promise<{ userId: string; slug: string; staffRoles: string[] }> {
     const profile = await this.resolveMemberProfile(idOrSlug);
     const targetUserId = profile.userId;
@@ -771,7 +780,7 @@ export class AdminMembersService {
               targetName: `${profile.firstName} ${profile.lastName}`.trim(),
               action: 'staff_role_granted',
               reasonCode: null,
-              note: role,
+              note: staffRoleAuditNote(role, reason),
               duration: null,
             }),
           );
@@ -808,12 +817,18 @@ export class AdminMembersService {
   /**
    * Revoke one additive staff role. A no-op — no delete, no audit row — when
    * the member doesn't hold it, mirroring `updateRole`'s no-op-on-same-role
-   * path. Same house-account guardrail as `grantStaffRole`.
+   * path. Same house-account guardrail as `grantStaffRole`, and the same
+   * `<role id>: <reason>` audit note.
    */
   async revokeStaffRole(
     actorUserId: string,
     idOrSlug: string,
     role: StaffRoleId,
+    // PRD-288, same contract as `grantStaffRole` above. Required on the HTTP
+    // surface (`RevokeStaffRoleDto.reason`); optional here only because the
+    // parameter shape is shared with the grant. There is no internal caller of
+    // this one today.
+    reason?: string,
   ): Promise<{ userId: string; slug: string; staffRoles: string[] }> {
     const profile = await this.resolveMemberProfile(idOrSlug);
     const targetUserId = profile.userId;
@@ -848,7 +863,7 @@ export class AdminMembersService {
             targetName: `${profile.firstName} ${profile.lastName}`.trim(),
             action: 'staff_role_revoked',
             reasonCode: null,
-            note: role,
+            note: staffRoleAuditNote(role, reason),
             duration: null,
           }),
         );

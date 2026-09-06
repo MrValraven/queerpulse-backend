@@ -45,6 +45,30 @@ export const ENFORCEMENT_TARGET_UNRESOLVED_CODE =
 export const ENFORCEMENT_TARGET_PROTECTED_CODE = 'ENFORCEMENT_TARGET_PROTECTED';
 
 /**
+ * A 400 on `POST /appeals`: the published filing window for the decision this
+ * member is contesting has already closed (PRD-286).
+ *
+ * The refusal itself is not new; what was missing is anything a member-facing
+ * screen could render honestly. The old throw was a bare
+ * `BadRequestException` carrying one long prose string, so the appeal form had
+ * exactly two options: print the server's sentence verbatim, or say "something
+ * went wrong". Neither tells the member the thing they actually need, which is
+ * WHICH DEADLINE PASSED and WHEN.
+ *
+ * So it carries, additively:
+ *  - `windowDays`: the published filing window, straight from
+ *    `APPEAL_FILING_WINDOW_DAYS`, so the screen can never quote a different
+ *    number from the one the server enforced.
+ *  - `decisionTakenAt`: the instant the clock started (the `mod_audit_logs`
+ *    row's `created_at`; `appeal-window.ts` explains why it is that instant).
+ *  - `closedAt`: the instant the window shut.
+ *
+ * All three are ISO-8601 UTC. `code` is the contract; branch on it and never
+ * on the message text.
+ */
+export const APPEAL_WINDOW_CLOSED_CODE = 'APPEAL_WINDOW_CLOSED';
+
+/**
  * Why no single account can be sanctioned, on the additive `target` field of
  * an {@link ENFORCEMENT_TARGET_UNRESOLVED_CODE} body.
  *
@@ -137,5 +161,34 @@ export function enforcementTargetProtected(
       target === 'house_account'
         ? HOUSE_ACCOUNT_MESSAGE
         : STAFF_ACCOUNT_MESSAGE,
+  });
+}
+
+/**
+ * The 400 `POST /appeals` answers when the filing window has closed.
+ *
+ * The prose is the human fallback for a client that does not know the code. It
+ * names the number of days, the date the window shut, and one thing the member
+ * can still do, because a refusal with no next step is how someone concludes
+ * the door is simply shut.
+ */
+export function appealWindowClosed(input: {
+  windowDays: number;
+  decisionTakenAt: Date;
+  closedAt: Date;
+}): BadRequestException {
+  const closedOn = input.closedAt.toISOString().slice(0, 10);
+  return new BadRequestException({
+    statusCode: 400,
+    error: 'Bad Request',
+    code: APPEAL_WINDOW_CLOSED_CODE,
+    // Additive detail, safe to ignore: `code` alone is the contract.
+    windowDays: input.windowDays,
+    decisionTakenAt: input.decisionTakenAt.toISOString(),
+    closedAt: input.closedAt.toISOString(),
+    message:
+      `Appeals are open for ${input.windowDays} days after a decision, and the window for this one closed on ` +
+      `${closedOn}. If something has changed since, or you could not reach this form in time, ` +
+      'write to the moderation team and ask them to look again.',
   });
 }

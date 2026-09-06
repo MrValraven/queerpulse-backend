@@ -11,6 +11,12 @@
  * Filing a report passes through three independent guards. They answer three
  * different questions, so all three are needed.
  *
+ * EVERYTHING IN THIS SECTION DESCRIBES A SIGNED-IN FILING. `POST /reports` is
+ * public (PRD-280), and layers 2 and 3 below are keyed on `reporterId`, which
+ * is NULL for a signed-out one, so neither binds there. The second half of
+ * this file carries the separate, tighter caps that do, and is honest about
+ * how much weaker they are.
+ *
  * 1. **The 60-second burst throttle.** `@Throttle({ limit: 10, ttl: 60s })` on
  *    `ReportsController.create`, served by the app-wide `HttpThrottlerGuard`.
  *    It stops a script hammering the endpoint. It is the weakest of the three:
@@ -269,3 +275,173 @@ export const REPORT_DAILY_EMERGENCY_ALLOWANCE_MESSAGE =
 
 export const REPORT_PER_SUBJECT_CAP_MESSAGE =
   'You have already reported this a few times recently. Those reports are with the moderation team, so there is no need to send another one. If something urgent is happening, use the Contact form at /about/contact.';
+
+/* ------------------------------------------------------------------------ *
+ * The anonymous path (PRD-280)
+ * ------------------------------------------------------------------------ */
+
+/**
+ * `POST /reports` is PUBLIC. A signed-out person can file, and everything above
+ * this line stops binding when they do.
+ *
+ * Read the three layers again with a NULL `reporterId` in mind and only one of
+ * them survives:
+ *
+ *  1. The burst `@Throttle` still applies, and it is tightened for the
+ *    signed-out path (see `REPORT_ANONYMOUS_BURST_LIMIT`).
+ *  2. The open-report dedupe does NOT apply, at either level. The partial
+ *    unique index is over `reporter_id`, and Postgres treats NULLs as distinct
+ *    in a unique index, so no two anonymous rows ever collide. The `findOne`
+ *    fast-path is skipped deliberately rather than being made to match on NULL:
+ *    matching would hand one stranger another stranger's report back and throw
+ *    the second filing away, which is a leak and a silent data loss at once.
+ *    `ReportsService.create` carries that argument at the call site. The cost
+ *    is that a signed-out double-submit writes two rows, which the caps below
+ *    are sized to absorb.
+ *  3. The rolling per-MEMBER caps do not apply, because there is no member.
+ *
+ * So the caps below exist, and they are keyed on the only durable thing a
+ * signed-out caller carries: a peppered digest of their network address
+ * (`anonymous-reporter-key.ts`, which is blunt about what that is worth).
+ *
+ * ## They are NOT equivalent to the per-member caps
+ *
+ * Say it plainly, because the numbers being smaller invites the opposite
+ * reading. A member cap is keyed on an account, and an account is scarce here:
+ * this platform is invite-only, so getting a second one is a social act with a
+ * person's name attached. An address is not scarce. A VPN subscription, a
+ * phone's mobile data and a laptop's wifi are three keys before anyone has
+ * tried, and a determined flooder rents as many as they like. These caps
+ * therefore raise the cost of a sustained anonymous flood and make it visible
+ * in the refusal log; they do not close it. What closes it, if it ever
+ * happens, is a moderator seeing the log line and a decision above this file's
+ * pay grade.
+ *
+ * They also OVER-bind in the other direction, and the sizes below are chosen
+ * for that rather than for the attacker. Carrier-grade NAT puts a large share
+ * of a country's mobile traffic behind a small number of addresses, and a
+ * queer community centre's wifi puts everyone in the building behind one, so
+ * several unrelated genuine reporters can share a key. A refusal on this path
+ * is therefore never a dead end: the copy hands over the Contact form at
+ * `/about/contact`, which is `POST /inquiries` and is itself open to
+ * signed-out visitors.
+ *
+ * ## Why they are tighter than the member ones anyway
+ *
+ * Because the anonymous path lost layer 2 as well as layer 3. A member's 30 a
+ * day sits on top of a dedupe that collapses repeats; an anonymous 30 would
+ * not. And an anonymous filing carries no account a moderator can look at, so
+ * a junk one costs more of a human's attention per row than a member's does.
+ *
+ * For scale: `POST /intakes/:kind` has been fully public all along with an
+ * 8/60s IP throttle and NO durable cap at all, so the anonymous report path
+ * ends up the STRICTER of the two public write paths this product exposes.
+ */
+
+/** The rolling window for the anonymous per-key cap: 24 hours, as for members. */
+export const REPORT_ANONYMOUS_DAILY_WINDOW_MS = REPORT_DAILY_WINDOW_MS;
+
+/**
+ * How many reports one anonymous key may file across ALL subjects in a rolling
+ * 24 hours.
+ *
+ * Ten, against thirty for a member, and the gap is the missing dedupe plus the
+ * missing account. Ten is still well clear of what one shared address plausibly
+ * needs: it covers a genuinely bad night for one person and leaves room for
+ * two or three unrelated people behind the same carrier NAT to each file a
+ * couple of times without ever seeing a refusal. It is a long way below what a
+ * flood looks like, which is the number that matters, since the burst
+ * throttle's implied ceiling on this path is 5 a minute.
+ */
+export const REPORT_ANONYMOUS_DAILY_LIMIT = 10;
+
+/**
+ * How many FURTHER reports one anonymous key may file in the same rolling 24
+ * hours once `REPORT_ANONYMOUS_DAILY_LIMIT` is reached, when the filing's
+ * derived severity is `Emergency` (`outing` / `doxxing`).
+ *
+ * Three, on the identical argument to `REPORT_DAILY_EMERGENCY_ALLOWANCE`: an
+ * allowance rather than an exemption, so the emergency band buys bounded room
+ * above the cap instead of an unbounded filing channel that any caller can
+ * open by choosing `outing` every time. Smaller than a member's five because
+ * the ceiling it lifts is smaller, and because it is the cheapest lever on
+ * this whole path for somebody with no account to lose.
+ *
+ * It is kept at all because of who is on the other side of it. The person most
+ * likely to file without signing in is somebody who does not have an account
+ * and is being outed by a member who does, and "you have reached today's
+ * limit" is the wrong answer to that report even at report eleven.
+ */
+export const REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE = 3;
+
+/**
+ * The absolute ceiling on reports from one anonymous key in
+ * `REPORT_ANONYMOUS_DAILY_WINDOW_MS`, whatever reason codes they carry.
+ *
+ * Derived, like `REPORT_DAILY_EMERGENCY_CEILING`, so the two numbers above
+ * cannot drift from the number actually enforced.
+ */
+export const REPORT_ANONYMOUS_DAILY_EMERGENCY_CEILING =
+  REPORT_ANONYMOUS_DAILY_LIMIT + REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE;
+
+/** The rolling window for the anonymous per-subject cap: 7 days, as for members. */
+export const REPORT_ANONYMOUS_PER_SUBJECT_WINDOW_MS =
+  REPORT_PER_SUBJECT_WINDOW_MS;
+
+/**
+ * How many reports one anonymous key may file against the SAME subject
+ * (`subjectType` + `subjectId`) in a rolling 7 days.
+ *
+ * Three, the same as a member's, and deliberately NOT tighter even though
+ * every other anonymous number is. This is the one cap standing in for the
+ * missing dedupe, so it has to absorb what the dedupe used to absorb: a
+ * signed-out double-tap on the submit button, or a retry after a flaky
+ * connection, writes two real rows here where a member's would have collapsed
+ * into one. Cutting this to two would mean an ordinary double-submit spends
+ * the whole allowance and the reporter's next genuine filing is refused.
+ *
+ * It yields to an `Emergency` filing exactly as the member cap does, logged as
+ * a bypass, and what bounds it instead is the daily ceiling above.
+ */
+export const REPORT_ANONYMOUS_PER_SUBJECT_LIMIT = 3;
+
+/**
+ * The burst `@Throttle` limit on the signed-out path: 5 a minute against a
+ * member's 10, over the same 60-second window.
+ *
+ * Tighter for the honest reason. On the member path the burst throttle is the
+ * layer nobody relies on, because two durable layers sit behind it. On the
+ * anonymous path it is one of only two, and it is the only one that binds
+ * within the first minute, before enough rows exist for a durable count to
+ * refuse anything. Five a minute is far above any human filling in a form,
+ * including a distressed one, and it halves what a script gets through before
+ * the daily cap starts answering.
+ *
+ * Both paths key this on client IP through `HttpThrottlerGuard`'s default
+ * tracker and both keep their counters in process memory, so this number says
+ * nothing about sustained behaviour. That is what the caps above are for.
+ */
+export const REPORT_ANONYMOUS_BURST_LIMIT = 5;
+
+/**
+ * The refusal copy for the anonymous caps.
+ *
+ * Written for a person with no account, which changes two things about it.
+ * There is no `GET /reports/mine` for them to check and no bell to notify
+ * them, so the reassurance that what they already sent is with moderators is
+ * the only confirmation they will ever get and it has to be unambiguous. And
+ * because a shared address means they may be reading a refusal earned by a
+ * stranger, it says nothing at all about earlier reports beyond that: not how
+ * many, not from whom, not what happened to them. The Contact form is named as
+ * the way through, and it is genuinely open to them.
+ *
+ * No promise of a reply, here or anywhere: QueerPulse delivers no email.
+ */
+export const REPORT_ANONYMOUS_DAILY_CAP_MESSAGE =
+  'A lot of reports have come from this connection in the last day, so this one was not sent. Anything already sent is with the moderation team. Please try again tomorrow, or use the Contact form at /about/contact if something urgent is happening. Signing in lifts this limit.';
+
+export const REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE_MESSAGE =
+  'This connection has reached the most reports it can send in a day, including the extra room kept for urgent ones, so this one was not sent. Anything already sent is with the moderation team and urgent reports are prioritized. If something is happening right now, use the Contact form at /about/contact and describe it there. Signing in lifts this limit.';
+
+export const REPORT_ANONYMOUS_PER_SUBJECT_CAP_MESSAGE =
+  'This has already been reported a few times from this connection recently, so this report was not sent. Those reports are with the moderation team. If something urgent is happening, use the Contact form at /about/contact.';

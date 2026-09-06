@@ -10,7 +10,10 @@ import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
-import { GroupJoinRequest } from './entities/group-join-request.entity';
+import {
+  GroupJoinRequest,
+  GroupJoinRequestStatus,
+} from './entities/group-join-request.entity';
 import {
   GroupListing,
   GroupListingStatus,
@@ -29,7 +32,7 @@ describe('HousingGroupsService', () => {
   let service: HousingGroupsService;
   let groups: { findOne: jest.Mock };
   let listings: { create: jest.Mock; save: jest.Mock };
-  let joinRequests: { count: jest.Mock };
+  let joinRequests: { count: jest.Mock; find: jest.Mock };
   let connections: Record<string, jest.Mock>;
   let profiles: Record<string, jest.Mock>;
   let affirmingPledge: { requireAccepted: jest.Mock };
@@ -37,11 +40,16 @@ describe('HousingGroupsService', () => {
   let notifications: { create: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
 
+  // An OPEN group: `isAccessGated` false means "an open reading room", so every
+  // active member may share a room in it and gate 0 stands down (ENG-171).
   const publishedGroup = {
     id: 'group-1',
     slug: 'sunset-house',
     name: 'Sunset House',
+    isAccessGated: false,
   };
+
+  const gatedGroup = { ...publishedGroup, isAccessGated: true };
 
   const CREATE_DTO: CreateGroupListingDto = {
     title: 'Room in a queer household',
@@ -69,7 +77,12 @@ describe('HousingGroupsService', () => {
         }),
       ),
     };
-    joinRequests = { count: jest.fn().mockResolvedValue(0) };
+    joinRequests = {
+      count: jest.fn().mockResolvedValue(0),
+      // The caller's own join requests for this group (ENG-171). Empty is the
+      // honest default; the access-gated cases below set it per test.
+      find: jest.fn().mockResolvedValue([]),
+    };
     connections = { find: jest.fn().mockResolvedValue([]) };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     affirmingPledge = {
@@ -130,6 +143,62 @@ describe('HousingGroupsService', () => {
 
       expect(listings.save).not.toHaveBeenCalled();
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('refuses a non-member on an access-gated group, before any other gate', async () => {
+      groups.findOne.mockResolvedValue(gatedGroup);
+
+      await expect(
+        service.createListing('sunset-house', CREATE_DTO, 'stranger-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      // Gate 0 runs first, so a stranger is never sent through a pledge or a
+      // phone verification only to be refused afterwards.
+      expect(affirmingPledge.requireAccepted).not.toHaveBeenCalled();
+      expect(verification.requireLevel).not.toHaveBeenCalled();
+      expect(listings.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('tells a member with a request still in triage that it is pending', async () => {
+      groups.findOne.mockResolvedValue(gatedGroup);
+      joinRequests.find.mockResolvedValue([
+        { id: 'request-1', status: GroupJoinRequestStatus.Pending },
+      ]);
+
+      await expect(
+        service.createListing('sunset-house', CREATE_DTO, 'applicant-1'),
+      ).rejects.toMatchObject({
+        response: {
+          code: 'GROUP_MEMBERSHIP_REQUIRED',
+          membershipStanding: 'pending',
+        },
+      });
+    });
+
+    it('lets an approved member share a room in an access-gated group', async () => {
+      groups.findOne.mockResolvedValue(gatedGroup);
+      joinRequests.find.mockResolvedValue([
+        { id: 'request-1', status: GroupJoinRequestStatus.Approved },
+      ]);
+
+      await service.createListing('sunset-house', CREATE_DTO, 'member-1');
+
+      expect(listings.save).toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.HousingGroupListings,
+        'group-listing-1',
+      );
+    });
+
+    it('leaves an open group open to every active member', async () => {
+      joinRequests.find.mockResolvedValue([]);
+
+      await service.createListing('sunset-house', CREATE_DTO, 'member-1');
+
+      // No roster read at all: the flag is false, so the gate never runs.
+      expect(joinRequests.find).not.toHaveBeenCalled();
+      expect(listings.save).toHaveBeenCalled();
     });
 
     it('tells nobody when the affirming pledge has not been accepted', async () => {

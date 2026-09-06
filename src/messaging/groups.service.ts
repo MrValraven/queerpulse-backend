@@ -768,7 +768,7 @@ export class GroupsService {
   ): Promise<ConversationResponse> {
     const [participantRows, lastByConvo, unreadByConvo] = await Promise.all([
       this.participants.find({ where: { conversationId: convo.id } }),
-      this.core.lastMessagesByConversation([convo.id]),
+      this.core.lastMessagesByConversation([convo.id], userId),
       this.core.unreadCountsByConversation([convo.id], userId),
     ]);
     const callerRow = participantRows.find((row) => row.userId === userId);
@@ -814,6 +814,9 @@ export class GroupsService {
       otherLastReadAt: null,
       otherDeliveredAt: null,
       otherParticipantId: null,
+      // The connection gate (PRD-220) never applies to a group thread — see
+      // `ConversationsService.listConversations`' matching field.
+      replyRequiresConnection: false,
       kind: 'group',
       title: convo.title,
       avatarUrl: toImageUrl(convo.avatarUrl),
@@ -824,6 +827,7 @@ export class GroupsService {
       muted: callerRow?.muted ?? false,
       pinnedAt: callerRow?.pinnedAt?.toISOString() ?? null,
       favorite: callerRow?.favoritedAt != null,
+      markedUnreadAt: callerRow?.markedUnreadAt?.toISOString() ?? null,
       hasLeft: callerRow?.leftAt != null,
       ...this.core.groupCapabilities(
         callerRow?.role,

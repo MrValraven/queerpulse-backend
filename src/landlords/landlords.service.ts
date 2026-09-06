@@ -31,6 +31,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
+import { PublishLandlordReplyDto } from './dto/publish-landlord-reply.dto';
 import { TakeDownRecommendationDto } from './dto/take-down-recommendation.dto';
 import { ListAdminLandlordsQuery } from './dto/list-admin-landlords.query';
 import { ListIntroRequestsQuery } from './dto/list-intro-requests.query';
@@ -45,11 +46,18 @@ import { LandlordRecommendation } from './entities/landlord-recommendation.entit
 import { Landlord, LandlordStatus } from './entities/landlord.entity';
 import { BrowseLandlordsQuery } from './dto/browse-landlords.query';
 import {
+  EARLIEST_TENANCY_MONTH,
+  isTenancyMonth,
+  tenancyMonthOf,
+} from './tenancy-month';
+import {
   AdminLandlordDTO,
   AdminRecommendationDTO,
+  EMPTY_LANDLORD_RATING,
   IntroRequestDTO,
   LandlordCardDTO,
   LandlordDetailDTO,
+  LandlordRatingDTO,
   ratingFromRecommendations,
   RecommendationDTO,
   toAdminLandlordDTO,
@@ -238,7 +246,7 @@ export class LandlordsService {
       if (!rows.length) return [];
       const ratings = await this.ratingsFor(rows.map((r) => r.id));
       return rows.map((r) =>
-        toLandlordCardDTO(r, ratings.get(r.id) ?? { score: '0', count: 0 }),
+        toLandlordCardDTO(r, ratings.get(r.id) ?? EMPTY_LANDLORD_RATING),
       );
     });
   }
@@ -277,19 +285,51 @@ export class LandlordsService {
   /**
    * Create or update the caller's rating of a landlord.
    *
-   * BE-HSG-18: a recommendation is a public, named rating of a real third party
-   * who is not a member here and has no right of reply on this surface, and it
-   * feeds `ratingFromRecommendations` on every landlord card. It carried none of
-   * the gates `createIntroRequest` two methods below has always had, so an
-   * account with only an email on file and no affirming pledge could rate a
-   * named person. It now carries both: the mandatory pledge and the same
+   * BE-HSG-18: a recommendation is a named rating of a real third party who is
+   * not a member here, visible to every member of the platform, and it feeds
+   * `ratingFromRecommendations` on every landlord card. It carried none of the
+   * gates `createIntroRequest` two methods below has always had, so an account
+   * with only an email on file and no affirming pledge could rate a named
+   * person. It now carries both: the mandatory pledge and the same
    * phone-verification step-up.
    *
-   * Still open (a follow-up, not something to fake here): there is no proof the
-   * recommender ever rented from this landlord. Tying a recommendation to an
-   * accepted `landlord_intro_requests` row is the natural interaction gate, but
-   * it needs a product decision about the members who found their home through
-   * a landlord they met off-platform.
+   * ## PRD-249: what closed the open follow-up, and what it did NOT close
+   *
+   * This docblock used to end on an open question: nothing proved the
+   * recommender had ever rented from this landlord. The decision is made, and
+   * it is not a proof requirement. It is three things:
+   *
+   *  1. THE AUTHOR ATTESTS. `hasRentedFromThisLandlord` must be `true`, and a
+   *     rough tenancy window comes with it (`YYYY-MM`, end omitted for a
+   *     tenancy still running). Stamped into `attestedAt` below.
+   *  2. EVERY READ SAYS IT IS UNVERIFIED. `RecommendationDTO.isSelfAttested`
+   *     and `LandlordCardDTO.isRatingSelfReported` are constants served on
+   *     every read, so no surface can render the words or the score without the
+   *     label in hand.
+   *  3. THE LANDLORD CAN ANSWER. See `publishLandlordReply` below.
+   *
+   * WHY NOT THE INTERACTION GATE THIS COMMENT USED TO PROPOSE. The obvious
+   * design is the one `HousingReviewsService.submit` uses: it refuses a review
+   * unless `HousingViewingsService.loadCompletedForReview` finds a viewing the
+   * author took part in that reached `completed`. That works there because the
+   * whole interaction happened on this platform: a member listed, a member
+   * viewed, and both are rows. This surface is the opposite. Almost everybody
+   * with a landlord worth telling others about found them through a friend, an
+   * agency or a card in a window, often years before this platform existed.
+   * Gating on an accepted `landlord_intro_requests` row would admit only the
+   * handful of tenancies that began here and would silence exactly the people
+   * the directory is for. So the gate that would have been real proof is
+   * refused as too narrow, and an honest label replaces it.
+   *
+   * WHAT STAYS TRUE AND HAS TO KEEP BEING SAID: an attestation is not evidence.
+   * Nobody checks it. `attestedAt` records that the author was ASKED and
+   * answered, which is worth something (it is a claim a phone-verified member
+   * made in their own name, and a false one is reportable) and is not worth
+   * confusing with verification.
+   *
+   * The upsert path writes the attestation on an UPDATE too, so an author
+   * editing a recommendation they wrote before this existed answers the
+   * question then, and the row stops being historic.
    */
   async recommend(
     slug: string,
@@ -301,6 +341,7 @@ export class LandlordsService {
     // Step-up gate: a public rating of a named person needs a real phone behind
     // it, matching the intro-request path.
     await this.verification.requireLevel(authorUserId, VerificationLevel.Phone);
+    const attestation = LandlordsService.attestationFrom(dto);
     const landlord = await this.loadLiveOr404(slug);
     const rec = await this.recommendations.findOne({
       where: { landlordId: landlord.id, authorUserId },
@@ -309,6 +350,7 @@ export class LandlordsService {
     if (rec) {
       rec.stars = dto.stars;
       rec.text = dto.text;
+      Object.assign(rec, attestation);
       saved = await this.recommendations.save(rec);
     } else {
       const created = this.recommendations.create({
@@ -316,6 +358,7 @@ export class LandlordsService {
         authorUserId,
         stars: dto.stars,
         text: dto.text,
+        ...attestation,
       });
       try {
         saved = await this.recommendations.save(created);
@@ -331,6 +374,7 @@ export class LandlordsService {
         if (!raced) throw err;
         raced.stars = dto.stars;
         raced.text = dto.text;
+        Object.assign(raced, attestation);
         saved = await this.recommendations.save(raced);
       }
     }
@@ -345,6 +389,76 @@ export class LandlordsService {
     // the takedown does. The author gets their own edit echoed back, which is
     // what they asked for, while every OTHER read below still withholds it.
     return toRecommendationDTO(saved, members.get(authorUserId) ?? null, level);
+  }
+
+  /**
+   * PRD-249. The attestation columns a submitted recommendation writes, with
+   * every rule the DTO's own decorators cannot express checked here.
+   *
+   * `CreateRecommendationDto` already refuses a missing or `false`
+   * `hasRentedFromThisLandlord` and a month that is not `YYYY-MM`. Three rules
+   * are left, and all three need something the decorators do not have (the
+   * clock, or the other field):
+   *
+   *  - not before {@link EARLIEST_TENANCY_MONTH}, which is a typo floor rather
+   *    than a claim about how long anybody has been renting: it catches a
+   *    mistyped year before it is stored and rendered as a tenancy in the third
+   *    century.
+   *  - not in the future. A tenancy that has not started yet is not something
+   *    the author can have an opinion about.
+   *  - end not before start.
+   *
+   * Returns the columns as a partial so the create and the two update paths in
+   * `recommend` write exactly the same fields. `tenancyEndedOn` is normalised
+   * to an explicit `null` (the DTO leaves it `undefined` when the author still
+   * rents there) so an update clears a stale end month instead of leaving the
+   * previous tenancy's end standing under a new attestation.
+   */
+  private static attestationFrom(dto: CreateRecommendationDto): {
+    attestedAt: Date;
+    tenancyStartedOn: string;
+    tenancyEndedOn: string | null;
+  } {
+    const now = new Date();
+    const thisMonth = tenancyMonthOf(now);
+    const startedOn = dto.tenancyStartedOn;
+    const endedOn = dto.tenancyEndedOn ?? null;
+
+    if (!isTenancyMonth(startedOn)) {
+      throw new BadRequestException(
+        `Check the year the tenancy started. Nothing earlier than ${EARLIEST_TENANCY_MONTH}.`,
+      );
+    }
+    if (startedOn > thisMonth) {
+      throw new BadRequestException(
+        'A tenancy that has not started yet cannot be recommended.',
+      );
+    }
+    if (endedOn !== null) {
+      if (!isTenancyMonth(endedOn)) {
+        throw new BadRequestException(
+          `Check the year the tenancy ended. Nothing earlier than ${EARLIEST_TENANCY_MONTH}.`,
+        );
+      }
+      if (endedOn > thisMonth) {
+        throw new BadRequestException(
+          'A tenancy cannot end in the future. Leave the end month out if you still rent from them.',
+        );
+      }
+      // Fixed-width `YYYY-MM` sorts chronologically as a string, so this needs
+      // no date parse.
+      if (endedOn < startedOn) {
+        throw new BadRequestException(
+          'The tenancy cannot end before it started.',
+        );
+      }
+    }
+
+    return {
+      attestedAt: now,
+      tenancyStartedOn: startedOn,
+      tenancyEndedOn: endedOn,
+    };
   }
 
   /**
@@ -447,7 +561,7 @@ export class LandlordsService {
       return rows.map((row) =>
         toAdminLandlordDTO(
           row,
-          ratings.get(row.id) ?? { score: '0', count: 0 },
+          ratings.get(row.id) ?? EMPTY_LANDLORD_RATING,
           row.submittedByUserId
             ? (submitters.get(row.submittedByUserId) ?? null)
             : null,
@@ -746,6 +860,110 @@ export class LandlordsService {
     return this.oneAdminRecommendationOr404(rec.id);
   }
 
+  /**
+   * PRD-249. Publish the named landlord's answer to one recommendation.
+   *
+   * ## WHY A STAFF ROUTE AND NOT A FORM FOR THE LANDLORD
+   *
+   * Every other right of reply on this platform is the subject answering for
+   * themselves: `HousingReviewsService.replyToReview` and
+   * `ListingsService.replyToReview` both authenticate the person the review is
+   * about. Neither shape is available here, and the reason is structural rather
+   * than unbuilt. A `Landlord` row is a community-maintained entry ABOUT a
+   * third party (see the entity docblock). Its only user column is
+   * `submittedByUserId`, the member who suggested it. There is no `userId`, no
+   * claim path, and no invite: a landlord is not a member and the whole
+   * directory sits behind `ActiveMemberGuard`, so a landlord cannot even read
+   * the page that rates them.
+   *
+   * Giving them an account to answer with was considered and refused, because
+   * it is the larger harm: a claimed entry is an entry its subject can then
+   * shape, and this directory exists so tenants can warn each other about
+   * landlords. The reply is the right of reply. It is not editorial control.
+   *
+   * ## THE PATH A REAL LANDLORD TAKES, END TO END
+   *
+   *  1. They learn about the recommendation (a tenant tells them; they cannot
+   *     read it here) and open the public "Is this you?" form, which submits
+   *     `POST /intakes/landlord_reply_request`. That route is `@Public()`, so
+   *     it works with no account, and the intake lands in /admin/intakes with a
+   *     14-day clock like every other intake kind.
+   *  2. A staff member works the row: they check, by whatever means a human has,
+   *     that they are dealing with the person named, and they hold the reply
+   *     text the landlord gave them.
+   *  3. They call this route. The words go on the recommendation, stamped with
+   *     the time and with the admin who published them.
+   *  4. Every member reading that recommendation sees the reply, labelled as
+   *     published by the team on the landlord's behalf
+   *     (`LandlordReplyDTO.publishedByStaff`).
+   *
+   * The intake row is the provenance record and nothing is copied onto this
+   * table: its payload carries the recommendation id, what the landlord said,
+   * and how to reach them.
+   *
+   * ## RULES
+   *
+   * ONE STANDING REPLY, not a thread: publishing again overwrites the text and
+   * re-stamps the time, exactly like `HousingReview.listerReplyText`. A reply
+   * is refused on a recommendation under a takedown, because there is nothing
+   * public left to answer and publishing one would tell a landlord's
+   * transcriber that a withheld recommendation exists.
+   */
+  async publishLandlordReply(
+    id: string,
+    adminUserId: string,
+    dto: PublishLandlordReplyDto,
+  ): Promise<AdminRecommendationDTO> {
+    const rec = await this.recommendations.findOne({ where: { id } });
+    if (!rec) {
+      throw new NotFoundException('Recommendation not found');
+    }
+    const text = LandlordsService.trimToNull(dto.text);
+    if (!text) {
+      throw new BadRequestException(
+        "A reply needs the landlord's own words. Publish what they said, never a summary of it.",
+      );
+    }
+    const state = await this.contentModeration.stateFor(
+      LandlordsService.RECOMMENDATION_SUBJECT_TYPE,
+      rec.id,
+    );
+    if (state.hidden || state.removed) {
+      throw new BadRequestException(
+        'This recommendation is already withheld from members. There is nothing public to answer.',
+      );
+    }
+    rec.landlordReplyText = text;
+    rec.landlordReplyPublishedAt = new Date();
+    rec.landlordReplyPublishedBy = adminUserId;
+    await this.recommendations.save(rec);
+    return this.oneAdminRecommendationOr404(rec.id);
+  }
+
+  /**
+   * PRD-249. Take a published landlord reply back down.
+   *
+   * Needed because the reply is TRANSCRIBED: staff published somebody else's
+   * words, and the ways that goes wrong (the wrong person, a misheard sentence,
+   * a landlord who asks for it to come down) all need an undo that is not a
+   * second overwrite. Clears all three columns together so the row cannot hold
+   * a publisher for a reply that is gone.
+   *
+   * IDEMPOTENT: a recommendation with no reply is already in the state the
+   * caller asked for. It DOES 404 on an unknown recommendation id.
+   */
+  async retractLandlordReply(id: string): Promise<AdminRecommendationDTO> {
+    const rec = await this.recommendations.findOne({ where: { id } });
+    if (!rec) {
+      throw new NotFoundException('Recommendation not found');
+    }
+    rec.landlordReplyText = null;
+    rec.landlordReplyPublishedAt = null;
+    rec.landlordReplyPublishedBy = null;
+    await this.recommendations.save(rec);
+    return this.oneAdminRecommendationOr404(rec.id);
+  }
+
   /** Re-read one recommendation as staff see it, after a state change. */
   private async oneAdminRecommendationOr404(
     id: string,
@@ -1039,23 +1257,35 @@ export class LandlordsService {
    * The takedown exclusion is therefore IN-QUERY: a post-query filter here
    * could only ever see the capped page, which would leave the headline score
    * and the list under it disagreeing about which recommendations exist.
+   *
+   * PRD-249 adds `attested_count` to the same single aggregate rather than a
+   * second query: the number is meaningless apart from `count` (it is "how many
+   * of these carry a tenancy attestation"), so the two have to be computed over
+   * exactly the same set of rows or the card could say 4 of 3.
    */
-  private async rating(
-    landlordId: string,
-  ): Promise<{ score: string; count: number }> {
+  private async rating(landlordId: string): Promise<LandlordRatingDTO> {
     const ratingQuery = this.recommendations
       .createQueryBuilder('r')
       .select('AVG(r.stars)', 'average')
       .addSelect('COUNT(*)', 'count')
+      .addSelect(
+        'COUNT(*) FILTER (WHERE r.attested_at IS NOT NULL)',
+        'attested_count',
+      )
       .where('r.landlord_id = :landlordId', { landlordId });
     this.excludeModeratedRecommendations(ratingQuery, 'r.id');
     const row = await ratingQuery.getRawOne<{
       average: string | null;
       count: string;
+      attested_count: string;
     }>();
     const count = Number(row?.count ?? 0);
-    if (!count || row?.average == null) return { score: '0', count: 0 };
-    return { score: Number(row.average).toFixed(1), count };
+    if (!count || row?.average == null) return EMPTY_LANDLORD_RATING;
+    return {
+      score: Number(row.average).toFixed(1),
+      count,
+      attestedCount: Number(row.attested_count ?? 0),
+    };
   }
 
   /**
@@ -1067,8 +1297,8 @@ export class LandlordsService {
    */
   private async ratingsFor(
     landlordIds: string[],
-  ): Promise<Map<string, { score: string; count: number }>> {
-    const map = new Map<string, { score: string; count: number }>();
+  ): Promise<Map<string, LandlordRatingDTO>> {
+    const map = new Map<string, LandlordRatingDTO>();
     if (!landlordIds.length) return map;
     const allRecs = await this.recommendations.find({
       where: { landlordId: In(landlordIds) },

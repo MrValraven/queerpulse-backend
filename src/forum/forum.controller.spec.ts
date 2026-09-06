@@ -21,6 +21,9 @@ describe('ForumController', () => {
     setLocked: jest.Mock;
     setPinned: jest.Mock;
     listPinned: jest.Mock;
+    updateThread: jest.Mock;
+    deleteThread: jest.Mock;
+    markRead: jest.Mock;
   };
   let postsService: {
     listPosts: jest.Mock;
@@ -38,6 +41,9 @@ describe('ForumController', () => {
       setLocked: jest.fn().mockResolvedValue({}),
       setPinned: jest.fn().mockResolvedValue({}),
       listPinned: jest.fn().mockResolvedValue([]),
+      updateThread: jest.fn().mockResolvedValue({}),
+      deleteThread: jest.fn().mockResolvedValue({}),
+      markRead: jest.fn().mockResolvedValue({ ok: true }),
     };
     postsService = {
       listPosts: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
@@ -88,9 +94,36 @@ describe('ForumController', () => {
       'user-1',
       'lease',
       'rent',
+      // A plain member: withdrawn threads stay out of the badges too, so the
+      // counts admit exactly the set the list draws (PRD-160).
+      false,
     );
     expect(postsService.hasEverPosted).toHaveBeenCalledWith('user-1');
     expect(res).toEqual({ counts: { all: 0 }, hasPosted: true });
+  });
+
+  it('delegates updateThread with the title, tags and category', async () => {
+    await controller.updateThread(user, 'hello-world', {
+      title: 'New title',
+      tags: ['housing'],
+      category: 'health',
+    });
+    expect(threadsService.updateThread).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      'New title',
+      ['housing'],
+      'health',
+    );
+  });
+
+  // PRD-160 — distinct from `DELETE /forum/posts/:id`, which reaches one post.
+  it('delegates the thread-level delete with the caller', async () => {
+    await controller.deleteThread(user, 'hello-world');
+    expect(threadsService.deleteThread).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+    );
   });
 
   it('delegates lock/unlock with the caller, the target state, and an optional lock reason', async () => {
@@ -237,5 +270,43 @@ describe('ForumController', () => {
     const res = await controller.vote(user, 'post-1', { value: 1 });
     expect(postsService.vote).toHaveBeenCalledWith('post-1', 'user-1', 1);
     expect(res).toEqual({ voteCount: 1, myVote: 1 });
+  });
+
+  it('passes the reply sort through to the service (C6/PRD-162)', async () => {
+    await controller.listPosts(user, 'hello-world', {
+      cursor: 'c1',
+      limit: 10,
+      sort: 'newest',
+    });
+
+    expect(postsService.listPosts).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      'c1',
+      10,
+      'newest',
+    );
+  });
+
+  it('defaults the reply sort to the service default when none is sent', async () => {
+    await controller.listPosts(user, 'hello-world', {});
+
+    expect(postsService.listPosts).toHaveBeenLastCalledWith(
+      'hello-world',
+      user,
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
+  it('marks a thread read through its own route, never the follow one', async () => {
+    // Reading is not following (C7/PRD-170): the two are separate routes
+    // writing separate fields of the same row.
+    await expect(
+      controller.markThreadRead(user, 'hello-world'),
+    ).resolves.toEqual({ ok: true });
+
+    expect(threadsService.markRead).toHaveBeenCalledWith('hello-world', user);
   });
 });

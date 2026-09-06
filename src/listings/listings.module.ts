@@ -26,6 +26,7 @@ import { ListingReview } from './entities/listing-review.entity';
 import { Listing } from './entities/listing.entity';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { ReportsModule } from '../reports/reports.module';
+import { SafeSpaceVouchesModule } from '../safe-space-vouches/safe-space-vouches.module';
 import { SafeSpaceNominationsModule } from '../safe-space-nominations/safe-space-nominations.module';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingCoManagersController } from './listing-co-managers.controller';
@@ -122,6 +123,15 @@ import { ListingsService } from './listings.service';
     // which reaches back here. So this is a plain import with no cycle and no
     // `forwardRef`.
     SafeSpaceNominationsModule,
+    // `SafeSpaceVisitsService`, so `ListingsService.setSafeSpace` can enforce
+    // the published three-independent-visit bar before a listing becomes
+    // `verified`. Imported directly rather than leant on through
+    // `SafeSpaceNominationsModule` above, which imports it but does not
+    // re-export it. The comment on that import already establishes the
+    // direction: `SafeSpaceVouchesModule` registers `Listing` and
+    // `ListingCoManager` as ENTITIES only and imports no module of this
+    // domain, so this is a plain import with no cycle and no `forwardRef`.
+    SafeSpaceVouchesModule,
     // `ReviewReplyNotifier` (PRD-47/48) — the review's author is told when the
     // business answers it, in `ListingsService.replyToReview`. Before this the
     // directory was the only one of the three review verticals that answered a

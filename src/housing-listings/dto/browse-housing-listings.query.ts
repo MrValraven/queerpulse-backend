@@ -61,6 +61,25 @@ export class BrowseHousingListingsQuery {
   @IsBoolean()
   hasAccessibilityInfo?: boolean;
 
+  // Only listings whose `features` array carries the canonical `Furnished`
+  // chip (case-insensitive, whole entry). See `housing-features.ts`.
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  furnished?: boolean;
+
+  // Only listings whose `features` array carries the canonical `Pets welcome`
+  // chip (case-insensitive, whole entry). See `housing-features.ts`.
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  petsWelcome?: boolean;
+
+  // Maximum deposit in euros. A listing that never stated a deposit is
+  // EXCLUDED once this is applied: an unstated deposit is unknown, and showing
+  // it under a cap would read as a promise the lister never made.
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) depositMax?: number;
+
   // Only listings the backend derives as "verified" (id-verified lister + live
   // + low risk). Applied server-side as risk_score < threshold AND an
   // id_verified lister — never a self-set flag.

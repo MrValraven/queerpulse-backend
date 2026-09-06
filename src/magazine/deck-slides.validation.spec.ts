@@ -1,5 +1,9 @@
 import { BadRequestException } from '@nestjs/common';
-import { validateDeckSlides } from './deck-slides.validation';
+import {
+  isDeckPublishReady,
+  validateDeckSlides,
+} from './deck-slides.validation';
+import { DeckSlide } from './entities/magazine-deck.entity';
 
 const VALID_MIXED_DECK = [
   {
@@ -100,5 +104,57 @@ describe('validateDeckSlides', () => {
     expect(() => validateDeckSlides([{ layout: 'carousel' }])).toThrow(
       BadRequestException,
     );
+  });
+});
+
+/**
+ * PRD-131 — the server-side mirror of the editor's publish checklist. These
+ * assert the same two REQUIRED rows the frontend gates on, so a drift in
+ * either place shows up here.
+ */
+describe('isDeckPublishReady', () => {
+  const TEXT_SLIDE: DeckSlide = { layout: 'text', body: 'A slide.' };
+
+  it('refuses an empty deck', () => {
+    expect(isDeckPublishReady([])).toBe(false);
+  });
+
+  it('accepts a deck with a slide and no images at all', () => {
+    expect(isDeckPublishReady([TEXT_SLIDE])).toBe(true);
+  });
+
+  it('refuses an image slide whose alt text is blank', () => {
+    expect(
+      isDeckPublishReady([
+        TEXT_SLIDE,
+        {
+          layout: 'image',
+          src: 'https://example.com/a.jpg',
+          alt: '   ',
+          tint: 'coral',
+        },
+      ]),
+    ).toBe(false);
+  });
+
+  it('accepts an image slide with real alt text', () => {
+    expect(
+      isDeckPublishReady([
+        {
+          layout: 'image',
+          src: 'https://example.com/a.jpg',
+          alt: 'A crowd cheering.',
+          tint: 'coral',
+        },
+      ]),
+    ).toBe(true);
+  });
+
+  it('leaves the optional stat-slide source line alone', () => {
+    expect(
+      isDeckPublishReady([
+        { layout: 'stat', value: '10', label: 'years', tint: 'coral' },
+      ]),
+    ).toBe(true);
   });
 });

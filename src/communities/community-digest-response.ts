@@ -38,6 +38,27 @@ export interface CommunityDigestEntry {
   newPostCount: number;
   newMemberCount: number;
   upcomingGatheringCount: number;
+  /**
+   * People waiting on this roster to be let in: join requests still
+   * `pending`.
+   *
+   * MODERATION STATE, so it is computed only where `myRole` is a staff role
+   * (owner, co-owner, moderator, per `isCommunityStaffRole`) and is a flat `0`
+   * for a plain member. How many people have applied to a room is not
+   * something belonging to the room tells you.
+   */
+  pendingJoinRequestCount: number;
+  /**
+   * Reports waiting on this roster, counted exactly as the community's own
+   * queue counts them (`CommunityPostsService.listCommunityReports`): status
+   * `open`, on one of this community's posts, one of its replies, or a photo
+   * in the album of a gathering it hosts.
+   *
+   * Same viewer gate as `pendingJoinRequestCount`, and for a stronger reason:
+   * the number of open reports in a community is a fact about who has been
+   * reported in it.
+   */
+  openReportCount: number;
   excerpts: CommunityDigestExcerpt[];
 }
 

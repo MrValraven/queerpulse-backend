@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
+import { SavedAvailabilityService } from './saved-availability.service';
 import { SavedListsService } from './saved-lists.service';
 import { SavedService } from './saved.service';
 
@@ -33,6 +34,10 @@ describe('SavedService', () => {
   // Named lists sit on top of the flat set: every plain save also joins the
   // member's default list, best-effort.
   let savedLists: { ensureDefaultMembership: jest.Mock };
+  // Answers "does this bookmark still point at something?" for the whole page
+  // at once (PRD-169). Defaults to "nothing resolves" so a test that cares has
+  // to say which refs are live.
+  let availability: { availableRefs: jest.Mock };
 
   const now = new Date('2026-07-15T12:00:00.000Z');
 
@@ -64,12 +69,16 @@ describe('SavedService', () => {
     savedLists = {
       ensureDefaultMembership: jest.fn().mockResolvedValue(undefined),
     };
+    availability = {
+      availableRefs: jest.fn().mockResolvedValue(new Set<string>()),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SavedService,
         { provide: getRepositoryToken(SavedItem), useValue: repo },
         { provide: SavedListsService, useValue: savedLists },
+        { provide: SavedAvailabilityService, useValue: availability },
       ],
     }).compile();
 
@@ -81,6 +90,10 @@ describe('SavedService', () => {
       const qb = qbStub();
       qb.getManyAndCount!.mockResolvedValue([[row()], 1]);
       repo.createQueryBuilder.mockReturnValue(qb);
+
+      availability.availableRefs.mockResolvedValue(
+        new Set(['article:coming-out-guide']),
+      );
 
       const query: ListSavedQuery = {};
       const result = await service.list('u1', query);
@@ -106,12 +119,79 @@ describe('SavedService', () => {
             description: 'A gentle primer.',
             readTime: '6 min',
             savedAt: now.toISOString(),
+            availability: 'available',
           },
         ],
         total: 1,
         page: 1,
         pageSize: 20,
       });
+    });
+
+    it('resolves the whole page in ONE batched call, never once per item', async () => {
+      const qb = qbStub();
+      const rows = [
+        row({ subjectId: 'one' }),
+        row({ subjectId: 'two' }),
+        row({ subjectId: 'three' }),
+      ];
+      qb.getManyAndCount!.mockResolvedValue([rows, 3]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('u1', {});
+
+      // The N+1 this feature exists to avoid: three saved items, one
+      // resolution, and the rows handed over as a batch rather than one by one.
+      expect(availability.availableRefs).toHaveBeenCalledTimes(1);
+      expect(availability.availableRefs).toHaveBeenCalledWith(rows, 'u1');
+    });
+
+    it('marks a dead subject unavailable and withholds its href, keeping the snapshot', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([[row()], 1]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+      // Nothing resolved: the thread/listing/article behind this bookmark is
+      // gone, taken down, or no longer visible to this member.
+      availability.availableRefs.mockResolvedValue(new Set<string>());
+
+      const result = await service.list('u1', {});
+
+      expect(result.items[0]).toEqual({
+        id: 'article:coming-out-guide',
+        kind: SavedKind.Article,
+        title: 'Coming Out: A Guide',
+        // Null rather than the stored path: a client that links it anyway
+        // still cannot send anyone to a 404.
+        href: null,
+        // The snapshot SURVIVES — it is what lets the member recognise what
+        // they lost, and it is the reason the row is still worth showing.
+        meta: 'QueerPulse Editorial',
+        description: 'A gentle primer.',
+        readTime: '6 min',
+        savedAt: now.toISOString(),
+        availability: 'unavailable',
+      });
+    });
+
+    it('keeps an unavailable item IN the page rather than filtering it out', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([
+        [row({ subjectId: 'gone' }), row({ subjectId: 'live' })],
+        2,
+      ]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+      availability.availableRefs.mockResolvedValue(new Set(['article:live']));
+
+      const result = await service.list('u1', {});
+
+      // Both rows come back. Dropping the dead one would make `total` disagree
+      // with the page and, under an OFFSET, permanently skip the row after it.
+      expect(result.items).toHaveLength(2);
+      expect(result.total).toBe(2);
+      expect(result.items.map((item) => item.availability)).toEqual([
+        'unavailable',
+        'available',
+      ]);
     });
 
     it('narrows to one list with a correlated EXISTS, never a join', async () => {
@@ -160,13 +240,22 @@ describe('SavedService', () => {
       ]);
       repo.createQueryBuilder.mockReturnValue(qb);
 
+      availability.availableRefs.mockResolvedValue(
+        new Set(['article:coming-out-guide']),
+      );
+
       const result = await service.list('u1', {});
 
       expect(result.items[0]).toEqual({
         id: 'article:coming-out-guide',
         kind: SavedKind.Article,
         title: 'Coming Out: A Guide',
+        // `href` is always PRESENT on the wire now, null when there is nowhere
+        // to go — here because nothing was stored, not because the subject
+        // went away. `meta`/`description`/`readTime` stay omitted when unset.
+        href: null,
         savedAt: now.toISOString(),
+        availability: 'available',
       });
     });
   });

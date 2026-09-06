@@ -283,6 +283,7 @@ describe('profile-response mappers', () => {
           role: RosterRole.Owner,
           tags: ['beginner-friendly'],
           coverImageUrl: 'https://api.test/files/cover.jpg',
+          avatarImageUrl: 'https://api.test/files/mark.png',
           activeThisWeek: 12,
         },
       ],
@@ -328,6 +329,7 @@ describe('profile-response mappers', () => {
       role: 'owner',
       tags: ['beginner-friendly'],
       coverImageUrl: 'https://api.test/files/cover.jpg',
+      avatarImageUrl: 'https://api.test/files/mark.png',
       activeThisWeek: 12,
     });
   });

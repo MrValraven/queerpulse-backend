@@ -22,6 +22,39 @@ export const SAFE_SPACE_FLAG_SUSPENSION_THRESHOLD = 3;
 /** "Every badge is re-reviewed once a year." */
 export const SAFE_SPACE_RE_REVIEW_INTERVAL_DAYS = 365;
 
+/**
+ * Refusal code when a badge is asked for below
+ * {@link SAFE_SPACE_REQUIRED_INDEPENDENT_VISITS} independent visits and no
+ * written override reason came with it.
+ *
+ * An exported constant rather than an inline literal, matching
+ * `VERIFICATION_REQUIRED_CODE` and its neighbours, so the specs and both award
+ * paths import the one spelling. The frontend branches on this value and never
+ * on message text.
+ *
+ * BOTH doors to a badge answer with it: the reviewed nomination path
+ * (`SafeSpaceNominationsService.decide`) and the direct mark
+ * (`ListingsService.setSafeSpace`).
+ */
+export const SAFE_SPACE_VISIT_BAR_NOT_MET_CODE = 'SAFE_SPACE_VISIT_BAR_NOT_MET';
+
+/**
+ * Refusal code when a caller who reached the endpoint on the additive
+ * `directory_moderator` grant alone tries to OVERRIDE the visit bar.
+ *
+ * Deciding a nomination is a directory moderator's job and stays theirs: they
+ * may award above the bar and they may decline. Waiving a guarantee the
+ * platform publishes is a platform-level act, so it is limited to a real
+ * `moderator`/`admin` account tier.
+ *
+ * Distinct from {@link SAFE_SPACE_VISIT_BAR_NOT_MET_CODE}, and answered with a
+ * 403 rather than a 400, because the two are different problems: one says
+ * "write a reason", the other says "this is not yours to waive". A client that
+ * conflated them would tell a delegate to write a reason they can never use.
+ */
+export const SAFE_SPACE_VISIT_BAR_OVERRIDE_FORBIDDEN_CODE =
+  'SAFE_SPACE_VISIT_BAR_OVERRIDE_FORBIDDEN';
+
 const HOUR_IN_MS = 60 * 60 * 1000;
 const DAY_IN_MS = 24 * HOUR_IN_MS;
 

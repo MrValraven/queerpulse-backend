@@ -15,17 +15,40 @@ import { TrimMessageBody } from './trim-message-body';
 
 /**
  * A picked GIF's `url`/`previewUrl` are absolute provider URLs (`@IsUrl`); an
- * uploaded IMAGE's are a private storage key (`message-images/<uuid>/<uuid>.
+ * uploaded IMAGE's or DOCUMENT's are a private storage key
+ * (`message-images/<uuid>/<uuid>.<ext>` / `message-documents/<uuid>/<uuid>.
  * <ext>`) — not a URL at all. `@IsUrl` would reject a bare key, so this
  * accepts either shape and `MessagingCoreService.postMessage` tells them apart
- * by `kind` (and, for `kind:'image'`, re-validates the key is a well-formed
- * `message-image` the CALLER actually owns — see `storageKeyOwnerId`).
+ * by `kind` (and, for `kind:'image'`/`kind:'document'`, re-validates the key
+ * is a well-formed `message-image`/`message-document` the CALLER actually
+ * owns — see `storageKeyOwnerId`).
+ *
+ * Carries BOTH the gif/image fields (`previewUrl`/`width`/`height`) and the
+ * document fields (`fileName`/`byteSize`/`contentType`), all optional except
+ * `url`/`provider` — one class covering three send kinds, kept under its
+ * original name for the SAME reason `GifAttachment` on the `Message` entity
+ * stayed named after its history (see that interface's own doc): renaming
+ * would touch this file's only other importer (`chat/dto/chat-payloads.ts`)
+ * for a purely cosmetic diff. `MessagingCoreService.postMessage` is what
+ * actually enforces which fields a given `kind` requires — this DTO only
+ * bounds each field's shape when present.
  */
 export class GifAttachmentDto {
   @IsString() @MinLength(1) @MaxLength(2048) url!: string;
-  @IsString() @MinLength(1) @MaxLength(2048) previewUrl!: string;
-  @IsInt() @Min(1) width!: number;
-  @IsInt() @Min(1) height!: number;
+
+  // `kind:'gif'` / `kind:'image'` only.
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(2048) previewUrl?: string;
+  @IsOptional() @IsInt() @Min(1) width?: number;
+  @IsOptional() @IsInt() @Min(1) height?: number;
+
+  // `kind:'document'` only. `fileName` is member-supplied DISPLAY text —
+  // bounded and control-character-stripped server-side (see
+  // `MessagingCoreService.sanitizeDisplayFileName`), never used to build a
+  // storage key or a served header.
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(255) fileName?: string;
+  @IsOptional() @IsInt() @Min(1) byteSize?: number;
+  @IsOptional() @IsString() @MaxLength(128) contentType?: string;
+
   // Free-form (bounded) so swapping the GIF provider — or the attachment
   // source — never needs a DTO change.
   @IsString() @MaxLength(32) provider!: string;
@@ -62,14 +85,15 @@ export class SendMessageDto {
   forwarded?: boolean;
 
   /** `'gif'` marks this send as a provider GIF, `'image'` a member-uploaded
-   *  photo (both require `attachment`); default/absent is an ordinary text
+   *  photo, `'document'` a member-uploaded PDF/spreadsheet/text file (PRD-226)
+   *  — all three require `attachment`; default/absent is an ordinary text
    *  bubble. */
   @IsOptional()
-  @IsIn(['user', 'gif', 'image'])
-  kind?: 'user' | 'gif' | 'image';
+  @IsIn(['user', 'gif', 'image', 'document'])
+  kind?: 'user' | 'gif' | 'image' | 'document';
 
-  /** The media attachment for a `kind:'gif'` or `kind:'image'` send. Ignored
-   *  for text. */
+  /** The media attachment for a `kind:'gif'`, `kind:'image'`, or
+   *  `kind:'document'` send. Ignored for text. */
   @IsOptional()
   @ValidateNested()
   @Type(() => GifAttachmentDto)

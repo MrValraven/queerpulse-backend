@@ -96,6 +96,11 @@ import { LastActiveService } from './last-active.service';
 
 const PAGE_SIZE = 20;
 const RELATED_LIMIT = 4;
+// How many rows are READ to fill those four cards. The moderator-takedown gate
+// runs after the fetch (see `dropTakenDown`), so reading exactly `RELATED_LIMIT`
+// would show a short row whenever one of the matches had been taken down.
+// A pool where EVERY row is taken down correctly renders nothing.
+const RELATED_READ_LIMIT = RELATED_LIMIT * 3;
 // How many activity rows a profile shows. Raised from 6 with the second and
 // third kinds (a public community join, a persona publish): six rows was a
 // half-screen of a section whose whole job is answering "what has this person
@@ -225,16 +230,38 @@ export class ProfilesService {
    * this member/slug exists at all?" (currently `getBySlug` itself and the
    * `GET /:slug/mutuals` controller route) shares one answer instead of
    * re-deriving or drifting out of sync.
+   *
+   * A slug with no live profile is not automatically a 404: PRD-204 forwards a
+   * renamed-away-from username while its reclaim cooldown is still running.
+   * See `throwMovedOrNotFound`.
    */
   async findBySlugOrThrow(
     slug: string,
     viewerUserId: string,
     viewerRole?: string,
   ): Promise<Profile> {
-    const profile = await this.profiles.findOne({ where: { slug } });
-    if (!profile) {
-      throw new NotFoundException('Profile not found');
-    }
+    // PRD-204: a slug with no live profile may be a name this member renamed
+    // away from and still holds the reclaim reservation for.
+    // `throwMovedOrNotFound` always throws, so the `??` branch never yields.
+    const profile =
+      (await this.profiles.findOne({ where: { slug } })) ??
+      (await this.throwMovedOrNotFound(slug, viewerUserId, viewerRole));
+    await this.assertVisibleOrNotFound(profile, viewerUserId, viewerRole);
+    return profile;
+  }
+
+  /**
+   * The four "does the viewer get to know this member exists at all?" gates,
+   * each throwing the SAME 404 so a hidden member is indistinguishable from a
+   * slug that was never real. Shared by `findBySlugOrThrow` and by the moved-
+   * handle path below, which must not answer "moved" for a member the viewer
+   * is not allowed to know about.
+   */
+  private async assertVisibleOrNotFound(
+    profile: Profile,
+    viewerUserId: string,
+    viewerRole?: string,
+  ): Promise<void> {
     // Computed once, up front, so every owner-exception below (self-hide,
     // takedown) reads the same answer.
     const isOwner = profile.userId === viewerUserId;
@@ -273,7 +300,58 @@ export class ProfilesService {
     if (!isOwner && !ProfilesService.isStaffRole(viewerRole)) {
       await this.assertNotTakenDown(profile.slug, profile.userId);
     }
-    return profile;
+  }
+
+  /**
+   * PRD-204. A printed QR card, a shared `/members/<slug>` link and a pasted
+   * `@mention` all die the moment a member renames, because the profile lookup
+   * reads the live `slug` column alone. The reclaim ledger already knows who
+   * held the name, so a rename can forward instead of breaking.
+   *
+   * The forwarding answer is bounded by the SAME window that protects the name:
+   * `previousProfileOwnerOf` returns an owner only while the reclaim cooldown
+   * is running and nobody else holds the name. Once the cooldown lapses (or the
+   * previous owner re-releases it to someone who claims it), this method stops
+   * answering, so a stranger who legitimately takes the name can never inherit
+   * traffic and trust meant for its previous owner.
+   *
+   * It also runs the full visibility gate on the former owner before saying
+   * anything. A member who blocked the viewer, hid from them, is inside "Hide
+   * me for 24 hours", or has been taken down gets the plain 404 they would have
+   * got under their current slug, so the move is never a way to confirm that
+   * someone exists.
+   *
+   * Never returns. The caller treats it as a throw.
+   */
+  private async throwMovedOrNotFound(
+    slug: string,
+    viewerUserId: string,
+    viewerRole?: string,
+  ): Promise<never> {
+    const previousOwnerUserId = await this.handles.previousProfileOwnerOf(slug);
+    if (!previousOwnerUserId) {
+      throw new NotFoundException('Profile not found');
+    }
+    const moved = await this.profiles.findOne({
+      where: { userId: previousOwnerUserId },
+    });
+    if (!moved) {
+      throw new NotFoundException('Profile not found');
+    }
+    // Throws the plain 404 for a viewer who may not know this member exists.
+    await this.assertVisibleOrNotFound(moved, viewerUserId, viewerRole);
+    // An application-level "moved" payload rather than an HTTP 301/308, for two
+    // reasons that are each on their own fatal to a bare redirect. A 301/308 is
+    // permanently cacheable by browsers and CDNs, and this forwarding MUST
+    // expire with the reclaim cooldown. And `fetch` follows a redirect
+    // transparently, so the SPA would render the profile under the dead URL
+    // instead of correcting the address bar. The frontend branches on `code`
+    // and re-navigates to `slug` with `replace: true`.
+    throw new NotFoundException({
+      code: 'PROFILE_MOVED',
+      message: 'That username has moved',
+      slug: moved.slug,
+    });
   }
 
   private async buildFullProfile(
@@ -479,6 +557,11 @@ export class ProfilesService {
       // Selected in the same pass rather than fetched per pin.
       .addSelect('c.tags', 'tags')
       .addSelect('c.cover_image_url', 'coverImageUrl')
+      // The community's own square identity mark. Rides the SAME select as
+      // the cover, so profile pins inherit it with no extra query and no
+      // N+1. `CommunityCardShell`'s prop is optional and an absent mark draws
+      // nothing, so an unmarked community's pin is unchanged. PRD-146.
+      .addSelect('c.avatar_image_url', 'avatarImageUrl')
       .addSelect('c.active_this_week', 'activeThisWeek')
       .orderBy('pin.position', 'ASC')
       .getRawMany<{
@@ -490,6 +573,7 @@ export class ProfilesService {
         role: RosterRole;
         tags: string[] | null;
         coverImageUrl: string | null;
+        avatarImageUrl: string | null;
         activeThisWeek: number | string | null;
       }>();
 
@@ -524,6 +608,7 @@ export class ProfilesService {
         role: r.role,
         tags: r.tags ?? [],
         coverImageUrl: toImageUrl(r.coverImageUrl),
+        avatarImageUrl: toImageUrl(r.avatarImageUrl),
         activeThisWeek: Number(r.activeThisWeek ?? 0),
       };
     });
@@ -549,6 +634,11 @@ export class ProfilesService {
         active: UserStatus.Active,
       })
       .where('p.user_id != :self', { self: profile.userId });
+    // ENG-150: the same viewer gates the directory applies. A related card
+    // carries a member's name, pronouns and photo, so it is a read path like
+    // any other: someone who blocked the viewer, hid from them, or turned on
+    // "Hide me for 24 hours" must not appear here either.
+    this.applyMemberVisibilityGates(qb, viewerUserId);
     const conds: string[] = [];
     const params: Record<string, unknown> = {};
     if (hasTags) {
@@ -560,9 +650,18 @@ export class ProfilesService {
       params.loc = profile.location;
     }
     qb.andWhere(`(${conds.join(' OR ')})`, params)
+      // `firstName` alone ties constantly across a member base, and a tie under
+      // a LIMIT makes the four cards shuffle between two requests. `userId` is
+      // the primary key, so it breaks every tie.
       .orderBy('p.firstName', 'ASC')
-      .take(RELATED_LIMIT);
-    const rows = await qb.getMany();
+      .addOrderBy('p.userId', 'ASC')
+      // Read a wider pool than we render: the fourth gate (moderator takedown)
+      // has no in-query form here, so it drops rows AFTER the fetch and reading
+      // exactly `RELATED_LIMIT` would leave a short row of cards whenever a
+      // match had been taken down.
+      .take(RELATED_READ_LIMIT);
+    const pool = await this.dropTakenDown(await qb.getMany());
+    const rows = pool.slice(0, RELATED_LIMIT);
     const counts = await this.vouchService.getVouchCounts(
       rows.map((r) => r.userId),
     );
@@ -612,6 +711,40 @@ export class ProfilesService {
     if (takenDown) {
       throw new NotFoundException('Profile not found');
     }
+  }
+
+  /**
+   * List form of `assertNotTakenDown`: drops every candidate a moderator has
+   * hidden or removed, in ONE batched lookup for the whole pool. Same
+   * both-keys rule as the single-profile gate, because a member can be
+   * reported under either their slug or their user id.
+   *
+   * Post-query rather than in-query on purpose. The subject is addressed by two
+   * different columns and a REMOVED member counts as well as a hidden one, so
+   * `ContentModerationService.excludeHidden` (one column, hidden-but-not-removed
+   * only) is the wrong predicate here. Callers therefore over-fetch and slice,
+   * the same shape `MemberSuggestionsService.dropTakenDown` uses.
+   */
+  private async dropTakenDown(candidates: Profile[]): Promise<Profile[]> {
+    if (!candidates.length) {
+      return candidates;
+    }
+    const states = await this.contentModeration.statesForAnyType(
+      [ProfilesService.MEMBER_SUBJECT_TYPE],
+      candidates.flatMap((candidate) => [candidate.slug, candidate.userId]),
+    );
+    if (!states.size) {
+      return candidates;
+    }
+    return candidates.filter((candidate) => {
+      const isTakenDown = [candidate.slug, candidate.userId].some(
+        (subjectId) => {
+          const state = states.get(subjectId);
+          return !!state && (state.hidden || state.removed);
+        },
+      );
+      return !isTakenDown;
+    });
   }
 
   async updateMe(
@@ -1089,6 +1222,41 @@ export class ProfilesService {
   }
 
   /**
+   * The in-query half of "may this viewer see this member at all?", applied to
+   * any list of `Profile` rows aliased `p`. ONE spelling of the rule, shared by
+   * the directory (`directoryBaseQuery`) and the profile page's related list
+   * (`loadRelated`), because a second spelling is how a surface quietly drifts
+   * out of sync with every other read path.
+   *
+   * Three of the four member gates live here. The fourth, moderator takedown,
+   * is keyed by slug OR userId in `content_moderation` and counts a removal as
+   * well as a hide, so it has no single-column `NOT EXISTS` form: callers apply
+   * it separately (`assertNotTakenDown` for a single profile, `dropTakenDown`
+   * over a fetched pool).
+   */
+  private applyMemberVisibilityGates(
+    qb: SelectQueryBuilder<Profile>,
+    viewerUserId: string,
+  ): void {
+    // Blocked-either-way members (in either direction) never surface (spec §2).
+    // `p`'s primary key is `user_id` (snake_case, per SnakeNamingStrategy) —
+    // matches this query builder's alias.
+    this.blockFilter.excludeBlocked(qb, viewerUserId, '"p"."user_id"');
+    // Hidden-from (member profile v2 Task 5): a candidate who hid THEIR
+    // profile from this viewer never surfaces either, same as a block —
+    // directional, unlike `excludeBlocked` above.
+    this.hiddenFrom.excludeHiddenFrom(qb, viewerUserId, '"p"."user_id"');
+    // Self-hide (member profile v2 Task 6, "Hide me for 24 hours"): a member
+    // with a live `hiddenUntil` excludes themself from EVERY viewer's
+    // results — unlike the block/hidden-from gates above, this is not
+    // viewer-relative, so it applies unconditionally rather than being
+    // scoped to `viewerUserId`. They can still fetch their own profile
+    // directly (`getMine`/`getBySlug` own the owner exception via
+    // `findBySlugOrThrow`).
+    qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
+  }
+
+  /**
    * A fresh directory query builder carrying the viewer's visibility gates and
    * every facet predicate — the single definition of "who is in this
    * directory". `searchMembers` orders and pages one of these; each facet count
@@ -1108,22 +1276,7 @@ export class ProfilesService {
       .innerJoin('p.user', 'u', 'u.status = :active', {
         active: UserStatus.Active,
       });
-    // Blocked-either-way members (in either direction) never surface in the
-    // directory (spec §2). `p`'s primary key is `user_id` (snake_case, per
-    // SnakeNamingStrategy) — matches this query builder's alias.
-    this.blockFilter.excludeBlocked(qb, viewerUserId, '"p"."user_id"');
-    // Hidden-from (member profile v2 Task 5): a candidate who hid THEIR
-    // profile from this viewer never surfaces either, same as a block —
-    // directional, unlike `excludeBlocked` above.
-    this.hiddenFrom.excludeHiddenFrom(qb, viewerUserId, '"p"."user_id"');
-    // Self-hide (member profile v2 Task 6, "Hide me for 24 hours"): a member
-    // with a live `hiddenUntil` excludes themself from EVERY viewer's search
-    // results — unlike the block/hidden-from gates above, this is not
-    // viewer-relative, so it applies unconditionally rather than being
-    // scoped to `viewerUserId`. They can still fetch their own profile
-    // directly (`getMine`/`getBySlug` own the owner exception via
-    // `findBySlugOrThrow`).
-    qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
+    this.applyMemberVisibilityGates(qb, viewerUserId);
     applyDirectoryFilters(qb, q, skip);
     return qb;
   }
@@ -1179,6 +1332,19 @@ export class ProfilesService {
         // row — see AddProfileVouchCount1787600100000. `VouchService` keeps
         // this column in sync on every vouch create/reactivate/withdraw.
         // Ties fall back to name order.
+        //
+        // This is the ONLY place that still reads the column, and it reads it
+        // knowingly. The column is block-blind (see `Profile.vouchCount`),
+        // so a candidate who has blocked one of their own vouchers ranks one
+        // place higher here than the number printed on their card. Going
+        // block-aware would mean putting the pair-correlated `NOT EXISTS`
+        // from `VouchService.getVouchCounts` into a correlated subquery in
+        // the ORDER BY, re-evaluated per candidate row before the LIMIT,
+        // which is exactly the O(members) count-per-search that
+        // AddProfileVouchCount1787600100000 was written to remove. A ranking
+        // nudge of one place is not worth reopening that. The NUMBER each
+        // card prints is unaffected: `searchMembers` maps its cards from the
+        // batched, block-aware `VouchService.getVouchCounts` below.
         qb.orderBy('p.vouchCount', 'DESC').addOrderBy('p.firstName', 'ASC');
         break;
       case MemberSort.ClosestMutuals: {

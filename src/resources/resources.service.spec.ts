@@ -58,6 +58,7 @@ describe('ResourcesService', () => {
     reviewDueOn: '2027-01-01',
     lastReviewedOn: '2026-01-01',
     reviewedBy: 'Trans Hub',
+    reviewOverdueNotifiedOn: null,
     updatedBy: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),

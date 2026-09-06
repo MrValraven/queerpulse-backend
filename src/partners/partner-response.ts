@@ -203,6 +203,32 @@ export function toPartnerDetail(p: Partner): PartnerDetailDTO {
   };
 }
 
+/**
+ * What the PARTNER ITSELF sees of its own profile in the self-service editor
+ * (PRD-263).
+ *
+ * The full public detail (that is the thing being edited, so it has to come
+ * back whole) plus the two fields the editor needs and the public shape has
+ * no reason to carry: the `id` the PATCH addresses, and the `status` — an
+ * owner is only ever stamped on an approved row today, but the editor states
+ * plainly what it is editing rather than assuming.
+ *
+ * Withheld on purpose: `submittedById`/`ownerUserId` (the caller IS the owner,
+ * so echoing account ids back tells them nothing and widens the surface),
+ * `reviewNote` (a note written to a reviewer's colleague, delivered to the
+ * APPLICANT through `MyPartnerApplicationDTO` under its own two conditions,
+ * and not part of maintaining a live profile), and the whole queue-assignment
+ * block, which is staff workflow.
+ */
+export interface OwnedPartnerDTO extends PartnerDetailDTO {
+  id: string;
+  status: PartnerStatus;
+}
+
+export function toOwnedPartner(p: Partner): OwnedPartnerDTO {
+  return { ...toPartnerDetail(p), id: p.id, status: p.status };
+}
+
 export function toPartnerApplication(
   p: Partner,
   submittedBy: MemberRef | null,

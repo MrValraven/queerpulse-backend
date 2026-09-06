@@ -61,7 +61,18 @@ export class CreateReportDto {
   @IsBoolean()
   anonymous?: boolean;
 
-  // Only for anonymous follow-up when the reporter has no account.
+  // An off-platform address a SIGNED-OUT reporter may leave so a human on the
+  // safety team can choose to reach out by hand. Nothing sends to it:
+  // QueerPulse delivers no email.
+  //
+  // Accepted from anyone and PERSISTED ONLY when there is no account behind
+  // the report. `ReportsService.create` drops it on a signed-in filing rather
+  // than refusing one, because a member is already reachable through the
+  // notification bell and can read their own report's status on
+  // `GET /reports/mine`, so storing an address beside their id buys nothing
+  // and leaves a second copy of their personal data on a moderation row. The
+  // frontend hides the field for signed-in members; the server is what makes
+  // that a rule instead of a display choice. See `Report.contactEmail`.
   @IsOptional()
   @IsEmail()
   @MaxLength(320)

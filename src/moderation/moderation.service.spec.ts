@@ -100,6 +100,7 @@ const baseReport = (overrides: Partial<Report> = {}): Report => ({
   detail: 'They kept messaging after being asked to stop.',
   anonymous: false,
   contactEmail: null,
+  anonymousReporterKey: null,
   evidence: null,
   severity: ReportSeverity.High,
   slaDueAt: new Date('2026-01-02T00:00:00.000Z'),
@@ -189,7 +190,9 @@ describe('ModerationService', () => {
       find: jest.fn().mockResolvedValue([]),
       // `save` echoes the row back with the columns the DATABASE fills in, the
       // way TypeORM's does: `submitAppeal` maps the saved entity straight to
-      // `SubmittedAppealDTO`, which reads `id` and `createdAt` off it.
+      // `SubmittedAppealDTO`, which reads `id`, `createdAt` and `slaDueAt` off
+      // it (`slaDueAt` is computed in `create` above, so the spread carries
+      // it through).
       save: jest.fn((a: object) =>
         Promise.resolve({ id: 'appeal-1', createdAt: new Date(), ...a }),
       ),

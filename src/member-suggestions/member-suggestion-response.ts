@@ -50,21 +50,26 @@ export function visibleOpenTo(profile: Profile): Profile['openTo'] {
 /**
  * Maps one scored candidate onto the wire.
  *
- * `vouchCount` comes from the profile's own denormalized column rather than a
- * batched `VouchService` lookup: the column is kept in sync inside the same
- * transaction as every vouch write, and reading it here keeps this module
- * from importing the vouch feature for a number it already has in hand.
+ * `vouchCount` is passed IN, from `VouchService.getVouchCounts`, rather than
+ * read off `profile.vouchCount`. The denormalized column is block-blind: it
+ * moves only on a vouch create or withdraw, and a block never touches it. The
+ * directory serves this same `MemberCard` shape from the batched, block-aware
+ * count (`ProfilesService.searchMembers`), so reading the column here printed
+ * a different number for the same member depending on which endpoint the card
+ * arrived from, and the higher of the two counted people the member had
+ * blocked.
  */
 export function toSuggestedMember(
   profile: Profile,
   reason: SuggestionReason,
   score: number,
+  vouchCount: number,
 ): SuggestedMember {
   return {
     // `isOwner` is hardcoded false: a viewer is never suggested to themself
     // (see `MemberSuggestionsService`'s self-exclusion), so the owner branch
     // of `gateAvatarUrl`/`gateLocation` is unreachable from this endpoint.
-    member: toMemberCard(profile, profile.vouchCount ?? 0, false, null),
+    member: toMemberCard(profile, vouchCount, false, null),
     reason,
     score,
   };

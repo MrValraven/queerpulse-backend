@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -46,6 +47,8 @@ import {
   isDueForReReview,
   reReviewDueAt,
   toDateColumnValue,
+  SAFE_SPACE_VISIT_BAR_NOT_MET_CODE,
+  SAFE_SPACE_VISIT_BAR_OVERRIDE_FORBIDDEN_CODE,
 } from './safe-space-policy';
 
 /** States a nomination may still be acted on from. */
@@ -286,17 +289,35 @@ export class SafeSpaceNominationsService {
    * Step three and four: the review panel decides, and a badge is granted or
    * the nomination is declined.
    *
-   * A HUMAN DECIDES. The three-visit bar is reported on the response and
-   * recorded in the audit row, and it does not block the award: a reviewer may
-   * have grounds the count cannot see, and the record then says plainly that
-   * they awarded with fewer. What is enforced is that a reason is written, that
-   * an award names a real listing, and that the grant is dated so the annual
-   * re-review has something to count from.
+   * A HUMAN DECIDES, and the three-visit bar now BINDS that decision. It was
+   * reported on the response and recorded in the audit row long before
+   * anything consulted it, which left five published sentences describing a
+   * guarantee this method did not make. An award below the bar is refused
+   * unless `belowVisitBarReason` comes with it, and an award that uses it
+   * cannot dress itself up: the public provenance line is forced to state the
+   * real count.
+   *
+   * The exception exists because a reviewer may have grounds the count cannot
+   * see. It is audited rather than free: the reason is required, it is written
+   * into the audit metadata beside `hasMetVisitBar`, and it is legible on the
+   * badge itself.
+   *
+   * Also enforced: that a reason is written, that an award names a real
+   * listing, and that the grant is dated so the annual re-review has something
+   * to count from. The bar deliberately does NOT gate the annual re-review,
+   * which asks a different question ("is it still safe") from the first award
+   * ("have enough independent people checked this place").
    */
   async decide(
     id: string,
     actorId: string,
     dto: DecideNominationDto,
+    // Whether the caller holds a real `moderator`/`admin` account tier, as
+    // opposed to reaching this endpoint on the additive `directory_moderator`
+    // grant alone. Deciding a nomination is a directory moderator's job;
+    // overriding a guarantee the platform publishes is a platform-level act,
+    // and the delegate grant was given for directory work.
+    isPlatformStaff: boolean,
   ): Promise<AdminSafeSpaceNominationResponse> {
     const nomination = await this.mustFind(id);
     if (
@@ -356,11 +377,60 @@ export class SafeSpaceNominationsService {
       listing.id,
       nomination.nominatorId,
     );
-    const verifier =
-      dto.verifierLabel?.trim() ||
-      `Review team, ${tally.independentVisitCount} independent member ${
-        tally.independentVisitCount === 1 ? 'visit' : 'visits'
-      }`;
+
+    // The independent-visit bar, enforced. It was computed here and written
+    // into the audit below long before anything consulted it, which left five
+    // published sentences ("Minimum 3 independent visits", "Three independent
+    // visits", "Three members with no stake in the place go there", the
+    // nomination confirmation and the governance page) describing a guarantee
+    // the service did not make.
+    //
+    // An audited exception rather than a hard refusal: a panel that visited in
+    // person, or a place at urgent risk, is a real case, and a ceiling with no
+    // door invites the worse workaround of filing vouches to clear it.
+    const belowVisitBarReason = dto.belowVisitBarReason?.trim();
+    const isBelowVisitBar = !tally.hasMetVisitBar;
+    // Refuses the ATTEMPT rather than silently dropping the reason and failing
+    // the award as under-bar, so a delegate is told the real rule instead of
+    // being sent to rewrite a reason they can never use.
+    if (isBelowVisitBar && belowVisitBarReason && !isPlatformStaff) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: SAFE_SPACE_VISIT_BAR_OVERRIDE_FORBIDDEN_CODE,
+        independentVisitCount: tally.independentVisitCount,
+        requiredVisitCount: tally.requiredVisitCount,
+        message:
+          'Awarding below the independent-visit bar is limited to platform ' +
+          'moderators and admins. Ask one of them to take this decision.',
+      });
+    }
+    if (isBelowVisitBar && !belowVisitBarReason) {
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'Bad Request',
+        code: SAFE_SPACE_VISIT_BAR_NOT_MET_CODE,
+        independentVisitCount: tally.independentVisitCount,
+        requiredVisitCount: tally.requiredVisitCount,
+        notIndependentVouchCount: tally.notIndependentVouchCount,
+        message:
+          `This listing has ${tally.independentVisitCount} of ` +
+          `${tally.requiredVisitCount} independent member visits. Awarding ` +
+          'below the bar needs a written reason, which is recorded and shown ' +
+          'on the badge.',
+      });
+    }
+
+    // An override cannot hide behind a hand-written provenance line. Above the
+    // bar `verifierLabel` is the moderator's to set; below it the public line
+    // always states the real count, so the exception is visible on the badge
+    // itself rather than only in the audit trail.
+    const composedVerifier = `Review team, ${tally.independentVisitCount} independent member ${
+      tally.independentVisitCount === 1 ? 'visit' : 'visits'
+    }`;
+    const verifier = isBelowVisitBar
+      ? composedVerifier
+      : dto.verifierLabel?.trim() || composedVerifier;
 
     await this.listings.update(
       { id: listing.id },
@@ -394,6 +464,9 @@ export class SafeSpaceNominationsService {
         independentVisitCount: tally.independentVisitCount,
         requiredVisitCount: tally.requiredVisitCount,
         hasMetVisitBar: tally.hasMetVisitBar,
+        // Present only on an override, so a reader of the trail can tell a
+        // badge that cleared the bar from one that was granted despite it.
+        ...(isBelowVisitBar ? { belowVisitBarReason } : {}),
         awardedOn: toDateColumnValue(now),
       },
     });

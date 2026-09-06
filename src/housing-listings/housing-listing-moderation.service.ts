@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -166,7 +166,9 @@ export class HousingListingModerationService {
    *     denormalised last-decision columns on the listing itself.
    *
    * Approving also emits `HOUSING_LISTING_WENT_LIVE`, which is what the housing
-   * saved-search alert listener consumes.
+   * saved-search alert listener consumes. The event carries `isFirstGoLive`,
+   * claimed off `first_live_at`, so a re-approval after an owner edit is still
+   * announced but no longer repeats the one-time alert (ENG-170).
    */
   async decide(
     ref: string,
@@ -208,6 +210,11 @@ export class HousingListingModerationService {
       listing.expiresAt.getTime() <= Date.now()
     ) {
       listing.expiresAt = computeExpiry();
+      // PRD-244: the refreshed window is a new term, so it earns its own
+      // pre-expiry warning. A listing that was warned, then edited back into
+      // review, then re-approved would otherwise keep a marker that belongs to
+      // a window no longer on the row and never warn again.
+      listing.expiryWarningSentAt = null;
     }
     listing.decisionReason = reason.length ? reason : null;
     listing.decidedById = moderatorId;
@@ -215,15 +222,15 @@ export class HousingListingModerationService {
     const saved = await this.listings.save(listing);
 
     // A listing transitioning INTO live (a new listing clearing review, or a
-    // re-approval after an owner edit) is the moment saved-search alerts fire.
-    // Compute the verified state once here — it needs the lister's assurance
-    // level — and hand it to the alerts listener so it never re-derives it per
-    // saved search.
+    // re-approval after an owner edit) is announced here. Compute the verified
+    // state once — it needs the lister's assurance level — and hand it to the
+    // alerts listener so it never re-derives it per saved search.
     if (!wasLive && saved.status === HousingListingStatus.Live) {
       const level = await this.listerVerificationLevel(saved.ownerId);
       const event: HousingListingWentLiveEvent = {
         listing: saved,
         listingVerified: deriveListingVerified(saved, level).verified,
+        isFirstGoLive: await this.claimFirstGoLive(saved),
       };
       this.eventEmitter.emit(HOUSING_LISTING_WENT_LIVE, event);
     }
@@ -323,6 +330,42 @@ export class HousingListingModerationService {
     const refs = await new MemberLookup(this.profiles).byUserIds([ownerId]);
     const ref = refs.get(ownerId);
     return ref ? `${ref.firstName} ${ref.lastName}`.trim() : null;
+  }
+
+  /**
+   * Stamps `first_live_at` the first time a listing is ever published, and
+   * answers whether THIS approval is that first time (ENG-170).
+   *
+   * Why the guard sits at the emit site. The alerts listener lives
+   * in `housing-saved-searches`, a module deliberately built with no import of
+   * and no cycle with housing-listings: it registers one entity, its own saved
+   * searches. Making it claim a marker would hand it write access to another
+   * module's table. This service already holds the row it just saved, so the
+   * claim is one extra statement here, and every consumer of the event, present
+   * or future, gets the answer instead of each rediscovering it.
+   *
+   * Why a conditional UPDATE rather than reading the column and writing it back:
+   * two moderators approving the same listing at the same instant would both
+   * read null and both alert. `affected === 1` means this call won the row, the
+   * same claim `EventCapacityAlertsService` makes on `nearly_full_notified_at`.
+   *
+   * No release on failure, unlike that service. The fan-out downstream is
+   * best-effort by construction (the listener absorbs and reports per page and
+   * never reports success back), and the failure this column exists to prevent
+   * is a repeat broadcast to every matching saved search. Losing one alert to a
+   * failed page is the cheaper mistake.
+   */
+  private async claimFirstGoLive(listing: HousingListing): Promise<boolean> {
+    const firstLiveAt = new Date();
+    const claim = await this.listings.update(
+      { id: listing.id, firstLiveAt: IsNull() },
+      { firstLiveAt },
+    );
+    if (claim.affected !== 1) return false;
+    // Keep the in-memory row in step with what the event carries, so the DTO
+    // built from it below is not a stale snapshot of the row on disk.
+    listing.firstLiveAt = firstLiveAt;
+    return true;
   }
 
   /**

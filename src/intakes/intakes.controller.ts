@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  NotFoundException,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -34,9 +35,11 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { QueueAssignmentDto } from '../common/queue-assignment.dto';
 import { UserRole } from '../users/entities/user.entity';
+import { ConcernStatusQuery } from './dto/concern-status.query';
 import { CreateIntakeDto } from './dto/create-intake.dto';
 import { ListIntakesQuery } from './dto/list-intakes.query';
 import { UpdateIntakeStatusDto } from './dto/update-intake-status.dto';
+import type { ConcernStatusDTO } from './intakes-response';
 import { IntakesService } from './intakes.service';
 
 /**
@@ -77,6 +80,49 @@ export class IntakesController {
     @CurrentUser() user: CurrentUserData | undefined,
   ) {
     return this.intakes.submit(kind, body.payload, user);
+  }
+
+  /**
+   * PUBLIC (PRD-261): whoever holds a concern's reference code asks where that
+   * concern stands. The code is the entire credential — an anonymous submitter
+   * has no account to sign in to and the platform sends no mail, so this route
+   * plus the code they kept is the only way they ever learn their report was
+   * picked up, resolved, or closed.
+   *
+   * Declared BEFORE `@Get()` so Nest matches this two-segment path first.
+   *
+   * Throttled 20/hour, keyed by IP through `HttpThrottlerGuard`'s inherited
+   * default tracker — the same figure and the same reasoning as
+   * `GET /join-requests/status`. The code carries 256 bits, so throttling is
+   * not what makes guessing infeasible; it is here so an unauthenticated read
+   * that touches the database is not free amplification. Looser than the 8/min
+   * on submit because reloading a status page is a normal thing for one person
+   * to do repeatedly, and someone waiting on a report about harm will.
+   *
+   * ONE 404 FOR EVERY FAILURE — unknown code, well-formed code that was never
+   * issued, a code minted for some other intake kind. A response that
+   * distinguished them would make the route an oracle for probing codes, and
+   * the rows behind these codes name people. A malformed code never reaches
+   * the service: the query DTO's charset and length bounds turn it into a 400
+   * first.
+   */
+  @Public()
+  @Throttle({ default: { limit: 20, ttl: seconds(3600) } })
+  @Get('concerns/status')
+  @ApiOperation({ summary: 'Check the status of your own concern.' })
+  @ApiOkResponse({ description: 'Where the concern stands.' })
+  @ApiBadRequestResponse({ description: 'A malformed reference code.' })
+  @ApiNotFoundResponse({
+    description: 'The code does not resolve to a concern.',
+  })
+  async concernStatus(
+    @Query() query: ConcernStatusQuery,
+  ): Promise<ConcernStatusDTO> {
+    const view = await this.intakes.getConcernStatus(query.token);
+    if (!view) {
+      throw new NotFoundException('Concern not found');
+    }
+    return view;
   }
 
   @UseGuards(ActiveMemberGuard, RolesGuard)

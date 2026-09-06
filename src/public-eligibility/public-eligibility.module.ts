@@ -12,6 +12,7 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
+import { VouchModule } from '../vouch/vouch.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
@@ -53,6 +54,12 @@ import { PublicEligibilityService } from './public-eligibility.service';
     SubprofilesModule,
     // Exports `ContentModerationService` (moderation/standing state).
     ContentModerationModule,
+    // Exports `VouchService`, for the block-aware INBOUND vouch count that
+    // feeds `trustScore`. `VouchModule` imports only `UsersModule` and
+    // `SocialModule`, neither of which reaches back here, so this is a
+    // one-way import with no cycle. The `Vouch` repository registered above
+    // stays: the outbound "vouches given" count is still read directly.
+    VouchModule,
   ],
   controllers: [PublicEligibilityController],
   providers: [PublicEligibilityService],

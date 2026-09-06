@@ -24,6 +24,7 @@ import {
   HousingListingStatus,
   HousingListingType,
 } from './entities/housing-listing.entity';
+import { GeocodeService } from '../geocode/geocode.service';
 import { HousingListingsService } from './housing-listings.service';
 
 type RepoMock = Record<string, jest.Mock>;
@@ -56,6 +57,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     city: 'Lisbon',
     area: '',
     rentEuros: 500,
+    depositEuros: null,
     // Null = bedroom count not specified (additive nullable column; old rows
     // never backfilled).
     bedrooms: null,
@@ -81,6 +83,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     decisionReason: null,
     decidedById: null,
     decidedAt: null,
+    firstLiveAt: null,
     // Null = lister added no virtual-tour link.
     virtualTourUrl: null,
     // Null = still looking / still live to the public (owner hasn't marked it
@@ -90,6 +93,8 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // Comfortably after the fixture's `createdAt` so "live" fixtures read as
     // not-yet-expired by default.
     expiresAt: new Date('2026-03-02T00:00:00.000Z'),
+    // PRD-244: not yet warned about this term.
+    expiryWarningSentAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -133,6 +138,7 @@ describe('HousingListingsService', () => {
   let affirmingPledge: { requireAccepted: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
+  let geocode: { resolveAddress: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -164,6 +170,11 @@ describe('HousingListingsService', () => {
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
+    geocode = {
+      resolveAddress: jest
+        .fn()
+        .mockResolvedValue({ latitude: 38.7169, longitude: -9.1487 }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -179,6 +190,10 @@ describe('HousingListingsService', () => {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
         },
+        // The address geocoder. Stubbed rather than exercised: the service only
+        // calls it for a listing that HAS an address, off the request path and
+        // without awaiting it, so nothing here should ever reach the network.
+        { provide: GeocodeService, useValue: geocode },
       ],
     }).compile();
 

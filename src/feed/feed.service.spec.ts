@@ -23,8 +23,12 @@ import {
 } from '../events/entities/event.entity';
 import { emptyAccessibilityAnswers } from '../listings/listing-accessibility';
 import { ConnectionsService } from '../connections/connections.service';
+import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { BlockFilterService } from '../social/block-filter.service';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -48,6 +52,9 @@ import { FeedService } from './feed.service';
 // `any`) lets `.mock.calls`/`toHaveBeenCalledWith` assertions narrow safely
 // instead of tripping `no-unsafe-*`.
 interface QbStub {
+  /** PRD-107: the magazine source projects its columns before filtering, so
+   *  the shared stub has to be chainable through `select` too. */
+  select: jest.Mock<QbStub, unknown[]>;
   where: jest.Mock<QbStub, unknown[]>;
   andWhere: jest.Mock<QbStub, unknown[]>;
   innerJoin: jest.Mock<QbStub, unknown[]>;
@@ -59,6 +66,7 @@ interface QbStub {
 
 function qbStub(rows: unknown[] = []): QbStub {
   const qb: QbStub = {
+    select: jest.fn<QbStub, unknown[]>(),
     where: jest.fn<QbStub, unknown[]>(),
     andWhere: jest.fn<QbStub, unknown[]>(),
     innerJoin: jest.fn<QbStub, unknown[]>(),
@@ -67,6 +75,7 @@ function qbStub(rows: unknown[] = []): QbStub {
     take: jest.fn<QbStub, unknown[]>(),
     getMany: jest.fn<Promise<unknown[]>, []>(),
   };
+  qb.select.mockReturnValue(qb);
   qb.where.mockReturnValue(qb);
   qb.andWhere.mockReturnValue(qb);
   qb.innerJoin.mockReturnValue(qb);
@@ -76,6 +85,52 @@ function qbStub(rows: unknown[] = []): QbStub {
   qb.getMany.mockResolvedValue(rows);
   return qb;
 }
+
+/**
+ * The `forum_post` aggregate `FeedService.forumThreadCards` runs once per page
+ * (ENG-132 / PRD-167): one grouped row per thread carrying the live
+ * non-deleted reply count and the opening post's body. Terminal call is
+ * `getRawMany`, so it needs its own chainable stub rather than `qbStub`'s
+ * `getMany`.
+ */
+interface RawQbStub {
+  select: jest.Mock<RawQbStub, unknown[]>;
+  addSelect: jest.Mock<RawQbStub, unknown[]>;
+  where: jest.Mock<RawQbStub, unknown[]>;
+  andWhere: jest.Mock<RawQbStub, unknown[]>;
+  groupBy: jest.Mock<RawQbStub, unknown[]>;
+  getRawMany: jest.Mock<Promise<unknown[]>, []>;
+}
+
+function rawQbStub(rows: unknown[] = []): RawQbStub {
+  const qb: RawQbStub = {
+    select: jest.fn<RawQbStub, unknown[]>(),
+    addSelect: jest.fn<RawQbStub, unknown[]>(),
+    where: jest.fn<RawQbStub, unknown[]>(),
+    andWhere: jest.fn<RawQbStub, unknown[]>(),
+    groupBy: jest.fn<RawQbStub, unknown[]>(),
+    getRawMany: jest.fn<Promise<unknown[]>, []>(),
+  };
+  qb.select.mockReturnValue(qb);
+  qb.addSelect.mockReturnValue(qb);
+  qb.where.mockReturnValue(qb);
+  qb.andWhere.mockReturnValue(qb);
+  qb.groupBy.mockReturnValue(qb);
+  qb.getRawMany.mockResolvedValue(rows);
+  return qb;
+}
+
+/** One row of that aggregate, as the driver returns it (`count(*)` is a
+ *  bigint, so it arrives as a string). */
+const threadCardRow = (
+  threadId: string,
+  replyCount: number,
+  opBody: string | null,
+) => ({
+  thread_id: threadId,
+  op_body: opBody,
+  reply_count: String(replyCount),
+});
 
 const t = (iso: string) => new Date(iso);
 
@@ -127,6 +182,10 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   createdAt: t('2026-07-09T00:00:00.000Z'),
   tags: [],
   opVoteCount: 0,
+  // Thread-level soft delete (contract C1). The feed excludes a deleted
+  // thread (C2 / PRD-160), so the default row is a live one.
+  deletedAt: null,
+  deletedById: null,
   ...overrides,
 });
 
@@ -257,6 +316,45 @@ const baseCommunityMember = (
   overrides: Partial<CommunityMember> = {},
 ): CommunityMember => withOverrides(communityMemberDefaults, overrides);
 
+/** PRD-107: a published magazine piece, as the `magazine_article` source's own
+ *  projected query returns it. `publishedAt` is the ordering key, NOT
+ *  `createdAt` — a piece drafted in March and shipped today belongs at the top
+ *  of today's feed. */
+const baseArticle = (
+  overrides: Partial<MagazineArticle> = {},
+): MagazineArticle =>
+  ({
+    id: 'article-1',
+    slug: 'a-room-of-our-own',
+    title: 'A room of our own',
+    dek: 'What a decade of queer housing organising in Lisbon actually built.',
+    kicker: 'Housing',
+    section: 'Features',
+    readMinutes: 9,
+    heroImageKey: '',
+    socialImage: '',
+    publishedAt: t('2026-07-11T00:00:00.000Z'),
+    authorId: 'byline-1',
+    tags: [],
+    locale: 'en',
+    translationOfArticleId: null,
+    ...overrides,
+  }) as unknown as MagazineArticle;
+
+/** The `magazine_author` row behind a byline. `userId` is the ONLY link to a
+ *  member account, and it is what the block filter checks; a contributor
+ *  credited by name only carries `null` there. */
+const baseByline = (overrides: Partial<MagazineAuthor> = {}): MagazineAuthor =>
+  ({
+    id: 'byline-1',
+    userId: null,
+    slug: 'rita-mendes',
+    name: 'Rita Mendes',
+    bio: null,
+    avatarUrl: null,
+    ...overrides,
+  }) as unknown as MagazineAuthor;
+
 /** Exercises `FeedService`'s private `fetchCandidates` directly for the
  * `community_new_member` source — same qb-stub mocking every other source's
  * test uses, just invoked one level down so the source's query-building can
@@ -300,12 +398,16 @@ describe('FeedService', () => {
   let communityPosts: { createQueryBuilder: jest.Mock };
   let communities: { find: jest.Mock };
   let forumThreads: { createQueryBuilder: jest.Mock };
+  let forumPosts: { createQueryBuilder: jest.Mock };
   let events: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let communityMembers: { createQueryBuilder: jest.Mock; find: jest.Mock };
   let topicFollows: { find: jest.Mock };
   let memberPreferences: { findOne: jest.Mock };
+  let magazineArticles: { createQueryBuilder: jest.Mock };
+  let magazineAuthors: { find: jest.Mock };
   let blockFilter: { hiddenUserIds: jest.Mock };
+  let hiddenFrom: { excludeHiddenFrom: jest.Mock };
   let connectionsService: { allAcceptedConnectionUserIds: jest.Mock };
   let feedInteractions: { forPosts: jest.Mock };
   let feedMutes: { mutedSources: jest.Mock };
@@ -314,6 +416,10 @@ describe('FeedService', () => {
     communityPosts = { createQueryBuilder: jest.fn(() => qbStub()) };
     communities = { find: jest.fn().mockResolvedValue([]) };
     forumThreads = { createQueryBuilder: jest.fn(() => qbStub()) };
+    // ENG-132/PRD-167: the per-page `forum_post` aggregate. No rows by
+    // default, which is a thread whose posts are all gone: the mapper's own
+    // fallback then reports zero replies and no excerpt.
+    forumPosts = { createQueryBuilder: jest.fn(() => rawQbStub()) };
     events = { createQueryBuilder: jest.fn(() => qbStub()) };
     profiles = {
       find: jest.fn().mockResolvedValue([]),
@@ -332,6 +438,10 @@ describe('FeedService', () => {
     // default (`PreferencesService` synthesises it), and it keeps every
     // pre-existing test seeing the unchanged candidate queries.
     memberPreferences = { findOne: jest.fn().mockResolvedValue(null) };
+    // PRD-107: the magazine publishes nothing by default, so every
+    // pre-existing test sees the same four sources it always did.
+    magazineArticles = { createQueryBuilder: jest.fn(() => qbStub()) };
+    magazineAuthors = { find: jest.fn().mockResolvedValue([]) };
     // `dropBlocked` now resolves the whole page's hidden authors in one batched
     // `hiddenUserIds(viewerId, authorIds)` call (union of blocked + muted),
     // returning a Set, rather than one `isBlockedEitherWay`/`isMutedBy` call
@@ -339,6 +449,12 @@ describe('FeedService', () => {
     blockFilter = {
       hiddenUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
+    // ENG-131: the directory's "hide my profile from this person" filter,
+    // which the two new-member sources now apply in-query too. The real
+    // service appends a NOT EXISTS to the builder it is handed and returns
+    // it; the stub only has to be callable, since the assertions read the
+    // arguments it was given.
+    hiddenFrom = { excludeHiddenFrom: jest.fn() };
     // DISC-2: `connections` tab support. Defaults to "no connections" so
     // every pre-existing test (none of which exercise the `connections`
     // tab) is unaffected — those tests never call this at all, since
@@ -365,6 +481,7 @@ describe('FeedService', () => {
         },
         { provide: getRepositoryToken(Community), useValue: communities },
         { provide: getRepositoryToken(ForumThread), useValue: forumThreads },
+        { provide: getRepositoryToken(ForumPost), useValue: forumPosts },
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         {
@@ -376,7 +493,16 @@ describe('FeedService', () => {
           provide: getRepositoryToken(MemberPreferences),
           useValue: memberPreferences,
         },
+        {
+          provide: getRepositoryToken(MagazineArticle),
+          useValue: magazineArticles,
+        },
+        {
+          provide: getRepositoryToken(MagazineAuthor),
+          useValue: magazineAuthors,
+        },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: HiddenFromService, useValue: hiddenFrom },
         { provide: ConnectionsService, useValue: connectionsService },
         { provide: FeedInteractionsService, useValue: feedInteractions },
         { provide: FeedMuteService, useValue: feedMutes },
@@ -1268,7 +1394,13 @@ describe('FeedService', () => {
       // The window holds all four rows (limit 2 x 3 pages), so the next
       // request stays on the same window and just moves the offset.
       const decoded = decodeRankedCursor(page.pageInfo.nextCursor as string);
-      expect(decoded).toEqual({ windowCursor: undefined, offset: 2 });
+      expect(decoded.windowCursor).toBeUndefined();
+      expect(decoded.offset).toBe(2);
+      // ENG-134: the first request stamps the window's ceiling and records
+      // the last card it served, so page two re-materialises the same window
+      // and resumes from immediately after that card.
+      expect(decoded.anchorAt).toBeInstanceOf(Date);
+      expect(decoded.lastKey).toBe('community_post:p3');
     });
 
     it('treats a plain pre-ranking cursor as the start of a window rather than rejecting it', async () => {
@@ -1328,15 +1460,22 @@ describe('FeedService', () => {
       });
     });
 
-    it("carries a forum thread's stored reply count", async () => {
+    // ENG-132: the card counts LIVE non-deleted replies, so the stale
+    // `forum_thread.reply_count` column (never decremented when a reply is
+    // tombstoned) no longer decides what the feed advertises.
+    it("counts a forum thread's live replies rather than its stored column", async () => {
       forumThreads.createQueryBuilder.mockReturnValue(
-        qbStub([baseThread({ replyCount: 7 })]),
+        qbStub([baseThread({ id: 'thread-1', replyCount: 7 })]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(
+        rawQbStub([threadCardRow('thread-1', 2, 'The opening post.')]),
       );
 
       const page = await service.getFeed('viewer-1', 'posts', undefined);
 
       const thread = page.data.find((item) => item.type === 'forum_thread');
-      expect(thread).toMatchObject({ replyCount: 7 });
+      expect(thread).toMatchObject({ replyCount: 2 });
+      expect(thread?.summary).toBe('general · 2 replies');
     });
   });
 
@@ -1509,6 +1648,577 @@ describe('FeedService', () => {
         predicateOf(profileQb, 'feedExcludedCommunityTags'),
       ).toBeUndefined();
       expect(predicateOf(profileQb, 'excludedItemTags')).toBeUndefined();
+    });
+  });
+
+  describe('profile privacy gates on the new-member sources (ENG-131)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    // The member directory refuses both of these, and this source announces
+    // the same people with their name, tagline or bio and a profile link. The
+    // gates are applied IN-QUERY, mirroring
+    // `ProfilesService.directoryBaseQuery`, so a page still fills to `limit`.
+    it('excludes a member who hid themself for 24 hours', async () => {
+      const profileQb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(profileQb);
+
+      await service.getFeed('viewer-1', 'people', undefined);
+
+      const call = predicateOf(profileQb, 'hidden_until');
+      expect(call?.[0]).toBe(
+        '("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())',
+      );
+    });
+
+    it('excludes a member who hid their profile from this viewer', async () => {
+      const profileQb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(profileQb);
+
+      await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(hiddenFrom.excludeHiddenFrom).toHaveBeenCalledWith(
+        profileQb,
+        'viewer-1',
+        '"p"."user_id"',
+      );
+    });
+
+    // Same two gates, reached across from the MEMBERSHIP row this source is
+    // built on to the joining member's profile.
+    it('applies both gates to the community_new_member source too', async () => {
+      const memberQb = qbStub([]);
+      communityMembers.createQueryBuilder.mockReturnValue(memberQb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      const call = predicateOf(memberQb, 'feed_hidden_profile');
+      expect(call?.[0]).toContain('"feed_hidden_profile"."hidden_until"');
+      expect(call?.[0]).toContain('"feed_hidden_profile"."user_id"');
+      expect(hiddenFrom.excludeHiddenFrom).toHaveBeenCalledWith(
+        memberQb,
+        'viewer-1',
+        '"m"."user_id"',
+      );
+    });
+
+    // Verified rather than assumed: the photo toggle was already honoured,
+    // because every actor on every feed card is resolved through
+    // `toMemberRef`, which is the single place `photoVisible` is applied.
+    // This test pins that down; nothing changed for it.
+    it('already withholds the avatar of a member who hid their photo', async () => {
+      profiles.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseMemberProfile({
+            userId: 'member-1',
+            avatarUrl: 'members/member-1.jpg',
+            photoVisible: false,
+          }),
+        ]),
+      );
+      profiles.find.mockResolvedValue([
+        baseMemberProfile({
+          userId: 'member-1',
+          avatarUrl: 'members/member-1.jpg',
+          photoVisible: false,
+        }),
+      ]);
+
+      const page = await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(page.data[0]?.actor?.avatarUrl).toBeNull();
+    });
+  });
+
+  describe('"New this week" date bound (PRD-168)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    it('bounds the new-member source to members who joined inside the window', async () => {
+      const profileQb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(profileQb);
+      const before = Date.now();
+
+      await service.getFeed('viewer-1', 'people', undefined, 20, 7);
+
+      const call = predicateOf(profileQb, 'feedJoinedSince');
+      expect(call?.[0]).toBe('"p"."created_at" >= :feedJoinedSince');
+      const params = call?.[1] as { feedJoinedSince: Date } | undefined;
+      const sevenDays = 7 * 24 * 60 * 60 * 1000;
+      expect(params?.feedJoinedSince.getTime()).toBeGreaterThanOrEqual(
+        before - sevenDays - 1000,
+      );
+      expect(params?.feedJoinedSince.getTime()).toBeLessThanOrEqual(
+        Date.now() - sevenDays + 1000,
+      );
+    });
+
+    // Nobody joined this week is an honest empty list, which is what the
+    // widget's empty state renders.
+    it('returns an empty page when nobody joined inside the window', async () => {
+      profiles.createQueryBuilder.mockReturnValue(qbStub([]));
+
+      const page = await service.getFeed(
+        'viewer-1',
+        'people',
+        undefined,
+        20,
+        7,
+      );
+
+      expect(page.data).toEqual([]);
+      expect(page.pageInfo.hasMore).toBe(false);
+    });
+
+    // The tab itself is unchanged: it still shows the newest members however
+    // long ago they joined.
+    it('emits no date bound when the caller does not ask for one', async () => {
+      const profileQb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(profileQb);
+
+      await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(predicateOf(profileQb, 'feedJoinedSince')).toBeUndefined();
+    });
+  });
+
+  describe('deleted threads (contract C2 / PRD-160)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    it('excludes a thread whose own row is soft-deleted', async () => {
+      const threadQb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(predicateOf(threadQb, '"t"."deleted_at" IS NULL')).toBeDefined();
+    });
+
+    it('excludes a thread whose opening post is tombstoned', async () => {
+      const threadQb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      const call = predicateOf(threadQb, 'feed_deleted_op');
+      expect(call?.[0]).toContain('"feed_deleted_op"."is_op" = true');
+      expect(call?.[0]).toContain('"feed_deleted_op"."deleted_at" IS NOT NULL');
+    });
+  });
+
+  describe('forum card excerpt (contract C4 / PRD-167)', () => {
+    it("previews the thread's opening post, HTML stripped", async () => {
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ id: 'thread-1' })]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(
+        rawQbStub([
+          threadCardRow(
+            'thread-1',
+            1,
+            '<p>Has anyone found a <b>good</b> queer choir in Lisbon?</p>',
+          ),
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const thread = page.data.find((item) => item.type === 'forum_thread');
+      expect(thread?.excerpt).toBe(
+        'Has anyone found a good queer choir in Lisbon?',
+      );
+    });
+
+    it('cuts a long body on a word boundary at 180 characters and marks the cut', async () => {
+      const longBody = `${'lisbon '.repeat(40)}end`;
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ id: 'thread-1' })]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(
+        rawQbStub([threadCardRow('thread-1', 0, longBody)]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const excerpt = page.data.find((item) => item.type === 'forum_thread')
+        ?.excerpt as string;
+      expect(excerpt.endsWith('…')).toBe(true);
+      // 180 characters of body plus the one-character ellipsis.
+      expect(excerpt.length).toBeLessThanOrEqual(181);
+      expect(excerpt).not.toContain('end');
+    });
+
+    // Every post gone (the OP tombstoned) leaves no aggregate row at all: no
+    // preview, and a count of zero rather than the stale stored one.
+    it('carries a null excerpt and no replies when the thread has no live posts', async () => {
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ id: 'thread-1', replyCount: 5 })]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(rawQbStub([]));
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const thread = page.data.find((item) => item.type === 'forum_thread');
+      expect(thread?.excerpt).toBeNull();
+      expect(thread?.replyCount).toBe(0);
+    });
+  });
+
+  describe('ranked window anchoring (ENG-134)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    const rankedRows = () =>
+      [1, 2, 3, 4].map((index) =>
+        basePost({
+          id: `p${index}`,
+          createdAt: t(`2026-07-2${index}T00:00:00.000Z`),
+        }),
+      );
+
+    it('bounds the first window to the instant it was built', async () => {
+      const postQb = qbStub(rankedRows());
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+
+      await service.getFeed('viewer-1', 'all', undefined, 2);
+
+      const call = predicateOf(postQb, 'feedWindowAnchor');
+      expect(call?.[0]).toBe('"cp"."created_at" <= :feedWindowAnchor');
+      expect(
+        (call?.[1] as { feedWindowAnchor: Date } | undefined)?.feedWindowAnchor,
+      ).toBeInstanceOf(Date);
+    });
+
+    // The bug: page two used to re-read the window from the top of the table,
+    // so anything posted between the two requests shifted the ranked order
+    // and a card repeated or vanished. Page two now re-materialises the SAME
+    // window, because it carries the first request's ceiling back.
+    it('re-uses the first window ceiling on page two', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub(rankedRows()));
+
+      const first = await service.getFeed('viewer-1', 'all', undefined, 2);
+      const firstAnchor = decodeRankedCursor(
+        first.pageInfo.nextCursor as string,
+      ).anchorAt;
+
+      const secondQb = qbStub(rankedRows());
+      communityPosts.createQueryBuilder.mockReturnValue(secondQb);
+      await service.getFeed(
+        'viewer-1',
+        'all',
+        first.pageInfo.nextCursor as string,
+        2,
+      );
+
+      const call = predicateOf(secondQb, 'feedWindowAnchor');
+      expect(
+        (call?.[1] as { feedWindowAnchor: Date } | undefined)?.feedWindowAnchor,
+      ).toEqual(firstAnchor);
+    });
+
+    it('serves each card exactly once across two pages of one window', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub(rankedRows()));
+
+      const first = await service.getFeed('viewer-1', 'all', undefined, 2);
+      const second = await service.getFeed(
+        'viewer-1',
+        'all',
+        first.pageInfo.nextCursor as string,
+        2,
+      );
+
+      expect(first.data.map((item) => item.id)).toEqual(['p4', 'p3']);
+      expect(second.data.map((item) => item.id)).toEqual(['p2', 'p1']);
+    });
+
+    // A row LEAVING the window (deleted, muted, its author blocked) used to
+    // pull an unseen card up into the slot the raw offset skips past. The
+    // last key served re-locates the boundary instead.
+    it('resumes after the last card served when a row left the window', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub(rankedRows()));
+      const first = await service.getFeed('viewer-1', 'all', undefined, 2);
+      expect(first.data.map((item) => item.id)).toEqual(['p4', 'p3']);
+
+      // `p4` is gone by the time page two is built.
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub(rankedRows().filter((post) => post.id !== 'p4')),
+      );
+      const second = await service.getFeed(
+        'viewer-1',
+        'all',
+        first.pageInfo.nextCursor as string,
+        2,
+      );
+
+      // A raw offset of 2 would have started at `p1` and dropped `p2`.
+      expect(second.data.map((item) => item.id)).toEqual(['p2', 'p1']);
+    });
+
+    it('falls back to the offset when the last card served is gone too', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub(rankedRows()));
+      const first = await service.getFeed('viewer-1', 'all', undefined, 2);
+
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub(rankedRows().filter((post) => post.id !== 'p3')),
+      );
+      const second = await service.getFeed(
+        'viewer-1',
+        'all',
+        first.pageInfo.nextCursor as string,
+        2,
+      );
+
+      expect(second.data.map((item) => item.id)).toEqual(['p1']);
+    });
+  });
+
+  describe('magazine articles in the feed (PRD-107)', () => {
+    /** Every `andWhere`/`where` predicate the magazine source built, as one
+     *  searchable string. */
+    const predicatesOf = (qb: QbStub): string =>
+      [...qb.where.mock.calls, ...qb.andWhere.mock.calls]
+        .map((call) => (typeof call[0] === 'string' ? call[0] : ''))
+        .join(' | ');
+
+    it('surfaces a published article on the "all" tab as an `article` item', async () => {
+      magazineArticles.createQueryBuilder.mockReturnValue(
+        qbStub([baseArticle()]),
+      );
+      magazineAuthors.find.mockResolvedValue([baseByline()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data).toHaveLength(1);
+      const item = page.data[0] as FeedItem;
+      expect(item.type).toBe('article');
+      expect(item.id).toBe('article-1');
+      expect(item.title).toBe('A room of our own');
+      expect(item.link).toBe('/magazine/article?id=a-room-of-our-own');
+      // The ordering key is the PUBLISH instant, never `created_at`.
+      expect(item.createdAt).toBe('2026-07-11T00:00:00.000Z');
+      expect(item.kicker).toBe('Housing');
+      expect(item.section).toBe('Features');
+      expect(item.readMinutes).toBe(9);
+      expect(item.locale).toBe('en');
+      expect(item.byline).toEqual({
+        name: 'Rita Mendes',
+        slug: 'rita-mendes',
+        avatarUrl: null,
+      });
+      // A byline credited by name only has no member account behind it, so
+      // there is no `actor` to link to a profile.
+      expect(item.actor).toBeNull();
+    });
+
+    it('gates on published_at being set, not in the future, and canonical-only', async () => {
+      const articleQb = qbStub([]);
+      magazineArticles.createQueryBuilder.mockReturnValue(articleQb);
+
+      await service.getFeed('viewer-1', 'all', undefined);
+
+      const predicates = predicatesOf(articleQb);
+      expect(predicates).toContain('article.published_at IS NOT NULL');
+      expect(predicates).toContain('article.published_at <= :magazineNow');
+      expect(predicates).toContain('article.translation_of_article_id IS NULL');
+    });
+
+    it('orders and seeks on the raw published_at column, so the partial index can serve it', async () => {
+      const articleQb = qbStub([]);
+      magazineArticles.createQueryBuilder.mockReturnValue(articleQb);
+      const cursor = encodeCursor({
+        createdAt: t('2026-07-11T00:00:00.000Z'),
+        id: 'article-9',
+      });
+
+      await service.getFeed('viewer-1', 'gatherings', cursor);
+      // The magazine is not on the gatherings tab at all.
+      expect(magazineArticles.createQueryBuilder).not.toHaveBeenCalled();
+
+      await service.getFeed('viewer-1', 'all', cursor);
+      expect(articleQb.orderBy).toHaveBeenCalledWith(
+        '"article"."published_at"',
+        'DESC',
+      );
+      expect(articleQb.addOrderBy).toHaveBeenCalledWith('article.id', 'DESC');
+      // Raw column on BOTH sides, with no `date_trunc(...)` wrapper: the
+      // column is only ever written from a JS Date, so it already matches the
+      // cursor's millisecond resolution, and keeping it raw is what lets
+      // `IDX_magazine_article_published_at` serve the seek.
+      expect(predicatesOf(articleQb)).toContain(
+        '("article"."published_at", article.id) < (:cursorCreatedAt, :cursorId)',
+      );
+      expect(predicatesOf(articleQb)).not.toContain('date_trunc');
+    });
+
+    it('is unioned into "all" only, never the scoped or single-source tabs', async () => {
+      for (const tab of [
+        'communities',
+        'connections',
+        'gatherings',
+        'people',
+        'posts',
+      ] as const) {
+        magazineArticles.createQueryBuilder.mockClear();
+        await service.getFeed('viewer-1', tab, undefined);
+        expect(magazineArticles.createQueryBuilder).not.toHaveBeenCalled();
+      }
+    });
+
+    it('drops an article whose byline belongs to a member the viewer blocked', async () => {
+      magazineArticles.createQueryBuilder.mockReturnValue(
+        qbStub([baseArticle()]),
+      );
+      magazineAuthors.find.mockResolvedValue([
+        baseByline({ userId: 'blocked-writer' }),
+      ]);
+      blockFilter.hiddenUserIds.mockResolvedValue(
+        new Set<string>(['blocked-writer']),
+      );
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      // Not even the byline reaches the home screen.
+      expect(page.data).toHaveLength(0);
+      expect(blockFilter.hiddenUserIds).toHaveBeenCalledWith('viewer-1', [
+        'blocked-writer',
+      ]);
+    });
+
+    it('excludes an article carrying a tag the viewer switched off (PRD-10)', async () => {
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: false,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: false,
+      });
+      const articleQb = qbStub([]);
+      magazineArticles.createQueryBuilder.mockReturnValue(articleQb);
+
+      await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(predicatesOf(articleQb)).toContain(
+        'NOT (article.tags && :excludedItemTags)',
+      );
+    });
+
+    it('shows the reader-language translation without moving the piece or duplicating it', async () => {
+      const canonical = baseArticle();
+      const translation = baseArticle({
+        id: 'article-1-pt',
+        slug: 'um-quarto-so-nosso',
+        title: 'Um quarto só nosso',
+        locale: 'pt',
+        translationOfArticleId: 'article-1',
+        // Shipped a week after the original, and deliberately ignored for
+        // ordering: the piece keeps its own place in the feed.
+        publishedAt: t('2026-07-18T00:00:00.000Z'),
+      });
+      magazineArticles.createQueryBuilder
+        .mockReturnValueOnce(qbStub([canonical]))
+        .mockReturnValueOnce(qbStub([translation]));
+      magazineAuthors.find.mockResolvedValue([baseByline()]);
+
+      const page = await service.getFeed(
+        'viewer-1',
+        'all',
+        undefined,
+        undefined,
+        undefined,
+        'pt-PT',
+      );
+
+      expect(page.data).toHaveLength(1);
+      const item = page.data[0] as FeedItem;
+      // One row, in Portuguese, at the CANONICAL piece's id and instant.
+      expect(item.id).toBe('article-1');
+      expect(item.createdAt).toBe('2026-07-11T00:00:00.000Z');
+      expect(item.title).toBe('Um quarto só nosso');
+      expect(item.link).toBe('/magazine/article?id=um-quarto-so-nosso');
+      expect(item.locale).toBe('pt');
+    });
+
+    it('runs no translation query at all for a reader on the default locale', async () => {
+      magazineArticles.createQueryBuilder.mockReturnValue(
+        qbStub([baseArticle()]),
+      );
+      magazineAuthors.find.mockResolvedValue([baseByline()]);
+
+      await service.getFeed(
+        'viewer-1',
+        'all',
+        undefined,
+        undefined,
+        undefined,
+        'en-GB',
+      );
+
+      // One builder for the candidates, and nothing else.
+      expect(magazineArticles.createQueryBuilder).toHaveBeenCalledTimes(1);
+    });
+
+    it('serves the piece as written when the language asked for has no translation', async () => {
+      magazineArticles.createQueryBuilder
+        .mockReturnValueOnce(qbStub([baseArticle()]))
+        .mockReturnValueOnce(qbStub([]));
+      magazineAuthors.find.mockResolvedValue([baseByline()]);
+
+      const page = await service.getFeed(
+        'viewer-1',
+        'all',
+        undefined,
+        undefined,
+        undefined,
+        'pt',
+      );
+
+      const item = page.data[0] as FeedItem;
+      expect(item.title).toBe('A room of our own');
+      expect(item.locale).toBe('en');
+    });
+
+    it('resolves the byline in ONE batched query for a whole page of articles', async () => {
+      magazineArticles.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseArticle({ id: 'article-1' }),
+          baseArticle({ id: 'article-2', slug: 'two', authorId: 'byline-2' }),
+          baseArticle({ id: 'article-3', slug: 'three' }),
+        ]),
+      );
+      magazineAuthors.find.mockResolvedValue([
+        baseByline(),
+        baseByline({ id: 'byline-2', slug: 'ines-faria', name: 'Inês Faria' }),
+      ]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data).toHaveLength(3);
+      expect(magazineAuthors.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('merges an article into the same newest-first order as every other source', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([basePost({ id: 'post-older' })]),
+      );
+      magazineArticles.createQueryBuilder.mockReturnValue(
+        qbStub([baseArticle()]),
+      );
+      magazineAuthors.find.mockResolvedValue([baseByline()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      // The post is 2026-07-10, the article 2026-07-11.
+      expect(page.data.map((item) => item.type)).toEqual([
+        'article',
+        'community_post',
+      ]);
     });
   });
 });

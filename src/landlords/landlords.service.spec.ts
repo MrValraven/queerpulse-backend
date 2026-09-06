@@ -86,6 +86,15 @@ function makeRec(
     authorUserId: 'author-1',
     stars: 5,
     text: 'Great!',
+    // PRD-249. The default fixture is an ATTESTED recommendation, because that
+    // is what every row written from now on looks like. Tests about the
+    // historic rows pass `attestedAt: null` explicitly.
+    attestedAt: new Date('2026-01-02T00:00:00.000Z'),
+    tenancyStartedOn: '2024-03',
+    tenancyEndedOn: '2025-09',
+    landlordReplyText: null,
+    landlordReplyPublishedAt: null,
+    landlordReplyPublishedBy: null,
     createdAt: new Date('2026-01-02T00:00:00.000Z'),
     ...overrides,
   };
@@ -462,6 +471,9 @@ describe('LandlordsService', () => {
         service.recommend('ghost', 'author-1', {
           stars: 5,
           text: 'x',
+          hasRentedFromThisLandlord: true,
+          tenancyStartedOn: '2024-03',
+          tenancyEndedOn: '2025-09',
         }),
       ).rejects.toThrow(NotFoundException);
     });
@@ -477,6 +489,9 @@ describe('LandlordsService', () => {
         service.recommend('friendly-landlord', 'author-1', {
           stars: 5,
           text: 'x',
+          hasRentedFromThisLandlord: true,
+          tenancyStartedOn: '2024-03',
+          tenancyEndedOn: '2025-09',
         }),
       ).rejects.toThrow(NotFoundException);
       expect(recommendations.save).not.toHaveBeenCalled();
@@ -492,6 +507,9 @@ describe('LandlordsService', () => {
       const result = await service.recommend('friendly-landlord', 'author-1', {
         stars: 5,
         text: 'Wonderful',
+        hasRentedFromThisLandlord: true,
+        tenancyStartedOn: '2024-03',
+        tenancyEndedOn: '2025-09',
       });
 
       expect(recommendations.create).toHaveBeenCalledWith(
@@ -515,6 +533,9 @@ describe('LandlordsService', () => {
       const result = await service.recommend('friendly-landlord', 'author-1', {
         stars: 4,
         text: 'Better now',
+        hasRentedFromThisLandlord: true,
+        tenancyStartedOn: '2024-03',
+        tenancyEndedOn: '2025-09',
       });
 
       expect(recommendations.create).not.toHaveBeenCalled();
@@ -536,6 +557,9 @@ describe('LandlordsService', () => {
       const result = await service.recommend('friendly-landlord', 'author-1', {
         stars: 5,
         text: 'raced',
+        hasRentedFromThisLandlord: true,
+        tenancyStartedOn: '2024-03',
+        tenancyEndedOn: '2025-09',
       });
 
       expect(result.stars).toBe(5);
@@ -1178,6 +1202,9 @@ describe('LandlordsService', () => {
       const saved = await service.recommend('friendly-landlord', 'author-1', {
         stars: 4,
         text: 'Fixed the boiler the same week.',
+        hasRentedFromThisLandlord: true,
+        tenancyStartedOn: '2024-03',
+        tenancyEndedOn: '2025-09',
       });
 
       expect(saved.id).toBe('rec-9');

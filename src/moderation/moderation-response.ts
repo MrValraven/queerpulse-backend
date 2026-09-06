@@ -467,6 +467,20 @@ export interface SubmittedAppealDTO {
   id: string;
   status: AppealStatus;
   createdAt: string;
+  /**
+   * When the platform has undertaken to decide this appeal by: the published
+   * decision window (`APPEAL_DECISION_WINDOW_DAYS`) counted from the moment of
+   * filing, the same `appeals.sla_due_at` the member later reads on
+   * `GET /appeals/me`.
+   *
+   * PRD-286: added here so the confirmation the member sees the instant they
+   * file can state the date rather than "usually within a few days". The
+   * deadline was already computed and stored at this exact point; withholding
+   * it from the one response the member is guaranteed to see, and sending it
+   * only on a later list call, made the promise invisible at the only moment
+   * it mattered. It is theirs to hold us to.
+   */
+  slaDueAt: string;
 }
 
 export function toSubmittedAppealDTO(appeal: Appeal): SubmittedAppealDTO {
@@ -474,6 +488,7 @@ export function toSubmittedAppealDTO(appeal: Appeal): SubmittedAppealDTO {
     id: appeal.id,
     status: appeal.status,
     createdAt: appeal.createdAt.toISOString(),
+    slaDueAt: appeal.slaDueAt.toISOString(),
   };
 }
 

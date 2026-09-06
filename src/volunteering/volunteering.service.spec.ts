@@ -231,7 +231,8 @@ describe('VolunteeringService', () => {
         expect.objectContaining({ partnerId: null, posterId: 'poster-1' }),
       );
       expect(res.partner).toBeNull();
-      expect(res.isPoster).toBe(true);
+      expect(res.canReviewApplicants).toBe(true);
+      expect(res.canEditOpportunity).toBe(true);
     });
 
     it('resolves a known partnerSlug to partner_id via PartnersService', async () => {
@@ -340,7 +341,8 @@ describe('VolunteeringService', () => {
 
       expect(detail.spotsFilled).toBe(3);
       expect(detail.spotsPct).toBe(75); // round(3/4 * 100)
-      expect(detail.isPoster).toBe(false);
+      expect(detail.canReviewApplicants).toBe(false);
+      expect(detail.canEditOpportunity).toBe(false);
     });
 
     it('guards divide-by-zero when spotsTotal is 0', async () => {

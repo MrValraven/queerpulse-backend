@@ -7,6 +7,7 @@ import { Connection } from '../connections/entities/connection.entity';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
+import { VouchModule } from '../vouch/vouch.module';
 import { MemberSuggestionDismissal } from './entities/member-suggestion-dismissal.entity';
 import { MemberSuggestionsController } from './member-suggestions.controller';
 import { MemberSuggestionsService } from './member-suggestions.service';
@@ -29,6 +30,10 @@ import { MemberSuggestionsService } from './member-suggestions.service';
  *    (`mutualCountsByUserIds`, already batched).
  *  - `ContentModerationModule` supplies the takedown state, so a member a
  *    moderator has hidden is never pushed into anyone's feed.
+ *  - `VouchModule` supplies the block-aware vouch count the card prints, the
+ *    same batched `getVouchCounts` the directory uses. `VouchModule` imports
+ *    only `UsersModule` and `SocialModule`, both of which are already here,
+ *    so this adds no cycle.
  */
 @Module({
   imports: [
@@ -42,6 +47,7 @@ import { MemberSuggestionsService } from './member-suggestions.service';
     SocialModule,
     ConnectionsModule,
     ContentModerationModule,
+    VouchModule,
   ],
   controllers: [MemberSuggestionsController],
   providers: [MemberSuggestionsService],

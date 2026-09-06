@@ -5,8 +5,10 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { randomBytes } from 'crypto';
 import { MoreThanOrEqual, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EventPhoto } from '../events/entities/event-photo.entity';
@@ -18,7 +20,17 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from './entities/report.entity';
+import { deriveAnonymousReporterKey } from './anonymous-reporter-key';
 import {
+  REPORT_ANONYMOUS_DAILY_CAP_MESSAGE,
+  REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE,
+  REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE_MESSAGE,
+  REPORT_ANONYMOUS_DAILY_EMERGENCY_CEILING,
+  REPORT_ANONYMOUS_DAILY_LIMIT,
+  REPORT_ANONYMOUS_DAILY_WINDOW_MS,
+  REPORT_ANONYMOUS_PER_SUBJECT_CAP_MESSAGE,
+  REPORT_ANONYMOUS_PER_SUBJECT_LIMIT,
+  REPORT_ANONYMOUS_PER_SUBJECT_WINDOW_MS,
   REPORT_DAILY_CAP_MESSAGE,
   REPORT_DAILY_EMERGENCY_ALLOWANCE,
   REPORT_DAILY_EMERGENCY_ALLOWANCE_MESSAGE,
@@ -106,6 +118,12 @@ export interface CreateReportInput {
  *
  * That file's doc comment is the full argument for why each layer exists and
  * why none of them subsumes another. Read it before changing any of the three.
+ *
+ * All three of those describe a SIGNED-IN filing. `POST /reports` is public
+ * (PRD-280), and on a signed-out filing layer 2 is deliberately skipped and
+ * layer 3 is replaced: `assertAnonymousReportingWindowIsClear` runs separate,
+ * tighter caps keyed on a peppered digest of the caller's network address. The
+ * signed-in path is byte-for-byte what it was.
  */
 @Injectable()
 export class ReportsService {
@@ -140,11 +158,62 @@ export class ReportsService {
     // invisible to every row-counting moderation surface. `MetricsModule` is
     // `@Global` and exports this, so `ReportsModule` needs no import.
     private readonly metrics: MetricsService,
+    // Holds the pepper the anonymous flood-cap key is derived under
+    // (`reports.config.ts`, registered via `ConfigModule.forFeature` in
+    // `ReportsModule`). `ConfigModule` is global, so nothing else is needed.
+    private readonly config: ConfigService,
   ) {}
 
+  /**
+   * The fallback pepper for the anonymous flood-cap key, generated ONCE per
+   * process. Used only when `REPORT_ANONYMOUS_FLOOD_PEPPER` is unset.
+   *
+   * Deliberately random rather than a constant. A hard-coded default would be
+   * in the repository, and a pepper in the repository is not a pepper: the
+   * digests on the `reports` table would be reversible by anyone who could read
+   * both. The cost of randomness is that the anonymous caps reset when the
+   * process restarts, which is the same durability the burst `@Throttle` has,
+   * and `reports.config.ts` says so.
+   */
+  private readonly fallbackAnonymousFloodPepper =
+    randomBytes(32).toString('hex');
+
+  private hasWarnedAboutMissingAnonymousFloodPepper = false;
+
+  /**
+   * The configured pepper, or the per-process fallback. Warns ONCE per process
+   * when it falls back, so an operator sees it without a line per filing.
+   */
+  private anonymousFloodPepper(): string {
+    const configured = this.config.get<string>('reports.anonymousFloodPepper');
+    if (configured) {
+      return configured;
+    }
+    if (!this.hasWarnedAboutMissingAnonymousFloodPepper) {
+      this.hasWarnedAboutMissingAnonymousFloodPepper = true;
+      this.logger.warn(
+        'REPORT_ANONYMOUS_FLOOD_PEPPER is not set. The anonymous report flood caps are running under a per-process pepper, so they reset on every restart. Set it in production.',
+      );
+    }
+    return this.fallbackAnonymousFloodPepper;
+  }
+
+  /**
+   * File a report. `reporterId` is NULL for a signed-out filing, which
+   * `POST /reports` now accepts (PRD-280).
+   *
+   * `clientIp` is the raw client address the controller read off the request
+   * (`@Ip()`, resolved through `trust proxy` in `main.ts`). It is used for ONE
+   * thing and never stored: deriving the anonymous flood-cap key. It is
+   * ignored entirely on a signed-in filing, whose caps key on the account.
+   * Optional and defaulting to null so the server-side callers that file
+   * through this pipeline (`ListingsService`'s dispute and owner-notify tasks)
+   * need no change: they always carry a real `reporterId` and no request.
+   */
   async create(
-    reporterId: string,
+    reporterId: string | null,
     input: CreateReportInput,
+    clientIp: string | null = null,
   ): Promise<ReportDTO> {
     // A member can't report their own message — mirrors the DTO's `canReport`
     // flag (`!isDeleted && !isAuthor` in `MessagingCoreService.toMessageResponses`),
@@ -162,7 +231,15 @@ export class ReportsService {
         // deleted-but-still-yours message can't be self-reported either.
         withDeleted: true,
       });
-      if (reportedMessage && reportedMessage.senderId === reporterId) {
+      // `reporterId !== null` is spelled out rather than left to the strict
+      // comparison below doing the right thing by accident: a signed-out caller
+      // has no messages to self-report, and an anonymous filing must never be
+      // refused because some column somewhere went nullable.
+      if (
+        reporterId !== null &&
+        reportedMessage &&
+        reportedMessage.senderId === reporterId
+      ) {
         throw new ForbiddenException('You cannot report your own message');
       }
     }
@@ -209,7 +286,25 @@ export class ReportsService {
     // then re-reads and returns the winner's row (below). (Resolved/escalated
     // reports don't block a fresh filing: a recurrence after a resolution is
     // worth surfacing again, hence the partial `WHERE status = 'open'`.)
-    const existing = await this.findOpenReport(reporterId, input);
+    //
+    // SIGNED-IN ONLY, and the guard is the point rather than an optimisation.
+    // There is no anonymous equivalent of "the caller's existing open report",
+    // because there is no caller to own one. Matching on `reporterId IS NULL`
+    // would collapse across PEOPLE: the first stranger to report a subject for
+    // a reason would own that row, and every later signed-out reporter naming
+    // the same subject and reason would have their filing thrown away and be
+    // handed somebody else's report back as if it were theirs. That is a
+    // silent loss of a safety report and a leak of another person's report id
+    // and status in one move. The database agrees by accident and then by
+    // design: `UQ_reports_open_reporter_subject` is over `reporter_id`, and
+    // Postgres treats NULLs as distinct in a unique index, so two anonymous
+    // rows never collide there either.
+    //
+    // The price is that the anonymous path has no idempotency: a double-tapped
+    // submit or a retry after a dropped connection writes two rows.
+    // `REPORT_ANONYMOUS_PER_SUBJECT_LIMIT` is sized to absorb exactly that.
+    const existing =
+      reporterId === null ? null : await this.findOpenReport(reporterId, input);
     if (existing) {
       return toReportDTO(existing);
     }
@@ -228,7 +323,25 @@ export class ReportsService {
     // never spends a slot and never gets refused: that request is answered
     // idempotently above and never reaches this point. Only a genuinely new
     // report is counted against the caps.
-    await this.assertReportingWindowIsClear(reporterId, input, severity);
+    //
+    // Two sets of caps, one per path, and a filing is only ever subject to
+    // one. A signed-in filing is counted per member off `reporterId`, exactly
+    // as it always was; nothing about that path changed when the route became
+    // public. A signed-out filing is counted per anonymous key, under the
+    // separate and tighter numbers in `report-flood-limits.ts`.
+    const anonymousReporterKey =
+      reporterId === null
+        ? deriveAnonymousReporterKey(clientIp, this.anonymousFloodPepper())
+        : null;
+    if (reporterId === null) {
+      await this.assertAnonymousReportingWindowIsClear(
+        anonymousReporterKey,
+        input,
+        severity,
+      );
+    } else {
+      await this.assertReportingWindowIsClear(reporterId, input, severity);
+    }
 
     const now = new Date();
 
@@ -240,7 +353,23 @@ export class ReportsService {
           reasonCode: input.reasonCode,
           detail: input.detail ?? null,
           anonymous: input.anonymous ?? false,
-          contactEmail: input.contactEmail ?? null,
+          // SERVER-SIDE RULE, never the client's to decide (PRD-281): a
+          // contact address is stored only when there is no account behind the
+          // report. A signed-in member is already reachable through the
+          // notification bell and can read their own report's status on
+          // `GET /reports/mine`, so an off-platform address filed beside their
+          // account buys nothing and leaves a second copy of their personal
+          // data sitting on a moderation row. A signed-in filing that carries
+          // one has it DROPPED rather than refused: the report is the thing
+          // that matters, and refusing it over a field the reporter should not
+          // have been shown would be the wrong trade. The frontend hides the
+          // field for signed-in members; this is what makes that true rather
+          // than merely displayed. Nothing sends to the stored address either
+          // way, here or anywhere: QueerPulse delivers no email, and it is
+          // kept so a human on the safety team can choose to reach out by hand.
+          contactEmail:
+            reporterId === null ? (input.contactEmail ?? null) : null,
+          anonymousReporterKey,
           evidence: this.buildEvidence(
             input.evidence,
             reportedMessage,
@@ -269,7 +398,17 @@ export class ReportsService {
       // partial unique index rejected the duplicate open report. Converge on
       // the same idempotent outcome as the `findOne` fast-path: return the
       // report that won.
-      if (isUniqueViolation(error, 'UQ_reports_open_reporter_subject')) {
+      //
+      // Signed-in only, for the same reason the fast-path above is. The index
+      // is over `reporter_id` and Postgres treats NULLs as distinct, so an
+      // anonymous insert cannot raise this violation in the first place; the
+      // `reporterId !== null` test is here so that if some future index ever
+      // did make it possible, the recovery would not silently hand one
+      // stranger another stranger's report.
+      if (
+        reporterId !== null &&
+        isUniqueViolation(error, 'UQ_reports_open_reporter_subject')
+      ) {
         const winner = await this.findOpenReport(reporterId, input);
         if (winner) {
           return toReportDTO(winner);
@@ -280,7 +419,11 @@ export class ReportsService {
   }
 
   /**
-   * The rolling flood caps: at most `REPORT_DAILY_LIMIT` reports across all
+   * The rolling flood caps for a SIGNED-IN filing, unchanged by PRD-280: a
+   * signed-out one is counted by `assertAnonymousReportingWindowIsClear`
+   * instead and never reaches here.
+   *
+   * At most `REPORT_DAILY_LIMIT` reports across all
    * subjects in `REPORT_DAILY_WINDOW_MS`, and at most
    * `REPORT_PER_SUBJECT_LIMIT` against one subject in
    * `REPORT_PER_SUBJECT_WINDOW_MS`. Every number lives in
@@ -495,6 +638,192 @@ export class ReportsService {
   }
 
   /**
+   * The rolling flood caps for a SIGNED-OUT filing.
+   *
+   * Same three-part shape as `assertReportingWindowIsClear` — a daily cap with
+   * a bounded Emergency allowance above it, then a per-subject cap the
+   * Emergency band walks past — under the separate, tighter numbers in
+   * `report-flood-limits.ts`, and keyed on `anonymousReporterKey` instead of
+   * on an account. That file carries the full argument for the sizes and, more
+   * importantly, for how much weaker this key is than a member id. The short
+   * version: it is a peppered digest of a network address, so a determined
+   * flooder buys new keys and several unrelated strangers can share one.
+   *
+   * ## A NULL key is not refused
+   *
+   * `deriveAnonymousReporterKey` returns null when there is no readable client
+   * address, and this method then does nothing at all. That is deliberate, and
+   * it is the one place these caps are weakest by choice: a caller who can
+   * strip their address past `trust proxy` is uncapped by this layer, bounded
+   * only by the burst `@Throttle`. Refusing instead would mean turning away a
+   * safety report because of a proxy configuration, which is the worse
+   * failure by a wide margin, and the shape it would take in practice is a
+   * whole deployment where nobody signed out can report anything.
+   *
+   * ## Same refusal contract as the member caps
+   *
+   * The same 429 and the same `REPORT_FLOOD_CAP` code, with the same additive
+   * `cap` field. A client cannot tell the two apart and does not need to: its
+   * only question is whether this 429 carries platform-authored copy worth
+   * showing, and the answer is yes either way. Only the wording differs, and
+   * the wording is already in `message`.
+   */
+  private async assertAnonymousReportingWindowIsClear(
+    anonymousReporterKey: string | null,
+    input: CreateReportInput,
+    severity: ReportSeverity,
+  ): Promise<void> {
+    if (!anonymousReporterKey) {
+      return;
+    }
+    const now = Date.now();
+    const isEmergencyReport = severity === ReportSeverity.Emergency;
+
+    // Served by the partial index `IDX_reports_anonymous_reporter_key` on
+    // (anonymous_reporter_key, created_at) as a range scan — the anonymous
+    // counterpart of `IDX_reports_reporter_created_at`.
+    const dailyWindowStartedAt = new Date(
+      now - REPORT_ANONYMOUS_DAILY_WINDOW_MS,
+    );
+    const filedInDailyWindow = await this.reports.count({
+      where: {
+        anonymousReporterKey,
+        createdAt: MoreThanOrEqual(dailyWindowStartedAt),
+      },
+    });
+    if (filedInDailyWindow >= REPORT_ANONYMOUS_DAILY_LIMIT) {
+      const hasEmergencyAllowanceLeft =
+        isEmergencyReport &&
+        filedInDailyWindow < REPORT_ANONYMOUS_DAILY_EMERGENCY_CEILING;
+
+      if (!hasEmergencyAllowanceLeft) {
+        if (isEmergencyReport) {
+          this.recordEmergencyAllowanceExhausted({
+            reporterId: null,
+            anonymousReporterKey,
+            limit: REPORT_ANONYMOUS_DAILY_LIMIT,
+            allowance: REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE,
+            windowMs: REPORT_ANONYMOUS_DAILY_WINDOW_MS,
+            filedInWindow: filedInDailyWindow,
+            input,
+          });
+        } else {
+          this.recordRefusal({
+            reporterId: null,
+            anonymousReporterKey,
+            cap: 'daily',
+            limit: REPORT_ANONYMOUS_DAILY_LIMIT,
+            windowMs: REPORT_ANONYMOUS_DAILY_WINDOW_MS,
+            filedInWindow: filedInDailyWindow,
+            input,
+          });
+        }
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.TOO_MANY_REQUESTS,
+            error: 'Too Many Requests',
+            code: REPORT_FLOOD_CAP_CODE,
+            cap: 'daily',
+            message: isEmergencyReport
+              ? REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE_MESSAGE
+              : REPORT_ANONYMOUS_DAILY_CAP_MESSAGE,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
+      this.recordEmergencyBypass({
+        reporterId: null,
+        anonymousReporterKey,
+        cap: 'daily',
+        limit: REPORT_ANONYMOUS_DAILY_LIMIT,
+        allowance: REPORT_ANONYMOUS_DAILY_EMERGENCY_ALLOWANCE,
+        windowMs: REPORT_ANONYMOUS_DAILY_WINDOW_MS,
+        filedInWindow: filedInDailyWindow,
+        input,
+      });
+    }
+
+    // Same index, one range wider, and cheap for the same reason the member
+    // per-subject count is: the daily cap above bounds this key's rows inside
+    // the 7-day window at roughly 7 x `REPORT_ANONYMOUS_DAILY_LIMIT`.
+    const subjectWindowStartedAt = new Date(
+      now - REPORT_ANONYMOUS_PER_SUBJECT_WINDOW_MS,
+    );
+    const filedAgainstSubject = await this.reports.count({
+      where: {
+        anonymousReporterKey,
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        createdAt: MoreThanOrEqual(subjectWindowStartedAt),
+      },
+    });
+    if (filedAgainstSubject >= REPORT_ANONYMOUS_PER_SUBJECT_LIMIT) {
+      if (isEmergencyReport) {
+        this.recordEmergencyBypass({
+          reporterId: null,
+          anonymousReporterKey,
+          cap: 'subject',
+          allowance: null,
+          limit: REPORT_ANONYMOUS_PER_SUBJECT_LIMIT,
+          windowMs: REPORT_ANONYMOUS_PER_SUBJECT_WINDOW_MS,
+          filedInWindow: filedAgainstSubject,
+          input,
+        });
+        return;
+      }
+      this.recordRefusal({
+        reporterId: null,
+        anonymousReporterKey,
+        cap: 'subject',
+        limit: REPORT_ANONYMOUS_PER_SUBJECT_LIMIT,
+        windowMs: REPORT_ANONYMOUS_PER_SUBJECT_WINDOW_MS,
+        filedInWindow: filedAgainstSubject,
+        input,
+      });
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          error: 'Too Many Requests',
+          code: REPORT_FLOOD_CAP_CODE,
+          cap: 'subject',
+          message: REPORT_ANONYMOUS_PER_SUBJECT_CAP_MESSAGE,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * Who the moderation log line names, as `key=value` pairs.
+   *
+   * A signed-in refusal names the member, exactly as it always did. A
+   * signed-out one has nobody to name, so it carries a SHORT PREFIX of the
+   * anonymous key instead: enough for a moderator reading a window of log
+   * lines to see that twelve refusals came from one place rather than twelve,
+   * which is the whole question a flood raises. The full digest stays out of
+   * the log — the log stream is read by more people and kept in more places
+   * than the table is, and a truncated prefix correlates without handing
+   * anyone the value to compare against a `reports` row.
+   *
+   * `anonymous` as a literal, never an empty value, so a line about a
+   * signed-out filing is unmistakably that rather than a line where the
+   * reporter id failed to interpolate.
+   */
+  private describeReporterForLog(reporter: {
+    reporterId: string | null;
+    anonymousReporterKey?: string | null;
+  }): string {
+    if (reporter.reporterId !== null) {
+      return `reporterId=${reporter.reporterId}`;
+    }
+    const keyPrefix = reporter.anonymousReporterKey
+      ? reporter.anonymousReporterKey.slice(0, 12)
+      : 'unkeyed';
+    return `reporterId=anonymous anonymousKeyPrefix=${keyPrefix}`;
+  }
+
+  /**
    * A refused filing is a moderation signal, so it is never silent.
    *
    * A member who reaches either cap is either being harassed at scale, and is
@@ -527,7 +856,9 @@ export class ReportsService {
    * home for that.
    */
   private recordRefusal(refusal: {
-    reporterId: string;
+    /** NULL on the signed-out path; `anonymousReporterKey` names it instead. */
+    reporterId: string | null;
+    anonymousReporterKey?: string | null;
     cap: ReportFloodCap;
     limit: number;
     windowMs: number;
@@ -553,7 +884,7 @@ export class ReportsService {
     this.logger.warn(
       `report-flood-cap refused a filing. ` +
         `cap=${refusal.cap} limit=${refusal.limit} windowHours=${windowHours} ` +
-        `filedInWindow=${refusal.filedInWindow} reporterId=${refusal.reporterId} ` +
+        `filedInWindow=${refusal.filedInWindow} ${this.describeReporterForLog(refusal)} ` +
         `subjectType=${refusal.input.subjectType} subjectId=${subjectId} ` +
         `reasonCode=${refusal.input.reasonCode}`,
     );
@@ -588,7 +919,9 @@ export class ReportsService {
    * A counter of its own is worth adding and belongs in `src/metrics`.
    */
   private recordEmergencyBypass(bypass: {
-    reporterId: string;
+    /** NULL on the signed-out path; `anonymousReporterKey` names it instead. */
+    reporterId: string | null;
+    anonymousReporterKey?: string | null;
     cap: ReportFloodCap;
     /** Room the emergency band bought above the cap; null where it is uncapped. */
     allowance: number | null;
@@ -603,7 +936,7 @@ export class ReportsService {
       `report-flood-cap-emergency-bypass let an emergency filing through. ` +
         `cap=${bypass.cap} limit=${bypass.limit} ` +
         `allowance=${bypass.allowance ?? 'unbounded'} windowHours=${windowHours} ` +
-        `filedInWindow=${bypass.filedInWindow} reporterId=${bypass.reporterId} ` +
+        `filedInWindow=${bypass.filedInWindow} ${this.describeReporterForLog(bypass)} ` +
         `subjectType=${bypass.input.subjectType} subjectId=${subjectId} ` +
         `reasonCode=${bypass.input.reasonCode}`,
     );
@@ -636,7 +969,9 @@ export class ReportsService {
    * carries the distinction and the counter stays comparable.
    */
   private recordEmergencyAllowanceExhausted(exhausted: {
-    reporterId: string;
+    /** NULL on the signed-out path; `anonymousReporterKey` names it instead. */
+    reporterId: string | null;
+    anonymousReporterKey?: string | null;
     limit: number;
     allowance: number;
     windowMs: number;
@@ -651,7 +986,7 @@ export class ReportsService {
       `report-flood-cap-emergency-allowance-exhausted refused an emergency filing. ` +
         `cap=daily limit=${exhausted.limit} allowance=${exhausted.allowance} ` +
         `windowHours=${windowHours} filedInWindow=${exhausted.filedInWindow} ` +
-        `reporterId=${exhausted.reporterId} ` +
+        `${this.describeReporterForLog(exhausted)} ` +
         `subjectType=${exhausted.input.subjectType} subjectId=${subjectId} ` +
         `reasonCode=${exhausted.input.reasonCode}`,
     );

@@ -22,6 +22,7 @@ function makeReport(overrides: Partial<Report> = {}): Report {
     detail: null,
     anonymous: false,
     contactEmail: null,
+    anonymousReporterKey: null,
     evidence: null,
     severity: ReportSeverity.Medium,
     slaDueAt: TOMORROW,

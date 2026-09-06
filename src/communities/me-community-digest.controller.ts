@@ -39,16 +39,17 @@ export class MeCommunityDigestController {
   ) {}
 
   @Get('digest')
-  // The response is a six-query fan-out over every community the caller
+  // The response is a fixed fan-out (six queries, eight for a caller who
+  // moderates any of their communities) over every community the caller
   // belongs to, so it is worth a tighter ceiling than the global default.
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @ApiOperation({
     summary:
-      "The last seven days across the caller's communities: new posts, new members, upcoming gatherings, and a couple of post excerpts each.",
+      "The last seven days across the caller's communities: new posts, new members, upcoming gatherings, a couple of post excerpts each, and (where the caller moderates) what is waiting in that community's queues.",
   })
   @ApiOkResponse({
     description:
-      "The caller's weekly digest. Muted communities are excluded, and a bare array is never returned: the envelope carries the window start.",
+      "The caller's weekly digest. Muted communities are excluded, and a bare array is never returned: the envelope carries the window start. `pendingJoinRequestCount` and `openReportCount` are 0 on every community the caller does not moderate.",
   })
   getDigest(@CurrentUser() user: CurrentUserData) {
     return this.communityDigestService.getDigest(user.userId);

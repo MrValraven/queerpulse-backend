@@ -102,6 +102,24 @@ export class ConversationParticipant {
   archivedAt!: Date | null;
 
   /**
+   * When this participant explicitly MARKED the conversation unread from the
+   * inbox row menu (PRD-225) — a WhatsApp/Telegram/Signal-style "come back to
+   * this" flag, independent of `lastReadAt`. Stored as a timestamp (like
+   * `pinnedAt`/`favoritedAt`/`archivedAt`) so it is server state that survives
+   * navigating away and shows up on this member's other devices. NULL = not
+   * manually marked unread.
+   *
+   * Deliberately NOT derived from (or written by) `markRead`'s GREATEST-only,
+   * forward-moving watermark logic — a manual mark-unread cannot walk
+   * `lastReadAt` backward, so it needs its own column. It is cleared back to
+   * NULL ONLY by `ConversationsService.markRead` (i.e. genuinely re-opening
+   * and reading the thread again), never by an inbox refetch or an unrelated
+   * preference toggle, so it can't be silently undone by a re-render.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  markedUnreadAt!: Date | null;
+
+  /**
    * This participant's unsent composer text for the conversation, synced from
    * the client so it survives a device switch (phone -> laptop) — the
    * cross-device layer on top of the instant, always-on localStorage copy the

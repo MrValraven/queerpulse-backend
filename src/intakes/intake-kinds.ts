@@ -36,6 +36,19 @@
  *                          other kind above. No dedicated admin page reads
  *                          them yet — visible via `GET /intakes?kind=...` —
  *                          so their success copy makes no reply-time promise.)
+ *  - `landlord_reply_request` → economy/LandlordReplyRequestPage (PRD-249).
+ *                          THE ONE KIND WHOSE SUBMITTER IS NOT A MEMBER AND
+ *                          NEVER WILL BE. A landlord named in the community
+ *                          landlord directory is a third party with no account
+ *                          and no claim path, and the directory itself is
+ *                          member-only, so they cannot read the page that
+ *                          rates them, let alone answer it. This form is their
+ *                          right of reply: a public page, no sign-in, carrying
+ *                          the recommendation's id, what they want to say, and
+ *                          how to reach them. Staff check who they are dealing
+ *                          with and publish the words through
+ *                          `POST /admin/landlords/recommendations/:id/reply`.
+ *                          Worked in /admin/intakes like every kind above.
  */
 export const INTAKE_KINDS = [
   'grant',
@@ -50,6 +63,7 @@ export const INTAKE_KINDS = [
   'culture_post_project',
   'culture_submit_work',
   'culture_submit_playlist',
+  'landlord_reply_request',
 ] as const;
 
 export type IntakeKind = (typeof INTAKE_KINDS)[number];

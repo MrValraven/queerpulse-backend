@@ -39,6 +39,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     city: 'Lisbon',
     area: 'Arroios',
     rentEuros: 500,
+    depositEuros: null,
     bedrooms: null,
     billsIncluded: false,
     lgbtqFriendly: true,
@@ -57,9 +58,12 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     decisionReason: null,
     decidedById: null,
     decidedAt: null,
+    firstLiveAt: null,
     virtualTourUrl: null,
     filledAt: null,
     expiresAt: new Date('2026-03-02T00:00:00.000Z'),
+    // PRD-244: not yet warned about this term.
+    expiryWarningSentAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -102,6 +106,10 @@ describe('HousingListingModerationService', () => {
   let listings: {
     findOne: jest.Mock;
     save: jest.Mock<Promise<HousingListing>, [HousingListing]>;
+    // The conditional `first_live_at IS NULL` claim behind `isFirstGoLive`
+    // (ENG-170). `affected: 1` is "this approval won the row", so the default
+    // here is a listing going live for the first time.
+    update: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let profiles: Record<string, jest.Mock>;
@@ -114,6 +122,7 @@ describe('HousingListingModerationService', () => {
     listings = {
       findOne: jest.fn().mockResolvedValue(null),
       save: jest.fn((row: HousingListing) => Promise.resolve(row)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => makeQueryBuilder()),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
@@ -172,13 +181,44 @@ describe('HousingListingModerationService', () => {
       expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
       const [eventName, event] = eventEmitter.emit.mock.calls[0] as [
         string,
-        { listing: HousingListing; listingVerified: boolean },
+        {
+          listing: HousingListing;
+          listingVerified: boolean;
+          isFirstGoLive: boolean;
+        },
       ];
       expect(eventName).toBe(HOUSING_LISTING_WENT_LIVE);
       expect(event.listing.status).toBe(HousingListingStatus.Live);
       // The lister here is only phone-verified, so the honest "verified
       // listing" chip is withheld even though the listing is live.
       expect(event.listingVerified).toBe(false);
+      expect(event.isFirstGoLive).toBe(true);
+    });
+
+    it('announces a re-approval but marks it as not the first go-live', async () => {
+      // The listing was published once, an owner edit to a moderated field
+      // knocked it back to `review`, and a moderator is approving it again. The
+      // `first_live_at` claim finds the row already stamped, so the event still
+      // fires (a reindexing consumer needs it) with `isFirstGoLive` false, and
+      // the saved-search fan-out stands down (ENG-170).
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          status: HousingListingStatus.Review,
+          firstLiveAt: new Date('2026-01-05T00:00:00.000Z'),
+        }),
+      );
+      listings.update.mockResolvedValue({ affected: 0 });
+
+      await service.decide('QPH-2026-0001', 'mod-1', {
+        decision: HousingListingDecision.Approve,
+      });
+
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      const [, event] = eventEmitter.emit.mock.calls[0] as [
+        string,
+        { isFirstGoLive: boolean },
+      ];
+      expect(event.isFirstGoLive).toBe(false);
     });
 
     it('refreshes an expired listing on approval so browse does not withhold it', async () => {

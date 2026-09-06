@@ -31,10 +31,16 @@ describe('FeedController', () => {
 
   it('delegates to FeedService with the caller id, tab, and cursor', async () => {
     await controller.getFeed(user, { tab: 'communities', cursor: 'c1' });
+    // `limit` is the controller's own omission (the service defaults it);
+    // `joinedWithinDays` (PRD-168) and `lang` (PRD-107) ride through from the
+    // query string.
     expect(feedService.getFeed).toHaveBeenCalledWith(
       'user-1',
       'communities',
       'c1',
+      undefined,
+      undefined,
+      undefined,
     );
   });
 
@@ -44,6 +50,33 @@ describe('FeedController', () => {
       'user-1',
       undefined,
       undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
+  it('threads the "New this week" date bound through (PRD-168)', async () => {
+    await controller.getFeed(user, { tab: 'people', joinedWithinDays: 7 });
+    expect(feedService.getFeed).toHaveBeenCalledWith(
+      'user-1',
+      'people',
+      undefined,
+      undefined,
+      7,
+      undefined,
+    );
+  });
+
+  it("threads the reader's language through for the magazine source (PRD-107)", async () => {
+    await controller.getFeed(user, { lang: 'pt-PT' });
+    expect(feedService.getFeed).toHaveBeenCalledWith(
+      'user-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'pt-PT',
     );
   });
 

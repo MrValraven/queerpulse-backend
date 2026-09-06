@@ -9,6 +9,7 @@ import {
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import {
   IssueDigestItem,
+  IssueLastShip,
   MagazineIssue,
 } from './entities/magazine-issue.entity';
 import { MagazinePitch, PitchStatus } from './entities/magazine-pitch.entity';
@@ -63,12 +64,34 @@ export interface PieceListItem {
 export interface PitchResponse {
   id: string;
   title: string;
+  /**
+   * Who pitched, as the inbox should read it. For a pitch that arrived from
+   * outside the platform this is the free-text `from` the editor typed. For a
+   * pitch submitted from inside (the writer workspace, or a member's story
+   * submission) `from` is stored EMPTY on purpose, and the caller resolves the
+   * submitter's account to a display name instead (PRD-123). Before that the
+   * whole inbox showed a blank byline for every internally-submitted pitch.
+   */
   from: string;
+  /**
+   * The account that submitted this pitch, or `null` for an external pitch.
+   * The desk already sees actor ids on the piece audit trail; this is the same
+   * kind of provenance, and it is what lets the inbox link a pitch to the
+   * person rather than to a string that may not match anyone.
+   */
+  submitterId: string | null;
   note: string;
   tags: string[];
   suggestFormat: PieceFormat | null;
   status: PitchStatus;
   fresh: boolean;
+  /**
+   * ISO instant this pitch came back into the inbox because the piece
+   * commissioned from it was deleted (ENG-113), or `null` for a pitch that has
+   * never been through that. The inbox uses it to mark a returning pitch, so a
+   * row reappearing is explained rather than surprising.
+   */
+  returnedAt: string | null;
 }
 
 /**
@@ -104,6 +127,50 @@ export interface PieceRecord extends PieceListItem {
   brief: PieceBrief | null;
   care: PieceCare | null;
   audit: PieceEventEntry[];
+  /** Whether the piece's linked article/deck is live to readers right now. */
+  isPublished: boolean;
+  /**
+   * ISO instant the linked article/deck goes (or went) live, or `null` when it
+   * is still a draft. A value in the FUTURE means scheduled, which is exactly
+   * how the public read paths already treat it.
+   */
+  publishedAt: string | null;
+  /**
+   * Reader-facing path for the live piece, or `null` when nothing is published
+   * yet. Built from `MAGAZINE_READER_PATH_BY_FORMAT`, the same route the reader
+   * front links to, so the desk and the bell can never point somewhere the
+   * router does not resolve.
+   */
+  publicHref: string | null;
+}
+
+/**
+ * The article or deck row a piece is linked to, narrowed to the two columns
+ * the record projection needs. Both `MagazineArticle` and `MagazineDeck`
+ * satisfy it, which is what lets one mapper serve both formats.
+ */
+export interface PieceLinkedContent {
+  slug: string;
+  publishedAt: Date | null;
+}
+
+/**
+ * The reader routes a published piece lives at, per format. These mirror
+ * `routes.article` / `routes.deck` in the frontend's `routeMap.ts`, and the
+ * `?id=<slug>` query is how both reader pages read their subject (see
+ * `ArticlePage`/`DeckPage`) — the slug is NOT a path segment. Kept as one map
+ * so a route change has a single place to land.
+ */
+export const MAGAZINE_READER_PATH_BY_FORMAT: Record<PieceFormat, string> = {
+  article: '/magazine/article',
+  deck: '/magazine/deck',
+};
+
+/** The reader-facing href for a published piece of `format` at `slug`. */
+export function toPiecePublicHref(format: PieceFormat, slug: string): string {
+  return `${MAGAZINE_READER_PATH_BY_FORMAT[format]}?id=${encodeURIComponent(
+    slug,
+  )}`;
 }
 
 /**
@@ -116,7 +183,13 @@ export function deriveLate(
   piece: Pick<MagazinePiece, 'dueOn' | 'stage'>,
   now: Date = new Date(),
 ): boolean {
-  if (piece.dueOn === null || piece.stage === 'ready') {
+  // `published` joins `ready` here: a piece that is already live cannot be
+  // late, and it is the stage every shipped piece now lands in (PRD-120).
+  if (
+    piece.dueOn === null ||
+    piece.stage === 'ready' ||
+    piece.stage === 'published'
+  ) {
     return false;
   }
 
@@ -188,16 +261,33 @@ export function toPieceListItem(piece: MagazinePiece): PieceListItem {
   };
 }
 
-export function toPitchResponse(pitch: MagazinePitch): PitchResponse {
+/**
+ * PRD-123 — `submitterName` is the submitter's resolved display name, which
+ * the caller looks up (this mapper has no repository, exactly like
+ * `toWriterPayment`). A pitch submitted from inside the platform stores
+ * `from: ''` and carries `submitterId` instead, so without the resolved name
+ * the editor inbox printed a blank byline on every workspace pitch and every
+ * commissioned member story submission.
+ *
+ * The stored `from` wins whenever there is no resolved name, which keeps an
+ * external pitch (free-text `from`, no `submitterId`) reading exactly as it
+ * always has.
+ */
+export function toPitchResponse(
+  pitch: MagazinePitch,
+  submitterName: string | null = null,
+): PitchResponse {
   return {
     id: pitch.id,
     title: pitch.title,
-    from: pitch.from,
+    from: submitterName ?? pitch.from,
+    submitterId: pitch.submitterId,
     note: pitch.note,
     tags: pitch.tags,
     suggestFormat: pitch.suggestFormat,
     status: pitch.status,
     fresh: pitch.fresh,
+    returnedAt: pitch.returnedAt?.toISOString() ?? null,
   };
 }
 
@@ -265,7 +355,9 @@ export function toPieceRecordSummary(
   piece: MagazinePiece,
   events: MagazinePieceEvent[],
   actorNameById: Map<string, string>,
+  content: PieceLinkedContent | null = null,
 ): PieceRecord {
+  const publishedAt = content?.publishedAt ?? null;
   return {
     ...toPieceListItem(piece),
     brief: piece.brief,
@@ -273,6 +365,15 @@ export function toPieceRecordSummary(
     audit: events.map((event) =>
       toPieceEventEntry(event, AUDIT_SUBJECT_LABEL, actorNameById),
     ),
+    // "Live right now" is a strictly narrower question than "has a
+    // `publishedAt`": a scheduled piece carries a future instant and is still
+    // invisible to readers, so the desk must not call it published.
+    isPublished: publishedAt !== null && publishedAt.getTime() <= Date.now(),
+    publishedAt: publishedAt === null ? null : publishedAt.toISOString(),
+    publicHref:
+      content === null || publishedAt === null
+        ? null
+        : toPiecePublicHref(piece.format, content.slug),
   };
 }
 
@@ -306,7 +407,7 @@ export function computePublishGate(care: PieceCare | null): PublishGateItem[] {
 
   for (const subject of care.subjects) {
     items.push({
-      label: `Consent — ${subject.name}`,
+      label: `Consent: ${subject.name}`,
       done: subject.consent !== 'pending',
     });
   }
@@ -426,9 +527,10 @@ export function toPieceRecordFull(
   payment: MagazinePayment | null,
   letters: MagazineLetter[],
   corrections: MagazineCorrection[],
+  content: PieceLinkedContent | null = null,
 ): PieceRecordFull {
   return {
-    ...toPieceRecordSummary(piece, events, actorNameById),
+    ...toPieceRecordSummary(piece, events, actorNameById, content),
     payment: payment === null ? null : toPaymentResponse(payment),
     letters: letters.map(toLetterResponse),
     corrections: corrections.map(toCorrectionResponse),
@@ -684,15 +786,70 @@ export function toArticleDraftResponse(
  * toggle never re-checks a live deck's draft state.
  */
 export function isArticlePublishReady(article: MagazineArticle): boolean {
-  const hasStandfirst = stripHtmlTags(article.standfirst).trim() !== '';
+  return articlePublishBlockers(article).length === 0;
+}
+
+/**
+ * The same bar as `isArticlePublishReady`, spelled out as human-readable
+ * reasons so the publish endpoints can answer "why not?" instead of only
+ * "no". Empty means ready.
+ */
+export function articlePublishBlockers(article: MagazineArticle): string[] {
+  const blockers: string[] = [];
+
+  if (stripHtmlTags(article.standfirst).trim() === '') {
+    blockers.push('The article needs a standfirst.');
+  }
+
   const imageBlocks = article.blocks.filter(
     (block): block is Extract<ArticleBlock, { kind: 'image' }> =>
       block.kind === 'image',
   );
-  const everyImageHasAlt = imageBlocks.every(
-    (block) => block.alt.trim() !== '',
-  );
-  return hasStandfirst && everyImageHasAlt;
+  if (imageBlocks.some((block) => block.alt.trim() === '')) {
+    blockers.push('Every image needs alt text.');
+  }
+
+  return blockers;
+}
+
+/**
+ * The deck's equivalent of `articlePublishBlockers` (ENG-110/PRD-119): until
+ * now a deck had NO server-side readiness bar at all, so `shipIssue` could put
+ * an empty deck live, and the unified publish endpoint would have had nothing
+ * to check for a `format: 'deck'` piece.
+ *
+ * The bar is the accessibility floor the reader page depends on, mirroring the
+ * article's: something to actually read, and a text alternative on every image
+ * a reader could meet. An interactive before/after slide carries two images,
+ * so both are checked; a reveal or text slide carries none. The cover is
+ * checked only when one is set, because `cover` is optional on a deck and
+ * `coverDesc` is its alt text.
+ */
+export function deckPublishBlockers(deck: MagazineDeck): string[] {
+  const blockers: string[] = [];
+
+  if (deck.slides.length === 0) {
+    blockers.push('The deck has no slides yet.');
+  }
+
+  const hasUnlabelledSlideImage = deck.slides.some((slide) => {
+    if (slide.layout === 'image') {
+      return slide.alt.trim() === '';
+    }
+    if (slide.layout === 'interactive' && slide.kind === 'before-after') {
+      return slide.before.alt.trim() === '' || slide.after.alt.trim() === '';
+    }
+    return false;
+  });
+  if (hasUnlabelledSlideImage) {
+    blockers.push('Every image slide needs alt text.');
+  }
+
+  if (deck.cover.trim() !== '' && deck.coverDesc.trim() === '') {
+    blockers.push('The cover image needs a description.');
+  }
+
+  return blockers;
 }
 
 /**
@@ -728,6 +885,12 @@ export interface IssueProductionResponse {
   digestSendOnPublish: boolean;
   digestSentAt: string | null;
   shipChecklist: PublishGateItem[];
+  /**
+   * What the most recent ship did, or `null` on an issue that has never
+   * shipped (ENG-110). Additive: the production page renders it as a ship
+   * report, and a client that does not know the field is unaffected.
+   */
+  lastShip: IssueLastShip | null;
   pages: { editorial: number; total: number; max: number };
 }
 
@@ -832,13 +995,25 @@ export function toIssueProduction(
     theme: issue.theme,
     title: issue.title,
     publishedOn: issue.publishedOn ? issue.publishedOn : null,
-    coverUrl: issue.coverUrl ?? '',
+    // Resolved, never the raw column. Since PRD-128 the desk UPLOADS the cover,
+    // so this column now usually holds a bare storage key, which is private and
+    // unfetchable. Serving it raw made a saved cover render as an empty
+    // placeholder on the next load even though it was set. Every sibling image
+    // field in this file already resolves (`heroImageUrl`, `avatarUrl`), as does
+    // the public magazine response. `toImageUrl` passes external `https://` URLs
+    // through untouched, so a pasted link still works, and the write path is
+    // unaffected: `StorageKeyOwnershipInterceptor` collapses a resolved
+    // `/files/<key>` back to the bare key before `updateCover` compares it, so
+    // the unchanged-foreign-cover case `assertNoForeignUploadIntroduced` allows
+    // still sees key against key.
+    coverUrl: toImageUrl(issue.coverUrl) ?? '',
     coverlines: issue.coverlines,
     runOrder,
     digest: issue.digest,
     digestSendOnPublish: issue.digestSendOnPublish,
     digestSentAt: issue.digestSentAt ? issue.digestSentAt.toISOString() : null,
     shipChecklist,
+    lastShip: issue.lastShip ?? null,
     pages: {
       editorial: runOrder.length,
       total: runOrder.length,

@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { parseCookie } from 'cookie';
 import { ConnectionsService } from '../connections/connections.service';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingService } from '../messaging/messaging.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
@@ -78,6 +79,7 @@ describe('ChatGateway', () => {
   let connections: { getAcceptedConnectionUserIds: jest.Mock };
   let users: { findById: jest.Mock };
   let refreshTokens: { exists: SessionExistsMock };
+  let conversationParticipants: { find: jest.Mock };
   let platformSettings: { get: jest.Mock };
   let presence: PresenceService;
   let roomEmit: jest.Mock;
@@ -107,6 +109,9 @@ describe('ChatGateway', () => {
     refreshTokens = {
       exists: (jest.fn() as SessionExistsMock).mockResolvedValue(true),
     };
+    // Empty by default — most tests never trigger MESSAGE_CREATED's
+    // per-recipient fan-out, and the ones that do set this explicitly.
+    conversationParticipants = { find: jest.fn().mockResolvedValue([]) };
     platformSettings = {
       get: jest.fn().mockResolvedValue({
         lockdownEnabled: false,
@@ -125,6 +130,10 @@ describe('ChatGateway', () => {
         { provide: ConnectionsService, useValue: connections },
         { provide: UsersService, useValue: users },
         { provide: getRepositoryToken(RefreshToken), useValue: refreshTokens },
+        {
+          provide: getRepositoryToken(ConversationParticipant),
+          useValue: conversationParticipants,
+        },
         { provide: PlatformSettingsService, useValue: platformSettings },
         {
           provide: MetricsService,
@@ -593,6 +602,53 @@ describe('ChatGateway', () => {
       }
       expect(rejected).toBeGreaterThan(0);
     });
+
+    // ENG-163: `conversation:join`, `read` and `presence:snapshot` used to
+    // carry no bucket at all — the one transport the HTTP ThrottlerGuard never
+    // reaches. Each now fails a rate-limited frame through the same
+    // `WsException` path `message:send` already used (caught by
+    // `WsAllExceptionsFilter`/socket.io's default handling, not a new shape).
+    it('eventually rejects a burst of conversation:join from the same user', async () => {
+      const client = makeClient({ data: { userId: 'flooder' } });
+      let rejected = 0;
+      for (let i = 0; i < 15; i++) {
+        try {
+          await gateway.handleJoin(client as never, { conversationId: 'c1' });
+        } catch (err) {
+          expect(err).toBeInstanceOf(WsException);
+          rejected++;
+        }
+      }
+      expect(rejected).toBeGreaterThan(0);
+    });
+
+    it('eventually rejects a burst of read from the same user', async () => {
+      const client = makeClient({ data: { userId: 'flooder' } });
+      let rejected = 0;
+      for (let i = 0; i < 30; i++) {
+        try {
+          await gateway.handleRead(client as never, { conversationId: 'c1' });
+        } catch (err) {
+          expect(err).toBeInstanceOf(WsException);
+          rejected++;
+        }
+      }
+      expect(rejected).toBeGreaterThan(0);
+    });
+
+    it('eventually rejects a burst of presence:snapshot from the same user', async () => {
+      const client = makeClient({ data: { userId: 'flooder' } });
+      let rejected = 0;
+      for (let i = 0; i < 10; i++) {
+        try {
+          await gateway.handlePresenceSnapshot(client as never);
+        } catch (err) {
+          expect(err).toBeInstanceOf(WsException);
+          rejected++;
+        }
+      }
+      expect(rejected).toBeGreaterThan(0);
+    });
   });
 
   describe('force-disconnect', () => {
@@ -665,6 +721,69 @@ describe('ChatGateway', () => {
       expect(roomEmit).toHaveBeenCalledWith('message:new', {
         conversationId: 'c1',
         message: response,
+      });
+    });
+
+    // ENG-160: `message:new` above only reaches sockets that JOINED the
+    // conversation room. A member who has a different thread open (or is
+    // elsewhere in the app entirely) never joins it, so without this
+    // per-recipient fan-out they got no badge bump, no inbox row, and no
+    // in-app signal until a remount/reload.
+    describe('ENG-160 conversation:message fan-out', () => {
+      it('signals every other active participant on their user room, not the sender', async () => {
+        conversationParticipants.find.mockResolvedValue([
+          { userId: 'sender', leftAt: null },
+          { userId: 'recipient', leftAt: null },
+        ]);
+        const response = { id: 'm1', conversationId: 'c1' };
+
+        gateway.handleMessageCreated({
+          conversationId: 'c1',
+          message: { senderId: 'sender' } as never,
+          response: response as never,
+        });
+        // The fan-out is fire-and-forget off the sync handler — flush the
+        // microtask queue so its `await`ed query resolves before asserting.
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(namespaceTo).toHaveBeenCalledWith('user:recipient');
+        expect(roomEmit).toHaveBeenCalledWith('conversation:message', {
+          conversationId: 'c1',
+          message: response,
+        });
+        expect(namespaceTo).not.toHaveBeenCalledWith('user:sender');
+      });
+
+      it('skips a participant who left the conversation', async () => {
+        conversationParticipants.find.mockResolvedValue([
+          { userId: 'sender', leftAt: null },
+          { userId: 'departed', leftAt: new Date() },
+        ]);
+
+        gateway.handleMessageCreated({
+          conversationId: 'c1',
+          message: { senderId: 'sender' } as never,
+          response: { id: 'm1' } as never,
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(namespaceTo).not.toHaveBeenCalledWith('user:departed');
+      });
+
+      it('swallows a participant-lookup failure rather than throwing', async () => {
+        conversationParticipants.find.mockRejectedValue(new Error('db down'));
+
+        expect(() =>
+          gateway.handleMessageCreated({
+            conversationId: 'c1',
+            message: { senderId: 'sender' } as never,
+            response: { id: 'm1' } as never,
+          }),
+        ).not.toThrow();
+        await Promise.resolve();
+        await Promise.resolve();
       });
     });
 

@@ -1620,7 +1620,25 @@ export type AnySafeSpaceDetailDTO = SafeSpaceDetailDTO | RemovedSpaceDetailDTO;
 export interface SafeSpaceListDTO {
   verified: SafeSpaceCardDTO[];
   removed: RemovedSpaceCardDTO[];
-  stats: { verified: number; reviews: number; removed: number };
+  stats: {
+    verified: number;
+    reviews: number;
+    /**
+     * Safe spaces standing in the REMOVED state right now, over the same
+     * publicly listed rows the page renders. It is not a count of removals
+     * "this year" and never was: there is no date filter anywhere in
+     * `listSafeSpaces`. The hub's copy now labels it for what it is.
+     */
+    removed: number;
+    /**
+     * The most recent `safe_space_re_verified_at` across the VERIFIED spaces
+     * on the page, as a `YYYY-MM-DD` string, or null when no badge on the
+     * page carries a date. This is the honest answer to "when was this list
+     * last checked?": the hub used to print a hardcoded "Last updated June
+     * 2025" that nothing produced and nothing could keep true.
+     */
+    lastReVerifiedAt: string | null;
+  };
 }
 
 function safeSpaceTypeLabel(cat: SafeSpaceCategory): string {

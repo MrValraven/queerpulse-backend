@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ConnectionsModule } from '../connections/connections.module';
+import { GeocodeModule } from '../geocode/geocode.module';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
@@ -46,6 +47,13 @@ import { HousingListing } from './entities/housing-listing.entity';
     // read discloses the exact point/address only to the owner or a connected
     // member (`areConnected`).
     ConnectionsModule,
+    // Exports GeocodeService — turns a lister's private street address into the
+    // precise pin that sits behind the gate above. `HousingListingsService`
+    // calls it AFTER the listing is committed and never awaits it, because the
+    // geocoder is a rate-limited outbound call and posting a home must not
+    // depend on a third party being up. No cycle: `GeocodeModule` imports
+    // nothing.
+    GeocodeModule,
     // Exports NotificationsService — every moderation decision tells the lister
     // in-app (and, via `PushNotificationListener`, on their phone). No cycle:
     // `NotificationsModule` imports nothing that reaches back into housing.

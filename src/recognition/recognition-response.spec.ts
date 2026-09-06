@@ -278,6 +278,41 @@ describe('buildPerks', () => {
     expect(row3.state).toBe('locked');
     // Level 3 starts at 200 + 300 = 500 cumulative XP; caller has 250.
     expect(row3.status).toBe('250 XP away');
+    // The machine half the frontend actually renders from.
+    expect(row1.statusKind).toBe('done');
+    expect(row2.statusKind).toBe('current');
+    expect(row3).toMatchObject({ statusKind: 'xp-away', xpAway: 250 });
+  });
+
+  it('every group and ladder entry carries a stable id beside its English', () => {
+    const result = buildPerks(4, 1000, []);
+    expect(result.groups.map((group) => group.kind)).toEqual(
+      expect.arrayContaining(['available', 'coming']),
+    );
+    const coming = result.groups.find((group) => group.kind === 'coming');
+    expect(coming?.unlockLevel).toBe(5);
+    expect(coming?.perks[0]?.footer).toMatchObject({
+      type: 'lock',
+      unlockLevel: 5,
+    });
+    // The invite-quota numbers travel as numbers, so the frontend can
+    // interpolate its own sentence with the ones the backend enforces.
+    const available = result.groups.find((group) => group.kind === 'available');
+    const inviteQuotaPerk = available?.perks.find(
+      (perk) => perk.key === 'invite-quota-level-4',
+    );
+    expect(inviteQuotaPerk?.inviteQuota).toEqual({ base: 5, total: 7 });
+
+    const row1 = result.ladder.find((row) => row.num === 1)!;
+    expect(row1.perks[0]).toEqual({
+      id: 'browse-directory',
+      label: 'Browse the member directory',
+    });
+    // A claimable perk joins the same list under its catalogue key.
+    const row4 = result.ladder.find((row) => row.num === 4)!;
+    expect(row4.perks.map((entry) => entry.id)).toContain(
+      'invite-quota-level-4',
+    );
   });
 });
 

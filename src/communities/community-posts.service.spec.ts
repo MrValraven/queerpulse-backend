@@ -3,6 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -10,7 +11,9 @@ import { Event } from '../events/entities/event.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
+import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityPostsService } from './community-posts.service';
+import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
   CommunityMember,
   RosterRole,
@@ -225,7 +228,10 @@ describe('CommunityPostsService', () => {
   let mentions: { notify: jest.Mock; notifyPostReply: jest.Mock };
   // Roster-wide post fan-out. Batched: `notifyRosterOfPost` calls
   // `createForRecipients` once per chunk of recipients, never once per member.
-  let notifications: { createForRecipients: jest.Mock };
+  let notifications: { createForRecipients: jest.Mock; create: jest.Mock };
+  // PRD-147. A moderator takedown writes one governance entry and one
+  // notification to the author; an author deleting their own writes neither.
+  let governanceLog: { log: jest.Mock };
   // `statesForAnyType` returns an empty map by default (every subject falls
   // back to `CommunityPostsService.VISIBLE`); `excludeHidden` is a pass-through
   // on the query builder, mirroring the `blockFilter` stub above — the real
@@ -346,7 +352,10 @@ describe('CommunityPostsService', () => {
     };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
+      // `recordTakedown`'s single-recipient write (PRD-147).
+      create: jest.fn().mockResolvedValue(null),
     };
+    governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
     reports = { createQueryBuilder: jest.fn(() => reportsQbStub()) };
     eventPhotos = { find: jest.fn().mockResolvedValue([]) };
     events = { find: jest.fn().mockResolvedValue([]) };
@@ -374,6 +383,10 @@ describe('CommunityPostsService', () => {
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: MentionNotificationService, useValue: mentions },
         { provide: NotificationsService, useValue: notifications },
+        {
+          provide: CommunityGovernanceLogService,
+          useValue: governanceLog,
+        },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: StorageService, useValue: storage },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
@@ -691,6 +704,135 @@ describe('CommunityPostsService', () => {
       );
     });
 
+    // --- PRD-147: a takedown is explained and recorded ----------------------
+
+    it('an author deleting their own post writes no log entry and tells nobody', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await service.deletePost('queer-devs', 'p1', 'author-1', {
+        reason: 'ignored',
+      });
+      // Nobody needs telling what they just did, and a member deleting their
+      // own words is not a governance decision. A reason sent on this path is
+      // not a way to manufacture either.
+      expect(governanceLog.log).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('a moderator takedown logs the decision and tells the author why', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        rules: ['Be kind', 'No recruiting'],
+        rulesVersion: 4,
+      });
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      await service.deletePost('queer-devs', 'p1', 'mod-1', {
+        reason: 'This is the third recruiting post today.',
+        ruleIndex: 1,
+        internalNote: 'Same account as the one we barred in March.',
+      });
+
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'mod-1',
+          action: GovernanceLogAction.PostRemoved,
+          // The author, so the community's log answers "what happened to
+          // them" and not only "what did we do".
+          targetUserId: 'author-1',
+          metadata: expect.objectContaining({
+            postId: 'p1',
+            reason: 'This is the third recruiting post today.',
+            internalNote: 'Same account as the one we barred in March.',
+            // The cited rule is SNAPSHOTTED: index, version and the exact
+            // wording, so the entry still reads after the rules are rewritten.
+            ruleIndex: 1,
+            ruleVersion: 4,
+            ruleText: 'No recruiting',
+          }) as unknown,
+        }),
+      );
+
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+      const [recipientId, type, payload, blockGateActorId] = notifications
+        .create.mock.calls[0] as [
+        string,
+        NotificationType,
+        Record<string, unknown>,
+        string | undefined,
+      ];
+      expect(recipientId).toBe('author-1');
+      expect(type).toBe(NotificationType.CommunityPostRemoved);
+      // No actor as the block/mute argument: a member who has blocked the
+      // moderator they are in conflict with must still be told what happened.
+      expect(blockGateActorId).toBeUndefined();
+      expect(payload).toEqual(
+        expect.objectContaining({
+          source: 'community',
+          communitySlug: 'queer-devs',
+          communityName: 'Queer Devs',
+          subject: 'post',
+          reason: 'This is the third recruiting post today.',
+          ruleIndex: 1,
+          ruleVersion: 4,
+          ruleText: 'No recruiting',
+        }),
+      );
+      // The bell never names the moderator, and never carries the moderators'
+      // internal note or the removed body.
+      expect(payload).not.toHaveProperty('actorId');
+      expect(payload).not.toHaveProperty('internalNote');
+      expect(payload).not.toHaveProperty('body');
+      expect(payload).not.toHaveProperty('excerpt');
+      // A removed POST carries no postId, so the bell resolves to the
+      // community page rather than a blank tombstone.
+      expect(payload).not.toHaveProperty('postId');
+    });
+
+    it('a takedown with no reason still leaves the record', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      await service.deletePost('queer-devs', 'p1', 'mod-1');
+      expect(governanceLog.log).toHaveBeenCalledTimes(1);
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+      const [, , payload] = notifications.create.mock.calls[0] as [
+        string,
+        NotificationType,
+        Record<string, unknown>,
+      ];
+      expect(payload).toMatchObject({ reason: null, ruleText: null });
+    });
+
+    it('re-deleting an already tombstoned post does not record a second decision', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      posts.findOne.mockResolvedValue({ ...POST, deletedAt: new Date() });
+      await service.deletePost('queer-devs', 'p1', 'mod-1');
+      expect(governanceLog.log).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('a failed governance write never fails the takedown, and the author is still told', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      governanceLog.log.mockRejectedValue(new Error('log is down'));
+      await expect(
+        service.deletePost('queer-devs', 'p1', 'mod-1'),
+      ).resolves.toBeDefined();
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+    });
+
     it('deletePost is idempotent — a second delete does not re-save', async () => {
       members.findOne.mockResolvedValue({
         userId: 'author-1',
@@ -959,6 +1101,45 @@ describe('CommunityPostsService', () => {
       expect(res.deleted).toBe(true);
     });
 
+    // PRD-147. A reply takedown was exactly as silent as a post takedown.
+    it('a moderator reply takedown is logged and explained, and links to the thread', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      await service.deleteReply('queer-devs', 'p1', 'r1', 'mod-1', {
+        reason: 'Please keep names out of this thread.',
+      });
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: GovernanceLogAction.ReplyRemoved,
+          targetUserId: 'author-1',
+          metadata: expect.objectContaining({
+            postId: 'p1',
+            replyId: 'r1',
+            reason: 'Please keep names out of this thread.',
+          }) as unknown,
+        }),
+      );
+      const [recipientId, type, payload] = notifications.create.mock
+        .calls[0] as [string, NotificationType, Record<string, unknown>];
+      expect(recipientId).toBe('author-1');
+      expect(type).toBe(NotificationType.CommunityPostRemoved);
+      // A removed REPLY deep-links to the thread it sat in, which still
+      // stands and is the context the member needs.
+      expect(payload).toMatchObject({ subject: 'reply', postId: 'p1' });
+    });
+
+    it('an author deleting their own reply writes no log entry and tells nobody', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await service.deleteReply('queer-devs', 'p1', 'r1', 'author-1');
+      expect(governanceLog.log).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
     it('deleteReply is idempotent — a second delete does not re-save', async () => {
       members.findOne.mockResolvedValue({
         userId: 'author-1',
@@ -1139,6 +1320,104 @@ describe('CommunityPostsService', () => {
       );
 
       expect(qb.execute).toHaveBeenCalled();
+    });
+  });
+
+  // An archive shuts the community's write side for EVERYONE, its own owner
+  // and moderators included, which is what separates it from a freeze. The
+  // gate used to be on the flat `/community-posts*` aliases only: the
+  // slug-scoped routes resolve the community through a plain `findOne` by
+  // slug with no archived predicate, so every one of them kept writing into
+  // archived communities.
+  describe('archived community — assertNotArchived gate', () => {
+    const ARCHIVED_COMMUNITY: Community = {
+      ...COMMUNITY,
+      archivedAt: new Date('2026-01-06T00:00:00.000Z'),
+    };
+
+    beforeEach(() => {
+      communities.findOne.mockResolvedValue(ARCHIVED_COMMUNITY);
+    });
+
+    it('refuses a new post, from the owner as much as from a member', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      await expect(
+        service.createPost('queer-devs', 'owner-1', { body: 'hi' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a reply', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.addReply('queer-devs', 'p1', 'u1', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses adding a reaction and taking one back', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.addReaction('queer-devs', 'p1', 'u1', ReactionKey.Heart),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(
+        service.removeReaction('queer-devs', 'p1', 'u1', ReactionKey.Heart),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(reactions.delete).not.toHaveBeenCalled();
+    });
+
+    it('refuses an edit', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.updatePost('queer-devs', 'p1', 'author-1', { body: 'edited' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses an author deleting their own post, and a moderator takedown', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.deletePost('queer-devs', 'p1', 'author-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      await expect(
+        service.deletePost('queer-devs', 'p1', 'mod-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('refuses a restore', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      await expect(
+        service.restorePost('queer-devs', 'p1', 'mod-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('still serves reads: a closed room keeps its history', async () => {
+      const qb = qbStub();
+      posts.createQueryBuilder.mockReturnValue(qb);
+      await expect(
+        service.listPosts('queer-devs', 'u1'),
+      ).resolves.toBeDefined();
     });
   });
 

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { HandlesModule } from '../handles/handles.module';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { ActivityVisibilityService } from '../profiles/activity-visibility.service';
 import { Activity } from '../profiles/entities/activity.entity';
@@ -55,6 +56,16 @@ import { PublicProfilesService } from './public-profiles.service';
     // 404s the published profile too, so the open web never serves a member the
     // moderators have hidden or removed.
     ContentModerationModule,
+    // `HandlesService`, read-only, for `previousProfileOwnerOf` alone (PRD-204,
+    // forwarding a username its owner renamed away from). This is the handle
+    // NAMESPACE ledger, not the authenticated profile read path the note above
+    // is about: it holds no member data, and the whole reason to import it
+    // rather than re-query `handle_history` here is that the reclaim rule must
+    // have exactly one spelling. A second one would drift, and a drifted answer
+    // on this route forwards a stranger to the wrong member. The service's
+    // write methods all take an `EntityManager` from their caller, so nothing
+    // on this route can reach the registry except to read it.
+    HandlesModule,
   ],
   controllers: [PublicProfilesController],
   providers: [

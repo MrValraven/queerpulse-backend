@@ -6,6 +6,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { SubmissionsModule } from '../submissions/submissions.module';
 import { UsersModule } from '../users/users.module';
 import { Partner } from './entities/partner.entity';
+import { PartnerOwnerController } from './partner-owner.controller';
 import {
   AdminPartnersController,
   PartnerApplicationsController,
@@ -37,6 +38,9 @@ import { PartnersService } from './partners.service';
   controllers: [
     PartnersController,
     PartnerApplicationsController,
+    // PRD-263. The partner's own edit surface, under `/my-partners` so it
+    // cannot collide with `GET /partners/:slug`.
+    PartnerOwnerController,
     AdminPartnersController,
   ],
   providers: [PartnersService],

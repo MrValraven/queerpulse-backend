@@ -503,9 +503,45 @@ describe('AuthController.logout', () => {
   });
 });
 
-// `describe('AuthController.logoutAll')` lived here until 2026-08-26, when the
-// `POST /auth/logout-all` route it covered was removed for having no caller.
-// `AuthService.revokeAllForUser` is still covered by auth.service.spec.ts.
+describe('AuthController.logoutAll', () => {
+  it("revokes every session for the caller and clears this device's cookies", async () => {
+    const { controller, authService } = build();
+    const res = makeRes();
+    const out = await controller.logoutAll(
+      { userId: 'u1', email: 'a@b.c', status: 'active', role: 'member' },
+      res as unknown as Response,
+    );
+    expect(authService.revokeAllForUser).toHaveBeenCalledWith('u1');
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'access_token',
+      expect.anything(),
+    );
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'refresh_token',
+      expect.anything(),
+    );
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'csrf_token',
+      expect.objectContaining({ path: '/' }),
+    );
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('swallows a revoke error and still clears cookies', async () => {
+    const { controller, authService } = build();
+    authService.revokeAllForUser.mockRejectedValue(new Error('db down'));
+    const res = makeRes();
+    const out = await controller.logoutAll(
+      { userId: 'u1', email: 'a@b.c', status: 'active', role: 'member' },
+      res as unknown as Response,
+    );
+    expect(out).toEqual({ ok: true });
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'access_token',
+      expect.anything(),
+    );
+  });
+});
 
 describe('AuthController.underEighteenDisclosure', () => {
   it("records the disclosure and clears this device's cookies", async () => {

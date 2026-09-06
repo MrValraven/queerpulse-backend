@@ -73,6 +73,24 @@ export class AdminMagazineDecksController {
     return this.magazine.getDeckById(id);
   }
 
+  // PRD-131 — backs the editor's "With issue" publish timing. Declared after
+  // `GET :id` for readability only: the two paths differ in segment count,
+  // so neither can shadow the other.
+  @Get(':id/issue-link')
+  @ApiOperation({
+    summary:
+      'The desk piece and issue this deck is filed under, for the editor’s "With issue" publish timing.',
+  })
+  @ApiOkResponse({
+    description:
+      'The linked piece id, issue number and issue title, each null when that link does not exist yet.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed deck id.' })
+  @ApiNotFoundResponse({ description: 'No deck exists for this id.' })
+  getIssueLink(@Param('id', ParseUUIDPipe) id: string) {
+    return this.magazine.getDeckIssueLink(id);
+  }
+
   @Post()
   @ApiOperation({ summary: 'Create a draft magazine deck.' })
   @ApiCreatedResponse({ description: 'The created draft deck.' })
@@ -83,9 +101,15 @@ export class AdminMagazineDecksController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a magazine deck, including publish state.' })
+  @ApiOperation({
+    summary:
+      'Update a magazine deck, including publish state (publish now, schedule, or unpublish).',
+  })
   @ApiOkResponse({ description: 'The updated deck.' })
-  @ApiBadRequestResponse({ description: 'Malformed id or invalid payload.' })
+  @ApiBadRequestResponse({
+    description:
+      'Malformed id, invalid payload, or a publish/schedule of a deck that fails the readiness bar (at least one slide, alt text on every image slide).',
+  })
   @ApiNotFoundResponse({ description: 'No deck exists for this id.' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -97,9 +121,15 @@ export class AdminMagazineDecksController {
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Delete a magazine deck.' })
+  @ApiOperation({
+    summary: 'Delete an unpublished, unlinked magazine deck (ENG-112).',
+  })
   @ApiNoContentResponse({ description: 'The deck was deleted.' })
   @ApiBadRequestResponse({ description: 'Malformed deck id.' })
+  @ApiConflictResponse({
+    description:
+      'The deck is published (unpublish it first), or a desk piece still links to it (delete the piece instead).',
+  })
   @ApiNotFoundResponse({ description: 'No deck exists for this id.' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.magazine.deleteDeck(id);

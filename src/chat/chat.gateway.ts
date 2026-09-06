@@ -41,6 +41,7 @@ import {
   MessageReactionEvent,
   MessageUpdatedEvent,
 } from '../messaging/messaging.events';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingService } from '../messaging/messaging.service';
 import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
 import {
@@ -241,9 +242,47 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // Delivered acks are already client-throttled (one "received up to now" stamp
   // per burst per conversation), but bound them here too — a misbehaving client
   // must not turn the receipt into a write amplifier.
+  //
+  // Capacity raised 10 → 20 for ENG-160: `conversation:message` (the
+  // per-recipient fan-out) now schedules a delivered ack from EVERY
+  // conversation a message lands in, not only the one open thread —  a
+  // member reconnecting to a dozen-plus active threads at once can
+  // legitimately fire that many acks within one `DELIVERED_ACK_DEBOUNCE_MS`
+  // window (realtime.ts), one per conversation, all against this single
+  // per-user bucket. 10 rejected a realistic dozen-thread catch-up outright;
+  // 20 clears it with headroom while the sustained `refillPerSecond` (this
+  // is a burst allowance, not the steady-state rate) stays unchanged.
   private readonly deliveredLimiter = new TokenBucketLimiter({
-    capacity: 10,
+    capacity: 20,
     refillPerSecond: 5,
+  });
+  // ENG-163: `conversation:join`, `read` and `presence:snapshot` used to carry
+  // NO bucket at all, even though each one costs a DB round-trip
+  // (`canJoinConversationLive`, `markRead`'s UPDATE + room broadcast,
+  // `getAcceptedConnectionUserIds`) that the HTTP `ThrottlerGuard` never sees —
+  // the one transport a hostile or misbehaving client could hammer for
+  // unbounded writes/broadcasts on this single-replica, ten-connection pool.
+  //
+  // A thread-open is roughly as rare per user as a send, so `joinLimiter`
+  // mirrors `messageLimiter`'s numbers exactly.
+  private readonly joinLimiter = new TokenBucketLimiter({
+    capacity: 10,
+    refillPerSecond: 1,
+  });
+  // A read watermark is legitimately far more frequent than a join — every
+  // thread the member scrolls through can advance it — so this bucket is
+  // sized well above `joinLimiter` while still bounding a flood.
+  private readonly readLimiter = new TokenBucketLimiter({
+    capacity: 20,
+    refillPerSecond: 5,
+  });
+  // `presence:snapshot` is legitimately bursty right after a reconnect (a
+  // fresh handshake already primes one via `emitPresenceSnapshot` outside this
+  // bucket), but a client re-requesting it in a loop buys nothing and costs a
+  // `getAcceptedConnectionUserIds` query each time.
+  private readonly presenceSnapshotLimiter = new TokenBucketLimiter({
+    capacity: 5,
+    refillPerSecond: 1,
   });
 
   constructor(
@@ -264,6 +303,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // media-crops in behind it, all for one `exists` query.
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
+    // Read-side only, and for one `conversationId`-indexed lookup: ENG-160's
+    // per-recipient fan-out (`fanOutConversationMessage`) needs the
+    // conversation's participant user ids to reach members who have not
+    // joined its socket room. `MessagingService`'s facade exposes no such
+    // method (its owning services are a different workstream's territory this
+    // wave), so this mirrors `PushMessageListener`'s identical direct
+    // repository injection for the same entity, rather than growing the
+    // facade for a one-query need.
+    @InjectRepository(ConversationParticipant)
+    private readonly conversationParticipants: Repository<ConversationParticipant>,
   ) {}
 
   async handleConnection(client: ChatSocket): Promise<void> {
@@ -318,6 +367,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.messageLimiter.clear(userId);
       this.typingLimiter.clear(userId);
       this.deliveredLimiter.clear(userId);
+      this.joinLimiter.clear(userId);
+      this.readLimiter.clear(userId);
+      this.presenceSnapshotLimiter.clear(userId);
     }
   }
 
@@ -327,6 +379,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: JoinPayload,
   ): Promise<{ joined: string }> {
     const userId = this.requireUserId(client);
+    if (!this.joinLimiter.tryConsume(userId)) {
+      throw new WsException('You are joining conversations too quickly');
+    }
     // Stricter than plain participation (P0 hardening): also refuses a
     // participant who left/was removed from a group (no live room for them —
     // history stays reachable over HTTP) and a DM whose counterpart is
@@ -410,6 +465,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: ReadPayload,
   ): Promise<void> {
     const userId = this.requireUserId(client);
+    if (!this.readLimiter.tryConsume(userId)) {
+      throw new WsException('You are marking messages read too quickly');
+    }
     await this.messaging.markRead(data.conversationId, userId, {
       upToMessageId: data.upToMessageId,
     });
@@ -436,6 +494,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: ChatSocket,
   ): Promise<void> {
     const userId = this.requireUserId(client);
+    if (!this.presenceSnapshotLimiter.tryConsume(userId)) {
+      throw new WsException('You are requesting presence too quickly');
+    }
     await this.emitPresenceSnapshot(client, userId);
   }
 
@@ -448,6 +509,69 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       conversationId: payload.conversationId,
       message: payload.response,
     });
+    // ENG-160: the room emit above reaches only sockets that have JOINED this
+    // conversation (via `conversation:join`) — a member browsing another page,
+    // or with a DIFFERENT thread open, is connected but not in this room, so
+    // without the fan-out below they got no badge bump, no inbox row and no
+    // in-app signal until a remount/reload. Fire-and-forget: a query failure
+    // here must not affect the message write, which already committed and
+    // already broadcast above.
+    void this.fanOutConversationMessage(payload);
+  }
+
+  /**
+   * Reach every OTHER, still-active participant's `user:<id>` room with a
+   * lightweight "a message landed in this conversation" signal, regardless of
+   * whether their socket has joined the conversation room — the gap
+   * `message:new` above leaves open (ENG-160). Mirrors the `user:<id>`
+   * fan-out convention `handleConversationCreated`/`handleNotificationCreated`
+   * already use for "reach a member who isn't in this specific room".
+   *
+   * The client (`realtime.ts`) patches its conversation-list cache and unread
+   * badge from `conversation:message` without a refetch — see
+   * `patchConversationPreview` in `messageCache.ts`. A participant who DOES
+   * have the thread open receives both this frame and the room's `message:new`
+   * for the same message; the client-side patch is idempotent (a re-affirming
+   * no-op), which is simpler and cheaper than tracking room membership here to
+   * suppress the duplicate.
+   *
+   * Deliberately does NOT reuse the `message:new` event itself: that frame
+   * also drives `upsertMessage` (writing into the per-thread message cache)
+   * and the delivered-receipt ack, both of which are specifically about a
+   * thread the recipient has OPEN — overloading it here would silently widen
+   * what "delivered" means. This event carries only what the inbox needs.
+   */
+  private async fanOutConversationMessage(
+    payload: MessageCreatedEvent,
+  ): Promise<void> {
+    try {
+      const participants = await this.conversationParticipants.find({
+        where: { conversationId: payload.conversationId },
+      });
+      for (const participant of participants) {
+        // Never signal the sender about their own send, and never a member who
+        // left/was removed — mirrors `PushMessageListener`'s identical filter
+        // for the same event.
+        if (
+          participant.userId === payload.message.senderId ||
+          participant.leftAt != null
+        ) {
+          continue;
+        }
+        this.namespace
+          ?.to(`user:${participant.userId}`)
+          .emit('conversation:message', {
+            conversationId: payload.conversationId,
+            message: payload.response,
+          });
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to fan out conversation:message: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+    }
   }
 
   @OnEvent(MESSAGE_UPDATED)

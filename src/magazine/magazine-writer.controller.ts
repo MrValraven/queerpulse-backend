@@ -116,6 +116,25 @@ export class MagazineWriterController {
     return this.magazinePieces.updateMyByline(user.userId, id, dto);
   }
 
+  @Get('pieces/:id/draft')
+  @ApiOperation({
+    summary:
+      "Read the article draft for the authenticated writer's own piece, as it stands now.",
+  })
+  @ApiOkResponse({
+    description:
+      "The draft body, its word count against the brief's target, and the `version` to send back as `expectedVersion` when filing.",
+  })
+  @ApiBadRequestResponse({ description: 'Malformed piece id.' })
+  @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
+  @ApiForbiddenResponse({ description: "The piece isn't this writer's." })
+  getMyDraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.getMyDraft(user.userId, id);
+  }
+
   @Post('pieces/:id/file')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

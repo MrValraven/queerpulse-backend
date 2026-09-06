@@ -1,4 +1,4 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, UseGuards } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiNotFoundResponse,
@@ -7,7 +7,13 @@ import {
   ApiTags,
   ApiTooManyRequestsResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
+import { UserStatus } from '../users/entities/user.entity';
 import { SavedListsService } from './saved-lists.service';
 
 /**
@@ -27,6 +33,15 @@ import { SavedListsService } from './saved-lists.service';
  *
  * Throttled: the token space is far too large to walk, but there is no reason
  * for one caller to be asking hundreds of times a minute either.
+ *
+ * OPTIONALLY AUTHENTICATED (PRD-169). The route stays open to somebody with no
+ * account, and it now also NOTICES when the recipient does have one, because
+ * every saved kind but the business directory sits behind `ActiveMemberGuard`
+ * on its own module. Without this, a member opening a friend's list would be
+ * told a community and a thread they can plainly read are "no longer
+ * available", purely because the endpoint never looked at who was asking. It
+ * discloses nothing extra about the LIST (the payload is unchanged and still
+ * says nothing about its owner) and nothing about the viewer to the owner.
  */
 @ApiTags('Saved')
 @Controller('saved-lists')
@@ -34,6 +49,7 @@ export class SharedSavedListController {
   constructor(private readonly savedListsService: SavedListsService) {}
 
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get(':token')
   @ApiOperation({
@@ -48,7 +64,16 @@ export class SharedSavedListController {
       'The token is malformed, was revoked, or never existed. The three are deliberately indistinguishable.',
   })
   @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded.' })
-  getShared(@Param('token') token: string) {
-    return this.savedListsService.getShared(token);
+  getShared(
+    // Populated best-effort by `OptionalJwtAuthGuard`; undefined when
+    // anonymous. Only an ACTIVE member counts as a viewer, matching the bar
+    // `ActiveMemberGuard` sets on every subject module's own read (the same
+    // narrowing `DirectoryController.getDirectoryListing` applies).
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Param('token') token: string,
+  ) {
+    const viewerId =
+      user?.status === UserStatus.Active ? (user?.userId ?? null) : null;
+    return this.savedListsService.getShared(token, viewerId);
   }
 }

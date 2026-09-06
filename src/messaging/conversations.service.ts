@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { toImageUrl } from '../common/image-url';
+import { ConnectionsService } from '../connections/connections.service';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -54,6 +55,9 @@ export class ConversationsService {
     // Batched crop lookup (`MediaCropService.getMany`) for a group's
     // `avatarUrl` sibling `avatarCrop`.
     private readonly mediaCropService: MediaCropService,
+    // `replyRequiresConnection` (PRD-220): whether the caller and a DM's
+    // counterpart are accepted connections.
+    private readonly connectionsService: ConnectionsService,
   ) {}
 
   async listConversations(userId: string): Promise<ConversationResponse[]> {
@@ -169,17 +173,23 @@ export class ConversationsService {
     // per-conversation findOne + count (N+1).
     // ONE batched crop lookup for every group avatar in the inbox — never a
     // per-conversation query. DM/official threads carry no `avatarUrl`.
-    const [lastByConvo, unreadByConvo, groupAvatarCrops] = await Promise.all([
-      this.core.lastMessagesByConversation(convoIds),
-      this.core.unreadCountsByConversation(convoIds, userId),
-      this.mediaCropService.getMany(
-        convos.flatMap((convo) =>
-          convo.kind === ConversationKind.Group && convo.avatarUrl
-            ? [convo.avatarUrl]
-            : [],
+    // `replyRequiresConnection` (PRD-220): one call for every accepted
+    // connection this caller has, not one `areConnected` check per row — so a
+    // long inbox costs the same single query as `unreadByConvo`/`lastByConvo`.
+    const [lastByConvo, unreadByConvo, groupAvatarCrops, acceptedConnections] =
+      await Promise.all([
+        this.core.lastMessagesByConversation(convoIds, userId),
+        this.core.unreadCountsByConversation(convoIds, userId),
+        this.mediaCropService.getMany(
+          convos.flatMap((convo) =>
+            convo.kind === ConversationKind.Group && convo.avatarUrl
+              ? [convo.avatarUrl]
+              : [],
+          ),
         ),
-      ),
-    ]);
+        this.connectionsService.allAcceptedConnectionUserIds(userId),
+      ]);
+    const acceptedConnectionUserIds = new Set(acceptedConnections);
     const reactionsByMessage = await this.core.reactionSummariesByMessage(
       [...lastByConvo.values()].map((m) => m.id),
       userId,
@@ -225,6 +235,16 @@ export class ConversationsService {
           first ? profileByUser.get(first.userId) : undefined,
         );
       }
+      // Mirrors `MessagesService.sendMessage`'s own gate condition exactly
+      // (`convo.kind !== Group && !convo.isOfficial`, evaluated against the
+      // single `other` participant): true only where that gate would actually
+      // fire on the next send. A blocked counterpart never reaches here (the
+      // `continue` above already dropped the row), so this purely reflects
+      // connection status.
+      const replyRequiresConnection =
+        !isGroup && !convo.isOfficial && !!first
+          ? !acceptedConnectionUserIds.has(first.userId)
+          : false;
       // Group roster: this caller's own participant row (`part`) + every other
       // participant, mapped to member summaries with roles.
       const members = isGroup
@@ -266,6 +286,7 @@ export class ConversationsService {
         otherLastReadAt: first?.lastReadAt?.toISOString() ?? null,
         otherDeliveredAt: first?.deliveredAt?.toISOString() ?? null,
         otherParticipantId: first?.userId ?? null,
+        replyRequiresConnection,
         kind: isGroup ? 'group' : 'direct',
         title: isGroup ? convo.title : null,
         avatarUrl: isGroup ? toImageUrl(convo.avatarUrl) : null,
@@ -279,6 +300,7 @@ export class ConversationsService {
         pinnedAt: part.pinnedAt?.toISOString() ?? null,
         favorite: part.favoritedAt != null,
         archivedAt: part.archivedAt?.toISOString() ?? null,
+        markedUnreadAt: part.markedUnreadAt?.toISOString() ?? null,
         draft: part.draft,
         hasLeft: isGroup ? part.leftAt != null : false,
         ...(isGroup
@@ -359,6 +381,11 @@ export class ConversationsService {
             'GREATEST(last_read_at, LEAST(:watermark::timestamptz, now()))',
           deliveredAt: () =>
             'GREATEST(delivered_at, LEAST(:watermark::timestamptz, now()))',
+          // Re-opening/reading a thread clears a manual "mark unread"
+          // (PRD-225) — this is the ONLY place that ever clears it, so it
+          // can't be silently undone by an inbox refetch or an unrelated
+          // preference toggle (see `ConversationParticipant.markedUnreadAt`).
+          markedUnreadAt: null,
         })
         .setParameter(
           'watermark',
@@ -368,6 +395,7 @@ export class ConversationsService {
       update.set({
         lastReadAt: () => 'GREATEST(last_read_at, now())',
         deliveredAt: () => 'GREATEST(delivered_at, now())',
+        markedUnreadAt: null,
       });
     }
     await update
@@ -525,6 +553,26 @@ export class ConversationsService {
   }
 
   /**
+   * Mark/unmark a conversation unread for THIS caller only (PRD-225),
+   * stamping `markedUnreadAt` with the app clock (NULL = not manually
+   * marked). Mirrors `setArchived`/`setFavorite`'s shape, but note this is
+   * NOT the read watermark: `lastReadAt` is untouched here (and can only ever
+   * move forward, via `markRead`'s GREATEST), so marking a thread unread
+   * cannot walk it backward. Re-opening the thread (a genuine `markRead`
+   * call) is the only thing that clears this flag back to NULL.
+   */
+  async setMarkedUnread(
+    conversationId: string,
+    userId: string,
+    markedUnread: boolean,
+  ): Promise<{ ok: true }> {
+    const part = await this.core.requireParticipant(conversationId, userId);
+    part.markedUnreadAt = markedUnread ? new Date() : null;
+    await this.participants.save(part);
+    return { ok: true };
+  }
+
+  /**
    * Sync THIS caller's own unsent composer text for a conversation to the
    * server — the cross-device layer on top of the client's always-on
    * localStorage copy (see the entity's own doc). An empty string clears the
@@ -672,9 +720,10 @@ export class ConversationsService {
       unreadByConvo,
       otherParticipantRow,
       callerParticipantRow,
+      areConnected,
     ] = await Promise.all([
       this.profiles.find({ where: { userId: In([userId, otherUserId]) } }),
-      this.core.lastMessagesByConversation([convo.id]),
+      this.core.lastMessagesByConversation([convo.id], userId),
       this.core.unreadCountsByConversation([convo.id], userId),
       this.participants.findOne({
         where: { conversationId: convo.id, userId: otherUserId },
@@ -682,6 +731,9 @@ export class ConversationsService {
       this.participants.findOne({
         where: { conversationId: convo.id, userId },
       }),
+      // `replyRequiresConnection` (PRD-220) — see `listConversations`' matching
+      // comment for the exact gate this mirrors.
+      this.connectionsService.areConnected(userId, otherUserId),
     ]);
     const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
     const lastMessage = lastByConvo.get(convo.id) ?? null;
@@ -716,6 +768,7 @@ export class ConversationsService {
       otherLastReadAt: otherParticipantRow?.lastReadAt?.toISOString() ?? null,
       otherDeliveredAt: otherParticipantRow?.deliveredAt?.toISOString() ?? null,
       otherParticipantId: otherParticipantRow?.userId ?? null,
+      replyRequiresConnection: !convo.isOfficial && !areConnected,
       // DM: the group-only fields carry their empty defaults so the DTO shape is
       // uniform. The client's DM path never reads them.
       kind: 'direct',

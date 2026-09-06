@@ -10,6 +10,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineReaderComment } from './entities/magazine-reader-comment.entity';
@@ -34,6 +35,7 @@ export class MagazineReaderCommentsService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly contentModeration: ContentModerationService,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   // GET /magazine/articles/:slug/comments — top-level comments (newest
@@ -55,6 +57,13 @@ export class MagazineReaderCommentsService {
       .andWhere('c.parentId IS NULL')
       .orderBy('c.createdAt', 'DESC')
       .addOrderBy('c.id', 'DESC');
+    // Safety filters, in-query so the page fills to `pageSize` with visible
+    // rows instead of coming back short (the documented reason both
+    // `excludeHidden` helpers exist). Same pair every other launched content
+    // list applies, in the same order as `ForumPostsService.listPosts` and
+    // `CommunityPostsService`: authors blocked either way or muted by the
+    // viewer first, then moderation-hidden rows.
+    this.blockFilter.excludeHidden(qb, user.userId, '"c"."author_id"');
     this.contentModeration.excludeHidden(qb, [SUBJECT_TYPE], '"c"."id"');
 
     return paginate(qb, normalizedPage, (rows) =>
@@ -74,7 +83,7 @@ export class MagazineReaderCommentsService {
   ): Promise<ReaderCommentResponse> {
     const article = await this.loadPublishedArticleOrThrow(slug);
     const parent = parentId
-      ? await this.loadReplyParentOrThrow(parentId, article.id)
+      ? await this.loadReplyParentOrThrow(parentId, article.id, user.userId)
       : null;
 
     const saved = await this.comments.save(
@@ -109,6 +118,20 @@ export class MagazineReaderCommentsService {
     }
     if (comment.authorId !== user.userId) {
       throw new ForbiddenException('Only the author can edit this comment');
+    }
+    // ENG-102 — a comment a moderator has hidden or removed is not editable by
+    // anyone, its author included. `toReaderCommentResponse` already reports
+    // `canEdit: false` on such a row, so the button is gone, but the endpoint
+    // has to enforce it too: without this a direct PATCH rewrites the body of
+    // the very row a moderator took down. 404 rather than 403, matching the
+    // tombstone branch above, so the reply is identical whether the row is
+    // gone or hidden.
+    const moderation = await this.contentModeration.stateFor(
+      SUBJECT_TYPE,
+      comment.id,
+    );
+    if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Comment not found');
     }
     comment.body = body;
     comment.editedAt = new Date();
@@ -164,8 +187,23 @@ export class MagazineReaderCommentsService {
   private async loadReplyParentOrThrow(
     parentId: string,
     articleId: string,
+    viewerId: string,
   ): Promise<MagazineReaderComment> {
     const parent = await this.loadCommentOrThrow(parentId);
+    // A block is a hard, bidirectional severance, so it gates the write path
+    // as well as the read one: `list` already drops this comment from the
+    // replier's page, and without this check they could still reply under it
+    // by posting the id directly. Answered with the same 404 as an unknown
+    // id so the block itself stays unobservable, and checked before the
+    // shape/tombstone rules below so those never leak either.
+    //
+    // Mutes are deliberately NOT checked here. A mute is a one-way soft
+    // silence that keeps content out of feeds and lists, never a severance,
+    // so a muted member's comment stays repliable. Same split
+    // `ForumThreadsService.loadOr404` documents.
+    if (await this.blockFilter.isBlockedEitherWay(viewerId, parent.authorId)) {
+      throw new NotFoundException('Comment not found');
+    }
     if (parent.articleId !== articleId) {
       throw new BadRequestException(
         'Parent comment does not belong to this article',
@@ -200,13 +238,25 @@ export class MagazineReaderCommentsService {
     if (!rows.length) return [];
     const topLevelIds = rows.map((row) => row.id);
 
-    const replyRows = topLevelIds.length
-      ? await this.comments
-          .createQueryBuilder('c')
-          .where('c.parentId IN (:...topLevelIds)', { topLevelIds })
-          .orderBy('c.createdAt', 'ASC')
-          .getMany()
-      : [];
+    let replyRows: MagazineReaderComment[] = [];
+    if (topLevelIds.length) {
+      const repliesQb = this.comments
+        .createQueryBuilder('c')
+        .where('c.parentId IN (:...topLevelIds)', { topLevelIds })
+        .orderBy('c.createdAt', 'ASC');
+      // Replies carry the same two filters as the top-level query above. A
+      // reply is content by another member, so leaving them off meant a
+      // blocked or muted author reached the viewer one level down, and a
+      // moderation-hidden reply came back blanked and rendered as an empty
+      // card with live Reply and Report buttons.
+      this.blockFilter.excludeHidden(repliesQb, viewerId, '"c"."author_id"');
+      this.contentModeration.excludeHidden(
+        repliesQb,
+        [SUBJECT_TYPE],
+        '"c"."id"',
+      );
+      replyRows = await repliesQb.getMany();
+    }
 
     const allRows = [...rows, ...replyRows];
     const authorIds = [...new Set(allRows.map((row) => row.authorId))];

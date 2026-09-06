@@ -53,6 +53,21 @@ export interface BadgeDTO {
   cat: string;
   name: string;
   context: string;
+  /**
+   * Whether `context` is a note written about THIS member's award rather than
+   * the catalogue's default line.
+   *
+   * The client translates a badge's words from its stable `key` (see the
+   * frontend's `badgeCatalog.data.ts`), so it has to know which of the two
+   * `context` is. A member-specific note ("Pride Brunch, Jun 2025") is free
+   * text nobody can translate and must render exactly as written; the
+   * catalogue default is a fixed English sentence that must NOT, or a PT
+   * member reads "Attended a QueerPulse gathering" under a translated badge.
+   *
+   * Present only when true, so a default-context badge stays the same shape
+   * on the wire as it has always been.
+   */
+  hasCustomContext?: boolean;
   rarity: BadgeRarity;
   tint: BadgeTint;
   /** XP awarded once earned, derived from rarity (`BADGE_BONUS_BY_RARITY`). */
@@ -78,34 +93,76 @@ export interface BadgesDTO {
 }
 
 export type PerkState = 'available' | 'locked' | 'claimed';
+
+/**
+ * Perk display text is owned by the FRONTEND, keyed on the stable ids below,
+ * in the same shape `badgeCatalog.data.ts` and `levelLadder.data.ts` already
+ * use. Every English string this file still emits is the FALLBACK a frontend
+ * build renders when it has not caught up with a new id, so it stays on the
+ * wire beside the id rather than instead of it.
+ */
 export type PerkFooterDTO =
   | { type: 'active-auto'; autoLabel: string }
   | { type: 'button'; label: string; toast: string }
   | { type: 'link-auto'; label: string; to: string; autoLabel: string }
-  | { type: 'lock'; label: string }
+  /** `unlockLevel` lets the frontend build "Unlocks at Level 4 · Familiar"
+   *  from its own level names; `label` is the English fallback. */
+  | { type: 'lock'; label: string; unlockLevel: number }
+  /** ISO timestamp. The frontend formats and phrases it locally, so no
+   *  hand-written date format crosses the wire. */
   | { type: 'claimed'; date: string };
+
+/** The base and post-claim monthly invite allowance an invite-quota perk
+ *  grants, so the frontend can interpolate its own sentence with the numbers
+ *  `InvitesService` really enforces. Absent on every other perk. */
+export interface PerkInviteQuotaDTO {
+  base: number;
+  total: number;
+}
+
 export interface PerkDTO {
   /** Stable catalogue key, and the path segment
-   *  `POST /me/recognition/perks/:key/claim` takes. */
+   *  `POST /me/recognition/perks/:key/claim` takes. The frontend resolves its
+   *  category, title, description and footer copy from this id. */
   key: string;
   cat: string;
   title: string;
   desc: string;
   state: PerkState;
   footer: PerkFooterDTO;
+  inviteQuota?: PerkInviteQuotaDTO;
 }
+
+export type PerkGroupKind = 'available' | 'coming' | 'claimed';
 export interface PerkGroupDTO {
+  kind: PerkGroupKind;
+  /** Set only on a `coming` group: the level its perks unlock at. */
+  unlockLevel?: number;
+  /** English fallback for the heading. */
   label: string;
   perks: PerkDTO[];
 }
 
+/** One capability named on a level's ladder row. `id` is either a
+ *  `BASE_PERKS_BY_LEVEL` id or a `PERK_CATALOG` key; `label` is the English
+ *  fallback for an id the frontend does not know. */
+export interface PerkLadderEntryDTO {
+  id: string;
+  label: string;
+}
+
 export type PerkLadderState = 'achieved' | 'current' | 'locked';
+export type PerkLadderStatusKind = 'done' | 'current' | 'xp-away';
 export interface PerkLadderRowDTO {
   num: number;
   name: string;
   state: PerkLadderState;
+  statusKind: PerkLadderStatusKind;
+  /** XP still to go, set only when `statusKind` is `xp-away`. */
+  xpAway?: number;
+  /** English fallback for the status label. */
   status: string;
-  perks: string[];
+  perks: PerkLadderEntryDTO[];
 }
 export interface PerksDTO {
   availableCount: number;
@@ -253,11 +310,19 @@ export function buildBadges(
       // member asked us not to make. On the owner's own view it stays, marked,
       // so they can see and undo what they hid.
       if (isHiddenFromProfile && !isOwnerView) continue;
+      // A stored context EQUAL to the catalogue default is treated as no
+      // custom note, which is what makes this work on rows written before the
+      // awarding pass stopped copying the default in: every one of them holds
+      // that exact English sentence, so they all report `hasCustomContext`
+      // false and the client translates them. No backfill needed.
+      const hasCustomContext =
+        row.context !== null && row.context !== def.earnedContext;
       earnedBadges.push({
         key: def.key,
         cat: def.cat,
         name: def.name,
         context: row.context ?? def.earnedContext,
+        hasCustomContext: hasCustomContext ? true : undefined,
         rarity: def.rarity,
         tint: def.tint,
         xpReward,
@@ -327,9 +392,8 @@ export function buildXpLedger(rows: LedgerEntryRow[]): XpLedgerEntryDTO[] {
   }));
 }
 
-function xpAwayLabel(unlockLevel: number, totalXp: number): string {
-  const away = Math.max(0, levelStartXp(unlockLevel) - Math.max(0, totalXp));
-  return `${away} XP away`;
+function xpAwayAmount(unlockLevel: number, totalXp: number): number {
+  return Math.max(0, levelStartXp(unlockLevel) - Math.max(0, totalXp));
 }
 
 /**
@@ -338,15 +402,26 @@ function xpAwayLabel(unlockLevel: number, totalXp: number): string {
  * this deployment actually enforces. A perk with no `{base}`/`{total}` in its
  * text is returned untouched.
  */
+export function perkInviteQuota(
+  def: PerkCatalogEntry,
+  baseInviteQuota: number,
+): PerkInviteQuotaDTO | undefined {
+  if (def.isInviteQuotaPerk !== true) return undefined;
+  return {
+    base: baseInviteQuota,
+    total: baseInviteQuota + inviteQuotaBonusForLevel(def.unlockLevel),
+  };
+}
+
 export function perkDescription(
   def: PerkCatalogEntry,
   baseInviteQuota: number,
 ): string {
-  if (def.isInviteQuotaPerk !== true) return def.desc;
-  const total = baseInviteQuota + inviteQuotaBonusForLevel(def.unlockLevel);
+  const quota = perkInviteQuota(def, baseInviteQuota);
+  if (!quota) return def.desc;
   return def.desc
-    .replace('{base}', String(baseInviteQuota))
-    .replace('{total}', String(total));
+    .replace('{base}', String(quota.base))
+    .replace('{total}', String(quota.total));
 }
 
 /**
@@ -369,6 +444,7 @@ export function buildPerks(
 
   for (const def of PERK_CATALOG) {
     const desc = perkDescription(def, baseInviteQuota);
+    const inviteQuota = perkInviteQuota(def, baseInviteQuota);
     const claim = claimedByKey.get(def.key);
     if (claim) {
       claimedPerks.push({
@@ -378,6 +454,7 @@ export function buildPerks(
         desc,
         state: 'claimed',
         footer: { type: 'claimed', date: claim.claimedAt.toISOString() },
+        inviteQuota,
       });
     } else if (currentLevel >= def.unlockLevel) {
       available.push({
@@ -387,6 +464,7 @@ export function buildPerks(
         desc,
         state: 'available',
         footer: def.availableFooter,
+        inviteQuota,
       });
     } else {
       const bucket = lockedByLevel.get(def.unlockLevel) ?? [];
@@ -399,7 +477,9 @@ export function buildPerks(
         footer: {
           type: 'lock',
           label: `Unlocks at Level ${def.unlockLevel} · ${levelName(def.unlockLevel)}`,
+          unlockLevel: def.unlockLevel,
         },
+        inviteQuota,
       });
       lockedByLevel.set(def.unlockLevel, bucket);
     }
@@ -407,24 +487,40 @@ export function buildPerks(
 
   const groups: PerkGroupDTO[] = [];
   if (available.length > 0) {
-    groups.push({ label: 'Available to claim', perks: available });
-  }
-  for (const lvl of [...lockedByLevel.keys()].sort((a, b) => a - b)) {
     groups.push({
-      label: `Coming at Level ${lvl} · ${levelName(lvl)}`,
-      perks: lockedByLevel.get(lvl)!,
+      kind: 'available',
+      label: 'Available to claim',
+      perks: available,
+    });
+  }
+  for (const unlockLevel of [...lockedByLevel.keys()].sort((a, b) => a - b)) {
+    groups.push({
+      kind: 'coming',
+      unlockLevel,
+      label: `Coming at Level ${unlockLevel} · ${levelName(unlockLevel)}`,
+      perks: lockedByLevel.get(unlockLevel)!,
     });
   }
   if (claimedPerks.length > 0) {
-    groups.push({ label: 'Already claimed', perks: claimedPerks });
+    groups.push({
+      kind: 'claimed',
+      label: 'Already claimed',
+      perks: claimedPerks,
+    });
   }
 
   const ladder: PerkLadderRowDTO[] = LEVEL_LADDER_DEF.map((def) => {
-    const perksAtLevel = [
-      ...(BASE_PERKS_BY_LEVEL[def.level] ?? []),
-      ...PERK_CATALOG.filter((p) => p.unlockLevel === def.level).map(
-        (p) => p.title,
-      ),
+    const perksAtLevel: PerkLadderEntryDTO[] = [
+      ...(BASE_PERKS_BY_LEVEL[def.level] ?? []).map((basePerk) => ({
+        id: basePerk.id,
+        label: basePerk.label,
+      })),
+      ...PERK_CATALOG.filter(
+        (catalogEntry) => catalogEntry.unlockLevel === def.level,
+      ).map((catalogEntry) => ({
+        id: catalogEntry.key,
+        label: catalogEntry.title,
+      })),
     ];
     const state: PerkLadderState =
       def.level < currentLevel
@@ -432,16 +528,26 @@ export function buildPerks(
         : def.level === currentLevel
           ? 'current'
           : 'locked';
-    const status =
+    const statusKind: PerkLadderStatusKind =
       state === 'achieved'
-        ? 'Done'
+        ? 'done'
         : state === 'current'
+          ? 'current'
+          : 'xp-away';
+    const xpAway =
+      statusKind === 'xp-away' ? xpAwayAmount(def.level, totalXp) : undefined;
+    const status =
+      statusKind === 'done'
+        ? 'Done'
+        : statusKind === 'current'
           ? 'Current'
-          : xpAwayLabel(def.level, totalXp);
+          : `${xpAway ?? 0} XP away`;
     return {
       num: def.level,
       name: def.name,
       state,
+      statusKind,
+      xpAway,
       status,
       perks: perksAtLevel,
     };

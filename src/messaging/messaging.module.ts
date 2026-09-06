@@ -10,6 +10,7 @@ import { ConversationsService } from './conversations.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
 import { Conversation } from './entities/conversation.entity';
+import { MessageHide } from './entities/message-hide.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { Message } from './entities/message.entity';
@@ -41,6 +42,7 @@ import { MessagingService } from './messaging.service';
       ConversationParticipant,
       ConversationPinnedMessage,
       Message,
+      MessageHide,
       MessageReaction,
       MessageStar,
     ]),

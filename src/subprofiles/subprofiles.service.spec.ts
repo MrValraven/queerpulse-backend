@@ -1504,6 +1504,18 @@ describe('SubprofilesService', () => {
           status: SubprofileStatus.Published,
         }),
       ]);
+      // The CREATOR's profile, resolved by the batched creator lookup so the
+      // card can be addressed at `/members/<creator>/<slug>` (ENG-153). Without
+      // it the card carried the viewed co-owner's slug, which 404s, or opened
+      // that co-owner's own same-slug persona instead.
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'creator-1',
+          slug: 'creator-one',
+          firstName: 'Creator',
+          lastName: 'One',
+        }),
+      ]);
       const result = await service.listForProfile('viewed-member', 'viewer-id');
       expect(members.find).toHaveBeenCalledWith({
         where: { userId: 'viewed-user-id' },
@@ -1519,6 +1531,15 @@ describe('SubprofilesService', () => {
         order: { position: 'ASC', createdAt: 'ASC' },
       });
       expect(result.map((view) => view.slug)).toContain('nightform');
+      // The owner ref is the CREATOR's, never the co-owner whose profile is
+      // being viewed: `ownerSlug` is what builds `/members/:ownerSlug/:slug`,
+      // and the nested route resolves that pair against the creator alone.
+      const coOwnedView = result.find((view) => view.slug === 'nightform');
+      expect(coOwnedView?.ownerSlug).toBe('creator-one');
+      expect(coOwnedView?.ownerName).toBe('Creator One');
+      expect(profiles.find).toHaveBeenCalledWith({
+        where: { userId: In(['creator-1']) },
+      });
     });
 
     it('skips the subprofiles query entirely when the profile’s user has no memberships', async () => {

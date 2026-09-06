@@ -18,7 +18,7 @@ import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
-import { Conversation } from './entities/conversation.entity';
+import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
@@ -123,7 +123,11 @@ describe('MessagingService', () => {
   };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let dataSource: { transaction: jest.Mock };
-  let connections: { areConnected: jest.Mock; requestConnection: jest.Mock };
+  let connections: {
+    areConnected: jest.Mock;
+    requestConnection: jest.Mock;
+    allAcceptedConnectionUserIds: jest.Mock;
+  };
   let blockFilter: {
     isBlockedEitherWay: jest.Mock;
     blockedUserIds: jest.Mock;
@@ -145,6 +149,7 @@ describe('MessagingService', () => {
     createQueryBuilder: jest.Mock;
   };
   let usersService: { findById: jest.Mock };
+  let mentions: { notify: jest.Mock };
   // `MessagingCoreService.toMessageResponses` now reads the shared
   // `content_moderation` table to tombstone moderator-taken-down messages; the
   // repo only needs `find` (default: no takedowns) for these tests.
@@ -190,6 +195,14 @@ describe('MessagingService', () => {
     connections = {
       areConnected: jest.fn().mockResolvedValue(true),
       requestConnection: jest.fn(),
+      // `replyRequiresConnection` (PRD-220): `listConversations` batches this
+      // once per call rather than checking `areConnected` per row. Default:
+      // everyone the caller has ever DM'd is an accepted connection, so
+      // existing fixtures (which never set up a "not connected" thread) keep
+      // getting `replyRequiresConnection: false` unless a test overrides this.
+      allAcceptedConnectionUserIds: jest
+        .fn()
+        .mockResolvedValue(['u2', 'u3', 'x', 'y', 'them']),
     };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
@@ -246,6 +259,7 @@ describe('MessagingService', () => {
       // (BE-MSG-07); default: no takedown.
       exist: jest.fn().mockResolvedValue(false),
     };
+    mentions = { notify: jest.fn().mockResolvedValue(new Set()) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -287,7 +301,7 @@ describe('MessagingService', () => {
           // Best-effort fan-out `sendMessage` now fires on every fresh send —
           // mirrors how forum/community specs stub it out; the notify() call
           // itself is covered by `MentionNotificationService`'s own spec.
-          useValue: { notify: jest.fn().mockResolvedValue(new Set()) },
+          useValue: mentions,
         },
       ],
     }).compile();
@@ -432,6 +446,10 @@ describe('MessagingService', () => {
           firstName: 'Me',
           lastName: 'Myself',
           avatarUrl: 'https://cdn.example/me.png',
+          // `authorSummaryFrom` gates the avatar on `photoVisible`, so a
+          // fixture that omits the column reads as "photo hidden" and the
+          // assertion below would pass against a null it never meant to test.
+          photoVisible: true,
         },
       ]);
 
@@ -542,6 +560,66 @@ describe('MessagingService', () => {
       // No messages yet, so last activity falls back to the thread's creation
       // (`conversations` has no updated_at column).
       expect(result[0]!.updatedAt).toBe('2026-03-04T05:06:07.000Z');
+      // The connection gate (PRD-220) never applies to an official thread.
+      expect(result[0]!.replyRequiresConnection).toBe(false);
+    });
+
+    it('sets replyRequiresConnection (PRD-220) for a DM whose counterpart is not an accepted connection, but not for one who is', async () => {
+      stubMyParticipants([
+        { conversationId: 'c1', muted: false, lastReadAt: null },
+        { conversationId: 'c2', muted: false, lastReadAt: null },
+      ]);
+      participants.find.mockResolvedValueOnce([
+        // c1's counterpart is a stranger (e.g. a cold housing enquiry);
+        // c2's is an accepted connection.
+        { conversationId: 'c1', userId: 'stranger' },
+        { conversationId: 'c2', userId: 'u2' },
+      ]);
+      conversations.find.mockResolvedValueOnce([
+        {
+          id: 'c1',
+          isOfficial: false,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        {
+          id: 'c2',
+          isOfficial: false,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ]);
+      profiles.find.mockResolvedValueOnce([
+        {
+          userId: 'stranger',
+          slug: 'stranger',
+          firstName: 'Sam',
+          lastName: 'T',
+          avatarUrl: null,
+        },
+        {
+          userId: 'u2',
+          slug: 'alice',
+          firstName: 'Alice',
+          lastName: 'A',
+          avatarUrl: null,
+        },
+      ]);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(makeQb())
+        .mockReturnValueOnce(makeQb());
+      // Only 'u2' is an accepted connection of the caller.
+      connections.allAcceptedConnectionUserIds.mockResolvedValueOnce(['u2']);
+
+      const result = await service.listConversations('me');
+
+      const c1 = result.find((c) => c.id === 'c1')!;
+      const c2 = result.find((c) => c.id === 'c2')!;
+      expect(c1.replyRequiresConnection).toBe(true);
+      expect(c2.replyRequiresConnection).toBe(false);
+      // One batched call, not one `areConnected` per conversation.
+      expect(connections.allAcceptedConnectionUserIds).toHaveBeenCalledTimes(1);
+      expect(connections.allAcceptedConnectionUserIds).toHaveBeenCalledWith(
+        'me',
+      );
     });
   });
 
@@ -1213,6 +1291,48 @@ describe('MessagingService', () => {
       expect(payload.message.senderId).toBe('me');
       expect(payload.message.body).toBe('hello');
     });
+
+    // PRD-221: mentioning the ONE person a 1:1 DM could possibly be to is
+    // always the same fact its own delivery already told them.
+    it('excludes the DM counterpart from the mention fan-out (PRD-221)', async () => {
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      conversations.findOne.mockResolvedValue({
+        id: 'c1',
+        kind: ConversationKind.Direct,
+        isOfficial: false,
+      });
+      connections.areConnected.mockResolvedValue(true);
+
+      await service.sendMessage('c1', 'me', '@them are you free tonight?');
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      const [, , , excludeUserIds] = mentions.notify.mock.calls[0]!;
+      expect(excludeUserIds).toEqual(['them']);
+    });
+
+    // A group has no single counterpart — the generic "new message" push is
+    // shared by every member, so a mention of a fellow participant still
+    // carries real "this one's about you" information and must not be
+    // suppressed the way the 1:1 case is above.
+    it('does not exclude anyone from the mention fan-out for a GROUP send', async () => {
+      participants.findOne.mockResolvedValueOnce({
+        conversationId: 'g1',
+        userId: 'me',
+      });
+      conversations.findOne.mockResolvedValue({
+        id: 'g1',
+        kind: ConversationKind.Group,
+        isOfficial: false,
+      });
+
+      await service.sendMessage('g1', 'me', '@teammate check this out');
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      const [, , , excludeUserIds] = mentions.notify.mock.calls[0]!;
+      expect(excludeUserIds).toEqual([]);
+    });
   });
 
   describe('messageRequest', () => {
@@ -1300,6 +1420,29 @@ describe('MessagingService', () => {
       });
       expect(result.lastMessage).toBeNull();
       expect(result.unreadCount).toBe(0);
+      // Default fixture: `connections.areConnected` resolves true.
+      expect(result.replyRequiresConnection).toBe(false);
+    });
+
+    it('sets replyRequiresConnection (PRD-220) when the two are not accepted connections — e.g. the thread a housing enquiry opened cold', async () => {
+      profiles.findOne.mockResolvedValueOnce(recipient);
+      conversations.findOne.mockResolvedValueOnce(null);
+      const created = {
+        id: 'convo-1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      };
+      dataSource.transaction.mockResolvedValueOnce(created);
+      profiles.find.mockResolvedValueOnce([recipient]);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(makeQb())
+        .mockReturnValueOnce(makeQb());
+      connections.areConnected.mockResolvedValueOnce(false);
+
+      const result = await service.createConversation('me', 'tam-rivera');
+
+      expect(result.replyRequiresConnection).toBe(true);
     });
 
     it('is idempotent: calling twice returns the same conversation id, only creating once', async () => {

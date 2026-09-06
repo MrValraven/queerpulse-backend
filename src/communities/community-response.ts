@@ -188,6 +188,13 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // community is findable by people who are not on this platform. Only ever
   // true while `accessTier` is `public` or `request`.
   isPubliclyListed: boolean;
+  // PRD-140/PRD-141. Non-null when the VIEWER is not on the roster and holds a
+  // pending invitation to this community: the ISO timestamp it was sent. Null
+  // for a member (they are already in) and for anybody uninvited. It is what
+  // lets the hero offer "Accept invitation" instead of a join request, and it
+  // is the only reason a `private` community's detail is served to a
+  // non-member at all.
+  invitedAt: string | null;
 }
 
 export function toCommunityCard(
@@ -231,6 +238,10 @@ export function toCommunityDetail(
   // null, which is the honest answer for a non-member and for a member who
   // joined before acceptance was recorded.
   rulesAcceptedVersion: number | null = null,
+  // When this viewer's standing invitation was sent (PRD-140). The caller
+  // resolves it and passes null for a member and for an uninvited viewer; see
+  // `CommunitiesService.buildDetail`.
+  invitedAt: Date | null = null,
 ): CommunityDetailDTO {
   return {
     ...toCommunityCard(c, stats, myRole),
@@ -258,6 +269,10 @@ export function toCommunityDetail(
     rulesAcceptedVersion,
     welcomeMessage: isOwnerOrMod(myRole) ? c.welcomeMessage : null,
     isPubliclyListed: c.isPubliclyListed,
+    // A member is already in, so their invitation is spent whatever the table
+    // still holds: the field answers "is there a door open to you", and for
+    // somebody standing inside the room the answer is no.
+    invitedAt: myRole ? null : (invitedAt?.toISOString() ?? null),
   };
 }
 
@@ -348,7 +363,13 @@ export interface CommunityJoinRequestDTO {
 }
 
 export interface JoinResultDTO {
-  outcome: 'joined' | 'requested';
+  // `invite_required` (PRD-141) is the `invite` tier's refusal: the caller
+  // holds no pending invitation, so there is no door for them yet. It is a
+  // 201 with `role` and `request` both null rather than a 403, because the
+  // client renders it as a state of the community ("invitation only"), not as
+  // an error the member did something to cause. A `private` community answers
+  // the same caller with a 404 instead: that tier does not confirm it exists.
+  outcome: 'joined' | 'requested' | 'invite_required';
   role: RosterRole.Member | null; // set when joined
   request: CommunityJoinRequestDTO | null; // set when requested
 }

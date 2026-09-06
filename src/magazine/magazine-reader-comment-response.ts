@@ -42,6 +42,10 @@ export interface ReaderCommentResponse {
   body: string;
   createdAt: string;
   editedAt: string | null;
+  // True whenever the row is blanked: author tombstone, moderation removal,
+  // or moderation hide. Every blanked row renders through the frontend's
+  // existing tombstone branch, so a hidden comment can never surface as an
+  // empty card with live Reply and Report buttons.
   deleted: boolean;
   canEdit: boolean;
   canDelete: boolean;
@@ -75,7 +79,10 @@ export function toReaderCommentResponse(
     body: blanked ? '' : comment.body,
     createdAt: comment.createdAt.toISOString(),
     editedAt: comment.editedAt ? comment.editedAt.toISOString() : null,
-    deleted: authorTombstoned || moderation.removed,
+    // Kept in lockstep with `blanked`. Splitting the two (hidden blanked the
+    // row but left `deleted` false) produced a ghost card: no author, no
+    // body, and the actions still live.
+    deleted: blanked,
     canEdit: isAuthor && !blanked,
     canDelete: isAuthor && !blanked,
     replies,

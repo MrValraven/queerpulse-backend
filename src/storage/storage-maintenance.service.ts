@@ -185,11 +185,14 @@ export class StorageMaintenanceService {
     return orphans;
   }
 
-  // Message-image attachments have no `MediaReferenceSource`, so they must be
-  // checked directly or the sweep would delete DM images that are still in a
-  // conversation. Matches both stored forms (bare key and the `/files/<key>`
-  // URL) and includes soft-deleted messages (`withDeleted`) — a key any message
-  // ever referenced is kept, the conservative direction for a delete sweep.
+  // Message-image AND message-document attachments have no `MediaReferenceSource`,
+  // so they must be checked directly or the sweep would delete DM attachments
+  // that are still in a conversation. Both kinds live under the SAME
+  // `message.attachment ->> 'url'` jsonb path, so one query already covers a
+  // document the moment it exists — no kind-specific branch needed here.
+  // Matches both stored forms (bare key and the `/files/<key>` URL) and
+  // includes soft-deleted messages (`withDeleted`) — a key any message ever
+  // referenced is kept, the conservative direction for a delete sweep.
   private async keysReferencedByMessages(
     bareKeys: string[],
   ): Promise<Set<string>> {

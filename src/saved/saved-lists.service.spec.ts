@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { SavedListEntry } from './entities/saved-list-entry.entity';
 import { SavedList } from './entities/saved-list.entity';
+import { SavedAvailabilityService } from './saved-availability.service';
 import { SavedListsService } from './saved-lists.service';
 
 const now = new Date('2026-08-20T12:00:00.000Z');
@@ -25,6 +26,20 @@ const list = (overrides: Partial<SavedList> = {}): SavedList =>
     updatedAt: now,
     ...overrides,
   }) as SavedList;
+
+const sharedItem = (overrides: Partial<SavedItem> = {}): SavedItem => ({
+  id: 'item-1',
+  userId: 'u1',
+  subjectType: SavedKind.Listing,
+  subjectId: 'drama-bar',
+  title: 'Drama Bar',
+  href: '/local/directory/drama-bar',
+  meta: null,
+  description: null,
+  readTime: null,
+  createdAt: now,
+  ...overrides,
+});
 
 describe('SavedListsService', () => {
   let service: SavedListsService;
@@ -47,6 +62,10 @@ describe('SavedListsService', () => {
     createQueryBuilder: jest.Mock;
   };
   let savedItems: { find: jest.Mock; findOne: jest.Mock };
+  // Resolves the shared page's subjects through the RECIPIENT's eyes
+  // (PRD-169). Defaults to "nothing resolves" so a test that cares has to say
+  // which refs are live.
+  let availability: { availableRefs: jest.Mock };
   // Repositories the in-transaction helpers reach for through the manager.
   let managerRepos: Map<unknown, Record<string, jest.Mock>>;
   let dataSource: { transaction: jest.Mock };
@@ -91,6 +110,9 @@ describe('SavedListsService', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
     };
+    availability = {
+      availableRefs: jest.fn().mockResolvedValue(new Set<string>()),
+    };
 
     managerRepos = new Map<unknown, Record<string, jest.Mock>>([
       [SavedList, lists],
@@ -122,6 +144,7 @@ describe('SavedListsService', () => {
         { provide: getRepositoryToken(SavedListEntry), useValue: entries },
         { provide: getRepositoryToken(SavedItem), useValue: savedItems },
         { provide: DataSource, useValue: dataSource },
+        { provide: SavedAvailabilityService, useValue: availability },
       ],
     }).compile();
 
@@ -340,28 +363,79 @@ describe('SavedListsService', () => {
       entries.find.mockResolvedValue([
         { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
       ]);
-      savedItems.find.mockResolvedValue([
-        {
-          id: 'item-1',
-          userId: 'u1',
-          subjectType: SavedKind.Listing,
-          subjectId: 'drama-bar',
-          title: 'Drama Bar',
-          href: '/local/directory/drama-bar',
-          meta: null,
-          description: null,
-          readTime: null,
-          createdAt: now,
-        },
-      ]);
+      savedItems.find.mockResolvedValue([sharedItem()]);
+      availability.availableRefs.mockResolvedValue(
+        new Set(['listing:drama-bar']),
+      );
 
       const shared = await service.getShared('c'.repeat(64));
 
       expect(shared.name).toBe('Open late');
       expect(shared.itemCount).toBe(1);
       expect(shared.items[0]?.id).toBe('listing:drama-bar');
+      expect(shared.items[0]?.availability).toBe('available');
       // No owner id, slug, name or avatar anywhere in the payload.
       expect(JSON.stringify(shared)).not.toContain('u1');
+    });
+
+    it('resolves the shared page through the RECIPIENT, in one batched call', async () => {
+      const item = sharedItem();
+      lists.findOne.mockResolvedValue(list());
+      entries.find.mockResolvedValue([
+        { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
+        { id: 'entry-2', listId: 'list-1', savedItemId: 'item-2' },
+      ]);
+      savedItems.find.mockResolvedValue([
+        item,
+        sharedItem({ id: 'item-2', subjectId: 'casa-verde' }),
+      ]);
+
+      await service.getShared('d'.repeat(64), 'recipient-1');
+
+      // Not the owner's id: what the sender can open is not what the person
+      // holding the link can open.
+      expect(availability.availableRefs).toHaveBeenCalledTimes(1);
+      expect(availability.availableRefs).toHaveBeenCalledWith(
+        [item, expect.objectContaining({ subjectId: 'casa-verde' })],
+        'recipient-1',
+      );
+    });
+
+    it('treats a link opened with no account as an anonymous viewer', async () => {
+      lists.findOne.mockResolvedValue(list());
+      entries.find.mockResolvedValue([
+        { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
+      ]);
+      savedItems.find.mockResolvedValue([sharedItem()]);
+
+      await service.getShared('e'.repeat(64));
+
+      expect(availability.availableRefs).toHaveBeenCalledWith(
+        expect.any(Array),
+        null,
+      );
+    });
+
+    it('keeps a dead item in the shared list, with its snapshot and no href', async () => {
+      lists.findOne.mockResolvedValue(list());
+      entries.find.mockResolvedValue([
+        { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
+      ]);
+      savedItems.find.mockResolvedValue([sharedItem({ meta: 'Bairro Alto' })]);
+      // The bar closed, or a moderator took the listing down, after the link
+      // was sent.
+      availability.availableRefs.mockResolvedValue(new Set<string>());
+
+      const shared = await service.getShared('f'.repeat(64));
+
+      // Still counted and still listed: the recipient was handed a curated
+      // set, and silently shrinking it would hide that the sender ever
+      // recommended the place.
+      expect(shared.itemCount).toBe(1);
+      expect(shared.items[0]?.availability).toBe('unavailable');
+      expect(shared.items[0]?.href).toBeNull();
+      expect(shared.items[0]?.title).toBe('Drama Bar');
+      expect(shared.items[0]?.meta).toBe('Bairro Alto');
     });
   });
 });

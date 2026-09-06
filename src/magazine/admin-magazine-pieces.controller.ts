@@ -43,6 +43,7 @@ import { CreatePieceMessageDto } from './dto/create-piece-message.dto';
 import { CreatePitchDto } from './dto/create-pitch.dto';
 import { ListPiecesQuery } from './dto/list-pieces.query';
 import { PublishArticleDto } from './dto/publish-article.dto';
+import { PublishPieceDto } from './dto/publish-piece.dto';
 import { ReplyArticleCommentDto } from './dto/reply-article-comment.dto';
 import { ResolveArticleCommentDto } from './dto/resolve-article-comment.dto';
 import { TriagePitchDto } from './dto/triage-pitch.dto';
@@ -175,6 +176,53 @@ export class AdminMagazinePiecesController {
     return this.magazinePieces.upsertPayment(id, dto, user.userId);
   }
 
+  // The piece record's own Publish/Unpublish pair (PRD-119/PRD-120), for BOTH
+  // formats: an `article`-format piece publishes its article, a `deck`-format
+  // piece publishes its deck. Declared here rather than beside the article
+  // rail's `pieces/:id/article/publish` because this is the format-agnostic
+  // one; the article rail keeps its own route and is gated identically.
+  @Post('pieces/:id/publish')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Publish or schedule a piece's article or deck.",
+  })
+  @ApiOkResponse({
+    description:
+      'The updated piece record, including `isPublished`, `publishedAt` and the reader `publicHref`.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Malformed id or payload; the piece is behind its care gate (`code: magazine_care_gate_open`); ' +
+      'or it is not ready to publish (`code: magazine_publish_not_ready`). Both carry `openGateItems`, ' +
+      'the human-readable list of what is still open.',
+  })
+  @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
+  publishPiece(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PublishPieceDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.publishPiece(id, dto, user.userId);
+  }
+
+  @Post('pieces/:id/unpublish')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Take a piece's article or deck back down to draft.",
+  })
+  @ApiOkResponse({
+    description:
+      'The updated piece record. Never gated: an editor must always be able to pull a live piece down.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed piece id.' })
+  @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
+  unpublishPiece(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.unpublishPiece(id, user.userId);
+  }
+
   @Get('pieces/:id/letters')
   @ApiOperation({ summary: 'List reader letters for a magazine piece.' })
   @ApiOkResponse({ description: 'The letters, newest first.' })
@@ -265,7 +313,9 @@ export class AdminMagazinePiecesController {
   @ApiOkResponse({ description: 'The updated article draft.' })
   @ApiBadRequestResponse({
     description:
-      'Malformed id or payload, or the draft is not ready to publish (missing standfirst or an image alt).',
+      'Malformed id or payload; the piece is behind its care gate (`code: magazine_care_gate_open`); ' +
+      'or the draft is not ready to publish (`code: magazine_publish_not_ready`: missing standfirst or ' +
+      'an image alt). Both carry `openGateItems`. Unpublishing (`publishedAt: null`) is never gated.',
   })
   @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
   publishArticle(

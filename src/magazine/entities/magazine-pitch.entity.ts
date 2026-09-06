@@ -77,6 +77,21 @@ export class MagazinePitch {
   @Column({ type: 'uuid', nullable: true })
   storySubmissionId!: string | null;
 
+  /**
+   * When this pitch came BACK into the inbox because the piece commissioned
+   * from it was deleted (ENG-113). Deleting a mis-commissioned piece used to
+   * leave the pitch stranded at `commissioned` forever, and `listPitches`
+   * returns only `waiting`/`maybe`, so the pitch simply vanished and could
+   * never be triaged again.
+   *
+   * `deletePiece` now returns the pitch to `waiting` and stamps this, so the
+   * inbox can say the row is a returning pitch rather than surprising an
+   * editor with something they thought they had already dealt with. Null on
+   * every pitch that has never been through a commission-then-delete.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  returnedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

@@ -22,31 +22,69 @@ export interface OverviewModerationStep {
 }
 
 /**
+ * PRD-265. One piece of prose an EDITOR wrote, in both languages.
+ *
+ * The four decisions, six principles and four council roles this table shipped
+ * with are i18n KEYS: their EN and PT live in the frontend catalogs, and adding
+ * a fifth decision meant a code change and a deploy. That made the public
+ * decision log — the page the platform presents as its accountability record —
+ * a bundle constant, so the next real decision could not be logged by the
+ * people who took it.
+ *
+ * An authored entry carries its own words instead. There is no key to
+ * translate, so the editor supplies both languages at write time; the reader
+ * picks the one for the active language. Stored sanitised (see
+ * `GovernanceOverviewService.toStoredAuthoredText`), so the public page never
+ * strips markup at render.
+ */
+export interface OverviewAuthoredText {
+  en: string;
+  pt: string;
+}
+
+/**
  * One advisory-council seat. `name`/`initials` are non-translatable data the
- * backend owns; `roleKey` is the seat descriptor resolved to EN/PT on the
- * frontend; `tint` selects the avatar colour pair (`jade`/`violet`/`plum`) the
- * frontend maps to `{bg,color}`.
+ * backend owns; `tint` selects the avatar colour pair (`jade`/`violet`/`plum`)
+ * the frontend maps to `{bg,color}`.
+ *
+ * The seat descriptor comes from EXACTLY ONE of two places (PRD-265):
+ * `roleKey`, an i18n key resolved on the frontend, on the four seeded seats;
+ * or `role`, the editor's own EN/PT words, on a seat authored in the admin UI.
+ * Both fields are optional on the type and the DTO enforces the exclusive-or,
+ * so a seeded seat keeps rendering unchanged and a new seat needs no deploy.
  */
 export interface OverviewCouncilSeat {
   name: string;
   initials: string;
-  roleKey: string;
+  roleKey?: string;
+  role?: OverviewAuthoredText;
   tint: 'jade' | 'violet' | 'plum';
 }
 
 /**
- * One platform principle. `key` is the i18n key (title + text); `icon` selects
- * the react-icon the frontend maps (`lock`/`eye`/`slash`/`message`/`book`/
- * `accessible`). Order is array order.
+ * One platform principle. `icon` selects the react-icon the frontend maps
+ * (`lock`/`eye`/`slash`/`message`/`book`/`accessible`). Order is array order.
+ *
+ * `key` (i18n, seeded) or `title` + `text` (authored, PRD-265) — exactly one
+ * of the two forms, enforced by the DTO.
  */
 export interface OverviewPrinciple {
-  key: string;
+  key?: string;
+  title?: OverviewAuthoredText;
+  text?: OverviewAuthoredText;
   icon: string;
 }
 
-/** One decision-log entry, keyed for i18n (lead + body). Order is array order. */
+/**
+ * One decision-log entry. Order is array order.
+ *
+ * `key` (i18n, seeded) or `lead` + `body` (authored, PRD-265) — exactly one of
+ * the two forms, enforced by the DTO.
+ */
 export interface OverviewDecision {
-  key: string;
+  key?: string;
+  lead?: OverviewAuthoredText;
+  body?: OverviewAuthoredText;
 }
 
 /** The singleton id — this table always holds exactly one row (see below). */
@@ -65,9 +103,17 @@ export const GOVERNANCE_OVERVIEW_ID = 'current';
  * `changemaker_directory_settings` — because the whole page renders as one
  * cohesive published document with no independent per-row query needs.
  *
- * "Structure in the DB, words in i18n": every field here is a stable content
- * key, a number, or non-translatable data (names/initials). The translated
- * prose stays in the frontend i18n catalogs, so EN/PT is preserved.
+ * "Structure in the DB, words in i18n" was the original rule: every field was
+ * a stable content key, a number, or non-translatable data (names/initials).
+ * That rule still holds for the SEEDED entries, and their translated prose
+ * still lives in the frontend catalogs.
+ *
+ * PRD-265 adds a second, coexisting form: a decision, principle or council
+ * seat an editor AUTHORED, carrying its own EN and PT text
+ * ({@link OverviewAuthoredText}) because no key exists to translate. The rule
+ * it replaces was making the platform's accountability record un-growable —
+ * logging the next real decision required a deploy. Both forms live in the
+ * same array; the reader resolves whichever one an entry carries.
  */
 @Entity('governance_overview')
 export class GovernanceOverview {

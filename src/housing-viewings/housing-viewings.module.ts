@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewing } from './entities/housing-viewing.entity';
 import { HousingViewingsController } from './housing-viewings.controller';
@@ -25,6 +26,14 @@ import { HousingViewingsService } from './housing-viewings.service';
     // mandatory LGBTQ+ affirming pledge on record (BE-HSG-06). Imports only
     // `UsersModule`, so no cycle with this module.
     AffirmingPledgeModule,
+    // PRD-240. Exports NotificationsService — every viewing transition tells
+    // the OTHER participant in-app (and, via `PushNotificationListener`, on
+    // their phone). Until this the whole lifecycle was silent, so a lister only
+    // learned somebody wanted to see their home by opening
+    // `/local/housing/viewings`. No cycle: `NotificationsModule` imports nothing
+    // that reaches back into housing, which is why `HousingListingsModule` and
+    // `HousingGroupsModule` already import it.
+    NotificationsModule,
   ],
   controllers: [HousingViewingsController],
   providers: [HousingViewingsService],

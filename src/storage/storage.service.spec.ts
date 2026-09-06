@@ -230,6 +230,73 @@ describe('StorageService', () => {
     });
   });
 
+  // PRD-226: `message-document` is validated against the DOCUMENT whitelist,
+  // not the image one — the opposite of every other kind above.
+  describe('presignImageUpload — message-document (PRD-226)', () => {
+    it('accepts a PDF and namespaces the key under message-documents/', async () => {
+      const service = buildService();
+      const result = await service.presignImageUpload({
+        kind: 'message-document',
+        userId: 'user-1',
+        contentType: 'application/pdf',
+        byteSize: 1024,
+      });
+      expect(result.key).toMatch(
+        /^message-documents\/user-1\/[0-9a-f]{8}-[0-9a-f-]{27}\.pdf$/,
+      );
+    });
+
+    it.each([
+      'text/plain',
+      'text/csv',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ])('accepts %s', async (contentType) => {
+      const service = buildService();
+      const result = await service.presignImageUpload({
+        kind: 'message-document',
+        userId: 'user-1',
+        contentType,
+        byteSize: 1024,
+      });
+      expect(result.key).toMatch(/^message-documents\/user-1\//);
+    });
+
+    it('rejects an IMAGE content type for a document kind (the tables do not cross over)', async () => {
+      const service = buildService();
+      await expect(
+        service.presignImageUpload({
+          kind: 'message-document',
+          userId: 'user-1',
+          contentType: 'image/png',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects a DOCUMENT content type for an image kind (the tables do not cross over)', async () => {
+      const service = buildService();
+      await expect(
+        service.presignImageUpload({
+          kind: 'avatar',
+          userId: 'user-1',
+          contentType: 'application/pdf',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects an over-cap byteSize (20 MB) with a 400', async () => {
+      const service = buildService();
+      const cap = UPLOAD_KIND_SPECS['message-document'].maxBytes;
+      await expect(
+        service.presignImageUpload({
+          kind: 'message-document',
+          userId: 'user-1',
+          contentType: 'application/pdf',
+          byteSize: cap + 1,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
   describe('createPresignedDownload', () => {
     it('signs a GET for the given key with the standard expiry', async () => {
       const service = buildService();

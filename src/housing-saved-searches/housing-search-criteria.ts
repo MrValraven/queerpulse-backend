@@ -1,4 +1,9 @@
 import {
+  HOUSING_FURNISHED_FEATURE,
+  HOUSING_PETS_WELCOME_FEATURE,
+  hasHousingFeature,
+} from '../housing-listings/housing-features';
+import {
   HousingListing,
   HousingListingType,
 } from '../housing-listings/entities/housing-listing.entity';
@@ -26,7 +31,13 @@ export interface HousingSearchCriteria {
   bedroomsMin?: number;
   billsIncluded?: boolean;
   hasAccessibilityInfo?: boolean;
+  /** Carries the canonical `Furnished` chip in `features`. */
+  furnished?: boolean;
+  /** Carries the canonical `Pets welcome` chip in `features`. */
+  petsWelcome?: boolean;
   verifiedOnly?: boolean;
+  /** Maximum deposit in euros. A listing with no stated deposit is excluded. */
+  depositMax?: number;
   /** YYYY-MM-DD move-in-by date. */
   availableBy?: string;
 }
@@ -86,6 +97,30 @@ export function matchesHousingCriteria(
     listing.accessibilityInfo.trim() === ''
   ) {
     return false;
+  }
+  // The in-memory half of `HousingDirectoryService.featurePredicate`: same
+  // whole-entry, case-insensitive comparison, through the same helper.
+  if (
+    criteria.furnished &&
+    !hasHousingFeature(listing.features, HOUSING_FURNISHED_FEATURE)
+  ) {
+    return false;
+  }
+  if (
+    criteria.petsWelcome &&
+    !hasHousingFeature(listing.features, HOUSING_PETS_WELCOME_FEATURE)
+  ) {
+    return false;
+  }
+  if (criteria.depositMax !== undefined) {
+    // Mirrors the SQL: an unstated deposit is unknown, never zero, so it
+    // cannot satisfy a cap.
+    if (
+      listing.depositEuros === null ||
+      listing.depositEuros > criteria.depositMax
+    ) {
+      return false;
+    }
   }
   if (criteria.verifiedOnly && !listingVerified) return false;
   if (criteria.availableBy) {

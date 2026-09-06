@@ -15,7 +15,7 @@ import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
-import { GifAttachment, Message } from './entities/message.entity';
+import { AttachmentInput, Message } from './entities/message.entity';
 import {
   MessageResponse,
   MessageSearchConversationGroup,
@@ -156,6 +156,17 @@ export class MessagesService {
         leftAt: participant.leftAt.toISOString(),
       });
     }
+    // PRD-227 "delete for me": a message THIS viewer hid never exists for
+    // them again — in pagination, in a jump-to-message, anywhere in the
+    // thread — while the other participant's copy is completely untouched
+    // (their own read never joins `message_hides` on their id).
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "message_hides" "mh"
+        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hidingUserId
+      )`,
+      { hidingUserId: userId },
+    );
     if (before) {
       if (beforeId) {
         // Composite keyset cursor: strictly "older" than (before, beforeId) in
@@ -224,6 +235,15 @@ export class MessagesService {
         leftAt: leftAt.toISOString(),
       });
     }
+    // PRD-227 "delete for me" — see the matching comment in `getMessages`;
+    // reconnect sync must not resurrect a message this viewer hid.
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "message_hides" "mh"
+        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hidingUserId
+      )`,
+      { hidingUserId: userId },
+    );
     if (afterId) {
       qb.andWhere(
         '(m.created_at, m.id) > (:after::timestamptz, :afterId::uuid)',
@@ -332,6 +352,17 @@ export class MessagesService {
         )`,
         { messageSubjectType: 'message' },
       )
+      // PRD-227 "delete for me": a message THIS searcher hid from their own
+      // view must not resurface as a search hit either — mirrors the
+      // moderation NOT EXISTS just above, keyed by (message, this userId)
+      // instead. `userId` is already bound via the participation join above.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "message_hides" "mh"
+          WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :userId
+        )`,
+        { userId },
+      )
       // No `.withDeleted()`: the @DeleteDateColumn default filter drops
       // soft-deleted rows, so tombstoned bodies are never returned.
       // Property path (`createdAt`), not the raw column: the participation
@@ -406,8 +437,8 @@ export class MessagesService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image',
-    attachment?: GifAttachment,
+    kind?: 'user' | 'gif' | 'image' | 'document',
+    attachment?: AttachmentInput,
   ): Promise<MessageResponse> {
     // Sending is the ONE messaging write both transports share (HTTP POST and
     // the gateway's `message:send`), so the sender's CURRENT account status is
@@ -443,11 +474,17 @@ export class MessagesService {
     // membership was validated at creation (and Phase 2 owns per-member gates),
     // and official threads are exempt. Picking an arbitrary "other" in a group
     // would wrongly gate on a single member.
+    //
+    // Hoisted (rather than scoped to the `if` below): PRD-221 reuses it after
+    // the send succeeds to keep an `@`-mention of this exact person out of the
+    // mention fan-out — see the `directCounterpartUserId` comment down there.
+    let directCounterpartUserId: string | null = null;
     if (convo.kind !== ConversationKind.Group && !convo.isOfficial) {
       const other = await this.participants.findOne({
         where: { conversationId, userId: Not(userId) },
       });
       if (other) {
+        directCounterpartUserId = other.userId;
         // P0 hardening: a `blocks` row is a hard stop even if the
         // `connections` edge somehow still reads Accepted (e.g. a stale read
         // racing `SocialService.blockMember`'s transactional sever) —
@@ -499,14 +536,35 @@ export class MessagesService {
     // and cross-mention dedup. `isNew` gates this to a genuinely fresh insert
     // — an idempotency-key replay (retry, or the dual HTTP+WS write path
     // racing itself) must not re-notify a mention that already fired once.
+    //
+    // PRD-221: `directCounterpartUserId` (set above, non-null only for a
+    // DIRECT non-official DM) is excluded from the fan-out. In a 1:1 thread
+    // the mentioned member and the message's only possible recipient are
+    // necessarily the same person — `PushMessageListener` already tells them
+    // a message arrived, so a SEPARATE "mentioned you" bell row/push for the
+    // identical message is pure duplication (and, per the report, the mention
+    // row's link target doesn't even point at the message). A GROUP is
+    // different: the "new message" push is a generic, unaddressed signal
+    // shared by every member, while `@name` inside it is the one signal that
+    // says "this one is about you specifically" among several participants —
+    // real triage value the generic push doesn't carry, and the same fact the
+    // "Mentions" inbox (`mentions-inbox.service.ts`) exists to surface across
+    // the app. So only the exact-counterpart case is excluded here; a mention
+    // of a fellow GROUP participant (or of anyone in a group, third party or
+    // not) still earns its own notification, unchanged.
     if (isNew) {
-      await this.mentions.notify(body, userId, {
-        actorId: userId,
-        source: 'message',
-        conversationId,
-        messageId: response.id,
-        excerpt: body.slice(0, 140),
-      });
+      await this.mentions.notify(
+        body,
+        userId,
+        {
+          actorId: userId,
+          source: 'message',
+          conversationId,
+          messageId: response.id,
+          excerpt: body.slice(0, 140),
+        },
+        directCounterpartUserId ? [directCounterpartUserId] : [],
+      );
     }
     return response;
   }

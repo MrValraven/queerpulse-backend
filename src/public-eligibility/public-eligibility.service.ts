@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, IsNull, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
+import { VouchService } from '../vouch/vouch.service';
 import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { MagazineDeck } from '../magazine/entities/magazine-deck.entity';
@@ -91,6 +92,11 @@ export class PublicEligibilityService {
     private readonly connections: ConnectionsService,
     private readonly endorsements: SubprofileEndorsementsService,
     private readonly contentModeration: ContentModerationService,
+    // The one spelling of "how many active vouches has this member received,
+    // with blocks honoured". Injected rather than re-derived here so the
+    // number the eligibility gate scores is the same number the profile page
+    // and the directory card print.
+    private readonly vouchService: VouchService,
   ) {}
 
   /**
@@ -172,6 +178,7 @@ export class PublicEligibilityService {
       subprofileIds,
       connectionCounts,
       eventsAttended,
+      vouchesReceivedCount,
       vouchesGivenCount,
       forumThreadCount,
       forumPostCount,
@@ -184,6 +191,27 @@ export class PublicEligibilityService {
       this.publishedSubprofileIds(userId),
       this.connections.counts(userId),
       this.attendedEventCount(userId, now),
+      // The INBOUND vouch total, taken from `VouchService` rather than from
+      // the denormalized `profiles.vouch_count` column beside it.
+      //
+      // That column is a block-BLIND cache: it is maintained by `± 1` on
+      // vouch create and withdraw only, and no block or unblock ever touches
+      // it. Every member-facing vouch number now comes from
+      // `activeVouchesReceivedBy`, which drops a vouch severed by a block in
+      // either direction. Reading the column here meant someone the member
+      // had blocked still fed `trustScore` (`public-eligibility.rules.ts`,
+      // `signals.vouchCount`) and could nudge them over the 100-point bar
+      // that lets a profile be published to the open web. A severed vouch
+      // must not buy anyone a public page.
+      //
+      // Cost: one COUNT over `IDX_vouches_vouchee_id` plus two equality
+      // probes on `UQ_blocks_pair` per row it finds, and it rides inside this
+      // existing `Promise.all`, so it adds no round trip to the request.
+      //
+      // The OUTBOUND count below stays on the plain repository count: a
+      // member's own record of whom they vouched for is deliberately not
+      // block-filtered (see `VouchService.listGiven`).
+      this.vouchService.getVouchCount(userId),
       this.vouches.count({
         where: { voucherId: userId, withdrawnAt: IsNull() },
       }),
@@ -219,7 +247,7 @@ export class PublicEligibilityService {
       publishedPieces,
       hostedOpenEvents,
       publishedSubprofiles: subprofileIds.length,
-      vouchCount: profile?.vouchCount ?? 0,
+      vouchCount: vouchesReceivedCount,
       vouchesGivenCount,
       endorsementCount,
       connectionCount: connectionCounts.all,

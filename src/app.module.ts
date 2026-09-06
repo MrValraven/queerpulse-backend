@@ -58,6 +58,7 @@ import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-netwo
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminModerationHealthModule } from './admin-moderation-health/admin-moderation-health.module';
 import { AdminQueueNotificationsModule } from './admin-queue-notifications/admin-queue-notifications.module';
+import { AdminQueuesModule } from './admin-queues/admin-queues.module';
 import { AdminReportsModule } from './admin-reports/admin-reports.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
 import { MyMediaModule } from './my-media/my-media.module';
@@ -353,6 +354,10 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     // right rather than folded into AdminOverviewModule.
     AdminModerationHealthModule,
     AdminQueueNotificationsModule,
+    // The staff triage console's read model (PRD-282). Counts every queue the
+    // caller can work, from the same registry the bell announces into, so one
+    // screen can say what is waiting today.
+    AdminQueuesModule,
     AdminReportsModule,
     AdminMediaModule,
     MyMediaModule,

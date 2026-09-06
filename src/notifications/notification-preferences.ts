@@ -48,6 +48,17 @@ export enum NotificationPreferenceCategory {
   Recognition = 'recognition',
   /** "Personas" — invitations to co-own a persona and who joined one. */
   Personas = 'personas',
+  /**
+   * "Personas you follow" — a persona you follow published new work.
+   *
+   * Its own category rather than a share of `Personas`, which is about the
+   * personas you RUN (an invitation to co-own one, somebody joining one). This
+   * one is about somebody else's, and it is the only thing following a persona
+   * ever sends you, so it is also the switch that makes following safe to try:
+   * a member who wants the list without the buzz turns this off and keeps
+   * every persona they follow.
+   */
+  PersonaFollows = 'persona_follows',
   /** "Invitations and introductions" — invites accepted, intros made. */
   Invitations = 'invitations',
   /** "Listings I manage" — questions, accepted edits, co-manager invites. */
@@ -145,6 +156,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   [NotificationType.SubprofileCoOwnerJoined]:
     NotificationPreferenceCategory.Personas,
 
+  // --- Personas you follow --------------------------------------------------
+  // The only type a FOLLOWER ever receives, and the reason the category exists
+  // separately from `Personas` above.
+  [NotificationType.PersonaUpdate]:
+    NotificationPreferenceCategory.PersonaFollows,
+
   // --- Invitations and introductions ----------------------------------------
   [NotificationType.InviteAccepted]: NotificationPreferenceCategory.Invitations,
   [NotificationType.IntroductionMade]:
@@ -175,11 +192,32 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Opportunities,
   [NotificationType.HousingListingMatch]:
     NotificationPreferenceCategory.Opportunities,
+  // PRD-240. Inbound interest in a home you listed, the same shape as
+  // `JobApplication` and `VolunteerApplicationReceived` above it: somebody
+  // wants the thing you posted. A busy lister may legitimately want this turned
+  // down, which is what makes it a category rather than always-delivered.
+  //
+  // Its three siblings are NOT here. `HousingViewingDecided` and
+  // `HousingViewingCancelled` are always-delivered below, because they answer
+  // something the recipient personally asked for and because somebody is
+  // otherwise about to travel to a viewing that is not happening.
+  [NotificationType.HousingViewingRequested]:
+    NotificationPreferenceCategory.Opportunities,
 
   // --- The magazine ---------------------------------------------------------
   [NotificationType.MagazinePieceMessage]:
     NotificationPreferenceCategory.Magazine,
   [NotificationType.MagazineIssuePublished]:
+    NotificationPreferenceCategory.Magazine,
+  // PRD-121, the writer's own desk signals. Same category as the desk message
+  // they already sit beside: a writer who silences "the magazine" means all of
+  // it, and this deliberately invents no new toggle for three types that only
+  // ever reach the handful of members who write.
+  [NotificationType.MagazinePieceCommissioned]:
+    NotificationPreferenceCategory.Magazine,
+  [NotificationType.MagazinePieceStageChanged]:
+    NotificationPreferenceCategory.Magazine,
+  [NotificationType.MagazinePiecePublished]:
     NotificationPreferenceCategory.Magazine,
 };
 
@@ -215,8 +253,46 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.ReportFiled,
     NotificationType.CommunityReportFiled,
     NotificationType.ReportResolved,
+    // PRD-289. The reporter's receipt on filing. Always delivered for the same
+    // reason `ReportResolved` is: it is the platform's own word about a case
+    // the member opened, and it is the only in-app record they hold until a
+    // moderator closes it (up to 7 days at the low severity band). A volume
+    // control that could silence it would recreate the silence this row exists
+    // to end.
+    NotificationType.ReportReceived,
+    // PRD-240/242/244, the housing lifecycle. Four values, three reasons, all
+    // of them the platform answering something the member themself started:
+    //
+    // `HousingViewingDecided` is the lister's yes, no or counter-offer on a
+    // viewing this member asked for. Same rule as `VolunteerApplicationDecided`
+    // and `JoinRequestApproved`: a decision on your own request is always
+    // written. It also carries real weight beyond the words, because acceptance
+    // is one of the three gates that unlock the exact address.
+    //
+    // `HousingViewingCancelled` is need-to-know in the `EventCancelled` sense:
+    // without it somebody travels across the city to a viewing that is no
+    // longer happening. No volume control may swallow that.
+    //
+    // `HousingJoinDecided` is staff triage on a co-op or housing-group
+    // application the member filed, and until it existed there was no bell AND
+    // no "my join requests" page, so silencing it would restore a dead end.
+    //
+    // `HousingListingExpiring` is a deadline on the member's OWN listing, and
+    // the only warning that arrives before the home drops off the board. Every
+    // other expiry signal is post-mortem.
+    NotificationType.HousingViewingDecided,
+    NotificationType.HousingViewingCancelled,
+    NotificationType.HousingJoinDecided,
+    NotificationType.HousingListingExpiring,
     NotificationType.AppealResolved,
     NotificationType.CommunityBanned,
+    // A moderator's takedown of your post or reply (PRD-147). The platform's
+    // word on an action taken against you, and the only channel that carries
+    // the reason and the rule it rested on, so no content-volume category may
+    // swallow it. It is not gated by the per-community `notificationLevel`
+    // either: `COMMUNITY_LEVELS_WANTING` is a whitelist and this type is
+    // absent from it, so a muted community still delivers it.
+    NotificationType.CommunityPostRemoved,
     NotificationType.ConcernUpdate,
     NotificationType.SecurityNewSignIn,
     // A moderation queue crossing its warning or critical threshold, and its

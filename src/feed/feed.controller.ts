@@ -30,6 +30,13 @@ export class FeedController {
   @ApiOperation({ summary: 'Get your feed (cursor paginated, by tab).' })
   @ApiOkResponse({ description: 'A cursor page of feed items.' })
   getFeed(@CurrentUser() user: CurrentUserData, @Query() query: GetFeedQuery) {
-    return this.feedService.getFeed(user.userId, query.tab, query.cursor);
+    return this.feedService.getFeed(
+      user.userId,
+      query.tab,
+      query.cursor,
+      undefined,
+      query.joinedWithinDays,
+      query.lang,
+    );
   }
 }

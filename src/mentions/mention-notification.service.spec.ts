@@ -236,6 +236,59 @@ describe('MentionNotificationService.notify', () => {
     expect(notifiedRecipients).not.toContain('user-outsider');
   });
 
+  it('excludeUserIds (PRD-221) drops a mentioned recipient the same as the author, without affecting others', async () => {
+    const {
+      service,
+      conversationParticipants,
+      notifications,
+      userIdsForSlugs,
+    } = build();
+    userIdsForSlugs.mockResolvedValue(
+      new Map([
+        ['counterpart', 'user-counterpart'],
+        ['other-member', 'user-other'],
+      ]),
+    );
+    conversationParticipants.find.mockResolvedValue([
+      { userId: 'user-counterpart' },
+      { userId: 'user-other' },
+    ]);
+
+    // Mirrors `MessagesService.sendMessage`'s 1:1-DM call: mentioning the
+    // thread's own counterpart is excluded, but a mention of anyone else in
+    // the same fan-out still notifies normally.
+    await service.notify(
+      '@counterpart @other-member look here',
+      'author-1',
+      {
+        source: 'message',
+        conversationId: 'conversation-1',
+        messageId: 'message-1',
+        excerpt: 'hey are you free',
+      },
+      ['user-counterpart'],
+    );
+
+    const notifiedRecipients =
+      notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
+    expect(notifiedRecipients).toEqual(['user-other']);
+    expect(notifiedRecipients).not.toContain('user-counterpart');
+  });
+
+  it('excludeUserIds defaults to empty — every existing 3-arg call site is unaffected', async () => {
+    const { service, notifications, userIdsForSlugs } = build();
+    userIdsForSlugs.mockResolvedValue(new Map([['alice', 'user-alice']]));
+
+    await service.notify('hey @alice check this', 'author-1', payloadBase);
+
+    expect(notifications.createForRecipients).toHaveBeenCalledWith(
+      ['user-alice'],
+      NotificationType.Mention,
+      { ...payloadBase, entityKind: 'member', entityRef: 'alice' },
+      'author-1',
+    );
+  });
+
   it('fails CLOSED on a message mention carrying no conversationId', async () => {
     const { service, notifications, userIdsForSlugs } = build();
     userIdsForSlugs.mockResolvedValue(new Map([['someone', 'user-someone']]));

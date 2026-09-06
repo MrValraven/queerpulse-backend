@@ -22,6 +22,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
+import { PublishLandlordReplyDto } from './dto/publish-landlord-reply.dto';
 import { ListAdminLandlordsQuery } from './dto/list-admin-landlords.query';
 import { ListIntroRequestsQuery } from './dto/list-intro-requests.query';
 import { RemoveLandlordQuery } from './dto/remove-landlord.query';
@@ -179,6 +180,64 @@ export class AdminLandlordsController {
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   restoreRecommendation(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.restoreRecommendation(id);
+  }
+
+  /**
+   * PRD-249. Publish the named landlord's RIGHT OF REPLY on one recommendation.
+   *
+   * A staff route because a landlord in this directory has no account and no
+   * claim path: the entry is community-maintained, about a third party, and the
+   * whole directory is behind `ActiveMemberGuard`, so the landlord cannot even
+   * read the page that rates them. Their words arrive through the public
+   * `landlord_reply_request` intake form, a human checks who they are dealing
+   * with, and this route publishes what they said. The full path, and what was
+   * rejected on the way to it, is in `LandlordsService.publishLandlordReply`.
+   *
+   * Moderator-tier, matching every other route on this controller: a moderator
+   * who can take a tenant's warning down entirely is trusted with the smaller
+   * act of letting the person it names answer it.
+   */
+  @Post('recommendations/:id/reply')
+  @ApiOperation({
+    summary: "Publish the landlord's reply to one recommendation",
+    description:
+      "The landlord's own words, transcribed. It is published on their " +
+      'behalf because they have no account here, and every member read labels ' +
+      'it that way. Publishing again replaces the standing reply; there is no ' +
+      'thread. Refused on a recommendation already withheld by a takedown, ' +
+      'since there is nothing public left to answer.',
+  })
+  @ApiOkResponse({ description: 'The recommendation, with the reply on it.' })
+  @ApiBadRequestResponse({
+    description: 'An empty reply, or one on a withheld recommendation.',
+  })
+  @ApiNotFoundResponse({ description: 'No recommendation with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  publishLandlordReply(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PublishLandlordReplyDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.service.publishLandlordReply(id, user.userId, dto);
+  }
+
+  // Reads as what it does: delete the REPLY, not the recommendation.
+  @Delete('recommendations/:id/reply')
+  @ApiOperation({
+    summary: 'Take a published landlord reply back down',
+    description:
+      'The undo for a transcription that went wrong: the wrong person, a ' +
+      'misheard sentence, or a landlord asking for it to come down. Clears ' +
+      'the text, the timestamp and the publishing admin together. Idempotent ' +
+      'on a recommendation carrying no reply.',
+  })
+  @ApiOkResponse({ description: 'The recommendation, with no reply on it.' })
+  @ApiNotFoundResponse({ description: 'No recommendation with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  retractLandlordReply(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.retractLandlordReply(id);
   }
 
   // The recommendations on one entry, with their moderation state: the read

@@ -4,6 +4,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { MetricsService } from '../metrics/metrics.service';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -93,6 +94,11 @@ describe('ReportsService', () => {
         { provide: getRepositoryToken(EventPhoto), useValue: eventPhotos },
         { provide: EventEmitter2, useValue: emitter },
         { provide: MetricsService, useValue: metrics },
+        // Holds `REPORT_ANONYMOUS_FLOOD_PEPPER`. Returning undefined is the
+        // unset case, which makes the service fall back to its per-process
+        // random pepper — the anonymous caps still bind, which is what these
+        // cases exercise.
+        { provide: ConfigService, useValue: { get: () => undefined } },
       ],
     }).compile();
     service = module.get(ReportsService);
@@ -163,23 +169,105 @@ describe('ReportsService', () => {
       );
     });
 
-    it('persists anonymity, contact email, and evidence when provided', async () => {
+    it('persists anonymity and evidence when provided', async () => {
       await service.create('reporter-1', {
         subjectType: ReportSubjectType.Message,
         subjectId: 'msg-1',
         reasonCode: 'unwanted_contact',
         anonymous: true,
-        contactEmail: 'anon@example.com',
         evidence: [{ type: 'screenshot', uploadId: 'upload-1' }],
       });
 
       expect(reports.save).toHaveBeenCalledWith(
         expect.objectContaining({
           anonymous: true,
-          contactEmail: 'anon@example.com',
           evidence: [{ type: 'screenshot', uploadId: 'upload-1' }],
         }),
       );
+    });
+
+    // PRD-281. `anonymous: true` on a signed-in filing hides the reporter from
+    // moderators; it does not mean there is no account. The member is reachable
+    // through the bell and can read their own report on `GET /reports/mine`, so
+    // an off-platform address is dropped rather than stored beside their id.
+    // Dropped, never refused: the report itself still files.
+    it('drops a contact email on a signed-in filing', async () => {
+      const res = await service.create('reporter-1', {
+        subjectType: ReportSubjectType.Message,
+        subjectId: 'msg-1',
+        reasonCode: 'unwanted_contact',
+        anonymous: true,
+        contactEmail: 'member@example.com',
+      });
+
+      expect(res.id).toBe('report-1');
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reporterId: 'reporter-1',
+          anonymous: true,
+          contactEmail: null,
+        }),
+      );
+    });
+
+    // The other half of the same rule: a signed-out reporter has no bell and no
+    // `GET /reports/mine`, so the address they chose to leave is the only way a
+    // human could ever reach them. Stored, and nothing sends to it.
+    it('keeps a contact email on a signed-out filing', async () => {
+      await service.create(
+        null,
+        {
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'member-2',
+          reasonCode: 'harassment',
+          contactEmail: 'stranger@example.com',
+        },
+        '203.0.113.9',
+      );
+
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reporterId: null,
+          contactEmail: 'stranger@example.com',
+        }),
+      );
+      // A peppered HMAC-SHA256 hex digest of the client address, never the
+      // address. This is what the anonymous flood caps count.
+      const savedCalls = reports.save.mock.calls as Array<
+        [{ anonymousReporterKey: string | null }]
+      >;
+      const savedKey = savedCalls[0]?.[0].anonymousReporterKey;
+      expect(savedKey).toMatch(/^[0-9a-f]{64}$/);
+      expect(savedKey).not.toContain('203.0.113.9');
+    });
+
+    // The dedupe fast-path is SKIPPED for a signed-out filing. Matching on a
+    // null reporter would hand one stranger another stranger's open report and
+    // throw the second filing away.
+    it('never collapses a signed-out filing into an existing open report', async () => {
+      reports.findOne.mockResolvedValue({
+        id: 'someone-elses-report',
+        subjectType: ReportSubjectType.Member,
+        subjectId: 'member-2',
+        reasonCode: 'harassment',
+        severity: ReportSeverity.High,
+        status: ReportStatus.Open,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        slaDueAt: new Date('2026-01-01T06:00:00.000Z'),
+      });
+
+      const res = await service.create(
+        null,
+        {
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'member-2',
+          reasonCode: 'harassment',
+        },
+        '203.0.113.9',
+      );
+
+      expect(res.id).toBe('report-1');
+      expect(reports.save).toHaveBeenCalled();
     });
 
     it('rejects reporting your own message', async () => {

@@ -203,6 +203,82 @@ describe('PushNotificationListener', () => {
     expect(payload.timestamp).toBe(NOTIFICATION_CREATED_AT.getTime());
   });
 
+  // PRD-222. The push has to open the same thing the bell row opens, for every
+  // source a mention can be written from, so `/notifications` is only ever the
+  // fallback for a payload with nothing to open.
+  it('deep-links a community-post Mention to the post permalink', async () => {
+    const { listener, push } = build({ actorProfile: ACTOR });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'community',
+          communitySlug: 'trans-joy',
+          postId: 'post-7',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.data.url).toBe('/community/trans-joy/post/post-7');
+  });
+
+  it('falls back to the community page for a community Mention with no post id', async () => {
+    const { listener, push } = build({ actorProfile: ACTOR });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'community',
+          communitySlug: 'trans-joy',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.data.url).toBe('/community/trans-joy');
+  });
+
+  it('deep-links a message Mention to the conversation and the message', async () => {
+    const { listener, push } = build({ actorProfile: ACTOR });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'message',
+          conversationId: 'conv-1',
+          messageId: 'msg-9',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.data.url).toBe('/messages?c=conv-1&m=msg-9');
+  });
+
+  it('falls back to the notifications centre when the payload names no destination', async () => {
+    const { listener, push } = build({ actorProfile: ACTOR });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'forum',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.data.url).toBe('/notifications');
+  });
+
   it('does not push a Mention when the Mentions category is off', async () => {
     const { listener, push } = build({
       actorProfile: ACTOR,
@@ -345,7 +421,7 @@ describe('PushNotificationListener', () => {
       bodyKey: 'push:event.cancelled.body',
       params: { event: 'Trivia Night' },
     });
-    expect(payload.data.url).toBe('/events/trivia-night');
+    expect(payload.data.url).toBe('/gatherings/trivia-night');
     // No actor for event system pushes -> no icon.
     expect(payload).not.toHaveProperty('icon');
     // The notification's own createdAt, not delivery time.

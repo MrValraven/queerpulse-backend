@@ -109,12 +109,30 @@ function subjectFor(
       return (
         stringField(payload, 'eventSlug') ?? stringField(payload, 'eventId')
       );
+    // A cancellation collapses onto its SERIES, and only onto a series
+    // (ENG-141). This is the second exception to the always-delivered rule
+    // above, and it is narrower than `AdminQueueItem`'s: a standalone
+    // cancellation has no `seriesId`, returns null here, and keeps its own row
+    // exactly as every other outcome does. Two occurrences of the same weekly
+    // group coming off the calendar, though, are one decision said twice, and
+    // "your Tuesday group is cancelled" is not made truer by arriving thirty
+    // times. `EventsService.cancel` already sends one message for a whole
+    // series; this is the guard for any path that ever cancels them singly.
+    case NotificationType.EventCancelled:
+      return stringField(payload, 'seriesId');
     // A new follower collapses onto the persona that was followed.
     case NotificationType.PersonaFollowed:
       return (
         stringField(payload, 'subprofileId') ??
         stringField(payload, 'personaId')
       );
+    // New work from a persona you follow collapses onto that PERSONA
+    // (PRD-208). An owner filling in a section publishes a run of items in one
+    // sitting, and "GRAIN posted a new photo" twenty times over is one act of
+    // attention said twenty ways. The bundle carries the newest item's title
+    // and floats back to the top, so the row stays worth opening.
+    case NotificationType.PersonaUpdate:
+      return stringField(payload, 'subprofileId');
     // An admin queue's arrivals collapse onto the QUEUE.
     //
     // This is the one always-delivered type that bundles, which the docstring

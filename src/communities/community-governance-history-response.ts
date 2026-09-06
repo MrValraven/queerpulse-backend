@@ -50,6 +50,16 @@ export interface CommunityGovernanceSettingChangeDTO {
  * the freeze trigger (`manual`, `report_pileup`, `emergency_report`), which
  * every viewer already reads as `CommunityDetailDTO.frozenReason`.
  *
+ * `ruleText`, `postId`, `replyId` and `internalNote` are in for PRD-147, the
+ * content-takedown entries. A log that records that a moderator removed
+ * something, without saying what, under which rule, or with what note, leaves
+ * the community's own staff exactly as unable to review their own decisions as
+ * the member was to understand them. `ruleText` is the community's own house
+ * rule, already public to every member; `internalNote` is moderator-authored
+ * and this audience is the one it was written for; the two content ids address
+ * rows this same audience already reads through their mod tools. None of it is
+ * new disclosure. It is attribution.
+ *
  * WHAT IS DELIBERATELY OUT
  *
  * 1. Raw user ids (`previousOwnerId`, `fromOwnerId`, `bannedByUserId`,
@@ -88,6 +98,25 @@ export interface CommunityGovernanceLogDetailsDTO {
   cardSerial?: string;
   /** `settings_changed`: the field-by-field diff, in the order it was written. */
   changedSettings?: CommunityGovernanceSettingChangeDTO[];
+  /** `member_banned` and `post_removed`/`reply_removed`: the house rule that
+   *  was cited, as it read at the moment of the action. The community's own
+   *  rules are already visible to every member, and an entry that says a
+   *  decision rested on a rule without saying which one answers half a
+   *  question. */
+  ruleText?: string;
+  /** `post_removed` / `reply_removed` (PRD-147): which piece of content was
+   *  taken down. Without it the entry records that a moderator removed
+   *  something and not what, which is the same silence the row exists to end.
+   *  A tombstoned post is still readable by this audience through the
+   *  community's own mod tools. */
+  postId?: string;
+  /** `reply_removed`: the reply itself; `postId` alongside it is the thread it
+   *  sat in. */
+  replyId?: string;
+  /** `post_removed` / `reply_removed`: the moderators' own working note, which
+   *  is NEVER sent to the author. This route is owner/co-owner/mod only and is
+   *  where such a note is meant to be read. */
+  internalNote?: string;
 }
 
 /**
@@ -221,6 +250,10 @@ export function toCommunityGovernanceLogDetails(
   const ratificationExpiresAt = readString(metadata, 'ratificationExpiresAt');
   const cardSerial = readString(metadata, 'serial');
   const changedSettings = readChangedSettings(metadata);
+  const ruleText = readString(metadata, 'ruleText');
+  const postId = readString(metadata, 'postId');
+  const replyId = readString(metadata, 'replyId');
+  const internalNote = readString(metadata, 'internalNote');
 
   if (fromRole !== undefined) details.fromRole = fromRole;
   if (toRole !== undefined) details.toRole = toRole;
@@ -234,6 +267,10 @@ export function toCommunityGovernanceLogDetails(
   }
   if (cardSerial !== undefined) details.cardSerial = cardSerial;
   if (changedSettings !== undefined) details.changedSettings = changedSettings;
+  if (ruleText !== undefined) details.ruleText = ruleText;
+  if (postId !== undefined) details.postId = postId;
+  if (replyId !== undefined) details.replyId = replyId;
+  if (internalNote !== undefined) details.internalNote = internalNote;
   return details;
 }
 

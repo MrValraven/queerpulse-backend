@@ -214,7 +214,7 @@ describe('EventRemindersService', () => {
         actions: [{ action: 'view', title: 'Details' }],
         requireInteraction: true,
         vibrate: [100, 50, 100],
-        data: { url: '/events/pride-picnic' },
+        data: { url: '/gatherings/pride-picnic' },
         l10n: { bodyKey: 'push:event.reminder.body' },
         // The event's own start time, not delivery time.
         timestamp: startAt.getTime(),

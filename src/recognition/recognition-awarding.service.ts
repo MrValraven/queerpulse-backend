@@ -179,13 +179,18 @@ export class RecognitionAwardingService {
         await awardsRepo
           .createQueryBuilder()
           .insert()
+          // `context` is left NULL. The column is for a note written about
+          // THIS member's award ("Pride Brunch, Jun 2025"); copying the
+          // catalogue's default English sentence into it persisted a display
+          // string as data, and left the client unable to tell a real note
+          // from the default, so a PT member read the default in English.
+          // `buildBadges` still serves `def.earnedContext` as the fallback, so
+          // the wire is unchanged.
           .values(
             earnedKeys.map((badgeKey) => ({
               userId,
               badgeKey,
-              context:
-                BADGE_CATALOG.find((badge) => badge.key === badgeKey)
-                  ?.earnedContext ?? null,
+              context: null,
             })),
           )
           .orIgnore()

@@ -24,6 +24,17 @@ export type PieceFormat = 'article' | 'deck';
  */
 export type ArtState = 'none' | 'brief' | 'in' | 'na';
 
+/**
+ * The workflow spine, in order. `published` is TERMINAL and is the only value
+ * the desk never sets by hand: `publishPiece`/`publishArticle`/`shipIssue`
+ * move a piece into it the moment its article or deck actually goes live, and
+ * `unpublishPiece` moves it back to `ready`. Before it existed the pipeline
+ * stopped at `ready`, so a piece that had been live for months still read
+ * "Ready" to its writer (PRD-120).
+ *
+ * Stored as `varchar` (see the header note above), so adding a value here is a
+ * code-only change with no Postgres `ALTER TYPE` migration.
+ */
 export type PieceStage =
   | 'commissioned'
   | 'drafting'
@@ -31,7 +42,8 @@ export type PieceStage =
   | 'edit'
   | 'sensitivity_read'
   | 'layout'
-  | 'ready';
+  | 'ready'
+  | 'published';
 
 /**
  * jsonb shape stored on `MagazinePiece.brief`. Validated by hand-written

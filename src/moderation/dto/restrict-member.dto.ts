@@ -1,5 +1,18 @@
-import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
+import { Transform } from 'class-transformer';
 import { REASON_CODES, ReasonCode } from '../../reports/reason-catalogue';
+import {
+  MAX_MOD_NOTE_LENGTH,
+  MEMBER_FACING_NOTE_MESSAGE,
+  MIN_MEMBER_FACING_NOTE_LENGTH,
+  trimmedText,
+} from './member-facing-note';
 
 /**
  * `POST /admin/members/:id/restrict` body — a direct admin restriction from the
@@ -16,8 +29,18 @@ export class RestrictMemberDto {
 
   // The exact member-facing text — the reason the restricted member reads in
   // their `moderation_outcome` notification.
+  //
+  // PRD-287: bounded on BOTH ends now, unconditionally. Unlike `ModActionDto`
+  // there is no action to branch on here — every request to this endpoint is a
+  // suspension or a ban, so every one of them reaches a member. Trimmed first,
+  // so a note of spaces fails rather than arriving as a blank reason attached
+  // to a locked account.
+  @Transform(trimmedText)
   @IsString()
-  @MaxLength(2000)
+  @MinLength(MIN_MEMBER_FACING_NOTE_LENGTH, {
+    message: MEMBER_FACING_NOTE_MESSAGE,
+  })
+  @MaxLength(MAX_MOD_NOTE_LENGTH)
   note!: string;
 
   // e.g. "7d" / "24h" / "30d" for a time-boxed suspension. OMIT for a permanent

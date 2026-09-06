@@ -17,6 +17,7 @@ const WORK_KEY = `work/${USER_SEGMENT}/${FILE_SEGMENT}.png`;
 const STORY_COVER_KEY = `story-covers/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
 const GATHERING_KEY = `gathering-photos/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
 const MESSAGE_IMAGE_KEY = `message-images/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
+const MESSAGE_DOCUMENT_KEY = `message-documents/${USER_SEGMENT}/${FILE_SEGMENT}.pdf`;
 
 const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
 // A logged-in member who did NOT upload the gathering photo (their id differs
@@ -156,6 +157,40 @@ describe('FilesController', () => {
       // uploader-scoped.
       messageQueryBuilder.getExists.mockResolvedValue(false);
       await expect(serve(MESSAGE_IMAGE_KEY, LOGGED_IN)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  // PRD-226: a document attachment gets the IDENTICAL participant-scoped
+  // treatment as a message image (M7) — never a weaker one, since a document
+  // is more sensitive than a photo, not less. Same fixture shape as the
+  // "message images" suite above, just against the `message-document` kind.
+  describe('message documents (participant-gated, PRD-226)', () => {
+    it('rejects an anonymous request', async () => {
+      await expect(serve(MESSAGE_DOCUMENT_KEY, null)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('redirects for a conversation participant', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(true);
+      await serve(MESSAGE_DOCUMENT_KEY, OTHER_MEMBER);
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('404s for a logged-in member who participates in no such conversation', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(false);
+      await expect(serve(MESSAGE_DOCUMENT_KEY, OTHER_MEMBER)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to the uploader-only check (participant path, not owner path)', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(false);
+      await expect(serve(MESSAGE_DOCUMENT_KEY, LOGGED_IN)).rejects.toThrow(
         NotFoundException,
       );
     });
