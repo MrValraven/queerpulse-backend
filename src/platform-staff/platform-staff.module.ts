@@ -13,5 +13,9 @@ import { PlatformStaffService } from './platform-staff.service';
   imports: [UsersModule, TypeOrmModule.forFeature([UserStaffRole])],
   controllers: [PlatformStaffController],
   providers: [PlatformStaffService],
+  // Exported for `GovernanceModule`: an advisory-council seat may only be held
+  // by someone on this roster, and the write path asks this service rather than
+  // restating the rule.
+  exports: [PlatformStaffService],
 })
 export class PlatformStaffModule {}

@@ -7,6 +7,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
   MaxLength,
   MinLength,
@@ -179,8 +180,9 @@ export class LongAuthoredTextDto {
 }
 
 /**
- * One advisory-council seat. `name`/`initials` are data; the role descriptor is
- * either the seeded `roleKey` or the authored `role`, never both (PRD-265).
+ * One advisory-council seat. The seat-holder is named by `memberId` (a staff
+ * member, checked in the service); the role descriptor is either the seeded
+ * `roleKey` or the authored `role`, never both (PRD-265).
  *
  * Note the exclusive-or here is spelled on `roleKey`, not `key`: this is the
  * one section whose seeded identifier is not called `key`, so the shared
@@ -189,13 +191,14 @@ export class LongAuthoredTextDto {
  * alongside a key, the second requires one in its absence.
  */
 export class CouncilSeatEditDto {
-  @IsString()
-  @MaxLength(80)
-  name!: string;
-
-  @IsString()
-  @MaxLength(4)
-  initials!: string;
+  /**
+   * The seat-holder, by user id. Only someone on the platform staff roster may
+   * hold a seat, and that is checked in `GovernanceOverviewService` rather than
+   * here: it needs a database read, which a validation decorator has no
+   * business doing.
+   */
+  @IsUUID()
+  memberId!: string;
 
   // Present only on a seeded seat, and only when no authored role is given.
   @ValidateIf((seat: CouncilSeatEditDto) => seat.roleKey !== undefined)

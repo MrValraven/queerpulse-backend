@@ -9,7 +9,12 @@ import {
   StaffRoleId,
   isBadgedStaffRoleId,
 } from '../users/staff-roles.registry';
-import { PlatformStaffRowDTO, StaffRole } from './platform-staff-response';
+import { toVisibleAvatarUrl } from '../common/member-ref';
+import {
+  PlatformStaffCandidateDTO,
+  PlatformStaffRowDTO,
+  StaffRole,
+} from './platform-staff-response';
 
 /** The account tiers that earn a staff badge. Plain members are excluded. */
 const STAFF_TIERS = [UserRole.Moderator, UserRole.Admin];
@@ -45,6 +50,88 @@ export class PlatformStaffService {
    * still fits with room to spare.
    */
   async list(): Promise<PlatformStaffRowDTO[]> {
+    const { rosterUsers, badgedRolesByUserId } = await this.loadRoster();
+
+    // A user without a profile row has no slug to key the badge by, so there is
+    // nothing the frontend could match them against.
+    return rosterUsers
+      .filter((staffUser) => staffUser.profile?.slug)
+      .map((staffUser) => ({
+        slug: staffUser.profile.slug,
+        firstName: staffUser.profile.firstName,
+        lastName: staffUser.profile.lastName,
+        // Null for a grant holder on the ordinary member tier: they are on this
+        // roster for what they were handed, and claiming a tier they do not hold
+        // would overstate what they can do.
+        platformRole: STAFF_TIERS.includes(staffUser.role)
+          ? (staffUser.role as StaffRole)
+          : null,
+        badgedStaffRoles: sortByRegistryOrder(
+          badgedRolesByUserId.get(staffUser.id) ?? [],
+        ),
+      }));
+  }
+
+  /**
+   * The roster as USER IDS — the one answer to "may this person hold a staff
+   * seat?", for the write paths that need to check a submitted id rather than
+   * render a list. The advisory-council editor is the first: a seat names a
+   * staff member, and `GovernanceOverviewService` refuses a save naming anyone
+   * else.
+   *
+   * Deliberately the same population as `list()` above, through the same
+   * loader: a second spelling of "tier OR badged grant, active only" beside
+   * this one is drift nobody would see until someone who is visibly on
+   * `/admin/staff` was refused a council seat, or the reverse.
+   *
+   * Unlike `list()` this keeps a user with no profile row: they are staff, and
+   * the caller here is an authorisation check, not a rendering one.
+   */
+  async listStaffUserIds(): Promise<Set<string>> {
+    const { rosterUsers } = await this.loadRoster();
+    return new Set(rosterUsers.map((staffUser) => staffUser.id));
+  }
+
+  /**
+   * The roster WITH user ids, for the admin-side pickers that have to submit a
+   * member id rather than a slug (the advisory-council editor).
+   *
+   * Kept off `GET /platform/staff` and behind the admin controller that serves
+   * it, because that endpoint is readable by every active member and its row
+   * shape is deliberately id-free: handing every member the user ids of
+   * everyone holding moderation power is not something the badge map needs.
+   * Slugs are not an alternative here — a handle can be changed, and a seat
+   * keyed on one would silently point at nobody afterwards.
+   */
+  async listCandidates(): Promise<PlatformStaffCandidateDTO[]> {
+    const { rosterUsers, badgedRolesByUserId } = await this.loadRoster();
+
+    return rosterUsers
+      .filter((staffUser) => staffUser.profile?.slug)
+      .map((staffUser) => ({
+        id: staffUser.id,
+        slug: staffUser.profile.slug,
+        firstName: staffUser.profile.firstName,
+        lastName: staffUser.profile.lastName,
+        avatarUrl: toVisibleAvatarUrl(staffUser.profile),
+        platformRole: STAFF_TIERS.includes(staffUser.role)
+          ? (staffUser.role as StaffRole)
+          : null,
+        badgedStaffRoles: sortByRegistryOrder(
+          badgedRolesByUserId.get(staffUser.id) ?? [],
+        ),
+      }));
+  }
+
+  /**
+   * Loads the roster population once: the moderator and admin account tiers,
+   * plus every member holding an additive grant that earns a badge, deduped and
+   * carrying the grants each of them holds.
+   */
+  private async loadRoster(): Promise<{
+    rosterUsers: User[];
+    badgedRolesByUserId: Map<string, StaffRoleId[]>;
+  }> {
     // Grants first: their holders are half of who the roster has to load, and
     // the same rows also tell us which badges every tier member wears.
     const badgedGrants = await this.staffRoleGrantsRepository.find({
@@ -90,24 +177,10 @@ export class PlatformStaffService {
       rosterUsersById.set(rosterUser.id, rosterUser);
     }
 
-    // A user without a profile row has no slug to key the badge by, so there is
-    // nothing the frontend could match them against.
-    return [...rosterUsersById.values()]
-      .filter((staffUser) => staffUser.profile?.slug)
-      .map((staffUser) => ({
-        slug: staffUser.profile.slug,
-        firstName: staffUser.profile.firstName,
-        lastName: staffUser.profile.lastName,
-        // Null for a grant holder on the ordinary member tier: they are on this
-        // roster for what they were handed, and claiming a tier they do not hold
-        // would overstate what they can do.
-        platformRole: STAFF_TIERS.includes(staffUser.role)
-          ? (staffUser.role as StaffRole)
-          : null,
-        badgedStaffRoles: sortByRegistryOrder(
-          badgedRolesByUserId.get(staffUser.id) ?? [],
-        ),
-      }));
+    return {
+      rosterUsers: [...rosterUsersById.values()],
+      badgedRolesByUserId,
+    };
   }
 }
 

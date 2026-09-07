@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { GovernanceOverviewService } from './governance-overview.service';
@@ -8,6 +8,7 @@ import {
 } from './entities/governance-overview.entity';
 import { governanceOverviewSeed } from './governance-overview.seed';
 import { Profile } from '../users/entities/profile.entity';
+import { PlatformStaffService } from '../platform-staff/platform-staff.service';
 import { UsersService } from '../users/users.service';
 import { DataSource } from 'typeorm';
 import {
@@ -57,6 +58,8 @@ describe('GovernanceOverviewService', () => {
     getMany: jest.Mock;
   };
   let profilesRepo: { find: jest.Mock };
+  let platformStaff: { listStaffUserIds: jest.Mock };
+  let dataSource: { transaction: jest.Mock };
 
   beforeEach(async () => {
     usersService = {
@@ -74,6 +77,12 @@ describe('GovernanceOverviewService', () => {
       createQueryBuilder: jest.fn(() => latestChangesQb),
     };
     profilesRepo = { find: jest.fn() };
+    platformStaff = {
+      listStaffUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
+    // Every `updateOverview` test below asserts on what the service does
+    // BEFORE the transaction opens, so the transaction body is never run.
+    dataSource = { transaction: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GovernanceOverviewService,
@@ -84,7 +93,8 @@ describe('GovernanceOverviewService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
         { provide: UsersService, useValue: usersService },
-        { provide: DataSource, useValue: { transaction: jest.fn() } },
+        { provide: PlatformStaffService, useValue: platformStaff },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
     service = module.get(GovernanceOverviewService);
@@ -234,6 +244,141 @@ describe('GovernanceOverviewService', () => {
       await expect(service.getAdminOverview()).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+  // ── Advisory-council seats ────────────────────────────────────────────────
+  // A seat stores a `memberId` and nothing else about the person, so both
+  // reads resolve it and the write refuses anyone who is not staff.
+  describe('advisory-council seats', () => {
+    const CHAIR_ID = '11111111-1111-4111-8111-111111111111';
+    const GONE_ID = '22222222-2222-4222-8222-222222222222';
+
+    const seat = (memberId: string) => ({
+      memberId,
+      roleKey: 'psychologistChair' as const,
+      tint: 'jade' as const,
+    });
+
+    const chairProfile = {
+      userId: CHAIR_ID,
+      firstName: 'Mariana',
+      lastName: 'Loução',
+      slug: 'mariana',
+      avatarUrl: 'avatars/mariana.jpg',
+      photoVisible: true,
+      pronouns: 'ela/dela',
+    };
+
+    it('resolves a seat to the member behind it on the public read', async () => {
+      repo.findOne.mockResolvedValue(
+        makeOverview({ council: [seat(CHAIR_ID)] }),
+      );
+      profilesRepo.find.mockResolvedValue([chairProfile]);
+
+      const result = await service.getOverview();
+
+      expect(result.council).toHaveLength(1);
+      expect(result.council[0]!.member.firstName).toBe('Mariana');
+      expect(result.council[0]!.member.slug).toBe('mariana');
+      expect(result.council[0]!.roleKey).toBe('psychologistChair');
+      // The public page gets the person, never the platform's id for them.
+      expect(result.council[0]!).not.toHaveProperty('memberId');
+    });
+
+    it('honours the member photo gate rather than reaching for avatarUrl', async () => {
+      repo.findOne.mockResolvedValue(
+        makeOverview({ council: [seat(CHAIR_ID)] }),
+      );
+      profilesRepo.find.mockResolvedValue([
+        { ...chairProfile, photoVisible: false },
+      ]);
+
+      const result = await service.getOverview();
+
+      // A seat-holder who has hidden their face keeps it hidden here; the
+      // frontend falls back to the tinted monogram.
+      expect(result.council[0]!.member.avatarUrl).toBeNull();
+    });
+
+    it('drops a seat whose member no longer resolves from the public read', async () => {
+      repo.findOne.mockResolvedValue(
+        makeOverview({ council: [seat(CHAIR_ID), seat(GONE_ID)] }),
+      );
+      profilesRepo.find.mockResolvedValue([chairProfile]);
+
+      const result = await service.getOverview();
+
+      // Rather than a seat with a hole where a person was.
+      expect(result.council).toHaveLength(1);
+      expect(result.council[0]!.member.slug).toBe('mariana');
+    });
+
+    it('KEEPS an unresolvable seat on the admin read, so someone can fix it', async () => {
+      repo.findOne.mockResolvedValue(
+        makeOverview({ council: [seat(CHAIR_ID), seat(GONE_ID)] }),
+      );
+      latestChangesQb.getMany.mockResolvedValue([]);
+      profilesRepo.find.mockResolvedValue([chairProfile]);
+
+      const result = await service.getAdminOverview();
+
+      expect(result.council).toHaveLength(2);
+      expect(result.council[1]!.memberId).toBe(GONE_ID);
+      expect(result.council[1]!.member).toBeNull();
+    });
+
+    it('refuses a seat naming someone who is not on the staff roster', async () => {
+      platformStaff.listStaffUserIds.mockResolvedValue(new Set([CHAIR_ID]));
+
+      await expect(
+        service.updateOverview({ council: [seat(GONE_ID)] }, 'admin-1'),
+      ).rejects.toThrow(BadRequestException);
+      // Rejected before anything is written.
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('names the offending seat by position, the only handle the editor has', async () => {
+      platformStaff.listStaffUserIds.mockResolvedValue(new Set([CHAIR_ID]));
+
+      await expect(
+        service.updateOverview(
+          { council: [seat(CHAIR_ID), seat(GONE_ID)] },
+          'admin-1',
+        ),
+      ).rejects.toThrow(/Seat 2/);
+    });
+
+    it('refuses to seat one person twice', async () => {
+      platformStaff.listStaffUserIds.mockResolvedValue(new Set([CHAIR_ID]));
+
+      await expect(
+        service.updateOverview(
+          { council: [seat(CHAIR_ID), seat(CHAIR_ID)] },
+          'admin-1',
+        ),
+      ).rejects.toThrow(/already holds a seat/);
+    });
+
+    it('accepts a council of staff members', async () => {
+      platformStaff.listStaffUserIds.mockResolvedValue(new Set([CHAIR_ID]));
+      repo.findOne.mockResolvedValue(
+        makeOverview({ council: [seat(CHAIR_ID)] }),
+      );
+      latestChangesQb.getMany.mockResolvedValue([]);
+      profilesRepo.find.mockResolvedValue([chairProfile]);
+
+      await service.updateOverview({ council: [seat(CHAIR_ID)] }, 'admin-1');
+
+      expect(dataSource.transaction).toHaveBeenCalled();
+    });
+
+    it('does not ask the roster at all when the payload leaves council alone', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      latestChangesQb.getMany.mockResolvedValue([]);
+
+      await service.updateOverview({ note: 'typo fix' }, 'admin-1');
+
+      expect(platformStaff.listStaffUserIds).not.toHaveBeenCalled();
     });
   });
 });

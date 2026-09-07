@@ -43,19 +43,29 @@ export interface OverviewAuthoredText {
 }
 
 /**
- * One advisory-council seat. `name`/`initials` are non-translatable data the
- * backend owns; `tint` selects the avatar colour pair (`jade`/`violet`/`plum`)
- * the frontend maps to `{bg,color}`.
+ * One advisory-council seat.
+ *
+ * A seat NAMES A MEMBER rather than carrying typed-in words: `memberId` is the
+ * user id of someone on the platform staff roster, and the person's name and
+ * face are resolved from their profile at read time
+ * (`GovernanceOverviewService.toCouncilSeatResponses`). Before this, a seat was
+ * a free-text `name` + `initials` pair, which meant the platform's public
+ * accountability page could name anyone at all, and went stale the moment a
+ * seat-holder changed their name.
+ *
+ * `tint` selects the avatar colour pair (`jade`/`violet`/`plum`) the frontend
+ * maps to `{bg,color}` for the monogram it falls back to when the member shows
+ * no photo — presentation the seat owns, so it stays here.
  *
  * The seat descriptor comes from EXACTLY ONE of two places (PRD-265):
  * `roleKey`, an i18n key resolved on the frontend, on the four seeded seats;
  * or `role`, the editor's own EN/PT words, on a seat authored in the admin UI.
  * Both fields are optional on the type and the DTO enforces the exclusive-or,
- * so a seeded seat keeps rendering unchanged and a new seat needs no deploy.
+ * so a seeded role keeps rendering unchanged and a new one needs no deploy.
  */
 export interface OverviewCouncilSeat {
-  name: string;
-  initials: string;
+  /** The seat-holder's user id. Must be on the staff roster at write time. */
+  memberId: string;
   roleKey?: string;
   role?: OverviewAuthoredText;
   tint: 'jade' | 'violet' | 'plum';
