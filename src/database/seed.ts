@@ -2472,7 +2472,10 @@ interface VolunteerOpportunitySeedDefinition {
   slug: string;
   org: string;
   role: string;
-  cause: OpportunityCause;
+  // Poster-ordered, one to three. Several rows carry a second and third cause
+  // so the board exercises the overlap filter: a chip has to find an
+  // opportunity that lists it in any position.
+  causes: OpportunityCause[];
   commit: OpportunityCommitLevel;
   time: string;
   location: string;
@@ -2491,7 +2494,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     slug: 'mentor-queer-youth',
     org: 'Queer Youth Collective',
     role: 'Mentor',
-    cause: OpportunityCause.Youth,
+    causes: [OpportunityCause.Youth, OpportunityCause.MentalHealth],
     commit: OpportunityCommitLevel.Low,
     time: '2 hrs / week',
     location: 'Lisbon',
@@ -2539,7 +2542,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     slug: 'lgbti-rights-helpline',
     org: 'ILGA Portugal',
     role: 'Helpline Volunteer',
-    cause: OpportunityCause.Rights,
+    causes: [OpportunityCause.Rights, OpportunityCause.Migration],
     commit: OpportunityCommitLevel.Medium,
     time: '4 hrs / week',
     location: 'Lisbon',
@@ -2588,7 +2591,11 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     slug: 'peer-support-facilitator-training',
     org: 'ILGA Portugal',
     role: 'Peer Support Trainee',
-    cause: OpportunityCause.Health,
+    causes: [
+      OpportunityCause.Health,
+      OpportunityCause.TransCare,
+      OpportunityCause.MentalHealth,
+    ],
     commit: OpportunityCommitLevel.Medium,
     time: '3 hrs / week',
     location: 'Lisbon',
@@ -2632,7 +2639,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     slug: 'queer-shelter-weekend-support',
     org: 'Casa Arco-Íris',
     role: 'Weekend Support Volunteer',
-    cause: OpportunityCause.Housing,
+    causes: [OpportunityCause.Housing],
     commit: OpportunityCommitLevel.Low,
     time: '3 hrs / weekend',
     location: 'Porto',
@@ -2671,7 +2678,7 @@ const VOLUNTEER_OPPORTUNITIES: VolunteerOpportunitySeedDefinition[] = [
     slug: 'zine-workshop-facilitator',
     org: 'Livraria Devagar',
     role: 'Workshop Facilitator',
-    cause: OpportunityCause.Arts,
+    causes: [OpportunityCause.Arts, OpportunityCause.CommunityEvents],
     commit: OpportunityCommitLevel.Low,
     time: '2 hrs / month',
     location: 'Braga',
@@ -2748,7 +2755,7 @@ async function seedVolunteering(
         // `VOLUNTEER_OPPORTUNITIES`.
         partnerId: null,
         role: o.role,
-        cause: o.cause,
+        causes: o.causes,
         commit: o.commit,
         time: o.time,
         location: o.location,

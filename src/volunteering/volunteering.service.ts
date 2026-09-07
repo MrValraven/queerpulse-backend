@@ -80,7 +80,10 @@ export interface CreateOpportunityInput {
   // throws (404/403) rather than resolving to `null`.
   communitySlug?: string;
   role: string;
-  cause: OpportunityCause;
+  // One to three, poster-ordered. Deduplicated by `dedupeCauses` before it
+  // reaches the column, so a client sending the same cause twice stores it
+  // once.
+  causes: OpportunityCause[];
   commit: OpportunityCommitLevel;
   time: string;
   location: string;
@@ -108,6 +111,8 @@ export type UpdateOpportunityInput = Partial<
 >;
 
 export interface OpportunityListQuery {
+  // Matches an opportunity listing this cause in ANY position, not just the
+  // one it leads with: a chip must find everything filed under it.
   cause?: OpportunityCause;
   commit?: OpportunityCommitLevel;
   page?: number;
@@ -141,6 +146,15 @@ const MAX_SESSION_HOURS = 24;
 /** How many rows the per-opportunity / per-community breakdowns return. The
  *  platform totals are exact regardless; only the breakdown lists are cut. */
 export const HOURS_BREAKDOWN_LIMIT = 100;
+
+/** Drops repeated causes while keeping the poster's order, so the first
+ * occurrence of each wins. `@ArrayMaxSize` counts what the client SENT, so
+ * without this a payload of `[youth, youth, youth]` passes validation and the
+ * card prints "Youth . Youth . Youth". The first entry survives either way,
+ * which is the one the card leads with and tints from. */
+function dedupeCauses(causes: OpportunityCause[]): OpportunityCause[] {
+  return [...new Set(causes)];
+}
 
 /** Fills every `OpportunityDetailBody` subfield so the `jsonb NOT NULL`
  * `detail` column is always fully populated, even when a caller only
@@ -232,7 +246,7 @@ export class VolunteeringService {
               partnerId,
               communityId,
               role: dto.role,
-              cause: dto.cause,
+              causes: dedupeCauses(dto.causes),
               commit: dto.commit,
               time: dto.time,
               location: dto.location,
@@ -283,7 +297,13 @@ export class VolunteeringService {
       .orderBy('o.created_at', 'DESC');
 
     if (query.cause) {
-      qb.andWhere('o.cause = :cause', { cause: query.cause });
+      // Array overlap, served by `IDX_volunteer_opportunities_causes` (GIN).
+      // The explicit cast is required: without it Postgres cannot infer the
+      // element type of the bound array literal and rejects the `&&`.
+      qb.andWhere(
+        'o.causes && ARRAY[:cause]::volunteer_opportunities_cause_enum[]',
+        { cause: query.cause },
+      );
     }
     if (query.commit) {
       qb.andWhere('o.commit = :commit', { commit: query.commit });
@@ -340,7 +360,7 @@ export class VolunteeringService {
     Object.assign(opportunity, {
       ...(dto.org !== undefined ? { org: dto.org } : {}),
       ...(dto.role !== undefined ? { role: dto.role } : {}),
-      ...(dto.cause !== undefined ? { cause: dto.cause } : {}),
+      ...(dto.causes !== undefined ? { causes: dedupeCauses(dto.causes) } : {}),
       ...(dto.commit !== undefined ? { commit: dto.commit } : {}),
       ...(dto.time !== undefined ? { time: dto.time } : {}),
       ...(dto.location !== undefined ? { location: dto.location } : {}),
