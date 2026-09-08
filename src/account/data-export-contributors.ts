@@ -441,7 +441,7 @@ export class CommunitiesExportContributor implements DataExportContribution {
 /**
  * `volunteering` — the member's signups and what became of them.
  *
- * Each row carries the opportunity's org/role/cause alongside the signup, for
+ * Each row carries the opportunity's org/role/causes alongside the signup, for
  * the same reason the `events` category inlines an event's title: an archive of
  * opaque uuids is not something a person can read. One extra query for the
  * opportunities rather than N, guarded for the never-signed-up case.
@@ -479,7 +479,7 @@ export class VolunteeringExportContributor implements DataExportContribution {
         opportunityId: signup.opportunityId,
         org: opportunity?.org ?? null,
         role: opportunity?.role ?? null,
-        cause: opportunity?.cause ?? null,
+        causes: opportunity?.causes ?? null,
         location: opportunity?.location ?? null,
         note: signup.note,
         status: signup.status,

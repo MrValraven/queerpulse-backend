@@ -7,7 +7,9 @@ import {
 } from '../entities/volunteer-opportunity.entity';
 
 export class ListOpportunitiesQuery {
-  // Filters `VolunteerOpportunity.cause`.
+  // Matches an opportunity that lists this cause anywhere in
+  // `VolunteerOpportunity.causes`, not only the one it leads with. Still a
+  // single value: the board's chip row picks one cause at a time.
   @IsOptional() @IsEnum(OpportunityCause) cause?: OpportunityCause;
 
   // Filters `VolunteerOpportunity.commit`.

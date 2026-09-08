@@ -91,7 +91,7 @@ describe('VolunteeringService', () => {
   const baseDto = {
     org: 'Queer Youth Collective',
     role: 'Mentor',
-    cause: OpportunityCause.Youth,
+    causes: [OpportunityCause.Youth],
     commit: OpportunityCommitLevel.Low,
     time: '2 hrs / week',
     location: 'Lisbon',
@@ -301,6 +301,42 @@ describe('VolunteeringService', () => {
     });
   });
 
+  describe('causes', () => {
+    it("deduplicates causes on create, keeping the poster's order", async () => {
+      await service.create('poster-1', {
+        ...baseDto,
+        causes: [
+          OpportunityCause.Youth,
+          OpportunityCause.MentalHealth,
+          OpportunityCause.Youth,
+        ],
+      });
+
+      // First occurrence wins, so `causes[0]` stays the cause the poster led
+      // with (the one the card tints from). `@ArrayMaxSize` counts what was
+      // SENT, so without the dedupe this row would print "Youth" twice.
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          causes: [OpportunityCause.Youth, OpportunityCause.MentalHealth],
+        }),
+      );
+    });
+
+    it('filters the list by array overlap, so a chip finds a cause in any position', async () => {
+      const qb = qbStub();
+      opportunities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({ cause: OpportunityCause.MentalHealth });
+
+      // `&&`, never `=`: an opportunity listing Mental health SECOND must
+      // still come back under the Mental health chip.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'o.causes && ARRAY[:cause]::volunteer_opportunities_cause_enum[]',
+        { cause: OpportunityCause.MentalHealth },
+      );
+    });
+  });
+
   describe('getBySlug / spotsPct', () => {
     it('404s an unknown slug', async () => {
       opportunities.findOne.mockResolvedValue(null);
@@ -316,7 +352,7 @@ describe('VolunteeringService', () => {
         org: 'Queer Youth Collective',
         partnerId: null,
         role: 'Mentor',
-        cause: OpportunityCause.Youth,
+        causes: [OpportunityCause.Youth],
         commit: OpportunityCommitLevel.Low,
         time: '2 hrs / week',
         location: 'Lisbon',
@@ -352,7 +388,7 @@ describe('VolunteeringService', () => {
         org: 'Org',
         partnerId: null,
         role: 'Role',
-        cause: OpportunityCause.Arts,
+        causes: [OpportunityCause.Arts],
         commit: OpportunityCommitLevel.Medium,
         time: '1 hr',
         location: 'Porto',

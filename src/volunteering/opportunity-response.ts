@@ -43,7 +43,10 @@ export interface OpportunityCardDTO {
   partner: PartnerRef | null;
   community: CommunityRef | null;
   role: string;
-  cause: OpportunityCause;
+  // Poster-ordered, one to three. `causes[0]` is the one the card leads with
+  // and takes its avatar tint from, so consumers must preserve the order
+  // rather than sorting for display.
+  causes: OpportunityCause[];
   commit: OpportunityCommitLevel;
   time: string;
   location: string;
@@ -126,7 +129,7 @@ export function toOpportunityCard(
     partner,
     community,
     role: opportunity.role,
-    cause: opportunity.cause,
+    causes: opportunity.causes,
     commit: opportunity.commit,
     time: opportunity.time,
     location: opportunity.location,

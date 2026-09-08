@@ -7,13 +7,36 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+/**
+ * The cause taxonomy an opportunity is filed under. A row carries one to three
+ * of these (see `VolunteerOpportunity.causes`), the first being the one the
+ * card tints and leads with.
+ *
+ * Ordered as the frontend renders them: the original five first, then the
+ * 2026-09-07 additions. Adding a value here is a curation decision that needs
+ * a migration (`ALTER TYPE ... ADD VALUE`) and a matching entry in the
+ * frontend's single `causes.data.ts` list: the labels, filter chips and
+ * avatar tints all derive from that one place.
+ */
 export enum OpportunityCause {
   Rights = 'rights',
   Health = 'health',
   Youth = 'youth',
   Housing = 'housing',
   Arts = 'arts',
+  TransCare = 'trans_care',
+  Elders = 'elders',
+  MentalHealth = 'mental_health',
+  Migration = 'migration',
+  Education = 'education',
+  Sport = 'sport',
+  CommunityEvents = 'community_events',
+  Fundraising = 'fundraising',
 }
+
+/** Most causes one opportunity may claim. Enforced by the create/update DTOs
+ *  and mirrored by the frontend's chip picker. */
+export const MAX_OPPORTUNITY_CAUSES = 3;
 
 export enum OpportunityCommitLevel {
   Low = 'low',
@@ -75,12 +98,18 @@ export class VolunteerOpportunity {
   @Column({ type: 'varchar' })
   role!: string;
 
+  // One to three causes, poster-ordered: `causes[0]` is the one the card leads
+  // with and takes its avatar tint from. Filtering is an array-overlap match,
+  // so a chip finds a row listing that cause in any position, hence the GIN
+  // index (`IDX_volunteer_opportunities_causes`), added with the column in
+  // `VolunteerOpportunityMultipleCauses1817060000000`.
   @Column({
     type: 'enum',
     enum: OpportunityCause,
     enumName: 'volunteer_opportunities_cause_enum',
+    array: true,
   })
-  cause!: OpportunityCause;
+  causes!: OpportunityCause[];
 
   @Column({
     type: 'enum',
