@@ -22,6 +22,7 @@ import {
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -74,6 +75,20 @@ import {
 // anonymous callers so a signed-out visitor can get a `members_only` signal
 // instead of a blanket 401).
 const ANONYMOUS_VIEWER_ID = '00000000-0000-0000-0000-000000000000';
+
+// The owner half of the directory's free-text search: one accent-folded blob
+// over the linked owner's name and profile handle, joined as `owner` in
+// `directory()`. Built with `foldedHaystack` so the folding here is character
+// for character the folding member search already uses — a second spelling of
+// "fold a name" is how two search boxes on one platform quietly disagree about
+// whether "Joao" finds "João". Columns are the DB's snake_case names, which is
+// what `qualifyColumn` quotes. Only the NAME columns: an owner's bio is not
+// something a persona should be findable by.
+const OWNER_SEARCH_HAYSTACK = foldedHaystack('owner', [
+  'first_name',
+  'last_name',
+  'slug',
+]);
 
 // The public/card read surface for personas: the profile-nested list, the
 // by-handle + by-slug single fetches, the directory browse, cross-entity
@@ -759,9 +774,40 @@ export class SubprofilePublicReadService {
     if (query.query) {
       // Escape LIKE metacharacters so the term matches literally.
       const term = `%${query.query.replace(/[\\%_]/g, '\\$&')}%`;
-      qb.andWhere('(sp.displayName ILIKE :term OR sp.tagline ILIKE :term)', {
-        term,
-      });
+      // The directory carries LINKED personas as well as standalone ones, and
+      // a linked card is titled by its owner ("Ana Silva | Poet"), so the name
+      // on screen has to be searchable — looking up the poet you met by the
+      // name you know them under is the directory's most obvious question, and
+      // before this it returned nothing.
+      //
+      // The owner is joined 1:1 (`profiles.user_id` is the PK), so the join
+      // multiplies no rows and `getCount()`/`offset`/`limit` below stay exact.
+      // It is added ONLY on the search path: an unsearched browse pays nothing.
+      qb.leftJoin(Profile, 'owner', 'owner.userId = sp.userId');
+      // The owner branch is gated on `linkVisibility = linked`, the SAME rule
+      // that decides whether `toCardDTO` fills `ownerName`/`ownerSlug` at all.
+      // An unlinked persona's owner is deliberately unnamed on the card, and
+      // making it matchable here would leak that tie back out through the
+      // result set: search "Ana Silva", get the anonymous persona she runs.
+      //
+      // Folded rather than a bare ILIKE (`foldedHaystack` — the member
+      // directory's own vocabulary), because this audience writes Portuguese
+      // and "Joao"/"Ines" have to find "João"/"Inês". First name, last name and
+      // profile slug are concatenated into ONE haystack, so a full name typed
+      // as "ana silva" matches across the two columns rather than neither.
+      // The persona's own name/tagline keep their plain ILIKE: those two
+      // columns carry GIN trigram indexes built on the unfolded values, and
+      // folding them here would silently stop using them.
+      qb.andWhere(
+        '(sp.displayName ILIKE :term OR sp.tagline ILIKE :term OR ' +
+          `(sp.linkVisibility = :linkedForSearch AND ${OWNER_SEARCH_HAYSTACK} ` +
+          `LIKE ${foldedSearchTerm('ownerTerm')}))`,
+        {
+          term,
+          ownerTerm: term,
+          linkedForSearch: SubprofileLinkVisibility.Linked,
+        },
+      );
     }
 
     // Offset pagination (replaces the fixed `take: DIRECTORY_RESULT_CAP`

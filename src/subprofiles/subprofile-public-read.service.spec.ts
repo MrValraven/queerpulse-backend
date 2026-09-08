@@ -78,6 +78,12 @@ interface DirectoryQueryBuilderStub {
     DirectoryQueryBuilderStub,
     [string, Record<string, unknown>?]
   >;
+  // The owner join `directory()` adds on the SEARCH path only, so the free-text
+  // branch can match a linked persona by its owner's name.
+  leftJoin: jest.Mock<
+    DirectoryQueryBuilderStub,
+    [unknown, string, string?, Record<string, unknown>?]
+  >;
   orderBy: jest.Mock<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>;
   addOrderBy: jest.Mock<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>;
   offset: jest.Mock<DirectoryQueryBuilderStub, [number]>;
@@ -98,6 +104,12 @@ function makeSubprofilesQueryBuilderStub(
     .mockReturnValue(queryBuilder);
   queryBuilder.andWhere = jest
     .fn<DirectoryQueryBuilderStub, [string, Record<string, unknown>?]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.leftJoin = jest
+    .fn<
+      DirectoryQueryBuilderStub,
+      [unknown, string, string?, Record<string, unknown>?]
+    >()
     .mockReturnValue(queryBuilder);
   queryBuilder.orderBy = jest
     .fn<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>()
@@ -326,10 +338,64 @@ describe('SubprofilePublicReadService', () => {
       // `%` and `_` (LIKE metacharacters) are backslash-escaped BEFORE the
       // literal is wrapped in its own wildcard `%...%` pair, so a search for
       // a literal "50% off_grid" cannot accidentally become a wildcard match.
-      expect(qb.andWhere).toHaveBeenCalledWith(
-        '(sp.displayName ILIKE :term OR sp.tagline ILIKE :term)',
-        { term: '%50\\% off\\_grid%' },
+      // Asserted structurally rather than against the whole predicate string:
+      // the owner branch splices in `foldedHaystack`'s generated SQL, and
+      // pinning that here would only restate `search-text.ts` (which
+      // `search-text.spec.ts` already pins against its own index migration).
+      const searchCall = qb.andWhere.mock.calls.find((call) =>
+        call[0].includes('sp.displayName ILIKE :term'),
       );
+      expect(searchCall).toBeDefined();
+      expect(searchCall?.[0]).toContain('sp.tagline ILIKE :term');
+      expect(searchCall?.[1]).toMatchObject({ term: '%50\\% off\\_grid%' });
+    });
+
+    it('also matches a LINKED persona by its owner name, folded, and never an unlinked one', async () => {
+      const rows = [makeSubprofile({ id: 'sp-a' })];
+      const qb = makeSubprofilesQueryBuilderStub(rows);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({ query: 'Joao' }, 'viewer-1');
+
+      // The owner is joined 1:1 off `sp.userId` so the name behind a linked
+      // card is searchable at all.
+      expect(qb.leftJoin).toHaveBeenCalledWith(
+        Profile,
+        'owner',
+        'owner.userId = sp.userId',
+      );
+      const searchCall = qb.andWhere.mock.calls.find((call) =>
+        call[0].includes('sp.displayName ILIKE :term'),
+      );
+      expect(searchCall).toBeDefined();
+      // THE anonymity rule: the owner branch only fires for a persona whose
+      // link visibility already puts the owner's name on the card. Without this
+      // gate, searching a member's name would surface the anonymous personas
+      // they run — the exact tie `toCardDTO` withholds.
+      expect(searchCall?.[0]).toContain('sp.linkVisibility = :linkedForSearch');
+      expect(searchCall?.[1]).toMatchObject({
+        linkedForSearch: SubprofileLinkVisibility.Linked,
+        // Folded on both sides, so "Joao" finds "João" — the same escaped,
+        // wildcard-wrapped literal the persona-side branch binds.
+        ownerTerm: '%Joao%',
+      });
+      // `translate(lower(...))` is `foldedHaystack`'s signature: the owner name
+      // is compared accent-folded, not by a bare ILIKE.
+      expect(searchCall?.[0]).toContain('translate(lower(');
+      expect(searchCall?.[0]).toContain('"owner"."first_name"');
+      expect(searchCall?.[0]).toContain('"owner"."last_name"');
+    });
+
+    it('does not join the owner table when there is no search term', async () => {
+      const rows = [makeSubprofile({ id: 'sp-a' })];
+      const qb = makeSubprofilesQueryBuilderStub(rows);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({}, 'viewer-1');
+
+      // An unsearched browse is the common case and pays nothing for a join it
+      // has no predicate for.
+      expect(qb.leftJoin).not.toHaveBeenCalled();
     });
 
     it('withholds a moderated/taken-down persona via an in-query NOT EXISTS clause', async () => {
