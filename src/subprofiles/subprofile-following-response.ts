@@ -43,6 +43,12 @@ export interface FollowedPersonaView {
   linkVisibility: SubprofileLinkVisibility;
   /** The CREATOR's profile slug. LINKED personas only, else `null`. */
   ownerSlug: string | null;
+  /** The CREATOR's display name, on the same linked-only anonymity rule as
+   *  `ownerSlug`. Titles a persona still named after its profession as
+   *  "Owner Name | Dancer" (`personaTitleName` on the client), the way the
+   *  directory card does; an unlinked persona gets `null` and keeps its bare
+   *  name. */
+  ownerName: string | null;
   /** Total followers, so the row can say how many others are listening. */
   followerCount: number;
   /** When THIS viewer started following, newest first in the list. */

@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
+import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { PAGE_SIZE, Paginated, normalizePage } from '../common/pagination';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -285,6 +286,17 @@ export class SubprofileFollowersService {
     const ownerSlugByUserId = new Map(
       ownerProfiles.map((profile) => [profile.userId, profile.slug]),
     );
+    // The name parts ride along on the read that already resolves `ownerSlug`,
+    // for the row's "Owner Name | Dancer" title on a persona still named after
+    // its profession — composed exactly as the directory card's does. An owner
+    // with both parts blank composes to "", normalised to null so the persona
+    // keeps its bare name rather than titling as " | Dancer".
+    const ownerNameByUserId = new Map(
+      ownerProfiles.map((profile) => [
+        profile.userId,
+        `${profile.firstName} ${profile.lastName}`.trim() || null,
+      ]),
+    );
 
     const items = pageRows.flatMap<FollowedPersonaView>((row) => {
       const persona = personaById.get(row.subprofileId);
@@ -297,7 +309,11 @@ export class SubprofileFollowersService {
           displayName: persona.displayName,
           kind: persona.kind,
           tagline: persona.tagline,
-          avatarUrl: persona.avatarUrl,
+          // Through `toImageUrl`, like every other persona mapper: the column
+          // holds a storage KEY for an uploaded avatar, and shipping it raw
+          // renders as a broken relative image — the row fell back to initials
+          // while the directory card, which resolves the key, showed the face.
+          avatarUrl: toImageUrl(persona.avatarUrl),
           accent: persona.accent,
           slug: persona.slug,
           // An unlinked persona is addressed by its handle; a linked one is
@@ -307,6 +323,9 @@ export class SubprofileFollowersService {
           linkVisibility: persona.linkVisibility,
           ownerSlug: isLinked
             ? (ownerSlugByUserId.get(persona.userId) ?? null)
+            : null,
+          ownerName: isLinked
+            ? (ownerNameByUserId.get(persona.userId) ?? null)
             : null,
           followerCount: followerCounts.get(persona.id) ?? 0,
           followedAt: row.followedAt,

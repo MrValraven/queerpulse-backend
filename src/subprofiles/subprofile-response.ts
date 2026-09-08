@@ -206,6 +206,14 @@ export interface SubprofileCardView {
   avatarUrl: string | null;
   /** Crop rect for `avatarUrl`, when the owner reframed it. */
   crop?: CropRect;
+  /** The persona's banner. Cover/accent/availability are persona-OWNED presence
+   *  fields, never identifying, so (exactly like `toPublicDTO`) this is exposed
+   *  for linked and unlinked rows alike — unlike `ownerSlug`/`ownerName`. */
+  coverUrl: string | null;
+  /** Crop rect for `coverUrl`, when the owner reframed it. Honoured as a FOCAL
+   *  POINT on the card, never as an exact frame: the card's header band is far
+   *  wider and shorter than the 3:1 box the crop was drawn in. */
+  coverCrop?: CropRect;
   tagline: string | null;
   accent: string | null;
   availability: string | null;
@@ -465,6 +473,8 @@ export function toCardDTO(
     displayName: subprofile.displayName,
     avatarUrl: toImageUrl(subprofile.avatarUrl),
     crop: cropFor(subprofile.avatarUrl, crops),
+    coverUrl: toImageUrl(subprofile.coverUrl),
+    coverCrop: cropFor(subprofile.coverUrl, crops),
     tagline: subprofile.tagline,
     accent: subprofile.accent,
     availability: subprofile.availability,

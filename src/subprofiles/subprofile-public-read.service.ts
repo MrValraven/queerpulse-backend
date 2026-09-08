@@ -732,14 +732,16 @@ export class SubprofilePublicReadService {
       // Project only what `toCardDTO` (plus the id used to key the batched
       // social-count/tag/follower lookups below) actually reads — this list is
       // now offset-paginated (see below) but was still hydrating full rows,
-      // including `bio`, `coverUrl`, the CTA fields, and the 16KB `skinData`
-      // jsonb blob, on every request.
+      // including `bio`, the CTA fields, and the 16KB `skinData` jsonb blob, on
+      // every request. `coverUrl` IS read now (the card renders the banner in
+      // its header band); it is a short varchar, unlike the blob above.
       .select([
         'sp.id',
         'sp.handle',
         'sp.kind',
         'sp.displayName',
         'sp.avatarUrl',
+        'sp.coverUrl',
         'sp.tagline',
         'sp.accent',
         'sp.availability',
@@ -876,10 +878,14 @@ export class SubprofilePublicReadService {
             select: ['userId', 'slug', 'firstName', 'lastName'],
           })
         : Promise.resolve([]),
-      // ONE batched crop lookup for every card's avatar on the page — never
-      // a per-card query.
+      // ONE batched crop lookup for every card's avatar AND banner on the page
+      // — never a per-card query, and one call for both keys rather than two.
       this.mediaCropService.getMany(
-        rows.flatMap((row) => (row.avatarUrl ? [row.avatarUrl] : [])),
+        rows.flatMap((row) =>
+          [row.avatarUrl, row.coverUrl].filter((key): key is string =>
+            Boolean(key),
+          ),
+        ),
       ),
     ]);
     const ownerSlugByUserId = new Map(

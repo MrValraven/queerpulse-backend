@@ -183,7 +183,9 @@ describe('countDirectoryFacets', () => {
       expect.arrayContaining(['Trans']),
     );
     // Hoods bind an ILIKE pattern, the same substring test the filter uses.
-    expect(spies.get('hoods')!.parameters.facetOption0).toBe('%Anjos%');
+    expect(spies.get('hoods')!.parameters.facetOption0).toBe(
+      `%${NEIGHBOURHOODS[0]}%`,
+    );
     // …and the last row, "All of Lisbon", binds the pattern that matches
     // everyone: it is the "no hood restriction" row, so its count is the whole
     // population rather than any one neighbourhood's.
