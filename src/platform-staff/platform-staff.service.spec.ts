@@ -216,4 +216,66 @@ describe('PlatformStaffService', () => {
 
     expect(await service.list()).toEqual([]);
   });
+  // ── The council pool ──────────────────────────────────────────────────────
+  // An advisory-council seat may only be held by someone on this roster, and
+  // `GovernanceOverviewService` asks these two rather than restating the rule.
+  describe('the seatable population', () => {
+    it('answers with the same people `list()` rosters, as ids', async () => {
+      const service = await buildService(
+        [moderator, housingGrantHolder],
+        [grantFixture('member-1', 'housing_moderator')],
+      );
+
+      const staffUserIds = await service.listStaffUserIds();
+
+      expect([...staffUserIds].sort()).toEqual(['member-1', 'moderator-1']);
+    });
+
+    it('keeps a staff member who has no profile row', async () => {
+      const slugless = userFixture({
+        id: 'moderator-2',
+        role: UserRole.Moderator,
+        status: UserStatus.Active,
+        slug: null,
+        firstName: 'Ines',
+        lastName: 'Ramos',
+      });
+      const service = await buildService([moderator, slugless], []);
+
+      // `list()` drops them — there is no slug to key a badge by. This is an
+      // authorisation answer, not a rendering one, and they ARE staff.
+      expect((await service.list()).map((row) => row.slug)).toEqual([
+        'mariana',
+      ]);
+      expect(await service.listStaffUserIds()).toContain('moderator-2');
+    });
+
+    it('leaves out someone the roster leaves out', async () => {
+      const suspendedModerator = userFixture({
+        id: 'moderator-3',
+        role: UserRole.Moderator,
+        status: UserStatus.Suspended,
+        slug: 'tomas',
+        firstName: 'Tomas',
+        lastName: 'Reis',
+      });
+      const service = await buildService([moderator, suspendedModerator], []);
+
+      expect(await service.listStaffUserIds()).not.toContain('moderator-3');
+    });
+
+    it('carries the user id and the gated photo for the council picker', async () => {
+      const service = await buildService([moderator], []);
+
+      const [candidate] = await service.listCandidates();
+
+      // `id` is the field a seat stores: a handle can be changed, and a seat
+      // keyed on one would afterwards point at nobody.
+      expect(candidate?.id).toBe('moderator-1');
+      expect(candidate?.slug).toBe('mariana');
+      expect(candidate?.platformRole).toBe(UserRole.Moderator);
+      // The fixture profile has no `photoVisible`, so the gate says no photo.
+      expect(candidate?.avatarUrl).toBeNull();
+    });
+  });
 });

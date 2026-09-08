@@ -47,3 +47,25 @@ export interface PlatformStaffRowDTO {
    */
   badgedStaffRoles: StaffRoleId[];
 }
+
+/**
+ * Wire shape for one person the advisory-council editor may seat: the roster
+ * row above, plus the two fields a picker needs that the badge map deliberately
+ * does not carry.
+ *
+ * `id` is here and NOT on `PlatformStaffRowDTO`, because that row goes to every
+ * active member (it badges moderators across the app) and handing all of them
+ * the user ids of everyone holding moderation power buys nothing. This shape is
+ * served only from the admin governance controller, to admins and moderators.
+ * The seat stores that id rather than the slug: a handle can be changed, and a
+ * seat keyed on one would afterwards point at nobody with nothing to show for
+ * it.
+ *
+ * `avatarUrl` honours the member's own "show your photo" toggle
+ * (`toVisibleAvatarUrl`), so a staff member who has hidden their face is picked
+ * by name and monogram here exactly as they are rendered everywhere else.
+ */
+export interface PlatformStaffCandidateDTO extends PlatformStaffRowDTO {
+  id: string;
+  avatarUrl: string | null;
+}

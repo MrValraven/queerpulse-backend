@@ -61,34 +61,13 @@ const moderationSteps: OverviewModerationStep[] = [
   { key: 'appeal' },
 ];
 
-// `name`/`initials` are real member data; `roleKey` → `governance:council.<roleKey>`;
-// `tint` → the frontend's `{bg,color}` avatar palette.
-const council: OverviewCouncilSeat[] = [
-  {
-    name: 'Mariana Loução',
-    initials: 'ML',
-    roleKey: 'psychologistChair',
-    tint: 'jade',
-  },
-  {
-    name: 'Raquel Baptista',
-    initials: 'RB',
-    roleKey: 'lawyerLegalAdvisor',
-    tint: 'violet',
-  },
-  {
-    name: 'Catarina Vaz',
-    initials: 'CV',
-    roleKey: 'housingActivist',
-    tint: 'plum',
-  },
-  {
-    name: 'Jonas Ferreira',
-    initials: 'JF',
-    roleKey: 'healthcareAdvocate',
-    tint: 'jade',
-  },
-];
+// Advisory-council seats name a STAFF MEMBER (`memberId`), so there is nothing
+// to seed: the seat-holders are whoever an admin appoints from the staff roster
+// on the Policy tab, and this fixture creates no staff accounts to point at.
+// It shipped with four hand-written names, which is exactly what the seat model
+// stopped allowing — a public accountability page naming people the platform
+// could not resolve to anyone.
+const council: OverviewCouncilSeat[] = [];
 
 // Short principle key → `governance:principles.<key>.title` / `.text`; `icon` →
 // the frontend's react-icon map. Order = array order.

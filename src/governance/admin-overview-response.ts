@@ -1,7 +1,7 @@
 import { MemberRef } from '../common/member-ref';
 import {
   GovernanceOverview,
-  OverviewCouncilSeat,
+  OverviewAuthoredText,
   OverviewDecision,
   OverviewHealthStat,
   OverviewModerationStep,
@@ -11,6 +11,27 @@ import {
   GovernanceOverviewChange,
   OverviewSection,
 } from './entities/governance-overview-change.entity';
+
+/**
+ * One advisory-council seat as the EDITOR sees it. The public shape
+ * (`CouncilSeatResponseDTO`) carries a resolved `member` and nothing else; this
+ * one keeps the stored `memberId` too, because the editor round-trips seats
+ * straight back into `PATCH /admin/governance/overview` and that is the field
+ * the write side takes.
+ *
+ * `member` is null when the seat-holder no longer resolves — a deleted account,
+ * or a user row with no profile. The public page drops such a seat rather than
+ * render a hole; here it survives, precisely so an admin can see WHY a seat
+ * stopped appearing and remove or reassign it, instead of a row silently
+ * vanishing from a page nobody is watching.
+ */
+export interface AdminCouncilSeatDTO {
+  memberId: string;
+  member: MemberRef | null;
+  roleKey?: string;
+  role?: OverviewAuthoredText;
+  tint: 'jade' | 'violet' | 'plum';
+}
 
 /** Who last edited a section, and when — `null`/`null` when it has never
  *  been edited since this audit trail started. */
@@ -25,7 +46,7 @@ export interface AdminOverviewSectionMeta {
 export interface AdminOverviewResponseDTO {
   health: OverviewHealthStat[];
   moderationSteps: OverviewModerationStep[];
-  council: OverviewCouncilSeat[];
+  council: AdminCouncilSeatDTO[];
   principles: OverviewPrinciple[];
   decisions: OverviewDecision[];
   meta: Record<OverviewSection, AdminOverviewSectionMeta>;
@@ -41,6 +62,7 @@ export function toAdminOverviewResponse(
   overview: GovernanceOverview,
   latestChangeBySection: ReadonlyMap<OverviewSection, GovernanceOverviewChange>,
   editorsByActorId: ReadonlyMap<string, MemberRef>,
+  council: AdminCouncilSeatDTO[],
 ): AdminOverviewResponseDTO {
   const metaFor = (section: OverviewSection): AdminOverviewSectionMeta => {
     const change = latestChangeBySection.get(section);
@@ -56,7 +78,7 @@ export function toAdminOverviewResponse(
   return {
     health: overview.health,
     moderationSteps: overview.moderationSteps,
-    council: overview.council,
+    council,
     principles: overview.principles,
     decisions: overview.decisions,
     meta: {

@@ -26,6 +26,11 @@ import { NotificationsModule } from '../notifications/notifications.module';
 // pattern `AdminOverviewModule` uses, rather than this module re-registering
 // `User` via its own `TypeOrmModule.forFeature` and duplicating the query.
 import { UsersModule } from '../users/users.module';
+// `PlatformStaffModule` exports `PlatformStaffService`, which owns the one
+// definition of who is on the staff roster. The advisory-council editor seats
+// staff and nobody else, and asking the roster is what keeps that rule in step
+// with `/admin/staff` instead of a second copy of "tier OR badged grant" here.
+import { PlatformStaffModule } from '../platform-staff/platform-staff.module';
 
 @Module({
   imports: [
@@ -47,6 +52,7 @@ import { UsersModule } from '../users/users.module';
     ]),
     UsersModule,
     NotificationsModule,
+    PlatformStaffModule,
   ],
   // `AdminGovernanceController` (`/admin/governance/*`) carries the staff
   // routes that used to live on `GovernanceController` under an `admin/*`

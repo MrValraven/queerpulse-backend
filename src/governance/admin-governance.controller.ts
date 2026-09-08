@@ -41,6 +41,7 @@ import { UpdateAdminFinancesDto } from './dto/update-admin-finances.dto';
 import { UpdateAdminOverviewDto } from './dto/update-admin-overview.dto';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceOverviewService } from './governance-overview.service';
+import { PlatformStaffService } from '../platform-staff/platform-staff.service';
 import { GovernanceProposalService } from './governance-proposal.service';
 import { GovernanceProposalDTO } from './governance-proposal-response';
 
@@ -82,6 +83,7 @@ export class AdminGovernanceController {
     private readonly governanceFinanceService: GovernanceFinanceService,
     private readonly governanceOverviewService: GovernanceOverviewService,
     private readonly governanceProposalService: GovernanceProposalService,
+    private readonly platformStaffService: PlatformStaffService,
     private readonly notifications: NotificationsService,
   ) {}
 
@@ -170,6 +172,32 @@ export class AdminGovernanceController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.governanceOverviewService.updateOverview(dto, user.userId);
+  }
+
+  /**
+   * Who may be seated on the advisory council: the platform staff roster, with
+   * the user id the council editor has to submit.
+   *
+   * Nested under `admin/governance` rather than given a route of its own so it
+   * inherits this class's default-deny guards and the console's elevated-path
+   * treatment, and served here rather than from `GET /platform/staff` because
+   * that endpoint goes to every active member and deliberately carries no user
+   * ids.
+   *
+   * Moderator-or-Admin (the class default): a moderator can already see the
+   * whole roster on `/admin/staff`, and seeing who could be seated is part of
+   * reading the Policy tab. Actually seating them is the `@Patch('overview')`
+   * above, which narrows to Admin.
+   */
+  @Get('overview/council-candidates')
+  @ApiOperation({
+    summary: 'List the staff members who may hold an advisory-council seat',
+  })
+  @ApiOkResponse({
+    description: 'The staff roster, with the user id a council seat stores.',
+  })
+  councilCandidates() {
+    return this.platformStaffService.listCandidates();
   }
 
   // Admin-only: the per-section audit trail behind the "last edited" badges.

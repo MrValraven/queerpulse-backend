@@ -8,13 +8,16 @@ import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { toStoredPlainText } from '../communities/community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
+import { PlatformStaffService } from '../platform-staff/platform-staff.service';
 import { UsersService } from '../users/users.service';
 import {
+  CouncilSeatResponseDTO,
   GovernanceOverviewResponseDTO,
   GovernancePublishResponseDTO,
   toGovernanceOverviewResponse,
 } from './governance-overview-response';
 import {
+  AdminCouncilSeatDTO,
   AdminOverviewResponseDTO,
   toAdminOverviewResponse,
 } from './admin-overview-response';
@@ -131,24 +134,23 @@ function toStoredPrinciples(
   );
 }
 
+/**
+ * A seat carries no typed-in words about the person any more — only the
+ * `memberId` this service has already checked against the staff roster — so the
+ * only thing left to sanitise is an authored role.
+ */
 function toStoredCouncil(
   council: OverviewCouncilSeat[],
 ): OverviewCouncilSeat[] {
-  return council.map((seat) => {
-    // `name` and `initials` are typed by the same editor into the same public
-    // page, so they get the same strip. They are not part of the
-    // seeded/authored exclusive-or: every seat has them.
-    const name = toStoredPlainText(seat.name);
-    const initials = toStoredPlainText(seat.initials);
-    return seat.roleKey !== undefined
-      ? { name, initials, roleKey: seat.roleKey, tint: seat.tint }
+  return council.map((seat) =>
+    seat.roleKey !== undefined
+      ? { memberId: seat.memberId, roleKey: seat.roleKey, tint: seat.tint }
       : {
-          name,
-          initials,
+          memberId: seat.memberId,
           role: toStoredAuthoredTextOrUndefined(seat.role, 'A council role'),
           tint: seat.tint,
-        };
-  });
+        },
+  );
 }
 
 @Injectable()
@@ -161,6 +163,7 @@ export class GovernanceOverviewService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly usersService: UsersService,
+    private readonly platformStaff: PlatformStaffService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -195,7 +198,23 @@ export class GovernanceOverviewService {
       throw new NotFoundException('Governance overview not found');
     }
     overview.health = await this.withLiveActiveMemberCount(overview.health);
-    return toGovernanceOverviewResponse(overview);
+    const seats = await this.resolveCouncilSeats(overview.council);
+    return toGovernanceOverviewResponse(
+      overview,
+      seats
+        // A seat whose member no longer resolves is dropped rather than
+        // rendered with a hole where a person was. The admin editor keeps it
+        // (see `resolveCouncilSeats`), so it stays visible to someone who can
+        // fix it.
+        .filter((seat) => seat.member !== null)
+        // `memberId` is dropped on the way out. This response is `@Public()`,
+        // and the public page needs the person, not the platform's id for
+        // them.
+        .map<CouncilSeatResponseDTO>(({ memberId: _memberId, ...seat }) => ({
+          ...seat,
+          member: seat.member!,
+        })),
+    );
   }
 
   // POST /admin/governance/publish (P3-7) — mark the current singleton snapshot
@@ -265,7 +284,73 @@ export class GovernanceOverviewService {
       overview,
       latestChangeBySection,
       editorsByActorId,
+      await this.resolveCouncilSeats(overview.council),
     );
+  }
+
+  /**
+   * Stored seats → seats carrying the person. One batched profile read for the
+   * whole council (`MemberLookup.byUserIds`), never one per seat: this runs on
+   * the public governance page, which is unauthenticated and cached by nobody.
+   *
+   * `member` comes back null for a seat whose holder no longer resolves — the
+   * account was deleted, or has no profile row. Both callers get the same
+   * array and decide separately what that means: the public page drops those
+   * seats, the admin editor keeps them so someone can see what happened.
+   */
+  private async resolveCouncilSeats(
+    council: OverviewCouncilSeat[],
+  ): Promise<AdminCouncilSeatDTO[]> {
+    const membersById = await new MemberLookup(this.profiles).byUserIds([
+      ...new Set(council.map((seat) => seat.memberId)),
+    ]);
+    return council.map((seat) => ({
+      memberId: seat.memberId,
+      member: membersById.get(seat.memberId) ?? null,
+      ...(seat.roleKey !== undefined ? { roleKey: seat.roleKey } : {}),
+      ...(seat.role !== undefined ? { role: seat.role } : {}),
+      tint: seat.tint,
+    }));
+  }
+
+  /**
+   * Refuses a council payload that seats anyone who is not platform staff, or
+   * seats one person twice.
+   *
+   * The roster is THE definition of who may hold a seat and it lives in
+   * `PlatformStaffService` (tier or badged grant, active accounts only), so
+   * this asks rather than restating it. A second spelling of that rule here
+   * would drift out of step with `/admin/staff` and nobody would notice until
+   * someone plainly on that page was refused a seat.
+   *
+   * Both failures are 400s naming the seat's position, because the editor
+   * submits the whole section as one array and "seat 3" is the only handle the
+   * admin has on which row to fix.
+   */
+  private async assertSeatsAreStaff(
+    council: OverviewCouncilSeat[],
+  ): Promise<void> {
+    if (!council.length) return;
+
+    const seen = new Set<string>();
+    council.forEach((seat, index) => {
+      if (seen.has(seat.memberId)) {
+        throw new BadRequestException(
+          `Seat ${index + 1} names someone who already holds a seat. One person, one seat.`,
+        );
+      }
+      seen.add(seat.memberId);
+    });
+
+    const staffUserIds = await this.platformStaff.listStaffUserIds();
+    const offendingIndex = council.findIndex(
+      (seat) => !staffUserIds.has(seat.memberId),
+    );
+    if (offendingIndex !== -1) {
+      throw new BadRequestException(
+        `Seat ${offendingIndex + 1} names someone who is not on the platform staff roster. Advisory-council seats are held by staff.`,
+      );
+    }
   }
 
   /**
@@ -279,6 +364,13 @@ export class GovernanceOverviewService {
     dto: UpdateAdminOverviewDto,
     actorId: string,
   ): Promise<AdminOverviewResponseDTO> {
+    // Outside the transaction on purpose: this is a read-only roster check
+    // against tables the transaction never touches, and a rejected payload
+    // should never have opened one.
+    if (dto.council !== undefined) {
+      await this.assertSeatsAreStaff(dto.council);
+    }
+
     await this.dataSource.transaction(async (manager) => {
       const overview = await manager.findOne(GovernanceOverview, {
         where: { id: GOVERNANCE_OVERVIEW_ID },
