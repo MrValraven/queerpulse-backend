@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, MoreThanOrEqual, Repository } from 'typeorm';
+import { FindOptionsWhere, In, MoreThanOrEqual, Repository } from 'typeorm';
 import {
   Event,
   EventStatus,
@@ -95,28 +95,38 @@ export class ListingVenueEventsService {
     userId: string,
   ): Promise<ListingVenueEventsDTO> {
     const listing = await this.loadOwnedOr404(ref, userId);
+    const now = new Date();
     const shared = {
       listingId: listing.id,
       status: EventStatus.Published,
-      startAt: MoreThanOrEqual(new Date()),
       visibility: In(ListingVenueEventsService.PAGE_VISIBLE_TIERS),
     };
+
+    // A gathering that is UNDERWAY is still upcoming, matching browse's
+    // 'upcoming' predicate in `EventsService.list`. An owner deciding about
+    // tonight's party needs it in this inbox for as long as it is happening.
+    // Find-options cannot write that disjunct inline, so it is two arms of an
+    // OR built from ONE scope: both arms carry the listing, the published
+    // status, the visible tiers and the confirmation state, and differ only in
+    // which timestamp they test, so neither can widen the other.
+    // `endAt: MoreThanOrEqual(now)` carries the `end_at IS NOT NULL` half for
+    // free, since SQL never matches a NULL against `>=`.
+    const stillAhead = (
+      venueConfirmation: EventVenueConfirmation,
+    ): FindOptionsWhere<Event>[] => [
+      { ...shared, venueConfirmation, startAt: MoreThanOrEqual(now) },
+      { ...shared, venueConfirmation, endAt: MoreThanOrEqual(now) },
+    ];
 
     const [[pendingRows, pendingCount], [confirmedRows, confirmedCount]] =
       await Promise.all([
         this.events.findAndCount({
-          where: {
-            ...shared,
-            venueConfirmation: EventVenueConfirmation.Pending,
-          },
+          where: stillAhead(EventVenueConfirmation.Pending),
           order: { startAt: 'ASC' },
           take: VENUE_EVENT_ITEM_CAP,
         }),
         this.events.findAndCount({
-          where: {
-            ...shared,
-            venueConfirmation: EventVenueConfirmation.Confirmed,
-          },
+          where: stillAhead(EventVenueConfirmation.Confirmed),
           order: { startAt: 'ASC' },
           take: VENUE_EVENT_ITEM_CAP,
         }),

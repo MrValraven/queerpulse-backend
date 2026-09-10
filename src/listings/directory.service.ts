@@ -701,18 +701,33 @@ export class DirectoryService {
     // This keeps the anonymous variant STRICTLY the narrowest one on both
     // axes (public-only visibility AND confirmed-only attachments), which is
     // what makes it safe for it to be the shared-cacheable variant.
+    //
+    // The scope is lifted into its own object so the two schedule arms below
+    // cannot drift apart. Every narrowing condition (listing, published,
+    // visibility tier, and for a stranger the confirmed-only rule) is carried
+    // by BOTH arms, so the OR stays a conjunct of this scope and can widen
+    // nothing: the arms differ only in which timestamp they test.
+    const upcomingScope = {
+      listingId: listing.id,
+      status: EventStatus.Published,
+      visibility: isActiveMemberViewer
+        ? In([EventVisibility.Public, EventVisibility.Members])
+        : EventVisibility.Public,
+      ...(isActiveMemberViewer
+        ? {}
+        : { venueConfirmation: EventVenueConfirmation.Confirmed }),
+    };
+    // A gathering that is UNDERWAY is still upcoming, matching browse's
+    // 'upcoming' predicate in `EventsService.list`: a venue's page kept
+    // dropping tonight's party at the moment its doors opened.
+    // `endAt: MoreThanOrEqual(now)` carries the `end_at IS NOT NULL` half for
+    // free, since SQL never matches a NULL against `>=`.
+    const now = new Date();
     const upcoming = await this.events.find({
-      where: {
-        listingId: listing.id,
-        status: EventStatus.Published,
-        startAt: MoreThanOrEqual(new Date()),
-        visibility: isActiveMemberViewer
-          ? In([EventVisibility.Public, EventVisibility.Members])
-          : EventVisibility.Public,
-        ...(isActiveMemberViewer
-          ? {}
-          : { venueConfirmation: EventVenueConfirmation.Confirmed }),
-      },
+      where: [
+        { ...upcomingScope, startAt: MoreThanOrEqual(now) },
+        { ...upcomingScope, endAt: MoreThanOrEqual(now) },
+      ],
       order: { startAt: 'ASC' },
       take: 4,
     });

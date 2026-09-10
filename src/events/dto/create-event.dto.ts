@@ -11,6 +11,7 @@ import {
   IsTimeZone,
   IsUrl,
   IsUUID,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -23,6 +24,14 @@ import {
   MAX_ACCESSIBILITY_NOTE_LENGTH,
 } from '../../listings/listing-accessibility';
 import { EventStatus, EventVisibility } from '../entities/event.entity';
+import {
+  GatheringFamily,
+  MAX_BRING_LENGTH,
+  MAX_RUNTIME_MINUTES,
+  MIN_RUNTIME_MINUTES,
+  TERRAIN_VALUES,
+  type Terrain,
+} from '../gathering-family';
 import { RecurrenceDto } from './recurrence.dto';
 
 /**
@@ -51,6 +60,42 @@ export class EventAccessibilityDto {
   @IsString()
   @MaxLength(MAX_ACCESSIBILITY_NOTE_LENGTH)
   note?: string;
+}
+
+/**
+ * The one or two questions a gathering's FAMILY raises, answered.
+ *
+ * Validated for shape only. WHICH of these six a given family may store is
+ * decided in `../gathering-family.ts` and enforced by `EventsService`, which
+ * strips the rest before writing. Validating membership here instead would
+ * turn a host switching family into a 400 with a stale field they cannot see,
+ * which is precisely the failure the stripping rule exists to avoid.
+ */
+export class FormatDetailsDto {
+  /** What to bring, one line. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_BRING_LENGTH)
+  bring?: string;
+
+  /** The door checks age. */
+  @IsOptional() @IsBoolean() isAdultsOnly?: boolean;
+
+  /** There is something good to drink that is not alcohol. */
+  @IsOptional() @IsBoolean() isSoberFriendly?: boolean;
+
+  /** How hard the ground is underfoot. */
+  @IsOptional() @IsIn(TERRAIN_VALUES) terrain?: Terrain;
+
+  /** Nobody needs to have done this before. */
+  @IsOptional() @IsBoolean() isBeginnerFriendly?: boolean;
+
+  /** How long the film, set or performance runs. */
+  @IsOptional()
+  @IsInt()
+  @Min(MIN_RUNTIME_MINUTES)
+  @Max(MAX_RUNTIME_MINUTES)
+  runtimeMinutes?: number;
 }
 
 export class CreateEventDto {
@@ -91,6 +136,25 @@ export class CreateEventDto {
   @IsOptional() @IsString() @MaxLength(120) neighbourhood?: string | null;
   @IsOptional() @IsString() @MaxLength(80) language?: string | null;
   @IsOptional() @IsString() @MaxLength(80) eventType?: string | null;
+  /**
+   * The gathering's family: the closed vocabulary its format sits inside.
+   *
+   * `string | null` in spirit like the LOC-04 fields above: `null` on UPDATE
+   * clears it (a host un-classifying a gathering), absent leaves it alone,
+   * a value sets it. `@IsOptional()` already skips validation for `null`.
+   */
+  @IsOptional()
+  @IsEnum(GatheringFamily)
+  gatheringFamily?: GatheringFamily | null;
+  /**
+   * The answers to this family's one or two questions. Same absent/null/value
+   * three-way. The service strips whatever the effective family does not
+   * allow, and stores `null` when nothing is left.
+   */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => FormatDetailsDto)
+  formatDetails?: FormatDetailsDto | null;
   @IsOptional()
   @ValidateNested()
   @Type(() => EventAccessibilityDto)

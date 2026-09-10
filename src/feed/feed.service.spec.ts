@@ -204,6 +204,8 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   neighbourhood: null,
   language: null,
   eventType: null,
+  gatheringFamily: null,
+  formatDetails: null,
   accessibilityAnswers: emptyAccessibilityAnswers(),
   accessibilityNote: '',
   cost: null,

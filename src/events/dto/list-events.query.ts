@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  IsEnum,
   IsIn,
   IsInt,
   IsISO8601,
@@ -11,6 +12,7 @@ import {
 } from 'class-validator';
 import { MAX_PAGE } from '../../common/pagination';
 import { EventListFilter } from '../events.service';
+import { GatheringFamily } from '../gathering-family';
 
 /** The `cost=` axis (LOC-18/LOC-17). `free` matches gatherings whose
  *  free-text cost reads as free (or that carry no cost at all, the historical
@@ -52,8 +54,8 @@ export class ListEventsQuery {
   // "What is on this Friday near Arroios" used to be four clauses none of
   // which was expressible: the browse box and its chips filtered CLIENT-side
   // over whatever pages had loaded, so every answer under-reported until the
-  // member had scrolled the whole feed. All five below are applied in SQL, so
-  // they survive pagination and the counts are honest.
+  // member had scrolled the whole feed. Every filter below is applied in SQL,
+  // so they survive pagination and the counts are honest.
   //
   // Every one is honoured on the `upcoming` browse branch. `from`/`to`/`q`
   // are honoured on `past` too (a member narrowing their own history), and
@@ -81,8 +83,17 @@ export class ListEventsQuery {
   @MaxLength(120)
   hood?: string;
 
-  /** A gathering type, matched case-insensitively against `Event.eventType`
-   *  ("Supper club", "Workshop / talk", ...). */
+  /** A gathering family, matched exactly against `Event.gatheringFamily`. The
+   *  browse board's primary facet: nine values plus "any", each a distinct
+   *  energy a member can read at a glance. Rows without a family (created
+   *  before families existed, or carrying a host's own words) are simply not
+   *  in any family's results. */
+  @IsOptional()
+  @IsEnum(GatheringFamily)
+  family?: GatheringFamily;
+
+  /** A gathering format, matched case-insensitively against `Event.eventType`
+   *  ("supper-club", "walk-or-hike", ...) or against a host's own words. */
   @IsOptional()
   @IsString()
   @MaxLength(80)

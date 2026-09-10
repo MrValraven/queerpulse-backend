@@ -7,6 +7,16 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import type { ListingAccessibilityAnswerMap } from '../../listings/listing-accessibility';
+import { GatheringFamily } from '../gathering-family';
+import type { FormatDetails } from '../gathering-family';
+
+// The family enum is DECLARED in `../gathering-family.ts` (alongside the
+// detail-key table and the legacy backfill map the migration reads) and
+// re-exported here so callers that reach for event enums find it beside
+// `EventVisibility` and `EventStatus`. Declaring it there rather than here is
+// what keeps `gathering-family.ts` free of any import back into this entity.
+export { GatheringFamily } from '../gathering-family';
+export type { FormatDetails } from '../gathering-family';
 
 export enum EventVisibility {
   Public = 'public',
@@ -86,6 +96,13 @@ export enum EventVenueConfirmation {
     where: `"listing_id" IS NOT NULL`,
   },
 )
+// The family is the browse board's primary facet, and browse only ever reads
+// published rows, so this mirrors the partial index
+// `AddGatheringFamilyAndFormatDetails1817080000000` created. Declared here so
+// the entity metadata describes the index that actually exists.
+@Index('IDX_events_gathering_family', ['gatheringFamily'], {
+  where: `"status" = 'published'`,
+})
 export class Event {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -270,7 +287,9 @@ export class Event {
   // `lower(col) = lower(:value)` predicate `EventsService` builds. There is
   // no `@Index` decorator here because TypeORM cannot express a functional
   // index, and declaring a plain one would describe an index that does not
-  // exist.
+  // exist. That reasoning covers the functional indexes on this column and on
+  // `event_type` alone: the plain partial index on `gathering_family` IS
+  // declared, at class level above.
   @Column({ type: 'varchar', length: 120, nullable: true })
   neighbourhood!: string | null;
 
@@ -279,11 +298,54 @@ export class Event {
   @Column({ type: 'varchar', length: 80, nullable: true })
   language!: string | null;
 
-  // "Supper club", "Workshop / talk", "Screening", ... — the wizard's type
-  // picker, stored verbatim. Indexed for the `type=` discovery filter the
-  // same functional-partial way `neighbourhood` above is.
+  /**
+   * The gathering's FORMAT, or the host's own words for it.
+   *
+   * Holds a curated kebab-case format key from the shared catalog
+   * ("supper-club", "walk-or-hike") whenever the host picked one of the 56,
+   * and the host's own text (1 to 80 characters) when they picked "something
+   * else". Column unchanged since LOC-04, only its vocabulary: rows written
+   * before the families landed still hold one of the eight old labels, or a
+   * free string, and both keep displaying verbatim.
+   *
+   * Indexed for the `type=` discovery filter the same functional-partial way
+   * `neighbourhood` above is.
+   */
   @Column({ type: 'varchar', length: 80, nullable: true })
   eventType!: string | null;
+
+  /**
+   * The gathering's FAMILY: the small closed vocabulary the format sits
+   * inside, and the only one of the two that drives behaviour.
+   *
+   * Nullable, and nullable forever: a gathering created before this existed,
+   * or one whose host typed a format nobody has classified, has no family and
+   * stays reachable through search, date and the format filter instead. See
+   * `../gathering-family.ts` for what a family decides.
+   *
+   * The browse board's `family=` filter is an exact enum match, served by the
+   * class-level `IDX_events_gathering_family` partial index above.
+   */
+  @Column({
+    type: 'enum',
+    enum: GatheringFamily,
+    enumName: 'events_gathering_family_enum',
+    nullable: true,
+  })
+  gatheringFamily!: GatheringFamily | null;
+
+  /**
+   * The one or two questions this family raises, answered.
+   *
+   * Six optional primitive fields (`FormatDetails`), of which any one family
+   * may store at most two. `EventsService` strips keys the effective family
+   * does not allow before writing, so a stale answer left behind by a host
+   * switching family is dropped rather than stored or rejected. A bag with
+   * nothing left in it is stored as `null`, so "nothing answered" has exactly
+   * one representation.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  formatDetails!: FormatDetails | null;
 
   // The SAME three-valued answer map business listings use
   // (`listings/listing-accessibility.ts`), deliberately reused rather than

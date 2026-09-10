@@ -5,6 +5,7 @@ import { ContentModerationModule } from '../content-moderation/content-moderatio
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { SocialModule } from '../social/social.module';
+import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationsService } from './conversations.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
@@ -64,6 +65,12 @@ import { MessagingService } from './messaging.service';
     // import, no `forwardRef`: `MentionsModule` does not depend on
     // `MessagingModule`.
     MentionsModule,
+    // Exports `StorageService` so `MessagesService.deleteMessage` can delete
+    // the BYTES behind a tombstoned message's attachment, not just hide it
+    // from the timeline. Plain import, no `forwardRef`: `StorageModule` only
+    // registers the `Message` ENTITY via its own `forFeature` (see its header)
+    // and never imports `MessagingModule`, so no cycle is introduced.
+    StorageModule,
   ],
   controllers: [ConversationsController, MessageRequestController],
   providers: [

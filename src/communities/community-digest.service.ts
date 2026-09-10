@@ -264,13 +264,20 @@ export class CommunityDigestService {
     communityIds: string[],
     now: Date,
   ): Promise<CountRow[]> {
+    // The schedule predicate is browse's, verbatim (`EventsService.list`'s
+    // 'upcoming' branch): a gathering that is UNDERWAY is still ahead, so a
+    // three-day festival that opened last night is still a reason to open the
+    // app tonight.
     return this.events
       .createQueryBuilder('e')
       .select('e.community_id', 'communityId')
       .addSelect('COUNT(*)', 'count')
       .where('e.community_id IN (:...communityIds)', { communityIds })
       .andWhere('e.status = :published', { published: EventStatus.Published })
-      .andWhere('e.start_at >= :now', { now })
+      .andWhere(
+        '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))',
+        { now },
+      )
       .groupBy('e.community_id')
       .getRawMany<CountRow>();
   }

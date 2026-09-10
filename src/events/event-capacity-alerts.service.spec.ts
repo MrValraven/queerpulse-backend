@@ -15,6 +15,9 @@ function baseEvent(overrides: Record<string, unknown> = {}) {
     title: 'Queer Book Club',
     status: EventStatus.Published,
     startAt: new Date(Date.now() + 48 * HOUR_MS),
+    // Most gatherings state no end. `hasEnded` reads that as ending at the
+    // start, which is what the multi-day tests below vary.
+    endAt: null,
     capacity: 20,
     nearlyFullNotifiedAt: null,
     ...overrides,
@@ -157,6 +160,57 @@ describe('EventCapacityAlertsService', () => {
       await service.onSeatsChanged('event-1');
       expect(notifications.createForRecipients).not.toHaveBeenCalled();
     }
+  });
+
+  // Multi-day and overnight gatherings. The alert used to go silent the moment
+  // `startAt` passed, so a three-day festival filling up on day two and an
+  // overnight party filling up at 01:00 both told their savers nothing. The
+  // bar is the gathering's real end, via `hasEnded`.
+  describe('a gathering that is still running', () => {
+    // Day two of a three-day festival: it began 24 hours ago and has another
+    // 48 to run.
+    const runningFestival = () =>
+      baseEvent({
+        startAt: new Date(Date.now() - 24 * HOUR_MS),
+        endAt: new Date(Date.now() + 48 * HOUR_MS),
+      });
+
+    it('still alerts while a multi-day gathering is underway', async () => {
+      const { service, notifications } = build({
+        event: runningFestival(),
+        seats: 18,
+      });
+      await service.onSeatsChanged('event-1');
+      expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
+      const [, type, payload] = notifications.createForRecipients.mock
+        .calls[0] as [string[], NotificationType, Record<string, unknown>];
+      expect(type).toBe(NotificationType.EventNearlyFull);
+      expect(payload).toMatchObject({ seatsRemaining: 2 });
+    });
+
+    it('still alerts on an overnight gathering after midnight', async () => {
+      const { service, notifications } = build({
+        event: baseEvent({
+          startAt: new Date(Date.now() - 2 * HOUR_MS),
+          endAt: new Date(Date.now() + 3 * HOUR_MS),
+        }),
+        seats: 18,
+      });
+      await service.onSeatsChanged('event-1');
+      expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
+    });
+
+    it('goes quiet once the stated end has passed', async () => {
+      const { service, notifications } = build({
+        event: baseEvent({
+          startAt: new Date(Date.now() - 72 * HOUR_MS),
+          endAt: new Date(Date.now() - HOUR_MS),
+        }),
+        seats: 18,
+      });
+      await service.onSeatsChanged('event-1');
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
   });
 
   it('hands the claim back when the send fails, so the next RSVP retries', async () => {

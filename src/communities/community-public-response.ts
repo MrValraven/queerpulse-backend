@@ -9,6 +9,18 @@ export interface PublicCommunityGathering {
   slug: string;
   title: string;
   startAt: Date;
+  /**
+   * When it finishes, or null for a gathering whose host stated no end. Same
+   * nullable shape as the column and as `VenueEventAttachmentDTO.endAt`, which
+   * is the directory's equivalent teaser.
+   *
+   * It is here because "the next gathering" now includes one that is UNDERWAY
+   * (see the query in `community-public.service.ts`), so `startAt` alone can be
+   * an instant already in the past. Without the end, a visitor is shown a
+   * stale-looking date and the payload withholds the one fact that explains it.
+   * What a client DOES with the pair is a display decision made elsewhere.
+   */
+  endAt: Date | null;
   isOnline: boolean;
 }
 

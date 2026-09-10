@@ -8,6 +8,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventBan } from './entities/event-ban.entity';
 import { Event, EventVenueConfirmation } from './entities/event.entity';
+import type { FormatDetails, GatheringFamily } from './gathering-family';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventSeries } from './entities/event-series.entity';
@@ -73,9 +74,18 @@ export interface EventSummary {
   // of location a non-attendee is always allowed. The exact `address` is
   // detail-only AND attendee-only — see `EventDetail.address`.
   neighbourhood: string | null;
-  /** The wizard's gathering type ("Supper club", "Workshop / talk", ...), or
-   *  null for an event created before the field existed. */
+  /** The gathering's format: a curated catalog key ("supper-club"), the host's
+   *  own words, or null for an event created before the field existed. The
+   *  frontend resolves a key to a translated name and falls back to the raw
+   *  text, so this is never a display string. */
   eventType: string | null;
+  /** The family the format sits inside, or null for a gathering nobody has
+   *  classified. The browse board's primary facet, and what the detail page's
+   *  conditional modules gate on. */
+  gatheringFamily: GatheringFamily | null;
+  /** The answers to this family's one or two questions, or null when the host
+   *  answered none. Already stripped to the keys the family allows. */
+  formatDetails: FormatDetails | null;
   /** The host's free-text door price (LOC-18) — "5 to 15 EUR sliding scale",
    *  "pay what you can at the door". DISPLAY ONLY: this platform takes no
    *  payment, so no reader of this field may promise a charge or a ticket.
@@ -555,6 +565,8 @@ export function toEventSummary(
     listingId: e.listingId,
     neighbourhood: e.neighbourhood,
     eventType: e.eventType,
+    gatheringFamily: e.gatheringFamily,
+    formatDetails: e.formatDetails,
     cost: e.cost,
     isFree: isFreeCost(e.cost),
     host,

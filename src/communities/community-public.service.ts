@@ -153,25 +153,42 @@ export class CommunityPublicService {
     // any member's identity) and the single next public gathering. Both are
     // scoped to this one community, so the endpoint costs three queries flat.
     const now = new Date();
+    // PUBLIC visibility only. A `members`, `community`, `network` or
+    // `invite_only` gathering is not something a signed-out visitor may learn
+    // exists, so the filter is an equality on `public` rather than an
+    // exclusion list that a new visibility tier could quietly widen.
+    const nextGatheringScope = {
+      communityId: community.id,
+      status: EventStatus.Published,
+      visibility: EventVisibility.Public,
+    };
     const [memberCount, nextGathering] = await Promise.all([
       this.members.count({ where: { communityId: community.id } }),
       this.events.findOne({
-        where: {
-          communityId: community.id,
-          status: EventStatus.Published,
-          // PUBLIC visibility only. A `members`, `community`, `network` or
-          // `invite_only` gathering is not something a signed-out visitor may
-          // learn exists, so the filter is an equality on `public` rather than
-          // an exclusion list that a new visibility tier could quietly widen.
-          visibility: EventVisibility.Public,
-          startAt: MoreThanOrEqual(now),
-        },
+        // A gathering that is UNDERWAY is still the next one, matching
+        // browse's 'upcoming' predicate in `EventsService.list`. Find-options
+        // cannot write that disjunct inline, so it is two arms of an OR that
+        // BOTH carry the whole scope above: the arms differ only in which
+        // timestamp they test, so neither can admit anything the other would
+        // refuse. `endAt: MoreThanOrEqual(now)` carries the
+        // `end_at IS NOT NULL` half for free, since SQL never matches NULL
+        // against `>=`. `ORDER BY start_at ASC` then puts a gathering that is
+        // already running ahead of one that has yet to begin, which is the
+        // order a visitor wants.
+        where: [
+          { ...nextGatheringScope, startAt: MoreThanOrEqual(now) },
+          { ...nextGatheringScope, endAt: MoreThanOrEqual(now) },
+        ],
         order: { startAt: 'ASC' },
         select: {
           id: true,
           slug: true,
           title: true,
           startAt: true,
+          // Carried because a gathering that is UNDERWAY can win this query,
+          // so a start instant in the past is a correct answer and the end is
+          // what makes it legible. See `PublicCommunityGathering.endAt`.
+          endAt: true,
           isOnline: true,
         },
       }),
@@ -197,6 +214,7 @@ export class CommunityPublicService {
             slug: nextGathering.slug,
             title: nextGathering.title,
             startAt: nextGathering.startAt,
+            endAt: nextGathering.endAt,
             isOnline: nextGathering.isOnline,
           }
         : null,
@@ -254,7 +272,21 @@ export class CommunityPublicService {
       .andWhere('gathering.status = :publishedStatus', {
         publishedStatus: EventStatus.Published,
       })
-      .andWhere('gathering.startAt >= :now', { now })
+      // A gathering that is UNDERWAY is still upcoming, matching browse's
+      // 'upcoming' predicate in `EventsService.list`, the member lane in
+      // `EventsService.listUpcomingByCommunity`, and `nextGathering` above.
+      // Without it a prospective member lost an overnight party at 23:00 and
+      // lost a three-day festival on its second and third days, while a member
+      // reading the same community still saw both. The whole disjunct is
+      // parenthesised so it stays ONE conjunct: an unparenthesised `OR` here
+      // would bind loosely enough to widen the visibility and takedown filters
+      // beside it. `end_at IS NOT NULL` is stated even though SQL never
+      // matches NULL against `>=`, because it says out loud that a gathering
+      // with no stated end is over once it has started.
+      .andWhere(
+        '(gathering.start_at >= :now OR (gathering.end_at IS NOT NULL AND gathering.end_at >= :now))',
+        { now },
+      )
       .andWhere('gathering.visibility IN (:...visibleTiers)', {
         visibleTiers: [...GATHERING_TIERS_VISIBLE_TO_NON_MEMBERS],
       })

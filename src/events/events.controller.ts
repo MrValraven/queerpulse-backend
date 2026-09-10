@@ -83,7 +83,7 @@ export class EventsController {
     description:
       '`filter=saved` returns the caller\'s bookmarked ("saved") events, ' +
       'most-recently-saved first. Every summary carries `isBookmarked`. ' +
-      '`from`/`to`/`hood`/`type`/`q`/`cost` are the discovery filters ' +
+      '`from`/`to`/`hood`/`family`/`type`/`q`/`cost` are the discovery filters ' +
       '(LOC-17), applied in SQL so a filtered browse survives pagination; ' +
       'they narrow `filter=upcoming` (and `from`/`to`/`q` also narrow ' +
       '`filter=past`).',
@@ -100,6 +100,7 @@ export class EventsController {
         from: query.from,
         to: query.to,
         hood: query.hood,
+        family: query.family,
         type: query.type,
         q: query.q,
         cost: query.cost,
@@ -173,6 +174,31 @@ export class EventsController {
     @Query() query: SeriesScopeQuery,
   ) {
     return this.eventsService.cancel(slug, user.userId, query.scope);
+  }
+
+  @Delete(':slug')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: 'Delete an event you host, permanently.',
+    description:
+      'Removes the row and everything hanging off it (RSVPs, invites, ' +
+      'co-hosts, lineup, photos, announcements, bans). The HOST alone can ' +
+      'do this: a co-host may cancel, and only the owner may destroy. ' +
+      'Allowed when the event is already cancelled (everyone with a stake ' +
+      'has been told) or when it has no live RSVPs and no pending invites ' +
+      '(nobody to tell). Otherwise cancel it first, via POST ' +
+      '/events/:slug/cancel, so the people who signed up hear about it, ' +
+      'then delete it.',
+  })
+  @ApiOkResponse({ description: '`{ ok: true }`.' })
+  @ApiForbiddenResponse({ description: 'Only the host can delete it.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  @ApiConflictResponse({
+    description:
+      'People still have a stake in it. Cancel it before deleting it.',
+  })
+  remove(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.eventsService.remove(slug, user.userId);
   }
 
   @Post(':slug/rsvp')

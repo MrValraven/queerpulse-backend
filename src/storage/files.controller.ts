@@ -226,7 +226,23 @@ export class FilesController {
         // key. A caller who merely holds the URL (leaked via referrer, proxy
         // log, forwarded link) is not a participant and gets the same 404 as
         // any unresolvable key.
+        //
+        // The UPLOADER is admitted first, and separately. Every other kind
+        // reaches the `storageKeyOwnerId(...) === user.userId` fallback below,
+        // but this branch `return`s before it, so a member could not load their
+        // OWN upload here — and the participant query requires a NON-deleted
+        // message, so the moment the message was deleted for everyone the
+        // object 404'd for its own uploader. It still appeared in Settings →
+        // My uploads (which lists bucket objects, not messages), rendering as a
+        // blank tile they could not identify. `MessagesService.deleteMessage`
+        // now purges the object on that delete so the tile normally goes away
+        // entirely; this keeps any object that outlives its message (a purge
+        // that failed, or one orphaned before that fix shipped) visible and
+        // therefore deletable by the one person entitled to it. It widens
+        // nothing: the key embeds the uploader's own id, so this grants a
+        // member access only to bytes they themselves uploaded.
         if (
+          storageKeyOwnerId(storageKey) !== user.userId &&
           !(await this.isMessageAttachmentParticipant(storageKey, user.userId))
         ) {
           throw new NotFoundException();

@@ -30,6 +30,7 @@ import { MessagesService } from './messages.service';
 import { MessageAnnotationsService } from './message-annotations.service';
 import { GroupsService } from './groups.service';
 import { MessageRequestsService } from './message-requests.service';
+import { StorageService } from '../storage/storage.service';
 
 /**
  * Minimal chainable stand-in for a TypeORM SelectQueryBuilder. Every builder
@@ -150,6 +151,7 @@ describe('MessagingService', () => {
   };
   let usersService: { findById: jest.Mock };
   let mentions: { notify: jest.Mock };
+  let storage: { deleteObjectByReference: jest.Mock };
   // `MessagingCoreService.toMessageResponses` now reads the shared
   // `content_moderation` table to tombstone moderator-taken-down messages; the
   // repo only needs `find` (default: no takedowns) for these tests.
@@ -260,6 +262,7 @@ describe('MessagingService', () => {
       exist: jest.fn().mockResolvedValue(false),
     };
     mentions = { notify: jest.fn().mockResolvedValue(new Set()) };
+    storage = { deleteObjectByReference: jest.fn().mockResolvedValue(true) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -302,6 +305,13 @@ describe('MessagingService', () => {
           // mirrors how forum/community specs stub it out; the notify() call
           // itself is covered by `MentionNotificationService`'s own spec.
           useValue: mentions,
+        },
+        {
+          provide: StorageService,
+          // `deleteMessage` purges the BYTES behind a tombstoned message's
+          // attachment; the bucket call itself is stubbed here and asserted in
+          // the delete specs below.
+          useValue: storage,
         },
       ],
     }).compile();
@@ -1580,6 +1590,180 @@ describe('MessagingService', () => {
           requestMessage: null,
         }),
       ).rejects.toThrow('boom');
+    });
+  });
+  describe('deleteMessage attachment purge', () => {
+    const IMAGE_KEY =
+      'message-images/me/11111111-1111-4111-8111-111111111111.jpg';
+    const DOCUMENT_KEY =
+      'message-documents/me/22222222-2222-4222-8222-222222222222.pdf';
+
+    /** A participant row for `me`, so `requireParticipant` resolves. */
+    function stubParticipant(): void {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'c1',
+        userId: 'me',
+        clearedAt: null,
+        leftAt: null,
+      });
+    }
+
+    /**
+     * Wire the two builders `deleteMessage` runs, in order: the conditional
+     * soft-delete UPDATE (terminal `execute`), then — only when that affected a
+     * row — the "is this key still referenced by a LIVE message?" probe
+     * (terminal `getExists`).
+     */
+    function stubDeleteThenReferenceProbe(options: {
+      affected: number;
+      stillReferenced: boolean;
+    }): { update: MockQb; probe: MockQb } {
+      const update = makeQb();
+      update.execute.mockResolvedValue({ affected: options.affected });
+      const probe = makeQb();
+      probe.getExists.mockResolvedValue(options.stillReferenced);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(update)
+        .mockReturnValueOnce(probe);
+      return { update, probe };
+    }
+
+    beforeEach(() => {
+      stubParticipant();
+    });
+
+    it('deletes the stored object behind an image attachment nothing else references', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        deletedAt: null,
+        attachment: {
+          url: IMAGE_KEY,
+          previewUrl: IMAGE_KEY,
+          provider: 'upload',
+        },
+      });
+      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: false });
+
+      await expect(service.deleteMessage('c1', 'm1', 'me')).resolves.toEqual({
+        ok: true,
+      });
+
+      // `url` and `previewUrl` are the same key for an uploaded image, so the
+      // object is deleted ONCE, not twice.
+      expect(storage.deleteObjectByReference).toHaveBeenCalledTimes(1);
+      expect(storage.deleteObjectByReference).toHaveBeenCalledWith(IMAGE_KEY);
+    });
+
+    it('deletes the stored object behind a document attachment', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        deletedAt: null,
+        attachment: {
+          url: DOCUMENT_KEY,
+          fileName: 'lease.pdf',
+          byteSize: 1024,
+          contentType: 'application/pdf',
+          provider: 'upload',
+        },
+      });
+      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: false });
+
+      await service.deleteMessage('c1', 'm1', 'me');
+
+      expect(storage.deleteObjectByReference).toHaveBeenCalledWith(
+        DOCUMENT_KEY,
+      );
+    });
+
+    it('KEEPS the object when another live message still references the key (a forward)', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        deletedAt: null,
+        attachment: {
+          url: IMAGE_KEY,
+          previewUrl: IMAGE_KEY,
+          provider: 'upload',
+        },
+      });
+      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: true });
+
+      await service.deleteMessage('c1', 'm1', 'me');
+
+      // A forward reuses the ORIGINAL key rather than copying the object, so
+      // deleting here would blank the forwarded copy too.
+      expect(storage.deleteObjectByReference).not.toHaveBeenCalled();
+    });
+
+    it('never touches storage for a GIF attachment (an absolute provider URL, not our key)', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        deletedAt: null,
+        attachment: {
+          url: 'https://media.giphy.com/media/abc/giphy.gif',
+          previewUrl: 'https://media.giphy.com/media/abc/200w.gif',
+          provider: 'giphy',
+        },
+      });
+      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: false });
+
+      await service.deleteMessage('c1', 'm1', 'me');
+
+      expect(storage.deleteObjectByReference).not.toHaveBeenCalled();
+    });
+
+    it('still reports success when the bucket delete throws', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        deletedAt: null,
+        attachment: {
+          url: IMAGE_KEY,
+          previewUrl: IMAGE_KEY,
+          provider: 'upload',
+        },
+      });
+      stubDeleteThenReferenceProbe({ affected: 1, stillReferenced: false });
+      storage.deleteObjectByReference.mockRejectedValue(new Error('bucket'));
+
+      // The message IS deleted either way; a 500 here would only be retried
+      // into an idempotent no-op that never reaches the purge again.
+      await expect(service.deleteMessage('c1', 'm1', 'me')).resolves.toEqual({
+        ok: true,
+      });
+      expect(emitter.emit).toHaveBeenCalledWith(
+        'message.deleted',
+        expect.objectContaining({ conversationId: 'c1', messageId: 'm1' }),
+      );
+    });
+
+    it('does not purge on a repeat delete of an already-tombstoned message', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        deletedAt: new Date(),
+        attachment: {
+          url: IMAGE_KEY,
+          previewUrl: IMAGE_KEY,
+          provider: 'upload',
+        },
+      });
+
+      await expect(service.deleteMessage('c1', 'm1', 'me')).resolves.toEqual({
+        ok: true,
+      });
+
+      expect(storage.deleteObjectByReference).not.toHaveBeenCalled();
+      expect(emitter.emit).not.toHaveBeenCalled();
     });
   });
 });

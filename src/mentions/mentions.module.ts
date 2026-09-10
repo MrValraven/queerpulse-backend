@@ -9,6 +9,7 @@ import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { MentionNameResolveService } from './mention-name-resolve.service';
 import { MentionNotificationService } from './mention-notification.service';
 import { MentionsInboxService } from './mentions-inbox.service';
 import { MentionsController } from './mentions.controller';
@@ -37,7 +38,11 @@ import { MentionsController } from './mentions.controller';
     ]),
   ],
   controllers: [MentionsController],
-  providers: [MentionNotificationService, MentionsInboxService],
+  providers: [
+    MentionNotificationService,
+    MentionNameResolveService,
+    MentionsInboxService,
+  ],
   exports: [MentionNotificationService],
 })
 export class MentionsModule {}

@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -15,7 +16,11 @@ import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
-import { AttachmentInput, Message } from './entities/message.entity';
+import {
+  AttachmentInput,
+  isDocumentAttachment,
+  Message,
+} from './entities/message.entity';
 import {
   MessageResponse,
   MessageSearchConversationGroup,
@@ -39,6 +44,10 @@ import {
 } from './messaging.events';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { MessagingCoreService } from './messaging-core.service';
+import { toBareKey } from '../storage/bare-key';
+import { parseStorageKey } from '../storage/storage-key';
+import { StorageService } from '../storage/storage.service';
+import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
 
 /**
  * A short window of `body` around the first case-insensitive occurrence of
@@ -75,6 +84,8 @@ function buildSearchSnippet(body: string, query: string): string {
  */
 @Injectable()
 export class MessagesService {
+  private readonly logger = new Logger(MessagesService.name);
+
   constructor(
     @InjectRepository(Conversation)
     private readonly conversations: Repository<Conversation>,
@@ -89,6 +100,7 @@ export class MessagesService {
     private readonly blockFilter: BlockFilterService,
     private readonly usersService: UsersService,
     private readonly mentions: MentionNotificationService,
+    private readonly storage: StorageService,
   ) {}
 
   async getMessages(
@@ -624,12 +636,127 @@ export class MessagesService {
       .execute();
 
     if (result.affected === 1) {
+      // The tombstone hides the attachment from the timeline; this removes the
+      // BYTES. Runs only on the affected-1 branch so a repeat/no-op delete
+      // never re-attempts it, and after the update so the row this call just
+      // tombstoned is already excluded from the "still referenced?" check.
+      await this.purgeAttachmentObject(message);
       this.eventEmitter.emit(MESSAGE_DELETED, {
         conversationId,
         messageId,
       } satisfies MessageDeletedEvent);
     }
     return { ok: true };
+  }
+
+  /**
+   * Delete the stored object behind a just-tombstoned message's attachment,
+   * once no OTHER live message still references it.
+   *
+   * Without this, "delete for everyone" only ever hid the attachment: the row
+   * kept its `attachment.url`, the bucket object was never touched, and the
+   * only `MESSAGE_DELETED` listener is the socket gateway. The uploader then
+   * kept seeing the photo listed in Settings → My uploads forever — as a BLANK
+   * tile, because `FilesController` refuses a `message-image` key that no
+   * un-deleted message references. `StorageMaintenanceService`'s orphan sweep
+   * cannot reclaim it either: it checks `withDeleted()` on purpose, so a key
+   * any message EVER referenced counts as in-use.
+   *
+   * This mirrors `EventPhotosService.remove`, which deletes the stored object
+   * along with the row, and the stance `reports/report-evidence.ts` argues
+   * explicitly: keeping a photograph of an identifiable person after a takedown
+   * is the worse failure. A message report snapshots only the BODY
+   * (`MessageSnapshotEvidence`), never the attachment, so no evidence path
+   * depends on these bytes.
+   *
+   * Applies to a staff takedown as well as the author's own delete — one code
+   * path, one outcome, for the same reason.
+   *
+   * Best-effort by design: a bucket failure is logged and swallowed. The
+   * message IS deleted either way, and turning a successful takedown into a 500
+   * (which a client would retry into an idempotent no-op that never reaches
+   * here) would be strictly worse than leaving one object for an operator.
+   */
+  private async purgeAttachmentObject(message: Message): Promise<void> {
+    const attachment = message.attachment;
+    if (!attachment) {
+      return;
+    }
+    // An image attachment carries `previewUrl` alongside `url` (the same value
+    // today, read anyway so a future separate thumbnail key is not orphaned); a
+    // document has no such field, hence the shape check rather than a blind
+    // union access. A picked GIF holds an absolute provider URL under both,
+    // which `isPurgeableKey` drops.
+    const candidateKeys = [
+      ...new Set(
+        (isDocumentAttachment(attachment)
+          ? [attachment.url]
+          : [attachment.url, attachment.previewUrl]
+        )
+          .filter((value): value is string => typeof value === 'string')
+          .map(toBareKey)
+          .filter((key) => MessagesService.isPurgeableKey(key)),
+      ),
+    ];
+    if (candidateKeys.length === 0) {
+      return;
+    }
+    for (const key of candidateKeys) {
+      try {
+        if (await this.isKeyStillReferencedByLiveMessage(key)) {
+          continue;
+        }
+        await this.storage.deleteObjectByReference(key);
+      } catch (error) {
+        this.logger.error(
+          `Failed to purge attachment object ${key} for deleted message ${message.id}: ${String(error)}`,
+        );
+      }
+    }
+  }
+
+  /** True for a key this platform stores for a message attachment. Anything
+   *  else — an absolute GIF provider URL, another kind's key, a malformed
+   *  string — is never handed to a delete. */
+  private static isPurgeableKey(key: string): boolean {
+    const kindSpec = parseStorageKey(key);
+    return (
+      kindSpec === UPLOAD_KIND_SPECS['message-image'] ||
+      kindSpec === UPLOAD_KIND_SPECS['message-document']
+    );
+  }
+
+  /**
+   * True when some OTHER un-deleted message still references this key.
+   *
+   * A FORWARD reuses the ORIGINAL key rather than copying the object (see
+   * `MessagingCoreService.senderCanForwardAttachment`), so one object can be
+   * referenced by many messages across many conversations. Deleting on the
+   * first tombstone alone would blank every forward of that photo. No
+   * `withDeleted()`: tombstoned rows are exactly the ones that must NOT keep
+   * the object alive, and the row this delete just tombstoned is excluded by
+   * the same token. Matches both stored forms, mirroring
+   * `FilesController.isMessageAttachmentParticipant`.
+   *
+   * The `deletedAt IS NULL` predicate is written out even though `Message` has
+   * a `@DeleteDateColumn` and TypeORM therefore adds it to a builder that does
+   * not call `withDeleted()`. Relying on that default here would be a silent
+   * trap in ONE direction: if it ever stopped applying, this probe would always
+   * find the row the caller just tombstoned, always report "still referenced",
+   * and quietly never purge anything — restoring the exact bug this method
+   * exists to fix, with no error to notice. `FilesController` states the same
+   * predicate explicitly for the same reason.
+   */
+  private async isKeyStillReferencedByLiveMessage(
+    storageKey: string,
+  ): Promise<boolean> {
+    return this.messages
+      .createQueryBuilder('message')
+      .where("message.attachment ->> 'url' IN (:...attachmentForms)", {
+        attachmentForms: [storageKey, `/files/${storageKey}`],
+      })
+      .andWhere('message.deletedAt IS NULL')
+      .getExists();
   }
 
   /**

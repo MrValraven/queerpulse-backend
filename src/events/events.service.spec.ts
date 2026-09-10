@@ -29,7 +29,12 @@ import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventSeries } from './entities/event-series.entity';
-import { Event, EventStatus, EventVisibility } from './entities/event.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+  GatheringFamily,
+} from './entities/event.entity';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
 
@@ -37,10 +42,15 @@ describe('EventsService', () => {
   let service: EventsService;
   let events: {
     findOne: jest.Mock;
+    // `create()` builds its row here before saving it, so the column values a
+    // create writes are readable off this mock's calls.
+    create: jest.Mock<Event, [Partial<Event>]>;
     save: jest.Mock<Event, [Event]>;
     exists: jest.Mock;
     find: jest.Mock;
     update: jest.Mock;
+    delete: jest.Mock;
+    createQueryBuilder: jest.Mock;
     manager: { transaction: jest.Mock };
   };
   let cohosts: { exists: jest.Mock; find: jest.Mock };
@@ -128,9 +138,67 @@ describe('EventsService', () => {
     return qb;
   };
 
+  // One recorded `where` / `andWhere` call: the SQL string AND the parameters
+  // bound to it. Both halves matter. A clause naming `:discoveryFrom` proves
+  // only what the SQL SAYS; the bound value proves what it will actually
+  // compare against, so a predicate handed the wrong Date still fails.
+  interface RecordedWhereCall {
+    clause: string;
+    parameters: Record<string, unknown>;
+  }
+
+  // A chainable stub for `list`'s browse query builders. It records every
+  // `where` / `andWhere` call it is handed, so a test can read back the exact
+  // schedule predicate a branch asked Postgres for and the values it bound.
+  // `getMany` resolves empty, which short-circuits `summarize` before any of
+  // its per-page lookups.
+  const recordingListQueryBuilder = () => {
+    const recordedWhereCalls: RecordedWhereCall[] = [];
+    const queryBuilder: Record<string, jest.Mock> = {};
+    for (const method of ['where', 'andWhere']) {
+      queryBuilder[method] = jest.fn((clause: unknown, parameters: unknown) => {
+        if (typeof clause === 'string') {
+          recordedWhereCalls.push({
+            clause,
+            parameters:
+              parameters && typeof parameters === 'object'
+                ? (parameters as Record<string, unknown>)
+                : {},
+          });
+        }
+        return queryBuilder;
+      });
+    }
+    for (const method of ['innerJoin', 'orderBy', 'skip', 'take']) {
+      queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+    }
+    queryBuilder.getMany = jest.fn().mockResolvedValue([]);
+    return { queryBuilder, recordedWhereCalls };
+  };
+
+  // ONE editable published gathering, hosted by `u1`, starting an hour from
+  // now. Every `update` test shares this single factory so the fixtures cannot
+  // drift apart; a test needing a different field spreads over it.
+  const editableEvent = () => ({
+    id: 'e1',
+    slug: 'x',
+    hostId: 'u1',
+    status: EventStatus.Published,
+    cost: null,
+    visibility: EventVisibility.Public,
+    startAt: new Date(Date.now() + 3_600_000),
+    endAt: null,
+    capacity: null,
+    communityId: null,
+  });
+
   beforeEach(async () => {
     events = {
       findOne: jest.fn(),
+      // The real repository hands back an entity instance built from the
+      // literal; handing the literal straight back keeps the saved row and the
+      // recorded call the same object, which is what the create tests read.
+      create: jest.fn((entityLike: Partial<Event>) => entityLike as Event),
       save: jest.fn((event: Event) => event),
       exists: jest.fn().mockResolvedValue(false),
       // Series scope (`update`/`cancel` with `scope: 'future'`) resolves the
@@ -140,6 +208,15 @@ describe('EventsService', () => {
       // `cancel` flips every occurrence in ONE statement rather than saving
       // them one at a time.
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      // `remove` hard-deletes the row and lets Postgres cascade the children,
+      // so there is nothing here for a child-table mock to observe.
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      // `list`'s browse branches build their query here. The schedule-predicate
+      // tests install their own recording stub; the default hands back a
+      // builder that returns an empty page.
+      createQueryBuilder: jest.fn(
+        () => recordingListQueryBuilder().queryBuilder,
+      ),
       // `update` runs its patch inside a transaction so a series edit is
       // all-or-nothing. The stub just runs the callback with a manager whose
       // `save` delegates to the same repository mock the non-transactional
@@ -560,21 +637,8 @@ describe('EventsService', () => {
   // authorization check (`assertMemberBySlug`), applied to the acting
   // organizer (`userId`) rather than always `hostId`.
   describe('update communitySlug handling', () => {
-    const baseEvent = () => ({
-      id: 'e1',
-      slug: 'x',
-      hostId: 'u1',
-      status: EventStatus.Published,
-      cost: null,
-      visibility: EventVisibility.Public,
-      startAt: new Date(Date.now() + 3_600_000),
-      endAt: null,
-      capacity: null,
-      communityId: null,
-    });
-
     it('resolves a non-empty communitySlug via the SAME authorization create() uses', async () => {
-      events.findOne.mockResolvedValue(baseEvent());
+      events.findOne.mockResolvedValue(editableEvent());
       membership.assertMemberBySlug.mockResolvedValue('community-9');
       const detail = await service.update('x', 'u1', {
         communitySlug: 'queer-devs',
@@ -588,7 +652,7 @@ describe('EventsService', () => {
 
     it('detaches the community when communitySlug is explicitly null', async () => {
       events.findOne.mockResolvedValue({
-        ...baseEvent(),
+        ...editableEvent(),
         communityId: 'community-9',
       });
       const detail = await service.update('x', 'u1', { communitySlug: null });
@@ -598,7 +662,7 @@ describe('EventsService', () => {
 
     it('detaches the community when communitySlug is an empty string', async () => {
       events.findOne.mockResolvedValue({
-        ...baseEvent(),
+        ...editableEvent(),
         communityId: 'community-9',
       });
       const detail = await service.update('x', 'u1', { communitySlug: '' });
@@ -607,7 +671,7 @@ describe('EventsService', () => {
 
     it('leaves communityId unchanged when communitySlug is absent from the patch', async () => {
       events.findOne.mockResolvedValue({
-        ...baseEvent(),
+        ...editableEvent(),
         communityId: 'community-9',
       });
       const detail = await service.update('x', 'u1', { capacity: 3 });
@@ -617,7 +681,7 @@ describe('EventsService', () => {
 
     it('400s when detaching the community while visibility stays community', async () => {
       events.findOne.mockResolvedValue({
-        ...baseEvent(),
+        ...editableEvent(),
         visibility: EventVisibility.Community,
         communityId: 'community-9',
       });
@@ -627,9 +691,318 @@ describe('EventsService', () => {
     });
 
     it('400s when switching visibility to community with no resolved community', async () => {
-      events.findOne.mockResolvedValue(baseEvent()); // communityId: null
+      events.findOne.mockResolvedValue(editableEvent()); // communityId: null
       await expect(
         service.update('x', 'u1', { visibility: EventVisibility.Community }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  // Multi-day and overnight gatherings. A gathering that is UNDERWAY belongs in
+  // 'upcoming', and the two browse branches have to partition time between them
+  // so nothing lands in both lists or in neither.
+  //
+  // These tests have no database, so they work in two steps. `scheduleClauseFor`
+  // reads back the exact SQL string the service handed the query builder, and
+  // `matchesScheduleClause` pins what that string MEANS by stating the same
+  // logic in JavaScript. A predicate the service changes without changing these
+  // constants fails the first test; a predicate whose meaning drifts fails the
+  // ones after it.
+  describe('list schedule predicates', () => {
+    const UPCOMING_SCHEDULE_CLAUSE =
+      '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))';
+    const PAST_SCHEDULE_CLAUSE =
+      '(e.start_at < :now AND (e.end_at IS NULL OR e.end_at < :now))';
+
+    const matchesScheduleClause = (
+      clause: string,
+      gathering: { startAt: Date; endAt: Date | null },
+      now: Date,
+    ): boolean => {
+      const startsAt = gathering.startAt.getTime();
+      const endsAt = gathering.endAt ? gathering.endAt.getTime() : null;
+      const nowInMilliseconds = now.getTime();
+      if (clause === UPCOMING_SCHEDULE_CLAUSE) {
+        return (
+          startsAt >= nowInMilliseconds ||
+          (endsAt !== null && endsAt >= nowInMilliseconds)
+        );
+      }
+      if (clause === PAST_SCHEDULE_CLAUSE) {
+        return (
+          startsAt < nowInMilliseconds &&
+          (endsAt === null || endsAt < nowInMilliseconds)
+        );
+      }
+      throw new Error(`No JavaScript reading for the clause: ${clause}`);
+    };
+
+    // Runs the branch and returns the one call it built around `:now`, having
+    // first checked that the `now` it bound is a real Date.
+    const scheduleCallFor = async (
+      filter: 'upcoming' | 'past',
+    ): Promise<RecordedWhereCall> => {
+      const { queryBuilder, recordedWhereCalls } = recordingListQueryBuilder();
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+      await service.list('viewer-1', filter, 1);
+      const scheduleCalls = recordedWhereCalls.filter((call) =>
+        call.clause.includes(':now'),
+      );
+      expect(scheduleCalls).toHaveLength(1);
+      expect(scheduleCalls[0]!.parameters.now).toBeInstanceOf(Date);
+      return scheduleCalls[0]!;
+    };
+
+    const scheduleClauseFor = async (
+      filter: 'upcoming' | 'past',
+    ): Promise<string> => (await scheduleCallFor(filter)).clause;
+
+    const now = new Date('2026-10-17T23:30:00.000Z');
+    const HOUR_IN_MILLISECONDS = 3_600_000;
+    const running = {
+      startAt: new Date(now.getTime() - HOUR_IN_MILLISECONDS),
+      endAt: new Date(now.getTime() + 3 * HOUR_IN_MILLISECONDS),
+    };
+    const finished = {
+      startAt: new Date(now.getTime() - 4 * HOUR_IN_MILLISECONDS),
+      endAt: new Date(now.getTime() - HOUR_IN_MILLISECONDS),
+    };
+    const startedWithNoStatedEnd = {
+      startAt: new Date(now.getTime() - HOUR_IN_MILLISECONDS),
+      endAt: null,
+    };
+
+    it('builds the underway-aware predicate for upcoming and its inverse for past', async () => {
+      await expect(scheduleClauseFor('upcoming')).resolves.toBe(
+        UPCOMING_SCHEDULE_CLAUSE,
+      );
+      await expect(scheduleClauseFor('past')).resolves.toBe(
+        PAST_SCHEDULE_CLAUSE,
+      );
+    });
+
+    it('keeps a gathering that started an hour ago and ends in three in upcoming, and out of past', async () => {
+      const upcomingClause = await scheduleClauseFor('upcoming');
+      const pastClause = await scheduleClauseFor('past');
+      expect(matchesScheduleClause(upcomingClause, running, now)).toBe(true);
+      expect(matchesScheduleClause(pastClause, running, now)).toBe(false);
+    });
+
+    it('moves a gathering that ended an hour ago into past, and out of upcoming', async () => {
+      const upcomingClause = await scheduleClauseFor('upcoming');
+      const pastClause = await scheduleClauseFor('past');
+      expect(matchesScheduleClause(pastClause, finished, now)).toBe(true);
+      expect(matchesScheduleClause(upcomingClause, finished, now)).toBe(false);
+    });
+
+    // `hasEnded` in `event-timing.ts` reads a null `endAt` strictly: a
+    // gathering that states no end is over once it has started. Browse agrees
+    // on exactly that case, which is what this test proves. Where an end IS
+    // stated the two differ for one instant: at `end_at == now` browse still
+    // says upcoming while `hasEnded`'s `<=` already says ended. Both operators
+    // were specified deliberately, so that instant is left alone here.
+    it('counts a started gathering with no stated end as past', async () => {
+      const upcomingClause = await scheduleClauseFor('upcoming');
+      const pastClause = await scheduleClauseFor('past');
+      expect(
+        matchesScheduleClause(pastClause, startedWithNoStatedEnd, now),
+      ).toBe(true);
+      expect(
+        matchesScheduleClause(upcomingClause, startedWithNoStatedEnd, now),
+      ).toBe(false);
+    });
+  });
+
+  // The "Today" / "This weekend" / "This week" chips, which reach the server as
+  // an optional `from` and an optional `to` (`whenPresetRange` in the
+  // frontend's `hub/browseFilters.ts`). A window is an INTERVAL, so the
+  // question is intersection: the gathering has to start at or before the
+  // window's end AND end at or after the window's start, reading a null end as
+  // ending at its own start. Asked point-in-time against `start_at` alone,
+  // "Today" dropped a festival that was running right then.
+  //
+  // Same two-step as the schedule predicates above: read back the SQL the
+  // service built, then pin what it MEANS in JavaScript.
+  describe('discovery window bounds', () => {
+    const FROM_CLAUSE =
+      '(e.start_at >= :discoveryFrom OR (e.end_at IS NOT NULL AND e.end_at >= :discoveryFrom))';
+    const TO_CLAUSE = 'e.start_at <= :discoveryTo';
+
+    // Every window call the branch built, in the order it built them, SQL and
+    // bound parameters together.
+    const windowCallsFor = async (options: {
+      from?: string;
+      to?: string;
+    }): Promise<RecordedWhereCall[]> => {
+      const { queryBuilder, recordedWhereCalls } = recordingListQueryBuilder();
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+      await service.list('viewer-1', 'upcoming', 1, options);
+      return recordedWhereCalls.filter(
+        (call) =>
+          call.clause.includes(':discoveryFrom') ||
+          call.clause.includes(':discoveryTo'),
+      );
+    };
+
+    const windowClausesFor = async (options: {
+      from?: string;
+      to?: string;
+    }): Promise<string[]> =>
+      (await windowCallsFor(options)).map((call) => call.clause);
+
+    // Reads each recorded call against a gathering using the value the service
+    // ACTUALLY bound, so a clause handed the wrong Date fails here rather than
+    // passing on the strength of its SQL text.
+    const matchesWindowCalls = (
+      calls: RecordedWhereCall[],
+      gathering: { startAt: Date; endAt: Date | null },
+    ): boolean =>
+      calls.every((call) => {
+        const startsAt = gathering.startAt.getTime();
+        const endsAt = gathering.endAt ? gathering.endAt.getTime() : null;
+        if (call.clause === FROM_CLAUSE) {
+          const boundFrom = call.parameters.discoveryFrom;
+          expect(boundFrom).toBeInstanceOf(Date);
+          const fromMilliseconds = (boundFrom as Date).getTime();
+          return (
+            startsAt >= fromMilliseconds ||
+            (endsAt !== null && endsAt >= fromMilliseconds)
+          );
+        }
+        if (call.clause === TO_CLAUSE) {
+          const boundTo = call.parameters.discoveryTo;
+          expect(boundTo).toBeInstanceOf(Date);
+          return startsAt <= (boundTo as Date).getTime();
+        }
+        throw new Error(`No JavaScript reading for the clause: ${call.clause}`);
+      });
+
+    // "Today" as the frontend builds it: now through the end of the day.
+    const from = new Date('2026-10-18T09:00:00.000Z');
+    const to = new Date('2026-10-18T23:59:59.999Z');
+    const todayWindow = { from: from.toISOString(), to: to.toISOString() };
+
+    const DAY_IN_MILLISECONDS = 86_400_000;
+    // Day two of a three-day festival: it began yesterday and runs to tomorrow.
+    const runningFestival = {
+      startAt: new Date(from.getTime() - DAY_IN_MILLISECONDS),
+      endAt: new Date(to.getTime() + DAY_IN_MILLISECONDS),
+    };
+    // An overnight party that ended at 04:00 this morning, before the window.
+    const endedBeforeTheWindow = {
+      startAt: new Date(from.getTime() - 12 * DAY_IN_MILLISECONDS),
+      endAt: new Date(from.getTime() - 3_600_000),
+    };
+    // Inside the window, stating no end at all.
+    const insideWithNoStatedEnd = {
+      startAt: new Date(from.getTime() + 3_600_000),
+      endAt: null,
+    };
+    // Starts the day after the window closes, stating no end.
+    const afterWithNoStatedEnd = {
+      startAt: new Date(to.getTime() + DAY_IN_MILLISECONDS),
+      endAt: null,
+    };
+
+    it('bounds the window by intersection rather than by the start alone', async () => {
+      await expect(windowClausesFor(todayWindow)).resolves.toEqual([
+        FROM_CLAUSE,
+        TO_CLAUSE,
+      ]);
+    });
+
+    // The chips send ISO strings. What the builder must receive is the parsed
+    // instant for each, bound to its own parameter and neither swapped for the
+    // other.
+    it('binds the parsed window instants, each to its own parameter', async () => {
+      const calls = await windowCallsFor(todayWindow);
+      const [fromCall, toCall] = calls;
+      expect(fromCall!.parameters).toEqual({ discoveryFrom: from });
+      expect(toCall!.parameters).toEqual({ discoveryTo: to });
+    });
+
+    it('keeps a festival that started before today and is still running', async () => {
+      const calls = await windowCallsFor(todayWindow);
+      expect(matchesWindowCalls(calls, runningFestival)).toBe(true);
+    });
+
+    it('drops a gathering that ended before the window opened', async () => {
+      const calls = await windowCallsFor(todayWindow);
+      expect(matchesWindowCalls(calls, endedBeforeTheWindow)).toBe(false);
+    });
+
+    it('treats a gathering with no stated end as a point in time', async () => {
+      const calls = await windowCallsFor(todayWindow);
+      expect(matchesWindowCalls(calls, insideWithNoStatedEnd)).toBe(true);
+      expect(matchesWindowCalls(calls, afterWithNoStatedEnd)).toBe(false);
+    });
+
+    // The two bounds are supplied independently, so each combination has to
+    // mean something on its own: `to` alone is an upper bound on the start,
+    // `from` alone is a lower bound on the end, and neither leaves the range
+    // open.
+    it('applies each bound independently', async () => {
+      await expect(
+        windowClausesFor({ from: todayWindow.from }),
+      ).resolves.toEqual([FROM_CLAUSE]);
+      await expect(windowClausesFor({ to: todayWindow.to })).resolves.toEqual([
+        TO_CLAUSE,
+      ]);
+      await expect(windowClausesFor({})).resolves.toEqual([]);
+    });
+
+    it('still finds a running festival with only the window start given', async () => {
+      const calls = await windowCallsFor({ from: todayWindow.from });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.parameters).toEqual({ discoveryFrom: from });
+      expect(matchesWindowCalls(calls, runningFestival)).toBe(true);
+      expect(matchesWindowCalls(calls, endedBeforeTheWindow)).toBe(false);
+    });
+
+    it('ignores an unparseable bound instead of filtering on NaN', async () => {
+      await expect(
+        windowClausesFor({ from: 'not a date', to: 'nor this' }),
+      ).resolves.toEqual([]);
+    });
+  });
+
+  // The 14-day ceiling on a single gathering's span, mirrored client-side by
+  // `MAX_GATHERING_SPAN_DAYS` in the wizard. `update` and `create` share one
+  // `assertScheduleValid`, so exercising the edit path covers both.
+  describe('maximum gathering span', () => {
+    const DAY_IN_MILLISECONDS = 86_400_000;
+    const startAt = '2026-10-17T21:00:00.000Z';
+    const endAfterDays = (days: number) =>
+      new Date(Date.parse(startAt) + days * DAY_IN_MILLISECONDS).toISOString();
+    // The shared fixture, pinned to a fixed start so the span arithmetic
+    // below reads off one known instant.
+    const storedEvent = () => ({
+      ...editableEvent(),
+      startAt: new Date(startAt),
+    });
+
+    it('accepts a fourteen-day span', async () => {
+      events.findOne.mockResolvedValue(storedEvent());
+      await expect(
+        service.update('x', 'u1', { startAt, endAt: endAfterDays(14) }),
+      ).resolves.toBeDefined();
+    });
+
+    it('rejects a fifteen-day span and names the limit', async () => {
+      events.findOne.mockResolvedValue(storedEvent());
+      await expect(
+        service.update('x', 'u1', { startAt, endAt: endAfterDays(15) }),
+      ).rejects.toThrow(/14 days/);
+      events.findOne.mockResolvedValue(storedEvent());
+      await expect(
+        service.update('x', 'u1', { startAt, endAt: endAfterDays(15) }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('still rejects an end that is not after the start', async () => {
+      events.findOne.mockResolvedValue(storedEvent());
+      await expect(
+        service.update('x', 'u1', { startAt, endAt: startAt }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
@@ -655,6 +1028,183 @@ describe('EventsService', () => {
       NotificationType.EventCancelled,
       expect.objectContaining({ eventId: 'e1' }),
     );
+  });
+
+  // Hard delete is the narrow door beside `cancel`. It is the HOST's alone
+  // (a co-host may call a gathering off, and only its owner may destroy the
+  // record), and it stays shut while anyone still has a stake, because a
+  // delete notifies nobody and leaves nothing to link to.
+  describe('remove', () => {
+    const cancelledEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host',
+      status: EventStatus.Cancelled,
+    };
+    const publishedEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host',
+      status: EventStatus.Published,
+    };
+
+    it('lets the host delete an already-cancelled event even with attendees', async () => {
+      events.findOne.mockResolvedValue(cancelledEvent);
+      // Attendees are irrelevant here: they were told when it was cancelled,
+      // so the stake check is never reached.
+      rsvps.count.mockResolvedValue(4);
+      await expect(service.remove('party', 'host')).resolves.toEqual({
+        ok: true,
+      });
+      expect(events.delete).toHaveBeenCalledWith({ id: 'e1' });
+      expect(rsvps.count).not.toHaveBeenCalled();
+    });
+
+    it('lets the host delete a published event nobody has signed up to', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.count.mockResolvedValue(0);
+      invites.exists.mockResolvedValue(false);
+      await expect(service.remove('party', 'host')).resolves.toEqual({
+        ok: true,
+      });
+      expect(events.delete).toHaveBeenCalledWith({ id: 'e1' });
+    });
+
+    it('409s a published event that still has a going RSVP', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.count.mockResolvedValue(1);
+      await expect(service.remove('party', 'host')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(events.delete).not.toHaveBeenCalled();
+    });
+
+    it('409s a published event that still has a pending invite', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.count.mockResolvedValue(0);
+      invites.exists.mockResolvedValue(true);
+      await expect(service.remove('party', 'host')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(events.delete).not.toHaveBeenCalled();
+    });
+
+    it('rejects a co-host, who may cancel but may never delete', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      cohosts.exists.mockResolvedValue(true);
+      await expect(service.remove('party', 'cohost')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(events.delete).not.toHaveBeenCalled();
+    });
+
+    it('rejects a stranger', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      await expect(service.remove('party', 'intruder')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(events.delete).not.toHaveBeenCalled();
+    });
+
+    it('404s an unknown slug', async () => {
+      events.findOne.mockResolvedValue(null);
+      await expect(service.remove('nope', 'host')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(events.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // A family decides WHICH of the six detail keys a gathering may carry, and
+  // the service is the only place that enforces it: the DTO validates the bag
+  // for shape alone, so a host who switches family mid-edit gets the stale
+  // answer dropped rather than a 400 naming a field the wizard stopped showing.
+  describe('gathering family and format details', () => {
+    it('strips detail keys the created family does not allow', async () => {
+      const detail = await service.create('host-1', {
+        title: 'Sunday screening',
+        description: 'One film, a wall, a projector.',
+        startAt: '2099-01-01T18:00:00.000Z',
+        timezone: 'Europe/Lisbon',
+        gatheringFamily: GatheringFamily.Watch,
+        eventType: 'screening',
+        formatDetails: { runtimeMinutes: 96, bring: 'a blanket' },
+      });
+      const created = events.create.mock.calls[0]![0];
+      expect(created.gatheringFamily).toBe(GatheringFamily.Watch);
+      expect(created.formatDetails).toEqual({ runtimeMinutes: 96 });
+      // And both reach the reader, so the detail page can gate its modules.
+      expect(detail.gatheringFamily).toBe(GatheringFamily.Watch);
+      expect(detail.formatDetails).toEqual({ runtimeMinutes: 96 });
+    });
+
+    it('stores null when nothing in the bag survives the strip', async () => {
+      await service.create('host-1', {
+        title: 'Monday meeting',
+        description: 'An agenda and decisions.',
+        startAt: '2099-01-01T18:00:00.000Z',
+        timezone: 'Europe/Lisbon',
+        gatheringFamily: GatheringFamily.Organise,
+        eventType: 'meeting',
+        formatDetails: { bring: 'a pen' },
+      });
+      const created = events.create.mock.calls[0]![0];
+      expect(created.formatDetails).toBeNull();
+    });
+
+    it('re-strips the stored bag against a newly patched family', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        gatheringFamily: GatheringFamily.Eat,
+        formatDetails: { bring: 'a dish' },
+      });
+
+      const detail = await service.update('x', 'u1', {
+        gatheringFamily: GatheringFamily.Watch,
+      });
+
+      expect(detail.gatheringFamily).toBe(GatheringFamily.Watch);
+      expect(detail.formatDetails).toBeNull();
+    });
+
+    it('leaves the stored bag alone when the patch touches neither half', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        gatheringFamily: GatheringFamily.Eat,
+        formatDetails: { bring: 'a dish' },
+      });
+
+      const detail = await service.update('x', 'u1', { title: 'New title' });
+
+      expect(detail.formatDetails).toEqual({ bring: 'a dish' });
+    });
+
+    it('narrows the browse query by family', async () => {
+      const { queryBuilder, recordedWhereCalls } = recordingListQueryBuilder();
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.list('viewer-1', 'upcoming', 1, {
+        family: GatheringFamily.Party,
+      });
+
+      expect(recordedWhereCalls).toContainEqual({
+        clause: 'e.gathering_family = :discoveryFamily',
+        parameters: { discoveryFamily: GatheringFamily.Party },
+      });
+    });
+
+    it('leaves the browse query unnarrowed when no family is asked for', async () => {
+      const { queryBuilder, recordedWhereCalls } = recordingListQueryBuilder();
+      events.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.list('viewer-1', 'upcoming', 1, {});
+
+      expect(
+        recordedWhereCalls.some((call) =>
+          call.clause.includes(':discoveryFamily'),
+        ),
+      ).toBe(false);
+    });
   });
 });
 

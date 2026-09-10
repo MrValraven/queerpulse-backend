@@ -34,11 +34,16 @@ import {
  * product answer for a gathering that is still on the calendar with forty
  * people going and nobody to open the door.
  *
- * So, for the erased member's FUTURE gatherings:
+ * So, for the erased member's gatherings that are not yet OVER, which includes
+ * a multi-day one that is running right now:
  *  - hand it to a co-host if the event has one (they were already an
  *    organizer, so nothing new is granted);
- *  - otherwise cancel it and tell everyone with a live RSVP, through the same
- *    `EventCancelled` notification the host's own cancel button fires.
+ *  - otherwise, if it has not started yet, cancel it and tell everyone with a
+ *    live RSVP or a pending invite, through the same `EventCancelled`
+ *    notification the host's own cancel button fires;
+ *  - a gathering already UNDER WAY with no co-host is left to finish. See
+ *    `handleFutureGatherings` for why cancelling a room full of people who
+ *    already turned up would be worse than the silence it replaces.
  *
  * And for the things people can still apply or reply to, which would otherwise
  * sit live with nobody reading them: open jobs and volunteering are closed,
@@ -78,7 +83,7 @@ import {
  * of those columns, leaving no trace of who hosted what.
  *
  * Every step is idempotent: each only ever matches rows still attributed to
- * `userId` AND still in the state that needs changing (future and not
+ * `userId` AND still in the state that needs changing (unfinished and not
  * cancelled, open, not yet filled), so a retry after a partial run finds
  * nothing left to do. That is what makes it safe to run outside the erasure
  * transaction, the same trade-off `CommunityOwnerOrphanService` already
@@ -119,7 +124,7 @@ export class ContentOwnerErasureService {
    * the legally-binding step and must not be blocked by a gathering handover.
    */
   async eraseFor(userId: string): Promise<void> {
-    await this.runIsolated('future gatherings', () =>
+    await this.runIsolated('unfinished gatherings', () =>
       this.handleFutureGatherings(userId),
     );
     await this.runIsolated('open job postings', () =>
@@ -150,30 +155,79 @@ export class ContentOwnerErasureService {
   // --- gatherings ------------------------------------------------------------
 
   /**
-   * Every not-yet-cancelled gathering the erased member hosts that has not
-   * started yet. A gathering already in the past keeps its erased host as a
-   * NULL byline: it happened, and cancelling history would be a lie.
+   * Every not-yet-cancelled gathering the erased member hosts that is not yet
+   * OVER, which includes one that is running right now. A gathering already in
+   * the past keeps its erased host as a NULL byline: it happened, and
+   * cancelling history would be a lie.
    *
-   * Drafts are in scope alongside published gatherings. A draft with no host
-   * left can never be published by anyone, and it carries no RSVPs, so
-   * cancelling it closes it out without notifying a soul.
+   * "Not over" is an interval question, so the selection is the same two-arm
+   * OR that `EventsService.list`'s 'upcoming' branch and
+   * `community-public.service.ts` already use, and it agrees exactly with
+   * `hasEnded` in `events/event-timing.ts` (`endAt ?? startAt`). Find-options
+   * cannot write the disjunct inline, so the two arms each carry the whole
+   * scope; `endAt: MoreThan(now)` carries the `end_at IS NOT NULL` half for
+   * free, since SQL never matches NULL against `>`. Asked point-in-time
+   * against `start_at`, a three-day festival whose host erased their account
+   * on day two fell out of this method entirely, which is precisely the
+   * "forty people going and nobody to open the door" case the class docblock
+   * above says this service exists for.
+   *
+   * THE TWO OUTCOMES ARE SCOPED DIFFERENTLY, deliberately:
+   *
+   *  - HANDOVER covers a gathering that is running as well as one still to
+   *    come. The successor is already a co-host, so nothing new is granted,
+   *    and they are very likely the person actually running the room right
+   *    now. Without this they inherit nothing and the live gathering has no
+   *    organizer who can edit it, message its attendees or check anyone in.
+   *  - CANCELLATION stays restricted to gatherings that have NOT STARTED.
+   *    Flipping a gathering to `cancelled` fires `EventCancelled` at everyone
+   *    holding an RSVP or an invite, and telling a room full of people who are
+   *    physically present that the thing they are at is off would be worse
+   *    than the silence it replaces. A running gathering with no co-host is
+   *    therefore left alone to finish; within `MAX_GATHERING_SPAN_DAYS` it
+   *    becomes history with a NULL byline, which is what the past-gathering
+   *    rule above already prescribes. It is logged so the case is visible
+   *    rather than silent.
+   *
+   * Drafts are in scope alongside published gatherings. A draft that has not
+   * started can never be published by anyone once its host is gone, and it
+   * carries no RSVPs, so cancelling it closes it out without notifying a soul.
+   *
+   * OPEN CASE, left as it is on purpose so somebody can decide it later: a
+   * draft whose start has already passed while it is still within its stated
+   * end takes the under-way branch above, which exists to protect attendees.
+   * A draft has none. So such a draft is skipped and left published-never,
+   * permanently unpublishable with a host the FK is about to null, where the
+   * old point-in-time filter would have cancelled it outright (drafts used to
+   * be either future, and cancelled, or past, and left as history). The window
+   * is narrow (a draft with a stated end, abandoned mid-span, whose host
+   * erases in exactly that window) and nothing is exposed to anyone by it,
+   * which is why this is a note rather than a branch. Cancelling an under-way
+   * DRAFT specifically would be safe, since the notification fan-out reaches
+   * only RSVPs and invites, and a draft has neither.
    */
   private async handleFutureGatherings(userId: string): Promise<void> {
-    const futureEvents = await this.events.find({
-      where: {
-        hostId: userId,
-        status: Not(EventStatus.Cancelled),
-        startAt: MoreThan(new Date()),
-      },
+    // One instant for the whole pass, so the query below and the
+    // has-it-started split further down cannot disagree about "now".
+    const now = new Date();
+    const unfinishedScope = {
+      hostId: userId,
+      status: Not(EventStatus.Cancelled),
+    };
+    const unfinishedEvents = await this.events.find({
+      where: [
+        { ...unfinishedScope, startAt: MoreThan(now) },
+        { ...unfinishedScope, endAt: MoreThan(now) },
+      ],
       order: { startAt: 'ASC' },
     });
-    // No future occurrence means no co-host can inherit anything, so the
-    // series pass below has nothing to hand over either.
-    if (!futureEvents.length) return;
+    // Nothing unfinished means no co-host can inherit anything, so the series
+    // pass below has nothing to hand over either.
+    if (!unfinishedEvents.length) return;
 
     // ONE batched co-host lookup for the whole set, never one query per event.
     const cohostRows = await this.cohosts.find({
-      where: { eventId: In(futureEvents.map((event) => event.id)) },
+      where: { eventId: In(unfinishedEvents.map((event) => event.id)) },
       order: { createdAt: 'ASC' },
     });
     const successorByEventId = new Map<string, string>();
@@ -188,18 +242,28 @@ export class ContentOwnerErasureService {
 
     const handedOver: Event[] = [];
     const cancelled: Event[] = [];
-    for (const event of futureEvents) {
+    for (const event of unfinishedEvents) {
       const successorUserId = successorByEventId.get(event.id);
-      if (successorUserId === undefined) {
-        cancelled.push(event);
-      } else {
+      if (successorUserId !== undefined) {
         handedOver.push(event);
+        continue;
       }
+      // See the docblock: a gathering already under way is never cancelled out
+      // from under the people standing in it.
+      if (event.startAt.getTime() <= now.getTime()) {
+        this.logger.log(
+          `Gathering ${event.id} is under way with no co-host to inherit it ` +
+            `after the host's account was erased; leaving it to finish rather ` +
+            `than cancelling it on its attendees`,
+        );
+        continue;
+      }
+      cancelled.push(event);
     }
 
     await this.handOverEvents(handedOver, successorByEventId);
     await this.cancelEvents(cancelled);
-    await this.releaseHostedSeries(userId, successorByEventId);
+    await this.releaseHostedSeries(userId, successorByEventId, now);
   }
 
   /**
@@ -326,29 +390,45 @@ export class ContentOwnerErasureService {
   }
 
   /**
-   * A recurring gathering's repeat rule follows its occurrences: if any future
-   * occurrence went to a co-host, that member takes the series too, so they
-   * can edit the schedule they are now running. A series whose occurrences
-   * were all cancelled keeps no host, and the FK blanks `host_id` when the
-   * user row goes.
+   * A recurring gathering's repeat rule follows its occurrences: if any
+   * unfinished occurrence went to a co-host, that member takes the series too,
+   * so they can edit the schedule they are now running. A series whose
+   * occurrences were all cancelled keeps no host, and the FK blanks `host_id`
+   * when the user row goes.
+   *
+   * The occurrence selection MUST match `handleFutureGatherings`' one arm for
+   * arm. `successorByEventId` is keyed by the events that method looked at, so
+   * a narrower filter here would silently drop a series whose only handed-over
+   * occurrence is the one currently running, leaving the new host unable to
+   * edit the schedule they were just given.
+   *
+   * `now` is the CALLER'S instant, passed in rather than read again. Two clocks
+   * inside one logical operation is a race: an occurrence that ends between the
+   * two reads would be handed to a co-host by the first pass and then be
+   * invisible to this one, so the series would keep a host the FK is about to
+   * null. It would happen only under load and leave nothing behind to trace.
    */
   private async releaseHostedSeries(
     userId: string,
     successorByEventId: ReadonlyMap<string, string>,
+    now: Date,
   ): Promise<void> {
     const hostedSeries = await this.eventSeries.find({
       where: { hostId: userId },
     });
     if (!hostedSeries.length) return;
 
-    // The successor for a series is the one chosen for its EARLIEST future
+    // The successor for a series is the one chosen for its EARLIEST unfinished
     // occurrence, so a series with different co-hosts per occurrence resolves
     // deterministically rather than by row order.
+    const seriesScope = {
+      seriesId: In(hostedSeries.map((series) => series.id)),
+    };
     const occurrences = await this.events.find({
-      where: {
-        seriesId: In(hostedSeries.map((series) => series.id)),
-        startAt: MoreThan(new Date()),
-      },
+      where: [
+        { ...seriesScope, startAt: MoreThan(now) },
+        { ...seriesScope, endAt: MoreThan(now) },
+      ],
       order: { startAt: 'ASC' },
     });
     const successorBySeriesId = new Map<string, string>();

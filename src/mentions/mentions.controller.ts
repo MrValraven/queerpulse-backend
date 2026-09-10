@@ -12,6 +12,8 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ListMentionsQuery } from './dto/list-mentions.query';
+import { ResolveMentionNamesQuery } from './dto/resolve-mention-names.query';
+import { MentionNameResolveService } from './mention-name-resolve.service';
 import { MentionsInboxService } from './mentions-inbox.service';
 
 /**
@@ -29,7 +31,39 @@ import { MentionsInboxService } from './mentions-inbox.service';
 @ApiCookieAuth()
 @Controller('mentions')
 export class MentionsController {
-  constructor(private readonly mentionsInbox: MentionsInboxService) {}
+  constructor(
+    private readonly mentionsInbox: MentionsInboxService,
+    private readonly mentionNames: MentionNameResolveService,
+  ) {}
+
+  /**
+   * Names the entities a piece of text mentions, so a reader sees "Val Raven"
+   * where the author typed `@val-raven`. Addressed by the exact `kind:slug`
+   * refs the client parsed out of the text it is about to render — a profile
+   * bio, today — so one render costs one request no matter how large the
+   * directory is, and a target outside any already-loaded list still resolves.
+   *
+   * Authenticated like the rest of this controller, and deliberately so: the
+   * platform serves a member's name to the open web only when that member has
+   * published a public profile, and an ungated `slug -> name` route would hand
+   * out the rest. A signed-out reader keeps the raw `@slug`, which is what the
+   * public profile page already renders (styled, inert) for the same reason.
+   *
+   * Every kind is additionally scoped to what THIS viewer could reach by the
+   * entity's own route — see `MentionNameResolveService`. Refs that resolve to
+   * nothing are omitted rather than erroring: a bio may name something deleted,
+   * private, or simply mistyped, and the client renders those unchanged.
+   */
+  @Get('names')
+  @ApiOperation({ summary: 'Resolve mention refs to display names' })
+  @ApiOkResponse({ description: 'The refs that resolved, as kind/slug/name.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  resolveNames(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ResolveMentionNamesQuery,
+  ) {
+    return this.mentionNames.resolve(user.userId, query.refs);
+  }
 
   @Get()
   @ApiOperation({ summary: "List the current member's @-mentions" })

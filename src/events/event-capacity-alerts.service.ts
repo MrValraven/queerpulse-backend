@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { EventBookmark } from './entities/event-bookmark.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus } from './entities/event.entity';
+import { hasEnded } from './event-timing';
 
 /**
  * How few seats count as "the last few spots".
@@ -85,12 +86,17 @@ export class EventCapacityAlertsService {
     if (!event || event.capacity === null) {
       return;
     }
-    // A draft or cancelled gathering has nobody to tell, and one that has
-    // already started cannot be joined on the strength of this alert.
+    // A draft or cancelled gathering has nobody to tell, and one that is over
+    // cannot be joined on the strength of this alert.
     if (event.status !== EventStatus.Published) {
       return;
     }
-    if (event.startAt.getTime() <= Date.now()) {
+    // The bar is the gathering's real END, via `hasEnded`, which reads
+    // `endAt ?? startAt`. A three-day festival filling up on day two is still
+    // joinable, and the members holding an unmade decision are exactly the
+    // ones this alert exists for. Comparing against `startAt` alone silenced
+    // every multi-day and overnight gathering the moment it began.
+    if (hasEnded(event)) {
       return;
     }
     if (event.capacity < NEARLY_FULL_MIN_CAPACITY) {

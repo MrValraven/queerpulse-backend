@@ -77,6 +77,11 @@ import {
   EventVenueConfirmation,
   EventVisibility,
 } from './entities/event.entity';
+import {
+  GatheringFamily,
+  stripDisallowedDetails,
+  type FormatDetails,
+} from './gathering-family';
 import { toCsvRow } from '../common/csv';
 import { RsvpService } from './rsvp.service';
 
@@ -139,6 +144,10 @@ export interface CreateEventInput {
   neighbourhood?: string | null;
   language?: string | null;
   eventType?: string | null;
+  // The gathering's family and the answers to the one or two questions it
+  // raises. Same absent/null/value three-way as `eventType` above.
+  gatheringFamily?: GatheringFamily | null;
+  formatDetails?: FormatDetails | null;
   accessibility?: {
     answers?: Partial<Record<string, ListingAccessibilityAnswer>>;
     note?: string;
@@ -179,6 +188,14 @@ const MAX_LINEUP_ENTRIES = 50;
 // design (see `EventSeries`'s class doc) bounded regardless of how far out
 // an `endUntil` date is, or how large an `endCount` is requested.
 const MAX_OCCURRENCES = 52;
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** The longest a single gathering may run, start to end. A festival or a
+ *  multi-night retreat fits comfortably; a typo that would pin a gathering to
+ *  the top of browse for two years does not. Mirrored client-side by
+ *  `MAX_GATHERING_SPAN_DAYS` in the wizard's `createGathering.data.ts`. */
+const MAX_GATHERING_SPAN_DAYS = 14;
 
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on the
 // QueryFailedError or on the wrapped driverError depending on the path.
@@ -366,6 +383,14 @@ export class EventsService {
         neighbourhood: EventsService.blankToNull(dto.neighbourhood),
         language: EventsService.blankToNull(dto.language),
         eventType: EventsService.blankToNull(dto.eventType),
+        gatheringFamily: dto.gatheringFamily ?? null,
+        // Stripped against the family being created with, so a bag carried
+        // over from a family the host tried and abandoned never reaches the
+        // column. An empty bag is stored as `null`.
+        formatDetails: stripDisallowedDetails(
+          dto.gatheringFamily ?? null,
+          dto.formatDetails ?? null,
+        ),
         // Always a COMPLETE six-question map on write, so a reader never has
         // to tell an absent key from an unanswered question — the whole point
         // of the three-valued model this borrows from `listings`.
@@ -728,6 +753,9 @@ export class EventsService {
       ...(dto.eventType !== undefined
         ? { eventType: EventsService.blankToNull(dto.eventType) }
         : {}),
+      ...(dto.gatheringFamily !== undefined
+        ? { gatheringFamily: dto.gatheringFamily ?? null }
+        : {}),
       ...(dto.cost !== undefined
         ? { cost: EventsService.blankToNull(dto.cost) }
         : {}),
@@ -747,6 +775,23 @@ export class EventsService {
         ? { accessibilityNote: dto.accessibility.note.trim() }
         : {}),
     });
+
+    // Re-strip the details against the EFFECTIVE family: the one just patched
+    // in, or (when the patch says nothing about family) the one already
+    // stored. A host who moves a gathering from a potluck to a screening in
+    // one patch, without resending the bag, must not keep "bring a dish" on a
+    // gathering that no longer asks. Runs whenever either half moved, and only
+    // then, so an unrelated title edit leaves the column untouched.
+    if (dto.gatheringFamily !== undefined || dto.formatDetails !== undefined) {
+      const nextDetails =
+        dto.formatDetails !== undefined
+          ? (dto.formatDetails ?? null)
+          : event.formatDetails;
+      event.formatDetails = stripDisallowedDetails(
+        event.gatheringFamily,
+        nextDetails,
+      );
+    }
 
     // Pushing the start later makes an already-sent reminder premature — re-arm
     // it so the cron fires again against the new time.
@@ -998,6 +1043,80 @@ export class EventsService {
   }
 
   /**
+   * Hard-delete a gathering: the row and, by cascade, everything hanging off
+   * it. The narrow counterpart to `cancel()`.
+   *
+   * HOST ONLY, deliberately tighter than the `assertOrganizer` check every
+   * other organizer action uses. A co-host is trusted to run the gathering,
+   * which is why they may edit it and call it off. Destroying the record is a
+   * different act: it ends the thing somebody else created and leaves them
+   * nothing to point at afterwards, so it stays with the person whose
+   * gathering it is.
+   *
+   * WHEN IT IS ALLOWED. A hard delete sends no notification and leaves nothing
+   * to link to, so it must never be the way somebody with confirmed guests
+   * makes a gathering disappear: an attendee who put it in their calendar
+   * would find a dead link and no explanation of what happened. That leaves
+   * exactly two openings. Either the gathering is already `Cancelled`, in
+   * which case everyone with a stake has already been told it is off and
+   * removing the record tells nobody anything new, or it has no live RSVPs
+   * (going/maybe/waitlisted) and no pending invites, in which case there is
+   * nobody to tell. Everything else is a 409 that names the fix: cancel it
+   * first so the people who signed up are told, then delete it.
+   *
+   * The delete itself is one statement. Every child table (`event_rsvps`,
+   * `event_cohosts`, `event_invites`, `event_cohost_invites`,
+   * `event_lineup_entries`, `event_bookmarks`, `event_photos`,
+   * `event_announcements`, `event_bans`) carries `ON DELETE CASCADE` on its
+   * `event_id` foreign key, so Postgres clears them in the same statement.
+   * `membership_card_scans.event_id` is the deliberate exception: a nullable,
+   * FK-less column on an append-only scan log, left pointing at a gone event
+   * on purpose so the record of who scanned what, and when, keeps its shape.
+   */
+  async remove(slug: string, userId: string): Promise<{ ok: true }> {
+    const event = await this.loadEventOr404(slug);
+    if (event.hostId !== userId) {
+      throw new ForbiddenException('Only the host can delete a gathering');
+    }
+
+    // An already-cancelled gathering skips the stake check entirely: its
+    // attendees were told when it was cancelled, so this delete owes them no
+    // second announcement.
+    if (event.status !== EventStatus.Cancelled) {
+      const [liveAttendeeCount, hasPendingInvites] = await Promise.all([
+        this.rsvps.count({
+          where: {
+            eventId: event.id,
+            status: In([
+              RsvpStatus.Going,
+              RsvpStatus.Maybe,
+              RsvpStatus.Waitlisted,
+            ]),
+          },
+        }),
+        this.invites.exists({
+          where: { eventId: event.id, status: EventInviteStatus.Pending },
+        }),
+      ]);
+      if (liveAttendeeCount > 0 || hasPendingInvites) {
+        // Name whichever stakes actually exist. A gathering blocked only by a
+        // standing invitation used to report "(0 attending)", which read as a
+        // contradiction of the refusal it was explaining.
+        const stakes = [
+          liveAttendeeCount > 0 ? `${liveAttendeeCount} attending` : null,
+          hasPendingInvites ? 'invitations still open' : null,
+        ].filter(Boolean);
+        throw new ConflictException(
+          `People still have a stake in this gathering (${stakes.join(', ')}). Cancel it first so they are told it is off, then delete it.`,
+        );
+      }
+    }
+
+    await this.events.delete({ id: event.id });
+    return { ok: true };
+  }
+
+  /**
    * Tell everyone with a stake in a cancellation that it is off.
    *
    * `occurrences` is the whole set the cancel took down — one event for a
@@ -1094,6 +1213,7 @@ export class EventsService {
       from?: string;
       to?: string;
       hood?: string;
+      family?: GatheringFamily;
       type?: string;
       q?: string;
       cost?: EventCostFilter;
@@ -1137,7 +1257,24 @@ export class EventsService {
         .andWhere('r.status IN (:...statuses)', {
           statuses: [RsvpStatus.Going, RsvpStatus.Maybe, RsvpStatus.Waitlisted],
         })
-        .andWhere('e.start_at < :now', { now });
+        // The exact logical inverse of the 'upcoming' branch's predicate
+        // below: a gathering is past once it has started AND either states no
+        // end at all or has already passed the end it stated. A three-day
+        // festival therefore stays out of this list while it is still running.
+        //
+        // The claim is about the two PREDICATES, which partition time between
+        // them so no instant reads as both past and upcoming. The two LISTS
+        // are scoped differently (this one is the viewer's own RSVPs at any
+        // status or visibility, that one is published and audience-gated), so
+        // a gathering can still be absent from both, which is a scope
+        // question rather than a schedule one.
+        //
+        // The null-end arm matches `hasEnded`'s strict reading in
+        // `event-timing.ts`.
+        .andWhere(
+          '(e.start_at < :now AND (e.end_at IS NULL OR e.end_at < :now))',
+          { now },
+        );
       this.applyDiscoveryFilters(pastQb, {
         from: options?.from,
         to: options?.to,
@@ -1166,7 +1303,27 @@ export class EventsService {
       const upcomingQb = this.events
         .createQueryBuilder('e')
         .where('e.status = :status', { status: EventStatus.Published })
-        .andWhere('e.start_at >= :now', { now })
+        // A gathering that is UNDERWAY is still upcoming: an overnight 23:00
+        // to 04:00 night out used to vanish from browse at midnight, and a
+        // three-day festival at the end of its first evening.
+        //
+        // The disjunct is deliberate, and the honest reading of it TODAY is
+        // that it scans: `IDX_events_status_start_at` is a plain
+        // `(status, start_at)` index (migration 1782692700000) and nothing
+        // indexes `end_at` at all, so the planner has no second index to
+        // combine the two arms with. What the shape buys is the option. The
+        // first arm stays exactly as index-shaped as it was, so adding a
+        // partial `(status, end_at) WHERE end_at IS NOT NULL` index later
+        // would let the planner serve the second arm and OR the two results
+        // together; that index is out of scope here (no migration in this
+        // work). A `COALESCE(end_at, start_at) >= :now` formulation would
+        // close that door on BOTH arms at once, which is the reason to write
+        // it this way rather than that way. The 'past' branch above carries
+        // the exact logical inverse of this predicate.
+        .andWhere(
+          '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))',
+          { now },
+        )
         .andWhere(visibilityClause, visibilityParams);
       this.excludeModeratedEvents(upcomingQb);
       if (options?.hostSlug) {
@@ -1187,6 +1344,15 @@ export class EventsService {
       }
       this.applyDiscoveryFilters(upcomingQb, options ?? {});
       events = await upcomingQb
+        // Sorting on the start alone puts a gathering that is ALREADY UNDER
+        // WAY at the top of its window, above everything starting later, since
+        // it started first. That is deliberate: a festival happening right now
+        // is the most actionable thing in a "Today" chip, and the same ordering
+        // is what `community-public.service.ts` and
+        // `listing-venue-events.service.ts` settled on (the former says so at
+        // its own `order: { startAt: 'ASC' }`). Ordering by the later of start and
+        // end instead would be a product decision about which of the two a
+        // member is really asking for.
         .orderBy('e.start_at', 'ASC')
         .skip(skip)
         .take(PAGE_SIZE)
@@ -1209,6 +1375,10 @@ export class EventsService {
    * `title`/`venue`/`description`), plus `neighbourhood` so typing a
    * neighbourhood name into the search box works the way a member expects.
    *
+   * `family` is an exact enum match on `gathering_family`, served by
+   * `IDX_events_gathering_family` (migration `1817080000000`), partial on
+   * published rows because browse only ever reads those.
+   *
    * `cost` reads the free-text column the way `isFreeCost` does. The two must
    * agree, or a card would carry a "free" chip that the free filter excludes.
    * `NULL`/empty counts as free: every gathering created before the column
@@ -1220,15 +1390,40 @@ export class EventsService {
       from?: string;
       to?: string;
       hood?: string;
+      family?: GatheringFamily;
       type?: string;
       q?: string;
       cost?: EventCostFilter;
     },
   ): void {
+    // `from` / `to` describe a WINDOW, so the question is interval
+    // intersection rather than where a single instant falls. A gathering
+    // overlaps the window when it starts at or before the window's end AND it
+    // ends at or after the window's start, reading a null `end_at` as ending
+    // at its own start (the same strict reading as `hasEnded` in
+    // `event-timing.ts`). Written point-in-time against `start_at` alone, the
+    // "Today" chip dropped a three-day festival on its second morning and an
+    // overnight party after midnight, because both started before the window
+    // opened. Please do not "simplify" the `from` arm back to
+    // `e.start_at >= :discoveryFrom`: that is the bug.
+    //
+    // The two bounds are independent. Only `to` is a pure upper bound on the
+    // start; only `from` is a pure lower bound on the end; both together are
+    // the full intersection; neither leaves the range unbounded.
+    //
+    // The `from` arm is a disjunct rather than
+    // `COALESCE(e.end_at, e.start_at) >= :discoveryFrom` for the reason the
+    // 'upcoming' branch above spells out: the first arm stays index-shaped
+    // against `start_at`, so a partial `(status, end_at)` index added later
+    // could serve the second one, while a COALESCE would close that door on
+    // both arms at once.
     if (options.from) {
       const from = new Date(options.from);
       if (!Number.isNaN(from.getTime())) {
-        qb.andWhere('e.start_at >= :discoveryFrom', { discoveryFrom: from });
+        qb.andWhere(
+          '(e.start_at >= :discoveryFrom OR (e.end_at IS NOT NULL AND e.end_at >= :discoveryFrom))',
+          { discoveryFrom: from },
+        );
       }
     }
     if (options.to) {
@@ -1240,6 +1435,14 @@ export class EventsService {
     if (options.hood) {
       qb.andWhere('lower(e.neighbourhood) = lower(:discoveryHood)', {
         discoveryHood: options.hood.trim(),
+      });
+    }
+    // The browse board's primary facet. An exact enum match, unlike the
+    // case-insensitive `type` predicate below: this column is a closed
+    // vocabulary the client sends verbatim, so there is no casing to forgive.
+    if (options.family) {
+      qb.andWhere('e.gathering_family = :discoveryFamily', {
+        discoveryFamily: options.family,
       });
     }
     if (options.type) {
@@ -1796,7 +1999,14 @@ export class EventsService {
       .createQueryBuilder('e')
       .where('e.community_id = :communityId', { communityId })
       .andWhere('e.status = :status', { status: EventStatus.Published })
-      .andWhere('e.start_at >= :now', { now });
+      // Underway counts as upcoming here too, so a community's own pulse
+      // keeps showing tonight's party while it is happening. See `list`'s
+      // 'upcoming' branch for what this disjunct costs today and what it
+      // keeps open.
+      .andWhere(
+        '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))',
+        { now },
+      );
     this.excludeModeratedEvents(qb);
     const candidates = await qb
       .orderBy('e.start_at', 'ASC')
@@ -1880,6 +2090,15 @@ export class EventsService {
     }
     if (endAt && endAt.getTime() <= startAt.getTime()) {
       throw new BadRequestException('endAt must be after startAt');
+    }
+    if (
+      endAt &&
+      endAt.getTime() - startAt.getTime() >
+        MAX_GATHERING_SPAN_DAYS * MILLISECONDS_PER_DAY
+    ) {
+      throw new BadRequestException(
+        `endAt must be at most ${MAX_GATHERING_SPAN_DAYS} days after startAt`,
+      );
     }
   }
 
