@@ -1,5 +1,8 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayUnique,
+  IsArray,
   IsBoolean,
   IsEnum,
   IsIn,
@@ -24,6 +27,19 @@ import {
   MAX_ACCESSIBILITY_NOTE_LENGTH,
 } from '../../listings/listing-accessibility';
 import { EventStatus, EventVisibility } from '../entities/event.entity';
+import {
+  CONTENT_NOTE_KEYS,
+  COST_KIND_VALUES,
+  GATHERING_THEME_KEYS,
+  MAX_CUSTOM_RSVP_QUESTION_LENGTH,
+  MAX_GATHERING_THEMES,
+  MAX_HOUSE_RULES_LENGTH,
+  RSVP_CUTOFF_VALUES,
+  type ContentNote,
+  type CostKind,
+  type GatheringTheme,
+  type RsvpCutoff,
+} from '../gathering-extras';
 import {
   GatheringFamily,
   MAX_BRING_LENGTH,
@@ -98,6 +114,19 @@ export class FormatDetailsDto {
   runtimeMinutes?: number;
 }
 
+/**
+ * Which optional questions the RSVP details modal asks.
+ *
+ * Every key is optional on the wire. On create, a missing key is `false`; on
+ * PATCH the map MERGES per key (`mergeRsvpQuestions`), so a host switching
+ * pronouns on does not silently switch dietary off.
+ */
+export class RsvpQuestionsDto {
+  @IsOptional() @IsBoolean() dietary?: boolean;
+  @IsOptional() @IsBoolean() pronouns?: boolean;
+  @IsOptional() @IsBoolean() access?: boolean;
+}
+
 export class CreateEventDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
   @IsString() @MinLength(1) @MaxLength(10000) description!: string;
@@ -164,6 +193,43 @@ export class CreateEventDto {
   // integration, so neither this field nor any message about it may promise
   // a charge, a ticket or a refund.
   @IsOptional() @IsString() @MaxLength(120) cost?: string | null;
+  // How it is paid for. `free` makes the service store `cost` as null.
+  // Same absent/null/value three-way as `cost` on update.
+  @IsOptional() @IsIn(COST_KIND_VALUES) costKind?: CostKind | null;
+  // ── Care (create-gathering v2), vocabularies in `../gathering-extras.ts` ──
+  // An unknown key is a 400 and so is a duplicate, which makes the
+  // three-theme cap count distinct themes. On update both arrays REPLACE
+  // wholesale; `null` clears.
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(MAX_GATHERING_THEMES)
+  @IsIn(GATHERING_THEME_KEYS, { each: true })
+  themes?: GatheringTheme[];
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(CONTENT_NOTE_KEYS.length)
+  @IsIn(CONTENT_NOTE_KEYS, { each: true })
+  contentNotes?: ContentNote[];
+  // Nullable strings follow the LOC-04 rule: `null` or blank clears on
+  // update, and the service trims what it stores.
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_HOUSE_RULES_LENGTH)
+  houseRules?: string | null;
+  // `null` means RSVPs stay open until the gathering ends; `at-start` closes
+  // them when it starts.
+  @IsOptional() @IsIn(RSVP_CUTOFF_VALUES) rsvpCutoff?: RsvpCutoff | null;
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => RsvpQuestionsDto)
+  rsvpQuestions?: RsvpQuestionsDto;
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_CUSTOM_RSVP_QUESTION_LENGTH)
+  customRsvpQuestion?: string | null;
   // `string | null` (not just optional): on UPDATE, `null` (or `''`) is a
   // meaningful "detach the community" signal, distinct from omitting the
   // field entirely ("leave unchanged") — see `EventsService.update`.

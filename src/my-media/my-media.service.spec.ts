@@ -8,6 +8,13 @@ import { MyMediaService } from './my-media.service';
 import { StorageService } from '../storage/storage.service';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { MediaReference } from '../media-references/media-reference.types';
+import { MediaCropService } from '../media-crops/media-crops.service';
+
+/** No upload in these suites has a saved crop. */
+const noCrops = {
+  provide: MediaCropService,
+  useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+};
 
 describe('MyMediaService.listMine', () => {
   const userId = '11111111-1111-1111-1111-111111111111';
@@ -27,6 +34,7 @@ describe('MyMediaService.listMine', () => {
           provide: MediaReferenceResolver,
           useValue: { resolve: resolveReferences },
         },
+        noCrops,
       ],
     }).compile();
   }
@@ -213,6 +221,7 @@ describe('MyMediaService.deleteMine', () => {
           provide: MediaReferenceResolver,
           useValue: { resolve: resolveReferences },
         },
+        noCrops,
       ],
     }).compile();
   }

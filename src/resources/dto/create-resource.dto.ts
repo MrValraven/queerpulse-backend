@@ -7,6 +7,7 @@ import {
   IsString,
   Matches,
   MaxLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
@@ -47,6 +48,8 @@ export class CreateResourceDto {
 
   /** The frontend path the guide is addressable at. Relative and rooted, so
    *  a guide can never be pointed at another origin. */
+  // An empty string clears the path; the service stores it as null.
+  @ValidateIf((_dto, value) => value !== '')
   @IsOptional()
   @IsString()
   @MaxLength(200)

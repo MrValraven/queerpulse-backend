@@ -12,6 +12,7 @@ export type UploadKind =
   | 'group-avatar'
   | 'listing-photo'
   | 'community-cover'
+  | 'event-cover'
   | 'community-avatar'
   | 'message-image'
   | 'message-document';
@@ -114,6 +115,25 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // the caller is the owner/mod before persisting it.
   'community-cover': {
     prefix: 'community-covers',
+    maxBytes: 10 * MB,
+    requiresSession: false,
+  },
+  // A gathering's cover image (`Event.coverImageUrl`), shown on the board card
+  // and the detail page. Mirrors `community-cover` in every setting: a wide
+  // 2:1 hero with the same 10 MB cap. Until this kind existed the wizard had
+  // no upload kind of its own for the cover, even though the media-reference
+  // type `event-cover` already tracked the column.
+  //
+  // `requiresSession: false` because `GET /files/<key>` serves a session-gated
+  // kind ONLY to the member who uploaded it (see `files.controller.ts`), which
+  // would show the cover to its uploader and blank it for every co-host,
+  // attendee and browsing member, and for shared-link unfurlers. Ownership of
+  // the SET action is unchanged: the key embeds the uploader's user id, the
+  // global StorageKeyOwnershipInterceptor rejects a write referencing someone
+  // else's key, and `EventsService.applyUpdate` runs
+  // `assertNoForeignUploadIntroduced` before persisting a cover.
+  'event-cover': {
+    prefix: 'event-covers',
     maxBytes: 10 * MB,
     requiresSession: false,
   },

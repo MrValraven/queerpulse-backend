@@ -11,6 +11,10 @@ import {
   RSVP_DETAILS_VISIBILITY_OPTIONS,
   RsvpDetailsVisibility,
 } from '../entities/event-rsvp.entity';
+import {
+  MAX_RSVP_CUSTOM_ANSWER_LENGTH,
+  MAX_RSVP_PRONOUNS_LENGTH,
+} from '../gathering-extras';
 
 /**
  * Body for `PATCH /events/:slug/rsvp/details` — the caller's own RSVP only
@@ -37,4 +41,17 @@ export class UpdateRsvpDetailsDto {
   @IsOptional()
   @IsIn(RSVP_DETAILS_VISIBILITY_OPTIONS)
   visibility?: RsvpDetailsVisibility;
+
+  // Answers to the gathering's optional questions (`Event.rsvpQuestions`,
+  // `Event.customRsvpQuestion`). Trimmed by the service, and a blank answer
+  // clears the stored one.
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_RSVP_PRONOUNS_LENGTH)
+  pronouns?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_RSVP_CUSTOM_ANSWER_LENGTH)
+  customAnswer?: string;
 }

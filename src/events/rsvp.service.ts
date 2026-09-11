@@ -24,6 +24,7 @@ import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus } from './entities/event.entity';
 import { hasEnded } from './event-timing';
+import { assertRsvpsOpen } from './gathering-extras';
 
 // Raw row shape from the unlimited-capacity promotion UPDATE's RETURNING
 // clause — column names are the actual (snake_case) DB columns, not the
@@ -97,12 +98,30 @@ export class RsvpService {
       if (hasEnded(event)) {
         throw new BadRequestException('This gathering has already happened');
       }
-      await this.assertMayRsvp(manager, event, userId);
+      const isOrganizer = await this.assertMayRsvp(manager, event, userId);
 
       const rsvpRepo = manager.getRepository(EventRsvp);
       const existing = await rsvpRepo.findOne({
         where: { eventId: event.id, userId },
       });
+
+      // The host's RSVP cutoff (create-gathering v2). Once it passes, nobody
+      // new joins the roster: no first RSVP, no revived cancelled one, and no
+      // step up to going from maybe or from the waitlist, both of which claim
+      // a seat the host has already stopped counting on. A member already
+      // holding a live RSVP can still step DOWN to maybe or re-press what they
+      // already hold, and cancelling runs through its own method. Organisers
+      // are exempt, like every other host action on their own gathering.
+      const holdsLiveRsvp = existing
+        ? existing.status !== RsvpStatus.Cancelled
+        : false;
+      const isStepUpToGoing =
+        status === 'going' &&
+        (existing?.status === RsvpStatus.Maybe ||
+          existing?.status === RsvpStatus.Waitlisted);
+      if (!isOrganizer && (!holdsLiveRsvp || isStepUpToGoing)) {
+        assertRsvpsOpen(event);
+      }
 
       // Notify the host only on a member's *first* RSVP to this event (no row
       // yet, or a previously cancelled one being revived) — never on a
@@ -504,14 +523,28 @@ export class RsvpService {
         'You do not have an active RSVP to this event',
       );
     }
+    const isGuestCountRaise =
+      dto.guestCount !== undefined && dto.guestCount > rsvp.guestCount;
+    // A raise brings more people onto a roster the host may already have
+    // closed, so past the RSVP cutoff it is refused like any other way on
+    // (`assertRsvpsOpen`'s doc). Organisers are exempt, as they are in
+    // `rsvp()`. Lowering the count and every other answer stay editable after
+    // the cutoff: a member whose friend can no longer come frees that seat by
+    // saying so. The organiser lookup runs only on a raise.
+    if (
+      isGuestCountRaise &&
+      !(await this.isOrganizerOf(this.dataSource.manager, event, userId))
+    ) {
+      assertRsvpsOpen(event);
+    }
     // Raising the guest count is a capacity change (LOC-07): every extra
     // guest occupies a seat, so an unchecked edit here would walk straight
     // past the check `rsvp()` now performs. Only a RAISE is checked, and only
     // for a 'going' row: lowering always fits, and a waitlisted member is not
     // taking a seat yet.
     if (
+      isGuestCountRaise &&
       dto.guestCount !== undefined &&
-      dto.guestCount > rsvp.guestCount &&
       rsvp.status === RsvpStatus.Going &&
       event.capacity !== null
     ) {
@@ -532,12 +565,45 @@ export class RsvpService {
         ? { dietaryNeeds: dto.dietaryNeeds }
         : {}),
       ...(dto.visibility !== undefined ? { visibility: dto.visibility } : {}),
+      // Trimmed, and a blank answer clears the stored one, so an emptied
+      // field reads as "no answer".
+      ...(dto.pronouns !== undefined
+        ? { pronouns: RsvpService.blankToNull(dto.pronouns) }
+        : {}),
+      ...(dto.customAnswer !== undefined
+        ? { customAnswer: RsvpService.blankToNull(dto.customAnswer) }
+        : {}),
     });
     const saved = await this.rsvps.save(rsvp);
     return toRsvpDetailsView(saved);
   }
 
+  // The same trim-then-blank-is-null rule `EventsService.blankToNull` applies
+  // to a gathering's own optional strings, for the attendee's answers.
+  private static blankToNull(value: string | null | undefined): string | null {
+    if (value === null || value === undefined) return null;
+    const trimmed = value.trim();
+    return trimmed === '' ? null : trimmed;
+  }
+
   // --- internals ---
+
+  // The one organiser rule in this service: the host, or a member holding a
+  // co-host row. It opens no transaction of its own and reads through the
+  // manager it is handed, so `assertMayRsvp` and `assertOrganizer` keep reading
+  // under their transaction's event lock while `updateRsvpDetails`, which
+  // takes no lock, passes the plain data-source manager. Short-circuits on the
+  // host, so only a non-host costs a query.
+  private async isOrganizerOf(
+    manager: EntityManager,
+    event: Event,
+    userId: string,
+  ): Promise<boolean> {
+    if (event.hostId === userId) return true;
+    return manager.exists(EventCohost, {
+      where: { eventId: event.id, userId },
+    });
+  }
 
   // Manager-scoped organizer check (host or co-host) — mirrors
   // `EventsService.isOrganizer`/`assertOrganizer` but reads through the
@@ -548,11 +614,7 @@ export class RsvpService {
     event: Event,
     userId: string,
   ): Promise<void> {
-    const isOrganizer =
-      event.hostId === userId ||
-      (await manager.exists(EventCohost, {
-        where: { eventId: event.id, userId },
-      }));
+    const isOrganizer = await this.isOrganizerOf(manager, event, userId);
     if (!isOrganizer) {
       throw new ForbiddenException('Only the host or a co-host can do that');
     }
@@ -583,22 +645,21 @@ export class RsvpService {
   // `manager`-scoped, since these are read-only membership checks with no
   // write-race to guard against, unlike the capacity/waitlist logic this
   // transaction's `pessimistic_write` lock actually protects).
+  //
+  // Resolves to whether the caller organises this gathering, so `rsvp` can
+  // exempt organisers from the RSVP cutoff without a second lookup.
   private async assertMayRsvp(
     manager: EntityManager,
     event: Event,
     userId: string,
-  ): Promise<void> {
-    const isOrganizer =
-      event.hostId === userId ||
-      (await manager.exists(EventCohost, {
-        where: { eventId: event.id, userId },
-      }));
+  ): Promise<boolean> {
+    const isOrganizer = await this.isOrganizerOf(manager, event, userId);
     await this.audienceGate.assertViewable(event, userId, isOrganizer);
 
     // ── LOC-08: the host's own door ──────────────────────────────────────
     // An organiser can always reach their own gathering, so neither check
     // below can lock a host out of an event they are running.
-    if (isOrganizer) return;
+    if (isOrganizer) return true;
 
     // A ban is one host saying "not at my table", scoped to this gathering.
     // Answered with an explicit, renderable message rather than a 404: the
@@ -646,6 +707,7 @@ export class RsvpService {
         'The host has removed you from this gathering',
       );
     }
+    return false;
   }
 
   // Promotes waitlist heads to 'going' while seats remain (or unconditionally

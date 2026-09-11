@@ -189,6 +189,57 @@ describe('EventInvitesService', () => {
     expect(result.status).toBe(EventInviteStatus.Accepted);
   });
 
+  // The host's RSVP cutoff (create-gathering v2). Accepting is the first half
+  // of an RSVP, so past the cutoff it is refused with the same 400 the RSVP
+  // itself would give. Declining clears a dead invite and stays allowed.
+  describe('RSVP cutoff', () => {
+    const HOUR_IN_MILLISECONDS = 60 * 60 * 1000;
+    const pendingInvite = () => ({
+      id: 'i1',
+      eventId: 'e1',
+      inviteeId: 'u1',
+      status: EventInviteStatus.Pending,
+    });
+    const eventStartingIn = (milliseconds: number) => ({
+      id: 'e1',
+      status: EventStatus.Published,
+      startAt: new Date(Date.now() + milliseconds),
+      endAt: null,
+      rsvpCutoff: 'day-before' as const,
+    });
+
+    it('refuses to accept once the cutoff has passed', async () => {
+      invites.findOne.mockResolvedValue(pendingInvite());
+      events.findOne.mockResolvedValue(
+        eventStartingIn(2 * HOUR_IN_MILLISECONDS),
+      );
+      const attempt = service.respondInvite('i1', 'u1', 'accept');
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(
+        'RSVPs for this gathering have closed',
+      );
+      expect(invites.save).not.toHaveBeenCalled();
+    });
+
+    it('still lets the invitee decline past the cutoff', async () => {
+      invites.findOne.mockResolvedValue(pendingInvite());
+      events.findOne.mockResolvedValue(
+        eventStartingIn(2 * HOUR_IN_MILLISECONDS),
+      );
+      const result = await service.respondInvite('i1', 'u1', 'decline');
+      expect(result.status).toBe(EventInviteStatus.Declined);
+    });
+
+    it('accepts while the cutoff is still ahead', async () => {
+      invites.findOne.mockResolvedValue(pendingInvite());
+      events.findOne.mockResolvedValue(
+        eventStartingIn(72 * HOUR_IN_MILLISECONDS),
+      );
+      const result = await service.respondInvite('i1', 'u1', 'accept');
+      expect(result.status).toBe(EventInviteStatus.Accepted);
+    });
+  });
+
   it('respondInvite returns only { id, status } — no raw entity columns', async () => {
     invites.findOne.mockResolvedValue({
       id: 'i1',

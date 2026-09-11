@@ -86,7 +86,9 @@ export class EventsController {
       '`from`/`to`/`hood`/`family`/`type`/`q`/`cost` are the discovery filters ' +
       '(LOC-17), applied in SQL so a filtered browse survives pagination; ' +
       'they narrow `filter=upcoming` (and `from`/`to`/`q` also narrow ' +
-      '`filter=past`).',
+      '`filter=past`). `filter=hosting` honours `to` alone, as an upper ' +
+      'bound on the start, so a host can ask for the gatherings they have ' +
+      'already started.',
   })
   @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
@@ -111,7 +113,12 @@ export class EventsController {
   @Post()
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create an event.' })
-  @ApiCreatedResponse({ description: 'The created event detail.' })
+  @ApiCreatedResponse({
+    description:
+      'The created event detail (the first occurrence of a series), plus ' +
+      '`occurrenceSlugs`: the slug of every saved occurrence in series ' +
+      'order, `[slug]` for a single gathering.',
+  })
   @ApiBadRequestResponse({
     description: 'Invalid schedule (past start, or end before start).',
   })

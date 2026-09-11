@@ -49,6 +49,9 @@ describe('RsvpService', () => {
   let goingSeats: number;
   let maxWaitlistPosition: number;
   let emitter: { emit: jest.Mock };
+  // `updateRsvpDetails` loads the event through the plain `Event` repository,
+  // outside any transaction.
+  let eventRepo: { findOne: jest.Mock };
 
   beforeEach(async () => {
     managerFindOne = jest.fn();
@@ -88,6 +91,7 @@ describe('RsvpService', () => {
       createQueryBuilder: jest.fn(() => rsvpQueryBuilder),
     };
     emitter = { emit: jest.fn() };
+    eventRepo = { findOne: jest.fn().mockResolvedValue(null) };
     audienceGate = {
       assertViewable: jest.fn().mockResolvedValue(undefined),
     };
@@ -107,6 +111,10 @@ describe('RsvpService', () => {
         (runInTransaction: (entityManager: unknown) => unknown) =>
           runInTransaction(manager),
       ),
+      // `updateRsvpDetails` takes no lock, so its organiser lookup reads
+      // through the plain data-source manager. The same stub answers it, so
+      // `managerExists` drives the co-host answer on both paths.
+      manager,
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -122,7 +130,7 @@ describe('RsvpService', () => {
         // `rsvp`/`cancelRsvp`/`reconcileWaitlist`, but required for the
         // module to compile/resolve.
         { provide: getRepositoryToken(Profile), useValue: {} },
-        { provide: getRepositoryToken(Event), useValue: {} },
+        { provide: getRepositoryToken(Event), useValue: eventRepo },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvpRepo },
       ],
     }).compile();
@@ -134,6 +142,238 @@ describe('RsvpService', () => {
     await expect(service.rsvp('e', 'u1', 'going')).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+
+  // The host's RSVP cutoff (create-gathering v2). Past it nobody new joins
+  // the roster, while stepping down, cancelling and organiser actions stay
+  // open.
+  describe('RSVP cutoff', () => {
+    const HOUR_IN_MILLISECONDS = 60 * 60 * 1000;
+    const CLOSED_MESSAGE = 'RSVPs for this gathering have closed';
+    // Starts in two hours with a day-before cutoff, so RSVPs closed 22 hours
+    // ago. Unlimited capacity keeps the seat arithmetic out of the way.
+    const closedEvent = () => ({
+      id: 'e1',
+      slug: 'e',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      capacity: null,
+      startAt: new Date(Date.now() + 2 * HOUR_IN_MILLISECONDS),
+      endAt: null,
+      rsvpCutoff: 'day-before' as const,
+    });
+    const existingRsvp = (status: RsvpStatus) => ({
+      id: 'r1',
+      eventId: 'e1',
+      userId: 'u1',
+      status,
+      waitlistPosition: null,
+      guestCount: 0,
+      removedByHostAt: null,
+      checkedInAt: null,
+    });
+
+    it('refuses a first RSVP once the cutoff has passed', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      const attempt = service.rsvp('e', 'u1', 'going');
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(CLOSED_MESSAGE);
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a first maybe once the cutoff has passed', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      await expect(service.rsvp('e', 'u1', 'maybe')).rejects.toThrow(
+        CLOSED_MESSAGE,
+      );
+    });
+
+    it('refuses to revive a cancelled RSVP past the cutoff', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      rsvpRepo.findOne.mockResolvedValue(existingRsvp(RsvpStatus.Cancelled));
+      await expect(service.rsvp('e', 'u1', 'going')).rejects.toThrow(
+        CLOSED_MESSAGE,
+      );
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a maybe stepping up to going past the cutoff', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      rsvpRepo.findOne.mockResolvedValue(existingRsvp(RsvpStatus.Maybe));
+      await expect(service.rsvp('e', 'u1', 'going')).rejects.toThrow(
+        CLOSED_MESSAGE,
+      );
+    });
+
+    it('refuses a waitlisted member stepping up to going past the cutoff', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      rsvpRepo.findOne.mockResolvedValue(existingRsvp(RsvpStatus.Waitlisted));
+      await expect(service.rsvp('e', 'u1', 'going')).rejects.toThrow(
+        CLOSED_MESSAGE,
+      );
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a going member step down to maybe past the cutoff', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      rsvpRepo.findOne.mockResolvedValue(existingRsvp(RsvpStatus.Going));
+      const result = await service.rsvp('e', 'u1', 'maybe');
+      expect(result.status).toBe(RsvpStatus.Maybe);
+    });
+
+    it('lets an organiser RSVP to their own gathering past the cutoff', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      const result = await service.rsvp('e', 'host-1', 'going');
+      expect(result.status).toBe(RsvpStatus.Going);
+    });
+
+    it('admits a first RSVP while the cutoff is still ahead', async () => {
+      managerFindOne.mockResolvedValue({
+        ...closedEvent(),
+        startAt: new Date(Date.now() + 72 * HOUR_IN_MILLISECONDS),
+      });
+      const result = await service.rsvp('e', 'u1', 'going');
+      expect(result.status).toBe(RsvpStatus.Going);
+    });
+
+    it('lets a member cancel past the cutoff', async () => {
+      managerFindOne.mockResolvedValue(closedEvent());
+      rsvpRepo.findOne.mockResolvedValue(existingRsvp(RsvpStatus.Going));
+      await expect(service.cancelRsvp('e', 'u1')).resolves.toEqual({
+        ok: true,
+      });
+      expect(rsvpRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: RsvpStatus.Cancelled }),
+      );
+    });
+  });
+
+  describe('updateRsvpDetails question answers', () => {
+    const goingRsvp = () => ({
+      id: 'r1',
+      eventId: 'e1',
+      userId: 'u1',
+      status: RsvpStatus.Going,
+      guestCount: 0,
+      accessNeeds: null,
+      dietaryNeeds: null,
+      visibility: null,
+      pronouns: 'she/her',
+      customAnswer: 'Bringing a friend',
+    });
+
+    beforeEach(() => {
+      eventRepo.findOne.mockResolvedValue({ id: 'e1', capacity: null });
+    });
+
+    it('trims the pronouns and stores a blank custom answer as null', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp());
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        pronouns: '  they/them  ',
+        customAnswer: '   ',
+      });
+      expect(view.pronouns).toBe('they/them');
+      expect(view.customAnswer).toBeNull();
+    });
+
+    it('leaves an answer alone when the patch does not mention it', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp());
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        guestCount: 0,
+      });
+      expect(view.pronouns).toBe('she/her');
+      expect(view.customAnswer).toBe('Bringing a friend');
+    });
+  });
+
+  // Past the host's RSVP cutoff a member can still lower their guest count
+  // and change every other answer; a raise gets the closed 400. Organisers
+  // keep raising, as they keep RSVPing.
+  describe('updateRsvpDetails guest count after the RSVP cutoff', () => {
+    const HOUR_IN_MILLISECONDS = 60 * 60 * 1000;
+    const CLOSED_MESSAGE = 'RSVPs for this gathering have closed';
+    // Starts in two hours with a day-before cutoff, so RSVPs closed 22 hours
+    // ago. Unlimited capacity keeps the seat arithmetic out of the way.
+    const closedEvent = () => ({
+      id: 'e1',
+      slug: 'e',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      capacity: null,
+      startAt: new Date(Date.now() + 2 * HOUR_IN_MILLISECONDS),
+      endAt: null,
+      rsvpCutoff: 'day-before' as const,
+    });
+    const goingRsvp = (userId: string, guestCount: number) => ({
+      id: 'r1',
+      eventId: 'e1',
+      userId,
+      status: RsvpStatus.Going,
+      guestCount,
+      accessNeeds: null,
+      dietaryNeeds: null,
+      visibility: null,
+      pronouns: null,
+      customAnswer: null,
+    });
+
+    beforeEach(() => {
+      eventRepo.findOne.mockResolvedValue(closedEvent());
+    });
+
+    it('refuses a member raising their guest count', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('u1', 1));
+      const attempt = service.updateRsvpDetails('e', 'u1', { guestCount: 2 });
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(CLOSED_MESSAGE);
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a member lower their guest count', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('u1', 2));
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        guestCount: 1,
+      });
+      expect(view.guestCount).toBe(1);
+    });
+
+    it('lets the host raise their own guest count without a co-host lookup', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('host-1', 0));
+      const view = await service.updateRsvpDetails('e', 'host-1', {
+        guestCount: 3,
+      });
+      expect(view.guestCount).toBe(3);
+      expect(managerExists).not.toHaveBeenCalled();
+    });
+
+    it('lets a co-host raise their guest count', async () => {
+      managerExists.mockResolvedValue(true);
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('cohost-1', 0));
+      const view = await service.updateRsvpDetails('e', 'cohost-1', {
+        guestCount: 1,
+      });
+      expect(view.guestCount).toBe(1);
+    });
+
+    it('keeps every other answer editable for a member', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp('u1', 1));
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        guestCount: 1,
+        accessNeeds: 'A step-free way in, please',
+        pronouns: '  they/them  ',
+        customAnswer: 'Bringing bread',
+      });
+      expect(view).toEqual(
+        expect.objectContaining({
+          guestCount: 1,
+          accessNeeds: 'A step-free way in, please',
+          pronouns: 'they/them',
+          customAnswer: 'Bringing bread',
+        }),
+      );
+      // An unchanged count is no raise, so nobody is asked who organises.
+      expect(managerExists).not.toHaveBeenCalled();
+    });
   });
 
   it('waitlists a going RSVP when capacity is full', async () => {

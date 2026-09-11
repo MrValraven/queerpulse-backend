@@ -5,9 +5,11 @@
  * paragraph change was an engineer editing two catalog files and shipping a
  * deploy. This shape is what replaces that: an ordered list of sections, each
  * an H2 plus ordered blocks, stored as JSONB on `resources.sections` (English)
- * and `resources.sections_pt` (Portuguese). It is deliberately small — four
- * block kinds, no nesting, no markup — so a non-engineer editor can hold the
- * whole model in their head and the renderer has nothing to sanitize.
+ * and `resources.sections_pt` (Portuguese). It is deliberately small (four
+ * block kinds, no nesting) so a non-engineer editor can hold the whole model
+ * in their head. Paragraph, list item and note blocks may carry sanitized
+ * inline HTML (em, strong, a, br) in `html`; the service sanitizes it on write
+ * and derives `text` from it.
  *
  * A guide with an EMPTY `sections` array is not managed yet: the frontend
  * keeps rendering its hardcoded page and the row exists only to carry the
@@ -18,8 +20,10 @@ export type GuideBlockKind = 'paragraph' | 'subheading' | 'listItem' | 'note';
 
 export interface GuideBlock {
   kind: GuideBlockKind;
-  /** Plain text. No HTML: the renderer prints it as text. */
+  /** Plain text. Always present; derived from `html` on write when `html` is set. */
   text: string;
+  /** Sanitized inline HTML (em, strong, a, br). Only on formatted kinds. */
+  html?: string;
 }
 
 export interface GuideSection {
@@ -37,11 +41,23 @@ export const GUIDE_BLOCK_KINDS: GuideBlockKind[] = [
   'note',
 ];
 
+/** The block kinds that accept inline formatting. Subheadings stay plain. */
+export const FORMATTED_GUIDE_BLOCK_KINDS: GuideBlockKind[] = [
+  'paragraph',
+  'listItem',
+  'note',
+];
+
+export function isFormattedGuideBlockKind(kind: GuideBlockKind): boolean {
+  return FORMATTED_GUIDE_BLOCK_KINDS.includes(kind);
+}
+
 /** Upper bounds, enforced by the DTO validators and re-checked here so a
  *  hand-written migration cannot smuggle an oversized body past the API. */
 export const MAX_GUIDE_SECTIONS = 40;
 export const MAX_GUIDE_BLOCKS_PER_SECTION = 60;
 export const MAX_GUIDE_BLOCK_LENGTH = 4000;
+export const MAX_GUIDE_BLOCK_HTML_LENGTH = 8000;
 
 /**
  * Narrows an untrusted JSONB value read back from Postgres. Anything that
@@ -69,10 +85,18 @@ export function parseGuideSections(value: unknown): GuideSection[] {
         const kind = block.kind;
         if (typeof block.text !== 'string' || !block.text.trim()) continue;
         if (!GUIDE_BLOCK_KINDS.includes(kind as GuideBlockKind)) continue;
-        blocks.push({
-          kind: kind as GuideBlockKind,
+        const parsedKind = kind as GuideBlockKind;
+        const parsedBlock: GuideBlock = {
+          kind: parsedKind,
           text: block.text.slice(0, MAX_GUIDE_BLOCK_LENGTH),
-        });
+        };
+        if (
+          typeof block.html === 'string' &&
+          isFormattedGuideBlockKind(parsedKind)
+        ) {
+          parsedBlock.html = block.html.slice(0, MAX_GUIDE_BLOCK_HTML_LENGTH);
+        }
+        blocks.push(parsedBlock);
       }
     }
     if (!heading && blocks.length === 0) continue;

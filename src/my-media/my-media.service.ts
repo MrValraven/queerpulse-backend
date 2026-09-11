@@ -14,6 +14,7 @@ import { storageKeyOwnerId } from '../storage/storage-key';
 import { MyMediaItem, MyMediaListResponse } from './dto/my-media-item.dto';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import type { MediaReference } from '../media-references/media-reference.types';
+import { MediaCropService } from '../media-crops/media-crops.service';
 
 const MAX_KEYS_PER_PAGE = 1000;
 
@@ -22,6 +23,7 @@ export class MyMediaService {
   constructor(
     private readonly storage: StorageService,
     private readonly references: MediaReferenceResolver,
+    private readonly mediaCrops: MediaCropService,
   ) {}
 
   async listMine(userId: string): Promise<MyMediaListResponse> {
@@ -53,8 +55,12 @@ export class MyMediaService {
       } while (continuationToken);
     }
 
-    const { references: referencesByKey, degraded } =
-      await this.references.resolve(listed.map((entry) => entry.key));
+    const listedKeys = listed.map((entry) => entry.key);
+    const [{ references: referencesByKey, degraded }, cropsByKey] =
+      await Promise.all([
+        this.references.resolve(listedKeys),
+        this.mediaCrops.getMany(listedKeys),
+      ]);
 
     const items: MyMediaItem[] = listed.map((entry) => ({
       key: entry.key,
@@ -63,6 +69,7 @@ export class MyMediaService {
       lastModified: entry.lastModified,
       fileUrl: `/files/${entry.key}`,
       references: referencesByKey.get(entry.key) ?? [],
+      crop: cropsByKey.get(entry.key) ?? null,
     }));
 
     // Newest first; objects with no lastModified sort last.

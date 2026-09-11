@@ -18,6 +18,7 @@ import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
 import { Event, EventStatus } from './entities/event.entity';
 import { EventsService } from './events.service';
 import { EVENT_INVITED, EventInvitedEvent } from './event.events';
+import { assertRsvpsOpen } from './gathering-extras';
 
 // The columns RETURNING (*) surfaces for freshly-inserted invite rows. Postgres
 // returns default (snake_case) column names, so we read invitee_id, not the
@@ -181,6 +182,11 @@ export class EventInvitesService {
       if (!event || event.status === EventStatus.Cancelled) {
         throw new ConflictException('This gathering has been cancelled');
       }
+      // Past the host's RSVP cutoff, accepting is the first half of an RSVP
+      // the second half would refuse. Refused here with the same message, so
+      // the invitee reads the real reason on the invite itself. Declining
+      // stays allowed for the reason above.
+      assertRsvpsOpen(event);
     }
     invite.status =
       action === 'accept'

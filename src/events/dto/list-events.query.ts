@@ -58,9 +58,11 @@ export class ListEventsQuery {
   // so they survive pagination and the counts are honest.
   //
   // Every one is honoured on the `upcoming` browse branch. `from`/`to`/`q`
-  // are honoured on `past` too (a member narrowing their own history), and
-  // ignored elsewhere: `going`/`hosting`/`waitlisted`/`saved` are already
-  // scoped by the viewer's own relationship to the event.
+  // are honoured on `past` too (a member narrowing their own history).
+  // `hosting` honours `to` alone, so the wizard's "same as last time" can ask
+  // for gatherings that already started without paging past every future
+  // date. The rest are ignored by `going`/`hosting`/`waitlisted`/`saved`,
+  // which are already scoped by the viewer's own relationship to the event.
 
   /** Inclusive lower bound on `startAt`, ISO-8601. On the `upcoming` branch
    *  it narrows the existing "from now" floor and can never widen it into the

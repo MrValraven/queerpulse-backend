@@ -1,5 +1,6 @@
 import { PartialType, OmitType } from '@nestjs/swagger';
 import { CreateResourceDto } from './create-resource.dto';
+import { IsDateString, IsOptional } from 'class-validator';
 
 /**
  * Every field optional, `slug` included via `PartialType` — a guide's slug is
@@ -13,4 +14,8 @@ import { CreateResourceDto } from './create-resource.dto';
  */
 export class UpdateResourceDto extends PartialType(
   OmitType(CreateResourceDto, ['publishedAt'] as const),
-) {}
+) {
+  /** The `updatedAt` the editor loaded. When it no longer matches, someone
+   *  else saved the guide in between and the write is refused with a 409. */
+  @IsOptional() @IsDateString() expectedUpdatedAt?: string;
+}

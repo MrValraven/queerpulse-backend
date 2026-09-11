@@ -18,7 +18,7 @@ import {
  * uploadProcessing.ts`) plus the two labels `useImageReframerState` synthesises
  * for the freeform ratio chips:
  *   - '1:1'      avatar, group-avatar, and the "Square" freeform chip
- *   - '2:1'      story-cover, community-cover, listing-photo
+ *   - '2:1'      story-cover, community-cover, event-cover, listing-photo
  *   - '3:1'      persona-cover
  *   - 'original' the "Original" freeform chip (the source's own ratio)
  *   - 'free'     the identity crop's label

@@ -1,13 +1,18 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Not, Repository } from 'typeorm';
+import {
+  inlineHtmlToPlainText,
+  sanitizeInlineHtml,
+} from '../common/inline-html';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { CreateResourceDto } from './dto/create-resource.dto';
-import { GuideSectionDto } from './dto/guide-section.dto';
+import { GuideBlockDto, GuideSectionDto } from './dto/guide-section.dto';
 import {
   AdminResourceSort,
   ListAdminResourcesQuery,
@@ -15,7 +20,13 @@ import {
 import { ReviewResourceDto } from './dto/review-resource.dto';
 import { UpdateResourceDto } from './dto/update-resource.dto';
 import { Resource } from './entities/resource.entity';
-import { GuideSection } from './guide-section';
+import {
+  GuideBlock,
+  GuideSection,
+  isFormattedGuideBlockKind,
+  MAX_GUIDE_BLOCK_HTML_LENGTH,
+  MAX_GUIDE_BLOCK_LENGTH,
+} from './guide-section';
 import { AdminResourceDTO, toAdminResourceResponse } from './resource-response';
 
 /** ISO date for "today", in the same YYYY-MM-DD shape a Postgres `date`
@@ -44,14 +55,49 @@ function sectionsToPlainBody(
   return text.length > 0 ? text : fallback;
 }
 
+/**
+ * One block as it is stored. A formatted block that arrives with `html` has
+ * that html sanitized and its `text` derived from it, so a crafted request
+ * cannot store markup outside the allowlist or a `text` that disagrees with
+ * what readers see. Subheadings never keep `html`, and a non-string `html`
+ * counts as absent. Two limits apply after sanitizing: the stored html stays
+ * within MAX_GUIDE_BLOCK_HTML_LENGTH (sanitizing can lengthen it, and a read
+ * would otherwise cut it mid-tag) and the derived text stays within
+ * MAX_GUIDE_BLOCK_LENGTH. Either one failing is a 400.
+ */
+function normalizeBlock(
+  block: GuideBlockDto,
+  sectionId: string,
+  blockIndex: number,
+): GuideBlock {
+  if (
+    !isFormattedGuideBlockKind(block.kind) ||
+    typeof block.html !== 'string'
+  ) {
+    return { kind: block.kind, text: block.text };
+  }
+  const html = sanitizeInlineHtml(block.html);
+  if (html.length > MAX_GUIDE_BLOCK_HTML_LENGTH) {
+    throw new BadRequestException(
+      `Block ${blockIndex + 1} in section "${sectionId}" has more than ${MAX_GUIDE_BLOCK_HTML_LENGTH} characters of formatting`,
+    );
+  }
+  const text = inlineHtmlToPlainText(html);
+  if (text.length > MAX_GUIDE_BLOCK_LENGTH) {
+    throw new BadRequestException(
+      `Block ${blockIndex + 1} in section "${sectionId}" is longer than ${MAX_GUIDE_BLOCK_LENGTH} characters`,
+    );
+  }
+  return { kind: block.kind, text, html };
+}
+
 function normalizeSections(sections: GuideSectionDto[]): GuideSection[] {
   return sections.map((section) => ({
     id: section.id,
     heading: section.heading,
-    blocks: section.blocks.map((block) => ({
-      kind: block.kind,
-      text: block.text,
-    })),
+    blocks: section.blocks.map((block, blockIndex) =>
+      normalizeBlock(block, section.id, blockIndex),
+    ),
   }));
 }
 
@@ -153,6 +199,7 @@ export class AdminResourcesService {
     adminUserId: string,
   ): Promise<AdminResourceDTO> {
     const resource = await this.requireById(id);
+    this.assertNotStale(resource, dto.expectedUpdatedAt);
 
     if (dto.slug !== undefined && dto.slug !== resource.slug) {
       await this.assertSlugFree(dto.slug, id);
@@ -238,6 +285,22 @@ export class AdminResourcesService {
   async remove(id: string): Promise<void> {
     const result = await this.resources.delete({ id });
     if (!result.affected) throw new NotFoundException('Resource not found');
+  }
+
+  /** Refuses a write made against an older copy of the guide. Compared in
+   *  milliseconds, the precision `toAdminResourceResponse` hands out. */
+  private assertNotStale(
+    resource: Resource,
+    expectedUpdatedAt: string | undefined,
+  ): void {
+    if (expectedUpdatedAt === undefined) return;
+    if (
+      new Date(expectedUpdatedAt).getTime() !== resource.updatedAt.getTime()
+    ) {
+      throw new ConflictException(
+        'This guide was saved by someone else since you opened it',
+      );
+    }
   }
 
   private async requireById(id: string): Promise<Resource> {

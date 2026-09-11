@@ -7,7 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, LessThanOrEqual, Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
@@ -429,6 +429,62 @@ describe('EventsService', () => {
       expect(where.userId._value).toEqual(['ok-1']);
       expect(page.total).toBe(1);
       expect(page.capacity).toBe(20);
+    });
+  });
+
+  // The door list CSV carries what attendees typed into their RSVP details,
+  // so it follows the same `justMe` rule the organiser's dashboard view does.
+  describe('attendeesCsv', () => {
+    const hostedEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+    };
+    const rsvpRow = (userId: string, visibility: 'justMe' | null) => ({
+      eventId: 'e1',
+      userId,
+      status: 'going',
+      waitlistPosition: null,
+      guestCount: 0,
+      createdAt: new Date('2026-09-01T10:00:00.000Z'),
+      checkedInAt: null,
+      visibility,
+      accessNeeds: `${userId} step-free entry`,
+      dietaryNeeds: `${userId} vegan`,
+      pronouns: `${userId} they/them`,
+      customAnswer: `${userId} bringing bread`,
+    });
+    const profileFor = (userId: string, firstName: string) => ({
+      userId,
+      firstName,
+      lastName: 'Silva',
+      pronouns: null,
+      photoVisible: false,
+      avatarUrl: null,
+    });
+
+    it('leaves every free-text answer out for an attendee who chose justMe', async () => {
+      events.findOne.mockResolvedValue(hostedEvent);
+      rsvps.find.mockResolvedValue([
+        rsvpRow('shared-1', null),
+        rsvpRow('private-1', 'justMe'),
+      ]);
+      profiles.find.mockResolvedValue([
+        profileFor('shared-1', 'Ana'),
+        profileFor('private-1', 'Rui'),
+      ]);
+
+      const csv = await service.attendeesCsv('party', 'host-1');
+      const [header, sharedLine, privateLine] = csv.split('\n');
+
+      expect(header).toContain('"rsvp pronouns","custom answer"');
+      expect(sharedLine).toContain('"shared-1 step-free entry"');
+      expect(sharedLine).toContain('"shared-1 vegan"');
+      expect(sharedLine).toContain('"shared-1 they/them"');
+      expect(sharedLine).toContain('"shared-1 bringing bread"');
+      expect(privateLine).toContain('"Rui Silva"');
+      expect(privateLine).not.toContain('private-1');
     });
   });
 
@@ -1204,6 +1260,348 @@ describe('EventsService', () => {
           call.clause.includes(':discoveryFamily'),
         ),
       ).toBe(false);
+    });
+  });
+
+  // The care layer the v2 wizard adds (themes, content notes, house rules,
+  // cost kind, RSVP cutoff and questions). Written onto every occurrence of a
+  // series; on update the arrays replace wholesale and the questions merge
+  // per key; a free gathering stores no price.
+  describe('gathering care fields', () => {
+    const baseCreate = {
+      title: 'Thursday supper',
+      description: 'A long table and one pot.',
+      startAt: '2099-01-01T18:00:00.000Z',
+      timezone: 'Europe/Lisbon',
+    };
+
+    it('writes every care field on create and carries them on the detail', async () => {
+      const detail = await service.create('host-1', {
+        ...baseCreate,
+        themes: ['trans-led', 'sober'],
+        contentNotes: ['loud-sound'],
+        houseRules: '  Ask before photos.  ',
+        costKind: 'pay-what-you-can',
+        cost: '5 to 15 EUR',
+        rsvpCutoff: 'day-before',
+        rsvpQuestions: { pronouns: true },
+        customRsvpQuestion: '  What should we cook?  ',
+      });
+
+      const created = events.create.mock.calls[0]![0];
+      expect(created.themes).toEqual(['trans-led', 'sober']);
+      expect(created.contentNotes).toEqual(['loud-sound']);
+      expect(created.houseRules).toBe('Ask before photos.');
+      expect(created.costKind).toBe('pay-what-you-can');
+      expect(created.cost).toBe('5 to 15 EUR');
+      expect(created.rsvpCutoff).toBe('day-before');
+      expect(created.rsvpQuestions).toEqual({
+        dietary: false,
+        pronouns: true,
+        access: false,
+      });
+      expect(created.customRsvpQuestion).toBe('What should we cook?');
+
+      expect(detail.themes).toEqual(['trans-led', 'sober']);
+      expect(detail.costKind).toBe('pay-what-you-can');
+      expect(detail.contentNotes).toEqual(['loud-sound']);
+      expect(detail.houseRules).toBe('Ask before photos.');
+      expect(detail.rsvpCutoff).toBe('day-before');
+      // 24 hours before the start, as an ISO instant.
+      expect(detail.rsvpClosesAt).toBe('2098-12-31T18:00:00.000Z');
+      expect(detail.rsvpQuestions).toEqual({
+        dietary: false,
+        pronouns: true,
+        access: false,
+      });
+      expect(detail.customRsvpQuestion).toBe('What should we cook?');
+    });
+
+    it('stores empty care fields when the wizard sends none', async () => {
+      const detail = await service.create('host-1', baseCreate);
+
+      const created = events.create.mock.calls[0]![0];
+      expect(created.themes).toEqual([]);
+      expect(created.contentNotes).toEqual([]);
+      expect(created.houseRules).toBeNull();
+      expect(created.costKind).toBeNull();
+      expect(created.rsvpCutoff).toBeNull();
+      expect(created.rsvpQuestions).toEqual({
+        dietary: false,
+        pronouns: false,
+        access: false,
+      });
+      expect(created.customRsvpQuestion).toBeNull();
+      expect(detail.rsvpClosesAt).toBeNull();
+    });
+
+    it('drops the price of a free gathering on create', async () => {
+      await service.create('host-1', {
+        ...baseCreate,
+        costKind: 'free',
+        cost: '10 EUR',
+      });
+      const created = events.create.mock.calls[0]![0];
+      expect(created.costKind).toBe('free');
+      expect(created.cost).toBeNull();
+    });
+
+    it('stores blank house rules and a blank custom question as null', async () => {
+      await service.create('host-1', {
+        ...baseCreate,
+        houseRules: '   ',
+        customRsvpQuestion: '',
+      });
+      const created = events.create.mock.calls[0]![0];
+      expect(created.houseRules).toBeNull();
+      expect(created.customRsvpQuestion).toBeNull();
+    });
+
+    it('writes the care fields onto every occurrence of a series', async () => {
+      await service.create('host-1', {
+        ...baseCreate,
+        themes: ['newcomers-to-lisbon'],
+        contentNotes: ['alcohol-present'],
+        houseRules: 'Leave the table as you found it.',
+        costKind: 'fixed',
+        cost: '8 EUR',
+        rsvpCutoff: 'three-days-before',
+        rsvpQuestions: { dietary: true },
+        customRsvpQuestion: 'Any allergies we missed?',
+        recurrence: { cadence: 'weekly', endType: 'count', endCount: 3 },
+      });
+
+      expect(events.create).toHaveBeenCalledTimes(3);
+      for (const [createdOccurrence] of events.create.mock.calls) {
+        expect(createdOccurrence).toEqual(
+          expect.objectContaining({
+            themes: ['newcomers-to-lisbon'],
+            contentNotes: ['alcohol-present'],
+            houseRules: 'Leave the table as you found it.',
+            costKind: 'fixed',
+            cost: '8 EUR',
+            rsvpCutoff: 'three-days-before',
+            rsvpQuestions: { dietary: true, pronouns: false, access: false },
+            customRsvpQuestion: 'Any allergies we missed?',
+          }),
+        );
+      }
+      // Each occurrence holds its own arrays, so editing one row in memory
+      // stays on that row alone.
+      const [firstOccurrence, secondOccurrence] = events.create.mock.calls;
+      expect(firstOccurrence![0].themes).not.toBe(secondOccurrence![0].themes);
+    });
+
+    it('replaces the arrays wholesale and merges the questions per key on update', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        themes: ['sober', 'sapphic'],
+        contentNotes: ['loud-sound'],
+        rsvpQuestions: { dietary: true, pronouns: false, access: true },
+      });
+
+      const detail = await service.update('x', 'u1', {
+        themes: ['trans-led'],
+        rsvpQuestions: { pronouns: true, access: false },
+      });
+
+      expect(detail.themes).toEqual(['trans-led']);
+      // Untouched by the patch, so left as stored.
+      expect(detail.contentNotes).toEqual(['loud-sound']);
+      expect(detail.rsvpQuestions).toEqual({
+        dietary: true,
+        pronouns: true,
+        access: false,
+      });
+    });
+
+    it('clears the arrays and nullable strings when the patch sends null', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        themes: ['sober'],
+        contentNotes: ['violence'],
+        houseRules: 'No phones.',
+        rsvpCutoff: 'day-before',
+        customRsvpQuestion: 'Coming by bike?',
+      });
+
+      const detail = await service.update('x', 'u1', {
+        themes: null,
+        contentNotes: null,
+        houseRules: null,
+        rsvpCutoff: null,
+        customRsvpQuestion: '',
+      });
+
+      expect(detail.themes).toEqual([]);
+      expect(detail.contentNotes).toEqual([]);
+      expect(detail.houseRules).toBeNull();
+      expect(detail.rsvpCutoff).toBeNull();
+      expect(detail.rsvpClosesAt).toBeNull();
+      expect(detail.customRsvpQuestion).toBeNull();
+    });
+
+    it('nulls the stored price when a patch marks the gathering free', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        cost: '10 EUR',
+        costKind: 'fixed',
+      });
+
+      const detail = await service.update('x', 'u1', { costKind: 'free' });
+
+      expect(detail.costKind).toBe('free');
+      expect(detail.cost).toBeNull();
+    });
+
+    it('refuses to store a price on a gathering already marked free', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        costKind: 'free',
+      });
+
+      const detail = await service.update('x', 'u1', { cost: '10 EUR' });
+
+      expect(detail.cost).toBeNull();
+    });
+
+    it('sheds an old price from a free gathering on a patch about something else', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        costKind: 'free',
+        cost: '10 EUR',
+      });
+
+      const detail = await service.update('x', 'u1', {
+        title: 'Thursday supper, one street over',
+      });
+
+      expect(detail.cost).toBeNull();
+      expect(events.save).toHaveBeenCalledWith(
+        expect.objectContaining({ costKind: 'free', cost: null }),
+      );
+    });
+  });
+
+  // A series steps on the gathering's own wall clock and hands back every
+  // slug it saved. Dated 2099 so the fixture stays in the future for
+  // `rejectPast`; Lisbon's October change falls on Sunday 25 October that
+  // year too, exactly as in 2026.
+  describe('series occurrences', () => {
+    const baseSeries = {
+      title: 'Thursday supper',
+      description: 'A long table and one pot.',
+      timezone: 'Europe/Lisbon',
+      startAt: '2099-10-18T18:00:00.000Z',
+      endAt: '2099-10-18T20:00:00.000Z',
+    };
+
+    it('keeps 19:00 Lisbon time across the October change and the elapsed duration', async () => {
+      await service.create('host-1', {
+        ...baseSeries,
+        recurrence: { cadence: 'weekly', endType: 'count', endCount: 3 },
+      });
+
+      const schedules = events.create.mock.calls.map(([occurrence]) => [
+        occurrence.startAt?.toISOString(),
+        occurrence.endAt?.toISOString(),
+      ]);
+      expect(schedules).toEqual([
+        ['2099-10-18T18:00:00.000Z', '2099-10-18T20:00:00.000Z'],
+        ['2099-10-25T19:00:00.000Z', '2099-10-25T21:00:00.000Z'],
+        ['2099-11-01T19:00:00.000Z', '2099-11-01T21:00:00.000Z'],
+      ]);
+    });
+
+    // Stepping the instant by elapsed days would put the third date at 18:00
+    // UTC, inside this bound. On the local clock it starts at 19:00 UTC, after
+    // the instant the host picked, so the series stops at two.
+    it('compares endUntil as an instant against the stepped starts', async () => {
+      await service.create('host-1', {
+        ...baseSeries,
+        recurrence: {
+          cadence: 'weekly',
+          endType: 'date',
+          endUntil: '2099-11-01T18:30:00.000Z',
+        },
+      });
+
+      expect(events.create).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns every saved occurrence slug in series order', async () => {
+      // Each save claims its slug, so the 2nd and 3rd occurrence of the same
+      // title get the random suffix a real database would force on them.
+      const takenSlugs = new Set<string>();
+      events.exists.mockImplementation(
+        (findOptions?: { where?: { slug?: string } }) =>
+          Promise.resolve(takenSlugs.has(findOptions?.where?.slug ?? '')),
+      );
+      events.save.mockImplementation((event: Event) => {
+        takenSlugs.add(event.slug);
+        return event;
+      });
+
+      const detail = await service.create('host-1', {
+        ...baseSeries,
+        recurrence: { cadence: 'weekly', endType: 'count', endCount: 3 },
+      });
+
+      const createdSlugs = events.create.mock.calls.map(
+        ([occurrence]) => occurrence.slug,
+      );
+      expect(detail.occurrenceSlugs).toEqual(createdSlugs);
+      expect(detail.occurrenceSlugs).toHaveLength(3);
+      expect(new Set(detail.occurrenceSlugs).size).toBe(3);
+      expect(detail.occurrenceSlugs[0]).toBe('thursday-supper');
+      expect(detail.slug).toBe('thursday-supper');
+    });
+
+    it('returns the one slug of a single gathering', async () => {
+      const detail = await service.create('host-1', baseSeries);
+
+      expect(detail.occurrenceSlugs).toEqual([detail.slug]);
+    });
+  });
+
+  // `filter=hosting` honours `to` alone, as an upper bound on the start: the
+  // wizard's "same as last time" asks for `to=now`. Both arms of the OR carry
+  // the bound, or every future co-hosted date would come back onto the page.
+  describe('hosting list upper bound', () => {
+    const to = '2026-09-11T12:00:00.000Z';
+
+    const hostingWhereFor = async (options: {
+      from?: string;
+      to?: string;
+    }): Promise<unknown> => {
+      await service.list('host-1', 'hosting', 1, options);
+      const [findOptions] = events.find.mock.calls[0] as [{ where: unknown }];
+      return findOptions.where;
+    };
+
+    beforeEach(() => {
+      cohosts.find.mockResolvedValue([{ eventId: 'cohosted-1' }]);
+    });
+
+    it('bounds the start on both the hosted and the co-hosted arm', async () => {
+      await expect(hostingWhereFor({ to })).resolves.toEqual([
+        { hostId: 'host-1', startAt: LessThanOrEqual(new Date(to)) },
+        { id: In(['cohosted-1']), startAt: LessThanOrEqual(new Date(to)) },
+      ]);
+    });
+
+    it('leaves the list unbounded without `to`, whatever `from` says', async () => {
+      await expect(hostingWhereFor({ from: to })).resolves.toEqual([
+        { hostId: 'host-1' },
+        { id: In(['cohosted-1']) },
+      ]);
+    });
+
+    it('ignores an unparseable `to`', async () => {
+      await expect(hostingWhereFor({ to: 'not a date' })).resolves.toEqual([
+        { hostId: 'host-1' },
+        { id: In(['cohosted-1']) },
+      ]);
     });
   });
 });

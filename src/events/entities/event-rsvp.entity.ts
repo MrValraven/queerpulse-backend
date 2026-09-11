@@ -7,6 +7,10 @@ import {
   Unique,
   UpdateDateColumn,
 } from 'typeorm';
+import {
+  MAX_RSVP_CUSTOM_ANSWER_LENGTH,
+  MAX_RSVP_PRONOUNS_LENGTH,
+} from '../gathering-extras';
 
 export enum RsvpStatus {
   Going = 'going',
@@ -78,6 +82,20 @@ export class EventRsvp {
 
   @Column({ type: 'varchar', length: 20, nullable: true })
   visibility!: RsvpDetailsVisibility | null;
+
+  // The attendee's answers to the gathering's optional RSVP questions
+  // (`Event.rsvpQuestions`, `Event.customRsvpQuestion`). Same self-service,
+  // own-row-only rules as the needs above, and the same `visibility`
+  // withholding when an organiser reads them.
+  @Column({ type: 'varchar', length: MAX_RSVP_PRONOUNS_LENGTH, nullable: true })
+  pronouns!: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: MAX_RSVP_CUSTOM_ANSWER_LENGTH,
+    nullable: true,
+  })
+  customAnswer!: string | null;
 
   // ── Day-of check-in (LOC-03) ─────────────────────────────────────────────
   // When a host or co-host marked this attendee as arrived, or null when they

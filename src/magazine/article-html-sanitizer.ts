@@ -1,5 +1,5 @@
-import sanitizeHtml from 'sanitize-html';
 import { ArticleBlock } from './entities/magazine-article.entity';
+import { sanitizeInlineHtml } from '../common/inline-html';
 
 /**
  * Server-side WRITE-boundary sanitizer for magazine article block rich text.
@@ -7,7 +7,7 @@ import { ArticleBlock } from './entities/magazine-article.entity';
  * Each article block carries inline rich text in an `html` field (and, for a
  * `qa` block, `q`; for an `image` block, `caption`), produced by the desk
  * editor's uncontrolled contentEditable surface. The public reader sanitizes
- * on READ (`queerpulse/.../desk/editor/sanitizeArticleHtml.ts`), but a crafted
+ * on READ (`queerpulse/src/shared/components/richText/sanitizeArticleHtml.ts`), but a crafted
  * API call to the draft-save route bypasses that entirely, so unsanitized
  * markup could be persisted and then rendered anywhere the reader is trusted.
  * We sanitize here, once, at the point of persistence, so the stored value is
@@ -26,39 +26,15 @@ import { ArticleBlock } from './entities/magazine-article.entity';
  * unwrapped to bare text as the reader does. The security property — no unsafe
  * URL is ever stored — is identical; the read-path sanitizer still normalises
  * the cosmetic difference away.
+ * The allowlist itself lives in `src/common/inline-html.ts`, shared with resource guides.
  */
-const ARTICLE_HTML_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
-  allowedTags: ['em', 'strong', 'a', 'br'],
-  // `rel`/`target` are allowlisted so the forced values from `transformTags`
-  // below survive the attribute filter; `href` is scheme-checked separately.
-  allowedAttributes: { a: ['href', 'rel', 'target'] },
-  allowedSchemes: ['http', 'https', 'mailto'],
-  allowedSchemesByTag: { a: ['http', 'https', 'mailto'] },
-  allowProtocolRelative: false,
-  // Discard a disallowed tag but keep its (already-sanitized) text children —
-  // the reader's "unwrap" behaviour. `script`/`style` and the other default
-  // `nonTextTags` have their content dropped entirely, which is safe.
-  disallowedTagsMode: 'discard',
-  transformTags: {
-    // Force `rel`/`target` on every surviving anchor; keep the incoming href
-    // (a disallowed scheme is stripped afterwards by `allowedSchemesByTag`).
-    a: (_tagName: string, attribs: Record<string, string>) => ({
-      tagName: 'a',
-      attribs: {
-        ...(attribs.href ? { href: attribs.href } : {}),
-        rel: 'noopener noreferrer',
-        target: '_blank',
-      },
-    }),
-  },
-};
 
 /**
  * Sanitizes a single article rich-text `html` value down to the reader-safe
  * allowlist. Safe to call with untrusted input; never throws.
  */
 export function sanitizeArticleHtml(html: string): string {
-  return sanitizeHtml(html, ARTICLE_HTML_SANITIZE_OPTIONS);
+  return sanitizeInlineHtml(html);
 }
 
 /**

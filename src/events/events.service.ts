@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto';
 import {
   EntityManager,
   In,
+  LessThanOrEqual,
   MoreThan,
   Not,
   Repository,
@@ -46,6 +47,7 @@ import type {
 } from './dto/recurrence.dto';
 import {
   AttendeesPageDTO,
+  CreatedEventDetail,
   EventDetail,
   EventLineupDTO,
   EventOrganizerView,
@@ -56,8 +58,18 @@ import {
   toEventVenueAttachmentView,
   toLineupEntryView,
   toOrganizerView,
+  toEventCareFields,
   toRsvpDetailsView,
 } from './event-response';
+import {
+  DEFAULT_RSVP_QUESTIONS,
+  mergeRsvpQuestions,
+  type ContentNote,
+  type CostKind,
+  type GatheringTheme,
+  type RsvpCutoff,
+  type RsvpQuestions,
+} from './gathering-extras';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventAnnouncement } from './entities/event-announcement.entity';
@@ -84,6 +96,7 @@ import {
 } from './gathering-family';
 import { toCsvRow } from '../common/csv';
 import { RsvpService } from './rsvp.service';
+import { occurrenceStartAt } from './series-occurrences';
 
 /** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
 export type SeriesScope = 'this' | 'future';
@@ -154,6 +167,16 @@ export interface CreateEventInput {
   };
   // Free-text door price (LOC-18). Display only; no payment code anywhere.
   cost?: string | null;
+  // Care (create-gathering v2). Vocabularies in `./gathering-extras.ts`.
+  // `costKind: 'free'` stores `cost` as null. Arrays replace wholesale on
+  // update and `null` clears them; `rsvpQuestions` merges per key.
+  costKind?: CostKind | null;
+  themes?: GatheringTheme[] | null;
+  contentNotes?: ContentNote[] | null;
+  houseRules?: string | null;
+  rsvpCutoff?: RsvpCutoff | null;
+  rsvpQuestions?: Partial<RsvpQuestions> | null;
+  customRsvpQuestion?: string | null;
   // `null`/`''` (update only — `create()` treats them the same as absent,
   // since there's no existing community to detach from) explicitly clears
   // `communityId`; a non-empty slug resolves/authorizes it; absent (the
@@ -276,7 +299,10 @@ export class EventsService {
     );
   }
 
-  async create(hostId: string, dto: CreateEventInput): Promise<EventDetail> {
+  async create(
+    hostId: string,
+    dto: CreateEventInput,
+  ): Promise<CreatedEventDetail> {
     const startAt = new Date(dto.startAt);
     const endAt = dto.endAt ? new Date(dto.endAt) : null;
     this.assertScheduleValid(startAt, endAt, { rejectPast: true });
@@ -325,7 +351,12 @@ export class EventsService {
     // on its own via the normal slug-keyed endpoints. No `recurrence` (the
     // common case) is exactly the prior single-event behavior: one
     // occurrence, no series.
-    const occurrences = this.resolveOccurrences(startAt, endAt, dto.recurrence);
+    const occurrences = this.resolveOccurrences(
+      startAt,
+      endAt,
+      dto.timezone,
+      dto.recurrence,
+    );
     let seriesId: string | null = null;
     if (occurrences.length > 1 && dto.recurrence) {
       const series = await this.eventSeries.save(
@@ -353,6 +384,9 @@ export class EventsService {
     // 2nd..Nth occurrence of "Weekly Support Group" gets a random-suffixed
     // slug), so no extra handling is needed here.
     let firstSaved: Event | null = null;
+    // Every saved slug, in series order, for the response. Read off each save
+    // as it lands, since the suffixed ones cannot be derived afterwards.
+    const occurrenceSlugs: string[] = [];
     for (const [index, occurrence] of occurrences.entries()) {
       const event = this.events.create({
         hostId,
@@ -398,7 +432,23 @@ export class EventsService {
           dto.accessibility?.answers,
         ),
         accessibilityNote: dto.accessibility?.note?.trim() ?? '',
-        cost: EventsService.blankToNull(dto.cost),
+        // A free gathering has no price to state, so whatever the wizard left
+        // in the amount field is dropped.
+        cost:
+          dto.costKind === 'free' ? null : EventsService.blankToNull(dto.cost),
+        costKind: dto.costKind ?? null,
+        // Care (create-gathering v2), written onto every occurrence of a
+        // series like the rest of the content. Each row gets its own arrays.
+        themes: EventsService.distinctKeys(dto.themes),
+        contentNotes: EventsService.distinctKeys(dto.contentNotes),
+        houseRules: EventsService.blankToNull(dto.houseRules),
+        rsvpCutoff: dto.rsvpCutoff ?? null,
+        // A new gathering asks only the questions the host switched on.
+        rsvpQuestions: mergeRsvpQuestions(
+          DEFAULT_RSVP_QUESTIONS,
+          dto.rsvpQuestions,
+        ),
+        customRsvpQuestion: EventsService.blankToNull(dto.customRsvpQuestion),
         communityId,
         allowWaitlist: dto.allowWaitlist ?? true,
         showAttendeeCount: dto.showAttendeeCount ?? true,
@@ -406,6 +456,7 @@ export class EventsService {
         seriesIndex: seriesId ? index : null,
       });
       const saved = await this.saveWithUniqueSlug(event, dto.title);
+      occurrenceSlugs.push(saved.slug);
       if (index === 0) firstSaved = saved;
     }
     // `firstSaved` is always set: `occurrences` always has at least one entry
@@ -414,16 +465,23 @@ export class EventsService {
     if (shouldAskVenueOwner && venueListing) {
       await this.notifyVenueOwnerBestEffort(firstSaved!, venueListing);
     }
-    return this.buildDetail(firstSaved!, hostId);
+    const detail = await this.buildDetail(firstSaved!, hostId);
+    return { ...detail, occurrenceSlugs };
   }
 
   // Computes every occurrence's own `{ startAt, endAt }` for a create() call,
   // capped at `MAX_OCCURRENCES`. No `recurrence` → a single-element array (the
-  // gathering's own schedule, unchanged) — the non-recurring path. `endAt`'s
-  // duration (when set) is preserved across every occurrence.
+  // gathering's own schedule, unchanged): the non-recurring path.
+  //
+  // Starts step on `timeZone`'s wall clock (see `series-occurrences.ts`), so a
+  // 19:00 series stays at 19:00 local across a clock change. The duration is
+  // kept as ELAPSED time instead: a two-hour supper that starts on the night
+  // the clocks change still lasts two hours, and `endUntil` is compared as an
+  // instant, the way the host picked it.
   private resolveOccurrences(
     startAt: Date,
     endAt: Date | null,
+    timeZone: string,
     recurrence?: CreateEventInput['recurrence'],
   ): { startAt: Date; endAt: Date | null }[] {
     if (!recurrence) return [{ startAt, endAt }];
@@ -463,6 +521,7 @@ export class EventsService {
         startAt,
         recurrence.cadence,
         index,
+        timeZone,
       );
       if (untilMs !== null && occurrenceStart.getTime() > untilMs) break;
       const occurrenceEnd =
@@ -475,20 +534,18 @@ export class EventsService {
   }
 
   // The Nth occurrence's start, `index` cadence-steps after `base` (index 0
-  // === `base` itself). Monthly uses `setMonth`, so a 31st-of-the-month start
-  // rolls into the next month on a shorter one (JS `Date` overflow) — an
-  // accepted, documented edge case for this deliberately minimal recurrence
-  // model (no RFC5545 "same weekday" or "last day of month" semantics).
+  // === `base` itself), stepped on the gathering's own `timeZone`. It used to
+  // step with `setDate`/`setMonth` in the PROCESS zone, which is UTC in the
+  // container, so a Lisbon series crossing the October change moved an hour
+  // on the local clock. `occurrenceStartAt` owns the calendar arithmetic, the
+  // month-overflow edge case and the rule for skipped and repeated hours.
   private static addCadence(
     base: Date,
     cadence: RecurrenceCadence,
     index: number,
+    timeZone: string,
   ): Date {
-    const next = new Date(base);
-    if (cadence === 'weekly') next.setDate(next.getDate() + 7 * index);
-    else if (cadence === 'biweekly') next.setDate(next.getDate() + 14 * index);
-    else next.setMonth(next.getMonth() + index); // 'monthly'
-    return next;
+    return occurrenceStartAt(base, cadence, index, timeZone);
   }
 
   async getBySlug(slug: string, viewerId: string): Promise<EventDetail> {
@@ -759,6 +816,39 @@ export class EventsService {
       ...(dto.cost !== undefined
         ? { cost: EventsService.blankToNull(dto.cost) }
         : {}),
+      ...(dto.costKind !== undefined ? { costKind: dto.costKind ?? null } : {}),
+      // Care (create-gathering v2). Both arrays REPLACE wholesale: the client
+      // holds the whole selection, so a patch naming two themes means exactly
+      // those two, and `null` clears. The strings follow the LOC-04 rule above.
+      ...(dto.themes !== undefined
+        ? { themes: EventsService.distinctKeys(dto.themes) }
+        : {}),
+      ...(dto.contentNotes !== undefined
+        ? { contentNotes: EventsService.distinctKeys(dto.contentNotes) }
+        : {}),
+      ...(dto.houseRules !== undefined
+        ? { houseRules: EventsService.blankToNull(dto.houseRules) }
+        : {}),
+      ...(dto.rsvpCutoff !== undefined
+        ? { rsvpCutoff: dto.rsvpCutoff ?? null }
+        : {}),
+      // The questions MERGE per key, for the reason accessibility answers do
+      // below: switching one question on must not switch the other two off.
+      ...(dto.rsvpQuestions
+        ? {
+            rsvpQuestions: mergeRsvpQuestions(
+              event.rsvpQuestions,
+              dto.rsvpQuestions,
+            ),
+          }
+        : {}),
+      ...(dto.customRsvpQuestion !== undefined
+        ? {
+            customRsvpQuestion: EventsService.blankToNull(
+              dto.customRsvpQuestion,
+            ),
+          }
+        : {}),
       // Accessibility answers MERGE per question rather than replacing the
       // map: a host correcting "accessible toilet" must not silently blank
       // the other five answers back to unknown. The note replaces wholesale,
@@ -791,6 +881,17 @@ export class EventsService {
         event.gatheringFamily,
         nextDetails,
       );
+    }
+
+    // A free gathering stores no price, checked against the EFFECTIVE kind
+    // the same way the details bag is checked against the effective family: a
+    // patch that sends only an amount to a gathering already marked free, or
+    // only `costKind: 'free'` to one that has an amount, both end with `cost`
+    // null. It runs on every patch, the same rule `create()` applies, so a row
+    // that is free and still carries an old amount sheds it on its next save
+    // whatever that save changed.
+    if (event.costKind === 'free') {
+      event.cost = null;
     }
 
     // Pushing the start later makes an already-sent reminder premature — re-arm
@@ -1199,9 +1300,12 @@ export class EventsService {
    * survives pagination: the old shape shipped whole pages to the client and
    * filtered them there, which under-reported every answer until the member
    * had scrolled the entire feed. `from`/`to`/`q` also apply to the 'past'
-   * branch (a member narrowing their own history); the rest are browse-only,
-   * and every one is ignored by `going`/`hosting`/`waitlisted`/`saved`, which
-   * are already scoped by the viewer's own relationship to the event.
+   * branch (a member narrowing their own history). 'hosting' honours `to`
+   * alone, as an upper bound on the start: the wizard's "same as last time"
+   * asks for `to=now`, so a host with twenty future dates still finds a
+   * gathering that already started on the first page. The rest
+   * are browse-only and ignored by `going`/`hosting`/`waitlisted`/`saved`,
+   * which are already scoped by the viewer's own relationship to the event.
    */
   async list(
     userId: string,
@@ -1226,8 +1330,20 @@ export class EventsService {
     if (filter === 'hosting') {
       const cohosted = await this.cohosts.find({ where: { userId } });
       const ids = cohosted.map((c) => c.eventId);
+      // Applied to BOTH arms of the OR: bounding only the hosted arm would let
+      // every future co-hosted date back onto the page. An unparseable `to`
+      // leaves the list unbounded, the same way `applyDiscoveryFilters`
+      // treats one.
+      const hostingTo = options?.to ? new Date(options.to) : null;
+      const startAtBound =
+        hostingTo && !Number.isNaN(hostingTo.getTime())
+          ? { startAt: LessThanOrEqual(hostingTo) }
+          : {};
       events = await this.events.find({
-        where: [{ hostId: userId }, ...(ids.length ? [{ id: In(ids) }] : [])],
+        where: [
+          { hostId: userId, ...startAtBound },
+          ...(ids.length ? [{ id: In(ids), ...startAtBound }] : []),
+        ],
         order: { startAt: 'DESC' },
         take: PAGE_SIZE,
         skip,
@@ -1496,6 +1612,15 @@ export class EventsService {
     if (value === null || value === undefined) return null;
     const trimmed = value.trim();
     return trimmed === '' ? null : trimmed;
+  }
+
+  // A fresh array of the distinct keys, in the order given. The DTO already
+  // refuses duplicates; this keeps a direct service caller from storing one,
+  // and `null`/absent become the empty array the column holds for "none".
+  private static distinctKeys<Key extends string>(
+    keys: readonly Key[] | null | undefined,
+  ): Key[] {
+    return [...new Set(keys ?? [])];
   }
 
   // Cross-entity global search (SearchService) — mirrors the 'upcoming'
@@ -1855,6 +1980,8 @@ export class EventsService {
         'checked in at',
         'access needs',
         'dietary needs',
+        'rsvp pronouns',
+        'custom answer',
       ],
       ...rows
         // Drop profile-less ghost rows, exactly as `attendees()` does — an
@@ -1862,6 +1989,10 @@ export class EventsService {
         .filter((row) => profiles.has(row.userId))
         .map((row) => {
           const profile = profiles.get(row.userId)!;
+          // The attendee's free-text answers go through `toAttendeeView`, the
+          // same organiser view the dashboard reads, so a `justMe` choice
+          // leaves these cells empty in the file exactly as it does on screen.
+          const view = toAttendeeView(row, profile, true);
           return [
             `${profile.firstName} ${profile.lastName}`.trim(),
             profile.pronouns ?? '',
@@ -1870,8 +2001,10 @@ export class EventsService {
             String(row.guestCount ?? 0),
             row.createdAt.toISOString(),
             row.checkedInAt ? row.checkedInAt.toISOString() : '',
-            row.accessNeeds ?? '',
-            row.dietaryNeeds ?? '',
+            view.accessNeeds ?? '',
+            view.dietaryNeeds ?? '',
+            view.pronouns ?? '',
+            view.customAnswer ?? '',
           ];
         }),
     ];
@@ -2349,6 +2482,7 @@ export class EventsService {
         event.accessibilityAnswers,
       ),
       accessibilityNote: event.accessibilityNote ?? '',
+      ...toEventCareFields(event),
       announcements: seesAnnouncements
         ? announcementRows.map((row) =>
             toEventAnnouncementView(

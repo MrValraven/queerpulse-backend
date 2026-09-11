@@ -9,6 +9,17 @@ import {
 import type { ListingAccessibilityAnswerMap } from '../../listings/listing-accessibility';
 import { GatheringFamily } from '../gathering-family';
 import type { FormatDetails } from '../gathering-family';
+import {
+  MAX_CUSTOM_RSVP_QUESTION_LENGTH,
+  MAX_HOUSE_RULES_LENGTH,
+} from '../gathering-extras';
+import type {
+  ContentNote,
+  CostKind,
+  GatheringTheme,
+  RsvpCutoff,
+  RsvpQuestions,
+} from '../gathering-extras';
 
 // The family enum is DECLARED in `../gathering-family.ts` (alongside the
 // detail-key table and the legacy backfill map the migration reads) and
@@ -373,6 +384,65 @@ export class Event {
   // charge, a refund or a ticket.
   @Column({ type: 'varchar', length: 120, nullable: true })
   cost!: string | null;
+
+  /**
+   * How the gathering is paid for: `free`, `pay-what-you-can` or `fixed`, or
+   * null for a gathering created before the wizard asked.
+   *
+   * Sits beside the free-text `cost`, which keeps the host's own words for
+   * the amount. A `free` gathering stores `cost` as
+   * null (enforced in `EventsService`), so the card reads either "free" or a
+   * price, one at a time. Display only, like `cost`.
+   */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  costKind!: CostKind | null;
+
+  // ── Care (create-gathering v2) ───────────────────────────────────────────
+  // Every vocabulary here is declared once in `../gathering-extras.ts`.
+
+  /** Up to three theme keys, shown on the card and the detail page. Always an
+   *  array: "no themes" is an empty one. */
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  themes!: GatheringTheme[];
+
+  /** Content note keys ("loud-sound", "alcohol-present"), so a member can
+   *  decide before arriving. Empty array when the host added none. */
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  contentNotes!: ContentNote[];
+
+  /** The host's one-line house rules, or null when they wrote none. */
+  @Column({ type: 'varchar', length: MAX_HOUSE_RULES_LENGTH, nullable: true })
+  houseRules!: string | null;
+
+  /**
+   * When RSVPs close, measured back from `startAt` (`at-start` closes at the
+   * start itself), or null for "open until the gathering ends", where
+   * `hasEnded` closes them. Read through `hasRsvpCutoffPassed`, which every
+   * member-initiated roster write calls; organiser actions and cancellations
+   * ignore it.
+   */
+  @Column({ type: 'varchar', length: 24, nullable: true })
+  rsvpCutoff!: RsvpCutoff | null;
+
+  /**
+   * Which optional questions the RSVP details modal asks. Always a complete
+   * three-key map. Rows that predate the column were backfilled to
+   * `{ dietary: true, pronouns: false, access: true }`, which is the modal
+   * they already had; a new gathering asks only what the host switched on.
+   */
+  @Column({
+    type: 'jsonb',
+    default: () => `'{"dietary":false,"pronouns":false,"access":false}'`,
+  })
+  rsvpQuestions!: RsvpQuestions;
+
+  /** The host's own extra RSVP question, or null when they asked none. */
+  @Column({
+    type: 'varchar',
+    length: MAX_CUSTOM_RSVP_QUESTION_LENGTH,
+    nullable: true,
+  })
+  customRsvpQuestion!: string | null;
 
   @Column({ type: 'timestamptz', nullable: true })
   reminderSentAt!: Date | null;

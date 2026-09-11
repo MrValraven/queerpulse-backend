@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsIn,
+  IsOptional,
   IsString,
   MaxLength,
   ValidateNested,
@@ -11,16 +12,22 @@ import {
   GUIDE_BLOCK_KINDS,
   GuideBlockKind,
   MAX_GUIDE_BLOCKS_PER_SECTION,
+  MAX_GUIDE_BLOCK_HTML_LENGTH,
   MAX_GUIDE_BLOCK_LENGTH,
 } from '../guide-section';
 
-/** One block inside a section. Plain text only: the renderer prints it as
- *  text, so there is no markup to sanitize and no way for an editor to
- *  accidentally break a page's layout. */
+/** One block inside a section. `text` is plain; `html` is optional inline rich text that the service sanitizes and turns into `text`. */
 export class GuideBlockDto {
   @IsIn(GUIDE_BLOCK_KINDS) kind!: GuideBlockKind;
 
   @IsString() @MaxLength(MAX_GUIDE_BLOCK_LENGTH) text!: string;
+
+  /** Inline rich text for paragraph, list item and note blocks. Ignored on
+   *  subheadings. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_GUIDE_BLOCK_HTML_LENGTH)
+  html?: string;
 }
 
 export class GuideSectionDto {

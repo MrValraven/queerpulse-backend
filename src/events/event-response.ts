@@ -9,6 +9,15 @@ import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventBan } from './entities/event-ban.entity';
 import { Event, EventVenueConfirmation } from './entities/event.entity';
 import type { FormatDetails, GatheringFamily } from './gathering-family';
+import {
+  mergeRsvpQuestions,
+  rsvpClosesAt,
+  type ContentNote,
+  type CostKind,
+  type GatheringTheme,
+  type RsvpCutoff,
+  type RsvpQuestions,
+} from './gathering-extras';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventSeries } from './entities/event-series.entity';
@@ -96,6 +105,12 @@ export interface EventSummary {
    *  filter uses, so a "free" chip on a card can never disagree with the
    *  filter that produced the card. */
   isFree: boolean;
+  /** Up to three theme keys from `GATHERING_THEME_KEYS`, empty when the host
+   *  picked none. On the card because the card is where they are shown. */
+  themes: GatheringTheme[];
+  /** `free`, `pay-what-you-can` or `fixed`, or null for a gathering created
+   *  before the wizard asked. Display only, like `cost`. */
+  costKind: CostKind | null;
   /** The event's host, batch-resolved from `hostId` (one `profilesByUserIds`
    *  lookup per page — see `EventsService.summarize`), or `null` when the
    *  host's profile can't be resolved (deleted account). Rides on every
@@ -133,6 +148,17 @@ export function toEventSeriesView(
     index: event.seriesIndex,
     occurrenceCount: series.occurrenceCount,
   };
+}
+
+/**
+ * What `POST /events` answers: the first occurrence's detail plus the slug of
+ * every occurrence the call saved, in series order (`[slug]` for a single
+ * gathering). The share kit's calendar file links each date to its own page,
+ * and the 2nd..Nth slugs carry a random suffix nobody could guess, so they are
+ * collected as each save lands.
+ */
+export interface CreatedEventDetail extends EventDetail {
+  occurrenceSlugs: string[];
 }
 
 export interface EventDetail extends EventSummary {
@@ -262,6 +288,24 @@ export interface EventDetail extends EventSummary {
   accessibilityAnswers: ListingAccessibilityAnswerMap;
   /** The host's free-text access note, or '' when they wrote none. */
   accessibilityNote: string;
+
+  // ── Care (create-gathering v2) ───────────────────────────────────────────
+  // Public to every reader of the detail: all of it is written so a member can
+  // decide whether to come, which is a decision made before RSVPing.
+  /** Content note keys from `CONTENT_NOTE_KEYS`, empty when there are none. */
+  contentNotes: ContentNote[];
+  /** The host's one-line house rules, or null. */
+  houseRules: string | null;
+  /** The host's chosen cutoff, or null when RSVPs stay open until the end. */
+  rsvpCutoff: RsvpCutoff | null;
+  /** ISO 8601 instant RSVPs close (`rsvpClosesAt` in `gathering-extras.ts`),
+   *  or null when there is no cutoff. The server refuses a new RSVP from this
+   *  instant on, so the client renders its closed state from this value. */
+  rsvpClosesAt: string | null;
+  /** Which optional questions the RSVP details modal asks. Always complete. */
+  rsvpQuestions: RsvpQuestions;
+  /** The host's own extra RSVP question, or null. */
+  customRsvpQuestion: string | null;
   /** Announcements the organisers have sent, newest first (LOC-06). Rides on
    *  the detail so an attendee reads "we moved to the back room" on the page
    *  they are already looking at, not only in a notification that has since
@@ -372,13 +416,17 @@ export function toEventBanView(
   };
 }
 
-/** The four self-service fields `RsvpDetailsModal` (FE) reads/writes — see
+/** The self-service fields `RsvpDetailsModal` (FE) reads and writes. See
  *  `EventRsvp`'s "RSVP details" columns and `RsvpService.updateRsvpDetails`. */
 export interface RsvpDetailsView {
   guestCount: number;
   accessNeeds: string | null;
   dietaryNeeds: string | null;
   visibility: string | null;
+  /** The attendee's answer to the pronouns question, or null. */
+  pronouns: string | null;
+  /** The attendee's answer to the host's own question, or null. */
+  customAnswer: string | null;
 }
 
 export function toRsvpDetailsView(rsvp: EventRsvp): RsvpDetailsView {
@@ -387,6 +435,38 @@ export function toRsvpDetailsView(rsvp: EventRsvp): RsvpDetailsView {
     accessNeeds: rsvp.accessNeeds,
     dietaryNeeds: rsvp.dietaryNeeds,
     visibility: rsvp.visibility,
+    pronouns: rsvp.pronouns ?? null,
+    customAnswer: rsvp.customAnswer ?? null,
+  };
+}
+
+/**
+ * The care fields a gathering's detail carries, mapped by hand from the row.
+ *
+ * Defensive about rows loaded without the columns (a fixture, or a partial
+ * select): an absent array reads as empty and the question map is always
+ * completed, so the wire shape stays the same however the row was loaded.
+ */
+export function toEventCareFields(
+  event: Event,
+): Pick<
+  EventDetail,
+  | 'contentNotes'
+  | 'houseRules'
+  | 'rsvpCutoff'
+  | 'rsvpClosesAt'
+  | 'rsvpQuestions'
+  | 'customRsvpQuestion'
+> {
+  const rsvpCutoff = event.rsvpCutoff ?? null;
+  const closesAt = rsvpClosesAt(event.startAt, rsvpCutoff);
+  return {
+    contentNotes: event.contentNotes ?? [],
+    houseRules: event.houseRules ?? null,
+    rsvpCutoff,
+    rsvpClosesAt: closesAt ? closesAt.toISOString() : null,
+    rsvpQuestions: mergeRsvpQuestions(event.rsvpQuestions),
+    customRsvpQuestion: event.customRsvpQuestion ?? null,
   };
 }
 
@@ -435,6 +515,12 @@ export interface AttendeeView {
    *  UI can say why a needs line is absent rather than implying nobody has
    *  any. Organisers only, like the three fields above. */
   detailsVisibility?: string | null;
+  /** The attendee's answer to the pronouns question. Organisers only, and
+   *  withheld under `justMe` exactly like `accessNeeds`. */
+  pronouns?: string | null;
+  /** The attendee's answer to the host's own question. Organisers only, and
+   *  withheld under `justMe` exactly like `accessNeeds`. */
+  customAnswer?: string | null;
 }
 
 /**
@@ -569,6 +655,8 @@ export function toEventSummary(
     formatDetails: e.formatDetails,
     cost: e.cost,
     isFree: isFreeCost(e.cost),
+    themes: e.themes ?? [],
+    costKind: e.costKind ?? null,
     host,
     series: toEventSeriesView(e, series),
   };
@@ -612,6 +700,10 @@ export function toAttendeeView(
     accessNeeds: disclosesNeeds ? rsvp.accessNeeds : null,
     dietaryNeeds: disclosesNeeds ? rsvp.dietaryNeeds : null,
     detailsVisibility: rsvp.visibility,
+    // The answers to the host's questions are free text the attendee typed
+    // into the same modal, so the same `justMe` choice covers them.
+    pronouns: disclosesNeeds ? (rsvp.pronouns ?? null) : null,
+    customAnswer: disclosesNeeds ? (rsvp.customAnswer ?? null) : null,
   };
 }
 
