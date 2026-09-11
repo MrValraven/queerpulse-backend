@@ -506,10 +506,19 @@ export class ConnectionsService {
           // both members ended up wanting settles whatever the earlier
           // refusals were about, so if they ever part the count starts from
           // nothing rather than from a hold neither of them remembers.
-          await manager.delete(ConnectionDecline, [
-            { requesterId: conn.requesterId, addresseeId: conn.addresseeId },
-            { requesterId: conn.addresseeId, addresseeId: conn.requesterId },
-          ]);
+          //
+          // One call per direction: `manager.delete` does not accept an array
+          // of conditions. With `invalidWhereValuesBehavior` configured, TypeORM
+          // normalizes the array into an object keyed "0"/"1" and throws
+          // `Property "0" was not found`, rolling back every accept.
+          await manager.delete(ConnectionDecline, {
+            requesterId: conn.requesterId,
+            addresseeId: conn.addresseeId,
+          });
+          await manager.delete(ConnectionDecline, {
+            requesterId: conn.addresseeId,
+            addresseeId: conn.requesterId,
+          });
         });
         conn.status = newStatus;
         conn.respondedAt = respondedAt;

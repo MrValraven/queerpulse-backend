@@ -601,10 +601,20 @@ describe('ConnectionsService', () => {
       await service.respond('c1', 'me', 'accept');
 
       expect(manager.query).not.toHaveBeenCalled();
-      expect(manager.delete).toHaveBeenCalledWith(ConnectionDecline, [
-        { requesterId: 'them', addresseeId: 'me' },
-        { requesterId: 'me', addresseeId: 'them' },
-      ]);
+      expect(manager.delete).toHaveBeenCalledTimes(2);
+      expect(manager.delete).toHaveBeenCalledWith(ConnectionDecline, {
+        requesterId: 'them',
+        addresseeId: 'me',
+      });
+      expect(manager.delete).toHaveBeenCalledWith(ConnectionDecline, {
+        requesterId: 'me',
+        addresseeId: 'them',
+      });
+      // TypeORM's `delete` rejects an array of conditions at runtime (it
+      // looks for a column named "0"), which a mocked manager cannot see.
+      for (const [, criteria] of manager.delete.mock.calls) {
+        expect(Array.isArray(criteria)).toBe(false);
+      }
     });
   });
 
