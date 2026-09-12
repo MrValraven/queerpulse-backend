@@ -35,17 +35,18 @@ import {
 } from './dto/admin-identity.dto';
 
 /**
- * The account-recovery levers on the member console: re-link a member's Google
- * sign-in identity (PRD-06) and reactivate a member stranded in `Deactivated`
- * (PRD-11).
+ * The sign-in identity routes on the member console: reveal a member's full
+ * sign-in address, re-link their Google sign-in identity (PRD-06), and
+ * reactivate a member stranded in `Deactivated` (PRD-11).
  *
  * ADMIN ONLY, and narrower than the rest of the console on purpose. The
  * neighbouring `AdminMemberModerationController` is `@Roles(Moderator, Admin)`
  * because verifying and restricting are moderator work. Nothing here is:
- * re-linking decides who controls an account, and reactivating writes
- * `users.status` directly. The empty `@StaffRoles()` is the explicit form of
- * "no additive grant opens this either" (see `RolesOrStaffGuard`) so a future
- * staff role can never widen these two routes by accident.
+ * re-linking decides who controls an account, reactivating writes
+ * `users.status` directly, and the reveal hands over a real person's
+ * third-party identity. The empty `@StaffRoles()` is the explicit form of "no
+ * additive grant opens this either" (see `RolesOrStaffGuard`) so a future staff
+ * role can never widen these routes by accident.
  *
  * Deliberately NOT `@LockdownExempt()`, mirroring `AdminMembersController`:
  * nothing here lifts a lockdown, so it goes dark with everything else.
@@ -73,6 +74,22 @@ export class AdminMemberIdentityController {
     @Param('memberId', ParseUUIDPipe) memberId: string,
   ) {
     return this.identity.getAccountRecovery(currentUser.userId, memberId);
+  }
+
+  @ApiOperation({
+    summary:
+      "Reveal one member's full sign-in address. Records who asked in the moderation audit trail.",
+  })
+  @ApiOkResponse({ description: 'The sign-in address.' })
+  @ApiNotFoundResponse({
+    description: 'Member not found, or no address is stored for them.',
+  })
+  @Get(':memberId/sign-in-email')
+  revealSignInEmail(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('memberId', ParseUUIDPipe) memberId: string,
+  ) {
+    return this.identity.revealSignInEmail(currentUser.userId, memberId);
   }
 
   // The body carries a reason and nothing else. The identity being linked is

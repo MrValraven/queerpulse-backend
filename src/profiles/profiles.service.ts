@@ -50,6 +50,7 @@ import {
   communityTypeLabel,
 } from './featured-communities';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
+import { ProfileNowHistory } from './entities/profile-now-history.entity';
 import { pruneDiscoverable } from './identities';
 import { normalizeOpenTo } from './open-to';
 import { reconcileDisciplineProfession } from './professions';
@@ -93,6 +94,7 @@ import {
 import { ActivityVisibilityService } from './activity-visibility.service';
 import { visibleBand } from './last-active';
 import { LastActiveService } from './last-active.service';
+import { NowInsightsService } from './now-insights.service';
 
 const PAGE_SIZE = 20;
 const RELATED_LIMIT = 4;
@@ -155,6 +157,8 @@ export class ProfilesService {
     private readonly communities: Repository<Community>,
     @InjectRepository(CommunityMember)
     private readonly communityMembers: Repository<CommunityMember>,
+    @InjectRepository(ProfileNowHistory)
+    private readonly nowHistory: Repository<ProfileNowHistory>,
     private readonly dataSource: DataSource,
     private readonly vouchService: VouchService,
     private readonly connectionsService: ConnectionsService,
@@ -173,6 +177,11 @@ export class ProfilesService {
     // The coarse "recently active" band. Read-only from here: the only writer
     // is `LastActiveListener` off a session refresh.
     private readonly lastActive: LastActiveService,
+    // How fast this member answers hellos, as a coarse phrase. A per-profile
+    // aggregate over `connections`, so it is read here (the single-profile
+    // path) only, never from `searchMembers`/`toMemberCard` (the list path),
+    // where one aggregate per row would turn a single query into N.
+    private readonly nowInsights: NowInsightsService,
   ) {}
 
   /**
@@ -410,19 +419,26 @@ export class ProfilesService {
         workItem.imageUrl ? [workItem.imageUrl] : [],
       ),
     );
-    // The two viewer-relative reads, run together and after the parallel block
-    // above rather than inside it, so that block's tuple stays as it is.
+    // The three reads below are all about the PROFILE OWNER (not the viewer),
+    // and independent of each other and of the parallel block above, so they
+    // run together rather than in series.
     // `activityBand` is one primary-key lookup on a two-column table;
-    // `mutualVoucherCount` is two bounded trust-graph reads.
-    const [activityBand, mutualVoucherCount] = await Promise.all([
-      // The band the VIEWER may see: `visibleBand` applies the member's
-      // opt-out, with the owner exempted so their own switch has a visible
-      // effect.
-      this.lastActive
-        .getSignal(userId)
-        .then((signal) => visibleBand(signal, isOwner)),
-      this.loadMutualVoucherCount(profile, viewerUserId),
-    ]);
+    // `mutualVoucherCount` is two bounded trust-graph reads; `respondsWithin`
+    // is one grouped aggregate over `connections`.
+    const [activityBand, mutualVoucherCount, respondsWithin] =
+      await Promise.all([
+        // The band the VIEWER may see: `visibleBand` applies the member's
+        // opt-out, with the owner exempted so their own switch has a visible
+        // effect.
+        this.lastActive
+          .getSignal(userId)
+          .then((signal) => visibleBand(signal, isOwner)),
+        this.loadMutualVoucherCount(profile, viewerUserId),
+        // Ungated, same as `now`/`notHereFor`: this is the single-profile
+        // read path, never the member-directory list path (`searchMembers`),
+        // which must not call this per row.
+        this.nowInsights.getRespondsWithin(userId),
+      ]);
     return toFullProfile(
       profile,
       rels,
@@ -431,6 +447,7 @@ export class ProfilesService {
       crops,
       activityBand,
       mutualVoucherCount,
+      respondsWithin,
     );
   }
 
@@ -788,10 +805,31 @@ export class ProfilesService {
     if (openTo !== undefined) {
       profile.openTo = normalizeOpenTo(openTo);
     }
+    // The outgoing status, archived below only if this patch actually changes
+    // it. Built here (before profile.now is overwritten) and written inside
+    // the same transaction as the profile save, so a failed save can never
+    // leave a history row describing a status the member still carries.
+    let archivedStatus: ProfileNowHistory | null = null;
     if (now !== undefined) {
       // An empty status normalises to NULL so a cleared Now reads back absent
       // rather than as an empty string.
-      profile.now = now.trim() || null;
+      const nextNow = now.trim() || null;
+      if (nextNow !== profile.now) {
+        if (profile.now) {
+          archivedStatus = this.nowHistory.create({
+            userId,
+            text: profile.now,
+            // Pre-nowUpdatedAt statuses have no start date of their own, so
+            // the profile's creation date is the only honest floor.
+            startedAt: profile.nowUpdatedAt ?? profile.createdAt,
+            endedAt: new Date(),
+          });
+        }
+        // Only a real change moves this. Re-saving the same words must not
+        // make the card claim the member updated it today.
+        profile.nowUpdatedAt = new Date();
+      }
+      profile.now = nextNow;
     }
     if (pronunciation !== undefined) {
       profile.pronunciation = pronunciation.trim() || null;
@@ -834,7 +872,14 @@ export class ProfilesService {
       profile.discoverableIdentities ?? [],
       profile.identities ?? [],
     );
-    await this.profiles.save(profile);
+    if (archivedStatus) {
+      await this.dataSource.transaction(async (manager) => {
+        await manager.save(profile);
+        await manager.save(archivedStatus);
+      });
+    } else {
+      await this.profiles.save(profile);
+    }
     if (featuredCommunityIds !== undefined) {
       await this.writeFeaturedCommunities(userId, featuredCommunityIds);
     }

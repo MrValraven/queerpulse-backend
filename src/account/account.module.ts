@@ -33,6 +33,7 @@ import { Message } from '../messaging/entities/message.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Activity } from '../profiles/entities/activity.entity';
+import { ProfileNowHistory } from '../profiles/entities/profile-now-history.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageModule } from '../storage/storage.module';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
@@ -177,6 +178,11 @@ import { DsarRequest } from './entities/dsar-request.entity';
       ListingReview,
       CompanyReview,
       HousingReview,
+      // Read-only source for `ProfileNowHistoryExportContributor`'s
+      // `nowHistory` category: the profile "Now" card's retired statuses,
+      // owned by `ProfilesModule`'s own `forFeature`. Same cross-module
+      // registration pattern as every entity above.
+      ProfileNowHistory,
     ]),
   ],
   controllers: [AccountController],

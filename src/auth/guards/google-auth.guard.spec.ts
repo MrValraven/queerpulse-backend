@@ -104,6 +104,32 @@ describe('GoogleAuthGuard.getAuthenticateOptions', () => {
     expect(decodeOAuthState(opts.state)?.reauth).toBeUndefined();
   });
 
+  it('sets prompt=select_account when the outbound leg is a retry after a failed attempt', () => {
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(
+      outboundContext({ switchAccount: '1', redirect: '/feed' }, res),
+    );
+    expect(opts.prompt).toBe('select_account');
+  });
+
+  it('only a literal "1" asks for the account chooser', () => {
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(
+      outboundContext({ switchAccount: 'true' }, res),
+    );
+    expect(opts.prompt).toBeUndefined();
+  });
+
+  it('prefers prompt=login when a reauth leg also asks to switch account', () => {
+    // `login` already re-renders the account picker AND forces credentials, so
+    // the weaker `select_account` must not downgrade a step-up re-auth.
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(
+      outboundContext({ reauth: '1', switchAccount: '1' }, res),
+    );
+    expect(opts.prompt).toBe('login');
+  });
+
   it('does not re-mint on the callback leg (state already present in query)', () => {
     // On the callback Google echoes `state` back; passport reads it from the
     // query, so we must not overwrite the nonce cookie.

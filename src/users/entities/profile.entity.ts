@@ -197,6 +197,13 @@ export class Profile {
   @Column({ type: 'text', nullable: true })
   now!: string | null;
 
+  // When `now` last CHANGED, which is what the profile card dates. Null
+  // until the member's first status change after this column shipped: the
+  // card omits the "Updated ..." line rather than dating it from a
+  // backfilled guess.
+  @Column({ type: 'timestamptz', nullable: true })
+  nowUpdatedAt!: Date | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   hiddenUntil!: Date | null;
 

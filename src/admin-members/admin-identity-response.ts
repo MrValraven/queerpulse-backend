@@ -29,6 +29,69 @@ export function googleIdTail(googleId: string): string {
   return googleId.slice(-GOOGLE_ID_TAIL_LENGTH);
 }
 
+/** The elision inside a masked address. Fixed width on purpose: a run of dots
+ *  as long as the hidden part would leak the local part's length. */
+const MASK_BODY = '\u2022\u2022\u2022';
+
+/**
+ * The masked form of a sign-in address, for the member console's identity
+ * panel.
+ *
+ * Sits beside {@link googleIdTail} because it answers the same question about a
+ * different field: how much of a real person's third-party identity the console
+ * may render without being asked. An operator opening a member drawer is
+ * usually checking "is this the account the ticket is about", and the first
+ * character, the last character and the domain answer that without putting a
+ * live address on screen every time anyone browses the roster. The whole value
+ * is reachable, once, through the reveal endpoint, which records who asked.
+ *
+ * Deliberately keeps the domain in full: the provider is the operator's first
+ * clue in a locked-out-account case (a workspace address that stopped
+ * resolving, a provider that no longer exists), and it identifies nobody on its
+ * own.
+ */
+export function maskEmailAddress(email: string): string {
+  const atIndex = email.lastIndexOf('@');
+  // Not an address shape at all. Nothing here is a validator, so the honest
+  // answer is to reveal none of it rather than guess where the local part
+  // ended.
+  if (atIndex <= 0) return MASK_BODY;
+  const localPart = email.slice(0, atIndex);
+  const domain = email.slice(atIndex);
+  // A one-character local part is entirely first-and-last, so keeping either
+  // end would print the whole thing.
+  if (localPart.length < 2) return `${MASK_BODY}${domain}`;
+  return `${localPart[0]}${MASK_BODY}${localPart[localPart.length - 1]}${domain}`;
+}
+
+/**
+ * One member's sign-in address in full, from the reveal endpoint.
+ *
+ * A separate read from the member detail DTO (which carries only the masked
+ * form) for one reason: this is the response that writes a
+ * {@link SIGN_IN_EMAIL_VIEWED_ACTION} row. Folding the full value into the
+ * detail DTO would make every drawer open a PII read and every audit row
+ * meaningless.
+ */
+export interface MemberSignInEmailDTO {
+  memberId: string;
+  slug: string;
+  email: string;
+}
+
+/**
+ * The `mod_audit_logs.action` written when an admin reveals a sign-in address.
+ *
+ * Shared with `AdminMembersService` because the per-member moderation timeline
+ * reads rows by `targetUserId` and must EXCLUDE this one: a lookup is a fact
+ * about the admin who ran it, and listing it among a member's warnings and
+ * citations would read as something the member did. It belongs in the
+ * governance audit feed, which is where it stays.
+ *
+ * `action` is a plain varchar on the entity, so this needs no migration.
+ */
+export const SIGN_IN_EMAIL_VIEWED_ACTION = 'member_sign_in_email_viewed';
+
 /**
  * One Google identity waiting to be accepted or refused as this member's new
  * sign-in (PRD-06).

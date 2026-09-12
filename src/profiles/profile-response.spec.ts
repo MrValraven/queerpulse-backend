@@ -178,6 +178,29 @@ describe('profile-response mappers', () => {
     expect(viewed).not.toHaveProperty('hiddenUntil');
   });
 
+  it('carries respondsWithin on the full profile', () => {
+    const dto = toFullProfile(
+      profile(),
+      emptyRels,
+      2,
+      false,
+      undefined,
+      null,
+      null,
+      'fewDays',
+    );
+    expect(dto.respondsWithin).toBe('fewDays');
+  });
+
+  it('defaults respondsWithin to null when the caller passes none', () => {
+    expect(toFullProfile(profile(), emptyRels, 2).respondsWithin).toBeNull();
+  });
+
+  it('omits respondsWithin from the limited card', () => {
+    const card = toLimitedProfile(profile(), 2);
+    expect('respondsWithin' in card).toBe(false);
+  });
+
   it('toFullProfile carries bioPt/notHereFor through ungated', () => {
     const dto = toFullProfile(
       profile({ bioPt: 'Uma bio', notHereFor: 'Casual hookups' }),

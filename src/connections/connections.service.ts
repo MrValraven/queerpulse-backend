@@ -1270,6 +1270,17 @@ export class ConnectionsService {
    * transaction, so no prior `(userLow, userHigh)` row can exist. Skips (returns
    * false) a self-connection — impossible for a brand-new signup, but keeps the
    * helper safe for any caller.
+   *
+   * `requestReason` carries the `system:autoConnect` sentinel rather than
+   * `null`. This row was never a hello the new member received, so it must not
+   * read as one: `NowInsightsService` (the profile "Now" card) sums hellos,
+   * replies, and a response-time median straight off `connections` rows, and a
+   * silent, already-accepted, zero-latency row would otherwise inflate every
+   * one of those figures for a personally invited member's first window and
+   * could pull a genuinely slow responder's median down to a claim they never
+   * earned. The `system:` prefix (not the exact string) is deliberate: it lets
+   * `NowInsightsService` exclude any future system-written row for free by
+   * matching the prefix, not this one literal value.
    */
   async createConnectionInTransaction(
     manager: EntityManager,
@@ -1288,7 +1299,7 @@ export class ConnectionsService {
       status: ConnectionStatus.Accepted,
       respondedAt: new Date(),
       requestMessage: null,
-      requestReason: null,
+      requestReason: 'system:autoConnect',
       introducedBy: null,
       flagged: false,
     });

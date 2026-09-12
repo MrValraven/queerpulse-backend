@@ -73,6 +73,13 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     // Step-up re-auth (see `OAuthState.reauth`'s doc comment). Only the
     // literal "1" opts in, same guard as `ageAttested`.
     const reauth = req.query?.reauth === '1';
+    // The previous attempt bounced back with an `?error=` (wrong Google
+    // account for an addressed invite, an address already on another account,
+    // cancelled consent). With one live Google session the chooser is skipped
+    // silently, so clicking the button again re-sends the SAME identity and
+    // fails identically — the member has no way to offer a different account.
+    // Same "1"-only opt-in as the flags above.
+    const switchAccount = req.query?.switchAccount === '1';
 
     // Bind this authorization request to the browser: a random nonce lives in
     // BOTH a short-lived httpOnly cookie and the OAuth `state` param; the
@@ -97,11 +104,21 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     });
     return {
       ...(state ? { state } : {}),
-      // Forces Google to show its login screen even if the browser already
-      // has an active Google session — proof the caller can complete a fresh
-      // login RIGHT NOW, not just that a cookie is still valid. Only set for
-      // the reauth leg; ordinary sign-in never forces re-entry.
-      ...(reauth ? { prompt: 'login' } : {}),
+      // `login` forces Google to show its login screen even if the browser
+      // already has an active Google session — proof the caller can complete a
+      // fresh login RIGHT NOW, not just that a cookie is still valid. Only set
+      // for the reauth leg; ordinary sign-in never forces re-entry.
+      //
+      // `select_account` is the weaker sibling used for a retry after a failed
+      // sign-in: it keeps the session but always renders the account chooser,
+      // including "Use another account", so the member can hand us a different
+      // identity instead of silently repeating the failed one. Reauth wins if
+      // both are set — it already implies picking an account.
+      ...(reauth
+        ? { prompt: 'login' }
+        : switchAccount
+          ? { prompt: 'select_account' }
+          : {}),
     };
   }
 

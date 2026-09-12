@@ -1,4 +1,5 @@
 import { UserRole } from '../users/entities/user.entity';
+import { maskEmailAddress } from './admin-identity-response';
 
 export type BadgeTone = 'plum' | 'coral' | 'jade' | 'violet' | 'amber';
 export type ModerationState = 'under_review' | 'frozen' | 'limited';
@@ -143,6 +144,19 @@ export interface AdminMemberDetailDTO {
    *  `AdminMemberCardDTO.staffRoles`. Drives the drawer's "Roles & access"
    *  toggle list. */
   staffRoles: string[];
+  /**
+   * The masked form of the address this member signs in with, e.g.
+   * `a\u2022\u2022\u2022a@gmail.com`. Enough to recognise the account in a
+   * support ticket; the whole value comes from
+   * `GET /admin/members/:id/sign-in-email`, which records the read.
+   *
+   * `null` only where the auth row itself could not be read — the same
+   * fallback that defaults `role` to `member` here, and what a profile left
+   * behind by an erased user row looks like. The console renders that case as
+   * its own sentence rather than an empty field, because a blank value and "we
+   * hold nothing here" mean different things to an operator.
+   */
+  signInEmailMasked: string | null;
 }
 
 export function toAdminMemberCard(input: {
@@ -248,6 +262,10 @@ export function toAdminMemberDetail(input: {
   }[];
   graph: { center: VouchAvatarDTO; nodes: VouchGraphNodeDTO[] };
   staffRoles: string[];
+  /** The RAW address off the auth row, masked here and nowhere else. This
+   *  mapper is the boundary the full value must not cross: callers pass what
+   *  they read, and what reaches the wire is `signInEmailMasked`. */
+  signInEmail: string | null;
 }): AdminMemberDetailDTO {
   const { profile } = input;
   return {
@@ -282,6 +300,9 @@ export function toAdminMemberDetail(input: {
       reportId: entry.reportId,
     })),
     graph: input.graph,
+    signInEmailMasked: input.signInEmail
+      ? maskEmailAddress(input.signInEmail)
+      : null,
   };
 }
 

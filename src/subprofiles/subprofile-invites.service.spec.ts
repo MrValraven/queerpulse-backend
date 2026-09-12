@@ -77,6 +77,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     hoodVisible: true,
     vouchersVisible: true,
     now: null,
+    nowUpdatedAt: null,
     hiddenUntil: null,
     joinedAt: new Date(),
     createdAt: new Date(),

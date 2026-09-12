@@ -1,4 +1,8 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -43,7 +47,19 @@ function makeUser(overrides: Partial<User> = {}): User {
  */
 function buildMocks() {
   const profiles = { findOne: jest.fn().mockResolvedValue(makeProfile()) };
-  const users = { findOne: jest.fn().mockResolvedValue(makeUser()) };
+  // `revealSignInEmail` reads through a QueryBuilder because `email` is
+  // `select: false` and has to be opted back in explicitly.
+  const usersQueryGetOne = jest
+    .fn()
+    .mockResolvedValue(makeUser({ email: 'ines.martins@example.com' }));
+  const users = {
+    findOne: jest.fn().mockResolvedValue(makeUser()),
+    createQueryBuilder: jest.fn(() => ({
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getOne: usersQueryGetOne,
+    })),
+  };
   const relinkCandidates = {
     createQueryBuilder: jest.fn(() => ({
       addSelect: jest.fn().mockReturnThis(),
@@ -78,6 +94,9 @@ function buildMocks() {
     transaction: jest.fn((callback: (m: unknown) => unknown) =>
       callback(manager),
     ),
+    // `revealSignInEmail` writes its audit row outside a transaction: there is
+    // no state change to keep it consistent with.
+    manager,
   };
   const auth = {
     applyGoogleIdRelink: jest.fn().mockResolvedValue(true),
@@ -96,6 +115,7 @@ function buildMocks() {
     manager,
     managerUpdate,
     auditRepo,
+    usersQueryGetOne,
   };
 }
 
@@ -302,5 +322,66 @@ describe('AdminIdentityService suppression lift (PRD-13)', () => {
     expect(auditRow.note).toContain('ticket 233');
     // The account this row protected was erased, so there is nobody to name.
     expect(auditRow.targetUserId).toBeNull();
+  });
+});
+
+describe('AdminIdentityService sign-in address reveal', () => {
+  let service: AdminIdentityService;
+  let mocks: ReturnType<typeof buildMocks>;
+
+  beforeEach(async () => {
+    mocks = buildMocks();
+    service = await buildService(mocks);
+  });
+
+  it('returns the address and records the read against the member', async () => {
+    const result = await service.revealSignInEmail(ACTOR_ID, MEMBER_ID);
+
+    expect(result.email).toBe('ines.martins@example.com');
+    expect(mocks.auditRepo.save).toHaveBeenCalledTimes(1);
+    const auditRow = mocks.auditRepo.create.mock.calls[0]?.[0] as {
+      action: string;
+      actorId: string;
+      targetUserId: string | null;
+      targetName: string | null;
+      note: string;
+    };
+    expect(auditRow.action).toBe('member_sign_in_email_viewed');
+    expect(auditRow.actorId).toBe(ACTOR_ID);
+    expect(auditRow.targetUserId).toBe(MEMBER_ID);
+    // Denormalized at write time so the row still names them after an erasure.
+    expect(auditRow.targetName).toBe('Inês Martins');
+  });
+
+  // `GET /mod/audit` is readable by every moderator. An address in the note
+  // would republish the PII this endpoint exists to meter, to a wider audience,
+  // permanently.
+  it('keeps the revealed address out of the audit note', async () => {
+    await service.revealSignInEmail(ACTOR_ID, MEMBER_ID);
+
+    const auditRow = mocks.auditRepo.create.mock.calls[0]?.[0] as {
+      note: string;
+    };
+    expect(auditRow.note).not.toContain('ines.martins@example.com');
+    expect(auditRow.note).not.toContain('@example.com');
+  });
+
+  it('404s an unknown member without writing a row', async () => {
+    mocks.profiles.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.revealSignInEmail(ACTOR_ID, MEMBER_ID),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(mocks.auditRepo.save).not.toHaveBeenCalled();
+  });
+
+  // The audit row is written before the value is handed over, so a trail that
+  // cannot be written is a call that does not answer.
+  it('fails the call rather than returning an unrecorded address', async () => {
+    mocks.auditRepo.save.mockRejectedValue(new Error('audit write failed'));
+
+    await expect(
+      service.revealSignInEmail(ACTOR_ID, MEMBER_ID),
+    ).rejects.toThrow('audit write failed');
   });
 });

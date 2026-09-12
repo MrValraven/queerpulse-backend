@@ -4,6 +4,7 @@ import { Community } from '../communities/entities/community.entity';
 import { Event as GatheringEvent } from '../events/entities/event.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { Connection } from '../connections/entities/connection.entity';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { HandlesModule } from '../handles/handles.module';
@@ -18,6 +19,7 @@ import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
 import { ProfileLastActive } from './entities/profile-last-active.entity';
+import { ProfileNowHistory } from './entities/profile-now-history.entity';
 import { Shaping } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
@@ -30,6 +32,7 @@ import { LastActiveService } from './last-active.service';
 import { DiscoverableIdentitiesController } from './discoverable-identities.controller';
 import { DiscoverableIdentitiesService } from './discoverable-identities.service';
 import { MembersController, ProfilesController } from './profiles.controller';
+import { NowInsightsService } from './now-insights.service';
 import { ProfilesService } from './profiles.service';
 
 @Module({
@@ -45,8 +48,14 @@ import { ProfilesService } from './profiles.service';
       GroupMembership,
       ProfileFeaturedCommunity,
       ProfileLastActive,
+      ProfileNowHistory,
       Community,
       CommunityMember,
+      // `ConnectionsModule` exports only `ConnectionsService`, not its
+      // TypeORM feature providers, so `NowInsightsService` (below) needs its
+      // own repository token for the read-only aggregate it runs over
+      // `connections`. It never writes to this table.
+      Connection,
       // Read-only, for the activity privacy gate: `ActivityVisibilityService`
       // re-checks that an activity row's subject (a gathering, a persona) is
       // still public, and `ActivityListener` reads the community a join event
@@ -95,7 +104,10 @@ import { ProfilesService } from './profiles.service';
     // a day per member. See last-active.ts for what the signal may say.
     LastActiveService,
     LastActiveListener,
+    // The read-only aggregate behind the profile Now card (hellos/replies,
+    // per-chip counts, status history, coarse response time).
+    NowInsightsService,
   ],
-  exports: [ProfilesService],
+  exports: [ProfilesService, NowInsightsService],
 })
 export class ProfilesModule {}

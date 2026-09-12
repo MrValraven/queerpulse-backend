@@ -31,8 +31,10 @@ import {
   EmailSuppressionLookupDTO,
   googleIdTail,
   MemberAccountRecoveryDTO,
+  MemberSignInEmailDTO,
   ReactivatedMemberDTO,
   RelinkDecisionDTO,
+  SIGN_IN_EMAIL_VIEWED_ACTION,
   toRelinkCandidate,
 } from './admin-identity-response';
 
@@ -533,6 +535,77 @@ export class AdminIdentityService {
       return 'This member is under a live suspension. Lift the suspension through the moderation tools first, so the decision is recorded as a moderation outcome and the member is told.';
     }
     return null;
+  }
+
+  /* ── Sign-in address reveal ────────────────────────────────────────────── */
+
+  /**
+   * One member's sign-in address in full, and a `mod_audit_logs` row saying who
+   * asked for it.
+   *
+   * WHY THIS IS A SEPARATE READ. The member detail DTO already carries the
+   * masked form, which is what an operator needs for the common question ("is
+   * this the account the ticket is about"). The whole address is a different
+   * kind of read: it is a real person's third-party identity, and it is wanted
+   * in a minority of cases (matching a support ticket, telling two accounts on
+   * one household domain apart, checking which address a locked-out member is
+   * actually trying to sign in with). Folding it into the detail DTO would make
+   * every drawer open a PII read, and would leave the audit trail with no way to
+   * distinguish browsing the roster from looking somebody up.
+   *
+   * THE AUDIT ROW NAMES NO ADDRESS. `mod_audit_logs` is readable by every
+   * moderator through `GET /mod/audit`, so writing the revealed value into
+   * `note` would republish the exact PII this endpoint is careful about, to a
+   * wider audience, permanently. The row records the act, and `targetUserId`
+   * plus the `targetName` snapshot records who it was about; anybody who needs
+   * the value itself has to come back through here and be recorded in turn.
+   *
+   * NO REASON FIELD, unlike the two recovery levers. Those change who controls
+   * an account and what state it is in, and a typed reason is the only record
+   * of the judgement behind them. This is a read: a mandatory free-text box in
+   * front of it would collect "checking" a hundred times and buy nothing the
+   * audit row does not already say.
+   *
+   * NOT TRANSACTIONAL. There is nothing to keep consistent with: the read does
+   * not change state, so the only ordering that matters is that the row is
+   * written before the value is returned. It is written with the repository the
+   * caller already holds, and a failure to write it fails the whole call rather
+   * than handing over an unrecorded address.
+   */
+  async revealSignInEmail(
+    actorUserId: string,
+    memberId: string,
+  ): Promise<MemberSignInEmailDTO> {
+    const profile = await this.requireProfile(memberId);
+
+    // `email` is `select: false` on the entity — this is the explicit opt-in
+    // its comment asks every legitimate reader to use, and the grep that
+    // enumerates them finds this line.
+    const target = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.email')
+      .where('user.id = :memberId', { memberId })
+      .getOne();
+    if (!target) throw new NotFoundException('Member not found');
+    if (!target.email) {
+      // The column is NOT NULL, so this is not a state the app can reach
+      // normally. Answering 404 rather than returning an empty string keeps the
+      // console's "we hold nothing here" branch the only thing that renders an
+      // absent address.
+      throw new NotFoundException(
+        'No sign-in address is stored for this member',
+      );
+    }
+
+    await this.writeAudit(this.dataSource.manager, {
+      actorUserId,
+      targetUserId: memberId,
+      targetName: this.nameOf(profile),
+      action: SIGN_IN_EMAIL_VIEWED_ACTION,
+      note: 'Revealed this member’s sign-in address in the member console. The address itself is deliberately not recorded here.',
+    });
+
+    return { memberId, slug: profile.slug, email: target.email };
   }
 
   /* ── PRD-13: lift an email suppression ─────────────────────────────────── */

@@ -18,6 +18,7 @@ import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineStorySubmission } from '../magazine/entities/magazine-story-submission.entity';
 import { MyCardsService } from '../membership-cards/my-cards.service';
 import { Notification } from '../notifications/entities/notification.entity';
+import { ProfileNowHistory } from '../profiles/entities/profile-now-history.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageService } from '../storage/storage.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
@@ -644,6 +645,42 @@ export class ReviewsExportContributor implements DataExportContribution {
 }
 
 /**
+ * `nowHistory`: the retired "Now" statuses behind the profile card
+ * (`profile_now_history`). `AccountExportService.buildProfile` already ships
+ * the CURRENT status as `profile.now`, but the rows this member replaced it
+ * with are their own personal data too, and owner-only by construction (see
+ * the entity's docstring: no endpoint returns these to anyone but the member
+ * they belong to), so they were missing from the archive entirely rather than
+ * merely folded into another key.
+ */
+@Injectable()
+export class ProfileNowHistoryExportContributor
+  implements DataExportContribution
+{
+  readonly category = 'nowHistory';
+  readonly archiveKey = 'nowHistory';
+
+  constructor(
+    @InjectRepository(ProfileNowHistory)
+    private readonly nowHistory: Repository<ProfileNowHistory>,
+  ) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows = await this.nowHistory.find({
+      where: { userId },
+      order: { endedAt: 'ASC' },
+    });
+    return rows.map((entry) => ({
+      id: entry.id,
+      text: entry.text,
+      startedAt: entry.startedAt.toISOString(),
+      endedAt: entry.endedAt.toISOString(),
+      createdAt: entry.createdAt.toISOString(),
+    }));
+  }
+}
+
+/**
  * `media` — the member's uploaded FILES.
  *
  * This contribution deliberately carries no bytes. It lists what the bucket
@@ -701,5 +738,6 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   VolunteeringExportContributor,
   GovernanceExportContributor,
   ReviewsExportContributor,
+  ProfileNowHistoryExportContributor,
   MediaExportContributor,
 ] as const;

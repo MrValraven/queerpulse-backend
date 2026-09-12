@@ -26,12 +26,14 @@ import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
+import { ProfileNowHistory } from './entities/profile-now-history.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
 import { ActivityVisibilityService } from './activity-visibility.service';
 import { LastActiveService } from './last-active.service';
+import { NowInsightsService } from './now-insights.service';
 import { ProfilesService } from './profiles.service';
 
 // A chainable query-builder stub whose terminal methods resolve to [].
@@ -78,6 +80,8 @@ describe('ProfilesService.getBySlug visibility', () => {
   let connections: { areConnected: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
   let handles: { rename: jest.Mock; previousProfileOwnerOf: jest.Mock };
+  let nowHistory: { create: jest.Mock };
+  let dataSource: { transaction: jest.Mock };
   const findEmpty = () => ({ find: jest.fn().mockResolvedValue([]) });
 
   const profile = (overrides = {}): Profile =>
@@ -118,6 +122,16 @@ describe('ProfilesService.getBySlug visibility', () => {
       // away from. No reservation by default.
       previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
     };
+    // `create` mirrors TypeORM's Repository.create: it merges the input into
+    // a plain object rather than persisting anything itself. Persistence
+    // happens through the transactional manager in `dataSource.transaction`,
+    // which individual tests configure to capture what was saved.
+    nowHistory = {
+      create: jest.fn(
+        (input: Partial<ProfileNowHistory>) => ({ ...input }) as ProfileNowHistory,
+      ),
+    };
+    dataSource = { transaction: jest.fn() };
     const groupMemberships = {
       ...findEmpty(),
       createQueryBuilder: jest.fn(() => qbStub()),
@@ -149,7 +163,8 @@ describe('ProfilesService.getBySlug visibility', () => {
           provide: getRepositoryToken(CommunityMember),
           useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
         },
-        { provide: DataSource, useValue: {} },
+        { provide: getRepositoryToken(ProfileNowHistory), useValue: nowHistory },
+        { provide: DataSource, useValue: dataSource },
         {
           provide: VouchService,
           useValue: {
@@ -204,6 +219,13 @@ describe('ProfilesService.getBySlug visibility', () => {
               .mockResolvedValue({ band: null, isHidden: false }),
             getSignals: jest.fn().mockResolvedValue(new Map()),
           },
+        },
+        {
+          // Its own spec covers the aggregate; every assertion in this file
+          // is indifferent to `respondsWithin`, so a plain null default keeps
+          // them all unaffected by its addition.
+          provide: NowInsightsService,
+          useValue: { getRespondsWithin: jest.fn().mockResolvedValue(null) },
         },
       ],
     }).compile();
@@ -465,7 +487,11 @@ describe('ProfilesService.getBySlug visibility', () => {
   });
 
   it('updateMe leaves now untouched when the field is omitted', async () => {
-    const p = profile({ now: 'old status' });
+    const untouchedNowUpdatedAt = new Date('2026-01-01T00:00:00.000Z');
+    const p = profile({
+      now: 'old status',
+      nowUpdatedAt: untouchedNowUpdatedAt,
+    });
     profiles.findOne.mockResolvedValue(p);
     (profiles as unknown as { save: jest.Mock }).save = jest
       .fn()
@@ -474,6 +500,102 @@ describe('ProfilesService.getBySlug visibility', () => {
     await service.updateMe('owner-1', { tagline: 'new tagline' });
 
     expect(p.now).toBe('old status');
+    // Proves the stamp is genuinely left alone rather than both sides just
+    // being undefined: `now` omitted means the whole branch is skipped, so
+    // nowUpdatedAt must still read the date it carried before the call.
+    expect(p.nowUpdatedAt).toEqual(untouchedNowUpdatedAt);
+  });
+
+  describe('updateMe now history', () => {
+    // TypeORM would hand `dataSource.transaction` a real EntityManager. This
+    // captures every entity the service saves through it, keeping a profile
+    // save apart from an archived-status save by shape rather than by call
+    // order, so a test does not need to assume how many saves happen first.
+    let savedHistoryRows: ProfileNowHistory[];
+
+    const captureHistoryTransaction = () => {
+      savedHistoryRows = [];
+      dataSource.transaction = jest.fn(
+        async (fn: (manager: { save: jest.Mock }) => Promise<void>) => {
+          const manager = {
+            save: jest.fn((entity: unknown) => {
+              if (entity && typeof entity === 'object' && 'text' in entity) {
+                savedHistoryRows.push(entity as ProfileNowHistory);
+              }
+              return Promise.resolve(entity);
+            }),
+          };
+          await fn(manager);
+        },
+      );
+    };
+
+    it('archives the outgoing status and stamps nowUpdatedAt', async () => {
+      captureHistoryTransaction();
+      const oldNowUpdatedAt = new Date('2026-01-01T00:00:00.000Z');
+      const p = profile({ now: 'Old status', nowUpdatedAt: oldNowUpdatedAt });
+      profiles.findOne.mockResolvedValue(p);
+
+      await service.updateMe('owner-1', { now: 'New status' });
+
+      expect(savedHistoryRows).toHaveLength(1);
+      expect(savedHistoryRows[0]).toMatchObject({
+        userId: 'owner-1',
+        text: 'Old status',
+        startedAt: oldNowUpdatedAt,
+      });
+      expect(p.now).toBe('New status');
+      expect(p.nowUpdatedAt).not.toEqual(oldNowUpdatedAt);
+    });
+
+    it('writes nothing when the status is unchanged, including when only surrounding whitespace differs', async () => {
+      captureHistoryTransaction();
+      const oldNowUpdatedAt = new Date('2026-01-01T00:00:00.000Z');
+      const p = profile({ now: 'Same status', nowUpdatedAt: oldNowUpdatedAt });
+      profiles.findOne.mockResolvedValue(p);
+      (profiles as unknown as { save: jest.Mock }).save = jest
+        .fn()
+        .mockResolvedValue(p);
+
+      await service.updateMe('owner-1', { now: '  Same status  ' });
+
+      expect(savedHistoryRows).toHaveLength(0);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(p.nowUpdatedAt).toEqual(oldNowUpdatedAt);
+    });
+
+    it('archives the old status when the member clears it', async () => {
+      captureHistoryTransaction();
+      // nowUpdatedAt is deliberately left unset here: this is the one test
+      // that exercises the startedAt fallback to profile.createdAt, so
+      // createdAt must be seeded and asserted on, or a swapped operand (or a
+      // wrong field entirely) would still pass.
+      const createdAt = new Date('2025-06-01T00:00:00.000Z');
+      const p = profile({ now: 'Old status', createdAt });
+      profiles.findOne.mockResolvedValue(p);
+
+      await service.updateMe('owner-1', { now: '' });
+
+      expect(savedHistoryRows).toHaveLength(1);
+      expect(savedHistoryRows[0]?.text).toBe('Old status');
+      expect(savedHistoryRows[0]?.startedAt).toEqual(createdAt);
+      expect(p.now).toBeNull();
+    });
+
+    it('archives nothing when the member had no status', async () => {
+      captureHistoryTransaction();
+      const p = profile({ now: null });
+      profiles.findOne.mockResolvedValue(p);
+      (profiles as unknown as { save: jest.Mock }).save = jest
+        .fn()
+        .mockResolvedValue(p);
+
+      await service.updateMe('owner-1', { now: 'First status' });
+
+      expect(savedHistoryRows).toHaveLength(0);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(p.nowUpdatedAt).toBeInstanceOf(Date);
+    });
   });
 
   // Same explicit `!== undefined` clearing shape as `now` above, for the
@@ -920,6 +1042,10 @@ describe('ProfilesService replace-list endpoints', () => {
           provide: getRepositoryToken(CommunityMember),
           useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
         },
+        {
+          provide: getRepositoryToken(ProfileNowHistory),
+          useValue: { create: jest.fn((input: unknown) => input) },
+        },
         { provide: DataSource, useValue: txDataSource() },
         {
           provide: VouchService,
@@ -987,6 +1113,12 @@ describe('ProfilesService replace-list endpoints', () => {
               .mockResolvedValue({ band: null, isHidden: false }),
             getSignals: jest.fn().mockResolvedValue(new Map()),
           },
+        },
+        {
+          // Same read-only stub as the module above: none of these
+          // replace-list endpoints touch `respondsWithin`.
+          provide: NowInsightsService,
+          useValue: { getRespondsWithin: jest.fn().mockResolvedValue(null) },
         },
       ],
     }).compile();

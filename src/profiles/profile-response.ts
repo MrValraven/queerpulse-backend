@@ -11,6 +11,7 @@ import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem, WorkLink } from './entities/work-item.entity';
 import { ActivityBand } from './last-active';
+import { RespondsWithin } from './now-insights.service';
 import { OpenToEntry } from './open-to';
 import { facetsForLabels } from './identities';
 import { matchNeighbourhood } from './neighbourhoods';
@@ -148,6 +149,11 @@ export interface FullProfileResponse extends ProfileCard {
   // What the member is explicitly not here for, shown alongside `now`.
   // Ungated — same as `now` above.
   notHereFor: string | null;
+  // How fast this member answers hellos, as a coarse phrase, or null when
+  // there are too few answered requests to say. Ungated, same as `now` and
+  // `notHereFor` above. Derived on read from the member's own answered
+  // requests: nothing is recorded to produce it.
+  respondsWithin: RespondsWithin | null;
   openTo: OpenToEntry[];
   // Private Interests preferences — populated only when the requester is the
   // profile owner; `[]` for everyone else (see toFullProfile's `isOwner`).
@@ -374,6 +380,10 @@ export function toFullProfile(
   // mapper never decides whether the count may be shown. See
   // MutualVoucherCount and ProfilesService.loadMutualVoucherCount.
   mutualVoucherCount: MutualVoucherCount = null,
+  // Computed by NowInsightsService.getRespondsWithin, ungated (see the field
+  // comment above). Never fetched here: a per-profile aggregate belongs to
+  // the single-profile read path only, never the member-directory list path.
+  respondsWithin: RespondsWithin | null = null,
 ): FullProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
@@ -393,6 +403,7 @@ export function toFullProfile(
     location: gateLocation(p, isOwner),
     now: p.now,
     notHereFor: p.notHereFor,
+    respondsWithin,
     openTo: p.openTo,
     identities: isOwner ? (p.identities ?? []) : [],
     // Owner always sees their own list; others see it only when the member has

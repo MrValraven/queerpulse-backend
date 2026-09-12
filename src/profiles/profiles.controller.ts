@@ -26,6 +26,7 @@ import { ReplaceWorkDto } from './dto/replace-work.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateUsernameDto } from './dto/update-username.dto';
 import { LastActiveService } from './last-active.service';
+import { NowInsightsService } from './now-insights.service';
 import { ProfilesService } from './profiles.service';
 import {
   ApiBadRequestResponse,
@@ -48,6 +49,7 @@ export class ProfilesController {
     private readonly profilesService: ProfilesService,
     private readonly connectionsService: ConnectionsService,
     private readonly lastActive: LastActiveService,
+    private readonly nowInsights: NowInsightsService,
   ) {}
 
   // pending-ok: edit your own draft profile.
@@ -119,6 +121,20 @@ export class ProfilesController {
   ) {
     const signal = await this.lastActive.setHidden(user.userId, dto.isHidden);
     return { band: signal.band, isHidden: signal.isHidden };
+  }
+
+  // Declared with the other 'me/...' routes so 'me' is never captured by
+  // ':slug'.
+  @ApiOperation({
+    summary: "The caller's own Now card figures",
+    description:
+      'Hellos and replies over the trailing 90 days, per-chip counts keyed by the raw request reason, when the status last changed, and the five newest retired statuses. Owner-only by construction: it reads the caller and takes no slug.',
+  })
+  @ApiOkResponse({ description: "The caller's Now insights." })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @Get('me/now-insights')
+  getNowInsights(@CurrentUser() user: CurrentUserData) {
+    return this.nowInsights.getForOwner(user.userId);
   }
 
   @ApiOperation({ summary: "Replace the caller's social links" })

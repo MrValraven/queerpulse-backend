@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { toImageUrl } from '../common/image-url';
 import { MemberLookup, MemberRef } from '../common/member-ref';
@@ -43,6 +43,7 @@ import {
   VouchAvatarDTO,
   VouchGraphNodeDTO,
 } from './admin-members-response';
+import { SIGN_IN_EMAIL_VIEWED_ACTION } from './admin-identity-response';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
 import { staffRoleAuditNote } from './dto/staff-role-reason';
 
@@ -346,7 +347,13 @@ export class AdminMembersService {
     ] = await Promise.all([
       this.users.findOne({
         where: { id: profile.userId },
-        select: ['id', 'role', 'isSystem'],
+        // `email` is `select: false` on the entity, so it is named explicitly
+        // here — the greppable opt-in the entity's own comment asks every
+        // legitimate reader to use. It is read to be MASKED
+        // (`toAdminMemberDetail` is the only place it is touched) and never
+        // reaches the wire in full: that is the reveal endpoint's job, and the
+        // reveal records who asked.
+        select: { id: true, role: true, isSystem: true, email: true },
       }),
       this.vouchService.getVouchCount(profile.userId),
       this.vouches.count({
@@ -409,8 +416,15 @@ export class AdminMembersService {
       // finds them. Without this second lookup a citation the admin just
       // wrote would vanish from the very timeline the graph inspector
       // promises it lands in.
+      // `SIGN_IN_EMAIL_VIEWED_ACTION` is excluded on purpose: it is a fact
+      // about the admin who ran the lookup, and this timeline is read as the
+      // case for and against the MEMBER. It stays in the governance audit feed,
+      // which is the surface that answers "who looked at what".
       this.modAuditLogs.find({
-        where: { targetUserId: profile.userId },
+        where: {
+          targetUserId: profile.userId,
+          action: Not(SIGN_IN_EMAIL_VIEWED_ACTION),
+        },
         order: { createdAt: 'ASC' },
       }),
       memberLookup.byUserIds(vouchersReceived.map((vouch) => vouch.voucherId)),
@@ -568,6 +582,7 @@ export class AdminMembersService {
       },
       role: userRow?.role ?? UserRole.Member,
       isSystem: userRow?.isSystem ?? false,
+      signInEmail: userRow?.email ?? null,
       openReportCount,
       vouchCount,
       outboundVouchCount,
