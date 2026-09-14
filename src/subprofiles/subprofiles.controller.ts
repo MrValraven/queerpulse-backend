@@ -29,6 +29,7 @@ import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
 import { ListAudienceQuery } from './dto/list-audience.query';
 import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import { ListFollowingQuery } from './dto/list-following.query';
+import { ReorderSubprofilesDTO } from './dto/reorder-subprofiles.dto';
 import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
@@ -80,6 +81,35 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   listMine(@CurrentUser() user: CurrentUserData) {
     return this.subprofilesService.listMine(user.userId);
+  }
+
+  // Collection-level and owner-scoped, exactly like `GET mine` above: it acts
+  // on the caller's whole list rather than on one persona, so it takes no
+  // `:id` and needs no per-persona membership gate beyond the class-level
+  // `ActiveMemberGuard` (the service resolves the caller's own membership
+  // rows and refuses any id outside them). A literal route, so it sits up
+  // here with `mine`/`directory` and is never swallowed by `:id` below.
+  @Put('order')
+  @ApiOperation({
+    summary: 'Reorder the current member’s own personas',
+  })
+  @ApiOkResponse({
+    description: 'The order was saved.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'ids is not a complete permutation of your personas (wrong length, ' +
+      'a duplicate, or an id you do not belong to).',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async reorderMine(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: ReorderSubprofilesDTO,
+  ): Promise<{ ok: true }> {
+    await this.subprofilesService.reorderMine(user.userId, dto.ids);
+    return { ok: true };
   }
 
   @Get('directory')

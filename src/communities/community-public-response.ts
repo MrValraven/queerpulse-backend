@@ -58,9 +58,18 @@ export interface PublicCommunityResponse {
   purpose: string;
   type: CommunityType;
   /**
-   * `public` or `request` only (an `invite`/`private` community is never
-   * reachable here). Carried so the teaser can say whether a visitor could
-   * walk in or would have to ask.
+   * Carried so a card can say whether the reader could walk in, would have to
+   * ask, or is looking at a door only an invitation opens.
+   *
+   * WHICH TIERS CAN APPEAR depends on which door served the card, and this
+   * type is served by two:
+   *   - `GET /communities/:slug/public`, the anonymous teaser: `public` or
+   *     `request` only, and only for an owner who opted into public listing.
+   *   - `GET /communities/:slug/gate`, the signed-in gate card: any tier the
+   *     caller is allowed to know exists, so `invite` and `private` reach it
+   *     too (`private` only for the holder of a standing invitation).
+   * Neither door widens the field list below, which is the reason one type
+   * serves both.
    */
   accessTier: AccessTier;
   tags: string[];

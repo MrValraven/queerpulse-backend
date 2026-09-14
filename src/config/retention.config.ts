@@ -4,6 +4,7 @@ import { registerAs } from '@nestjs/config';
 // that keep row-accreting stores from growing forever:
 //   - AccountRetentionService      (data_export_job archives, account_reauth_token)
 //   - NotificationRetentionService (read notifications)
+//   - FeatureUsageRetentionService (feature_usage_daily)
 //   - PushSubscriptionRetentionService (stale push subscriptions)
 //   - EventAttendanceRetentionService  (past gatherings' attendance details)
 //
@@ -35,6 +36,15 @@ export default registerAs('retention', () => ({
   notificationReadDays: positiveIntOrDefault(
     process.env.NOTIFICATION_RETENTION_DAYS,
     90,
+  ),
+  /**
+   * Rows in `feature_usage_daily` older than this are deleted. 24 months is
+   * long enough to read a year over year shape and is a stated limit rather
+   * than an open one.
+   */
+  featureUsageDays: positiveIntOrDefault(
+    process.env.FEATURE_USAGE_RETENTION_DAYS,
+    730,
   ),
   /**
    * Push subscriptions not successfully delivered to (nor created) within this

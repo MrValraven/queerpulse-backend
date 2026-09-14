@@ -157,7 +157,21 @@ details a member supplied. See §2.1 D1 for the wording that makes that precise.
 | **Safe-space reviews** | `safe_space_nominations` | Swept on schedule | `src/safe-space-nominations/safe-space-review-sweeper.service.ts:48` | Daily at 09:00 |
 | **Community owner inactivity** | `communities` | Swept on schedule | `src/communities/community-owner-inactivity.service.ts:117` | Daily at midnight |
 
-### 1.9 Data with no retention period at all
+### 1.9 Feature usage
+
+| Data | Entity / table | Period | Enforced by | Cadence |
+|---|---|---|---|---|
+| **Daily feature-usage counts** | `feature_usage_daily` / `FeatureUsageDaily` | **24 months** (730 days) from the row's `day`, then the row is deleted | `retention.featureUsageDays`, default 730, overridable via `FEATURE_USAGE_RETENTION_DAYS` (`src/config/retention.config.ts:40-47`); `FeatureUsageRetentionService.purgeOldUsageRows` (`src/feature-usage/feature-usage-retention.service.ts:28-51`) | Daily at 01:00 (`feature-usage-retention.service.ts:28`) |
+
+The table holds one row per calendar day and feature key, with a request count
+and nothing else: no member id, no session id, no URL, no time of day, no
+ordering (`src/feature-usage/entities/feature-usage-daily.entity.ts:12-24`).
+That is a deliberate design choice rather than an oversight, and it is the same
+property that keeps the table **out of DSAR scope entirely**: there is no data
+subject in a row, so there is nothing to export and nothing to erase. See
+`docs/ops/dsar-runbook.md` §2.
+
+### 1.10 Data with no retention period at all
 
 Everything in this table persists until the member's account is erased, or
 forever if the row does not hang off the member.
@@ -267,7 +281,7 @@ Nothing in `privacy.retention.*` mentions any of these, and each is a member-fac
 | Sessions after sign-out or expiry | 30 days at the default `JWT_REFRESH_TTL` | `src/auth/auth-maintenance.service.ts:28-30` |
 | Housing listings | hidden from browse after 60 days, never deleted | `src/housing-listings/housing-listings.service.ts:175` |
 | Invites | 7 days | `src/membership/invites.service.ts:39` |
-| Direct messages, reports, moderation records, consent logs | kept for the life of the account, with moderation records kept beyond it in pseudonymised form | §1.9 |
+| Direct messages, reports, moderation records, consent logs | kept for the life of the account, with moderation records kept beyond it in pseudonymised form | §1.10 |
 
 **Correct action:** add a short list. The last row matters most: a member reading
 "most personal data is removed within 30 days" reasonably concludes their

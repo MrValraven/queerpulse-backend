@@ -11,7 +11,7 @@ import {
   CommunityMember,
   CommunityNotificationLevel,
 } from './entities/community-member.entity';
-import { Community } from './entities/community.entity';
+import { AccessTier, Community } from './entities/community.entity';
 
 /**
  * Backs `GET`/`PATCH /communities/:slug/preferences` and
@@ -152,6 +152,16 @@ export class CommunityPreferencesService {
    * .assertMemberBySlug`) and the caller's own roster row (403 for a
    * non-member). Two indexed point lookups, and the second one is the only
    * roster read any method here performs.
+   *
+   * A `private` community plus NO roster row answers that same 404 instead of
+   * the 403. `GET /communities/:slug/preferences` asks for no standing beyond
+   * a signed-in account, so a 403 here was the cheapest existence oracle on
+   * the platform: one request per guessed slug, and a real private slug
+   * answered differently from an unknown one. Same rule and same reasoning as
+   * `CommunitiesService.assert404IfPrivateOutsider` and
+   * `CommunityMembershipService`'s own copy; only `private` is gated this way,
+   * because a `request`- or `invite`-tier community is listed in discover and
+   * carries its tier on its card, so 403 is the correct answer there.
    */
   private async loadOwnMembership(
     slug: string,
@@ -167,6 +177,9 @@ export class CommunityPreferencesService {
       where: { communityId: community.id, userId },
     });
     if (!membership) {
+      if (community.accessTier === AccessTier.Private) {
+        throw new NotFoundException('Community not found');
+      }
       throw new ForbiddenException('Only roster members can do that');
     }
     return { community, membership };

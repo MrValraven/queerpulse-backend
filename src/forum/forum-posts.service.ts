@@ -262,8 +262,11 @@ export class ForumPostsService {
    *    (`BlockFilterService.excludeHidden`, same as `listPosts`);
    *  - the THREAD's author is not blocked or muted either — `ForumThreadsService.list`
    *    hides those threads, so a reply inside one must not be a side door back in;
-   *  - the thread's community is public/request/invite, or the viewer is on a
-   *    Private community's roster (the same H1 gate as thread search);
+   *  - the thread's community is `public`, or the viewer is on its roster,
+   *    the same gate `ForumThreadsService.applyCommunityAccessFilter` puts on
+   *    thread search. Every tier but `public` (`request`, `invite`, `private`)
+   *    closes its content to anyone off that roster, so a gated community's
+   *    reply excerpts stay out of the header search box too;
    *  - the post is not tombstoned (`deleted_at`), whose body is retained only so
    *    a moderator can restore it;
    *  - the post is not hidden OR removed by moderation. Read paths keep a
@@ -291,7 +294,7 @@ export class ForumPostsService {
       // A reply inside a withdrawn thread is not a side door back into it
       // (PRD-160): this row renders the THREAD's title and links to it, which
       // is exactly what deleting the thread retracted. Same reasoning as the
-      // block and Private-community gates below, applied to the new
+      // block and community-access gates below, applied to the new
       // thread-level tombstone.
       .andWhere('t.deletedAt IS NULL');
 
@@ -314,14 +317,29 @@ export class ForumPostsService {
       { searchViewerId: viewerId },
     );
 
-    // Private-community gate, mirroring `ForumThreadsService.applyCommunityAccessFilter`.
+    // Community access gate, the same rule
+    // `ForumThreadsService.applyCommunityAccessFilter` puts on thread search:
+    // a reply inside a community-scoped thread surfaces only when that
+    // community is `public`, OR the viewer is on its roster. This filter used
+    // to admit every tier but `private`, so a non-member of a `request`- or
+    // `invite`-tier community still received that community's thread title,
+    // its category, an excerpt of a REPLY BODY and a deep link to the thread,
+    // through the header search box, while the forum's own box already hid
+    // the same thread.
+    //
+    // Written as "is `public`" rather than "is not one of the closed tiers"
+    // for the reason `isGatedTier` (`src/communities/community-gate.ts`) is
+    // written that way: a tier added later stays closed until somebody
+    // deliberately opens it. A flat/global thread (`community_id IS NULL`)
+    // belongs to no roster, so no gate applies to it and its replies stay
+    // searchable by everyone.
     qb.andWhere(
       `(
         "t"."community_id" IS NULL
         OR EXISTS (
           SELECT 1 FROM "communities" "__search_com"
           WHERE "__search_com"."id" = "t"."community_id"
-            AND "__search_com"."access_tier" != :searchPrivateTier
+            AND "__search_com"."access_tier" = :searchPublicTier
         )
         OR EXISTS (
           SELECT 1 FROM "community_members" "__search_mem"
@@ -329,7 +347,7 @@ export class ForumPostsService {
             AND "__search_mem"."user_id" = :searchViewerId
         )
       )`,
-      { searchPrivateTier: AccessTier.Private },
+      { searchPublicTier: AccessTier.Public },
     );
 
     // Moderation takedowns, both kinds. `ContentModerationService.excludeHidden`

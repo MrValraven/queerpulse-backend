@@ -81,6 +81,7 @@ import {
   SubprofilePublicView,
   SubprofileSearchRow,
   SubprofileView,
+  sortByMemberPosition,
   toSubprofileDTO,
 } from './subprofile-response';
 import { Paginated } from '../common/pagination';
@@ -407,9 +408,13 @@ export class SubprofilesService {
     // Co-owner-aware: list every persona this member belongs to via
     // `subprofile_members`, not only ones they created (`sp.userId`). Mirrors
     // the `isMember` gate backing `getOwned`.
+    //
+    // `position` rides along on this SAME query (it is a column on the rows
+    // already being fetched), so per-member ordering costs no extra round
+    // trip.
     const memberRows = await this.members.find({
       where: { userId },
-      select: { subprofileId: true },
+      select: { subprofileId: true, position: true },
     });
     const ids = memberRows.map((row) => row.subprofileId);
     const sps = ids.length
@@ -418,7 +423,18 @@ export class SubprofilesService {
           order: { position: 'ASC', createdAt: 'ASC' },
         })
       : [];
-    const subprofileIds = sps.map((sp) => sp.id);
+    // The caller's OWN arrangement of their list (`subprofile_members.
+    // position`), applied in memory over the rows above. The query's `ORDER
+    // BY` is left alone deliberately: `subprofiles.position` is frozen
+    // history now, and it only serves as a stable input that this sort then
+    // overrides. A co-owned persona sits wherever THIS member put it, which
+    // is what the shared `subprofiles.position` column could never express
+    // (see migration `1817210000000-AddSubprofileMemberPosition`).
+    const memberPositionsBySubprofileId = new Map(
+      memberRows.map((row) => [row.subprofileId, row.position]),
+    );
+    const orderedSps = sortByMemberPosition(sps, memberPositionsBySubprofileId);
+    const subprofileIds = orderedSps.map((sp) => sp.id);
     const itemsById = await this.publicRead.loadItemsFor(subprofileIds);
     const [
       socialLinksById,
@@ -450,9 +466,9 @@ export class SubprofilesService {
     // ONE batched crop lookup for every persona's avatar/cover + every item
     // image in the whole list — never a per-persona/per-item query.
     const crops = await this.mediaCropService.getMany(
-      sps.flatMap((sp) => imageKeysFor(sp, itemsById.get(sp.id) ?? [])),
+      orderedSps.flatMap((sp) => imageKeysFor(sp, itemsById.get(sp.id) ?? [])),
     );
-    return sps.map((sp) =>
+    return orderedSps.map((sp) =>
       toSubprofileDTO(
         sp,
         itemsById.get(sp.id) ?? [],
@@ -463,6 +479,9 @@ export class SubprofilesService {
         collaboratorsByHandle,
         memberCountsById.get(sp.id) ?? 1,
         crops,
+        // The caller's own rank for this persona, so the dashboard's
+        // `position` agrees with the order the list came back in.
+        memberPositionsBySubprofileId.get(sp.id),
       ),
     );
   }
@@ -498,6 +517,97 @@ export class SubprofilesService {
   }
 
   // ---- owner mutations -----------------------------------------------------
+
+  /**
+   * Rewrite the order of the caller's OWN persona list, top first.
+   *
+   * The single writer of persona ordering. It writes
+   * `subprofile_members.position`, never `subprofiles.position`: a co-owned
+   * persona hangs under every co-owner's profile, so a shared column on the
+   * persona row meant one co-owner arranging their page silently reshuffled
+   * their collaborator's. Each membership row now carries that member's own
+   * rank, and `position` is gone from `UpdateSubprofileDTO` so nothing else
+   * can write ordering at all.
+   *
+   * `ids` MUST be a complete permutation of the caller's membership set, and
+   * this is the same reasoning the section-replace path documents: this
+   * endpoint's only identity for a row is its slot, so a list that names only
+   * some of the personas leaves the rest ambiguous. Sending five ids for
+   * eight personas leaves three with no defined slot, and accepting it would
+   * mean inventing a rule (leave them where they were? push them to the end?)
+   * that the client never stated and cannot see the result of before it
+   * renders.
+   * Length, duplicates and unknown ids are therefore each rejected outright
+   * with a message naming what was wrong, so a client bug surfaces as a 400 it
+   * can read instead of a list that quietly rearranged itself.
+   *
+   * Unknown ids are rejected rather than ignored for a second reason: an id
+   * the caller does not belong to is either a stale client cache or a probe at
+   * somebody else's persona. Neither should write anything, and neither should
+   * be told whether the id exists, so the message names the caller's own list
+   * rather than the id's status.
+   *
+   * A member who holds no personas sending `[]` is a valid no-op: an empty
+   * list really is its own only permutation.
+   */
+  async reorderMine(userId: string, ids: string[]): Promise<void> {
+    const memberRows = await this.members.find({
+      where: { userId },
+      select: { id: true, subprofileId: true },
+    });
+
+    if (ids.length !== memberRows.length) {
+      throw new BadRequestException(
+        `ids must list every one of your personas exactly once ` +
+          `(expected ${memberRows.length}, received ${ids.length})`,
+      );
+    }
+
+    // Duplicates are checked before membership so "you sent the same persona
+    // twice" is never reported as the vaguer "one of these is not yours".
+    const uniqueIds = new Set(ids);
+    if (uniqueIds.size !== ids.length) {
+      throw new BadRequestException('ids must not contain duplicates');
+    }
+
+    const memberRowBySubprofileId = new Map(
+      memberRows.map((row) => [row.subprofileId, row]),
+    );
+    for (const subprofileId of ids) {
+      if (!memberRowBySubprofileId.has(subprofileId)) {
+        throw new BadRequestException(
+          'ids must list every one of your personas exactly once ' +
+            'and nothing else',
+        );
+      }
+    }
+
+    // Nothing to write, and no transaction to open, for a member with no
+    // personas. The three checks above have already established that `ids` is
+    // empty too.
+    if (memberRows.length === 0) {
+      return;
+    }
+
+    // ONE transaction for the whole list. A reorder is a single act from the
+    // member's side: a half-applied one would leave two personas sharing a
+    // rank and the list settling somewhere neither the old order nor the new
+    // one, which the reader's `createdAt` tiebreak would then make look
+    // arbitrary rather than broken.
+    //
+    // The rows are addressed by their own primary key (resolved above), so
+    // this never touches another member's row for the same persona.
+    await this.dataSource.transaction(async (manager) => {
+      for (const [index, subprofileId] of ids.entries()) {
+        const memberRow = memberRowBySubprofileId.get(subprofileId)!;
+        await manager.update(
+          SubprofileMember,
+          { id: memberRow.id },
+          { position: index },
+        );
+      }
+    });
+  }
 
   async create(
     userId: string,

@@ -62,6 +62,25 @@ describe('CommunityMembershipService', () => {
     isPubliclyListed: false,
   };
 
+  /**
+   * The same community at the `private` tier, whose existence is the secret
+   * the tier keeps. Only this tier answers 404 to a caller with no roster row;
+   * `request` and `invite` are listed in discover with their tier on their
+   * card, so a 403 from those is the correct, more useful answer and is pinned
+   * below.
+   */
+  const PRIVATE_COMMUNITY: Community = {
+    ...COMMUNITY,
+    accessTier: AccessTier.Private,
+  };
+
+  /** The tiers whose existence is public knowledge, so they keep the 403. */
+  const NON_PRIVATE_TIER_CASES: ReadonlyArray<[string, AccessTier]> = [
+    ['public', AccessTier.Public],
+    ['request', AccessTier.Request],
+    ['invite', AccessTier.Invite],
+  ];
+
   const MEMBERSHIP: CommunityMember = {
     id: 'membership-1',
     communityId: 'community-1',
@@ -133,6 +152,42 @@ describe('CommunityMembershipService', () => {
         service.assertMemberBySlug('queer-devs', 'stranger-1'),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
+
+    // The existence oracle this helper used to be: a real `private` slug
+    // answered 403 where an unknown slug answered 404, so one request per
+    // guessed slug confirmed whether the community was there. Roughly a dozen
+    // call sites across events, forum, volunteering, membership cards and
+    // community pulse come through here, so the fix belongs at this door.
+    it('throws NotFoundException for a private-tier caller with no roster row', async () => {
+      communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.assertMemberBySlug('queer-devs', 'stranger-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it.each(NON_PRIVATE_TIER_CASES)(
+      'still throws ForbiddenException on a %s-tier community',
+      async (_tierName: string, accessTier: AccessTier) => {
+        communities.findOne.mockResolvedValue({ ...COMMUNITY, accessTier });
+        members.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.assertMemberBySlug('queer-devs', 'stranger-1'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      },
+    );
+
+    it('still resolves normally for a private-tier roster member', async () => {
+      // A member's behaviour must not change on any tier.
+      communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
+      members.findOne.mockResolvedValue(MEMBERSHIP);
+
+      await expect(
+        service.assertMemberBySlug('queer-devs', 'user-1'),
+      ).resolves.toBe('community-1');
+    });
   });
 
   describe('assertOwnerOrModBySlug', () => {
@@ -177,6 +232,52 @@ describe('CommunityMembershipService', () => {
         service.assertOwnerOrModBySlug('queer-devs', 'user-1'),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
+
+    it('throws NotFoundException for a private-tier caller with no roster row', async () => {
+      communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.assertOwnerOrModBySlug('queer-devs', 'stranger-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // THE case that proves the existence guard tests `!membership` and not the
+    // role: a plain `Member` of a private community already knows it exists,
+    // so turning their 403 into a 404 would hide nothing and only confuse
+    // them.
+    it('still throws ForbiddenException for a private-tier PLAIN MEMBER', async () => {
+      communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
+      members.findOne.mockResolvedValue(MEMBERSHIP);
+
+      await expect(
+        service.assertOwnerOrModBySlug('queer-devs', 'user-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it.each(NON_PRIVATE_TIER_CASES)(
+      'still throws ForbiddenException for a non-member on a %s-tier community',
+      async (_tierName: string, accessTier: AccessTier) => {
+        communities.findOne.mockResolvedValue({ ...COMMUNITY, accessTier });
+        members.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.assertOwnerOrModBySlug('queer-devs', 'stranger-1'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      },
+    );
+
+    it.each([RosterRole.Owner, RosterRole.Mod])(
+      'still returns the community id for a private-tier %s',
+      async (role) => {
+        communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
+        members.findOne.mockResolvedValue({ ...MEMBERSHIP, role });
+
+        await expect(
+          service.assertOwnerOrModBySlug('queer-devs', 'user-1'),
+        ).resolves.toBe('community-1');
+      },
+    );
   });
 
   // Backs moderation's community-mod dismiss carve-out

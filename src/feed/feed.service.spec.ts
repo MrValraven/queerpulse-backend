@@ -402,6 +402,51 @@ function fetchCommunityNewMemberCandidates(
   );
 }
 
+/**
+ * Every tier the platform has, so a per-tier expectation covers the whole
+ * enum rather than the three tiers that happen to exist today.
+ */
+const ALL_ACCESS_TIERS: readonly AccessTier[] = Object.values(AccessTier);
+
+/** The `andWhere` call that carries a source's community access-tier gate. */
+function accessTierGateCall(qb: QbStub): {
+  sql: string;
+  parameters: Record<string, unknown>;
+} {
+  const gateCall = qb.andWhere.mock.calls.find(
+    (call) => typeof call[0] === 'string' && call[0].includes('access_tier'),
+  );
+  expect(gateCall).toBeDefined();
+  return {
+    sql: String(gateCall?.[0]),
+    parameters: (gateCall?.[1] ?? {}) as Record<string, unknown>,
+  };
+}
+
+/**
+ * The access tiers a source's gate admits for a viewer who is NOT on the
+ * community's roster, read straight off the predicate the source built.
+ *
+ * The gate is one SQL string handed to a stubbed query builder, so a per-tier
+ * assertion has to evaluate the one comparison inside it that decides tier
+ * admission (`"com"."access_tier" <operator> :<bound parameter>`) against the
+ * parameter the source bound. That gives each tier its own named expectation
+ * and still fails loudly if the comparison ever flips back to `!=`, which
+ * would readmit `request` and `invite` to an outsider's feed.
+ */
+function tiersAdmittedForNonMember(
+  predicateSql: string,
+  parameters: Record<string, unknown>,
+): AccessTier[] {
+  const tierTest = /"com"\."access_tier"\s*(=|!=)\s*:(\w+)/.exec(predicateSql);
+  if (!tierTest) return [];
+  const [, operator, parameterName] = tierTest;
+  const boundTier = parameters[parameterName ?? ''] as AccessTier | undefined;
+  return ALL_ACCESS_TIERS.filter((tier) =>
+    operator === '=' ? tier === boundTier : tier !== boundTier,
+  );
+}
+
 describe('FeedService', () => {
   let service: FeedService;
   let communityPosts: { createQueryBuilder: jest.Mock };
@@ -694,7 +739,7 @@ describe('FeedService', () => {
 
       expect(qb.andWhere).toHaveBeenCalledWith(
         expect.stringContaining('access_tier'),
-        { privateTier: AccessTier.Private, viewerId: 'viewer-1' },
+        { publicTier: AccessTier.Public, viewerId: 'viewer-1' },
       );
       expect(qb.andWhere).not.toHaveBeenCalledWith(
         expect.stringContaining('cp.community_id IS NOT NULL'),
@@ -791,6 +836,132 @@ describe('FeedService', () => {
         expect.stringContaining('t.community_id IS NOT NULL'),
         expect.anything(),
       );
+    });
+  });
+
+  // Every tier but `public` closes its community's content to anyone off the
+  // roster: `GET /communities/:slug` answers 403 `COMMUNITY_MEMBERS_ONLY` and
+  // `CommunityPostsService.assertViewable` refuses the board, so the general
+  // feed must not hand the same post bodies, authors and deep links back
+  // through a different door. The gate used to test `access_tier != 'private'`,
+  // which left a `request`- or `invite`-tier community's content in the feed of
+  // somebody that community had refused.
+  describe('gated-community access gate on the general feed', () => {
+    const gatedTierCases: ReadonlyArray<[string, AccessTier]> = [
+      ['request', AccessTier.Request],
+      ['invite', AccessTier.Invite],
+      // Unchanged behaviour, pinned so a future rewrite of the tier test
+      // cannot quietly reopen the tier that was closed all along.
+      ['private', AccessTier.Private],
+    ];
+
+    const communityPostGate = async (): Promise<{
+      sql: string;
+      parameters: Record<string, unknown>;
+    }> => {
+      const qb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+      await service.getFeed('viewer-1', 'posts', undefined);
+      return accessTierGateCall(qb);
+    };
+
+    const forumThreadGate = async (): Promise<{
+      sql: string;
+      parameters: Record<string, unknown>;
+    }> => {
+      const qb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(qb);
+      await service.getFeed('viewer-1', 'posts', undefined);
+      return accessTierGateCall(qb);
+    };
+
+    it('gates community posts on "is public", binding the public tier', async () => {
+      const { sql, parameters } = await communityPostGate();
+
+      expect(sql).toContain('"com"."access_tier" = :publicTier');
+      expect(sql).not.toContain('!=');
+      expect(parameters).toEqual({
+        publicTier: AccessTier.Public,
+        viewerId: 'viewer-1',
+      });
+    });
+
+    it.each(gatedTierCases)(
+      'keeps a %s-tier community post away from a non-member',
+      async (_tierName: string, tier: AccessTier) => {
+        const { sql, parameters } = await communityPostGate();
+
+        expect(tiersAdmittedForNonMember(sql, parameters)).not.toContain(tier);
+      },
+    );
+
+    it('still shows a public-tier community post to a non-member', async () => {
+      const { sql, parameters } = await communityPostGate();
+
+      expect(tiersAdmittedForNonMember(sql, parameters)).toEqual([
+        AccessTier.Public,
+      ]);
+    });
+
+    it('still shows a gated community post to a viewer on its roster', async () => {
+      // The roster branch is what admits a gated community's post, so it has
+      // to survive the tier change: without it, closing `request`/`invite`
+      // would hide a member's own community from their feed.
+      const { sql, parameters } = await communityPostGate();
+
+      expect(sql).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = cp\.community_id\s*AND "mem"\."user_id" = :viewerId/,
+      );
+      expect(parameters.viewerId).toBe('viewer-1');
+    });
+
+    it('leaves flat/global posts (community_id IS NULL) visible to everyone', async () => {
+      const { sql } = await communityPostGate();
+
+      expect(sql).toContain('cp.community_id IS NULL');
+    });
+
+    it('gates forum threads on "is public", binding the public tier', async () => {
+      const { sql, parameters } = await forumThreadGate();
+
+      expect(sql).toContain('"com"."access_tier" = :publicTier');
+      expect(sql).not.toContain('!=');
+      expect(parameters).toEqual({
+        publicTier: AccessTier.Public,
+        viewerId: 'viewer-1',
+      });
+    });
+
+    it.each(gatedTierCases)(
+      'keeps a %s-tier community thread away from a non-member',
+      async (_tierName: string, tier: AccessTier) => {
+        const { sql, parameters } = await forumThreadGate();
+
+        expect(tiersAdmittedForNonMember(sql, parameters)).not.toContain(tier);
+      },
+    );
+
+    it('still shows a public-tier community thread to a non-member', async () => {
+      const { sql, parameters } = await forumThreadGate();
+
+      expect(tiersAdmittedForNonMember(sql, parameters)).toEqual([
+        AccessTier.Public,
+      ]);
+    });
+
+    it('still shows a gated community thread to a viewer on its roster', async () => {
+      const { sql, parameters } = await forumThreadGate();
+
+      expect(sql).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = t\.community_id\s*AND "mem"\."user_id" = :viewerId/,
+      );
+      expect(parameters.viewerId).toBe('viewer-1');
+    });
+
+    it('leaves flat/global threads (community_id IS NULL) visible to everyone', async () => {
+      const { sql } = await forumThreadGate();
+
+      expect(sql).toContain('t.community_id IS NULL');
     });
   });
 

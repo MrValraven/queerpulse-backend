@@ -886,14 +886,25 @@ export class FeedService {
         // tombstone rendering — so surfacing one would leak its original
         // `body`. Redact it from the feed entirely.
         //
-        // Access-tier / membership gate (mirrors the gathering branch's "don't
-        // leak non-public content into a general feed" intent): a post scoped
-        // to a community only surfaces when that community isn't `private`, OR
-        // the viewer is a member of it — otherwise a private, invite-only
-        // community's post bodies and deep links would leak to non-members via
-        // the feed. A flat/global post (`community_id IS NULL`, see
-        // `CommunityPost.communityId`) is scoped to no community's roster and
-        // stays visible to everyone.
+        // Access-tier / membership gate: a post scoped to a community only
+        // surfaces when that community is `public`, OR the viewer is on its
+        // roster. Every other tier (`request`, `invite`, `private`) closes its
+        // content to anyone off that roster, which is exactly what the
+        // community gate promises: `CommunitiesService.getBySlug` refuses the
+        // community itself and `CommunityPostsService.assertViewable` refuses
+        // its board, so leaving the post body, its author and its deep link in
+        // a non-member's general feed would hand back through the feed what
+        // those two doors just refused.
+        //
+        // The tier test is written as "is `public`" rather than "is not one of
+        // the closed tiers" on purpose, for the reason `isGatedTier`
+        // (`src/communities/community-gate.ts`) is written the same way: a tier
+        // added later stays closed until somebody deliberately opens it, which
+        // is the safe direction for a privacy rule to drift in.
+        //
+        // A flat/global post (`community_id IS NULL`, see
+        // `CommunityPost.communityId`) is scoped to no community's roster, so
+        // no gate applies to it and it stays visible to everyone.
         //
         // Expressed as correlated EXISTS subqueries rather than an innerJoin
         // for the same reason the `new_member` branch below is join-free:
@@ -926,7 +937,7 @@ export class FeedService {
               OR EXISTS (
                 SELECT 1 FROM "communities" "com"
                 WHERE "com"."id" = cp.community_id
-                  AND "com"."access_tier" != :privateTier
+                  AND "com"."access_tier" = :publicTier
               )
               OR EXISTS (
                 SELECT 1 FROM "community_members" "mem"
@@ -934,7 +945,7 @@ export class FeedService {
                   AND "mem"."user_id" = :viewerId
               )
             )`,
-            { privateTier: AccessTier.Private, viewerId },
+            { publicTier: AccessTier.Public, viewerId },
           );
         }
         if (mutedCommunityIds.length) {
@@ -1022,18 +1033,24 @@ export class FeedService {
         } else {
           // Access-tier / membership gate, mirroring the `community_post`
           // branch above (and `ForumThreadsService`'s read paths): a thread
-          // scoped to a Private community only surfaces when the viewer is on
-          // its roster — otherwise a private community's thread titles and deep
-          // links would leak to non-members via the general feed. A
-          // flat/global thread (`community_id IS NULL`) and threads in
-          // non-Private communities stay visible to everyone.
+          // scoped to a community only surfaces when that community is
+          // `public`, OR the viewer is on its roster. Every other tier
+          // (`request`, `invite`, `private`) closes its content to anyone off
+          // that roster, the same rule `CommunityPostsService.assertViewable`
+          // now applies to a community's board, so a gated community's thread
+          // titles and deep links no longer reach somebody that community has
+          // refused. Written as "is `public`" rather than "is not `private`"
+          // so a tier added later is closed until somebody deliberately opens
+          // it (see `isGatedTier` in `src/communities/community-gate.ts`). A
+          // flat/global thread (`community_id IS NULL`) belongs to no roster,
+          // so no gate applies to it and it stays visible to everyone.
           qb.andWhere(
             `(
               t.community_id IS NULL
               OR EXISTS (
                 SELECT 1 FROM "communities" "com"
                 WHERE "com"."id" = t.community_id
-                  AND "com"."access_tier" != :privateTier
+                  AND "com"."access_tier" = :publicTier
               )
               OR EXISTS (
                 SELECT 1 FROM "community_members" "mem"
@@ -1041,7 +1058,7 @@ export class FeedService {
                   AND "mem"."user_id" = :viewerId
               )
             )`,
-            { privateTier: AccessTier.Private, viewerId },
+            { publicTier: AccessTier.Public, viewerId },
           );
         }
         if (mutedThreadIds.length) {

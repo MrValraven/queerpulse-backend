@@ -1,4 +1,5 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumPostsService } from './forum-posts.service';
@@ -485,6 +486,40 @@ function buildSearch() {
   return { service, queryBuilder, blockFilter, predicates, andWhereCalls };
 }
 
+/**
+ * Every tier the platform has, so a per-tier expectation covers the whole
+ * enum rather than the three tiers that happen to exist today.
+ */
+const ALL_ACCESS_TIERS: readonly AccessTier[] = Object.values(AccessTier);
+
+/**
+ * The access tiers `searchByText`'s community gate admits for a viewer who is
+ * NOT on the community's roster, read straight off the predicate it built.
+ *
+ * The query builder here is a stub, so a per-tier assertion has to evaluate
+ * the one comparison inside the gate that decides tier admission
+ * (`"__search_com"."access_tier" <operator> :<bound parameter>`) against the
+ * parameter the service bound. That gives each tier its own named expectation
+ * and still fails loudly if the comparison ever flips back to `!=`, which
+ * would readmit `request` and `invite` to an outsider's search results.
+ * Mirrors the helper of the same name in `forum-threads.service.spec.ts` and
+ * `feed.service.spec.ts`, which pin the same rule on the other surfaces.
+ */
+function tiersAdmittedForNonMember(
+  predicateSql: string,
+  parameters: Record<string, unknown>,
+): AccessTier[] {
+  const tierTest = /"__search_com"\."access_tier"\s*(=|!=)\s*:(\w+)/.exec(
+    predicateSql,
+  );
+  if (!tierTest) return [];
+  const [, operator, parameterName] = tierTest;
+  const boundTier = parameters[parameterName ?? ''] as AccessTier | undefined;
+  return ALL_ACCESS_TIERS.filter((tier) =>
+    operator === '=' ? tier === boundTier : tier !== boundTier,
+  );
+}
+
 describe('ForumPostsService.searchByText visibility', () => {
   it('drops posts whose author the viewer blocked or muted', async () => {
     const { service, queryBuilder, blockFilter } = buildSearch();
@@ -509,19 +544,77 @@ describe('ForumPostsService.searchByText visibility', () => {
     expect(sql).toContain('"t"."author_id"');
   });
 
-  it('never surfaces a Private community thread to a non-member', async () => {
-    const { service, predicates, andWhereCalls } = buildSearch();
+  // Every tier but `public` closes its community's content to anyone off the
+  // roster, and this is the query that used to disagree: it admitted anything
+  // that was not `private`, so the header search box handed a non-member of a
+  // `request`- or `invite`-tier community that community's thread title, its
+  // category and an EXCERPT OF A REPLY BODY, while the forum's own box
+  // (`ForumThreadsService.applyCommunityAccessFilter`) already hid the thread.
+  describe('community access by tier', () => {
+    const communityGate = async (): Promise<{
+      sql: string;
+      parameters: Record<string, unknown>;
+    }> => {
+      const { service, andWhereCalls } = buildSearch();
+      await service.searchByText('viewer-1', 'gp', 6);
+      const gateCall = andWhereCalls().find((call) =>
+        String(call[0]).includes('__search_com'),
+      );
+      expect(gateCall).toBeDefined();
+      return {
+        sql: String(gateCall?.[0]),
+        parameters: (gateCall?.[1] ?? {}) as Record<string, unknown>,
+      };
+    };
 
-    await service.searchByText('viewer-1', 'gp', 6);
+    it('gates the search on "is public", binding the public tier', async () => {
+      const { sql, parameters } = await communityGate();
 
-    expect(predicates()).toContain('"__search_com"."access_tier" != ');
-    expect(predicates()).toContain(
-      '"__search_mem"."user_id" = :searchViewerId',
+      expect(sql).toContain('"__search_com"."access_tier" = :searchPublicTier');
+      expect(sql).not.toContain('!=');
+      expect(parameters).toEqual({ searchPublicTier: AccessTier.Public });
+    });
+
+    const gatedTierCases: ReadonlyArray<[string, AccessTier]> = [
+      ['request', AccessTier.Request],
+      ['invite', AccessTier.Invite],
+      // Unchanged behaviour, pinned so a future rewrite of the tier test
+      // cannot quietly reopen the tier that was closed all along.
+      ['private', AccessTier.Private],
+    ];
+
+    it.each(gatedTierCases)(
+      'never surfaces a %s-tier community reply to a non-member',
+      async (_tierName: string, tier: AccessTier) => {
+        const { sql, parameters } = await communityGate();
+
+        expect(tiersAdmittedForNonMember(sql, parameters)).not.toContain(tier);
+      },
     );
-    const communityCall = andWhereCalls().find((call) =>
-      String(call[0]).includes('__search_com'),
-    );
-    expect(communityCall?.[1]).toEqual({ searchPrivateTier: 'private' });
+
+    it('still surfaces a public-tier community reply to a non-member', async () => {
+      // The positive path, so over-refusal cannot pass silently: a gate that
+      // admitted nothing would satisfy every case above.
+      const { sql, parameters } = await communityGate();
+
+      expect(tiersAdmittedForNonMember(sql, parameters)).toEqual([
+        AccessTier.Public,
+      ]);
+    });
+
+    it('still surfaces a gated community reply to a viewer on its roster', async () => {
+      const { sql } = await communityGate();
+
+      expect(sql).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "community_members" "__search_mem"\s*WHERE "__search_mem"\."community_id" = "t"\."community_id"\s*AND "__search_mem"\."user_id" = :searchViewerId/,
+      );
+    });
+
+    it('leaves flat/global threads (community_id IS NULL) searchable by everyone', async () => {
+      const { sql } = await communityGate();
+
+      expect(sql).toContain('"t"."community_id" IS NULL');
+    });
   });
 
   it('never surfaces a tombstoned post body', async () => {

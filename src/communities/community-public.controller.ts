@@ -59,6 +59,13 @@ import {
  * class-level one, so the teaser above keeps reaching anonymous visitors) and
  * uncached. It shares this file because it asks the same question the teaser
  * asks: what may somebody outside the roster be shown.
+ *
+ * THIRD ROUTE: `GET /communities/:slug/gate`, the gate card a signed-in
+ * caller sees for a community they are not on the roster of and whose tier is
+ * not `public`. Also a method-level `ActiveMemberGuard`, also uncached, for
+ * the same reasons as the second route. All three routes in this controller
+ * answer the same question, "what may somebody outside a community's roster
+ * be shown of it", at three different distances.
  */
 @Feature('communities')
 @ApiTags('Communities')
@@ -87,6 +94,40 @@ export class CommunityPublicController {
   })
   getPublicTeaser(@Param('slug') slug: string) {
     return this.communityPublicService.getPublicTeaser(slug);
+  }
+
+  /**
+   * The gate card behind a closed community's link, for a signed-in caller who
+   * is not on its roster. Paired with the `COMMUNITY_MEMBERS_ONLY` 403 that
+   * `CommunitiesService.getBySlug` now answers for the same community: the
+   * client turns that refusal into this card.
+   *
+   * NO `Cache-Control`, for the same reason `upcoming-gatherings` below
+   * carries none: the answer depends on the caller. An invited viewer gets a
+   * private community's card where an uninvited one gets a 404, so a shared
+   * cache must never hold it.
+   */
+  @UseGuards(ActiveMemberGuard)
+  @Get(':slug/gate')
+  @ApiCookieAuth()
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiOperation({
+    summary:
+      'What a signed-in non-member may see of a community whose tier is not public.',
+  })
+  @ApiOkResponse({
+    description:
+      'Name, tagline, purpose, type, tier, tags, place, languages, member count, images, and the next public gathering. Never the roster, any post, the owner, or the rules.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Unknown slug, a private community the caller holds no invitation to, or one archived or taken down. Always 404, never 403, so existence is not leaked.',
+  })
+  getGateCard(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communityPublicService.getGateCard(slug, user.userId);
   }
 
   /**

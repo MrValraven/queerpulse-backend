@@ -116,6 +116,12 @@ export interface SubprofileView {
   linkVisibility: SubprofileLinkVisibility;
   visibility: SubprofileVisibility;
   status: SubprofileStatus;
+  /**
+   * Where this persona sits in the VIEWING member's own list, zero-based
+   * (`subprofile_members.position`). Per-member: a co-owned persona carries a
+   * different number for each co-owner, because each of them arranges their
+   * own profile. `PUT /subprofiles/order` is the only thing that writes it.
+   */
   position: number;
   items: SubprofileItemView[];
   socialLinks: SocialLinkView[];
@@ -324,6 +330,43 @@ function sortSocialLinks(
   return [...socialLinks].sort((a, b) => a.position - b.position);
 }
 
+/**
+ * Personas ordered the way ONE member arranged their own list, top first.
+ *
+ * Ordering is per-member (`subprofile_members.position`), so a co-owned
+ * persona can sit third on one owner's profile and first on another's. The
+ * caller supplies the map from the membership rows it has ALREADY fetched for
+ * that member, which is why this is an in-memory sort rather than an `ORDER
+ * BY` on the persona query: there is no extra query to pay for, and a member
+ * holds at most `MAX_SUBPROFILES` (12) personas.
+ *
+ * `createdAt` ASC is the deterministic tiebreak, so two personas that share a
+ * position (possible while a reorder is in flight, and for rows still on the
+ * migration's backfill) always come out in the same order. Gaps in the
+ * sequence are fine: only the relative order is read.
+ *
+ * A persona missing from the map sinks to the bottom rather than floating to
+ * the top. Both call sites build the map from the very rows the persona ids
+ * came from, so this is unreachable; it keeps the comparison a total order
+ * instead of silently promoting an unknown persona to first place.
+ */
+export function sortByMemberPosition<
+  Row extends { id: string; createdAt: Date },
+>(
+  subprofiles: Row[],
+  memberPositionsBySubprofileId: Map<string, number>,
+): Row[] {
+  const positionOf = (row: Row): number =>
+    memberPositionsBySubprofileId.get(row.id) ?? Number.MAX_SAFE_INTEGER;
+  return [...subprofiles].sort((left, right) => {
+    const positionDifference = positionOf(left) - positionOf(right);
+    if (positionDifference !== 0) {
+      return positionDifference;
+    }
+    return left.createdAt.getTime() - right.createdAt.getTime();
+  });
+}
+
 export function toSubprofileDTO(
   subprofile: Subprofile,
   items: SubprofileItem[],
@@ -338,6 +381,18 @@ export function toSubprofileDTO(
   // (owner list, single owner read, publish, etc.) and passes the resulting
   // Map straight through; this mapper stays synchronous.
   crops: Map<string, CropRect> = new Map(),
+  // This persona's rank in the VIEWING member's own list
+  // (`subprofile_members.position`). Ordering is per-member, so only a caller
+  // that knows whose list it is building can supply it: `listMine` reads it
+  // off the membership rows it already holds.
+  //
+  // Undefined falls back to the persona's frozen `subprofiles.position` for
+  // the single-persona responses (create, publish, `getOwnedDTO`, every
+  // mutation) that answer about one persona without a list around it. Order
+  // is unobservable in those responses, and paying a membership query to
+  // populate a field nothing reads there would be a query for nothing. The
+  // two reads where order IS observable both pass the real member position.
+  memberPosition?: number,
 ): SubprofileView {
   return {
     id: subprofile.id,
@@ -358,7 +413,7 @@ export function toSubprofileDTO(
     linkVisibility: subprofile.linkVisibility,
     visibility: subprofile.visibility,
     status: subprofile.status,
-    position: subprofile.position,
+    position: memberPosition ?? subprofile.position,
     items: sortItems(items).map((item) =>
       toItemView(item, collaboratorsByHandle, crops),
     ),

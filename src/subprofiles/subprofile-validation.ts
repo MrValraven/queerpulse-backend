@@ -7,10 +7,7 @@ import {
   Subprofile,
   SubprofileLinkVisibility,
 } from './entities/subprofile.entity';
-import {
-  SubprofileItem,
-  SubprofileSection,
-} from './entities/subprofile-item.entity';
+import { SubprofileItem } from './entities/subprofile-item.entity';
 import { HANDLE_RE, RESERVED_HANDLES } from '../common/handles';
 import { BLOCKED_TERMS, textHasBlockedTerm } from '../common/blocked-terms';
 
@@ -22,8 +19,28 @@ import { BLOCKED_TERMS, textHasBlockedTerm } from '../common/blocked-terms';
 export { HANDLE_RE, RESERVED_HANDLES };
 
 export const MIN_BIO = 80; // characters
-export const MIN_CONTENT_ITEMS = 3; // items in sections other than `links`
+// Items in sections other than `links`. ADVISORY ONLY: an owner may publish a
+// persona with no content at all (the frontend shows "add a few pieces" as an
+// optional polish nudge, never as a publish gate), so `validatePublish` no
+// longer reads this. Kept exported because the frontend mirrors the same
+// threshold for that nudge, and the `not_enough_items` code stays in the C5
+// union below for older clients.
+export const MIN_CONTENT_ITEMS = 3;
 export const MAX_SUBPROFILES = 12; // per user
+// Upper bound on the `ids` array of `PUT /subprofiles/order`. Deliberately
+// NOT `MAX_SUBPROFILES`: that cap counts personas a member CREATED (see the
+// `count(Subprofile, { where: { userId } })` check in `SubprofilesService.
+// create`), while a reorder names every row in `subprofile_members`, which
+// also holds the personas a member co-owns by accepting an invite. Nothing
+// bounds how many invites a member may accept, so capping the request at 12
+// would hand a member who created 12 personas and accepted even one invite a
+// permanent 400 on a request that was correct.
+//
+// This is a request-shape guard against an absurd body, not a domain rule.
+// The domain rule is the exact equality against the caller's own membership
+// count in `SubprofilesService.reorderMine`, which is the only place that
+// knows what the caller actually belongs to.
+export const MAX_REORDERABLE_PERSONAS = 200;
 export const MAX_ITEMS_PER_SECTION = 100;
 
 // The universal `gallery` section (every kind, added just before `links` by
@@ -60,15 +77,20 @@ function containsBlockedTerm(sp: Subprofile): boolean {
  *
  * - **Linked** personas only require a non-empty `display_name` (guaranteed at
  *   create/update); they render nested and never claim a handle, so the handle/
- *   avatar/bio/items checks are skipped (design spec §4).
+ *   avatar/bio checks are skipped (design spec §4).
  * - **Unlinked** personas must pass the full automated completeness check.
+ *
+ * Content items are NOT part of that check: a persona may go live empty and
+ * fill up afterwards, so `not_enough_items` is never emitted and `_items` goes
+ * unread. The parameter stays so every existing caller keeps compiling, and the
+ * frontend carries the same threshold as an optional "add a few pieces" nudge.
  *
  * `handleTaken` is supplied by the caller (the service queries the partial
  * unique `handle` index) so this function stays synchronous and pure.
  */
 export function validatePublish(
   sp: Subprofile,
-  items: SubprofileItem[],
+  _items: SubprofileItem[],
   handleTaken = false,
 ): PublishUnmetCode[] {
   if (sp.linkVisibility === SubprofileLinkVisibility.Linked) {
@@ -92,13 +114,6 @@ export function validatePublish(
 
   if (!sp.bio || sp.bio.trim().length < MIN_BIO) {
     unmet.push('bio_too_short');
-  }
-
-  const contentItems = items.filter(
-    (it) => it.section !== SubprofileSection.Links,
-  ).length;
-  if (contentItems < MIN_CONTENT_ITEMS) {
-    unmet.push('not_enough_items');
   }
 
   if (containsBlockedTerm(sp)) {

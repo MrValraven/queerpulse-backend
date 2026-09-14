@@ -58,6 +58,7 @@ import {
   SubprofileOwnerRef,
   SubprofilePublicView,
   SubprofileSearchRow,
+  sortByMemberPosition,
   toCardDTO,
   toPublicDTO,
   toSubprofileSearchRow,
@@ -195,11 +196,21 @@ export class SubprofilePublicReadService {
     // Co-owner-aware: any persona where this profile's user is a member
     // (creator or co-owner) shows nested under their profile, not only ones
     // they created (`sp.userId`).
+    //
+    // `position` rides along on this SAME query (it is a column on the rows
+    // already being fetched), so per-member ordering costs no extra round
+    // trip. These are the VIEWED profile owner's membership rows, which is
+    // the whole point: the nested list is their page, so it is their
+    // arrangement that decides the order, even for a persona they co-own with
+    // someone who arranged it differently on their own page.
     const memberRows = await this.members.find({
       where: { userId: profile.userId },
-      select: { subprofileId: true },
+      select: { subprofileId: true, position: true },
     });
     const memberIds = memberRows.map((row) => row.subprofileId);
+    const memberPositionsBySubprofileId = new Map(
+      memberRows.map((row) => [row.subprofileId, row.position]),
+    );
     const linkedSps = memberIds.length
       ? await this.subprofiles.find({
           where: {
@@ -240,7 +251,18 @@ export class SubprofilePublicReadService {
       viewerId,
       visibleSps.map((sp) => sp.userId),
     );
-    const sps = visibleSps.filter((sp) => !blockedCreatorIds.has(sp.userId));
+    // Ordered by the profile owner's own arrangement
+    // (`subprofile_members.position`), applied in memory after every filter
+    // above. The query's `ORDER BY` is left alone deliberately:
+    // `subprofiles.position` is frozen history now, and it only serves as a
+    // stable input that this sort then overrides. Sorting last is safe
+    // because the filters only ever REMOVE rows, so the gaps they leave in
+    // the position sequence change nothing: only relative order is read. See
+    // migration `1817210000000-AddSubprofileMemberPosition`.
+    const sps = sortByMemberPosition(
+      visibleSps.filter((sp) => !blockedCreatorIds.has(sp.userId)),
+      memberPositionsBySubprofileId,
+    );
     const subprofileIds = sps.map((sp) => sp.id);
     // Every read below is mutually independent (each is its own batched query
     // keyed on the same `subprofileIds`) — fire them in one round trip instead
@@ -1074,9 +1096,26 @@ export class SubprofilePublicReadService {
           },
         ]),
     );
+    // A persona's community affiliation is the MEMBER's own disclosure about
+    // themselves, so a signed-in viewer still sees every tier but `private`,
+    // exactly as before. An ANONYMOUS viewer sees `public` communities only.
+    //
+    // The reason the two differ: a community reaches the signed-out internet
+    // only when its owner opts into `is_publicly_listed` (see
+    // `CommunityPublicService.getPublicTeaser`, which also refuses any tier
+    // past `request`). An affiliation chip naming a `request`- or
+    // `invite`-tier community to an anonymous visitor bypassed that opt-in
+    // entirely, and on this platform "who belongs to this group" is exactly
+    // the fact an outing risk attaches to. Signed-in members are a different
+    // audience: the community is already discoverable to them.
+    const isAnonymousViewer = viewerId === ANONYMOUS_VIEWER_ID;
     const communityBySlug = new Map<string, ResolvedTarget>(
       communityRows
-        .filter((community) => community.accessTier !== AccessTier.Private)
+        .filter((community) =>
+          isAnonymousViewer
+            ? community.accessTier === AccessTier.Public
+            : community.accessTier !== AccessTier.Private,
+        )
         .map((community) => [
           community.slug,
           // Communities have no image column — `imageUrl` is always null.

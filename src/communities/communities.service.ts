@@ -39,6 +39,7 @@ import {
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { knownCommunityTags } from './community-tags';
+import { isGatedTier, membersOnlyException } from './community-gate';
 import { knownLanguages } from '../profiles/languages';
 import { toStoredPlainTextOrNull } from './community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
@@ -185,6 +186,10 @@ export interface CreateCommunityInput {
   type: CommunityType;
   whoFor: string;
   accessTier: AccessTier;
+  // Only decides visibility for a `public` community. For every other tier
+  // the tier itself closes the roster to a non-member outright (see
+  // `isGatedTier` and `roster()`'s tier gate), so this flag is the `public`
+  // tier's own roster switch, not a standalone gate.
   rosterVisible: boolean;
   features: string[];
   rules: string[];
@@ -967,6 +972,7 @@ export class CommunitiesService {
     viewerId: string,
   ): Promise<CommunityCardDTO[]> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, viewerId);
     if (!community.tags.length) return [];
 
     const relatedCommunitiesQuery = this.communities
@@ -1168,6 +1174,26 @@ export class CommunitiesService {
     if (community.archivedAt != null && role == null) {
       throw new NotFoundException('Community not found');
     }
+    // THE TIER GATE. Every tier but `public` is closed to anyone off the
+    // roster, and closed to their DETAILS as well as their contents: the house
+    // rules, the owner's identity, `whoFor`, the feature toggles and the
+    // activity stats all ride on `buildDetail` below, and posts being
+    // member-only never withheld any of them.
+    //
+    // 403 and not 404, unlike every gate above: a `request` or `invite`
+    // community is listed in discover and already carries its tier on its card,
+    // so refusing to confirm it exists would be a pretence. `private` is the
+    // exception and it never reaches here uninvited, because its own 404 gate
+    // fires first. An INVITED private non-member does reach here and does get
+    // the 403, which is what lets their notification deep-link somewhere: the
+    // client turns it into the gate card and offers them Accept.
+    //
+    // What the client shows instead is `GET /communities/:slug/gate`
+    // (`CommunityPublicService.getGateCard`), the same closed field list the
+    // anonymous teaser serves.
+    if (isGatedTier(community.accessTier) && !role) {
+      throw membersOnlyException();
+    }
     return this.buildDetail(
       community,
       viewerId,
@@ -1201,6 +1227,7 @@ export class CommunitiesService {
     dto: UpdateCommunityInput,
   ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, userId);
     const actorMembership = await this.assertOwnerOrMod(community.id, userId);
 
     if (community.archivedAt != null) {
@@ -1406,6 +1433,7 @@ export class CommunitiesService {
    */
   async archive(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, userId);
     this.assertOwner(community, userId);
 
     if (community.archivedAt == null) {
@@ -1446,6 +1474,7 @@ export class CommunitiesService {
     input: FreezeCommunityInput = {},
   ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, userId);
     const role = await this.myRole(community.id, userId);
     if (!CommunitiesService.isStaffRole(role)) {
       throw new ForbiddenException(
@@ -1521,6 +1550,7 @@ export class CommunitiesService {
    */
   async unfreeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, userId);
     const role = await this.myRole(community.id, userId);
     if (!CommunitiesService.isStaffRole(role)) {
       throw new ForbiddenException(
@@ -1591,6 +1621,7 @@ export class CommunitiesService {
     memberSlug: string,
   ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
 
     // 1. actor is the current owner
     this.assertOwner(community, actorId);
@@ -2243,9 +2274,9 @@ export class CommunitiesService {
   }
 
   // Private + non-member -> 404, not 403, so existence isn't leaked — mirrors
-  // `getBySlug`/`CommunityPostsService.assertViewable`. Beyond that, respects
-  // `rosterVisible`: a non-member is forbidden from seeing the roster of a
-  // (non-private) community that has opted to keep it members-only.
+  // `getBySlug`/`CommunityPostsService.assertViewable`. Beyond that, the tier
+  // gate closes the roster to a non-member outright for every tier but
+  // `public`, and only then does `rosterVisible` decide for `public`.
   //
   // DELIBERATELY NOT block/mute filtered, unlike the post feeds in
   // `CommunityPostsService.listPosts`. A roster is a factual membership
@@ -2268,6 +2299,19 @@ export class CommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
+    // THE TIER GATE, ahead of `rosterVisible`. Every tier but `public` closes
+    // its roster to a non-member outright: a `request`-tier community that
+    // left `rosterVisible` on used to hand its whole roster to any signed-in
+    // stranger who opened its URL, which is exactly the disclosure the tier
+    // was chosen to prevent.
+    if (isGatedTier(community.accessTier) && !role) {
+      throw membersOnlyException();
+    }
+
+    // `rosterVisible` is now the `public` tier's own roster switch, and it is
+    // the only tier left where a non-member can legitimately ask. It keeps its
+    // owner-level permission and its meaning for members; what it no longer
+    // does is stand alone as the whole gate.
     if (!community.rosterVisible && !role) {
       throw new ForbiddenException('Roster is private to members');
     }
@@ -2335,6 +2379,7 @@ export class CommunitiesService {
     dto: CreateCommunityTagRequestDto,
   ): Promise<CommunityTagRequestResponseDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
     await this.assertOwnerOrMod(community.id, actorId);
     // Nothing is left to tag on a closed room, and the queue that answers
     // these is worked by people, whose time it would spend on a community
@@ -2456,6 +2501,7 @@ export class CommunitiesService {
     query: ListJoinRequestsQuery = {},
   ): Promise<Paginated<CommunityJoinRequestDTO>> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
     await this.assertOwnerOrMod(community.id, actorId);
 
     const page = normalizePage(query.page);
@@ -2602,6 +2648,7 @@ export class CommunitiesService {
   ): Promise<CommunityJoinRequestDTO> {
     const { action } = input;
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
     await this.assertOwnerOrMod(community.id, actorId);
     // Approving somebody into an archived community would walk them into a
     // room they cannot post in, and `join` has refused every new applicant
@@ -2857,6 +2904,7 @@ export class CommunitiesService {
     options: RemoveMemberOptions = {},
   ): Promise<CommunityRemovalOutcomeDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
 
     const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
       memberSlug,
@@ -3283,6 +3331,7 @@ export class CommunitiesService {
     role: AssignableRole,
   ): Promise<MemberRoleDTO> {
     const community = await this.loadOr404(slug);
+    await this.assert404IfPrivateOutsider(community, actorId);
     // An archived community's roster is a record of who was there. Handing
     // somebody moderator standing over a room that takes no writes changes
     // nothing anybody can act on, so it is refused with every other write.
@@ -3375,6 +3424,36 @@ export class CommunitiesService {
       throw new NotFoundException('Community not found');
     }
     return community;
+  }
+
+  /**
+   * The shared existence-oracle guard for `loadOr404` call sites that go on
+   * to assert some ROLE (owner, owner/mod, staff) rather than returning
+   * content straight away. `private` + no roster row -> 404, never 403: a
+   * 403 from a role check ("only an owner or mod can do that") still tells an
+   * off-roster caller the slug resolved to a real community, which is exactly
+   * the disclosure a `private` tier exists to prevent. Answering 404 here,
+   * the same 404 an unknown slug produces, is what keeps a private
+   * community's existence unconfirmable to anyone not on its roster.
+   *
+   * Deliberately narrower than `getBySlug`'s and `join`'s own inline private
+   * checks: those two carry a PENDING-INVITATION exception (an invitee must
+   * be able to follow their invitation notification to the community), and
+   * this helper does not. It is for call sites with no such exception; do
+   * not fold `getBySlug` or `join` onto it, and do not add an invitation
+   * lookup to it for their sake.
+   */
+  private async assert404IfPrivateOutsider(
+    community: Community,
+    viewerId: string,
+  ): Promise<void> {
+    if (community.accessTier !== AccessTier.Private) return;
+    const membership = await this.members.findOne({
+      where: { communityId: community.id, userId: viewerId },
+    });
+    if (!membership) {
+      throw new NotFoundException('Community not found');
+    }
   }
 
   /** Tier 1 of the permission model (see `isStaffRole`): the moderation gate,

@@ -1390,8 +1390,23 @@ describe('ConnectionsService', () => {
       // prove the final `members` order comes from the mutuals list, not from
       // `Repository.find`'s (unstable, no-ORDER-BY) row order.
       profiles.find.mockResolvedValue([
-        { userId: 'c', slug: 'cleo', firstName: 'Cleo', lastName: 'Cruz' },
-        { userId: 'a', slug: 'ana', firstName: 'Ana', lastName: 'Alvarez' },
+        {
+          userId: 'c',
+          slug: 'cleo',
+          firstName: 'Cleo',
+          lastName: 'Cruz',
+          avatarUrl: 'https://cdn.test/cleo.jpg',
+          photoVisible: true,
+        },
+        {
+          userId: 'a',
+          slug: 'ana',
+          firstName: 'Ana',
+          lastName: 'Alvarez',
+          avatarUrl: 'https://cdn.test/ana.jpg',
+          // Ana hid her photo: the card must fall back to her initials.
+          photoVisible: false,
+        },
       ]);
 
       const result = await service.mutualMembers('me', 'them');
@@ -1399,8 +1414,18 @@ describe('ConnectionsService', () => {
       expect(result).toEqual({
         count: 2,
         members: [
-          { slug: 'ana', firstName: 'Ana', lastName: 'Alvarez' },
-          { slug: 'cleo', firstName: 'Cleo', lastName: 'Cruz' },
+          {
+            slug: 'ana',
+            firstName: 'Ana',
+            lastName: 'Alvarez',
+            avatarUrl: null,
+          },
+          {
+            slug: 'cleo',
+            firstName: 'Cleo',
+            lastName: 'Cruz',
+            avatarUrl: 'https://cdn.test/cleo.jpg',
+          },
         ],
       });
       expect(profiles.find).toHaveBeenCalledWith(

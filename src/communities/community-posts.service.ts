@@ -38,6 +38,7 @@ import {
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { resolveRuleSnapshot } from './community-bans-response';
+import { isGatedTier, membersOnlyException } from './community-gate';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { toStoredPlainTextOrNull } from './community-plain-text';
 import {
@@ -293,17 +294,19 @@ export class CommunityPostsService {
    * Every gate `listPosts` applies to the same row is applied here, so a
    * permalink can never show what the timeline withholds:
    *
-   * - a PRIVATE community is a 404 to a non-member (`assertViewable`), the
-   *   same not-found the timeline gives, so holding a post id proves nothing;
+   * - a GATED community (every tier but `public`) refuses a non-member
+   *   outright (`assertViewable`): 404 on the `private` tier, 403 on
+   *   `request`/`invite`, the same refusal the timeline gives, so holding a
+   *   post id proves nothing;
    * - a blocked-either-way or muted author's post is a 404, matching the
    *   in-query `blockFilter.excludeHidden` the timeline runs;
    * - a moderator-hidden post is a 404 for a non-staff viewer, because
    *   `toPostDTOs` drops it and leaves the array empty. Owner/co-owner/mod
    *   still read it, exactly as they still see it in the timeline.
    *
-   * A non-member of a PUBLIC/request/invite community reads the post the same
-   * way they read the timeline: the DTO's own `canEdit`/`canDelete` flags stay
-   * false, so the page renders it without write affordances.
+   * A non-member of a PUBLIC community reads the post the same way they read
+   * the timeline: the DTO's own `canEdit`/`canDelete` flags stay false, so the
+   * page renders it without write affordances.
    */
   async getPost(
     slug: string,
@@ -1115,11 +1118,12 @@ export class CommunityPostsService {
     page?: number,
   ): Promise<Paginated<CommunityReplyDTO>> {
     const community = await this.loadCommunityOr404(slug);
-    // A private community's replies are 404 to a non-member, exactly like
-    // `listPosts` above — `viewerRoleIn` below returns null for a non-member
-    // rather than throwing, so without this an ex-member (or any member of
-    // another community) who still holds a post id could read the whole
-    // private thread. Mirrors the sibling read's gate.
+    // A gated community's replies are refused to a non-member, exactly like
+    // `listPosts` above (404 on `private`, 403 on `request`/`invite`).
+    // `viewerRoleIn` below returns null for a non-member rather than throwing,
+    // so without this an ex-member (or any member of another community) who
+    // still holds a post id could read the whole thread. Mirrors the sibling
+    // read's gate.
     await this.assertViewable(community, viewerId);
     const post = await this.loadPostOr404(community.id, postId);
     const viewerRole = await this.viewerRoleIn(community.id, viewerId);
@@ -1671,8 +1675,8 @@ export class CommunityPostsService {
    * whatever the UI chooses to render.
    *
    * READS STAY OPEN, and that is the point rather than an oversight.
-   * `listPosts` and `getPost` gate on `assertViewable`, which narrows the
-   * `private` tier alone, so an archived community's roster keeps reading
+   * `listPosts` and `getPost` gate on `assertViewable`, which refuses only
+   * viewers off the roster, so an archived community's roster keeps reading
    * everything that was said there. "Read-only" is a promise with two halves
    * and this is the other one.
    *
@@ -2019,21 +2023,38 @@ export class CommunityPostsService {
     }
   }
 
-  // Private communities are 404 (not 403) to a non-member, mirroring
-  // `CommunitiesService.getBySlug` — existence isn't leaked. Non-private
-  // tiers' post feeds are viewable without membership; only mutating actions
-  // (`createPost`/`addReaction`/`addReply`/pin) require a roster row.
+  // THE TIER GATE for reading a board, drawn exactly where
+  // `CommunitiesService.getBySlug` draws it so there is one rule and not a
+  // second weaker copy of it. Every tier but `public` closes its board to
+  // anyone off the roster: post bodies, images, author `MemberRef`s,
+  // reactions and replies are all interior, and a gated community's interior
+  // is what the gate is for.
+  //
+  // The refusal differs by tier because the secret differs. `private` answers
+  // 404 `Community not found`, since there its very existence is the secret.
+  // `request` and `invite` answer 403 `membersOnlyException()`, since both are
+  // listed in discover and already carry their tier on their card: existence
+  // is no secret there, contents are, and pretending the community is absent
+  // would be a pretence the client already knows through. The client turns
+  // that 403 into the gate card (`GET /communities/:slug/gate`).
+  //
+  // `public` needs no roster row, deliberately: an open community's board is
+  // readable by any signed-in viewer. Mutating actions
+  // (`createPost`/`addReaction`/`addReply`/pin) still require a roster row on
+  // every tier, this tier included, and are gated on their own paths.
   private async assertViewable(
     community: Community,
     viewerId: string,
   ): Promise<void> {
-    if (community.accessTier !== AccessTier.Private) return;
+    if (!isGatedTier(community.accessTier)) return;
     const membership = await this.members.findOne({
       where: { communityId: community.id, userId: viewerId },
     });
-    if (!membership) {
+    if (membership) return;
+    if (community.accessTier === AccessTier.Private) {
       throw new NotFoundException('Community not found');
     }
+    throw membersOnlyException();
   }
 
   // States for a page of posts + their replies, keyed by row id. One query for

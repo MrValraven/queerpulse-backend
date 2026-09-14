@@ -1,8 +1,10 @@
+import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Event } from '../events/entities/event.entity';
 import { CommunityPublicService } from './community-public.service';
+import { CommunityInvite } from './entities/community-invite.entity';
 import { CommunityMember } from './entities/community-member.entity';
 import { AccessTier, Community } from './entities/community.entity';
 
@@ -53,6 +55,7 @@ describe('CommunityPublicService', () => {
   let members: { findOne: jest.Mock; count: jest.Mock };
   let events: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
+  let invites: { exists: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -71,6 +74,11 @@ describe('CommunityPublicService', () => {
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
+    // No standing invitation is the default caller here, same as `members`
+    // defaulting to no roster row: a prospective member off the street.
+    // `exists` and not `findOne`, matching the query the service runs: the
+    // answer is a boolean, so no row need be materialized.
+    invites = { exists: jest.fn().mockResolvedValue(false) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -79,6 +87,7 @@ describe('CommunityPublicService', () => {
         { provide: getRepositoryToken(CommunityMember), useValue: members },
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: ContentModerationService, useValue: contentModeration },
+        { provide: getRepositoryToken(CommunityInvite), useValue: invites },
       ],
     }).compile();
     service = module.get(CommunityPublicService);
@@ -223,6 +232,206 @@ describe('CommunityPublicService', () => {
       }
       expect(closesEarly).toBe(false);
       expect(depth).toBe(0);
+    });
+  });
+
+  describe('listUpcomingGatherings gated-tier non-member', () => {
+    // The Events tab this endpoint backs only exists for a `public` community
+    // now: a non-member of any other tier gets the gate card, whose
+    // `nextGathering` is public-visibility only. So this endpoint has no
+    // legitimate gated-tier non-member left, and serving one its
+    // members-visibility calendar was a leak.
+    it('404s a request-tier community for a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'community-1',
+        slug: 'queer-devs',
+        accessTier: AccessTier.Request,
+        archivedAt: null,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.listUpcomingGatherings('queer-devs', 'stranger', 1),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('still serves a public-tier community to a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'community-1',
+        slug: 'queer-devs',
+        accessTier: AccessTier.Public,
+        archivedAt: null,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const page = await service.listUpcomingGatherings(
+        'queer-devs',
+        'stranger',
+        1,
+      );
+
+      expect(page.items).toEqual([]);
+      expect(page.page).toBe(1);
+    });
+  });
+
+  describe('getGateCard', () => {
+    // The card an outsider sees instead of the hub. Its field list is closed
+    // and it is the SAME closed list the anonymous teaser serves, which is why
+    // one type serves both doors.
+    const GATED_COMMUNITY = {
+      id: 'community-1',
+      slug: 'queer-devs',
+      name: 'Queer Devs',
+      tagline: 'Code and company',
+      purpose: 'Monthly pairing nights',
+      type: 'professional',
+      tags: ['tech'],
+      city: 'Lisbon',
+      area: 'Arroios',
+      isOnline: false,
+      languages: ['pt', 'en'],
+      avatarImageUrl: null,
+      coverImageUrl: null,
+      archivedAt: null,
+    };
+
+    it('serves the card to a non-member of a request-tier community, without an is-publicly-listed opt-in', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Request,
+        isPubliclyListed: false,
+      });
+      members.findOne.mockResolvedValue(null);
+      members.count.mockResolvedValue(34);
+
+      const card = await service.getGateCard('queer-devs', 'stranger');
+
+      expect(card.name).toBe('Queer Devs');
+      expect(card.accessTier).toBe(AccessTier.Request);
+      expect(card.memberCount).toBe(34);
+    });
+
+    it('serves the card to a non-member of an invite-tier community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Invite,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const card = await service.getGateCard('queer-devs', 'stranger');
+
+      expect(card.accessTier).toBe(AccessTier.Invite);
+    });
+
+    // The one door into a private community for somebody off its roster, and
+    // it opens onto the card rather than onto the community.
+    it('serves the card to a private-tier non-member holding a pending invitation', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.exists.mockResolvedValue(true);
+
+      const card = await service.getGateCard('queer-devs', 'invitee');
+
+      expect(card.accessTier).toBe(AccessTier.Private);
+    });
+
+    it('404s a private-tier community for a non-member with no invitation', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.exists.mockResolvedValue(false);
+
+      await expect(
+        service.getGateCard('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getGateCard('nope', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s an archived community for a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Request,
+        archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getGateCard('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s a community under a moderator takedown for a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue(null);
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(
+        service.getGateCard('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // The guard that matters most. A field added to the card is a field served
+    // to somebody the community did not let in, so the shape is asserted whole
+    // rather than field by field.
+    it('carries exactly the closed field list and nothing else', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Request,
+        // Fields an outsider must never receive, present on the entity and
+        // expected to be dropped by the mapper.
+        rules: ['no bigotry'],
+        ownerId: 'owner-1',
+        whoFor: 'devs',
+        features: ['discussion'],
+        rosterVisible: true,
+        welcomeMessage: 'hello',
+        frozenAt: new Date('2026-04-01T00:00:00.000Z'),
+        frozenReason: 'reports',
+        ref: 'QP-C-0004',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const card = await service.getGateCard('queer-devs', 'stranger');
+
+      expect(Object.keys(card).sort()).toEqual(
+        [
+          'accessTier',
+          'area',
+          'avatarImageUrl',
+          'city',
+          'coverImageUrl',
+          'isOnline',
+          'languages',
+          'memberCount',
+          'name',
+          'nextGathering',
+          'purpose',
+          'slug',
+          'tagline',
+          'tags',
+          'type',
+        ].sort(),
+      );
     });
   });
 });

@@ -2,12 +2,10 @@ import { Transform } from 'class-transformer';
 import {
   IsEnum,
   IsIn,
-  IsInt,
   IsObject,
   IsOptional,
   IsString,
   MaxLength,
-  Min,
   MinLength,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
@@ -56,7 +54,15 @@ export class UpdateSubprofileDTO {
 
   @IsOptional() @IsEnum(SubprofileVisibility) visibility?: SubprofileVisibility;
 
-  @IsOptional() @IsInt() @Min(0) position?: number;
+  // NO `position` HERE. Ordering moved to `subprofile_members.position` and
+  // its one writer is `PUT /subprofiles/order`
+  // (`SubprofilesService.reorderMine`). While this field lived on the PATCH
+  // body it wrote the shared `subprofiles.position`, so a co-owner nudging
+  // one persona reordered their collaborator's profile as well, and the value
+  // it wrote was a single number with no view of the rest of the list. The
+  // global `ValidationPipe` runs `forbidNonWhitelisted`, so a client still
+  // sending `position` now gets a 400 naming the field rather than a silently
+  // dropped write.
 
   @IsOptional() @IsImageReference() coverUrl?: string | null;
 

@@ -11,7 +11,7 @@ import {
 } from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
-import { Community } from './entities/community.entity';
+import { AccessTier, Community } from './entities/community.entity';
 
 // Loose enough to guard a uuid-typed lookup from a Postgres "invalid input
 // syntax for type uuid" error when a non-post/reply id (a slug, a member id,
@@ -65,7 +65,9 @@ export class CommunityMembershipService {
   /**
    * Resolve a community by slug and assert the given user is on its roster.
    * A missing or archived community 404s (existence isn't leaked); a
-   * resolved-but-non-member caller gets a 403. Returns the community's id for
+   * resolved-but-non-member caller gets a 403, except on a `private`
+   * community, where it gets the same 404 (see
+   * `assert404IfPrivateOutsiderOfCommunity`). Returns the community's id for
    * the caller to scope its own write with.
    */
   async assertMemberBySlug(slug: string, userId: string): Promise<string> {
@@ -78,6 +80,7 @@ export class CommunityMembershipService {
     const membership = await this.members.findOne({
       where: { communityId: community.id, userId },
     });
+    this.assert404IfPrivateOutsiderOfCommunity(community, membership);
     if (!membership) {
       throw new ForbiddenException('Only roster members can do that');
     }
@@ -91,6 +94,10 @@ export class CommunityMembershipService {
    * let a member attribute something they're posting to a community (e.g.
    * volunteering's `communitySlug` link), which should require standing to
    * speak for that community, not just membership in it.
+   *
+   * A plain `Member` of a `private` community therefore keeps its 403: the
+   * existence guard below turns on having NO roster row at all, never on the
+   * role, and somebody already on the roster knows the community is there.
    */
   async assertOwnerOrModBySlug(slug: string, userId: string): Promise<string> {
     const community = await this.communities.findOne({
@@ -102,12 +109,47 @@ export class CommunityMembershipService {
     const membership = await this.members.findOne({
       where: { communityId: community.id, userId },
     });
+    this.assert404IfPrivateOutsiderOfCommunity(community, membership);
     if (!membership || !STANDING_ROLES.includes(membership.role)) {
       throw new ForbiddenException(
         'Only the community owner or a moderator can do that',
       );
     }
     return community.id;
+  }
+
+  /**
+   * The existence-oracle guard both `*BySlug` asserts run between resolving
+   * the roster row and refusing the caller: a `private` community plus NO
+   * roster row answers 404, the same 404 an unknown slug produces, so one
+   * request per guessed slug can no longer confirm that a private community
+   * is there. Without it a real private slug answered 403 where an unknown
+   * slug answered 404, and the difference between those two responses IS the
+   * disclosure a `private` tier exists to prevent.
+   *
+   * Mirrors `CommunitiesService.assert404IfPrivateOutsider`, which does the
+   * same job for the `loadOr404` call sites inside the communities module;
+   * this service is the shared door the other feature modules (events, forum,
+   * volunteering, membership cards, community pulse) come through, so the rule
+   * has to be enforced at both.
+   *
+   * Two deliberate limits:
+   *
+   *  - the test is `!membership`, NOT the role. A plain `Member` refused by
+   *    `assertOwnerOrModBySlug` still gets a 403, because a member already
+   *    knows the community exists and a 404 would only confuse them.
+   *  - only `private` is gated. A `request`- or `invite`-tier community is
+   *    listed in discover and carries its tier on its card, so its existence
+   *    is not the secret and a 403 there is the correct, more useful answer
+   *    (see `isGatedTier` and `membersOnlyException` in `./community-gate`).
+   */
+  private assert404IfPrivateOutsiderOfCommunity(
+    community: Community,
+    membership: CommunityMember | null,
+  ): void {
+    if (membership) return;
+    if (community.accessTier !== AccessTier.Private) return;
+    throw new NotFoundException('Community not found');
   }
 
   /**

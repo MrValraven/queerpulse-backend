@@ -108,6 +108,17 @@ and most rectification and erasure, self-service is faster for the member and
 lighter for the platform. It is never a substitute for answering a DSAR that has
 been filed.
 
+**Data with no data subject is out of scope entirely.** `feature_usage_daily`
+holds one row per calendar day and feature key, carrying only a request count:
+no member id, no session id, no URL, no time of day, no ordering
+(`src/feature-usage/entities/feature-usage-daily.entity.ts:12-24`). There is no
+data subject in the row, so an access request has nothing to export from it and
+an erasure request has nothing to remove from it. That is the same property
+that makes the table acceptable to hold in the first place. If a request names
+this table, say so plainly and cite the three columns; there is no case file
+entry to open. See `docs/ops/retention-periods.md` for how long the rows are
+kept and what sweeps them.
+
 ---
 
 ## 3. How a request arrives
@@ -413,7 +424,7 @@ article, scopes, details, `submittedAt`, `dueBy`, `respondedAt`, `outcomeNote`,
 must never delete the record of a statutory request being answered" (`:71-73`).
 
 **No sweeper deletes a `dsar_request` row** (`docs/ops/retention-periods.md`
-§1.9). That is correct: the record is the evidence of compliance.
+§1.10). That is correct: the record is the evidence of compliance.
 
 Keep a separate case file, outside the platform, for anything that does not fit
 the row: an off-platform request, a verification step and what was collected and

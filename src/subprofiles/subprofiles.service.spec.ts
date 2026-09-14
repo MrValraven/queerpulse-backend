@@ -42,7 +42,12 @@ import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { isSectionAllowed } from './subprofile-kinds';
-import { toCardDTO, toPublicDTO, toSubprofileDTO } from './subprofile-response';
+import {
+  sortByMemberPosition,
+  toCardDTO,
+  toPublicDTO,
+  toSubprofileDTO,
+} from './subprofile-response';
 import {
   BLOCKED_TERMS,
   MIN_BIO,
@@ -283,14 +288,17 @@ describe('validatePublish', () => {
     expect(validatePublish(sp, contentItems(3))).toContain('bio_too_short');
   });
 
-  it('flags not_enough_items when under the content threshold (links excluded)', () => {
+  it('never flags content items: an otherwise-complete persona publishes empty', () => {
     const sp = completeUnlinked();
-    const items = [
-      ...contentItems(2),
-      makeItem({ id: 'link', section: SubprofileSection.Links }),
-    ];
-    // 2 content items + 1 link = still short.
-    expect(validatePublish(sp, items)).toContain('not_enough_items');
+    // No content at all, and a links-only persona: both publish. Content is an
+    // optional polish nudge on the frontend, never a gate (`MIN_CONTENT_ITEMS`
+    // is advisory), so `not_enough_items` is no longer emitted.
+    expect(validatePublish(sp, [])).toEqual([]);
+    expect(
+      validatePublish(sp, [
+        makeItem({ id: 'link', section: SubprofileSection.Links }),
+      ]),
+    ).toEqual([]);
   });
 
   it('flags blocked_terms when a blocked term appears in the bio', () => {
@@ -1073,9 +1081,14 @@ describe('SubprofilesService', () => {
           if (await blockFilter.isBlockedEitherWay(viewerId, profile.userId)) {
             return [];
           }
-          const memberRows: { subprofileId: string }[] = await members.find({
+          // `position` is selected alongside `subprofileId` here for the same
+          // reason production selects it: the nested list is ordered by the
+          // VIEWED profile owner's own arrangement
+          // (`subprofile_members.position`), read off the membership rows
+          // this query already fetches.
+          const memberRows: MemberRowFixture[] = await members.find({
             where: { userId: profile.userId },
-            select: { subprofileId: true },
+            select: { subprofileId: true, position: true },
           });
           const memberIds = memberRows.map((row) => row.subprofileId);
           const linkedSps: Subprofile[] = memberIds.length
@@ -1089,11 +1102,21 @@ describe('SubprofilesService', () => {
                 order: { position: 'ASC', createdAt: 'ASC' },
               })
             : [];
+          const memberPositionsBySubprofileId = new Map(
+            memberRows.flatMap((row) =>
+              row.position === undefined
+                ? []
+                : [[row.subprofileId, row.position] as const],
+            ),
+          );
           const owner = {
             slug: profile.slug,
             name: `${profile.firstName} ${profile.lastName}`.trim(),
           };
-          return linkedSps.map((sp) => toPublicDTO(sp, [], owner));
+          return sortByMemberPosition(
+            linkedSps,
+            memberPositionsBySubprofileId,
+          ).map((sp) => toPublicDTO(sp, [], owner));
         }),
       getByHandle: jest
         .fn()
@@ -1418,7 +1441,9 @@ describe('SubprofilesService', () => {
       const result = await service.listMine('co-owner-1');
       expect(members.find).toHaveBeenCalledWith({
         where: { userId: 'co-owner-1' },
-        select: { subprofileId: true },
+        // `position` rides along on this same query: per-member ordering
+        // costs no extra round trip.
+        select: { subprofileId: true, position: true },
       });
       expect(subprofiles.find).toHaveBeenCalledWith({
         where: { id: In(['sp-created-by-other']) },
@@ -1483,6 +1508,143 @@ describe('SubprofilesService', () => {
       // grouped-count call per persona (no N+1).
       expect(members.find).toHaveBeenCalledTimes(2);
     });
+
+    // Per-member persona ordering (`subprofile_members.position`). The
+    // persona rows come back from the database in their own (now frozen)
+    // `subprofiles.position` order; what the caller sees is THEIR arrangement
+    // on top of that.
+    it('returns personas in the caller’s own member order, not the persona-row order', async () => {
+      members.find.mockImplementation((rawOptions: unknown) => {
+        const options = rawOptions as { where: { userId?: string } };
+        if (options.where.userId) {
+          // Deliberately the reverse of the order the persona rows arrive in
+          // below, so a pass here cannot be the database order in disguise.
+          return Promise.resolve([
+            { subprofileId: 'sp-first', userId: 'user-1', position: 2 },
+            { subprofileId: 'sp-second', userId: 'user-1', position: 1 },
+            { subprofileId: 'sp-third', userId: 'user-1', position: 0 },
+          ]);
+        }
+        return Promise.resolve([
+          { subprofileId: 'sp-first' },
+          { subprofileId: 'sp-second' },
+          { subprofileId: 'sp-third' },
+        ]);
+      });
+      subprofiles.find.mockResolvedValue([
+        makeSubprofile({ id: 'sp-first', createdAt: new Date('2026-01-01') }),
+        makeSubprofile({ id: 'sp-second', createdAt: new Date('2026-01-02') }),
+        makeSubprofile({ id: 'sp-third', createdAt: new Date('2026-01-03') }),
+      ]);
+      const result = await service.listMine('user-1');
+      expect(result.map((view) => view.id)).toEqual([
+        'sp-third',
+        'sp-second',
+        'sp-first',
+      ]);
+      // The DTO's `position` is the MEMBER position, so it agrees with the
+      // order the list came back in.
+      expect(result.map((view) => view.position)).toEqual([0, 1, 2]);
+    });
+
+    // `createdAt` ASC is the deterministic tiebreak, which matters while a
+    // reorder is in flight and for rows still sitting on the migration's
+    // backfill.
+    it('breaks a member-position tie on createdAt ASC', async () => {
+      members.find.mockImplementation((rawOptions: unknown) => {
+        const options = rawOptions as { where: { userId?: string } };
+        if (options.where.userId) {
+          return Promise.resolve([
+            { subprofileId: 'sp-newer', userId: 'user-1', position: 0 },
+            { subprofileId: 'sp-older', userId: 'user-1', position: 0 },
+          ]);
+        }
+        return Promise.resolve([
+          { subprofileId: 'sp-newer' },
+          { subprofileId: 'sp-older' },
+        ]);
+      });
+      subprofiles.find.mockResolvedValue([
+        makeSubprofile({ id: 'sp-newer', createdAt: new Date('2026-02-02') }),
+        makeSubprofile({ id: 'sp-older', createdAt: new Date('2026-01-01') }),
+      ]);
+      const result = await service.listMine('user-1');
+      expect(result.map((view) => view.id)).toEqual(['sp-older', 'sp-newer']);
+    });
+  });
+
+  // Per-member persona ordering. `reorderMine` is the ONE writer of ordering
+  // (`position` came off `UpdateSubprofileDTO` in the same change), and it
+  // writes `subprofile_members.position` so a co-owner arranging their own
+  // profile never touches their collaborator's.
+  describe('reorderMine', () => {
+    const membershipRows = [
+      { id: 'member-a', subprofileId: 'sp-a', userId: 'user-1' },
+      { id: 'member-b', subprofileId: 'sp-b', userId: 'user-1' },
+      { id: 'member-c', subprofileId: 'sp-c', userId: 'user-1' },
+    ];
+
+    it('writes position = index onto every member row, in one transaction', async () => {
+      members.find.mockResolvedValue(membershipRows);
+      await service.reorderMine('user-1', ['sp-c', 'sp-a', 'sp-b']);
+      expect(members.find).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+        select: { id: true, subprofileId: true },
+      });
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      // Addressed by the MEMBERSHIP row's primary key, so a co-owned
+      // persona's other owners keep the order they chose.
+      expect(manager.update.mock.calls).toEqual([
+        [SubprofileMember, { id: 'member-c' }, { position: 0 }],
+        [SubprofileMember, { id: 'member-a' }, { position: 1 }],
+        [SubprofileMember, { id: 'member-b' }, { position: 2 }],
+      ]);
+    });
+
+    it('rejects a list that is not the same length as the membership set', async () => {
+      members.find.mockResolvedValue(membershipRows);
+      await expect(
+        service.reorderMine('user-1', ['sp-a', 'sp-b']),
+      ).rejects.toThrow(BadRequestException);
+      await expect(
+        service.reorderMine('user-1', ['sp-a', 'sp-b']),
+      ).rejects.toThrow(
+        'ids must list every one of your personas exactly once (expected 3, received 2)',
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a duplicate id', async () => {
+      members.find.mockResolvedValue(membershipRows);
+      // Right length, so only the duplicate check can catch this one.
+      await expect(
+        service.reorderMine('user-1', ['sp-a', 'sp-a', 'sp-b']),
+      ).rejects.toThrow('ids must not contain duplicates');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects an id the caller does not belong to', async () => {
+      members.find.mockResolvedValue(membershipRows);
+      // Right length and no duplicates: `sp-someone-elses` stands in for a
+      // stale client cache or a probe at another member's persona. Either way
+      // it writes nothing, and the message names the caller's own list rather
+      // than saying whether that id exists.
+      await expect(
+        service.reorderMine('user-1', ['sp-a', 'sp-b', 'sp-someone-elses']),
+      ).rejects.toThrow(
+        'ids must list every one of your personas exactly once and nothing else',
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('accepts an empty list from a member who holds no personas, as a no-op', async () => {
+      members.find.mockResolvedValue([]);
+      await expect(
+        service.reorderMine('lonely-user', []),
+      ).resolves.toBeUndefined();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(manager.update).not.toHaveBeenCalled();
+    });
   });
 
   describe('listForProfile', () => {
@@ -1520,7 +1682,9 @@ describe('SubprofilesService', () => {
       const result = await service.listForProfile('viewed-member', 'viewer-id');
       expect(members.find).toHaveBeenCalledWith({
         where: { userId: 'viewed-user-id' },
-        select: { subprofileId: true },
+        // `position` rides along on this same query: per-member ordering
+        // costs no extra round trip.
+        select: { subprofileId: true, position: true },
       });
       expect(subprofiles.find).toHaveBeenCalledWith({
         where: {

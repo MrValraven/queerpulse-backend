@@ -27,6 +27,7 @@ import {
 import { BlockFilterService } from '../social/block-filter.service';
 import { Block } from '../social/entities/block.entity';
 import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
@@ -1522,8 +1523,8 @@ export class ConnectionsService {
 
   /**
    * The viewer and `otherUserId`'s shared accepted connections: a total count
-   * plus up to `limit` of their profiles (slug + name), for a "N mutual
-   * connections" chip on another member's profile. Ordering is deterministic
+   * plus up to `limit` of their profiles (slug + name + `photoVisible`-gated
+   * avatar), for a "N mutual connections" chip on another member's profile. Ordering is deterministic
    * end-to-end — {@link mutualUserIdsBetween}'s order is preserved through the
    * final profile lookup by mapping `top` to a userId->Profile lookup rather
    * than trusting `Repository.find`'s row order (unstable for an `IN (...)`
@@ -1535,7 +1536,12 @@ export class ConnectionsService {
     limit = 2,
   ): Promise<{
     count: number;
-    members: { slug: string; firstName: string; lastName: string }[];
+    members: {
+      slug: string;
+      firstName: string;
+      lastName: string;
+      avatarUrl: string | null;
+    }[];
   }> {
     const mutualUserIds = await this.mutualUserIdsBetween(
       viewerUserId,
@@ -1545,7 +1551,14 @@ export class ConnectionsService {
     const profiles = top.length
       ? await this.profiles.find({
           where: { userId: In(top) },
-          select: { userId: true, slug: true, firstName: true, lastName: true },
+          select: {
+            userId: true,
+            slug: true,
+            firstName: true,
+            lastName: true,
+            avatarUrl: true,
+            photoVisible: true,
+          },
         })
       : [];
     const profileByUserId = new Map(profiles.map((p) => [p.userId, p]));
@@ -1556,6 +1569,10 @@ export class ConnectionsService {
         slug: p.slug,
         firstName: p.firstName,
         lastName: p.lastName,
+        // The card shows each mutual's real face, so it goes through the one
+        // `photoVisible` gate every cross-domain face uses — a mutual who hid
+        // their photo falls back to initials here too.
+        avatarUrl: toVisibleAvatarUrl(p),
       }));
     return { count: mutualUserIds.length, members };
   }

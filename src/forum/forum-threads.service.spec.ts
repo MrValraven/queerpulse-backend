@@ -94,15 +94,75 @@ function qbStub(rows: ForumThread[] = []): QbStub {
 
 // A chainable `Community` query-builder stub for `isCommunityHiddenFrom`'s
 // existence probe (`this.threads.manager.createQueryBuilder(Community, 'com')`):
-// its terminal `getExists()` resolves to whether the thread's Private community
-// hides itself from the viewer (H1).
-function communityAccessQbStub(hidden: boolean) {
-  const qb: Record<string, jest.Mock> = {};
-  for (const method of ['where', 'andWhere']) {
-    qb[method] = jest.fn().mockReturnValue(qb);
-  }
-  qb.getExists = jest.fn().mockResolvedValue(hidden);
+// its terminal `getExists()` resolves to whether the thread's gated community
+// hides itself from the viewer (H1). Every tier but `public` is gated.
+//
+// Typed rather than `Record<string, jest.Mock>` so a test can read
+// `andWhere.mock.calls` without the arguments coming back as `any` (the same
+// reason `QbStub` above is typed).
+interface CommunityAccessQbStub {
+  where: jest.Mock<CommunityAccessQbStub, unknown[]>;
+  andWhere: jest.Mock<CommunityAccessQbStub, unknown[]>;
+  getExists: jest.Mock<Promise<boolean>, []>;
+}
+
+function communityAccessQbStub(isHidden: boolean): CommunityAccessQbStub {
+  const qb: CommunityAccessQbStub = {
+    where: jest.fn<CommunityAccessQbStub, unknown[]>(),
+    andWhere: jest.fn<CommunityAccessQbStub, unknown[]>(),
+    getExists: jest.fn<Promise<boolean>, []>(),
+  };
+  qb.where.mockReturnValue(qb);
+  qb.andWhere.mockReturnValue(qb);
+  qb.getExists.mockResolvedValue(isHidden);
   return qb;
+}
+
+/**
+ * Every tier the platform has, so a per-tier expectation covers the whole
+ * enum rather than the three tiers that happen to exist today.
+ */
+const ALL_ACCESS_TIERS: readonly AccessTier[] = Object.values(AccessTier);
+
+/** The `andWhere` call that carries the community access-tier gate. */
+function accessTierGateCall(qb: QbStub): {
+  sql: string;
+  parameters: Record<string, unknown>;
+} {
+  const gateCall = qb.andWhere.mock.calls.find(
+    (call) => typeof call[0] === 'string' && call[0].includes('access_tier'),
+  );
+  expect(gateCall).toBeDefined();
+  return {
+    sql: String(gateCall?.[0]),
+    parameters: (gateCall?.[1] ?? {}) as Record<string, unknown>,
+  };
+}
+
+/**
+ * The access tiers `applyCommunityAccessFilter` admits for a viewer who is NOT
+ * on the community's roster, read straight off the predicate it built.
+ *
+ * The gate is one SQL string handed to a stubbed query builder, so a per-tier
+ * assertion has to evaluate the one comparison inside it that decides tier
+ * admission (`"com"."access_tier" <operator> :<bound parameter>`) against the
+ * parameter the service bound. That gives each tier its own named expectation
+ * and still fails loudly if the comparison ever flips back to `!=`, which
+ * would readmit `request` and `invite` to an outsider's browse list. Mirrors
+ * the helper of the same name in `feed.service.spec.ts`, which pins the same
+ * rule on the other surface.
+ */
+function tiersAdmittedForNonMember(
+  predicateSql: string,
+  parameters: Record<string, unknown>,
+): AccessTier[] {
+  const tierTest = /"com"\."access_tier"\s*(=|!=)\s*:(\w+)/.exec(predicateSql);
+  if (!tierTest) return [];
+  const [, operator, parameterName] = tierTest;
+  const boundTier = parameters[parameterName ?? ''] as AccessTier | undefined;
+  return ALL_ACCESS_TIERS.filter((tier) =>
+    operator === '=' ? tier === boundTier : tier !== boundTier,
+  );
 }
 
 const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
@@ -500,7 +560,7 @@ describe('ForumThreadsService', () => {
       expect(threads.manager.createQueryBuilder).not.toHaveBeenCalled();
     });
 
-    it('404s a non-member reading a Private-community thread (H1)', async () => {
+    it('404s a non-member reading a gated-community thread (H1)', async () => {
       threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
       threads.manager.createQueryBuilder.mockReturnValue(
         communityAccessQbStub(true),
@@ -539,22 +599,182 @@ describe('ForumThreadsService', () => {
     });
   });
 
+  // Every tier but `public` closes its community's content to anyone off the
+  // roster: `GET /communities/:slug` answers 403 `COMMUNITY_MEMBERS_ONLY` and
+  // `CommunityPostsService.assertViewable` refuses the board, so the forum must
+  // not hand a gated community's thread titles back through a different door.
+  // The gate used to test `access_tier != 'private'`, which left a `request`-
+  // or `invite`-tier community's threads in the browse list of somebody that
+  // community had refused.
   describe('list community access (H1)', () => {
-    it('gates the browse list on the community access predicate', async () => {
+    const gatedTierCases: ReadonlyArray<[string, AccessTier]> = [
+      ['request', AccessTier.Request],
+      ['invite', AccessTier.Invite],
+      // Unchanged behaviour, pinned so a future rewrite of the tier test
+      // cannot quietly reopen the tier that was closed all along.
+      ['private', AccessTier.Private],
+    ];
+
+    const browseGate = async (): Promise<{
+      sql: string;
+      parameters: Record<string, unknown>;
+    }> => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
-
       await service.list('viewer-1', undefined, undefined, undefined);
+      return accessTierGateCall(qb);
+    };
 
-      const accessCall = qb.andWhere.mock.calls.find(
-        (call) =>
-          typeof call[0] === 'string' && call[0].includes('access_tier'),
-      );
-      expect(accessCall).toBeDefined();
-      expect(accessCall?.[1]).toEqual({
-        privateTier: AccessTier.Private,
+    it('gates the browse list on "is public", binding the public tier', async () => {
+      const { sql, parameters } = await browseGate();
+
+      expect(sql).toContain('"com"."access_tier" = :publicTier');
+      expect(sql).not.toContain('!=');
+      expect(parameters).toEqual({
+        publicTier: AccessTier.Public,
         viewerId: 'viewer-1',
       });
+    });
+
+    it.each(gatedTierCases)(
+      'keeps a %s-tier community thread out of a non-member browse list',
+      async (_tierName: string, tier: AccessTier) => {
+        const { sql, parameters } = await browseGate();
+
+        expect(tiersAdmittedForNonMember(sql, parameters)).not.toContain(tier);
+      },
+    );
+
+    it('still lists a public-tier community thread for a non-member', async () => {
+      const { sql, parameters } = await browseGate();
+
+      expect(tiersAdmittedForNonMember(sql, parameters)).toEqual([
+        AccessTier.Public,
+      ]);
+    });
+
+    it('still lists a gated community thread for a viewer on its roster', async () => {
+      // The roster branch is what admits a gated community's thread, so it has
+      // to survive the tier change: without it, closing `request`/`invite`
+      // would hide a member's own community from the forum.
+      const { sql, parameters } = await browseGate();
+
+      expect(sql).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = t\.community_id\s*AND "mem"\."user_id" = :viewerId/,
+      );
+      expect(parameters.viewerId).toBe('viewer-1');
+    });
+
+    it('leaves flat/global threads (community_id IS NULL) visible to everyone', async () => {
+      const { sql } = await browseGate();
+
+      expect(sql).toContain('t.community_id IS NULL');
+    });
+
+    it('binds the same gate on counts and listPinned', async () => {
+      // One private helper serves `list`/`counts`/`listPinned`/`searchByText`,
+      // and a badge or a sticky row that counts a thread the list will not
+      // draw is the same leak in a smaller frame.
+      const countsQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(countsQb);
+      await service.counts('viewer-1', undefined, undefined);
+      expect(accessTierGateCall(countsQb).parameters).toEqual({
+        publicTier: AccessTier.Public,
+        viewerId: 'viewer-1',
+      });
+
+      const pinnedQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(pinnedQb);
+      await service.listPinned('viewer-1', undefined, false);
+      expect(accessTierGateCall(pinnedQb).parameters).toEqual({
+        publicTier: AccessTier.Public,
+        viewerId: 'viewer-1',
+      });
+    });
+  });
+
+  // The single-thread counterpart, `isCommunityHiddenFrom`, reads the same rule
+  // inverted: it is TRUE when the community must be hidden, so its tier half
+  // asks for the gated tiers rather than for `public`. The list is derived from
+  // `isGatedTier`, so a tier added later hides its content until somebody
+  // deliberately opens it.
+  describe('loadOr404 community access by tier (H1)', () => {
+    const gatedTiers = async (): Promise<AccessTier[]> => {
+      const probeQb = communityAccessQbStub(true);
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(probeQb);
+
+      await expect(
+        service.loadOr404('hello-world', 'outsider-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      const tierCall = probeQb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes('accessTier'),
+      );
+      expect(tierCall).toBeDefined();
+      const parameters = (tierCall?.[1] ?? {}) as {
+        gatedTiers?: readonly AccessTier[];
+      };
+      return [...(parameters.gatedTiers ?? [])];
+    };
+
+    it('probes every gated tier, not `private` alone', async () => {
+      const probeQb = communityAccessQbStub(true);
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(probeQb);
+
+      await expect(
+        service.loadOr404('hello-world', 'outsider-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(probeQb.andWhere).toHaveBeenCalledWith(
+        'com.accessTier IN (:...gatedTiers)',
+        {
+          gatedTiers: [
+            AccessTier.Request,
+            AccessTier.Invite,
+            AccessTier.Private,
+          ],
+        },
+      );
+    });
+
+    const hiddenTierCases: ReadonlyArray<[string, AccessTier]> = [
+      ['request', AccessTier.Request],
+      ['invite', AccessTier.Invite],
+      ['private', AccessTier.Private],
+    ];
+
+    it.each(hiddenTierCases)(
+      'hides a %s-tier community thread from a non-member',
+      async (_tierName: string, tier: AccessTier) => {
+        expect(await gatedTiers()).toContain(tier);
+      },
+    );
+
+    it('never hides a public-tier community thread from a non-member', async () => {
+      expect(await gatedTiers()).not.toContain(AccessTier.Public);
+    });
+
+    it('requires the viewer to be off the roster before hiding anything', async () => {
+      // The membership half of the probe: a roster member of a gated community
+      // still reads the thread (the `returns the thread for a roster member`
+      // case above covers the outcome; this pins the predicate that produces
+      // it).
+      const probeQb = communityAccessQbStub(true);
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(probeQb);
+
+      await expect(
+        service.loadOr404('hello-world', 'outsider-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      const membershipCall = probeQb.andWhere.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' && call[0].includes('community_members'),
+      );
+      expect(String(membershipCall?.[0])).toContain('NOT EXISTS');
+      expect(membershipCall?.[1]).toEqual({ viewerId: 'outsider-1' });
     });
   });
 
@@ -1671,7 +1891,7 @@ describe('ForumThreadsService', () => {
       );
     });
 
-    it('keeps the Private-community gate', async () => {
+    it('keeps the gated-community gate', async () => {
       const qb = searchQb();
 
       await service.searchByText('viewer-1', 'sao', 6);
@@ -1681,7 +1901,7 @@ describe('ForumThreadsService', () => {
       );
       expect(communityCall).toBeDefined();
       expect(communityCall?.[1]).toEqual({
-        privateTier: AccessTier.Private,
+        publicTier: AccessTier.Public,
         viewerId: 'viewer-1',
       });
     });

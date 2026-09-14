@@ -1543,6 +1543,74 @@ describe('CommunityPostsService', () => {
         service.listPosts('queer-devs', 'stranger'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    // THE TIER GATE on the board itself. `assertViewable` closes every tier
+    // but `public` to a non-member, and answers with the same posture
+    // `CommunitiesService.getBySlug` uses: 403 + the gate-card discriminator
+    // where the community's existence is public knowledge (`request`,
+    // `invite`), 404 where existence is the secret (`private`). Before this,
+    // only `private` was gated, so a `request`-tier board handed any
+    // signed-in stranger its post bodies, author `MemberRef`s, reactions and
+    // replies.
+    //
+    // `HttpException`'s status and body are read through their getters, not
+    // off instance properties, so the error is captured and inspected rather
+    // than matched with `toMatchObject` (an assertion against a plain
+    // `.status` property would pass vacuously against `undefined`). Mirrors
+    // `communities.service.spec.ts`'s gate tests.
+    it("403s a request-tier community's feed for a non-member, with the members-only code", async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const error: unknown = await service
+        .listPosts('queer-devs', 'stranger')
+        .catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(ForbiddenException);
+      expect((error as ForbiddenException).getStatus()).toBe(403);
+      expect((error as ForbiddenException).getResponse()).toMatchObject({
+        code: 'COMMUNITY_MEMBERS_ONLY',
+      });
+    });
+
+    it("404s a private community's feed for a non-member, read through the getters", async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const error: unknown = await service
+        .listPosts('queer-devs', 'stranger')
+        .catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).getStatus()).toBe(404);
+      expect((error as NotFoundException).getResponse()).toMatchObject({
+        message: 'Community not found',
+      });
+    });
+
+    // The other half of the gate, and the reason it is expressed as "every
+    // tier but `public`" rather than "refuse a non-member": an open
+    // community's board stays readable without a roster row. Over-refusing
+    // here would break every public community's hub for the people it exists
+    // to reach.
+    it("serves a public community's feed to a non-member", async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Public,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const page = await service.listPosts('queer-devs', 'stranger');
+
+      expect(page.items).toEqual([]);
+      expect(page.total).toBe(0);
+    });
   });
 
   describe('listReplies', () => {

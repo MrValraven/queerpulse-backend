@@ -99,7 +99,6 @@ import {
   LimitedProfileResponse,
   MemberCard,
   MutualVoucherCount,
-  ProfileCard,
   ProfileRelations,
   RelatedCard,
   SocialLinkView,
@@ -915,11 +914,19 @@ export class ProfilesService {
    * are both on the roster of, or nothing. Alphabetical, so a pair always
    * yields the same name instead of shuffling between reads.
    *
-   * Two gates, both the community's own promise rather than the viewer's: a
-   * private-tier community is never advertised (mirroring
-   * `loadFeaturedCommunities`), and neither is one whose roster has been
-   * turned invisible. "Both in X" is a statement about who is on that roster,
-   * so `rosterVisible: false` forbids it just as surely as the tier does.
+   * Two gates, both the community's own promise rather than the viewer's:
+   * only a `public`-tier community is ever advertised here, and only one whose
+   * roster has been left visible. "Both in X" is a statement about who is on
+   * that roster, so `rosterVisible: false` forbids it just as surely as the
+   * tier does.
+   *
+   * The tier gate is `= public` rather than `!= private` because every other
+   * tier now closes its roster to non-members outright: `CommunitiesService.
+   * roster` refuses them before it ever consults `rosterVisible`, which left
+   * that flag meaningful for the `public` tier alone. Reading `!= private`
+   * here would have gone on naming a `request`-tier community whose roster the
+   * platform had already stopped serving, so the two would have disagreed
+   * about the same community.
    */
   private async sharedCommunityNames(
     ownerUserId: string,
@@ -935,8 +942,8 @@ export class ProfilesService {
       )
       .innerJoin(Community, 'c', 'c.id = mine.community_id')
       .where('mine.user_id = :ownerUserId', { ownerUserId })
-      .andWhere('c.access_tier != :privateTier', {
-        privateTier: AccessTier.Private,
+      .andWhere('c.access_tier = :publicTier', {
+        publicTier: AccessTier.Public,
       })
       .andWhere('c.roster_visible = true')
       .select('theirs.user_id', 'userId')

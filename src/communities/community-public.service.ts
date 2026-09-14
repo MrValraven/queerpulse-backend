@@ -15,10 +15,15 @@ import {
   CommunityUpcomingGatheringsResponse,
 } from './community-upcoming-gatherings-response';
 import {
+  CommunityInvite,
+  CommunityInviteStatus,
+} from './entities/community-invite.entity';
+import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
 import { AccessTier, Community } from './entities/community.entity';
+import { isGatedTier } from './community-gate';
 
 /**
  * The only access tiers a signed-out teaser can ever describe. `invite` and
@@ -113,6 +118,12 @@ const UPCOMING_GATHERINGS_MAX_PAGE = 10;
  * member gets a bounded page of the `public` and `members` ones, because
  * those already appear on their own gatherings browse. Neither ever reaches
  * a post or a roster.
+ *
+ * THIRD RESPONSIBILITY: `getGateCard`, backing `GET /communities/:slug/gate`
+ * for a SIGNED-IN caller who is not on the roster of a community whose tier
+ * is not `public`. All three methods answer the same question at three
+ * different distances: what may somebody outside a community's roster be
+ * shown of it.
  */
 @Injectable()
 export class CommunityPublicService {
@@ -123,6 +134,12 @@ export class CommunityPublicService {
     private readonly members: Repository<CommunityMember>,
     @InjectRepository(Event)
     private readonly events: Repository<Event>,
+    // The private tier's one exception, read by `getGateCard` alone: a standing
+    // invitation is what lets somebody off a private community's roster learn
+    // it is there. `listUpcomingGatherings` deliberately does NOT pass that
+    // option, so its gate stays exactly as narrow as it is today.
+    @InjectRepository(CommunityInvite)
+    private readonly invites: Repository<CommunityInvite>,
     // PRD-145: the prospective-member gatherings list applies the same
     // moderator-takedown gate `CommunitiesService.getBySlug` applies, so a
     // hidden or removed community stays a 404 there too.
@@ -149,76 +166,42 @@ export class CommunityPublicService {
       throw new NotFoundException('Community not found');
     }
 
-    // Two more queries, run together: a COUNT over the roster (a number, never
-    // any member's identity) and the single next public gathering. Both are
-    // scoped to this one community, so the endpoint costs three queries flat.
-    const now = new Date();
-    // PUBLIC visibility only. A `members`, `community`, `network` or
-    // `invite_only` gathering is not something a signed-out visitor may learn
-    // exists, so the filter is an equality on `public` rather than an
-    // exclusion list that a new visibility tier could quietly widen.
-    const nextGatheringScope = {
-      communityId: community.id,
-      status: EventStatus.Published,
-      visibility: EventVisibility.Public,
-    };
-    const [memberCount, nextGathering] = await Promise.all([
-      this.members.count({ where: { communityId: community.id } }),
-      this.events.findOne({
-        // A gathering that is UNDERWAY is still the next one, matching
-        // browse's 'upcoming' predicate in `EventsService.list`. Find-options
-        // cannot write that disjunct inline, so it is two arms of an OR that
-        // BOTH carry the whole scope above: the arms differ only in which
-        // timestamp they test, so neither can admit anything the other would
-        // refuse. `endAt: MoreThanOrEqual(now)` carries the
-        // `end_at IS NOT NULL` half for free, since SQL never matches NULL
-        // against `>=`. `ORDER BY start_at ASC` then puts a gathering that is
-        // already running ahead of one that has yet to begin, which is the
-        // order a visitor wants.
-        where: [
-          { ...nextGatheringScope, startAt: MoreThanOrEqual(now) },
-          { ...nextGatheringScope, endAt: MoreThanOrEqual(now) },
-        ],
-        order: { startAt: 'ASC' },
-        select: {
-          id: true,
-          slug: true,
-          title: true,
-          startAt: true,
-          // Carried because a gathering that is UNDERWAY can win this query,
-          // so a start instant in the past is a correct answer and the end is
-          // what makes it legible. See `PublicCommunityGathering.endAt`.
-          endAt: true,
-          isOnline: true,
-        },
-      }),
-    ]);
+    const { memberCount, nextGathering } = await this.loadCardFacts(community);
+    return this.toPublicCard(community, memberCount, nextGathering);
+  }
 
-    return {
-      slug: community.slug,
-      name: community.name,
-      tagline: community.tagline,
-      purpose: community.purpose,
-      type: community.type,
-      accessTier: community.accessTier,
-      tags: community.tags ?? [],
-      city: community.city,
-      area: community.area,
-      isOnline: community.isOnline,
-      languages: community.languages ?? [],
-      memberCount,
-      avatarImageUrl: toImageUrl(community.avatarImageUrl),
-      coverImageUrl: toImageUrl(community.coverImageUrl),
-      nextGathering: nextGathering
-        ? {
-            slug: nextGathering.slug,
-            title: nextGathering.title,
-            startAt: nextGathering.startAt,
-            endAt: nextGathering.endAt,
-            isOnline: nextGathering.isOnline,
-          }
-        : null,
-    };
+  /**
+   * `GET /communities/:slug/gate`: what a SIGNED-IN member of the platform
+   * sees when they open a community they are not on the roster of and whose
+   * tier is not `public`.
+   *
+   * The third distance in this file, and the reason all three live together.
+   * The anonymous teaser answers "what may the internet see of a community its
+   * owner listed publicly". `listUpcomingGatherings` answers "which of a
+   * community's gatherings may a prospective member see". This answers "what
+   * may somebody the community has not let in see of it at all", and the
+   * answer is deliberately the same closed field list as the teaser's: one
+   * definition of what an outsider may see, guarded by one `DO NOT WIDEN`
+   * block.
+   *
+   * Two differences from the teaser, both because the caller is signed in:
+   * `is_publicly_listed` is not required (that flag governs reach outside the
+   * platform, and this card never leaves it), and every tier can appear (the
+   * tier is the thing the card exists to explain).
+   *
+   * A roster member who calls this gets the card rather than a refusal. It
+   * discloses nothing to somebody already inside, and refusing them would be a
+   * second membership rule to keep in step with `getBySlug`'s.
+   */
+  async getGateCard(
+    slug: string,
+    viewerId: string,
+  ): Promise<PublicCommunityResponse> {
+    const { community } = await this.assertCommunityVisible(slug, viewerId, {
+      allowPendingInvite: true,
+    });
+    const { memberCount, nextGathering } = await this.loadCardFacts(community);
+    return this.toPublicCard(community, memberCount, nextGathering);
   }
 
   /**
@@ -231,7 +214,7 @@ export class CommunityPublicService {
    * Gatherings are the strongest reason to join a community, and the people
    * being shown an empty tab were exactly the people the community wants.
    *
-   * TWO GATES, in this order.
+   * THREE GATES, in this order.
    *
    * 1. MAY THIS CALLER SEE THE COMMUNITY AT ALL. `assertCommunityVisible`
    *    reproduces the three gates `CommunitiesService.getBySlug` applies, and
@@ -239,7 +222,9 @@ export class CommunityPublicService {
    *    `private` community stays invisible to anyone off its roster, a
    *    moderator takedown and an archived community stay visible only to that
    *    community's own staff.
-   * 2. WHICH OF ITS GATHERINGS MAY THEY SEE. Published, still upcoming, not
+   * 2. IS THIS CALLER A NON-MEMBER OF A GATED TIER. A non-member of anything
+   *    but `public` gets the gate card instead of this tab; see below.
+   * 3. WHICH OF ITS GATHERINGS MAY THEY SEE. Published, still upcoming, not
    *    under a takedown, and in one of
    *    `GATHERING_TIERS_VISIBLE_TO_NON_MEMBERS` — the same two tiers the
    *    caller's own `GET /events` browse already shows them. A members-only
@@ -255,7 +240,22 @@ export class CommunityPublicService {
     viewerId: string,
     requestedPage: number,
   ): Promise<CommunityUpcomingGatheringsResponse> {
-    const community = await this.assertCommunityVisible(slug, viewerId);
+    const { community, role } = await this.assertCommunityVisible(
+      slug,
+      viewerId,
+    );
+
+    // A non-member of a gated tier no longer has an Events tab to fill: they
+    // get the gate card, whose `nextGathering` is public-visibility only. This
+    // lane exists for a prospective member of a `public` community, and
+    // serving anybody else the `members`-visibility calendar of a community
+    // that has not let them in was a leak. 404 rather than 403, matching this
+    // method's never-403 posture, and reading the role
+    // `assertCommunityVisible` already resolved so the method still costs
+    // three queries flat.
+    if (isGatedTier(community.accessTier) && !role) {
+      throw new NotFoundException('Community not found');
+    }
 
     const page = Math.min(
       Math.max(Math.trunc(requestedPage) || 1, 1),
@@ -337,7 +337,18 @@ export class CommunityPublicService {
   private async assertCommunityVisible(
     slug: string,
     viewerId: string,
-  ): Promise<Community> {
+    // `allowPendingInvite` opens the private-tier branch below to the holder
+    // of a standing invitation, which is the carve-out
+    // `CommunitiesService.getBySlug` already makes. Off by default, so a
+    // caller has to ask for it: `getGateCard` does, and
+    // `listUpcomingGatherings` must not.
+    options: { allowPendingInvite?: boolean } = {},
+    // Returns the caller's roster role alongside the community because it
+    // already loaded it to answer the gates below. `listUpcomingGatherings`
+    // reads it for its own tier gate, and without this it would run a second
+    // identical `members.findOne` on a method that advertises three queries
+    // flat.
+  ): Promise<{ community: Community; role: RosterRole | null }> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
       throw new NotFoundException('Community not found');
@@ -347,7 +358,18 @@ export class CommunityPublicService {
     });
     const role = membership?.role ?? null;
     if (community.accessTier === AccessTier.Private && !role) {
-      throw new NotFoundException('Community not found');
+      const hasPendingInvite =
+        options.allowPendingInvite === true &&
+        (await this.invites.exists({
+          where: {
+            communityId: community.id,
+            invitedUserId: viewerId,
+            status: CommunityInviteStatus.Pending,
+          },
+        }));
+      if (!hasPendingInvite) {
+        throw new NotFoundException('Community not found');
+      }
     }
     const isCommunityStaff =
       role !== null && COMMUNITY_STAFF_ROLES.includes(role);
@@ -361,7 +383,101 @@ export class CommunityPublicService {
     if (community.archivedAt != null && !isCommunityStaff) {
       throw new NotFoundException('Community not found');
     }
-    return community;
+    return { community, role };
+  }
+
+  /**
+   * The two facts a card carries beyond the community row itself: how many
+   * people are on the roster (a COUNT, never who) and the next PUBLIC
+   * gathering. Run together, so a card costs three queries flat including the
+   * community lookup.
+   *
+   * PUBLIC visibility only, and written as an equality on `public` rather than
+   * as an exclusion list, so a future visibility tier cannot quietly widen
+   * what a card discloses. A `members`, `community`, `network` or
+   * `invite_only` gathering is not something an outsider may learn exists.
+   */
+  private async loadCardFacts(community: Community): Promise<{
+    memberCount: number;
+    nextGathering: Event | null;
+  }> {
+    const now = new Date();
+    const nextGatheringScope = {
+      communityId: community.id,
+      status: EventStatus.Published,
+      visibility: EventVisibility.Public,
+    };
+    const [memberCount, nextGathering] = await Promise.all([
+      this.members.count({ where: { communityId: community.id } }),
+      this.events.findOne({
+        // A gathering that is UNDERWAY is still the next one, matching
+        // browse's 'upcoming' predicate in `EventsService.list`. Find-options
+        // cannot write that disjunct inline, so it is two arms of an OR that
+        // BOTH carry the whole scope above: the arms differ only in which
+        // timestamp they test, so neither can admit anything the other would
+        // refuse. `endAt: MoreThanOrEqual(now)` carries the
+        // `end_at IS NOT NULL` half for free, since SQL never matches NULL
+        // against `>=`. `ORDER BY start_at ASC` then puts a gathering that is
+        // already running ahead of one that has yet to begin, which is the
+        // order a visitor wants.
+        where: [
+          { ...nextGatheringScope, startAt: MoreThanOrEqual(now) },
+          { ...nextGatheringScope, endAt: MoreThanOrEqual(now) },
+        ],
+        order: { startAt: 'ASC' },
+        select: {
+          id: true,
+          slug: true,
+          title: true,
+          startAt: true,
+          // Carried because a gathering that is UNDERWAY can win this query,
+          // so a start instant in the past is a correct answer and the end is
+          // what makes it legible. See `PublicCommunityGathering.endAt`.
+          endAt: true,
+          isOnline: true,
+        },
+      }),
+    ]);
+    return { memberCount, nextGathering };
+  }
+
+  /**
+   * The ONE place a community becomes a `PublicCommunityResponse`. Both doors
+   * that serve that type go through here (the anonymous teaser and the
+   * signed-in gate card), so a field cannot reach one outsider without
+   * reaching the other, and the type's `DO NOT WIDEN` block governs a single
+   * mapper rather than two literals that drift.
+   */
+  private toPublicCard(
+    community: Community,
+    memberCount: number,
+    nextGathering: Event | null,
+  ): PublicCommunityResponse {
+    return {
+      slug: community.slug,
+      name: community.name,
+      tagline: community.tagline,
+      purpose: community.purpose,
+      type: community.type,
+      accessTier: community.accessTier,
+      tags: community.tags ?? [],
+      city: community.city,
+      area: community.area,
+      isOnline: community.isOnline,
+      languages: community.languages ?? [],
+      memberCount,
+      avatarImageUrl: toImageUrl(community.avatarImageUrl),
+      coverImageUrl: toImageUrl(community.coverImageUrl),
+      nextGathering: nextGathering
+        ? {
+            slug: nextGathering.slug,
+            title: nextGathering.title,
+            startAt: nextGathering.startAt,
+            endAt: nextGathering.endAt,
+            isOnline: nextGathering.isOnline,
+          }
+        : null,
+    };
   }
 
   /**

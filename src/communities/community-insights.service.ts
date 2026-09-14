@@ -1,34 +1,18 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { CommunityMembershipService } from './community-membership.service';
 import {
   CommunityInsightsResponse,
   CommunityTrendPoint,
   INSIGHTS_TREND_WEEKS,
 } from './community-insights-response';
-import {
-  CommunityMember,
-  RosterRole,
-} from './entities/community-member.entity';
+import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
-import { Community } from './entities/community.entity';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
-
-// `co_owner` is a member the owner handed owner-level powers to inside the
-// community (see `RosterRole.CoOwner`), so it reads insights exactly as
-// `owner` does.
-const STAFF_ROLES: readonly RosterRole[] = [
-  RosterRole.Owner,
-  RosterRole.CoOwner,
-  RosterRole.Mod,
-];
 
 /**
  * The Monday 00:00 UTC that starts the ISO calendar week containing `date`.
@@ -107,8 +91,7 @@ function fillWeeks(
 @Injectable()
 export class CommunityInsightsService {
   constructor(
-    @InjectRepository(Community)
-    private readonly communities: Repository<Community>,
+    private readonly membership: CommunityMembershipService,
     @InjectRepository(CommunityMember)
     private readonly members: Repository<CommunityMember>,
     @InjectRepository(CommunityPost)
@@ -121,7 +104,13 @@ export class CommunityInsightsService {
     slug: string,
     userId: string,
   ): Promise<CommunityInsightsResponse> {
-    const communityId = await this.resolveStaffCommunityId(slug, userId);
+    // 404-before-403 private-tier existence gate and the owner/co-owner/mod
+    // role check both live in one place now: see
+    // `CommunityMembershipService.assertOwnerOrModBySlug`.
+    const communityId = await this.membership.assertOwnerOrModBySlug(
+      slug,
+      userId,
+    );
     const now = new Date();
     const weekAgo = new Date(now.getTime() - WEEK_MS);
     const monthAgo = new Date(now.getTime() - MONTH_MS);
@@ -232,33 +221,5 @@ export class CommunityInsightsService {
       newMembersByWeek: fillWeeks(weekStarts, newMemberWeekRows),
       postsByWeek: fillWeeks(weekStarts, postWeekRows),
     };
-  }
-
-  /**
-   * Resolves a community by slug (404 for unknown/archived — same
-   * "don't leak existence" posture as `CommunityMembershipService
-   * .assertMemberBySlug`) and asserts the caller holds `owner`/`mod` on its
-   * roster (403 otherwise), returning the community's id. Kept local rather
-   * than added to `CommunityMembershipService` (which only exposes a plain
-   * roster-membership check, not a role-aware one) so that shared,
-   * cross-feature module stays untouched by this endpoint.
-   */
-  private async resolveStaffCommunityId(
-    slug: string,
-    userId: string,
-  ): Promise<string> {
-    const community = await this.communities.findOne({
-      where: { slug, archivedAt: IsNull() },
-    });
-    if (!community) {
-      throw new NotFoundException('Community not found');
-    }
-    const membership = await this.members.findOne({
-      where: { communityId: community.id, userId },
-    });
-    if (!membership || !STAFF_ROLES.includes(membership.role)) {
-      throw new ForbiddenException('Owner or moderator role required');
-    }
-    return community.id;
   }
 }

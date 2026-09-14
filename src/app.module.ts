@@ -76,6 +76,8 @@ import { PartnersModule } from './partners/partners.module';
 import { OrgTiersModule } from './org-tiers/org-tiers.module';
 import { StorageModule } from './storage/storage.module';
 import { StorageKeyOwnershipInterceptor } from './storage/storage-key-ownership.interceptor';
+import { FeatureUsageModule } from './feature-usage/feature-usage.module';
+import { FeatureUsageInterceptor } from './feature-usage/feature-usage.interceptor';
 import { UsersModule } from './users/users.module';
 import { VolunteeringModule } from './volunteering/volunteering.module';
 import { BarterModule } from './barter/barter.module';
@@ -366,6 +368,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     AdminHousingModule,
     PlatformStaffModule,
     PublicEligibilityModule,
+    FeatureUsageModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must
@@ -387,6 +390,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     // body references a storage key it did not upload — see the invariant
     // documented at the top of the interceptor itself.
     { provide: APP_INTERCEPTOR, useClass: StorageKeyOwnershipInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: FeatureUsageInterceptor },
   ],
 })
 export class AppModule {}

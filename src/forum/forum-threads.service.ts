@@ -38,6 +38,7 @@ import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { isGatedTier } from '../communities/community-gate';
 import {
   ContentModerationService,
   ContentModerationState,
@@ -114,6 +115,15 @@ const CATEGORY_MOVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 // `MODERATOR_ROLES` below is replicated. Keep the two in sync: this one exists
 // only so a hidden or removed OP's words stay out of a thread card's `excerpt`.
 const OP_MODERATION_SUBJECT_TYPES: readonly string[] = ['post', 'reply'];
+
+// The access tiers whose content is closed to anyone off the community's
+// roster, i.e. everything but `public`. Derived from `isGatedTier` rather than
+// listed by hand so the forum's read gates and the community gate itself can
+// never disagree about which tiers are closed, and so a tier added later is
+// gated until somebody deliberately opens it. Used by `isCommunityHiddenFrom`,
+// whose sense is inverted and so needs the closed tiers rather than `public`.
+const GATED_ACCESS_TIERS: readonly AccessTier[] =
+  Object.values(AccessTier).filter(isGatedTier);
 
 // What a thread card assumes about an OP nobody has moderated.
 const OP_NOT_MODERATED: ContentModerationState = {
@@ -260,9 +270,10 @@ export class ForumThreadsService {
     // post-query filtering (`FeedService.dropBlocked`) returns short pages.
     // `t`'s author column is `author_id` under `SnakeNamingStrategy`.
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
-    // A Private community's threads never enter a non-member's browse list
-    // (H1) — same gate `loadOr404`/the feed apply, so the list can't leak a
-    // thread the detail read would 404.
+    // A gated community's threads never enter a non-member's browse list (H1).
+    // Every tier but `public` is gated, and this is the same gate `loadOr404`
+    // and the feed apply, so the list cannot leak a thread the detail read
+    // would 404.
     this.applyCommunityAccessFilter(qb, viewerId);
     // A withdrawn thread leaves the browse list for everyone but staff
     // (PRD-160), before any of the narrowing below, so the same set every other
@@ -444,7 +455,7 @@ export class ForumThreadsService {
       .addSelect('COUNT(*)', 'count')
       .groupBy('t.category');
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
-    // Same Private-community gate as `list` (H1) so the category badges never
+    // Same gated-community gate as `list` (H1) so the category badges never
     // count threads the viewer can't open.
     this.applyCommunityAccessFilter(qb, viewerId);
     // Same soft-delete gate as `list` (PRD-160): a badge that counts a
@@ -689,7 +700,7 @@ export class ForumThreadsService {
       .createQueryBuilder('t')
       .andWhere('t.is_pinned = true');
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
-    // Same Private-community gate as `list` (H1): a pinned thread in a Private
+    // Same gated-community gate as `list` (H1): a pinned thread in a gated
     // community stays out of a non-member's sticky bucket.
     this.applyCommunityAccessFilter(qb, viewerId);
     // Same soft-delete gate as `list` (PRD-160). A pinned thread that is later
@@ -712,7 +723,7 @@ export class ForumThreadsService {
   // "trans" still finds "transfeminine" (full text matches whole tokens, so
   // replacing the substring test outright would have been a regression).
   // Reply bodies live in `ForumPostsService.searchByText`, a separate result
-  // type. Reuses the same block filter and Private-community gate as `list()`.
+  // type. Reuses the same block filter and gated-community gate as `list()`.
   async searchByText(
     viewerId: string,
     term: string,
@@ -732,8 +743,9 @@ export class ForumThreadsService {
         { searchTerm: term, searchPattern: pattern },
       );
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
-    // Same Private-community gate as `list` (H1): global search must not
-    // surface a Private community's thread titles to a non-member.
+    // Same gated-community gate as `list` (H1): global search must not
+    // surface a gated community's thread titles to a non-member, on any tier
+    // but `public`.
     this.applyCommunityAccessFilter(qb, viewerId);
     // Withdrawn threads leave global search too (PRD-160), unconditionally: the
     // caller (`SearchService`) carries only the viewer's id and this path
@@ -774,8 +786,9 @@ export class ForumThreadsService {
     viewerId: string,
     viewerIsModerator = false,
   ): Promise<ForumThreadResponse> {
-    // A non-member reading a Private community's thread by slug 404s (H1); a
-    // platform moderator bypasses so they can still open a reported thread.
+    // A non-member reading a gated community's thread by slug 404s (H1), on
+    // every tier but `public`; a platform moderator bypasses so they can still
+    // open a reported thread.
     const thread = await this.loadOr404(slug, viewerId, {
       bypassCommunityAccess: viewerIsModerator,
       // Direct navigation to a withdrawn thread 404s for everybody but staff
@@ -821,7 +834,7 @@ export class ForumThreadsService {
    * (see `ForumThreadSubscription`).
    *
    * Goes through `loadOr404` with the caller's id, so a watermark can only be
-   * stamped on a thread the member could actually read: a Private community's
+   * stamped on a thread the member could actually read: a gated community's
    * thread, a blocked author's thread and a withdrawn thread all 404 here
    * exactly as they do everywhere else.
    *
@@ -911,14 +924,15 @@ export class ForumThreadsService {
    * `CommunityPostsService.assertViewable` uses for private communities, so a
    * blocked author's thread can't be reached by guessing its slug either.
    *
-   * Also gates community access: a thread scoped to a Private community 404s
-   * for a viewer who isn't on that community's roster (again mirroring
-   * `CommunityPostsService.assertViewable`), so a private community's threads
-   * and their posts can't be read by a non-member who guesses or holds the
-   * slug. Because `ForumPostsService.reply`/read paths load through here with
-   * the viewer's id, this closes the thread-detail AND post-list leak in one
-   * place. Threads with a null `communityId` (flat/global) and threads in
-   * non-Private communities stay reachable by everyone. Privileged callers
+   * Also gates community access: a thread scoped to a community on any tier
+   * but `public` 404s for a viewer who isn't on that community's roster (again
+   * mirroring `CommunityPostsService.assertViewable`), so a gated community's
+   * threads and their posts can't be read by a non-member who guesses or holds
+   * the slug. Because `ForumPostsService.reply`/read paths load through here
+   * with the viewer's id, this closes the thread-detail AND post-list leak in
+   * one place. Threads with a null `communityId` (flat/global) belong to no
+   * roster and stay reachable by everyone, as do threads in a `public`
+   * community. Privileged callers
    * (moderator lock/pin) pass `bypassCommunityAccess` so they can still act on
    * a thread in a community they don't happen to be a member of.
    *
@@ -955,7 +969,7 @@ export class ForumThreadsService {
    * `ForumPostsService.assertCanVote` is the first (ENG-133). Voting had no
    * visibility check at all, and re-deriving one at the vote endpoint would
    * have meant a second, quietly diverging copy of the deleted-thread, block
-   * and Private-community rules. Both entry points share
+   * and gated-community rules. Both entry points share
    * `assertVisibleOr404`, so there is one set of rules and one place to change
    * them.
    */
@@ -998,16 +1012,19 @@ export class ForumThreadsService {
   }
 
   /**
-   * Shared with `ForumPostsService.reply` — a thread scoped to a community
+   * Shared with `ForumPostsService.reply`: a thread scoped to a community
    * takes replies from that community's ROSTER only.
    *
    * `create` has always required membership (`assertMemberBySlug`), and
-   * `loadOr404`'s access gate keeps a Private community's threads out of a
-   * non-member's reach entirely. This closes the remaining half (BE-COM-05):
-   * on a `request`/`invite` tier the thread is readable platform-wide, but
+   * `loadOr404`'s access gate keeps a GATED community's threads out of a
+   * non-member's reach entirely: every tier but `public` closes its content to
+   * anyone off the roster, so the only thread a non-member can read at all is
+   * one in a `public` community. This closes the remaining half (BE-COM-05):
+   * on the `public` tier the thread is readable by any signed-in member, but
    * writing into it is a roster action, exactly as it is for the community's
-   * own post feed (`CommunityPostsService.assertMember` on every write while
-   * `listPosts` stays open to non-members).
+   * own post feed (`CommunityPostsService.assertMember` on every write, while
+   * its `assertViewable` lets a non-member READ a `public` community's board
+   * and nothing more).
    *
    * A flat/global thread (`communityId: null`) has no roster, so this is a
    * no-op for the forum's ordinary threads.
@@ -1523,6 +1540,13 @@ export class ForumThreadsService {
   // said exactly that. The forum's own box has to be at least as good as the
   // one in the header.
   //
+  // The two boxes also apply the SAME community gate now: this one is narrowed
+  // by `applyCommunityAccessFilter` below, and `searchByText` builds the same
+  // "the community is `public`, OR the viewer is on its roster" predicate over
+  // reply bodies. Neither box can surface a thread the other hides, in either
+  // direction: being "as good as the header" is about finding answers, never
+  // about admitting a community that refused the viewer.
+  //
   // Written as a correlated EXISTS rather than a join so it stacks cleanly onto
   // the keyset ORDER BY without multiplying thread rows per matching reply
   // (mirroring `applyCommunityAccessFilter`). Backed by
@@ -1575,12 +1599,21 @@ export class ForumThreadsService {
   }
 
   // Narrows a thread list/count query to the threads a given viewer may see by
-  // community access tier: a thread scoped to a Private community only stays
-  // in the result set for a viewer on that community's roster. Threads with a
-  // null `community_id` (flat/global) and threads in non-Private communities
-  // (public/request/invite) stay visible to everyone — the same set
-  // `CommunityPostsService.assertViewable` and the `community_post` feed branch
-  // admit. Expressed as correlated EXISTS subqueries (not a join) so it stacks
+  // community access tier: a thread scoped to a community stays in the result
+  // set only when that community is `public`, or when the viewer is on its
+  // roster. Every other tier (`request`, `invite`, `private`) closes its
+  // content to anyone off that roster, which is what the community gate
+  // promises: the same set `CommunityPostsService.assertViewable` admits for a
+  // community's own board, and the same set the `community_post` feed branch
+  // admits. Threads with a null `community_id` (flat/global) belong to no
+  // roster, so no gate applies to them and they stay visible to everyone.
+  //
+  // The tier test asks "is `public`" rather than "is not one of the closed
+  // tiers", for the reason `isGatedTier` (`src/communities/community-gate.ts`)
+  // is written the same way: a tier added later stays closed until somebody
+  // deliberately opens it.
+  //
+  // Expressed as correlated EXISTS subqueries (not a join) so it stacks
   // cleanly onto `cursorPaginate`'s keyset ORDER BY, mirroring
   // `FeedService.fetchCandidates`. Shared by `list`/`counts`/`listPinned`/
   // `searchByText` so every browse/search surface hides the same threads.
@@ -1594,7 +1627,7 @@ export class ForumThreadsService {
         OR EXISTS (
           SELECT 1 FROM "communities" "com"
           WHERE "com"."id" = t.community_id
-            AND "com"."access_tier" != :privateTier
+            AND "com"."access_tier" = :publicTier
         )
         OR EXISTS (
           SELECT 1 FROM "community_members" "mem"
@@ -1602,18 +1635,28 @@ export class ForumThreadsService {
             AND "mem"."user_id" = :viewerId
         )
       )`,
-      { privateTier: AccessTier.Private, viewerId },
+      { publicTier: AccessTier.Public, viewerId },
     );
   }
 
   // Single-thread counterpart to `applyCommunityAccessFilter`, used by
-  // `loadOr404`: true only when the thread's community is Private AND the
-  // viewer isn't on its roster — the exact condition
-  // `CommunityPostsService.assertViewable` 404s on. Non-Private tiers
-  // (public/request/invite) are readable by non-members, same as community
-  // posts, so they never hide a thread. Runs against the `communities` entity
-  // via the thread repo's shared entity manager, so `ForumModule` needs no
-  // extra `Community` repository registration.
+  // `loadOr404`: true only when the thread's community is NOT `public` AND the
+  // viewer isn't on its roster, the exact condition
+  // `CommunityPostsService.assertViewable` refuses on. Every tier but `public`
+  // closes its content to anyone off the roster, which is what the community
+  // gate promises, so a `request`- or `invite`-tier thread now hides from a
+  // non-member exactly as a `private` one always did. Flat/global threads never
+  // reach here: `loadOr404` only probes when the thread carries a
+  // `communityId`, so no gate applies to them.
+  //
+  // This one reads the tier half inverted, so it asks for the gated tiers
+  // instead of for `public`. The list comes from `GATED_ACCESS_TIERS`
+  // (derived from `isGatedTier`) rather than being spelled out here, so a tier
+  // added later hides its content until somebody deliberately opens it.
+  //
+  // Runs against the `communities` entity via the thread repo's shared entity
+  // manager, so `ForumModule` needs no extra `Community` repository
+  // registration.
   private async isCommunityHiddenFrom(
     communityId: string,
     viewerId: string,
@@ -1621,8 +1664,8 @@ export class ForumThreadsService {
     return this.threads.manager
       .createQueryBuilder(Community, 'com')
       .where('com.id = :communityId', { communityId })
-      .andWhere('com.accessTier = :privateTier', {
-        privateTier: AccessTier.Private,
+      .andWhere('com.accessTier IN (:...gatedTiers)', {
+        gatedTiers: GATED_ACCESS_TIERS,
       })
       .andWhere(
         `NOT EXISTS (

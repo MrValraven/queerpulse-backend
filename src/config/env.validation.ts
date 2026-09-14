@@ -182,6 +182,11 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   @Min(1)
+  FEATURE_USAGE_RETENTION_DAYS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
   PUSH_SUBSCRIPTION_STALE_DAYS?: number;
 
   // The window the published privacy policy promises for gathering attendance.
