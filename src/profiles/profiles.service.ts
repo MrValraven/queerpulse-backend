@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -8,7 +9,14 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
+import {
+  DataSource,
+  In,
+  MoreThanOrEqual,
+  ObjectLiteral,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
@@ -53,6 +61,7 @@ import { ProfileFeaturedCommunity } from './entities/profile-featured-community.
 import { ProfileNowHistory } from './entities/profile-now-history.entity';
 import { pruneDiscoverable } from './identities';
 import { normalizeOpenTo } from './open-to';
+import { closenessFor, type RelatedCloseness } from './related-closeness';
 import { reconcileDisciplineProfession } from './professions';
 import {
   applyDirectoryFilters,
@@ -66,6 +75,16 @@ import {
   BoardPost,
   BoardPostStatus,
 } from './entities/board-post.entity';
+import {
+  BoardPostResponse,
+  BoardResponseKind,
+} from './entities/board-post-response.entity';
+import {
+  BOARD_INSIGHTS_WINDOW_DAYS,
+  BOARD_MATCHES_PER_POST,
+  BoardInsightsView,
+  BoardMatchView,
+} from './board-insights';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { Shaping } from './entities/shaping.entity';
@@ -73,6 +92,7 @@ import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
 import {
+  BoardResponderView,
   BoardView,
   FullProfileResponse,
   GroupView,
@@ -81,9 +101,12 @@ import {
   MutualVoucherCount,
   ProfileCard,
   ProfileRelations,
+  RelatedCard,
   SocialLinkView,
   WorkView,
+  buildBoardResponderSummary,
   gateAvatarUrl,
+  gateLocation,
   sortShapings,
   toBoardView,
   toFullProfile,
@@ -122,6 +145,9 @@ const BOARD_ITEM_LIFESPAN_DAYS: Record<BoardKind, number> = {
   [BoardKind.Looking]: 30,
   [BoardKind.Offering]: 90,
 };
+// How many times a post can be renewed before a member has to rewrite it.
+// Three renewals give a looking post four months and an offering post a year.
+export const BOARD_RENEW_LIMIT = 3;
 
 @Injectable()
 export class ProfilesService {
@@ -145,6 +171,8 @@ export class ProfilesService {
     @InjectRepository(Skill) private readonly skills: Repository<Skill>,
     @InjectRepository(BoardPost)
     private readonly boardPosts: Repository<BoardPost>,
+    @InjectRepository(BoardPostResponse)
+    private readonly boardResponses: Repository<BoardPostResponse>,
     @InjectRepository(Shaping) private readonly shapings: Repository<Shaping>,
     @InjectRepository(Activity)
     private readonly activities: Repository<Activity>,
@@ -439,6 +467,15 @@ export class ProfilesService {
         // which must not call this per row.
         this.nowInsights.getRespondsWithin(userId),
       ]);
+    // Response counts and the first few responders for this member's board,
+    // in ONE query keyed by post id — never per post. See loadBoardResponses.
+    // `viewerUserId` gates each responder by the same visibility rule every
+    // other surface uses: a responder must never be named to a viewer they
+    // blocked, or who blocked/hid from them.
+    const boardResponses = await this.loadBoardResponses(
+      board.map((boardPost) => boardPost.id),
+      viewerUserId,
+    );
     return toFullProfile(
       profile,
       rels,
@@ -448,7 +485,125 @@ export class ProfilesService {
       activityBand,
       mutualVoucherCount,
       respondsWithin,
+      boardResponses,
     );
+  }
+
+  /**
+   * Response counts and the first few responders for a member's board, in one
+   * query. Returns a map keyed by board post id so the caller can zip it onto
+   * the posts it already has.
+   *
+   * `viewerUserId` gates every responder row by the SAME "may this viewer see
+   * this member at all?" rule every other surface applies
+   * (`applyMemberVisibilityGates` + active-user join + `dropTakenDown`) —
+   * this is the more exposed of the two board reads that need it (the other
+   * is `getBoardInsights`'s matches): a responder's name and photo are shown
+   * to any VISITOR of the post owner's profile, not just the owner. A
+   * responder who has blocked the viewer, been blocked by them, hidden their
+   * own profile from them, is self-hidden, or been taken down by a moderator
+   * must not appear here by name — and since the counts below are derived
+   * from the SAME filtered rows, filtering also keeps `responseCount`/
+   * `helloCount` honest rather than counting someone who is invisible.
+   */
+  private async loadBoardResponses(
+    postIds: string[],
+    viewerUserId: string,
+  ): Promise<
+    Map<
+      string,
+      {
+        responders: BoardResponderView[];
+        responseCount: number;
+        helloCount: number;
+      }
+    >
+  > {
+    if (!postIds.length) return new Map();
+    const qb = this.boardResponses
+      .createQueryBuilder('response')
+      .innerJoin(Profile, 'profile', 'profile.user_id = response.responder_id')
+      // A deactivated (paused, or mid erasure-grace-period), suspended, or
+      // still-pending responder must never surface by name — same active-only
+      // rule `directoryBaseQuery` applies via `p.user`.
+      .innerJoin(
+        'profile.user',
+        'profileUser',
+        'profileUser.status = :active',
+        {
+          active: UserStatus.Active,
+        },
+      )
+      .select([
+        'response.post_id AS post_id',
+        'response.kind AS kind',
+        'response.created_at AS created_at',
+        'profile.slug AS slug',
+        'profile.first_name AS first',
+        'profile.last_name AS last',
+        'profile.avatar_url AS avatar_url',
+        'profile.photo_visible AS photo_visible',
+        'profile.user_id AS user_id',
+      ])
+      .where('response.post_id IN (:...postIds)', { postIds });
+    this.applyMemberVisibilityGates(qb, viewerUserId, 'profile');
+    const fetched = await qb.orderBy('response.created_at', 'ASC').getRawMany<{
+      post_id: string;
+      kind: string;
+      created_at: Date;
+      slug: string;
+      first: string;
+      last: string | null;
+      avatar_url: string | null;
+      photo_visible: boolean;
+      user_id: string;
+    }>();
+    // Moderator takedown is the fourth gate and has no single-column in-query
+    // form (see `dropTakenDown`), so it runs post-query, same as everywhere
+    // else in this file — and before the grouping below, so a taken-down
+    // responder never reaches the counts or the avatar list. `dropTakenDown`
+    // reads `.userId` (camelCase); the raw row keeps its own `user_id` too,
+    // widened rather than renamed, since nothing downstream needs it.
+    const rows = await this.dropTakenDown(
+      fetched.map((row) => ({ ...row, userId: row.user_id })),
+    );
+    // Group in application code: the counts and the capped avatar list come off
+    // the same rows, so one pass beats two aggregate queries.
+    const grouped = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const bucket = grouped.get(row.post_id) ?? [];
+      bucket.push(row);
+      grouped.set(row.post_id, bucket);
+    }
+    const result = new Map<
+      string,
+      {
+        responders: BoardResponderView[];
+        responseCount: number;
+        helloCount: number;
+      }
+    >();
+    for (const [postId, bucket] of grouped) {
+      const help = bucket.filter((row) => row.kind === 'help');
+      const summary = buildBoardResponderSummary(
+        help.map((row) => ({
+          slug: row.slug,
+          first: row.first,
+          last: row.last,
+          // Same resolved-URL shape every other avatar on the wire uses (see
+          // toProfileCard/gateAvatarUrl) — the raw column is a storage key or
+          // external URL, not something the frontend can render directly.
+          avatarUrl: toImageUrl(row.avatar_url),
+          photoVisible: row.photo_visible,
+        })),
+        help.length,
+      );
+      result.set(postId, {
+        ...summary,
+        helloCount: bucket.filter((row) => row.kind === 'hello').length,
+      });
+    }
+    return result;
   }
 
   /**
@@ -639,7 +794,7 @@ export class ProfilesService {
     // page, and that person must see their own real photo regardless of
     // their own `photoVisible` toggle. See `gateAvatarUrl`.
     viewerUserId: string,
-  ): Promise<ProfileCard[]> {
+  ): Promise<RelatedCard[]> {
     const hasTags = profile.tags.length > 0;
     const hasLocation = !!profile.location;
     if (!hasTags && !hasLocation) {
@@ -679,13 +834,122 @@ export class ProfilesService {
       .take(RELATED_READ_LIMIT);
     const pool = await this.dropTakenDown(await qb.getMany());
     const rows = pool.slice(0, RELATED_LIMIT);
-    const counts = await this.vouchService.getVouchCounts(
-      rows.map((r) => r.userId),
-    );
-    return rows.map((r) => ({
-      ...toProfileCard(r, counts.get(r.userId) ?? 0),
-      avatarUrl: gateAvatarUrl(r, r.userId === viewerUserId),
-    }));
+    const [counts, closeness] = await Promise.all([
+      this.vouchService.getVouchCounts(rows.map((r) => r.userId)),
+      this.loadCloseness(profile, rows, viewerUserId),
+    ]);
+    return rows.map((r) => {
+      const isSelf = r.userId === viewerUserId;
+      return {
+        ...toProfileCard(r, counts.get(r.userId) ?? 0),
+        avatarUrl: gateAvatarUrl(r, isSelf),
+        // Same two-layer gate `toMemberCard` applies to a directory card: a
+        // `network`/`private` member shows no neighbourhood at all, and an
+        // `open` one shows it only to themselves or once they opted into
+        // `hoodVisible`.
+        location:
+          r.visibility === ProfileVisibility.Open
+            ? gateLocation(r, isSelf)
+            : null,
+        closeness: closeness.get(r.userId) ?? null,
+      };
+    });
+  }
+
+  /**
+   * The one chip each related card carries ("Vouched for Ines", "Both in
+   * Editorial Reading Circle"), keyed by user id. Two queries for the whole
+   * set of four (vouch directions, shared communities); every other signal
+   * comes off rows already in memory.
+   *
+   * The privacy toggles and the ranking both live in `closenessFor`, which is
+   * pure and specced; this method's whole job is to read the two queries and
+   * hand it facts that are already gated on the two things only a Profile row
+   * can answer (the `open`-visibility layer, and `gateLocation`).
+   */
+  private async loadCloseness(
+    owner: Profile,
+    rows: Profile[],
+    viewerUserId: string,
+  ): Promise<Map<string, RelatedCloseness>> {
+    const ids = rows.map((r) => r.userId);
+    const out = new Map<string, RelatedCloseness>();
+    if (!ids.length) {
+      return out;
+    }
+    const [directions, communities] = await Promise.all([
+      this.vouchService.getPublicVouchDirections(owner.userId, ids),
+      this.sharedCommunityNames(owner.userId, ids),
+    ]);
+    // The owner's own neighbourhood, under the same gate their profile header
+    // renders it with (`toFullProfile`). A member who hid their hood hid it
+    // from this chip too, whichever card it would have sat on.
+    const ownerHood = gateLocation(owner, owner.userId === viewerUserId);
+    for (const row of rows) {
+      const isSelf = row.userId === viewerUserId;
+      const rowOpen = row.visibility === ProfileVisibility.Open;
+      const rowHood = rowOpen ? gateLocation(row, isSelf) : null;
+      const closeness = closenessFor({
+        ownerVouchersVisible: owner.vouchersVisible,
+        theirVouchersVisible: row.vouchersVisible,
+        theyVouchedForOwner: directions.vouchedForYou.has(row.userId),
+        ownerVouchedForThem: directions.youVouched.has(row.userId),
+        sharedCommunity: communities.get(row.userId) ?? null,
+        theirProfileOpen: rowOpen,
+        ownerOpenTo: owner.openTo,
+        theirOpenTo: row.openTo,
+        ownerTags: owner.tags,
+        theirTags: row.tags,
+        ownerHood,
+        theirHood: rowHood,
+      });
+      if (closeness) {
+        out.set(row.userId, closeness);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * For each of `otherIds`, the name of one community they and `ownerUserId`
+   * are both on the roster of, or nothing. Alphabetical, so a pair always
+   * yields the same name instead of shuffling between reads.
+   *
+   * Two gates, both the community's own promise rather than the viewer's: a
+   * private-tier community is never advertised (mirroring
+   * `loadFeaturedCommunities`), and neither is one whose roster has been
+   * turned invisible. "Both in X" is a statement about who is on that roster,
+   * so `rosterVisible: false` forbids it just as surely as the tier does.
+   */
+  private async sharedCommunityNames(
+    ownerUserId: string,
+    otherIds: string[],
+  ): Promise<Map<string, string>> {
+    const rows = await this.communityMembers
+      .createQueryBuilder('mine')
+      .innerJoin(
+        CommunityMember,
+        'theirs',
+        'theirs.community_id = mine.community_id AND theirs.user_id IN (:...otherIds)',
+        { otherIds },
+      )
+      .innerJoin(Community, 'c', 'c.id = mine.community_id')
+      .where('mine.user_id = :ownerUserId', { ownerUserId })
+      .andWhere('c.access_tier != :privateTier', {
+        privateTier: AccessTier.Private,
+      })
+      .andWhere('c.roster_visible = true')
+      .select('theirs.user_id', 'userId')
+      .addSelect('c.name', 'name')
+      .orderBy('c.name', 'ASC')
+      .getRawMany<{ userId: string; name: string }>();
+    const out = new Map<string, string>();
+    for (const row of rows) {
+      if (!out.has(row.userId)) {
+        out.set(row.userId, row.name);
+      }
+    }
+    return out;
   }
 
   private async canViewFull(
@@ -736,13 +1000,24 @@ export class ProfilesService {
    * both-keys rule as the single-profile gate, because a member can be
    * reported under either their slug or their user id.
    *
+   * Generic over anything carrying `{slug, userId}` rather than pinned to
+   * `Profile` — board reads (`loadBoardResponses`, `getBoardInsights`) call
+   * this over plain raw-query rows (a responder or a matched member, each
+   * shaped down to just those two fields plus whatever the caller already
+   * selected), not `Profile` entities, and a second takedown-filtering
+   * function for that shape would be exactly the drift this method's own
+   * "ONE spelling" precedent (see `applyMemberVisibilityGates`) exists to
+   * prevent.
+   *
    * Post-query rather than in-query on purpose. The subject is addressed by two
    * different columns and a REMOVED member counts as well as a hidden one, so
    * `ContentModerationService.excludeHidden` (one column, hidden-but-not-removed
    * only) is the wrong predicate here. Callers therefore over-fetch and slice,
    * the same shape `MemberSuggestionsService.dropTakenDown` uses.
    */
-  private async dropTakenDown(candidates: Profile[]): Promise<Profile[]> {
+  private async dropTakenDown<T extends { slug: string; userId: string }>(
+    candidates: T[],
+  ): Promise<T[]> {
     if (!candidates.length) {
       return candidates;
     }
@@ -1118,7 +1393,12 @@ export class ProfilesService {
 
   async replaceBoard(
     userId: string,
-    items: { kind: BoardPost['kind']; title: string; slug: string }[],
+    items: {
+      kind: BoardPost['kind'];
+      title: string;
+      slug: string;
+      tags?: string[];
+    }[],
   ): Promise<BoardView[]> {
     // board_posts has a unique (userId, slug); reject in-payload duplicates up
     // front so the whole replace fails cleanly rather than tripping the DB
@@ -1133,38 +1413,77 @@ export class ProfilesService {
     await this.dataSource.transaction(async (manager) => {
       // This endpoint replaces the caller's whole ORDERED LIST on every save
       // (title/slug/position edits, reordering, add/remove) — it does not
-      // reset each item's closed/found lifecycle. Load the current rows
-      // before deleting them so a re-saved slug can carry its
-      // status/closedAt/closedNote/expiresAt/createdAt forward unchanged;
-      // only a slug that is genuinely new (not present before) gets a fresh
-      // expiresAt/createdAt. `createdAt` matters beyond bookkeeping: the FE
-      // renders it as relative-age copy ("Asked 12 days ago") — silently
-      // resetting it on an unrelated list edit would misdate every existing
-      // item shown to visitors.
+      // reset each item's closed/found lifecycle, and it does not reset each
+      // item's IDENTITY either. `board_post_responses` hangs off
+      // `board_posts.id` with ON DELETE CASCADE, so deleting a row that is
+      // about to be recreated would silently destroy every offer to help and
+      // every board-scoped hello that post has received. A surviving slug is
+      // therefore UPDATED IN PLACE, keeping its `id`; only slugs absent from
+      // the payload are deleted, and only genuinely new slugs are inserted.
+      //
+      // The same reasoning covers the field values a survivor carries
+      // forward untouched: status/closedAt/closedNote/expiresAt/renewCount/
+      // renewedAt/createdAt. `createdAt` matters beyond bookkeeping — the FE
+      // renders it as relative-age copy ("Asked 12 days ago"), so resetting
+      // it on an unrelated list edit would misdate every existing item shown
+      // to visitors. `renewCount` matters because BOARD_RENEW_LIMIT is
+      // counted from it: resetting it here while keeping the already
+      // pushed-out `expiresAt` would let a member renew forever by saving
+      // the editor between runs.
       const existing = await manager.find(BoardPost, { where: { userId } });
       const existingBySlug = new Map(
         existing.map((boardPost) => [boardPost.slug, boardPost]),
       );
 
-      await manager.delete(BoardPost, { userId });
+      // Ordering inside the transaction: the deletes run FIRST, before any
+      // insert or update, so a slug freed by this same save is already gone
+      // from `UQ_board_posts_user_slug` by the time anything else claims it.
+      // Beyond that the unique index cannot be transiently violated at all,
+      // because `slug` is the match key: a surviving row keeps the slug it
+      // already had (only kind/title/position/tags are written), so no
+      // update ever moves a slug from one row to another. A pure reorder
+      // touches `position`, which carries no unique constraint, and deletes
+      // nothing.
+      const incomingSlugs = new Set(items.map((item) => item.slug));
+      const removedIds = existing
+        .filter((boardPost) => !incomingSlugs.has(boardPost.slug))
+        .map((boardPost) => boardPost.id);
+      if (removedIds.length) {
+        await manager.delete(BoardPost, { userId, id: In(removedIds) });
+      }
+
       const now = Date.now();
       const rows = items.map((item, index) => {
         const previous = existingBySlug.get(item.slug);
+        if (previous) {
+          // In place, on the loaded entity: `previous.id` is untouched, so
+          // `manager.save` issues an UPDATE and the response rows keyed to
+          // that id survive. Everything not assigned here is preserved by
+          // simply not being written.
+          previous.kind = item.kind;
+          previous.title = item.title;
+          previous.position = index;
+          previous.tags = item.tags ?? [];
+          return previous;
+        }
         return manager.create(BoardPost, {
           userId,
           kind: item.kind,
           title: item.title,
           slug: item.slug,
           position: index,
-          status: previous ? previous.status : BoardPostStatus.Open,
-          closedNote: previous ? previous.closedNote : null,
-          closedAt: previous ? previous.closedAt : null,
-          expiresAt: previous
-            ? previous.expiresAt
-            : new Date(now + BOARD_ITEM_LIFESPAN_DAYS[item.kind] * DAY_MS),
+          status: BoardPostStatus.Open,
+          closedNote: null,
+          closedAt: null,
+          expiresAt: new Date(
+            now + BOARD_ITEM_LIFESPAN_DAYS[item.kind] * DAY_MS,
+          ),
+          renewCount: 0,
+          renewedAt: null,
           // Left undefined for a genuinely new slug so `@CreateDateColumn`
           // populates it on insert as usual.
-          createdAt: previous ? previous.createdAt : undefined,
+          createdAt: undefined,
+          tags: item.tags ?? [],
         });
       });
       if (rows.length) {
@@ -1175,7 +1494,9 @@ export class ProfilesService {
       where: { userId },
       order: { position: 'ASC' },
     });
-    return saved.map(toBoardView);
+    // `.map(toBoardView)` would hand toBoardView the array index as its
+    // second (responses) argument — see the same note in profile-response.ts.
+    return saved.map((b) => toBoardView(b));
   }
 
   async closeBoardItem(
@@ -1194,6 +1515,301 @@ export class ProfilesService {
     boardPost.closedNote = note ?? null;
     await this.boardPosts.save(boardPost);
     return toBoardView(boardPost);
+  }
+
+  /**
+   * Push a board post's expiry out by its kind's full window, from now.
+   *
+   * One endpoint serves two labels in the UI: "Renew 30 days" while the post
+   * is still alive, and "Repost" once it has expired. Both land here, and both
+   * measure the new window from now, so a post that lapsed three weeks ago
+   * gets a full fresh run rather than a backdated one.
+   *
+   * A closed post is reopened through the board editor, so renewing one is a
+   * conflict.
+   */
+  async renewBoardItem(userId: string, slug: string): Promise<BoardView> {
+    const boardPost = await this.boardPosts.findOne({
+      where: { userId, slug },
+    });
+    if (!boardPost) {
+      throw new NotFoundException('No board item with that slug.');
+    }
+    if (boardPost.status === BoardPostStatus.Closed) {
+      throw new ConflictException(
+        'This post is closed. Reopen it from the board editor.',
+      );
+    }
+    if (boardPost.renewCount >= BOARD_RENEW_LIMIT) {
+      throw new ConflictException(
+        'This post has been renewed as many times as it can be. Write a fresh one.',
+      );
+    }
+    const now = Date.now();
+    boardPost.expiresAt = new Date(
+      now + BOARD_ITEM_LIFESPAN_DAYS[boardPost.kind] * DAY_MS,
+    );
+    boardPost.renewedAt = new Date(now);
+    boardPost.renewCount += 1;
+    await this.boardPosts.save(boardPost);
+    return toBoardView(boardPost);
+  }
+
+  /**
+   * Record one member's response to another's board post: an offer to help, or
+   * a board-scoped hello.
+   *
+   * The unique index on (postId, responderId, kind) makes a repeat response a
+   * conflict rather than a second row, so counts stay honest. Visibility is the
+   * profile's own gate, reused here: a member who only shows their profile to
+   * their network only takes board responses from their network.
+   */
+  async respondToBoardItem(
+    viewerId: string,
+    ownerSlug: string,
+    postSlug: string,
+    kind: BoardResponseKind,
+    note?: string,
+  ): Promise<{ kind: string; createdAt: string }> {
+    // Reuses the single-profile read's own two-part visibility gate rather
+    // than a second rule: `findBySlugOrThrow` covers the "does the viewer get
+    // to know this member exists at all?" gates (block, hidden-from,
+    // self-hide, moderator takedown — all the same indistinguishable-from-404
+    // as `getBySlug`, plus PRD-204 moved-slug forwarding), and `canViewFull`
+    // below covers the owner/open/network/private visibility TIER on top of
+    // that. Calling `this.profiles.findOne` directly here would skip the
+    // block/hidden-from/takedown gates entirely.
+    const owner = await this.findBySlugOrThrow(ownerSlug, viewerId);
+    if (owner.userId === viewerId) {
+      throw new ForbiddenException('This is your own board post.');
+    }
+    if (!(await this.canViewFull(owner, viewerId))) {
+      throw new ForbiddenException('This board is not open to you.');
+    }
+    const boardPost = await this.boardPosts.findOne({
+      where: { userId: owner.userId, slug: postSlug },
+    });
+    // A closed or lapsed post is gone as far as a responder is concerned, so it
+    // reads as absent rather than as a separate refusal.
+    if (
+      !boardPost ||
+      boardPost.status === BoardPostStatus.Closed ||
+      boardPost.expiresAt.getTime() <= Date.now()
+    ) {
+      throw new NotFoundException('No open board item with that slug.');
+    }
+    const existing = await this.boardResponses.findOne({
+      where: { postId: boardPost.id, responderId: viewerId, kind },
+    });
+    if (existing) {
+      throw new ConflictException('You have already responded to this post.');
+    }
+    const row = this.boardResponses.create({
+      postId: boardPost.id,
+      responderId: viewerId,
+      kind,
+      note: note?.trim() || null,
+    });
+    try {
+      await this.boardResponses.save(row);
+    } catch (err) {
+      // The pre-check above has a TOCTOU gap: two concurrent identical
+      // requests can both pass it, and the loser trips the unique index on
+      // (postId, responderId, kind) here instead. Same recovery as
+      // `updateUsername`'s handle-collision race.
+      if (
+        isUniqueViolation(err, 'UQ_board_post_responses_post_responder_kind')
+      ) {
+        throw new ConflictException('You have already responded to this post.');
+      }
+      throw err;
+    }
+    // Task 3 does not wire an owner notification here: ProfilesService injects
+    // no notifications dependency, and adding one is out of scope for this
+    // task. See the Task 3 report — the owner is not yet notified of a help
+    // response; that needs its own task.
+    return { kind: row.kind, createdAt: row.createdAt.toISOString() };
+  }
+
+  /**
+   * The owner's board figures: the hellos/replies funnel over the trailing
+   * window, and the reciprocal matches for each of their live posts.
+   *
+   * Matching is deliberately literal. A post matches another member's post when
+   * the kinds are opposite and they share at least one tag from the curated
+   * vocabulary, so a pill only ever claims something both members typed. The
+   * whole board resolves in ONE query via a windowed derived-table join (see
+   * the `ROW_NUMBER()` inside the `ranked` subquery below); a per-post query
+   * here would be an N+1 on the owner's own profile load.
+   */
+  async getBoardInsights(userId: string): Promise<BoardInsightsView> {
+    const windowStart = new Date(
+      Date.now() - BOARD_INSIGHTS_WINDOW_DAYS * DAY_MS,
+    );
+    const own = await this.boardPosts.find({ where: { userId } });
+    const ownIds = own.map((post) => post.id);
+
+    const [hellos, replies] = ownIds.length
+      ? await Promise.all([
+          this.boardResponses.count({
+            where: {
+              postId: In(ownIds),
+              kind: BoardResponseKind.Hello,
+              createdAt: MoreThanOrEqual(windowStart),
+            },
+          }),
+          this.boardResponses.count({
+            where: {
+              postId: In(ownIds),
+              kind: BoardResponseKind.Help,
+              createdAt: MoreThanOrEqual(windowStart),
+            },
+          }),
+        ])
+      : [0, 0];
+
+    // `own` is filtered against the Node clock (`Date.now()`/`new Date()`
+    // here) while `other`'s expiry check below runs Postgres's own `now()`
+    // inside the query. The two clocks can drift by a few ms; harmless at
+    // this day-scale expiry window, so left as two clocks rather than forcing
+    // one query to read the other's snapshot.
+    const now = new Date();
+    const matchable = own.filter(
+      (post) =>
+        post.status === BoardPostStatus.Open &&
+        post.expiresAt > now &&
+        post.tags.length > 0,
+    );
+
+    const matches: Record<string, BoardMatchView[]> = {};
+    if (matchable.length) {
+      const ids = matchable.map((post) => post.id);
+      // Capped IN SQL via a window function, not a plain `.limit()` —
+      // `.limit()` would cap the WHOLE result set, letting one post's
+      // matches starve another's once one owner post has many candidates.
+      // `ROW_NUMBER() OVER (PARTITION BY own.id ORDER BY …)` ranks each
+      // owner post's candidates independently; the outer `ranked` query below
+      // keeps only rows `<= BOARD_MATCHES_PER_POST * 3` per partition, so the
+      // cap is enforced in Postgres and rows other than a small multiple of
+      // 3-per-post never leave it, not after the full cross product is on
+      // the wire.
+      const rows = await this.dataSource
+        .createQueryBuilder()
+        .select([
+          'ranked.owner_post_slug AS owner_post_slug',
+          'ranked.post_slug AS post_slug',
+          'ranked.kind AS kind',
+          'ranked.slug AS slug',
+          'ranked.first AS first',
+          'ranked.matched_user_id AS matched_user_id',
+        ])
+        .from((rankedQb) => {
+          const inner = rankedQb
+            .select([
+              'own.slug AS owner_post_slug',
+              'other.post_slug AS post_slug',
+              'other.kind AS kind',
+              'profile.slug AS slug',
+              'profile.first_name AS first',
+              'other.user_id AS matched_user_id',
+              // Tiebroken by the matched post's own slug: posts written in
+              // the same `replaceBoard` transaction share `created_at` down
+              // to the millisecond, and without a tiebreaker which 3 survive
+              // the cap below would be nondeterministic between requests.
+              'ROW_NUMBER() OVER (PARTITION BY own.id ORDER BY other.created_at DESC, other.post_slug ASC) AS rn',
+            ])
+            .from(BoardPost, 'own')
+            .innerJoin(
+              (sub) =>
+                sub
+                  .select([
+                    'other.slug AS post_slug',
+                    'other.kind AS kind',
+                    'other.user_id AS user_id',
+                    'other.tags AS tags',
+                    'other.created_at AS created_at',
+                  ])
+                  .from(BoardPost, 'other')
+                  .where('other.status = :open', { open: BoardPostStatus.Open })
+                  .andWhere('other.expires_at > now()')
+                  .andWhere('other.user_id != :userId', { userId }),
+              'other',
+              'other.tags && own.tags AND other.kind != own.kind',
+            )
+            .innerJoin(Profile, 'profile', 'profile.user_id = other.user_id')
+            // The matched member must be an ACTIVE user — deactivated
+            // (covers both "pause my account" and the 30-day erasure grace
+            // period), suspended, and pending members must never surface by
+            // name. Same join `directoryBaseQuery` uses via `p.user`.
+            .innerJoin(
+              'profile.user',
+              'profileUser',
+              'profileUser.status = :active',
+              { active: UserStatus.Active },
+            )
+            .where('own.id IN (:...ids)', { ids });
+          // The SAME single spelling of "may this viewer see this member at
+          // all?" every other read path uses — block either way, hidden-from,
+          // and self-hide — with `userId` (the insights OWNER) as the viewer.
+          // A member who blocked the owner, or whom the owner blocked, or who
+          // hid their profile from the owner, or is self-hidden, must not
+          // surface as a match by name. Called with `'profile'` because this
+          // query's `Profile` join is aliased `profile`, not the directory's
+          // `p`.
+          this.applyMemberVisibilityGates(inner, userId, 'profile');
+          return inner;
+        }, 'ranked')
+        // Read a wider pool than we render: the fourth gate (moderator
+        // takedown) has no in-query form here, so it drops rows AFTER the
+        // fetch (see `dropTakenDown` below), and capping the SQL at exactly
+        // `BOARD_MATCHES_PER_POST` would leave a short (or, in the
+        // degenerate case, missing) bucket whenever one of a post's top 3
+        // matches had been taken down — same reasoning as `RELATED_READ_LIMIT`
+        // above. The JS trim after `dropTakenDown`, below, cuts each bucket
+        // back down to `BOARD_MATCHES_PER_POST` once takedowns are removed.
+        .where('ranked.rn <= :cap', { cap: BOARD_MATCHES_PER_POST * 3 })
+        .orderBy('ranked.rn', 'ASC')
+        .getRawMany<{
+          owner_post_slug: string;
+          post_slug: string;
+          kind: 'looking' | 'offering';
+          slug: string;
+          first: string;
+          matched_user_id: string;
+        }>();
+
+      // Moderator takedown is the fourth gate and has no single-column
+      // in-query form (see `dropTakenDown`), so it runs post-query, same as
+      // everywhere else in this file — BEFORE the per-post trim below, so a
+      // taken-down member never occupies one of the BOARD_MATCHES_PER_POST
+      // slots a visible member could have filled instead.
+      const visibleRows = await this.dropTakenDown(
+        rows.map((row) => ({ ...row, userId: row.matched_user_id })),
+      );
+
+      for (const row of visibleRows) {
+        const bucket = matches[row.owner_post_slug] ?? [];
+        // The real trim: the SQL cap above over-fetches to
+        // `BOARD_MATCHES_PER_POST * 3` per post specifically so takedowns can
+        // be removed first without shorting a bucket, so this cuts each one
+        // back down to the real, displayed cap.
+        if (bucket.length >= BOARD_MATCHES_PER_POST) continue;
+        bucket.push({
+          slug: row.slug,
+          first: row.first,
+          kind: row.kind,
+          postSlug: row.post_slug,
+        });
+        matches[row.owner_post_slug] = bucket;
+      }
+    }
+
+    return {
+      hellos,
+      replies,
+      windowDays: BOARD_INSIGHTS_WINDOW_DAYS,
+      matches,
+    };
   }
 
   async replaceShapings(
@@ -1268,10 +1884,18 @@ export class ProfilesService {
 
   /**
    * The in-query half of "may this viewer see this member at all?", applied to
-   * any list of `Profile` rows aliased `p`. ONE spelling of the rule, shared by
-   * the directory (`directoryBaseQuery`) and the profile page's related list
-   * (`loadRelated`), because a second spelling is how a surface quietly drifts
-   * out of sync with every other read path.
+   * any query builder carrying a `Profile` join, whatever it is aliased. ONE
+   * spelling of the rule, shared by the directory (`directoryBaseQuery`), the
+   * profile page's related list (`loadRelated`), and the board reads
+   * (`loadBoardResponses`, `getBoardInsights`) — because a second spelling is
+   * how a surface quietly drifts out of sync with every other read path.
+   *
+   * `alias` defaults to `'p'` (the directory/related-list alias); board reads
+   * join `Profile` as `'profile'` and pass that explicitly. The generic `E`
+   * (not pinned to `Profile`) is what lets this be called on a query builder
+   * whose MAIN entity is `BoardPost`/`BoardPostResponse` rather than
+   * `Profile` itself — the four gates below only ever touch the named
+   * `alias`'s columns, never the query's root entity.
    *
    * Three of the four member gates live here. The fourth, moderator takedown,
    * is keyed by slug OR userId in `content_moderation` and counts a removal as
@@ -1279,18 +1903,20 @@ export class ProfilesService {
    * it separately (`assertNotTakenDown` for a single profile, `dropTakenDown`
    * over a fetched pool).
    */
-  private applyMemberVisibilityGates(
-    qb: SelectQueryBuilder<Profile>,
+  private applyMemberVisibilityGates<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
     viewerUserId: string,
+    alias = 'p',
   ): void {
+    const userIdColumn = `"${alias}"."user_id"`;
     // Blocked-either-way members (in either direction) never surface (spec §2).
-    // `p`'s primary key is `user_id` (snake_case, per SnakeNamingStrategy) —
-    // matches this query builder's alias.
-    this.blockFilter.excludeBlocked(qb, viewerUserId, '"p"."user_id"');
+    // `user_id` is snake_case per SnakeNamingStrategy, matching every alias
+    // this is called with.
+    this.blockFilter.excludeBlocked(qb, viewerUserId, userIdColumn);
     // Hidden-from (member profile v2 Task 5): a candidate who hid THEIR
     // profile from this viewer never surfaces either, same as a block —
     // directional, unlike `excludeBlocked` above.
-    this.hiddenFrom.excludeHiddenFrom(qb, viewerUserId, '"p"."user_id"');
+    this.hiddenFrom.excludeHiddenFrom(qb, viewerUserId, userIdColumn);
     // Self-hide (member profile v2 Task 6, "Hide me for 24 hours"): a member
     // with a live `hiddenUntil` excludes themself from EVERY viewer's
     // results — unlike the block/hidden-from gates above, this is not
@@ -1298,7 +1924,9 @@ export class ProfilesService {
     // scoped to `viewerUserId`. They can still fetch their own profile
     // directly (`getMine`/`getBySlug` own the owner exception via
     // `findBySlugOrThrow`).
-    qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
+    qb.andWhere(
+      `("${alias}"."hidden_until" IS NULL OR "${alias}"."hidden_until" <= now())`,
+    );
   }
 
   /**

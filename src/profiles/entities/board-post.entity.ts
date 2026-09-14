@@ -61,6 +61,20 @@ export class BoardPost {
   @Column({ type: 'timestamptz' })
   expiresAt!: Date;
 
+  // Drawn from the frontend's curated PROFILE_TAG_CATEGORIES vocabulary and
+  // matched literally, the same contract profile tags already use. Powers the
+  // reciprocal match query (ProfilesService.getBoardInsights).
+  @Column({ type: 'text', array: true, default: () => "'{}'" })
+  tags!: string[];
+
+  // Renewal bookkeeping. `renewCount` is capped at BOARD_RENEW_LIMIT so a post
+  // cannot live indefinitely without a member rewriting it.
+  @Column({ type: 'timestamptz', nullable: true })
+  renewedAt!: Date | null;
+
+  @Column({ type: 'int', default: 0 })
+  renewCount!: number;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

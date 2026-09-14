@@ -650,6 +650,59 @@ export class VouchService {
   }
 
   /**
+   * The PUBLIC vouch relationships between `memberUserId` and each of
+   * `otherIds`, split by direction. Powers the "People close by" chip on a
+   * profile ("Vouched for Ines" / "Ines vouched for them").
+   *
+   * Deliberately NOT `getVouchDirections`, which is viewer-relative and lets an
+   * anonymous OUTGOING vouch through because the viewer is the person who made
+   * it. Here the first argument is the PROFILE OWNER while the reader is any
+   * visitor, so both directions drop `anonymous` rows: an anonymous voucher is
+   * shielded from every third party, whichever end of the pair they are.
+   *
+   * Block-severed vouches are dropped too, in both directions, matching
+   * `activeVouchesReceivedBy`: a block stops the vouch existing for the pair
+   * and for every visitor, so the number and the chip can never disagree.
+   */
+  async getPublicVouchDirections(
+    memberUserId: string,
+    otherIds: string[],
+  ): Promise<VouchDirections> {
+    const youVouched = new Set<string>();
+    const vouchedForYou = new Set<string>();
+    if (!otherIds.length) {
+      return { youVouched, vouchedForYou };
+    }
+    // Received by the member, from someone in the set. `activeVouchesReceivedBy`
+    // already carries the withdrawn + block filters.
+    const received = await this.activeVouchesReceivedBy(memberUserId)
+      .andWhere('v.voucherId IN (:...otherIds)', { otherIds })
+      .andWhere('v.anonymous = false')
+      .getMany();
+    for (const vouch of received) {
+      vouchedForYou.add(vouch.voucherId);
+    }
+    // Given by the member to someone in the set. Same pair, so the same block
+    // severance applies; `excludeBlocked` binds a fixed parameter name and is
+    // called once on this builder, per its contract.
+    const givenQuery = this.vouches
+      .createQueryBuilder('v')
+      .where('v.voucherId = :memberUserId', { memberUserId })
+      .andWhere('v.voucheeId IN (:...otherIds)', { otherIds })
+      .andWhere('v.withdrawnAt IS NULL')
+      .andWhere('v.anonymous = false');
+    this.blockFilter.excludeBlocked(
+      givenQuery,
+      memberUserId,
+      '"v"."vouchee_id"',
+    );
+    for (const vouch of await givenQuery.getMany()) {
+      youVouched.add(vouch.voucheeId);
+    }
+    return { youVouched, vouchedForYou };
+  }
+
+  /**
    * The one definition of "an active vouch this member has received": not
    * withdrawn, and not severed by a block in either direction between the
    * member and the voucher.

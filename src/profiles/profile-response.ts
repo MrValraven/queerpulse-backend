@@ -13,6 +13,7 @@ import { WorkItem, WorkLink } from './entities/work-item.entity';
 import { ActivityBand } from './last-active';
 import { RespondsWithin } from './now-insights.service';
 import { OpenToEntry } from './open-to';
+import type { RelatedCloseness } from './related-closeness';
 import { facetsForLabels } from './identities';
 import { matchNeighbourhood } from './neighbourhoods';
 
@@ -45,6 +46,24 @@ export interface ProfileCard {
   vouchersVisible: boolean;
 }
 
+/**
+ * A "People close by" card: a member similar to the profile owner by craft or
+ * neighbourhood (see `ProfilesService.loadRelated`), carrying two fields a
+ * plain `ProfileCard` has no use for.
+ *
+ * `location` is here because this card renders a "role - neighbourhood" line
+ * and `ProfileCard` carries no location at all; it is gated exactly as
+ * `toMemberCard` gates it (the member's profile is `open` AND they are the
+ * viewer or opted into `hoodVisible`).
+ *
+ * `closeness` is the one reason the card shows, owner-relative. See
+ * ./related-closeness.ts.
+ */
+export interface RelatedCard extends ProfileCard {
+  location: string | null;
+  closeness: RelatedCloseness | null;
+}
+
 export interface SocialLinkView {
   platform: string;
   urlOrHandle: string;
@@ -69,6 +88,72 @@ export interface BoardView {
   closedAt: string | null;
   expiresAt: string;
   createdAt: string;
+  tags: string[];
+  renewCount: number;
+  responseCount: number;
+  helloCount: number;
+  responders: BoardResponderView[];
+}
+
+// How many responder avatars a row shows. The full count travels separately so
+// the UI can render a "+N" overflow without the extra rows on the wire.
+export const BOARD_RESPONDERS_SHOWN = 3;
+
+export interface BoardResponderView {
+  slug: string;
+  first: string;
+  last: string | null;
+  initials: string;
+  tint: string;
+  avatarUrl: string | null;
+}
+
+// `last` is ungated — see `toProfileCard`/`ProfileCard.lastName`, which ships
+// the member's last name to every viewer with no visibility toggle guarding
+// it (unlike `avatarUrl`/`photoVisible` and `location`/`hoodVisible` above).
+// So the initials below can read straight off it with no gate to respect.
+function boardResponderInitials(first: string, last: string | null): string {
+  const firstLetter = first.slice(0, 1).toUpperCase();
+  const lastLetter = (last ?? '').trim().slice(0, 1).toUpperCase();
+  return `${firstLetter}${lastLetter}`;
+}
+
+/**
+ * Shape the responder list a board row shows. Photos run through the same
+ * `photoVisible` gate every other avatar on a profile does, so a member who
+ * hides their photo appears here as initials — two letters (first + last)
+ * when a last name is on file, one when it isn't (see
+ * `boardResponderInitials`).
+ */
+export function buildBoardResponderSummary(
+  responders: {
+    slug: string;
+    first: string;
+    last?: string | null;
+    avatarUrl?: string | null;
+    photoVisible?: boolean;
+    tint?: string;
+  }[],
+  responseCount: number,
+): { responders: BoardResponderView[]; responseCount: number } {
+  return {
+    responseCount,
+    responders: responders
+      .slice(0, BOARD_RESPONDERS_SHOWN)
+      .map((responder) => ({
+        slug: responder.slug,
+        first: responder.first,
+        last: responder.last ?? null,
+        initials: boardResponderInitials(
+          responder.first,
+          responder.last ?? null,
+        ),
+        tint: responder.tint ?? 'default',
+        avatarUrl: responder.photoVisible
+          ? (responder.avatarUrl ?? null)
+          : null,
+      })),
+  };
 }
 
 export interface SkillView {
@@ -102,7 +187,7 @@ export interface ProfileRelations {
   groups: GroupView[];
   shapings: Shaping[];
   activity: Activity[];
-  related: ProfileCard[];
+  related: RelatedCard[];
   featuredCommunities: FeaturedCommunityRefView[];
 }
 
@@ -182,7 +267,7 @@ export interface FullProfileResponse extends ProfileCard {
   groups: GroupView[];
   shapings: ShapingView[];
   activity: ActivityView[];
-  related: ProfileCard[];
+  related: RelatedCard[];
   // Communities the member has pinned to their profile, resolved for display.
   // Visible to anyone who can see the full profile (self/open/connected), like
   // the other public sections; empty on the limited card.
@@ -348,7 +433,14 @@ export function toMemberCard(
   };
 }
 
-export function toBoardView(b: BoardPost): BoardView {
+export function toBoardView(
+  b: BoardPost,
+  responses?: {
+    responders: BoardResponderView[];
+    responseCount: number;
+    helloCount: number;
+  },
+): BoardView {
   return {
     kind: b.kind,
     title: b.title,
@@ -358,6 +450,11 @@ export function toBoardView(b: BoardPost): BoardView {
     closedAt: b.closedAt?.toISOString() ?? null,
     expiresAt: b.expiresAt.toISOString(),
     createdAt: b.createdAt.toISOString(),
+    tags: b.tags ?? [],
+    renewCount: b.renewCount ?? 0,
+    responseCount: responses?.responseCount ?? 0,
+    helloCount: responses?.helloCount ?? 0,
+    responders: responses?.responders ?? [],
   };
 }
 
@@ -384,6 +481,18 @@ export function toFullProfile(
   // comment above). Never fetched here: a per-profile aggregate belongs to
   // the single-profile read path only, never the member-directory list path.
   respondsWithin: RespondsWithin | null = null,
+  // Response counts and the first few responders per board post, keyed by
+  // `BoardPost.id`. The caller batches ONE query for the whole board (see
+  // `ProfilesService.loadBoardResponses`) and passes the resulting Map
+  // straight through; this mapper stays synchronous, same as `crops` above.
+  boardResponses: Map<
+    string,
+    {
+      responders: BoardResponderView[];
+      responseCount: number;
+      helloCount: number;
+    }
+  > = new Map(),
 ): FullProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
@@ -427,7 +536,11 @@ export function toFullProfile(
       crop: cropFor(workItem.imageUrl, crops),
       links: workItem.links,
     })),
-    board: rels.board.map(toBoardView),
+    // `.map(toBoardView)` would hand toBoardView the array index as its
+    // second argument (responses would then be typed `number`, a real type
+    // error against the optional-object parameter above) — wrapped in an
+    // arrow so each post's own responder slice gets zipped on instead.
+    board: rels.board.map((b) => toBoardView(b, boardResponses.get(b.id))),
     skills: rels.skills.map((s) => ({ name: s.name, meta: s.meta })),
     groups: rels.groups,
     shapings: sortShapings(rels.shapings).map((s) => ({

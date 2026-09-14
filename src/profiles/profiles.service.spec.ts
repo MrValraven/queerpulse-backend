@@ -22,7 +22,12 @@ import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { truncateAtWord } from './directory-blurb';
 import { Activity } from './entities/activity.entity';
-import { BoardPost } from './entities/board-post.entity';
+import {
+  BoardKind,
+  BoardPost,
+  BoardPostStatus,
+} from './entities/board-post.entity';
+import { BoardPostResponse } from './entities/board-post-response.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
@@ -82,6 +87,13 @@ describe('ProfilesService.getBySlug visibility', () => {
   let handles: { rename: jest.Mock; previousProfileOwnerOf: jest.Mock };
   let nowHistory: { create: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+  // Board fixtures for the `loadBoardResponses` visibility-gate test below.
+  // Defaulted to empty so every OTHER test in this describe (which never
+  // touches the board) is unaffected: `loadBoardResponses` short-circuits on
+  // an empty `postIds` before ever calling `boardResponses.createQueryBuilder`.
+  let boardPosts: { find: jest.Mock };
+  let boardResponses: { find: jest.Mock; createQueryBuilder?: jest.Mock };
+  let contentModeration: { statesForAnyType: jest.Mock };
   const findEmpty = () => ({ find: jest.fn().mockResolvedValue([]) });
 
   const profile = (overrides = {}): Profile =>
@@ -128,10 +140,16 @@ describe('ProfilesService.getBySlug visibility', () => {
     // which individual tests configure to capture what was saved.
     nowHistory = {
       create: jest.fn(
-        (input: Partial<ProfileNowHistory>) => ({ ...input }) as ProfileNowHistory,
+        (input: Partial<ProfileNowHistory>) =>
+          ({ ...input }) as ProfileNowHistory,
       ),
     };
     dataSource = { transaction: jest.fn() };
+    boardPosts = { find: jest.fn().mockResolvedValue([]) };
+    boardResponses = { find: jest.fn().mockResolvedValue([]) };
+    contentModeration = {
+      statesForAnyType: jest.fn().mockResolvedValue(new Map()),
+    };
     const groupMemberships = {
       ...findEmpty(),
       createQueryBuilder: jest.fn(() => qbStub()),
@@ -143,7 +161,11 @@ describe('ProfilesService.getBySlug visibility', () => {
         { provide: getRepositoryToken(SocialLink), useValue: findEmpty() },
         { provide: getRepositoryToken(WorkItem), useValue: findEmpty() },
         { provide: getRepositoryToken(Skill), useValue: findEmpty() },
-        { provide: getRepositoryToken(BoardPost), useValue: findEmpty() },
+        { provide: getRepositoryToken(BoardPost), useValue: boardPosts },
+        {
+          provide: getRepositoryToken(BoardPostResponse),
+          useValue: boardResponses,
+        },
         { provide: getRepositoryToken(Shaping), useValue: findEmpty() },
         { provide: getRepositoryToken(Activity), useValue: findEmpty() },
         { provide: getRepositoryToken(Group), useValue: findEmpty() },
@@ -163,7 +185,10 @@ describe('ProfilesService.getBySlug visibility', () => {
           provide: getRepositoryToken(CommunityMember),
           useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
         },
-        { provide: getRepositoryToken(ProfileNowHistory), useValue: nowHistory },
+        {
+          provide: getRepositoryToken(ProfileNowHistory),
+          useValue: nowHistory,
+        },
         { provide: DataSource, useValue: dataSource },
         {
           provide: VouchService,
@@ -189,9 +214,7 @@ describe('ProfilesService.getBySlug visibility', () => {
         {
           // No takedown by default; `assertNotTakenDown` sees an empty map.
           provide: ContentModerationService,
-          useValue: {
-            statesForAnyType: jest.fn().mockResolvedValue(new Map()),
-          },
+          useValue: contentModeration,
         },
         {
           provide: MediaCropService,
@@ -401,6 +424,70 @@ describe('ProfilesService.getBySlug visibility', () => {
       const res = await service.getBySlug('jo', 'viewer-1');
       const full = res as Extract<typeof res, { limited: false }>;
       expect(full.related[0]?.avatarUrl).toBe('https://x/me.png');
+    });
+  });
+
+  describe('loadBoardResponses visibility gate (Task 5 fix round 2)', () => {
+    const boardPost = {
+      id: 'post-1',
+      userId: 'owner-1',
+      kind: BoardKind.Looking,
+      title: 'A collaborator for a queer zine',
+      slug: 'zine-collab',
+      status: BoardPostStatus.Open,
+      position: 0,
+      closedNote: null,
+      closedAt: null,
+      expiresAt: new Date('2026-09-15T00:00:00.000Z'),
+      createdAt: new Date('2026-08-01T00:00:00.000Z'),
+      tags: ['Illustration'],
+      renewedAt: null,
+      renewCount: 0,
+    } as BoardPost;
+
+    it('gates board responders by the ACTUAL VIEWER, not the profile owner, and drops takedowns before counting', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ visibility: ProfileVisibility.Open }),
+      );
+      boardPosts.find.mockResolvedValue([boardPost]);
+      const qb = qbStub();
+      qb.getRawMany.mockResolvedValue([
+        {
+          post_id: 'post-1',
+          kind: 'help',
+          created_at: new Date('2026-08-15T00:00:00.000Z'),
+          slug: 'beatriz',
+          first: 'Beatriz',
+          avatar_url: null,
+          photo_visible: true,
+          user_id: 'beatriz-user-id',
+        },
+      ]);
+      boardResponses.createQueryBuilder = jest.fn().mockReturnValue(qb);
+      // The one responder row above has been taken down by a moderator.
+      contentModeration.statesForAnyType.mockResolvedValue(
+        new Map([['beatriz-user-id', { hidden: true, removed: false }]]),
+      );
+
+      const res = await service.getBySlug('jo', 'viewer-1');
+
+      // The single assertion that catches an owner-for-viewer swap: this MUST
+      // be called with 'viewer-1' (the actual caller), not 'owner-1' (the
+      // profile owner `jo` resolves to) — a swap here would gate a
+      // responder's visibility against the wrong person entirely.
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"profile"."user_id"',
+      );
+
+      // Takedown runs BEFORE the response is counted, not after: the one
+      // response above is from a taken-down member, so it must not inflate
+      // `responseCount`/`helloCount` or appear in `responders`.
+      const full = res as Extract<typeof res, { limited: false }>;
+      expect(full.board[0]!.responseCount).toBe(0);
+      expect(full.board[0]!.helloCount).toBe(0);
+      expect(full.board[0]!.responders).toEqual([]);
     });
   });
 
@@ -1014,6 +1101,10 @@ describe('ProfilesService replace-list endpoints', () => {
           useValue: overrides.skills ?? findEmpty(),
         },
         { provide: getRepositoryToken(BoardPost), useValue: findEmpty() },
+        {
+          provide: getRepositoryToken(BoardPostResponse),
+          useValue: findEmpty(),
+        },
         {
           provide: getRepositoryToken(Shaping),
           useValue: overrides.shapings ?? findEmpty(),

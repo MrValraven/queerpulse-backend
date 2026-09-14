@@ -15,6 +15,7 @@ import { UsersModule } from '../users/users.module';
 import { VouchModule } from '../vouch/vouch.module';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
+import { BoardPostResponse } from './entities/board-post-response.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
@@ -42,6 +43,7 @@ import { ProfilesService } from './profiles.service';
       WorkItem,
       Skill,
       BoardPost,
+      BoardPostResponse,
       Shaping,
       Activity,
       Group,

@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Patch,
+  Post,
   Put,
   Query,
   UseGuards,
@@ -23,6 +24,7 @@ import { ReplaceShapingsDto } from './dto/replace-shapings.dto';
 import { ReplaceSkillsDto } from './dto/replace-skills.dto';
 import { ReplaceSocialsDto } from './dto/replace-socials.dto';
 import { ReplaceWorkDto } from './dto/replace-work.dto';
+import { RespondToBoardItemDto } from './dto/respond-to-board-item.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateUsernameDto } from './dto/update-username.dto';
 import { LastActiveService } from './last-active.service';
@@ -199,6 +201,23 @@ export class ProfilesController {
     return this.profilesService.closeBoardItem(user.userId, slug, dto.note);
   }
 
+  @ApiOperation({
+    summary: "Renew one of the caller's board items, or repost an expired one",
+  })
+  @ApiOkResponse({ description: 'The board item, with a fresh expiry.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiNotFoundResponse({ description: 'No board item with that slug.' })
+  @ApiConflictResponse({
+    description: 'The post is closed, or has hit its renewal limit.',
+  })
+  @Patch('me/board/:slug/renew')
+  renewBoardItem(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.profilesService.renewBoardItem(user.userId, slug);
+  }
+
   @ApiOperation({ summary: "Replace the caller's shaping entries" })
   @ApiOkResponse({
     description: 'The persisted shaping entries, in canonical order.',
@@ -227,6 +246,19 @@ export class ProfilesController {
     @Body() dto: ReplaceGroupsDto,
   ) {
     return this.profilesService.replaceGroups(user.userId, dto.items);
+  }
+
+  // Owner-only by construction: it reads `user.userId` and takes no slug, so
+  // there is no other member's board it could return. Declared with the other
+  // 'me/...' routes so 'me' is never captured by ':slug'.
+  @ApiOperation({ summary: "The caller's own board insights" })
+  @ApiOkResponse({
+    description: 'Funnel counts over the window, and matches per post.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @Get('me/board-insights')
+  getBoardInsights(@CurrentUser() user: CurrentUserData) {
+    return this.profilesService.getBoardInsights(user.userId);
   }
 
   // Active members only (browsing someone else's profile). Declared AFTER the
@@ -282,6 +314,33 @@ export class ProfilesController {
       return { count: 0, members: [] };
     }
     return this.connectionsService.mutualMembers(user.userId, target.userId);
+  }
+
+  // Declared AFTER ':slug' but is not shadowed by it — ':slug/board/:postSlug/
+  // responses' is a distinct three-segment path Express/Nest only matches on
+  // its own route, same as ':slug/mutuals' above.
+  @ApiOperation({ summary: "Respond to a member's board post" })
+  @ApiOkResponse({ description: 'The recorded response.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Your own post, or a board that is not open to you.',
+  })
+  @ApiNotFoundResponse({ description: 'No open board item with that slug.' })
+  @ApiConflictResponse({ description: 'You have already responded.' })
+  @Post(':slug/board/:postSlug/responses')
+  respondToBoardItem(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('postSlug') postSlug: string,
+    @Body() dto: RespondToBoardItemDto,
+  ) {
+    return this.profilesService.respondToBoardItem(
+      user.userId,
+      slug,
+      postSlug,
+      dto.kind,
+      dto.note,
+    );
   }
 }
 

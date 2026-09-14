@@ -1,7 +1,11 @@
-import { NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, FindOperator } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandlesService } from '../handles/handles.service';
@@ -19,15 +23,18 @@ import {
   BoardPost,
   BoardPostStatus,
 } from './entities/board-post.entity';
+import { BoardPostResponse } from './entities/board-post-response.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
+import { ProfileNowHistory } from './entities/profile-now-history.entity';
 import { Shaping } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
 import { ActivityVisibilityService } from './activity-visibility.service';
 import { LastActiveService } from './last-active.service';
+import { NowInsightsService } from './now-insights.service';
 import { ProfilesService } from './profiles.service';
 
 // Board-item lifecycle (Task 3 of the member-profile-v2-backend plan): status,
@@ -105,6 +112,13 @@ describe('ProfilesService board lifecycle', () => {
         { provide: getRepositoryToken(WorkItem), useValue: findEmpty() },
         { provide: getRepositoryToken(Skill), useValue: findEmpty() },
         { provide: getRepositoryToken(BoardPost), useValue: boardPosts },
+        {
+          // Not exercised by any test in this file (these tests are about
+          // BoardPost lifecycle, not responses), but the constructor now
+          // requires it since Task 3 added it alongside `boardPosts`.
+          provide: getRepositoryToken(BoardPostResponse),
+          useValue: findEmpty(),
+        },
         { provide: getRepositoryToken(Shaping), useValue: findEmpty() },
         { provide: getRepositoryToken(Activity), useValue: findEmpty() },
         { provide: getRepositoryToken(Group), useValue: findEmpty() },
@@ -115,6 +129,10 @@ describe('ProfilesService board lifecycle', () => {
         },
         { provide: getRepositoryToken(Community), useValue: findEmpty() },
         { provide: getRepositoryToken(CommunityMember), useValue: findEmpty() },
+        {
+          provide: getRepositoryToken(ProfileNowHistory),
+          useValue: findEmpty(),
+        },
         { provide: DataSource, useValue: dataSource },
         {
           provide: VouchService,
@@ -184,6 +202,13 @@ describe('ProfilesService board lifecycle', () => {
             getSignals: jest.fn().mockResolvedValue(new Map()),
           },
         },
+        {
+          // Its own spec covers the aggregate; every assertion in this file
+          // is indifferent to `respondsWithin`, so a plain null default keeps
+          // them all unaffected by its addition.
+          provide: NowInsightsService,
+          useValue: { getRespondsWithin: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
     service = module.get(ProfilesService);
@@ -209,6 +234,9 @@ describe('ProfilesService board lifecycle', () => {
     closedNote: null,
     closedAt: null,
     expiresAt: new Date('2026-06-01T00:00:00.000Z'),
+    tags: [],
+    renewedAt: null,
+    renewCount: 0,
     createdAt: new Date('2026-03-01T00:00:00.000Z'),
     ...overrides,
   });
@@ -384,6 +412,178 @@ describe('ProfilesService board lifecycle', () => {
         new Date(NOW + 30 * 24 * 60 * 60 * 1000).toISOString(),
       );
     });
+
+    // ---------------------------------------------------------------------
+    // Row IDENTITY. `board_post_responses.post_id` references
+    // `board_posts.id` ON DELETE CASCADE, so a replace that deletes and
+    // recreates a surviving post silently destroys every offer to help and
+    // every board-scoped hello it has received. These tests assert the row's
+    // `id`, not just its field values: an implementation that recreates each
+    // row with identical fields but a fresh UUID passes every field-equality
+    // test above and still loses the responses.
+    // ---------------------------------------------------------------------
+
+    it('keeps a re-saved slug on its EXISTING row id, so its responses are not cascade-deleted', async () => {
+      const original = existingRow({ id: 'row-with-responses' });
+      manager.find.mockResolvedValue([original]);
+
+      await service.replaceBoard(USER_ID, [
+        {
+          kind: BoardKind.Offering,
+          title: 'Help with web dev, reworded',
+          slug: 'web-dev-help',
+        },
+      ]);
+
+      // The whole fix: same slug in, same row id out.
+      expect(savedRows).toHaveLength(1);
+      expect(savedRows[0]?.id).toBe('row-with-responses');
+      expect(savedRows[0]?.title).toBe('Help with web dev, reworded');
+      // A survivor is UPDATED, never recreated: nothing is deleted and
+      // nothing is constructed for it.
+      expect(manager.delete).not.toHaveBeenCalled();
+      expect(manager.create).not.toHaveBeenCalled();
+    });
+
+    it('carries renewCount and renewedAt forward on a re-save, so the renew limit still bites', async () => {
+      const renewedAt = new Date('2026-08-01T10:00:00.000Z');
+      const original = existingRow({
+        id: 'row-renewed',
+        renewCount: 3,
+        renewedAt,
+        expiresAt: new Date('2026-11-01T00:00:00.000Z'),
+      });
+      manager.find.mockResolvedValue([original]);
+
+      const result = await service.replaceBoard(USER_ID, [
+        {
+          kind: BoardKind.Offering,
+          title: 'Help with web dev',
+          slug: 'web-dev-help',
+        },
+      ]);
+
+      // Resetting the counter to 0 while keeping the already pushed-out
+      // expiry would defeat BOARD_RENEW_LIMIT: renew to the cap, save the
+      // editor, renew to the cap again, forever.
+      expect(savedRows[0]?.renewCount).toBe(3);
+      expect(savedRows[0]?.renewedAt).toEqual(renewedAt);
+      expect(savedRows[0]?.expiresAt).toEqual(original.expiresAt);
+      expect(result[0]?.renewCount).toBe(3);
+    });
+
+    it('deletes ONLY the rows whose slug is absent from the payload', async () => {
+      const kept = existingRow({ id: 'row-kept', slug: 'kept', title: 'Kept' });
+      const dropped = existingRow({
+        id: 'row-dropped',
+        slug: 'dropped',
+        title: 'Dropped',
+      });
+      manager.find.mockResolvedValue([kept, dropped]);
+
+      await service.replaceBoard(USER_ID, [
+        { kind: BoardKind.Offering, title: 'Kept', slug: 'kept' },
+      ]);
+
+      expect(manager.delete).toHaveBeenCalledTimes(1);
+      const deleteCall = manager.delete.mock.calls[0] as [
+        unknown,
+        { userId: string; id: FindOperator<string> },
+      ];
+      expect(deleteCall[0]).toBe(BoardPost);
+      // Scoped to the caller AND to the dropped row only — never a blanket
+      // `{ userId }` delete of the whole board.
+      expect(deleteCall[1].userId).toBe(USER_ID);
+      expect(deleteCall[1].id.value).toEqual(['row-dropped']);
+
+      expect(savedRows).toHaveLength(1);
+      expect(savedRows[0]?.id).toBe('row-kept');
+    });
+
+    it('inserts a genuinely new slug with a fresh kind-dependent expiry, renewCount 0 and no explicit createdAt', async () => {
+      manager.find.mockResolvedValue([]);
+
+      await service.replaceBoard(USER_ID, [
+        {
+          kind: BoardKind.Looking,
+          title: 'A collaborator for a queer zine',
+          slug: 'zine-collab',
+          tags: ['Illustration'],
+        },
+      ]);
+
+      expect(manager.create).toHaveBeenCalledTimes(1);
+      const createCalls = manager.create.mock.calls as [
+        unknown,
+        Partial<BoardPost>,
+      ][];
+      const created = createCalls[0]?.[1] ?? {};
+      // No id is supplied, so the database mints one on insert.
+      expect(Object.prototype.hasOwnProperty.call(created, 'id')).toBe(false);
+      // Looking = 30 days from now, not the 90-day offering window.
+      expect(created.expiresAt).toEqual(
+        new Date(NOW + 30 * 24 * 60 * 60 * 1000),
+      );
+      expect(created.renewCount).toBe(0);
+      expect(created.renewedAt).toBeNull();
+      expect(created.status).toBe(BoardPostStatus.Open);
+      expect(created.tags).toEqual(['Illustration']);
+      // Left undefined on purpose so `@CreateDateColumn` populates it.
+      expect(created.createdAt).toBeUndefined();
+      // A genuinely new slug means nothing existed to delete.
+      expect(manager.delete).not.toHaveBeenCalled();
+    });
+
+    it('still rejects an in-payload duplicate slug before opening a transaction', async () => {
+      manager.find.mockResolvedValue([]);
+
+      await expect(
+        service.replaceBoard(USER_ID, [
+          { kind: BoardKind.Offering, title: 'One', slug: 'same-slug' },
+          { kind: BoardKind.Looking, title: 'Two', slug: 'same-slug' },
+        ]),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // The unique (userId, slug) index is never given the chance to trip
+      // mid-transaction: the payload is refused before any write happens.
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(manager.delete).not.toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('reorders two existing posts by position without deleting or recreating either', async () => {
+      const first = existingRow({
+        id: 'row-first',
+        slug: 'first',
+        title: 'First',
+        position: 0,
+      });
+      const second = existingRow({
+        id: 'row-second',
+        slug: 'second',
+        title: 'Second',
+        position: 1,
+      });
+      manager.find.mockResolvedValue([first, second]);
+
+      const result = await service.replaceBoard(USER_ID, [
+        { kind: BoardKind.Offering, title: 'Second', slug: 'second' },
+        { kind: BoardKind.Offering, title: 'First', slug: 'first' },
+      ]);
+
+      // A swap touches `position` only. `slug` is the match key, so no row
+      // ever hands its slug to another row and the unique (userId, slug)
+      // index cannot be transiently violated mid-transaction.
+      expect(manager.delete).not.toHaveBeenCalled();
+      expect(manager.create).not.toHaveBeenCalled();
+
+      const byId = new Map(savedRows.map((row) => [row.id, row]));
+      expect(byId.get('row-second')?.position).toBe(0);
+      expect(byId.get('row-first')?.position).toBe(1);
+      expect(byId.get('row-second')?.slug).toBe('second');
+      expect(byId.get('row-first')?.slug).toBe('first');
+      expect(result.map((view) => view.slug)).toEqual(['second', 'first']);
+    });
   });
 
   describe('closeBoardItem', () => {
@@ -414,6 +614,105 @@ describe('ProfilesService board lifecycle', () => {
       await expect(
         service.closeBoardItem(USER_ID, 'nope', undefined),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('renewBoardItem', () => {
+    const openPost = (over: Partial<BoardPost> = {}) =>
+      ({
+        userId: USER_ID,
+        kind: BoardKind.Looking,
+        title: 'A collaborator for a queer zine',
+        slug: 'zine-collab',
+        status: BoardPostStatus.Open,
+        closedNote: null,
+        closedAt: null,
+        expiresAt: new Date(NOW + 2 * 24 * 60 * 60 * 1000),
+        createdAt: new Date(NOW - 28 * 24 * 60 * 60 * 1000),
+        tags: ['Illustration'],
+        renewedAt: null,
+        renewCount: 0,
+        ...over,
+      }) as BoardPost;
+
+    it('pushes a looking post 30 days out and records the renewal', async () => {
+      const post = openPost();
+      boardPosts.findOne.mockResolvedValue(post);
+      boardPosts.save.mockImplementation((row: BoardPost) =>
+        Promise.resolve(row),
+      );
+
+      const result = await service.renewBoardItem(USER_ID, 'zine-collab');
+
+      expect(result.expiresAt).toBe(
+        new Date(NOW + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      );
+      expect(post.renewCount).toBe(1);
+      expect(post.renewedAt).toEqual(new Date(NOW));
+    });
+
+    it('pushes an offering post 90 days out', async () => {
+      boardPosts.findOne.mockResolvedValue(
+        openPost({ kind: BoardKind.Offering, slug: 'portfolio-reviews' }),
+      );
+      boardPosts.save.mockImplementation((row: BoardPost) =>
+        Promise.resolve(row),
+      );
+
+      const result = await service.renewBoardItem(USER_ID, 'portfolio-reviews');
+
+      expect(result.expiresAt).toBe(
+        new Date(NOW + 90 * 24 * 60 * 60 * 1000).toISOString(),
+      );
+    });
+
+    it('renews an already expired post from now, which is the repost action', async () => {
+      boardPosts.findOne.mockResolvedValue(
+        openPost({ expiresAt: new Date(NOW - 5 * 24 * 60 * 60 * 1000) }),
+      );
+      boardPosts.save.mockImplementation((row: BoardPost) =>
+        Promise.resolve(row),
+      );
+
+      const result = await service.renewBoardItem(USER_ID, 'zine-collab');
+
+      expect(result.expiresAt).toBe(
+        new Date(NOW + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      );
+    });
+
+    it('rejects an unknown slug', async () => {
+      boardPosts.findOne.mockResolvedValue(null);
+      await expect(
+        service.renewBoardItem(USER_ID, 'nope'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses once the renew limit is reached', async () => {
+      boardPosts.findOne.mockResolvedValue(openPost({ renewCount: 3 }));
+      await expect(
+        service.renewBoardItem(USER_ID, 'zine-collab'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(boardPosts.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a closed post, which is reopened through the editor instead', async () => {
+      boardPosts.findOne.mockResolvedValue(
+        openPost({ status: BoardPostStatus.Closed, closedAt: new Date(NOW) }),
+      );
+      await expect(
+        service.renewBoardItem(USER_ID, 'zine-collab'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('scopes the lookup to the caller, so another member cannot renew it', async () => {
+      boardPosts.findOne.mockResolvedValue(null);
+      await expect(
+        service.renewBoardItem('someone-else', 'zine-collab'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(boardPosts.findOne).toHaveBeenCalledWith({
+        where: { userId: 'someone-else', slug: 'zine-collab' },
+      });
     });
   });
 });
