@@ -52,6 +52,17 @@ export class GifAttachmentDto {
   // Free-form (bounded) so swapping the GIF provider — or the attachment
   // source — never needs a DTO change.
   @IsString() @MaxLength(32) provider!: string;
+
+  // `kind:'gif'`, `kind:'image'`, or `kind:'document'` — an optional
+  // WhatsApp-style caption typed alongside a staged attachment, sent as ONE
+  // message rather than an attachment followed by a separate text bubble.
+  // Member-supplied DISPLAY text, bounded and sanitized the same way
+  // `fileName` above is (see `MessagingCoreService.sanitizeAttachmentCaption`)
+  // — never used to build a storage key or a served header. The frontend
+  // already sends its localized "Photo"/"Document" fallback as `body` when
+  // the member leaves no caption, so `body` keeps its own `@MinLength(1)`
+  // unrelaxed; this field is purely the optional extra text riding along.
+  @IsOptional() @IsString() @MaxLength(1000) caption?: string;
 }
 
 export class SendMessageDto {

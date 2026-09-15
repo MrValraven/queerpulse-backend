@@ -68,10 +68,10 @@ interface QueueTallyRow {
  *
  * The accessible set is computed BEFORE the fan-out, so a queue the caller
  * cannot work costs no query and appears nowhere in the answer. That ordering
- * is not only about privacy, it is most of the cost: a full request is 30
- * round trips for an admin (31 queues, one of them uncountable, and no grant
- * lookup because Admin is a superset of every grant), 12 for a moderator (the
- * grant lookup plus 11 moderator-tier queues), and 3 for a plain member
+ * is not only about privacy, it is most of the cost: a full request is 31
+ * round trips for an admin (32 queues, one of them uncountable, and no grant
+ * lookup because Admin is a superset of every grant), 13 for a moderator (the
+ * grant lookup plus 12 moderator-tier queues), and 3 for a plain member
  * holding a single grant such as `editorial`.
  */
 @Injectable()

@@ -167,6 +167,19 @@ export class PushNotificationListener {
         case NotificationType.LandlordIntroRequestDecided:
           await this.pushLandlordIntroRequestDecided(userIds, notification);
           return;
+        // The verdict on a forum thread its author held back for review. Same
+        // always-on reading as the four queues above: it is the platform's
+        // answer to something the member themself submitted, and it maps to no
+        // `NotificationPreferenceCategory` at all.
+        //
+        // It pushes where the report types deliberately do not. Those stay off
+        // this whitelist because the member is holding the phone that just
+        // filed the report; this one lands whenever a moderator reaches the
+        // queue, which can be days later and is never a moment the author is
+        // watching for. Until it arrives their thread is simply dark.
+        case NotificationType.ForumThreadReviewed:
+          await this.pushForumThreadReviewed(userIds, notification);
+          return;
         // A sign-in from a device the member has not used before (ID-06).
         // No `NotificationPreferenceCategory` gate, deliberately: the member's
         // own switch (`member_preferences.login_alerts_enabled`) is enforced at
@@ -727,6 +740,51 @@ export class PushNotificationListener {
           : isQuestion
             ? 'push:groupListing.question.body'
             : 'push:groupListing.declined.body',
+        params: { title },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Your thread was reviewed" — the verdict on a thread its author held back
+   * for the editors or the council.
+   *
+   * An APPROVED thread deep-links to the thread itself, which is live from the
+   * moment the verdict was written (or from its scheduled instant, if the
+   * author also scheduled it). A rejected one goes to the notifications centre,
+   * where the moderator's note is: the thread stays invisible to everyone but
+   * its author and staff, so sending them to a page only they can open would
+   * read as though something had gone wrong.
+   *
+   * Nothing of the thread's BODY is in the copy — only the title the author
+   * wrote themself, which is what makes the row worth opening when several
+   * threads are in the queue.
+   */
+  private async pushForumThreadReviewed(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const isApproved =
+      this.payloadString(notification, 'decision') === 'approved';
+    const title = this.payloadString(notification, 'title') ?? 'Your thread';
+    // `threadUrl` builds the same `/thread/:slug` deep link every other forum
+    // push uses, off the `source: 'forum'` + `threadSlug` pair in the payload.
+    const url = isApproved ? this.threadUrl(notification) : '/notifications';
+    await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
+      title: isApproved ? 'Your thread is live' : 'About your thread',
+      body: isApproved
+        ? `${title} is on the forum now.`
+        : `${title} was not published. Tap to read why.`,
+      tag: `notification:${notification.id}`,
+      data: { url },
+      l10n: {
+        titleKey: isApproved
+          ? 'push:forumThreadReviewed.approved.title'
+          : 'push:forumThreadReviewed.rejected.title',
+        bodyKey: isApproved
+          ? 'push:forumThreadReviewed.approved.body'
+          : 'push:forumThreadReviewed.rejected.body',
         params: { title },
       },
       timestamp: notification.createdAt.getTime(),

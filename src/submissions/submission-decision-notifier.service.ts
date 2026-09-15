@@ -134,7 +134,7 @@ export class SubmissionDecisionNotifier {
     // pointing at the index is a far better outcome than no row at all.
     const isAllowedOverride = Boolean(
       notice.deepLinkSource &&
-        config.alternateDeepLinkSources?.includes(notice.deepLinkSource),
+      config.alternateDeepLinkSources?.includes(notice.deepLinkSource),
     );
     const deepLinkSource: SubmissionDeepLinkSource | null = isAllowedOverride
       ? (notice.deepLinkSource ?? null)

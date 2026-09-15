@@ -13,6 +13,8 @@ import { CommunityMembershipService } from '../communities/community-membership.
 import { TopicPostLinkService } from '../content/topic-post-link.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { ModAuditService } from '../moderation/mod-audit.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AccessTier } from '../communities/entities/community.entity';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -22,7 +24,12 @@ import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
-import { ForumThreadsService } from './forum-threads.service';
+import { FORUM_THREAD_CREATED } from './forum.events';
+import {
+  FORUM_THREAD_VISIBLE_SQL,
+  ForumThreadsService,
+  forumThreadVisibleSql,
+} from './forum-threads.service';
 
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
 // configurable row list — mirrors `moderation.service.spec.ts`'s `qbStub`,
@@ -178,6 +185,22 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   lockReason: null,
   isOfficial: false,
   acceptedPostId: null,
+  kind: null,
+  contentWarnings: [],
+  isAnonymous: false,
+  coAuthorId: null,
+  // Mirrors `createdAt`: `AddForumRichComposer1817300000000` backfills
+  // `published_at` from `created_at`, so a live fixture is a published one.
+  publishedAt: new Date('2026-01-01T00:00:00.000Z'),
+  reviewState: null,
+  // A thread that exists on the forum has already made its announcement —
+  // see `ForumThread.fannedOutAt`. Tests that exercise the deferred fan-out
+  // override this to null.
+  fannedOutAt: new Date('2026-01-01T00:00:00.000Z'),
+  crossPosted: false,
+  neighbourhood: null,
+  closesAt: null,
+  language: null,
   tags: [],
   opVoteCount: 0,
   replyCount: 0,
@@ -229,7 +252,11 @@ describe('ForumThreadsService', () => {
     update: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
-    manager: { createQueryBuilder: jest.Mock; query: jest.Mock };
+    manager: {
+      createQueryBuilder: jest.Mock;
+      query: jest.Mock;
+      find: jest.Mock;
+    };
   };
   let posts: {
     createQueryBuilder: jest.Mock;
@@ -249,6 +276,12 @@ describe('ForumThreadsService', () => {
     isBlockedEitherWay: jest.Mock;
   };
   let mentions: { notify: jest.Mock };
+  // DISC-5's topics reconciliation and the author's own review-verdict bell —
+  // the two halves of the create fan-out that reach other members, hoisted so
+  // the deferred-fan-out specs can assert on exactly when each one fires.
+  let topicPostLink: { linkThread: jest.Mock };
+  let notifications: { create: jest.Mock };
+  let eventEmitter: { emit: jest.Mock };
   // PRD-167 — the thread card's `excerpt` has to know whether a moderator took
   // the OP down. Default: nothing moderated.
   let contentModeration: { statesForAnyType: jest.Mock };
@@ -293,6 +326,12 @@ describe('ForumThreadsService', () => {
         // page. Default: no watermark for anybody, so every card comes back
         // with `unreadReplyCount: null`.
         query: jest.fn().mockResolvedValue([]),
+        // The two batched composer reads that go through the entity manager:
+        // `pollViewsByThread` (polls, their options, the viewer's ballots) and
+        // `photoRowsByPost` (the OPs' photos). Default: no polls and no photo
+        // rows anywhere, so every card comes back with `poll: null` and
+        // `opPhotos: []`.
+        find: jest.fn().mockResolvedValue([]),
       },
     };
     posts = {
@@ -325,6 +364,9 @@ describe('ForumThreadsService', () => {
       statesForAnyType: jest.fn().mockResolvedValue(new Map<string, unknown>()),
     };
     modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
+    topicPostLink = { linkThread: jest.fn().mockResolvedValue(undefined) };
+    notifications = { create: jest.fn().mockResolvedValue(null) };
+    eventEmitter = { emit: jest.fn() };
 
     // Runs the transaction callback against a manager whose `getRepository`
     // resolves to the *same* mocked repos the test configures — mirrors
@@ -395,7 +437,7 @@ describe('ForumThreadsService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: MentionNotificationService, useValue: mentions },
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: EventEmitter2, useValue: eventEmitter },
         {
           provide: CommunityMembershipService,
           useValue: { assertMemberBySlug: jest.fn() },
@@ -404,10 +446,7 @@ describe('ForumThreadsService', () => {
         // `ModAuditService` (BE-COM-19's lock/pin/official audit rows) are
         // constructor dependencies of the service under test — stubbed here
         // so Nest can instantiate it; neither is exercised by these specs.
-        {
-          provide: TopicPostLinkService,
-          useValue: { linkThread: jest.fn() },
-        },
+        { provide: TopicPostLinkService, useValue: topicPostLink },
         { provide: ModAuditService, useValue: modAudit },
         {
           provide: ContentModerationService,
@@ -419,6 +458,8 @@ describe('ForumThreadsService', () => {
           provide: ForumSubscriptionsService,
           useValue: subscriptions,
         },
+        // The author's word on a moderator's review verdict.
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -2266,6 +2307,524 @@ describe('ForumThreadsService', () => {
       expect(sql).toContain('"p"."is_op" = false');
       expect(sql).toContain('"__unread_block"');
       expect(sql).toContain('"__unread_mute"');
+    });
+  });
+
+  /**
+   * The scheduled / under-review read gate.
+   *
+   * Two halves are pinned here. The SHAPE of the predicate, because
+   * `AddForumRichComposer1817300000000` built both hot keyset indexes partial
+   * on the review disjunction written exactly one way and Postgres's predicate
+   * prover matches it arm for arm; and the BYPASSES, because the whole point of
+   * hiding an unpublished thread is that its author and the moderators can
+   * still reach it.
+   */
+  describe('scheduled and under-review threads (read gate)', () => {
+    // The `andWhere` calls carrying any part of the gate. One call, always: the
+    // arms split across two would stop matching the partial index predicate.
+    const gateCalls = (qb: QbStub): string[] =>
+      qb.andWhere.mock.calls
+        .map((call) => (typeof call[0] === 'string' ? call[0] : ''))
+        .filter(
+          (sql) => sql.includes('review_state') || sql.includes('published_at'),
+        );
+
+    it('emits the review disjunction verbatim, arm for arm', () => {
+      // Frozen text. `AddForumRichComposer1817300000000` writes
+      // `("review_state" IS NULL OR "review_state" = 'approved')` into both
+      // partial index predicates; a rewrite here (IS DISTINCT FROM, COALESCE,
+      // the arms reordered) is logically equivalent and silently unindexed.
+      expect(FORUM_THREAD_VISIBLE_SQL).toBe(
+        "t.published_at <= now() AND (t.review_state IS NULL OR t.review_state = 'approved')",
+      );
+      expect(FORUM_THREAD_VISIBLE_SQL).toContain(
+        "(t.review_state IS NULL OR t.review_state = 'approved')",
+      );
+    });
+
+    it('keeps the same arms in the same order under another alias', () => {
+      // `SavedAvailabilityService` runs this gate over its own `thread` alias.
+      // The alias is the ONLY thing that may differ: the arms and their order
+      // are what the planner's predicate prover matches on, so a template that
+      // reordered or rewrote them under a different alias would hand one caller
+      // an indexed predicate and the other an unindexed one.
+      expect(forumThreadVisibleSql('"thread"')).toBe(
+        '"thread".published_at <= now() AND ' +
+          '("thread".review_state IS NULL OR "thread".review_state = \'approved\')',
+      );
+      expect(forumThreadVisibleSql('t')).toBe(FORUM_THREAD_VISIBLE_SQL);
+    });
+
+    it('folds it onto the browse list as ONE andWhere', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(FORUM_THREAD_VISIBLE_SQL);
+      expect(gateCalls(qb)).toEqual([FORUM_THREAD_VISIBLE_SQL]);
+    });
+
+    it('keeps the gate on both keyset paths, including the top window probe', async () => {
+      // `paginateTop` counts the window on a CLONE of the fully-filtered
+      // builder, so the gate has to be folded on before the sort branches.
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined, 'top');
+      expect(gateCalls(qb)).toEqual([FORUM_THREAD_VISIBLE_SQL]);
+
+      const unansweredQb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(unansweredQb);
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        'unanswered',
+      );
+      expect(gateCalls(unansweredQb)).toEqual([FORUM_THREAD_VISIBLE_SQL]);
+    });
+
+    it('does not gate a moderator browse', async () => {
+      const staffQb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(staffQb);
+
+      await service.list(
+        'mod-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      expect(gateCalls(staffQb)).toEqual([]);
+    });
+
+    it('carries the same gate on counts, the pinned bucket and search', async () => {
+      const countsQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(countsQb);
+      await service.counts('viewer-1', undefined, undefined);
+      expect(gateCalls(countsQb)).toEqual([FORUM_THREAD_VISIBLE_SQL]);
+
+      const pinnedQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(pinnedQb);
+      await service.listPinned('viewer-1', undefined, false);
+      expect(gateCalls(pinnedQb)).toEqual([FORUM_THREAD_VISIBLE_SQL]);
+
+      const searchQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(searchQb);
+      await service.searchByText('viewer-1', 'hrt', 10);
+      expect(gateCalls(searchQb)).toEqual([FORUM_THREAD_VISIBLE_SQL]);
+    });
+
+    it('does not gate the staff pinned bucket', async () => {
+      const staffPinnedQb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(staffPinnedQb);
+
+      await service.listPinned('mod-1', undefined, true);
+
+      expect(gateCalls(staffPinnedQb)).toEqual([]);
+    });
+
+    const scheduled = (): ForumThread =>
+      baseThread({ publishedAt: new Date(Date.now() + 60_000) });
+
+    it('404s a scheduled thread for anybody else', async () => {
+      threads.findOne.mockResolvedValue(scheduled());
+
+      await expect(
+        service.getBySlug('hello-world', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('still serves a scheduled thread to its own author', async () => {
+      // The author bypass lives on the single-row gate, not as an OR arm on the
+      // browse query, precisely so the browse query keeps its keyset.
+      threads.findOne.mockResolvedValue(scheduled());
+
+      const dto = await service.getBySlug('hello-world', 'author-1');
+
+      expect(dto.slug).toBe('hello-world');
+    });
+
+    it('still serves a scheduled thread to a moderator', async () => {
+      threads.findOne.mockResolvedValue(scheduled());
+
+      const dto = await service.getBySlug('hello-world', 'mod-1', true);
+
+      expect(dto.slug).toBe('hello-world');
+    });
+
+    it.each([['pending'], ['rejected']])(
+      '404s a %s thread for anybody but its author and staff',
+      async (reviewState: string) => {
+        threads.findOne.mockResolvedValue(baseThread({ reviewState }));
+
+        await expect(
+          service.getBySlug('hello-world', 'viewer-1'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+
+        threads.findOne.mockResolvedValue(baseThread({ reviewState }));
+        await expect(
+          service.getBySlug('hello-world', 'author-1'),
+        ).resolves.toMatchObject({ reviewState });
+      },
+    );
+
+    it('serves an approved thread, and one nobody ever submitted', async () => {
+      // NULL is "never submitted for review", which is the state of nearly
+      // every thread on the forum and is VISIBLE. Reading it as "unreviewed,
+      // therefore hidden" would empty the forum.
+      threads.findOne.mockResolvedValue(
+        baseThread({ reviewState: 'approved' }),
+      );
+      await expect(
+        service.getBySlug('hello-world', 'viewer-1'),
+      ).resolves.toMatchObject({ reviewState: 'approved' });
+
+      threads.findOne.mockResolvedValue(baseThread({ reviewState: null }));
+      await expect(
+        service.getBySlug('hello-world', 'viewer-1'),
+      ).resolves.toMatchObject({ reviewState: null });
+    });
+
+    it('lets staff actions reach a thread that has not published', async () => {
+      // Lock/pin/official/delete all pass `includeUnpublished`, so a moderator
+      // handling a report on a scheduled thread is not blocked by the gate.
+      threads.findOne.mockResolvedValue(scheduled());
+
+      await expect(
+        service.setLocked('hello-world', moderator, true),
+      ).resolves.toMatchObject({ isLocked: true });
+    });
+  });
+  // ---------------------------------------------------------------------------
+  // The deferred create fan-out (`fannedOutAt` / `publishThread`)
+  // ---------------------------------------------------------------------------
+  describe('the deferred create fan-out', () => {
+    // The claim `publishThread` issues is an UPDATE builder, not the SELECT
+    // builder `qbStub` models. `affected` is what decides which caller fans
+    // out, so it is the whole point of this stub.
+    interface UpdateQbStub {
+      update: jest.Mock;
+      set: jest.Mock;
+      where: jest.Mock;
+      execute: jest.Mock;
+    }
+    const updateQbStub = (affected: number): UpdateQbStub => {
+      const qb: UpdateQbStub = {
+        update: jest.fn(() => qb),
+        set: jest.fn(() => qb),
+        where: jest.fn(() => qb),
+        execute: jest.fn(() => Promise.resolve({ affected })),
+      };
+      return qb;
+    };
+
+    // A thread that is visible now and still owes its announcement: exactly the
+    // state a scheduled thread lands in the moment its instant passes.
+    const owing = (overrides: Partial<ForumThread> = {}): ForumThread =>
+      baseThread({ fannedOutAt: null, ...overrides });
+
+    const opWithBody = {
+      id: 'op-1',
+      threadId: 'thread-1',
+      authorId: 'author-1',
+      body: 'Come and help, @ana',
+      deletedAt: null,
+      editedAt: null,
+    };
+
+    // The entity `createWithUniqueSlug` handed the transaction's repository —
+    // where `fannedOutAt` is set, and therefore where "did this thread announce
+    // itself on insert" is actually decided.
+    const savedThreadOnCreate = (): ForumThread => {
+      const repo = manager.getRepository(ForumThread) as { create: jest.Mock };
+      return repo.create.mock.calls[0][0] as ForumThread;
+    };
+
+    beforeEach(() => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue(opWithBody);
+    });
+
+    it('announces a thread published straight away, in the create request', async () => {
+      await service.create('author-1', {
+        title: 'Hello, World!',
+        body: 'First post body, @ana',
+        category: 'general',
+      });
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        FORUM_THREAD_CREATED,
+        expect.objectContaining({ authorId: 'author-1' }),
+      );
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(1);
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      // And the row is written already marked, so nothing can repeat it: the
+      // insert is its own claim.
+      const saved = savedThreadOnCreate();
+      expect(saved.fannedOutAt).toBeInstanceOf(Date);
+    });
+
+    it('announces NOTHING for a thread created pending review', async () => {
+      await service.create('author-1', {
+        title: 'Hello, World!',
+        // The excerpt is the disclosure: this body must not reach anybody
+        // before a moderator has read the thread.
+        body: 'A health question, @ana',
+        category: 'health',
+        submitForReview: true,
+      });
+
+      expect(mentions.notify).not.toHaveBeenCalled();
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      const saved = savedThreadOnCreate();
+      expect(saved.reviewState).toBe('pending');
+      // Owed, not cancelled.
+      expect(saved.fannedOutAt).toBeNull();
+    });
+
+    it('announces NOTHING for a thread created scheduled for later', async () => {
+      await service.create('author-1', {
+        title: 'Hello, World!',
+        body: 'Next week, @ana',
+        category: 'general',
+        publishAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      });
+
+      expect(mentions.notify).not.toHaveBeenCalled();
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+      const saved = savedThreadOnCreate();
+      expect(saved.fannedOutAt).toBeNull();
+    });
+
+    it('pays the debt on the first read that sees the thread is visible', async () => {
+      threads.findOne.mockResolvedValue(owing());
+      threads.createQueryBuilder.mockReturnValue(updateQbStub(1));
+
+      await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(1);
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(mentions.notify).toHaveBeenCalledWith(
+        opWithBody.body,
+        'author-1',
+        expect.objectContaining({
+          threadSlug: 'hello-world',
+          excerpt: opWithBody.body,
+        }),
+      );
+    });
+
+    it('fans out EXACTLY ONCE when two reads observe the same newly visible thread', async () => {
+      // Both requests hold a row whose `fannedOutAt` is still null, which is
+      // precisely the stale in-memory read the conditional UPDATE exists to
+      // defend: the database, not the caller, decides who won.
+      threads.findOne.mockResolvedValue(owing());
+      threads.createQueryBuilder
+        .mockReturnValueOnce(updateQbStub(1))
+        .mockReturnValue(updateQbStub(0));
+
+      await Promise.all([
+        service.getBySlug('hello-world', 'viewer-1'),
+        service.getBySlug('hello-world', 'viewer-2'),
+      ]);
+
+      expect(threads.createQueryBuilder).toHaveBeenCalledTimes(2);
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(1);
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+    });
+
+    it('never fans out a thread that is still scheduled, or still pending', async () => {
+      threads.findOne.mockResolvedValue(
+        owing({ publishedAt: new Date(Date.now() + 60_000) }),
+      );
+      await service.getBySlug('hello-world', 'author-1');
+
+      threads.findOne.mockResolvedValue(owing({ reviewState: 'pending' }));
+      await service.getBySlug('hello-world', 'author-1');
+
+      // Not even the claim was attempted: the debt stays owed and the next
+      // observer asks again.
+      expect(threads.createQueryBuilder).not.toHaveBeenCalled();
+      expect(mentions.notify).not.toHaveBeenCalled();
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+    });
+
+    it('never re-fans out a thread that has already announced itself', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(threads.createQueryBuilder).not.toHaveBeenCalled();
+      expect(mentions.notify).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reviewThread', () => {
+    interface UpdateQbStub {
+      update: jest.Mock;
+      set: jest.Mock;
+      where: jest.Mock;
+      execute: jest.Mock;
+    }
+    const updateQbStub = (affected: number): UpdateQbStub => {
+      const qb: UpdateQbStub = {
+        update: jest.fn(() => qb),
+        set: jest.fn(() => qb),
+        where: jest.fn(() => qb),
+        execute: jest.fn(() => Promise.resolve({ affected })),
+      };
+      return qb;
+    };
+
+    const pending = (): ForumThread =>
+      baseThread({ reviewState: 'pending', fannedOutAt: null });
+
+    beforeEach(() => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        authorId: 'author-1',
+        body: 'A guide, @ana',
+        deletedAt: null,
+        editedAt: null,
+      });
+    });
+
+    it('approving publishes the thread and fires the fan-out it was owing', async () => {
+      threads.findOne.mockResolvedValue(pending());
+      threads.createQueryBuilder.mockReturnValue(updateQbStub(1));
+
+      const dto = await service.reviewThread('hello-world', moderator, true);
+
+      expect(dto.reviewState).toBe('approved');
+      expect(dto.isPublished).toBe(true);
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(1);
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'author-1',
+        NotificationType.ForumThreadReviewed,
+        expect.objectContaining({ decision: 'approved' }),
+      );
+      // No actor argument: the bell never names which moderator decided.
+      expect(notifications.create.mock.calls[0]).toHaveLength(3);
+    });
+
+    it('rejecting leaves the thread invisible and announces nothing', async () => {
+      threads.findOne.mockResolvedValue(pending());
+
+      const dto = await service.reviewThread(
+        'hello-world',
+        moderator,
+        false,
+        'Not while the report is open.',
+      );
+
+      expect(dto.reviewState).toBe('rejected');
+      expect(dto.isPublished).toBe(false);
+      expect(threads.createQueryBuilder).not.toHaveBeenCalled();
+      expect(mentions.notify).not.toHaveBeenCalled();
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+      expect(notifications.create).toHaveBeenCalledWith(
+        'author-1',
+        NotificationType.ForumThreadReviewed,
+        expect.objectContaining({
+          decision: 'rejected',
+          reviewNote: 'Not while the report is open.',
+        }),
+      );
+    });
+
+    it('approving a thread its author ALSO scheduled leaves the fan-out owed', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({
+          reviewState: 'pending',
+          fannedOutAt: null,
+          publishedAt: new Date(Date.now() + 60_000),
+        }),
+      );
+
+      const dto = await service.reviewThread('hello-world', moderator, true);
+
+      expect(dto.reviewState).toBe('approved');
+      expect(dto.isPublished).toBe(false);
+      expect(mentions.notify).not.toHaveBeenCalled();
+      expect(threads.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('refuses a second decision on the same thread', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ reviewState: 'approved' }),
+      );
+
+      await expect(
+        service.reviewThread('hello-world', moderator, false),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a non-moderator outright', async () => {
+      threads.findOne.mockResolvedValue(pending());
+
+      await expect(
+        service.reviewThread('hello-world', member, true),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  describe('create schedule coherence', () => {
+    it('refuses a thread that closes before it opens', async () => {
+      const publishAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      const closesAt = new Date(Date.now() + 60 * 60 * 1000);
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello',
+          body: 'Body',
+          category: 'general',
+          publishAt: publishAt.toISOString(),
+          closesAt: closesAt.toISOString(),
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses a thread that closes at the very instant it opens', async () => {
+      const at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello',
+          body: 'Body',
+          category: 'general',
+          publishAt: at,
+          closesAt: at,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('accepts a deadline after the scheduled publish', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello',
+          body: 'Body',
+          category: 'general',
+          publishAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          closesAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+        }),
+      ).resolves.toBeDefined();
     });
   });
 });

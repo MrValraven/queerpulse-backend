@@ -1,6 +1,8 @@
+import { MemberRef } from '../common/member-ref';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { toForumPostResponse, toForumThreadResponse } from './forum-response';
+import { isThreadPublished } from './forum-threads.service';
 
 // A COMPLETE default typed as `ForumPost` itself, so TS rejects it outright
 // if it ever omits a field the entity declares — spreading `Partial<ForumPost>`
@@ -42,6 +44,19 @@ const forumThreadDefaults: ForumThread = {
   lockReason: null,
   isOfficial: false,
   acceptedPostId: null,
+  kind: null,
+  contentWarnings: [],
+  isAnonymous: false,
+  coAuthorId: null,
+  // Mirrors `createdAt`: `AddForumRichComposer1817300000000` backfills
+  // `published_at` from `created_at`, so a live fixture is a published one.
+  publishedAt: new Date('2026-07-23T10:00:00Z'),
+  reviewState: null,
+  fannedOutAt: new Date('2026-07-23T10:00:00Z'),
+  crossPosted: false,
+  neighbourhood: null,
+  closesAt: null,
+  language: null,
   tags: [],
   opVoteCount: 0,
   replyCount: 0,
@@ -417,5 +432,320 @@ describe('toForumThreadResponse unreadReplyCount', () => {
       7,
     );
     expect(behind.unreadReplyCount).toBe(7);
+  });
+});
+
+/**
+ * Anonymity masks the BYLINE and nothing else. Every assertion here is about
+ * that split: what a reader sees, what a moderator sees, and what the record
+ * still says underneath both.
+ */
+describe('toForumThreadResponse anonymous byline', () => {
+  const author = { userId: 'author-1', isModerator: false };
+  const moderator = { userId: 'mod-1', isModerator: true };
+  const stranger = { userId: 'other-1', isModerator: false };
+  const realAuthor: MemberRef = {
+    slug: 'ava',
+    firstName: 'Ava',
+    lastName: 'Lee',
+    pronouns: null,
+    avatarUrl: null,
+  };
+  const realCoAuthor: MemberRef = {
+    slug: 'bo',
+    firstName: 'Bo',
+    lastName: 'Reis',
+    pronouns: null,
+    avatarUrl: null,
+  };
+  const anonymous = makeThread({ isAnonymous: true });
+
+  it('masks the rendered author for an ordinary reader', () => {
+    const dto = toForumThreadResponse(anonymous, realAuthor, stranger);
+
+    expect(dto.author).toEqual({
+      handle: '',
+      displayName: 'Anonymous member',
+      avatarUrl: null,
+    });
+    // No handle to build a profile link out of, and no `official` flag: an
+    // anonymous thread is a member's, never the platform's.
+    expect(dto.author.handle).toBe('');
+    expect(dto.author.official).toBeUndefined();
+    expect(dto.isAnonymous).toBe(true);
+  });
+
+  it('masks it for the author themselves, who is not a moderator', () => {
+    // The card is the same card everybody else is reading; the author knows
+    // whose it is without the byline saying so.
+    expect(toForumThreadResponse(anonymous, realAuthor, author).author).toEqual(
+      {
+        handle: '',
+        displayName: 'Anonymous member',
+        avatarUrl: null,
+      },
+    );
+  });
+
+  it('still shows a MODERATOR the real author', () => {
+    // An anonymous thread is exactly the kind that draws a report, and a report
+    // that cannot reach an actor is not actionable.
+    const dto = toForumThreadResponse(anonymous, realAuthor, moderator);
+
+    expect(dto.author).toEqual({
+      handle: 'ava',
+      displayName: 'Ava Lee',
+      avatarUrl: null,
+    });
+    expect(dto.isAnonymous).toBe(true);
+  });
+
+  it('leaves ownership and canEdit pointing at the real author', () => {
+    // `author_id` is untouched by the mask, which is the whole contract.
+    expect(toForumThreadResponse(anonymous, realAuthor, author).canEdit).toBe(
+      true,
+    );
+    expect(toForumThreadResponse(anonymous, realAuthor, stranger).canEdit).toBe(
+      false,
+    );
+  });
+
+  it('lets isOfficial win when a row somehow carries both', () => {
+    // The DTO makes them exclusive, but an admin can flip `isOfficial` on after
+    // the fact and the database has no constraint to appeal to.
+    const dto = toForumThreadResponse(
+      makeThread({ isAnonymous: true, isOfficial: true }),
+      realAuthor,
+      stranger,
+    );
+
+    expect(dto.author).toEqual({
+      handle: 'queerpulse',
+      displayName: 'QueerPulse',
+      avatarUrl: null,
+      official: true,
+    });
+  });
+
+  it('renders a co-author on an ordinary thread', () => {
+    const dto = toForumThreadResponse(
+      makeThread({ coAuthorId: 'user-2' }),
+      realAuthor,
+      stranger,
+      null,
+      0,
+      false,
+      undefined,
+      null,
+      realCoAuthor,
+    );
+
+    expect(dto.coAuthor).toEqual({
+      handle: 'bo',
+      displayName: 'Bo Reis',
+      avatarUrl: null,
+    });
+  });
+
+  it('drops the co-author too when the byline is masked', () => {
+    // A byline is both names: an "anonymous" thread co-credited to a named
+    // member is not anonymous.
+    const dto = toForumThreadResponse(
+      makeThread({ isAnonymous: true, coAuthorId: 'user-2' }),
+      realAuthor,
+      stranger,
+      null,
+      0,
+      false,
+      undefined,
+      null,
+      realCoAuthor,
+    );
+
+    expect(dto.coAuthor).toBeNull();
+  });
+
+  it('shows a moderator the co-author behind an anonymous byline', () => {
+    const dto = toForumThreadResponse(
+      makeThread({ isAnonymous: true, coAuthorId: 'user-2' }),
+      realAuthor,
+      moderator,
+      null,
+      0,
+      false,
+      undefined,
+      null,
+      realCoAuthor,
+    );
+
+    expect(dto.coAuthor?.handle).toBe('bo');
+  });
+});
+
+describe('toForumPostResponse opening-post byline', () => {
+  const moderator = { userId: 'mod-1', isModerator: true };
+  const stranger = { userId: 'other-1', isModerator: false };
+  const realAuthor: MemberRef = {
+    slug: 'ava',
+    firstName: 'Ava',
+    lastName: 'Lee',
+    pronouns: null,
+    avatarUrl: null,
+  };
+  const anonymous = makeThread({ isAnonymous: true });
+
+  it('masks the OP author, so the thread page agrees with the card', () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: true }),
+      realAuthor,
+      0,
+      stranger,
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.author).toEqual({
+      handle: '',
+      displayName: 'Anonymous member',
+      avatarUrl: null,
+    });
+  });
+
+  it('leaves a REPLY in the same thread alone', () => {
+    // Anonymity is the thread author's choice about their own byline. A reply
+    // is somebody else writing under their own name.
+    const dto = toForumPostResponse(
+      makePost({ isOp: false }),
+      realAuthor,
+      0,
+      stranger,
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.author.handle).toBe('ava');
+  });
+
+  it('still shows a moderator the real OP author', () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: true }),
+      realAuthor,
+      0,
+      moderator,
+      undefined,
+      null,
+      anonymous,
+    );
+
+    expect(dto.author.handle).toBe('ava');
+  });
+
+  it('is a no-op for a caller that passes no thread', () => {
+    const dto = toForumPostResponse(
+      makePost({ isOp: true }),
+      realAuthor,
+      0,
+      stranger,
+    );
+
+    expect(dto.author.handle).toBe('ava');
+  });
+});
+
+describe('toForumThreadResponse composer fields', () => {
+  const viewer = { userId: 'other-1', isModerator: false };
+
+  it('passes the scalar composer fields through unchanged', () => {
+    const dto = toForumThreadResponse(
+      makeThread({
+        kind: 'guide',
+        contentWarnings: ['medical detail'],
+        crossPosted: true,
+        neighbourhood: 'Arroios',
+        language: 'both',
+        reviewState: 'approved',
+        publishedAt: new Date('2026-07-23T10:00:00Z'),
+      }),
+      null,
+      viewer,
+    );
+
+    expect(dto.kind).toBe('guide');
+    expect(dto.contentWarnings).toEqual(['medical detail']);
+    expect(dto.crossPosted).toBe(true);
+    expect(dto.neighbourhood).toBe('Arroios');
+    expect(dto.language).toBe('both');
+    expect(dto.reviewState).toBe('approved');
+    expect(dto.publishedAt).toBe('2026-07-23T10:00:00.000Z');
+  });
+
+  it('derives isPublished exactly as the service gate does', () => {
+    // The mapper mirrors `isThreadPublished` by hand, because that function
+    // lives in the module that imports THIS one and the reverse would be a
+    // cycle. This is the spec that pins the two together: every case below is
+    // asserted against the real predicate rather than against a literal.
+    const cases: Partial<ForumThread>[] = [
+      { publishedAt: new Date(Date.now() - 1000), reviewState: null },
+      { publishedAt: new Date(Date.now() - 1000), reviewState: 'approved' },
+      { publishedAt: new Date(Date.now() - 1000), reviewState: 'pending' },
+      { publishedAt: new Date(Date.now() - 1000), reviewState: 'rejected' },
+      { publishedAt: new Date(Date.now() + 60_000), reviewState: null },
+      { publishedAt: new Date(Date.now() + 60_000), reviewState: 'approved' },
+    ];
+
+    for (const overrides of cases) {
+      const thread = makeThread(overrides);
+      expect(toForumThreadResponse(thread, null, viewer).isPublished).toBe(
+        isThreadPublished(thread),
+      );
+    }
+
+    // And the three states the composer's success screen has to tell apart.
+    const live = toForumThreadResponse(makeThread(), null, viewer);
+    expect(live.isPublished).toBe(true);
+
+    const scheduled = toForumThreadResponse(
+      makeThread({ publishedAt: new Date(Date.now() + 60_000) }),
+      null,
+      viewer,
+    );
+    expect(scheduled.isPublished).toBe(false);
+    expect(new Date(scheduled.publishedAt).getTime()).toBeGreaterThan(
+      Date.now(),
+    );
+
+    const awaitingReview = toForumThreadResponse(
+      makeThread({ reviewState: 'pending' }),
+      null,
+      viewer,
+    );
+    expect(awaitingReview.isPublished).toBe(false);
+    expect(awaitingReview.reviewState).toBe('pending');
+  });
+
+  it('derives isClosed from closesAt', () => {
+    const past = toForumThreadResponse(
+      makeThread({ closesAt: new Date(Date.now() - 1000) }),
+      null,
+      viewer,
+    );
+    const future = toForumThreadResponse(
+      makeThread({ closesAt: new Date(Date.now() + 60_000) }),
+      null,
+      viewer,
+    );
+
+    expect(past.isClosed).toBe(true);
+    expect(future.isClosed).toBe(false);
+    // Null means the thread never auto-closes, which is not the same fact as
+    // "closed", and is why `closesAt` stays on the wire beside `isClosed`.
+    expect(toForumThreadResponse(makeThread(), null, viewer).isClosed).toBe(
+      false,
+    );
+    expect(
+      toForumThreadResponse(makeThread(), null, viewer).closesAt,
+    ).toBeNull();
   });
 });

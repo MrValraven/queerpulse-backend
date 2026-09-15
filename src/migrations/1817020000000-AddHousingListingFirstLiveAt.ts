@@ -39,9 +39,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * NO INDEX: the column is only ever read by a primary-key-conditioned UPDATE.
  */
-export class AddHousingListingFirstLiveAt1817020000000
-  implements MigrationInterface
-{
+export class AddHousingListingFirstLiveAt1817020000000 implements MigrationInterface {
   name = 'AddHousingListingFirstLiveAt1817020000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

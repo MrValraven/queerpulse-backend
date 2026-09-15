@@ -25,7 +25,9 @@ import { ReplyThreadDto } from './dto/reply-thread.dto';
 import { SetAcceptedPostDto } from './dto/set-accepted-post.dto';
 import { UpdateForumPostDto } from './dto/update-post.dto';
 import { UpdateThreadDto } from './dto/update-thread.dto';
+import { VotePollDto } from './dto/vote-poll.dto';
 import { VotePostDto } from './dto/vote-post.dto';
+import { ForumPollsService } from './forum-polls.service';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumThreadsService, isModeratorRole } from './forum-threads.service';
 import {
@@ -54,6 +56,7 @@ export class ForumController {
   constructor(
     private readonly threadsService: ForumThreadsService,
     private readonly postsService: ForumPostsService,
+    private readonly pollsService: ForumPollsService,
   ) {}
 
   @Get('threads')
@@ -218,7 +221,42 @@ export class ForumController {
       dto.body,
       dto.parentPostId,
       dto.image,
+      dto.photos,
     );
+  }
+
+  // Declared with the other `threads/:slug` routes. A ballot rather than a
+  // toggle: the body carries the caller's COMPLETE selection and replaces
+  // whatever they had picked before, so sending the same array twice changes
+  // nothing (see `VotePollDto`). Throttled like the post-vote route.
+  @Post('threads/:slug/poll/vote')
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @ApiOperation({
+    summary:
+      "Cast a ballot on this thread's poll; re-voting replaces the previous selection",
+  })
+  @ApiCreatedResponse({
+    description:
+      'The poll, with the counts now released to this caller because they have voted.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'A single-choice poll was sent more than one option, or no option was sent at all.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The poll has closed, or the thread belongs to a community you are not on the roster of.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Thread not found, the thread carries no poll, or an option id is not on this poll.',
+  })
+  votePoll(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: VotePollDto,
+  ) {
+    return this.pollsService.vote(slug, user, dto.optionIds);
   }
 
   @Post('posts/:id/vote')
@@ -245,7 +283,9 @@ export class ForumController {
 
   @Patch('posts/:id')
   @UseGuards(NotRestrictedGuard)
-  @ApiOperation({ summary: 'Edit a post body (author only)' })
+  @ApiOperation({
+    summary: 'Edit a post body and/or its photos (author only)',
+  })
   @ApiOkResponse({ description: 'The updated post.' })
   @ApiForbiddenResponse({ description: 'Only the author can edit this post.' })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
@@ -255,7 +295,13 @@ export class ForumController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateForumPostDto,
   ) {
-    return this.postsService.updatePostBody(id, user, dto.body, dto.image);
+    return this.postsService.updatePostBody(
+      id,
+      user,
+      dto.body,
+      dto.image,
+      dto.photos,
+    );
   }
 
   @Delete('posts/:id')

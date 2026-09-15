@@ -56,9 +56,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * set already narrowed by `landlord_id`, which
  * `IDX_landlord_recommendations_landlord_id` covers.
  */
-export class AddLandlordRecommendationAttestationAndReply1817040000000
-  implements MigrationInterface
-{
+export class AddLandlordRecommendationAttestationAndReply1817040000000 implements MigrationInterface {
   name = 'AddLandlordRecommendationAttestationAndReply1817040000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

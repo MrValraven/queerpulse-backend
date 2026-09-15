@@ -1327,6 +1327,42 @@ export enum NotificationType {
    * `AddHousingListingExpiryWarningSentAt1817010000000`.
    */
   HousingListingExpiring = 'housing_listing_expiring',
+
+  /**
+   * The verdict on a forum thread its AUTHOR sent to review
+   * (`CreateThreadDto.submitForReview`), written by
+   * `ForumThreadsService.reviewThread`.
+   *
+   * WHY IT EXISTS. A thread held back for review is invisible to every
+   * member-facing read path until somebody approves it, so until this value the
+   * author had no channel for the answer at all: their thread simply stayed
+   * dark, and the only way to learn it had been approved (or that it never
+   * would be) was to reopen its own link and read the state off the page.
+   *
+   * FIRES AT MOST ONCE PER THREAD. `reviewThread` refuses any thread that is
+   * not still `pending`, so a second decision cannot be made and a second row
+   * cannot be written.
+   *
+   * NO ACTOR, deliberately: the bell never names which moderator decided,
+   * matching `HousingJoinDecided` and every other staff-triage verdict. Naming
+   * them turns a review into a person for the author to answer, and the queue
+   * exists so a sensitive thread is READ before it is published, not so its
+   * reader is exposed. With no actor passed to `create`, no block or mute can
+   * swallow it either.
+   *
+   * ALWAYS DELIVERED (group 4, "a decision on something you asked for") and it
+   * DOES push, unlike the report types: the answer lands whenever a moderator
+   * reaches the queue, which can be days later and is never a moment the author
+   * is watching for.
+   *
+   * PAYLOAD: `{ source: 'forum', threadSlug, title, decision, reviewNote }`,
+   * where `decision` is `approved` | `rejected` and `reviewNote` is the
+   * moderator's optional word to the author. Nothing about the thread's own
+   * body rides along: it is the author's text and they are holding it.
+   *
+   * See migration `AddForumThreadReviewedNotificationType1817320000000`.
+   */
+  ForumThreadReviewed = 'forum_thread_reviewed',
 }
 
 @Entity('notifications')

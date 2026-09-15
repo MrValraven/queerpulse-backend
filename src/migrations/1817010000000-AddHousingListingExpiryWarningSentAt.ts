@@ -28,9 +28,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the ORDER BY matches index order so there is no sort. This column is a
  * residual filter on at most 500 returned rows.
  */
-export class AddHousingListingExpiryWarningSentAt1817010000000
-  implements MigrationInterface
-{
+export class AddHousingListingExpiryWarningSentAt1817010000000 implements MigrationInterface {
   name = 'AddHousingListingExpiryWarningSentAt1817010000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

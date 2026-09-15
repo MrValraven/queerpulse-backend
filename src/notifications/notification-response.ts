@@ -138,6 +138,14 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.HousingViewingRequested]: 'actorId',
   [NotificationType.HousingViewingDecided]: 'actorId',
   [NotificationType.HousingViewingCancelled]: 'actorId',
+  // `ForumThreadReviewed` is deliberately ABSENT, on the same rule as
+  // `HousingJoinDecided` directly above: it is a staff triage verdict, and the
+  // bell never names which moderator returned it. Naming them would turn a
+  // review into a person for the author to answer, while the review queue
+  // exists so a sensitive thread is read before it is published rather than so
+  // its reader is exposed. It yields `actor: null` and reads as the platform,
+  // and its emit site passes no `actorId` to `create` either, so there is no
+  // block or mute gate to lose.
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -356,12 +364,7 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // PRD-242. `kind` (`coop` | `group`) picks which noun the copy uses and
     // which route the deep link builds; `decision` (`accepted` | `declined`)
     // picks the sentence. `name` is the co-op or group's public display name.
-    [NotificationType.HousingJoinDecided]: [
-      'kind',
-      'slug',
-      'name',
-      'decision',
-    ],
+    [NotificationType.HousingJoinDecided]: ['kind', 'slug', 'name', 'decision'],
     // PRD-244. `expiresAt` is an ISO date the copy renders as a deadline. It is
     // the member's OWN listing, so nothing here is another member's data.
     [NotificationType.HousingListingExpiring]: ['title', 'slug', 'expiresAt'],
@@ -381,6 +384,14 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'opportunitySlug',
     ],
     [NotificationType.ListingReview]: ['field'],
+    // The verdict on a thread the author sent to review. `decision`
+    // (`approved` | `rejected`) is the discriminator the copy branches on,
+    // `title` is the author's OWN thread title so the row says which thread,
+    // and `reviewNote` is the moderator's optional word to them — the whole
+    // point of a rejection, and the same field `WriterApplicationDeclined` and
+    // the changemaker verdicts already forward. `threadSlug` needs no entry: it
+    // rides in `COMMON_PAYLOAD_KEYS` and is what the deep link is built from.
+    [NotificationType.ForumThreadReviewed]: ['decision', 'title', 'reviewNote'],
     // The verdict on a reader's story, plus the member's OWN working title so
     // the row says which one. The decider's reply note stays off the wire here
     // on purpose: it is staff-authored prose, and the member reads it on their

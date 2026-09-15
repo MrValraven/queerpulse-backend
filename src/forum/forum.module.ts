@@ -5,14 +5,20 @@ import { ContentModule } from '../content/content.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { ModerationModule } from '../moderation/moderation.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
+import { ForumPollOption } from './entities/forum-poll-option.entity';
+import { ForumPollVote } from './entities/forum-poll-vote.entity';
+import { ForumPoll } from './entities/forum-poll.entity';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
+import { ForumPostPhoto } from './entities/forum-post-photo.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadSubscription } from './entities/forum-thread-subscription.entity';
 import { ForumController } from './forum.controller';
+import { ForumPollsService } from './forum-polls.service';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
@@ -25,6 +31,15 @@ import { ForumThreadsService } from './forum-threads.service';
       ForumPostVote,
       ForumPostEdit,
       ForumThreadSubscription,
+      // The richer composer's own tables
+      // (`AddForumRichComposer1817300000000`): one poll per thread with its
+      // options and ballots, and the multi-photo child of `forum_post`.
+      // Registered here rather than in a module of their own — they have no
+      // life outside a thread, and every FK between them cascades from one.
+      ForumPoll,
+      ForumPollOption,
+      ForumPollVote,
+      ForumPostPhoto,
     ]),
     // Gives access to `Repository<Profile>` (exported by `UsersModule`) for
     // resolving thread/post authors to `AuthorSummary` — mirrors
@@ -61,13 +76,29 @@ import { ForumThreadsService } from './forum-threads.service';
     // content-moderation, notifications, community-membership) never reaches
     // back into `ForumModule`.
     ModerationModule,
+    // `NotificationsService` — the author's own word on a moderator's review
+    // verdict (`ForumThreadsService.reviewThread`). Plain import, no
+    // `forwardRef`: `NotificationsModule` imports users, social, reports and
+    // community membership, none of which reaches back into `ForumModule`.
+    NotificationsModule,
   ],
   controllers: [ForumController],
   providers: [
     ForumThreadsService,
     ForumPostsService,
+    // Polls. Depends on `ForumThreadsService` for the thread visibility gate
+    // and on nothing else in this module; `ForumThreadsService` writes polls
+    // through the plain helpers in `forum-poll.ts` rather than injecting this,
+    // which is what keeps the arrow one-way and the module free of a
+    // `forwardRef`.
+    ForumPollsService,
     ForumSubscriptionsService,
   ],
-  exports: [ForumThreadsService, ForumPostsService, ForumSubscriptionsService],
+  exports: [
+    ForumThreadsService,
+    ForumPostsService,
+    ForumPollsService,
+    ForumSubscriptionsService,
+  ],
 })
 export class ForumModule {}

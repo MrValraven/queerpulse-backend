@@ -46,9 +46,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `IF NOT EXISTS` guard (forbidden here, since it hides drift; see
  * CLAUDE.md).
  */
-export class AddConnectionsAddresseeCreatedIndex1817140000000
-  implements MigrationInterface
-{
+export class AddConnectionsAddresseeCreatedIndex1817140000000 implements MigrationInterface {
   name = 'AddConnectionsAddresseeCreatedIndex1817140000000';
 
   // Runs outside a transaction for `CREATE INDEX CONCURRENTLY`; requires

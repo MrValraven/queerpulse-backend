@@ -20,6 +20,7 @@ import {
   CommunityTagRequest,
   CommunityTagRequestStatus,
 } from '../communities/entities/community-tag-request.entity';
+import { ForumThread } from '../forum/entities/forum-thread.entity';
 import {
   GroupListing,
   GroupListingStatus,
@@ -568,8 +569,9 @@ export const ADMIN_REGISTRY_QUEUE_COUNTERS: Record<
 };
 
 /**
- * The three queues that receive arrivals under their own notification type and
- * are therefore absent from `AdminQueueKey`. See `AdminExtraQueueKey`.
+ * The four queues outside `AdminQueueKey`: three that receive arrivals under
+ * their own notification type, and one that announces nothing to staff at all.
+ * See `AdminExtraQueueKey`.
  */
 export const ADMIN_EXTRA_QUEUE_COUNTERS: Record<
   AdminExtraQueueKey,
@@ -599,6 +601,30 @@ export const ADMIN_EXTRA_QUEUE_COUNTERS: Record<
       sql: `${column('status')} = :escalationStatus`,
       parameters: { escalationStatus: BanEvasionEscalationStatus.Open },
     }),
+  }),
+
+  [AdminExtraQueueKey.ForumThreadReviews]: queueCounter({
+    // The queue IS a state of the thread row; there is no separate submission
+    // table, the same shape `LandlordSuggestions` above has.
+    entity: ForumThread,
+    // `createdAt`, not `publishedAt`: a thread starts waiting the moment its
+    // author sends it, and an author who ALSO scheduled it for next week has
+    // not thereby given the reviewer an extra week. `publishedAt` would report
+    // a queue that is younger than it is, which on a backlog is the one
+    // direction that lets an operator stop looking.
+    waitingSince: 'createdAt',
+    // Pending is the whole queue: `approved` and `rejected` are both answered,
+    // and NULL means nobody ever asked for a review (see
+    // `ForumThread.reviewState`). Withdrawn threads drop out, matching
+    // `ForumThreadsService.listPendingReview` — the author has answered the
+    // question themselves and there is nothing left to approve.
+    waiting: (column) => ({
+      sql: `${column('reviewState')} = :forumReviewState AND ${column('deletedAt')} IS NULL`,
+      parameters: { forumReviewState: 'pending' },
+    }),
+    // No deadline. The platform promises no turnaround on a thread its author
+    // chose to hold back, and inventing one here would publish a clock nobody
+    // agreed to. The console renders this as "no clock" rather than "on time".
   }),
 
   [AdminExtraQueueKey.CommunityOwnerReviewRequests]: queueCounter({

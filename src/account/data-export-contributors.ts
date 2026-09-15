@@ -654,9 +654,7 @@ export class ReviewsExportContributor implements DataExportContribution {
  * merely folded into another key.
  */
 @Injectable()
-export class ProfileNowHistoryExportContributor
-  implements DataExportContribution
-{
+export class ProfileNowHistoryExportContributor implements DataExportContribution {
   readonly category = 'nowHistory';
   readonly archiveKey = 'nowHistory';
 

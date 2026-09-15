@@ -67,6 +67,14 @@ export const NOTIFICATION_BUNDLE_KEY_MAX_LENGTH = 200;
  *    because nobody reads "the queue got another item" as a report on any one
  *    item in it.
  *
+ *    `ForumThreadReviewed` is covered by the rule rather than the exception,
+ *    and is worth naming because it is the newest always-delivered type here.
+ *    A review verdict is an outcome on ONE thread, it is written at most once
+ *    per thread (`ForumThreadsService.reviewThread` refuses a thread that is
+ *    not still `pending`), and an author with two threads in the queue is owed
+ *    two answers, not one row saying two threads were decided. It is absent
+ *    from `subjectFor` below and therefore never bundles.
+ *
  * The key must identify the SUBJECT, never the actor: it is what makes two
  * events "the same thing happening again". A type whose payload is missing its
  * subject field returns `null` and simply writes its own row, so a payload shape

@@ -17,6 +17,7 @@ import {
 } from '../events/entities/event.entity';
 import { FlatmateProfile } from '../flatmate-profiles/entities/flatmate-profile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import {
   HousingListing,
   HousingListingStatus,
@@ -268,6 +269,23 @@ export class SavedAvailabilityService {
    * means this file neither declares that column nor breaks before it arrives,
    * and starts excluding deleted threads the moment it does, with no second
    * edit here.
+   *
+   * THE SCHEDULED/UNDER-REVIEW GATE IS IMPORTED, NOT RE-SPELLED. This method
+   * had fallen exactly one predicate behind `loadOr404` the moment that gate
+   * landed, so a bookmarked thread that was scheduled for next week or still
+   * waiting on a moderator kept rendering its title on a saved list — the one
+   * disclosure this whole resolver exists to prevent, arriving through the one
+   * kind it re-implements by hand. `forumThreadVisibleSql` is the forum's own
+   * frozen predicate with this query's alias in it, so there is no third
+   * spelling left to fall behind: a change to the gate reaches here by import.
+   *
+   * The AUTHOR's own rows pass it, as an OR arm, which `loadOr404` grants too
+   * (`assertVisibleOr404` lets a member past the gate on their own thread). The
+   * arm is affordable here and deliberately is not on the forum's browse query:
+   * that one seeks through partial keyset indexes an `OR` would cost it, while
+   * this is a bounded `slug IN (...)` lookup with no ORDER BY and therefore no
+   * seek to lose. A member who bookmarked a thread they themself scheduled can
+   * still open it, so reporting it as unavailable would be the wrong answer.
    */
   private async resolveThreads(
     slugs: string[],
@@ -302,6 +320,10 @@ export class SavedAvailabilityService {
     if (this.hasColumn(ForumThread, 'deletedAt')) {
       queryBuilder.andWhere('"thread"."deleted_at" IS NULL');
     }
+    queryBuilder.andWhere(
+      `(${forumThreadVisibleSql('"thread"')} OR "thread"."author_id" = :savedViewerId)`,
+      { savedViewerId: viewerId },
+    );
     return this.subjectKeys(queryBuilder, 'thread.slug');
   }
 

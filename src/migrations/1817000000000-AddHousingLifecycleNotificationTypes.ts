@@ -35,9 +35,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the newest migration in the repo keeps it and a mixed convention is how the
  * next author gets it wrong. `IF NOT EXISTS` keeps it re-run-safe.
  */
-export class AddHousingLifecycleNotificationTypes1817000000000
-  implements MigrationInterface
-{
+export class AddHousingLifecycleNotificationTypes1817000000000 implements MigrationInterface {
   name = 'AddHousingLifecycleNotificationTypes1817000000000';
 
   transaction = false as const;

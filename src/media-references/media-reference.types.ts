@@ -17,6 +17,7 @@ export type MediaReferenceType =
   | 'persona-item' // SubprofileItem.imageUrl
   | 'community-post' // CommunityPost.image
   | 'forum-post' // ForumPost.image
+  | 'forum-post-photo' // ForumPostPhoto.storageKey
   | 'community-cover' // Community.coverImageUrl
   | 'community-avatar' // Community.avatarImageUrl
   | 'card-crest' // CommunityCard.crestMediaKey

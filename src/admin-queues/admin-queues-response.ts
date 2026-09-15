@@ -43,6 +43,27 @@ export enum AdminExtraQueueKey {
   Reports = 'reports',
   BanEvasionEscalations = 'ban_evasion_escalations',
   CommunityOwnerReviewRequests = 'community_owner_review_requests',
+  /**
+   * Forum threads their own author held back for review
+   * (`CreateThreadDto.submitForReview`), waiting on a moderator's verdict.
+   *
+   * A FOURTH reason for being outside `AdminQueueKey`, and it is the mirror
+   * image of the three above rather than the same one. They are absent because
+   * each already announces its arrivals under a notification type of its own,
+   * so a second `admin_queue_item` row would double every arrival. This queue
+   * announces NOTHING to staff: the only notification the review lifecycle
+   * writes is `ForumThreadReviewed`, and that goes to the thread's AUTHOR with
+   * the verdict, never to a moderator with an arrival. A key in
+   * `AdminQueueKey` is a promise that things land in the bell, and nothing
+   * here does.
+   *
+   * Which leaves exactly the gap this module was built to close: work that is
+   * real, that somebody has to do, and that no operator can see without
+   * opening the page. So it is counted from this vocabulary, the same way
+   * ban-evasion escalations are, rather than by writing a key into a registry
+   * that is not this module's to change.
+   */
+  ForumThreadReviews = 'forum_thread_reviews',
 }
 
 /**
@@ -58,6 +79,10 @@ export enum AdminExtraQueueKey {
  *  - ban-evasion escalations: `BanEvasionController` is
  *    `@Roles(Moderator, Admin)` at class level and `routes.adminBanEvasion` is
  *    in the same frontend list.
+ *  - forum thread reviews: `AdminForumController` is
+ *    `@Roles(Moderator, Admin)` with an EMPTY `@StaffRoles()`, so both staff
+ *    tiers and no grant, and `/admin/forum` sits in the frontend's
+ *    `MOD_ACCESSIBLE_ADMIN_PATTERNS` alongside the other moderation surfaces.
  *  - community owner review requests: Admin, with NO capability, even though
  *    the `communities` grant does open `/admin/communities`. The only action a
  *    row in this queue leads to is reassigning ownership, and
@@ -82,6 +107,15 @@ export const ADMIN_EXTRA_QUEUE_REGISTRY: Record<
   [AdminExtraQueueKey.CommunityOwnerReviewRequests]: {
     route: '/admin/communities',
     tier: UserRole.Admin,
+    capabilities: [],
+  },
+  [AdminExtraQueueKey.ForumThreadReviews]: {
+    route: '/admin/forum',
+    tier: UserRole.Moderator,
+    // No grant opens the forum in `staff-roles.registry.ts`, and the queue
+    // serves the full text of threads that are deliberately invisible to the
+    // platform, so the controller switches the grant axis off with an empty
+    // `@StaffRoles()`. This mirrors that.
     capabilities: [],
   },
 };

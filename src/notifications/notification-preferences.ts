@@ -364,6 +364,15 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.WriterApplicationApproved,
     NotificationType.WriterApplicationDeclined,
     NotificationType.VolunteerApplicationDecided,
+    // The verdict on a forum thread the author held back for review. It maps to
+    // NO `NotificationPreferenceCategory` at all, and that is the mapping
+    // decision rather than an omission: while a thread sits at `pending` it is
+    // invisible to every member-facing read path, so this row is the only word
+    // its author gets that their own thread is now live (or never will be). A
+    // content-volume switch able to silence it would restore exactly the
+    // silence it exists to end. Same reading as `VolunteerApplicationDecided`
+    // directly above: a decision on something you personally asked for.
+    NotificationType.ForumThreadReviewed,
     NotificationType.ChangemakerNominationApproved,
     NotificationType.ChangemakerNominationDismissed,
     NotificationType.RoadmapStatus,

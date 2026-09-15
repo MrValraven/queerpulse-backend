@@ -243,7 +243,7 @@ describe('MessagingCoreService.postMessage — document attachment ownership (PR
         undefined,
         false,
         'document',
-        { url: OWN_DOCUMENT_KEY, provider: 'upload' } as never,
+        { url: OWN_DOCUMENT_KEY, provider: 'upload' },
       ),
     ).rejects.toThrow(BadRequestException);
     expect(buildPostResult).not.toHaveBeenCalled();

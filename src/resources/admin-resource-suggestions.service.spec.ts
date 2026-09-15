@@ -407,11 +407,7 @@ describe('AdminResourceSuggestionsService', () => {
 
       // The transaction has already committed by this point. An admin who saw
       // a 500 here would reasonably retry, onto a row that now 409s.
-      const result = await service.approve(
-        'rs-1',
-        'admin-1',
-        makeApproveDto(),
-      );
+      const result = await service.approve('rs-1', 'admin-1', makeApproveDto());
 
       expect(result.status).toBe(ResourceSuggestionStatus.Approved);
     });

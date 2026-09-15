@@ -85,6 +85,152 @@ export class ForumThread {
   @Column({ type: 'text', array: true, default: () => "'{}'" })
   tags!: string[];
 
+  // What the thread IS: 'question', 'guide', 'proposal' or 'share'. The forum
+  // carried all four shapes under one undifferentiated "thread" until the
+  // richer composer (`AddForumRichComposer1817300000000`), which is why
+  // `unanswered` had to be rescued once already (see `acceptedPostId` below): a
+  // guide has no answer to accept, and a proposal's resolution is a decision
+  // rather than a reply.
+  //
+  // NULL means "unclassified", which is every thread written before the
+  // composer asked the question — stamping them all 'question' would print a
+  // guess on the card as a fact. varchar rather than a Postgres enum, matching
+  // `category`/`tags`: the vocabulary is expected to grow, and growing it
+  // should be a product decision, not a migration.
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  kind!: string | null;
+
+  // Author-chosen labels warning a reader what is inside before they read it,
+  // picked from a fixed list the composer offers (the list is application-side,
+  // the same contract `tags` has). Array rather than a join table for the same
+  // reason `tags` is one: a handful of short labels, read on every render of
+  // the thread and never queried across threads.
+  //
+  // NOT NULL with a `'{}'` default, so "no warnings" is an empty array
+  // everywhere and no read path branches on NULL. No GIN index, unlike `tags`:
+  // nothing filters or browses BY a content warning.
+  @Column({ type: 'text', array: true, default: () => "'{}'" })
+  contentWarnings!: string[];
+
+  // Masks the BYLINE only. `authorId` above stays the real member, untouched,
+  // so ownership, `canEdit`, moderation, reports and the recognition/XP signals
+  // all keep working against a real account — the same split `isOfficial`
+  // already uses, and it matters more here: an anonymous thread is exactly the
+  // kind that draws a report, and a report that cannot reach an actor is not
+  // actionable. Anonymity is a rendering decision, never a gap in the record.
+  @Column({ type: 'boolean', default: false })
+  isAnonymous!: boolean;
+
+  // A second member credited on the thread, for the guides and proposals two
+  // people actually wrote together. NULL is the ordinary single-author case.
+  //
+  // The migration-owned FK is `ON DELETE SET NULL`, not CASCADE: a co-author
+  // erasing their account must not take somebody else's thread down with it, so
+  // the credit is dropped and the thread stands. That SET NULL is also why
+  // `IDX_forum_thread_co_author_id` exists — the action has to find every
+  // referencing row when a user row goes, and unindexed it scans the whole
+  // thread table per deleted account (same argument as
+  // `IDX_event_photos_uploader_id`).
+  @Index('IDX_forum_thread_co_author_id')
+  @Column({ type: 'uuid', nullable: true })
+  coAuthorId!: string | null;
+
+  // When the thread became visible, which stops being "when it was created" the
+  // moment the composer can schedule. Backfilled to `created_at` for every
+  // pre-existing row by `AddForumRichComposer1817300000000` and only then set
+  // NOT NULL: for a thread written before scheduling existed, published and
+  // created ARE the same instant, and a nullable column would push a NULL check
+  // into every browse predicate forever.
+  //
+  // NO database default, deliberately — a `DEFAULT now()` would silently
+  // publish a scheduled thread the moment an insert forgot to name the column,
+  // and "now" is the one value this must never invent. Every write path sets it
+  // explicitly.
+  //
+  // Member-facing reads gate on `published_at <= now()`. That predicate cannot
+  // live in an index predicate (`now()` is STABLE, and index predicates must be
+  // IMMUTABLE), so it is a filter on already-seeked rows; the rows it removes
+  // are the scheduled-future tail, which clusters at the newest end of both
+  // sorts. Millisecond precision matches `createdAt`/`lastActivityAt`, so a
+  // future keyset on this column needs no `date_trunc()` wrapper.
+  @Column({ type: 'timestamptz', precision: 3 })
+  publishedAt!: Date;
+
+  // 'pending' / 'approved' / 'rejected' — and NULL, which means NEVER SUBMITTED
+  // FOR REVIEW and is the state of every thread that existed before this
+  // column. That distinction is load-bearing: the forum is not becoming a
+  // moderated-by-default surface, so NULL reads as "visible, nobody asked for
+  // review" and not as "unreviewed, therefore hidden". Only the kinds that opt
+  // in (a guide going to the editors, a proposal going to the council) ever
+  // leave NULL.
+  //
+  // Member-facing reads gate on `review_state IS NULL OR review_state =
+  // 'approved'`, and both partial keyset indexes below carry that disjunction.
+  // It must be emitted VERBATIM, arm for arm: Postgres proves an OR predicate
+  // by matching each query arm against a predicate arm, so a rewrite such as
+  // `review_state IS DISTINCT FROM 'pending'` silently loses the index.
+  @Column({ type: 'varchar', length: 12, nullable: true })
+  reviewState!: string | null;
+
+  // When this thread's CREATE FAN-OUT actually went out: the profile activity
+  // event, the topics-directory link (and the topic-follow notifications behind
+  // it), and the @mention notifications, whose payload carries the first 140
+  // characters of the opening post as an excerpt.
+  //
+  // NULL means "owed, not sent yet", which is the state a thread is written in
+  // when it is created scheduled (`publishedAt` in the future) or pending
+  // review. Fanning out at create time for those two would put the excerpt in
+  // front of other members before the thread was visible and, in the review
+  // case, before a moderator had read it, which is the one thing pre-publish
+  // review exists to prevent. So the fan-out is deferred and
+  // `ForumThreadsService.publishThread` runs it the first time a read or a
+  // write observes the thread has become visible, or when a moderator approves
+  // it.
+  //
+  // It is also the IDEMPOTENCE mark, which is why it is durable rather than a
+  // flag in memory: `publishThread` claims it with a single conditional
+  // `UPDATE ... WHERE id = $1 AND fanned_out_at IS NULL` and fans out only when
+  // that statement reports one affected row, so two concurrent readers of the
+  // same newly-visible thread produce exactly one fan-out (see that method for
+  // the full concurrency argument).
+  //
+  // Backfilled to `created_at` for every pre-existing row by
+  // `AddForumThreadPublishLifecycle1817310000000`: those threads all fanned out
+  // in the request that created them, and leaving them NULL would re-fire their
+  // mentions years late on the first read.
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  fannedOutAt!: Date | null;
+
+  // A community thread (`communityId IS NOT NULL`) that its author also carried
+  // out to the town square. Stored as its own flag rather than inferred,
+  // because "which community wrote it" and "who gets to see it" are different
+  // questions — a community thread without this stays where it was written.
+  @Column({ type: 'boolean', default: false })
+  crossPosted!: boolean;
+
+  // The part of the city a thread is about, for the asks that only make sense
+  // locally. Free text rather than a lookup table: neighbourhood names are
+  // contested, overlapping and member-defined, and a curated list beside a
+  // taxonomy nobody owns drifts. Unindexed — nothing browses by it yet.
+  @Column({ type: 'varchar', length: 60, nullable: true })
+  neighbourhood!: string | null;
+
+  // After this instant the thread takes no new replies. Distinct from
+  // `isLocked`/`lockReason`, which is a MODERATOR shutting a thread down; this
+  // is the AUTHOR saying up front how long the question stays open (a poll that
+  // ends, a call for volunteers with a deadline). Compared by the reply path at
+  // write time, never by a scheduled job — a timestamp checked on write cannot
+  // drift and needs nothing scheduled. NULL means the thread never auto-closes.
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  closesAt!: Date | null;
+
+  // 'pt', 'en' or 'both'. Most readers have exactly one of the two, and a
+  // Portuguese-only thread at the top of an English reader's list is a dead row
+  // for them. NULL is "unstated", which is honest for the backlog: guessing
+  // from the text would mislabel every short or mixed post.
+  @Column({ type: 'varchar', length: 4, nullable: true })
+  language!: string | null;
+
   // The reply this thread's author (or a platform moderator) marked as the
   // answer — a pointer into `forum_post`, null while the question is open.
   //
@@ -92,9 +238,13 @@ export class ForumThread {
   // says: `ForumThreadsService.list` filters on `accepted_post_id IS NULL`,
   // where it used to filter on `reply_count = 0` (so a question with forty
   // replies and no resolution counted as answered). Backed by the partial
-  // keyset index `IDX_forum_thread_unanswered_created_at_id`, which covers
-  // exactly the rows that sort can return — migration-owned, since a partial
-  // DESC composite is not expressible as an `@Index` decorator.
+  // keyset index `IDX_forum_thread_visible_unanswered_created_at_id`, which
+  // covers exactly the rows that sort can return — migration-owned, since a
+  // partial DESC composite is not expressible as an `@Index` decorator. It
+  // superseded the narrower `IDX_forum_thread_unanswered_created_at_id`
+  // (partial on `accepted_post_id IS NULL` alone) in
+  // `AddForumRichComposer1817300000000`, which folded the `deleted_at` and
+  // review-state halves of the read gate into the predicate.
   //
   // `ON DELETE SET NULL` on the FK: a hard-deleted post clears the mark and
   // leaves the thread standing. A soft tombstone never reaches the FK, so
@@ -109,9 +259,12 @@ export class ForumThread {
   // `forum_post` per row.
   //
   // The `top` sort's backing index is the migration-owned
-  // `IDX_forum_thread_top_keyset` (`op_vote_count DESC, last_activity_at DESC,
-  // id DESC`, `WHERE deleted_at IS NULL`), built by
-  // `AddForumThreadTopKeysetAndReplySearch`. All three columns descend, matching
+  // `IDX_forum_thread_visible_top_keyset` (`op_vote_count DESC,
+  // last_activity_at DESC, id DESC`, `WHERE deleted_at IS NULL AND
+  // (review_state IS NULL OR review_state = 'approved')`), built by
+  // `AddForumRichComposer1817300000000` over the `WHERE deleted_at IS NULL`
+  // version `AddForumThreadTopKeysetAndReplySearch` had built as
+  // `IDX_forum_thread_top_keyset`. All three columns descend, matching
   // the ORDER BY `ForumThreadsService.paginateTop` emits, and the middle column
   // is what stops a forum full of zero-vote threads from coming back in uuid
   // order: `op_vote_count DESC, id DESC` alone (the older
@@ -167,13 +320,16 @@ export class ForumThread {
   // and stay intact (`ForumThreadsService.deleteThread` touches only the OP),
   // and moderation history that points at this thread must not dangle.
   //
-  // Every member-facing browse path carries `deleted_at IS NULL`, so the ONE
-  // new keyset index this release adds (`IDX_forum_thread_top_keyset`) is
-  // partial on that predicate: it then covers exactly the rows the sort can
-  // return, and shrinks rather than grows as threads are withdrawn. The
-  // pre-existing `created_at`/`last_activity_at` keyset indexes are left whole
-  // — they already serve their ORDER BY and there is no measurement saying the
-  // extra filter step costs anything worth an index rebuild.
+  // Every member-facing browse path carries `deleted_at IS NULL`, so the keyset
+  // index that release added (`IDX_forum_thread_top_keyset`, since superseded
+  // by `IDX_forum_thread_visible_top_keyset`) is partial on that predicate: it
+  // then covers exactly the rows the sort can return, and shrinks rather than
+  // grows as threads are withdrawn. The pre-existing
+  // `created_at`/`last_activity_at` keyset indexes are left whole — they are
+  // declared by `@Index` decorators (so a migration narrowing them would be
+  // undone by the next `migration:generate` diff), they already serve their
+  // ORDER BY, and there is no measurement saying the extra filter step costs
+  // anything worth an index rebuild.
   @Column({ type: 'timestamptz', nullable: true })
   deletedAt!: Date | null;
 

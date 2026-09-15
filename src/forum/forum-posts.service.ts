@@ -17,10 +17,19 @@ import { MentionNotificationService } from '../mentions/mention-notification.ser
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
+import { ForumPostPhotoDto } from './dto/forum-post-photo.dto';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
+import { ForumPostPhoto } from './entities/forum-post-photo.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import {
+  assertSinglePhotoSpelling,
+  insertPostPhotos,
+  normalizePostPhotos,
+  photoRowsByPost,
+  replacePostPhotos,
+} from './forum-post-photo';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
 import {
@@ -42,6 +51,7 @@ import {
   ForumPostHistoryResponse,
   ForumPostResponse,
   ForumPostViewer,
+  ThreadByline,
   toForumPostHistoryEntry,
   toForumPostResponse,
 } from './forum-response';
@@ -447,6 +457,10 @@ export class ForumPostsService {
         // moderator who can open the thread detail has to be able to read the
         // thread.
         includeDeleted: isModeratorRole(user.role),
+        // Same posture for a scheduled or under-review thread: a moderator who
+        // can open the detail view has to be able to read its posts. An AUTHOR
+        // needs no flag, `assertVisibleOr404` lets them past on their own rows.
+        includeUnpublished: isModeratorRole(user.role),
       },
     );
 
@@ -520,7 +534,12 @@ export class ForumPostsService {
     ]);
 
     return {
-      data: await this.toPostResponses(orderedRows, user, acceptedPostId),
+      data: await this.toPostResponses(
+        orderedRows,
+        user,
+        acceptedPostId,
+        thread,
+      ),
       pageInfo: { nextCursor, hasMore },
       opAvailable: isOpVisible,
     };
@@ -723,11 +742,26 @@ export class ForumPostsService {
     body: string,
     parentPostId?: string,
     image?: string,
+    // The same photo array the opening post takes. A reply gets it because the
+    // RENDERING is shared: `toForumPostResponse` maps the OP and every reply
+    // through one function, so a reply list that could only draw one photo per
+    // row while the OP above it drew four would be a difference in the client
+    // rather than in the data. Persisted in the reply's own transaction.
+    photos?: ForumPostPhotoDto[],
   ): Promise<ForumPostResponse> {
     // Passing the replier as viewer 404s the thread when its author is blocked
     // either way — a block is a hard severance, so it has to gate the write
     // path too, not just the reads above.
-    const thread = await this.threadsService.loadOr404(threadSlug, user.userId);
+    const thread = await this.threadsService.loadOr404(
+      threadSlug,
+      user.userId,
+      {
+        // A moderator never meets the scheduled/under-review gate (see
+        // `ForumThreadsService.applyPublishedThreadGate`); the thread's author
+        // passes it on their own rows without a flag.
+        includeUnpublished: isModeratorRole(user.role),
+      },
+    );
     // A community-scoped thread takes replies from that community's roster
     // only — same rule `ForumThreadsService.create` applies to starting one
     // (BE-COM-05). `loadOr404` above has already 404'd a Private community's
@@ -737,6 +771,18 @@ export class ForumPostsService {
     if (thread.isLocked) {
       throw new ForbiddenException('This thread is locked');
     }
+    // The AUTHOR's own deadline, enforced here rather than by a job: a
+    // timestamp compared on write cannot drift and needs nothing scheduled
+    // (see `ForumThread.closesAt`). Its own message, deliberately distinct from
+    // the lock above — a moderator shutting a thread down and an author saying
+    // up front how long it stays open are different facts, and a reader who is
+    // told the wrong one goes looking for a moderator who did nothing.
+    if (thread.closesAt && thread.closesAt.getTime() <= Date.now()) {
+      throw new ForbiddenException('This thread has closed to new replies');
+    }
+
+    assertSinglePhotoSpelling(image, photos);
+    const normalizedPhotos = normalizePostPhotos(photos);
 
     const parentPost = parentPostId
       ? await this.loadReplyParentOr400(parentPostId, thread.id)
@@ -762,6 +808,10 @@ export class ForumPostsService {
           parentPostId: parentPost?.id ?? null,
         }),
       );
+      // Inside the reply's own transaction: a photo row that landed outside it
+      // would survive a rolled-back reply and then violate
+      // `FK_forum_post_photo_post_id`.
+      await insertPostPhotos(manager, created.id, normalizedPhotos);
       await this.threadsService.markActivity(thread.id, manager);
       // SOC-13 — replying IS following: the member has committed to this
       // conversation, so the rest of it should reach them. Idempotent, and
@@ -833,6 +883,12 @@ export class ForumPostsService {
     const authors = await new MemberLookup(this.profiles).byUserIds([
       user.userId,
     ]);
+    // Read back rather than rebuilt from the input, so the echo carries the row
+    // ids and the ordering the database actually stored. Costs nothing on the
+    // ordinary photoless reply.
+    const photoRows = normalizedPhotos.length
+      ? await photoRowsByPost(this.posts.manager, [saved.id])
+      : new Map<string, ForumPostPhoto[]>();
     return toForumPostResponse(
       saved,
       authors.get(user.userId) ?? null,
@@ -840,6 +896,9 @@ export class ForumPostsService {
       viewerOf(user),
       undefined,
       thread.acceptedPostId,
+      // A reply is never the OP, so there is no byline to mask here.
+      null,
+      photoRows.get(saved.id) ?? [],
     );
   }
 
@@ -1036,6 +1095,7 @@ export class ForumPostsService {
     user: CurrentUserData,
     body: string,
     image?: string,
+    photos?: ForumPostPhotoDto[],
   ): Promise<ForumPostResponse> {
     const post = await this.loadPostOr404(postId);
     if (post.deletedAt) {
@@ -1044,6 +1104,7 @@ export class ForumPostsService {
     if (post.authorId !== user.userId) {
       throw new ForbiddenException('Only the author can edit this post');
     }
+    assertSinglePhotoSpelling(image, photos);
 
     // Snapshot the pre-edit body and persist the new one atomically: a partial
     // failure between the two writes would otherwise record a "previous body"
@@ -1056,6 +1117,17 @@ export class ForumPostsService {
     if (image !== undefined) {
       post.image = image === '' ? null : image;
     }
+    // `photos` follows the SAME contract one field up: omitted leaves the
+    // existing set alone, an empty array clears it. Supplying it at all makes it
+    // the post's whole photo set, which is why it also clears the legacy
+    // `image` column — the rows are then the gallery (see `toPostPhotoViews`),
+    // and a column nothing reads is a photo the author has no way to delete.
+    // That is also what makes `photos: []` mean what it says: "no photos",
+    // rather than "no rows, and whatever the old column still holds".
+    const normalizedPhotos = photos ? normalizePostPhotos(photos) : null;
+    if (normalizedPhotos !== null) {
+      post.image = null;
+    }
     post.editedAt = new Date();
     await this.posts.manager.transaction(async (manager) => {
       await manager.save(
@@ -1066,6 +1138,11 @@ export class ForumPostsService {
           editorId: user.userId,
         }),
       );
+      // `forum_post_edit` snapshots the BODY only, so swapping photos is not
+      // itself a revision — the same call the `image` swap above already makes.
+      if (normalizedPhotos !== null) {
+        await replacePostPhotos(manager, post.id, normalizedPhotos);
+      }
       await manager.save(post);
     });
 
@@ -1229,7 +1306,7 @@ export class ForumPostsService {
     const authors = await new MemberLookup(this.profiles).byUserIds([
       post.authorId,
     ]);
-    const [vote, moderation, thread] = await Promise.all([
+    const [vote, moderation, thread, photoRows] = await Promise.all([
       this.votes.findOne({
         where: { postId: post.id, userId: user.userId },
       }),
@@ -1238,10 +1315,19 @@ export class ForumPostsService {
       ]),
       // Only the accepted-answer pointer is needed here, so this reads the one
       // column rather than hydrating the whole thread row.
+      // The accepted-answer pointer plus the two byline flags, so this reads
+      // four columns rather than hydrating the whole thread row. The byline
+      // flags are not optional here: this path maps a single post, that post
+      // can be the OP, and an unmasked OP is the whole anonymity contract lost
+      // on the one read that returns it alone.
       this.posts.manager.findOne(ForumThread, {
         where: { id: post.threadId },
-        select: ['id', 'acceptedPostId'],
+        select: ['id', 'acceptedPostId', 'isOfficial', 'isAnonymous'],
       }),
+      // Rides the same parallel batch as everything else this mapper needs, so
+      // a single-post echo still costs one round of queries rather than one
+      // more after them.
+      photoRowsByPost(this.posts.manager, [post.id]),
     ]);
     return toForumPostResponse(
       post,
@@ -1250,6 +1336,8 @@ export class ForumPostsService {
       viewerOf(user),
       moderation.get(post.id) ?? { hidden: false, removed: false },
       thread?.acceptedPostId ?? null,
+      thread ?? null,
+      photoRows.get(post.id) ?? [],
     );
   }
 
@@ -1262,6 +1350,7 @@ export class ForumPostsService {
     rows: ForumPost[],
     user: CurrentUserData,
     acceptedPostId: string | null = null,
+    threadByline: ThreadByline | null = null,
   ): Promise<ForumPostResponse[]> {
     if (!rows.length) return [];
     const viewer = viewerOf(user);
@@ -1275,9 +1364,12 @@ export class ForumPostsService {
     const postIds = survivors.map(({ post }) => post.id);
     const authorIds = [...new Set(survivors.map(({ post }) => post.authorId))];
 
-    const [authors, myVoteRows] = await Promise.all([
+    const [authors, myVoteRows, photosByPost] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
       this.votes.find({ where: { postId: In(postIds), userId: user.userId } }),
+      // One `post_id IN (...)` query for the whole page, ordered by `position`
+      // in SQL — never a gallery read per post.
+      photoRowsByPost(this.posts.manager, postIds),
     ]);
 
     const myVoteByPost = new Map(
@@ -1292,6 +1384,12 @@ export class ForumPostsService {
         viewer,
         moderation,
         acceptedPostId,
+        // Handed down for the whole page; `toForumPostResponse` applies it to
+        // the one row whose `isOp` says it is the opening post, so an anonymous
+        // thread's OP is masked here exactly as its card is, and no reply
+        // mapper had to learn about threads.
+        threadByline,
+        photosByPost.get(post.id) ?? [],
       ),
     );
   }

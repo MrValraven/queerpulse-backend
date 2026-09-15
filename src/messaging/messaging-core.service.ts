@@ -30,6 +30,7 @@ import {
   MessageKind,
 } from './entities/message.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { toStoredPlainText } from '../communities/community-plain-text';
 import { storageKeyFromImageUrl } from '../common/image-url';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { DOCUMENT_UPLOAD_TYPES } from '../storage/upload-content-types';
@@ -850,6 +851,7 @@ export class MessagingCoreService {
         width: attachment.width,
         height: attachment.height,
         provider: attachment.provider,
+        caption: this.sanitizeAttachmentCaption(attachment.caption),
       };
     }
     if (kind === 'image' && attachment) {
@@ -912,6 +914,7 @@ export class MessagingCoreService {
         width: attachment.width,
         height: attachment.height,
         provider: attachment.provider,
+        caption: this.sanitizeAttachmentCaption(attachment.caption),
       };
     }
     if (kind === 'document' && attachment) {
@@ -973,6 +976,7 @@ export class MessagingCoreService {
         byteSize: attachment.byteSize,
         contentType: attachment.contentType,
         provider: attachment.provider,
+        caption: this.sanitizeAttachmentCaption(attachment.caption),
       };
     }
     const entityKind =
@@ -1102,6 +1106,69 @@ export class MessagingCoreService {
       MessagingCoreService.MAX_DISPLAY_FILE_NAME_LENGTH,
     );
     return bounded.length > 0 ? bounded : 'Document';
+  }
+
+  // The longest a caption may be — generous for a genuine WhatsApp-style
+  // caption, tight enough that a pathological value can't bloat every
+  // response/broadcast that echoes it back. The DTO already enforces this at
+  // the transport boundary (`GifAttachmentDto.caption`'s own `@MaxLength`);
+  // repeated here because this method also runs against `AttachmentInput`
+  // wire values that bypass the DTO's own validation in unit tests.
+  private static readonly MAX_ATTACHMENT_CAPTION_LENGTH = 1000;
+
+  /**
+   * Bounds and cleans a `kind:'gif'`/`kind:'image'`/`kind:'document'` send's
+   * optional, member-supplied caption before it is ever persisted — the same
+   * write-boundary treatment `sanitizeDisplayFileName` above gives a
+   * document's `fileName`, plus markup-stripping, since a caption is the ONE
+   * new piece of freeform text this slice introduces (a file name is already
+   * bounded to a handful of realistic characters; a caption is prose a member
+   * actually composes, so it needs the same defence every other freeform
+   * member text field gets before being rendered verbatim in a bubble).
+   *
+   * UNLIKE `sanitizeDisplayFileName`, this does NOT strip `\n`: a caption is
+   * typed in the composer's own textarea, the identical multi-line control an
+   * ordinary message `body` uses (`TrimMessageBody` only trims the OUTER
+   * whitespace of a body and never touches an internal line break), so a
+   * caption and a body must not disagree about what counts as legal text —
+   * stripping every newline here would silently run a two-line caption's words
+   * together. CRLF and a lone CR are first normalized to `\n` (a pasted
+   * Windows-style caption must not end up with a stray, invisible `\r` sitting
+   * next to the `\n` a fresh Linux/macOS-typed one gets), and every OTHER
+   * C0/DEL control byte is still stripped, same as `sanitizeDisplayFileName`.
+   * Markup is stripped next through `toStoredPlainText` — the same
+   * write-boundary plain-text pass `community-plain-text.ts` uses for every
+   * other short, non-rich-text member field — so a crafted `<img
+   * onerror=...>` or `&lt;script&gt;` never survives into the bubble even
+   * though a caption was never HTML to begin with; `sanitizeHtml` with an
+   * empty tag allowlist passes an input's newlines through unchanged (verified
+   * directly — it neither collapses nor drops them), so this step cannot
+   * undo the normalization above. `undefined` in (no caption typed) stays
+   * `undefined` out; a caption that sanitizes down to nothing (all
+   * whitespace, all markup) is also dropped rather than persisted as an empty
+   * string — unlike a document's `fileName`, a caption is OPTIONAL, so there
+   * is no placeholder to fall back to and none is needed.
+   */
+  private sanitizeAttachmentCaption(
+    caption: string | undefined,
+  ): string | undefined {
+    if (caption === undefined) {
+      return undefined;
+    }
+    const withNormalizedLineBreaks = caption
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
+    const withoutControlCharacters = withNormalizedLineBreaks.replace(
+      // eslint-disable-next-line no-control-regex -- deliberately matching every C0/DEL control byte EXCEPT \n (\x0a), which the normalization above already made the sole line-break form, to strip them.
+      /[\x00-\x09\x0b-\x1f\x7f]/g,
+      '',
+    );
+    const withoutMarkup = toStoredPlainText(withoutControlCharacters);
+    const bounded = withoutMarkup.slice(
+      0,
+      MessagingCoreService.MAX_ATTACHMENT_CAPTION_LENGTH,
+    );
+    return bounded.length > 0 ? bounded : undefined;
   }
 
   /**

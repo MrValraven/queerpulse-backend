@@ -37,9 +37,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the handful of rows that survive it, on a table holding roughly thirty
  * guides.
  */
-export class AddResourceReviewOverdueNotifiedOn1812010000000
-  implements MigrationInterface
-{
+export class AddResourceReviewOverdueNotifiedOn1812010000000 implements MigrationInterface {
   name = 'AddResourceReviewOverdueNotifiedOn1812010000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

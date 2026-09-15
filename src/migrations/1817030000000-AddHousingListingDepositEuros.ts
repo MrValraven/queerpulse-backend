@@ -33,9 +33,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * covers. A GIN would be unusable by the query that exists, so proposing one
  * would be a speculative index that could never be hit.
  */
-export class AddHousingListingDepositEuros1817030000000
-  implements MigrationInterface
-{
+export class AddHousingListingDepositEuros1817030000000 implements MigrationInterface {
   name = 'AddHousingListingDepositEuros1817030000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

@@ -40,9 +40,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `ON DELETE SET NULL` would silently re-open the duplicate guard on a row a
  * curator had already dealt with.
  */
-export class AddResourceSuggestionCreatedListing1812000000000
-  implements MigrationInterface
-{
+export class AddResourceSuggestionCreatedListing1812000000000 implements MigrationInterface {
   name = 'AddResourceSuggestionCreatedListing1812000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

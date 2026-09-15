@@ -79,6 +79,14 @@ export interface GifAttachment {
    *  provider — or adding another attachment source later — never requires a
    *  schema/type change. */
   provider: string;
+  /** An optional WhatsApp-style caption typed alongside the attachment in the
+   *  composer and sent as ONE message. Member-supplied DISPLAY text —
+   *  sanitized (trimmed, control characters and markup stripped, length-
+   *  bounded) at the write boundary before it is ever persisted, exactly like
+   *  `DocumentAttachment.fileName` below (see
+   *  `MessagingCoreService.sanitizeAttachmentCaption`). Absent, not null, when
+   *  the member left no caption. */
+  caption?: string;
 }
 
 /**
@@ -115,6 +123,12 @@ export interface DocumentAttachment {
   /** Mirrors `GifAttachment.provider` — always `"upload"` today, kept
    *  free-form for the same forward-compatibility reason. */
   provider: string;
+  /** Mirrors `GifAttachment.caption` — an optional WhatsApp-style caption
+   *  typed alongside the document in the composer, sent as ONE message.
+   *  Member-supplied DISPLAY text, sanitized the same way `fileName` above is
+   *  (see `MessagingCoreService.sanitizeAttachmentCaption`). Absent, not
+   *  null, when the member left no caption. */
+  caption?: string;
 }
 
 /**
@@ -153,6 +167,12 @@ export interface AttachmentInput {
   fileName?: string;
   byteSize?: number;
   contentType?: string;
+  /** The optional caption typed alongside the attachment, present for
+   *  `kind:'gif'`, `kind:'image'`, or `kind:'document'`. Unvalidated wire
+   *  input — `postMessage` sanitizes it (see
+   *  `MessagingCoreService.sanitizeAttachmentCaption`) before it is ever
+   *  persisted, mirroring how `fileName` is handled. */
+  caption?: string;
 }
 
 @Entity('messages')

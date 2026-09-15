@@ -35,6 +35,12 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'CreateThreadDto.image': 'ForumPost.image',
   'ReplyThreadDto.image': 'ForumPost.image',
   'UpdateForumPostDto.image': 'ForumPost.image',
+  // The forum composer's gallery. One DTO carries every photo on the opening
+  // post, on a reply and on an edit, so the single entry covers all three
+  // bodies — and it maps to its OWN source, not to `ForumPost.image`: the rows
+  // and the legacy column are different storage that has to be collectible
+  // independently.
+  'ForumPostPhotoDto.image': 'ForumPostPhoto.storageKey',
   'CreateCommunityDto.coverImageUrl': 'Community.coverImageUrl',
   'CreateCommunityDto.avatarImageUrl': 'Community.avatarImageUrl',
   'UpsertCardProgramDto.crestMediaKey': 'CommunityCard.crestMediaKey',

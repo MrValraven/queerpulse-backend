@@ -15,7 +15,8 @@ export type UploadKind =
   | 'event-cover'
   | 'community-avatar'
   | 'message-image'
-  | 'message-document';
+  | 'message-document'
+  | 'forum-photo';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -205,6 +206,42 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
     prefix: 'message-documents',
     maxBytes: 20 * MB,
     requiresSession: true,
+  },
+  // A photo on a forum post (the richer composer's gallery, up to four per
+  // post, plus the single photo a reply may carry). Until now the forum
+  // composer had no kind of its own and borrowed `work-image`, so every forum
+  // photo landed under the `work/` prefix, counted against a portfolio cap it
+  // has nothing to do with, and showed up in Settings -> My uploads labelled
+  // as portfolio work.
+  //
+  // `requiresSession: false`, and that is FORCED rather than chosen. A
+  // session-gated kind is served by `GET /files/<key>` ONLY to the member who
+  // uploaded it (see `files.controller.ts`; the message-image/document pair is
+  // the one exception, hand-written for conversation participants). Gating this
+  // kind would therefore show a thread photo to its own author and blank it for
+  // every other reader of the thread, which is the exact failure
+  // `group-avatar` above exists to document.
+  //
+  // Nothing is weakened by that. The forum itself is member-only
+  // (`ForumController` is `@Feature('forum')` behind `ActiveMemberGuard`), so
+  // the only thing this flag would add is a session check on the bytes of a
+  // photo whose thread is already gated. Ownership of the ATTACH action is
+  // untouched either way: the key embeds the uploader's user id and the global
+  // `StorageKeyOwnershipInterceptor` rejects a body referencing somebody else's
+  // key. A forum post has exactly ONE editor (its author -- see
+  // `ForumPostsService.updatePostBody`, which refuses everyone else), so this
+  // controller is deliberately NOT added to `SHARED_UPLOAD_HANDLERS`: there is
+  // no second editor who could re-send a photo they did not upload, and the
+  // strict rule is the correct default.
+  //
+  // 8 MB matches `message-image`, the other member-to-member photo: a forum
+  // photo is a screenshot of a landlord's message or a picture of a venue's
+  // step-free entrance, the same kind of evidence at the same kind of size,
+  // and not a full-bleed 10 MB hero.
+  'forum-photo': {
+    prefix: 'forum-photos',
+    maxBytes: 8 * MB,
+    requiresSession: false,
   },
 };
 

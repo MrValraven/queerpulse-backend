@@ -46,6 +46,10 @@ function build() {
       findOne: jest.fn().mockResolvedValue(null),
       // `tombstonePost` releases the accepted-answer mark the same way.
       update: jest.fn().mockResolvedValue({ affected: 0 }),
+      // `photoRowsByPost` — the batched `forum_post_photo` read every post
+      // mapper goes through. Default: no photo rows, so `photos` comes back as
+      // whatever the legacy `image` column holds (nothing, here).
+      find: jest.fn().mockResolvedValue([]),
     },
   };
   const votes = { findOne: jest.fn().mockResolvedValue(null) };

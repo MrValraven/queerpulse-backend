@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ForumController } from './forum.controller';
+import { ForumPollsService } from './forum-polls.service';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumThreadsService } from './forum-threads.service';
 
@@ -31,6 +32,7 @@ describe('ForumController', () => {
     vote: jest.Mock;
     hasEverPosted: jest.Mock;
   };
+  let pollsService: { vote: jest.Mock };
 
   beforeEach(async () => {
     threadsService = {
@@ -51,12 +53,14 @@ describe('ForumController', () => {
       vote: jest.fn().mockResolvedValue({ voteCount: 1, myVote: 1 }),
       hasEverPosted: jest.fn().mockResolvedValue(false),
     };
+    pollsService = { vote: jest.fn().mockResolvedValue({}) };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ForumController],
       providers: [
         { provide: ForumThreadsService, useValue: threadsService },
         { provide: ForumPostsService, useValue: postsService },
+        { provide: ForumPollsService, useValue: pollsService },
       ],
     }).compile();
     controller = module.get(ForumController);
@@ -255,15 +259,26 @@ describe('ForumController', () => {
   it('delegates reply with the caller user', async () => {
     await controller.reply(user, 'hello-world', { body: 'A reply' });
     // reply also takes the full CurrentUserData, plus the optional
-    // parentPostId (undefined when replying at thread level) and the optional
-    // attached image.
+    // parentPostId (undefined when replying at thread level), the optional
+    // attached image and the optional photo array.
     expect(postsService.reply).toHaveBeenCalledWith(
       'hello-world',
       user,
       'A reply',
       undefined,
       undefined,
+      undefined,
     );
+  });
+
+  it('delegates a poll ballot with the caller and the option ids', async () => {
+    await controller.votePoll(user, 'hello-world', {
+      optionIds: ['option-1', 'option-2'],
+    });
+    expect(pollsService.vote).toHaveBeenCalledWith('hello-world', user, [
+      'option-1',
+      'option-2',
+    ]);
   });
 
   it('delegates vote with the caller id', async () => {

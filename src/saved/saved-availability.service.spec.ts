@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { SavedAvailabilityService } from './saved-availability.service';
@@ -117,6 +118,70 @@ describe('SavedAvailabilityService', () => {
 
     expect(available.has('post:still-here')).toBe(true);
     expect(available.has('post:long-gone')).toBe(false);
+  });
+
+  describe('the bookmarked-thread gate', () => {
+    // Every predicate the thread query folded on, in the order it folded them.
+    const foldedPredicates = (): string[] => {
+      const result = manager.createQueryBuilder.mock.results[0] as
+        { value: Record<string, jest.Mock> } | undefined;
+      const andWhere = result?.value.andWhere;
+      if (!andWhere) return [];
+      return andWhere.mock.calls.map((call: unknown[]) => String(call[0]));
+    };
+
+    it("carries the forum's own scheduled/under-review gate, verbatim", async () => {
+      // The regression this closes: this service re-implements `loadOr404`
+      // predicate for predicate, fell exactly one predicate behind when the
+      // scheduled/under-review gate landed, and so kept rendering the TITLE of
+      // a bookmarked thread that was scheduled for next week or still waiting
+      // on a moderator.
+      await build({ thread: ['a-thread'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Post, 'a-thread')],
+        'viewer-1',
+      );
+
+      // Asserted against the forum's own exported predicate rather than a
+      // string typed here, which is the entire point: a third spelling is what
+      // fell behind in the first place.
+      expect(
+        foldedPredicates().some((sql) =>
+          sql.includes(forumThreadVisibleSql('"thread"')),
+        ),
+      ).toBe(true);
+    });
+
+    it("lets the thread's own author past it, as `loadOr404` does", async () => {
+      await build({ thread: ['a-thread'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Post, 'a-thread')],
+        'viewer-1',
+      );
+
+      const gate = foldedPredicates().find((sql) =>
+        sql.includes(forumThreadVisibleSql('"thread"')),
+      );
+      // One arm, in the SAME predicate as the gate: an author who bookmarked a
+      // thread they themself scheduled can still open it, so reporting it as
+      // unavailable would be the wrong answer.
+      expect(gate).toContain('"thread"."author_id" = :savedViewerId');
+    });
+
+    it('still excludes withdrawn threads alongside it', async () => {
+      await build({ thread: ['a-thread'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Post, 'a-thread')],
+        'viewer-1',
+      );
+
+      expect(
+        foldedPredicates().some((sql) => sql.includes('"deleted_at" IS NULL')),
+      ).toBe(true);
+    });
   });
 
   it('deduplicates a subject id repeated on the page', async () => {

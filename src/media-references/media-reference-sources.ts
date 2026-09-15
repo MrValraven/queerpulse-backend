@@ -18,6 +18,7 @@ import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
+import { ForumPostPhoto } from '../forum/entities/forum-post-photo.entity';
 import { Community } from '../communities/entities/community.entity';
 import {
   CardIssuerType,
@@ -204,6 +205,22 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     // A forum post has no title of its own, so the body doubles as the label
     // the way `CommunityPost` uses none at all.
     labelColumns: ['body'],
+  }),
+  plainSource({
+    // The forum composer's multi-photo gallery, a SEPARATE source from
+    // `ForumPost.image` above rather than a second column on it. `plainSource`
+    // matches exactly one column, and the two are independently deletable: a
+    // gallery photo with no references must not be kept alive by a legacy
+    // `image` on the same post, nor the other way round. Same call
+    // `community-avatar` makes below.
+    type: 'forum-post-photo',
+    field: 'ForumPostPhoto.storageKey',
+    entity: ForumPostPhoto,
+    column: 'storageKey',
+    idColumn: 'id',
+    // No label, matching `event-photo`, the row this table is modelled on: a
+    // photo row carries no title of its own and the post's body is a join away.
+    labelColumns: [],
   }),
   plainSource({
     type: 'community-cover',
