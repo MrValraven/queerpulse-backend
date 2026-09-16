@@ -63,7 +63,7 @@ export class ChatSessionEnforcementService {
       return;
     }
     try {
-      const users = await this.users.findByIdsWithProfile(onlineUserIds);
+      const users = await this.users.findStatusesByIds(onlineUserIds);
       const activeIds = new Set(
         users
           .filter((user) => user.status === UserStatus.Active)

@@ -1,7 +1,9 @@
 import {
+  GroupAddPolicy,
   MemberPreferences,
   OutAtWork,
 } from './entities/member-preferences.entity';
+import { WhoCanMessage } from './who-can-message';
 
 // Response shapes are the frontend contract exactly — the two endpoints project
 // disjoint subsets of the one row, so neither leaks the other's settings.
@@ -59,6 +61,29 @@ export interface SuggestionVisibilityDTO {
   hideFromSuggestions: boolean;
 }
 
+/**
+ * `GET|PUT /me/messaging-privacy` (PRD-364/PRD-366): the reciprocal
+ * read-receipt/typing/presence shares plus the "who can message me" gate, on
+ * their own. All four default to the platform's pre-PRD-364/366 behaviour
+ * (sharing on, everyone may message), so a member with no row reads
+ * identically to one who explicitly chose those values.
+ */
+export interface MessagingPrivacyDTO {
+  shareReadReceipts: boolean;
+  shareTyping: boolean;
+  sharePresence: boolean;
+  whoCanMessage: WhoCanMessage;
+}
+
+/**
+ * `GET|PUT /me/group-add-policy` (PRD-353): who may put this member straight
+ * into a group, on its own. Mirrors `SuggestionVisibilityDTO`'s single-field
+ * shape.
+ */
+export interface GroupAddPolicyDTO {
+  policy: GroupAddPolicy;
+}
+
 export function toWorkPreferencesDTO(
   row: MemberPreferences,
 ): WorkPreferencesDTO {
@@ -97,4 +122,19 @@ export function toSuggestionVisibilityDTO(
   row: MemberPreferences,
 ): SuggestionVisibilityDTO {
   return { hideFromSuggestions: row.hideFromSuggestions };
+}
+
+export function toMessagingPrivacyDTO(
+  row: MemberPreferences,
+): MessagingPrivacyDTO {
+  return {
+    shareReadReceipts: row.shareReadReceipts,
+    shareTyping: row.shareTyping,
+    sharePresence: row.sharePresence,
+    whoCanMessage: row.whoCanMessage,
+  };
+}
+
+export function toGroupAddPolicyDTO(row: MemberPreferences): GroupAddPolicyDTO {
+  return { policy: row.groupAddPolicy };
 }

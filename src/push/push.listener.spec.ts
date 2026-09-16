@@ -2,10 +2,16 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { ConversationMuteMode } from '../messaging/entities/conversation-participant.entity';
+import { ConversationKind } from '../messaging/entities/conversation.entity';
 import { MessageKind } from '../messaging/entities/message.entity';
 import { MessageCreatedEvent } from '../messaging/messaging.events';
 import { MessageView } from '../messaging/message-response';
-import { PushMessageListener } from './push.listener';
+import {
+  PUSH_MIN_INTERVAL_MS,
+  PUSH_QUIET_REPEAT_WINDOW_MS,
+  PushMessageListener,
+} from './push.listener';
 import { PushPayload } from './push.service';
 
 // The listener resolves the sender's display name via `requireAuthorSummary`,
@@ -20,6 +26,11 @@ beforeAll(() => {
 
 afterAll(() => {
   resetImageUrlBaseForTesting();
+});
+
+// The pacing cases pin `Date.now`; never let one leak into the next test.
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
@@ -50,7 +61,12 @@ function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
       id: message.id,
       conversationId: message.conversationId,
       body: message.body,
-      sender: { handle: 'alex', displayName: 'Alex Doe', avatarUrl: null },
+      sender: {
+        handle: 'alex',
+        displayName: 'Alex Doe',
+        pronouns: null,
+        avatarUrl: null,
+      },
       createdAt: message.createdAt.toISOString(),
       editedAt: null,
       reactions: [],
@@ -73,7 +89,12 @@ function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
 }
 
 function build(opts: {
-  participants: { userId: string; muted: boolean }[];
+  participants: {
+    userId: string;
+    muted: boolean;
+    mutedUntil?: Date | null;
+    muteMode?: ConversationMuteMode;
+  }[];
   online: string[];
   isOfficial?: boolean;
   blocked?: string[];
@@ -85,17 +106,70 @@ function build(opts: {
   // absolute https URL is a public avatar; a storage key resolves to our
   // auth-gated `/files/*` route and must NOT become the push icon.
   senderAvatarUrl?: string;
+  // Conversation shape (PRD-333). Defaults to a 1:1 DM.
+  conversationKind?: ConversationKind;
+  groupTitle?: string | null;
+  // ENG-232: whether sender and recipient are accepted connections. Defaults
+  // to connected, so the rich-payload cases above measure only what they mean.
+  isConnected?: boolean;
+  hasConnectionLookupFailure?: boolean;
+  // PRD-336: member slug -> userId, for resolving an `@slug` mention in the
+  // message body via `MemberLookup` (empty = no mention resolves to anyone,
+  // which is what every non-mention test above relies on).
+  mentionSlugUserIds?: Record<string, string>;
 }) {
+  const conversationKind = opts.conversationKind ?? ConversationKind.Direct;
   const conversationsRepo = {
     findOne: jest.fn().mockResolvedValue({
       id: 'conv-1',
       isOfficial: opts.isOfficial ?? false,
-      pairKey: opts.isOfficial ? null : 'sender-1:recipient-1',
+      kind: conversationKind,
+      title:
+        conversationKind === ConversationKind.Group
+          ? (opts.groupTitle ?? null)
+          : null,
+      pairKey:
+        opts.isOfficial || conversationKind === ConversationKind.Group
+          ? null
+          : 'sender-1:recipient-1',
     }),
   };
-  const participantsRepo = {
-    find: jest.fn().mockResolvedValue(opts.participants),
+  const connections = {
+    areConnected: jest
+      .fn()
+      .mockImplementation(() =>
+        opts.hasConnectionLookupFailure
+          ? Promise.reject(new Error('connections lookup failed'))
+          : Promise.resolve(opts.isConnected ?? true),
+      ),
   };
+  // Two different shapes call `find` here: `eligibleMessagePushRecipientUserIds`
+  // (no `userId` filter, unless a caller narrows it) and, for a group,
+  // `groupMentionedParticipantUserIds` (always filtered to a specific
+  // `userId: In([...])`). Filtering by that when present keeps the two calls
+  // from bleeding into each other, the same way the real repository would.
+  const participantsRepo = {
+    find: jest
+      .fn()
+      .mockImplementation(
+        (options: { where?: { userId?: { value?: string[] } } }) => {
+          const allowedUserIds = options?.where?.userId?.value;
+          const rows = allowedUserIds
+            ? opts.participants.filter((participant) =>
+                allowedUserIds.includes(participant.userId),
+              )
+            : opts.participants;
+          return Promise.resolve(rows);
+        },
+      ),
+  };
+  // `MemberLookup.userIdsForSlugs` (PRD-336's `@`-mention resolution) goes
+  // through `createQueryBuilder().innerJoin().where().getMany()` rather than
+  // a plain `find`, so it needs its own chainable stub. Only ever invoked
+  // when a test's message body actually contains an `@slug` token.
+  const mentionRows = Object.entries(opts.mentionSlugUserIds ?? {}).map(
+    ([slug, userId]) => ({ slug, userId }),
+  );
   const profilesRepo = {
     findOne: jest.fn().mockResolvedValue({
       userId: 'sender-1',
@@ -103,6 +177,11 @@ function build(opts: {
       lastName: 'Doe',
       slug: 'alex',
       avatarUrl: opts.senderAvatarUrl ?? null,
+    }),
+    createQueryBuilder: jest.fn().mockReturnValue({
+      innerJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue(mentionRows),
     }),
   };
   const presence = {
@@ -166,6 +245,7 @@ function build(opts: {
     blockFilter as never,
     notificationPreferences as never,
     notificationDelivery as never,
+    connections as never,
   );
   return {
     listener,
@@ -174,7 +254,37 @@ function build(opts: {
     conversationsRepo,
     blockFilter,
     notificationPreferences,
+    connections,
   };
+}
+
+const DIRECT_PARTICIPANTS = [
+  { userId: 'sender-1', muted: false },
+  { userId: 'recipient-1', muted: false },
+];
+
+const GROUP_PARTICIPANTS = [
+  { userId: 'sender-1', muted: false },
+  { userId: 'recipient-1', muted: false },
+  { userId: 'recipient-2', muted: false },
+];
+
+/** The `callIndex`-th `sendToUsers` call, failing loudly when it never happened. */
+function sentCall(
+  push: { sendToUsers: jest.Mock },
+  callIndex: number,
+): { userIds: string[]; payload: PushPayload } {
+  const calls: unknown[] = push.sendToUsers.mock.calls;
+  const call = calls[callIndex] as [string[], PushPayload] | undefined;
+  if (!call) throw new Error(`sendToUsers call ${callIndex} never happened`);
+  return { userIds: call[0], payload: call[1] };
+}
+
+function sentPayload(
+  push: { sendToUsers: jest.Mock },
+  callIndex: number,
+): PushPayload {
+  return sentCall(push, callIndex).payload;
 }
 
 it('pushes to an offline recipient with the sender name + preview', async () => {
@@ -235,15 +345,64 @@ it('never pushes to the sender', async () => {
   expect(push.sendToUsers).not.toHaveBeenCalled();
 });
 
-it('excludes muted participants at the query level', async () => {
-  const { listener, participantsRepo } = build({
-    participants: [{ userId: 'recipient-1', muted: false }],
+it('excludes a participant with an indefinite mute (PRD-349)', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: true, mutedUntil: null },
+    ],
     online: [],
   });
   await listener.handleMessageCreated(makeEvent());
-  expect(participantsRepo.find).toHaveBeenCalledWith({
-    where: { conversationId: 'conv-1', muted: false },
+  expect(push.sendToUsers).not.toHaveBeenCalled();
+});
+
+it('excludes a participant whose timed mute has not expired yet (PRD-349)', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      {
+        userId: 'recipient-1',
+        muted: true,
+        mutedUntil: new Date(Date.now() + 60_000),
+      },
+    ],
+    online: [],
   });
+  await listener.handleMessageCreated(makeEvent());
+  expect(push.sendToUsers).not.toHaveBeenCalled();
+});
+
+it('pushes to a participant whose timed mute already expired (PRD-349)', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      {
+        userId: 'recipient-1',
+        muted: true,
+        mutedUntil: new Date(Date.now() - 60_000),
+      },
+    ],
+    online: [],
+  });
+  await listener.handleMessageCreated(makeEvent());
+  expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+  const [userIds] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(userIds).toEqual(['recipient-1']);
+});
+
+it('pushes to an unmuted participant', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+  });
+  await listener.handleMessageCreated(makeEvent());
+  expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+  const [userIds] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(userIds).toEqual(['recipient-1']);
 });
 
 it('never pushes to a recipient blocked either way relative to the sender (P0)', async () => {
@@ -366,4 +525,578 @@ it('never pushes for an official (non-DM) conversation', async () => {
   expect(push.sendToUsers).not.toHaveBeenCalled();
   // Bails before the participant query — no unnecessary work for group threads.
   expect(participantsRepo.find).not.toHaveBeenCalled();
+});
+
+describe('group message shape (PRD-333)', () => {
+  it('titles the push with the group and prefixes the body with the sender', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: 'the terrace is booked' }),
+    );
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(userIds).toEqual(['recipient-1', 'recipient-2']);
+    expect(payload.title).toBe('Terrace crew');
+    expect(payload.body).toBe('Alex Doe: the terrace is booked');
+    expect(payload.data).toEqual({
+      conversationId: 'conv-1',
+      url: '/messages?c=conv-1',
+      isGroup: true,
+    });
+    expect(payload).not.toHaveProperty('l10n');
+  });
+
+  it('falls back to the DM shape, without isGroup, for a group with a blank title', async () => {
+    const { listener, push, connections } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: '   ',
+    });
+    await listener.handleMessageCreated(makeEvent());
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('Alex Doe');
+    expect(payload.body).toBe('hey there');
+    expect(payload.data).not.toHaveProperty('isGroup');
+    // A group is never subject to the stranger rule (ENG-232).
+    expect(connections.areConnected).not.toHaveBeenCalled();
+  });
+
+  it('never sets isGroup on a DM push', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    const payload = sentPayload(push, 0);
+    expect(payload.data).not.toHaveProperty('isGroup');
+  });
+});
+
+describe('participant column selection (ENG-239)', () => {
+  it('selects only userId, leftAt, muted, mutedUntil and muteMode off the participants query', async () => {
+    const { listener, participantsRepo } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    expect(participantsRepo.find).toHaveBeenCalledWith({
+      where: { conversationId: 'conv-1' },
+      select: {
+        userId: true,
+        leftAt: true,
+        muted: true,
+        mutedUntil: true,
+        muteMode: true,
+      },
+    });
+  });
+});
+
+describe('mentions-only mute (PRD-349)', () => {
+  it('excludes a mentions-only participant from a PLAIN message push', async () => {
+    const { listener, push } = build({
+      participants: [
+        { userId: 'sender-1', muted: false },
+        {
+          userId: 'recipient-1',
+          muted: false,
+          muteMode: ConversationMuteMode.MentionsOnly,
+        },
+      ],
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    expect(push.sendToUsers).not.toHaveBeenCalled();
+  });
+
+  it('excludes a mentions-only participant even when muted is also false and mutedUntil is in the past', async () => {
+    // muteMode wins independent of the ordinary muted/mutedUntil ladder, per
+    // ConversationParticipant.muteMode's own doc.
+    const { listener, push } = build({
+      participants: [
+        { userId: 'sender-1', muted: false },
+        {
+          userId: 'recipient-1',
+          muted: false,
+          mutedUntil: new Date(Date.now() - 60_000),
+          muteMode: ConversationMuteMode.MentionsOnly,
+        },
+      ],
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    expect(push.sendToUsers).not.toHaveBeenCalled();
+  });
+
+  it('eligibleMessagePushRecipientUserIds excludes a mentions-only participant unconditionally', async () => {
+    const { listener } = build({
+      participants: [
+        { userId: 'sender-1', muted: false },
+        {
+          userId: 'recipient-1',
+          muted: false,
+          muteMode: ConversationMuteMode.MentionsOnly,
+        },
+      ],
+      online: [],
+    });
+    const eligible = await listener.eligibleMessagePushRecipientUserIds(
+      'conv-1',
+      'sender-1',
+    );
+    expect(eligible).toEqual(new Set());
+  });
+
+  it('never sends a mentions-only GROUP member the plain OR the merged mention push, even when the message mentions them: they fall through to the standalone mention push path instead (PushNotificationListener.pushMention, which asks eligibleMessagePushRecipientUserIds the identical question and finds them uncovered, verified by the two assertions above)', async () => {
+    const { listener, push } = build({
+      participants: [
+        { userId: 'sender-1', muted: false },
+        {
+          userId: 'recipient-1',
+          muted: false,
+          muteMode: ConversationMuteMode.MentionsOnly,
+        },
+        { userId: 'recipient-2', muted: false },
+      ],
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+      mentionSlugUserIds: { ana: 'recipient-1' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: '@ana are we still on for Saturday?' }),
+    );
+    // Only recipient-2 (the ordinary group copy) is sent FROM THIS LISTENER.
+    // recipient-1 gets zero pushes here, proving no double-send from this
+    // listener's own merge, and is left for `pushMention`'s standalone send.
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(userIds).toEqual(['recipient-2']);
+    expect(payload).not.toHaveProperty('l10n');
+  });
+});
+
+describe('attachment copy (ENG-227)', () => {
+  it("ignores the sender's placeholder body and sends kind copy for an uncaptioned DM photo", async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(
+      makeEvent({
+        kind: MessageKind.Image,
+        // A PT sender's client placeholder: must never reach the lock screen.
+        body: 'Foto',
+        attachment: {
+          url: 'message-images/sender-1/photo.jpg',
+          previewUrl: 'message-images/sender-1/photo.jpg',
+          width: 800,
+          height: 600,
+          provider: 'upload',
+        },
+      }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('Alex Doe');
+    expect(payload.body).toBe('Photo');
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.attachment.photo',
+    });
+  });
+
+  it('treats a whitespace-only caption as no caption', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(
+      makeEvent({
+        kind: MessageKind.Document,
+        body: 'Ficheiro',
+        attachment: {
+          url: 'message-documents/sender-1/lease.pdf',
+          fileName: 'lease.pdf',
+          byteSize: 1_000,
+          contentType: 'application/pdf',
+          provider: 'upload',
+          caption: '   ',
+        },
+      }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe('Document');
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.attachment.document',
+    });
+  });
+
+  it('sends group kind copy with the sender name as a param for an uncaptioned group GIF', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(
+      makeEvent({
+        kind: MessageKind.Gif,
+        body: 'GIF',
+        attachment: {
+          url: 'https://static.klipy.com/wave.gif',
+          previewUrl: 'https://static.klipy.com/wave-small.gif',
+          width: 320,
+          height: 240,
+          provider: 'klipy',
+        },
+      }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('Terrace crew');
+    expect(payload.body).toBe('Alex Doe: GIF');
+    expect(payload.l10n).toEqual({
+      bodyKey: 'push:messages.group.attachment.gif',
+      params: { name: 'Alex Doe' },
+    });
+    expect(payload.data.isGroup).toBe(true);
+  });
+
+  it('previews the caption, without kind copy, when the member typed one', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(
+      makeEvent({
+        kind: MessageKind.Document,
+        body: 'Ficheiro',
+        attachment: {
+          url: 'message-documents/sender-1/lease.pdf',
+          fileName: 'lease.pdf',
+          byteSize: 1_000,
+          contentType: 'application/pdf',
+          provider: 'upload',
+          caption: '  lease for the flat  ',
+        },
+      }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe('Alex Doe: lease for the flat');
+    expect(payload).not.toHaveProperty('l10n');
+  });
+});
+
+describe('per-recipient push pacing (ENG-230)', () => {
+  const START_MS = 1_800_000_000_000;
+
+  it('suppresses a second push inside the minimum interval', async () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(START_MS);
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    nowSpy.mockReturnValue(START_MS + PUSH_MIN_INTERVAL_MS - 1);
+    await listener.handleMessageCreated(makeEvent({ id: 'm2' }));
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a quiet repeat (renotify false, no vibrate) inside the repeat window', async () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(START_MS);
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    nowSpy.mockReturnValue(START_MS + PUSH_MIN_INTERVAL_MS);
+    await listener.handleMessageCreated(makeEvent({ id: 'm2' }));
+    const firstPayload = sentPayload(push, 0);
+    const secondPayload = sentPayload(push, 1);
+    expect(firstPayload.renotify).toBe(true);
+    expect(firstPayload.vibrate).toEqual([80, 40, 80]);
+    expect(secondPayload.renotify).toBe(false);
+    expect(secondPayload).not.toHaveProperty('vibrate');
+  });
+
+  it('buzzes again once the repeat window has passed', async () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(START_MS);
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    nowSpy.mockReturnValue(START_MS + PUSH_QUIET_REPEAT_WINDOW_MS);
+    await listener.handleMessageCreated(makeEvent({ id: 'm2' }));
+    const secondPayload = sentPayload(push, 1);
+    expect(secondPayload.renotify).toBe(true);
+    expect(secondPayload.vibrate).toEqual([80, 40, 80]);
+  });
+
+  it('paces each conversation separately', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(START_MS);
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    await listener.handleMessageCreated(makeEvent());
+    await listener.handleMessageCreated({
+      ...makeEvent({ id: 'm2', conversationId: 'conv-2' }),
+      conversationId: 'conv-2',
+    });
+    expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+    const secondPayload = sentPayload(push, 1);
+    expect(secondPayload.tag).toBe('conv-2');
+    expect(secondPayload.renotify).toBe(true);
+  });
+
+  it('splits a group into a fresh batch and a quiet batch, sent one after the other', async () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(START_MS);
+    // recipient-2 is online for the first message, so only recipient-1 is
+    // pushed and paced; both are offline for the second.
+    const online = ['recipient-2'];
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online,
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    await listener.handleMessageCreated(makeEvent());
+    online.length = 0;
+    nowSpy.mockReturnValue(START_MS + 10_000);
+    await listener.handleMessageCreated(makeEvent({ id: 'm2' }));
+
+    expect(push.sendSplitByPreviewPreference).toHaveBeenCalledTimes(3);
+    const freshCall = sentCall(push, 1);
+    const quietCall = sentCall(push, 2);
+    expect(freshCall.userIds).toEqual(['recipient-2']);
+    expect(freshCall.payload.renotify).toBe(true);
+    expect(quietCall.userIds).toEqual(['recipient-1']);
+    expect(quietCall.payload.renotify).toBe(false);
+    expect(quietCall.payload).not.toHaveProperty('vibrate');
+  });
+
+  it('releases the reservation when a send fails, so the next message still buzzes', async () => {
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(START_MS);
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+    });
+    push.sendSplitByPreviewPreference.mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+    await expect(
+      listener.handleMessageCreated(makeEvent()),
+    ).resolves.toBeUndefined();
+    nowSpy.mockReturnValue(START_MS + 1_000);
+    await listener.handleMessageCreated(makeEvent({ id: 'm2' }));
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const payload = sentPayload(push, 0);
+    expect(payload.renotify).toBe(true);
+    expect(payload.vibrate).toEqual([80, 40, 80]);
+  });
+});
+
+describe('cold DM from a non-connection (ENG-232)', () => {
+  it('sends the generic message copy with no icon, actions or params', async () => {
+    const { listener, push, connections } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+      isConnected: false,
+      senderAvatarUrl: 'https://lh3.googleusercontent.com/a/alex.png',
+    });
+    await listener.handleMessageCreated(makeEvent());
+    expect(connections.areConnected).toHaveBeenCalledWith(
+      'sender-1',
+      'recipient-1',
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('QueerPulse');
+    expect(payload.body).toBe('You have a new message.');
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:preview.hidden.title',
+      bodyKey: 'push:preview.hidden.message',
+    });
+    expect(payload).not.toHaveProperty('icon');
+    expect(payload).not.toHaveProperty('actions');
+    expect(payload.data).toEqual({
+      conversationId: 'conv-1',
+      url: '/messages?c=conv-1',
+    });
+    expect(payload.renotify).toBe(true);
+  });
+
+  it('never sends a stranger an attachment kind word', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+      isConnected: false,
+    });
+    await listener.handleMessageCreated(
+      makeEvent({
+        kind: MessageKind.Image,
+        body: 'Photo',
+        attachment: {
+          url: 'message-images/sender-1/photo.jpg',
+          previewUrl: 'message-images/sender-1/photo.jpg',
+          width: 800,
+          height: 600,
+          provider: 'upload',
+        },
+      }),
+    );
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe('You have a new message.');
+  });
+
+  it('fails private when the connection lookup throws', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+      hasConnectionLookupFailure: true,
+    });
+    await listener.handleMessageCreated(makeEvent());
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const payload = sentPayload(push, 0);
+    expect(payload.title).toBe('QueerPulse');
+    expect(payload).not.toHaveProperty('icon');
+  });
+});
+
+describe('group mention fold (PRD-336)', () => {
+  it('sends exactly one push to a mentioned, pushable recipient, mention-aware and on the thread tag', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+      mentionSlugUserIds: { ana: 'recipient-1' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: '@ana are we still on for Saturday?' }),
+    );
+    // TWO batches (one per recipient), never a third, separately-tagged push
+    // for the mentioned recipient. This is the fold this proves.
+    expect(push.sendToUsers).toHaveBeenCalledTimes(2);
+    const calls = push.sendToUsers.mock.calls as [string[], PushPayload][];
+    const mentionCall = calls.find(([userIds]) =>
+      userIds.includes('recipient-1'),
+    );
+    const plainCall = calls.find(([userIds]) =>
+      userIds.includes('recipient-2'),
+    );
+    if (!mentionCall || !plainCall) {
+      throw new Error('expected one call per recipient');
+    }
+    const [mentionUserIds, mentionPayload] = mentionCall;
+    const [plainUserIds, plainPayload] = plainCall;
+    // Each recipient appears in exactly ONE of the two batches.
+    expect(mentionUserIds).toEqual(['recipient-1']);
+    expect(plainUserIds).toEqual(['recipient-2']);
+    // Same thread tag on both, so a service worker replaces rather than
+    // stacks. This is never a second, `notification:<id>`-tagged push.
+    expect(mentionPayload.tag).toBe('conv-1');
+    expect(plainPayload.tag).toBe('conv-1');
+    expect(mentionPayload.title).toBe('Terrace crew');
+    expect(mentionPayload.body).toBe(
+      'Alex Doe mentioned you: @ana are we still on for Saturday?',
+    );
+    expect(mentionPayload.l10n).toEqual({
+      bodyKey: 'push:messages.group.mention.body',
+      params: {
+        name: 'Alex Doe',
+        preview: '@ana are we still on for Saturday?',
+      },
+    });
+    // The non-mentioned recipient still gets the ordinary group copy.
+    expect(plainPayload.body).toBe(
+      'Alex Doe: @ana are we still on for Saturday?',
+    );
+  });
+
+  it('never folds a DM mention (no group title to carry the mention copy)', async () => {
+    const { listener, push } = build({
+      participants: DIRECT_PARTICIPANTS,
+      online: [],
+      mentionSlugUserIds: { ana: 'recipient-1' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: '@ana are you free tonight?' }),
+    );
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const payload = sentPayload(push, 0);
+    expect(payload.body).toBe('@ana are you free tonight?');
+    expect(payload).not.toHaveProperty('l10n');
+  });
+
+  it('leaves a mentioned recipient who is NOT pushable (e.g. thread-muted) out of the mention fold entirely', async () => {
+    const { listener, push } = build({
+      participants: [
+        { userId: 'sender-1', muted: false },
+        { userId: 'recipient-1', muted: true, mutedUntil: null },
+        { userId: 'recipient-2', muted: false },
+      ],
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+      mentionSlugUserIds: { ana: 'recipient-1' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: '@ana are we still on for Saturday?' }),
+    );
+    // recipient-1 is thread-muted, so they are excluded from `pushable`
+    // entirely (unchanged by PRD-336) and get no push of either shape here.
+    // `PushNotificationListener.pushMention` is what still reaches them.
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(userIds).toEqual(['recipient-2']);
+    expect(payload).not.toHaveProperty('l10n');
+  });
+});
+
+describe('eligibleMessagePushRecipientUserIds (PRD-336)', () => {
+  it('narrows to only the requested candidates when given', async () => {
+    const { listener } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    const eligible = await listener.eligibleMessagePushRecipientUserIds(
+      'conv-1',
+      'sender-1',
+      ['recipient-1'],
+    );
+    expect(eligible).toEqual(new Set(['recipient-1']));
+  });
+
+  it('excludes a recipient outside the narrowed candidate list even if they would otherwise be eligible', async () => {
+    const { listener } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Terrace crew',
+    });
+    const eligible = await listener.eligibleMessagePushRecipientUserIds(
+      'conv-1',
+      'sender-1',
+      ['recipient-2'],
+    );
+    expect(eligible).not.toContain('recipient-1');
+  });
 });

@@ -55,20 +55,32 @@ export class BlockFilterService {
    * DB's `SnakeNamingStrategy` column name (e.g. `'"cp"."author_id"'`), not
    * a TypeORM camelCase property path. Call once per query builder — the
    * bound parameter name (`blockFilterActorId`) is fixed.
+   *
+   * `options.unless`, when given, is a raw SQL boolean expression (same
+   * verbatim-splice contract as `memberIdColumn`, never caller-controlled
+   * input) OR'd in front of the `NOT EXISTS`, so a row that satisfies it is
+   * kept regardless of a block. Two callers: a group's own system pills,
+   * which must stay visible to every member even when their actor is blocked
+   * (`"m"."kind" = 'system'`), and a query spanning several conversation
+   * kinds where the block gate should only bite for one of them (a search
+   * across DMs and groups scoping the filter to group rows). Omit it for
+   * the plain, unconditional filter every existing caller already gets.
    */
   excludeBlocked<E extends ObjectLiteral>(
     qb: SelectQueryBuilder<E>,
     actorId: string,
     memberIdColumn: string,
+    options?: { unless: string },
   ): SelectQueryBuilder<E> {
-    return qb.andWhere(
-      `NOT EXISTS (
+    const notBlocked = `NOT EXISTS (
         SELECT 1 FROM "blocks" "__block_filter"
         WHERE ("__block_filter"."blocker_id" = :blockFilterActorId AND "__block_filter"."blocked_id" = ${memberIdColumn})
            OR ("__block_filter"."blocked_id" = :blockFilterActorId AND "__block_filter"."blocker_id" = ${memberIdColumn})
-      )`,
-      { blockFilterActorId: actorId },
-    );
+      )`;
+    const predicate = options
+      ? `(${options.unless} OR ${notBlocked})`
+      : notBlocked;
+    return qb.andWhere(predicate, { blockFilterActorId: actorId });
   }
 
   /**
@@ -178,6 +190,43 @@ export class BlockFilterService {
       select: { muterId: true },
     });
     return new Set(rows.map((r) => r.muterId));
+  }
+
+  /**
+   * Multi-actor block gate (PRD-354): the subset of `candidateIds` blocked
+   * EITHER WAY with ANY of `guardianIds` (e.g. every active member of a
+   * group, so adding/inviting someone blocked by even one existing member is
+   * refused, not just a block with the adder) OR with another member of the
+   * SAME candidate batch (two people seated by the same `createGroup`/
+   * `addMembers` call who blocked each other must both be refused, not
+   * silently seated together). Folding `candidateIds` into the guarded set
+   * for this query catches both shapes in ONE round trip: a block row counts
+   * if one side names a candidate and the other names a guardian OR another
+   * candidate, in either blocker/blocked position. A block row can never
+   * pair a user with themselves, so no self-pair exclusion is needed.
+   * `actorId`-only gates (a DM, a single-adder check) should keep using
+   * `blockedUserIds` instead: this is for the "any of several" case.
+   */
+  async blockedAgainstAnyOf(
+    candidateIds: string[],
+    guardianIds: string[],
+  ): Promise<Set<string>> {
+    const candidates = new Set(candidateIds);
+    const guarded = [...new Set([...guardianIds, ...candidateIds])];
+    if (!candidates.size || !guarded.length) return new Set();
+    const rows = await this.blocks.find({
+      where: [
+        { blockerId: In([...candidates]), blockedId: In(guarded) },
+        { blockedId: In([...candidates]), blockerId: In(guarded) },
+      ],
+      select: { blockerId: true, blockedId: true },
+    });
+    const blocked = new Set<string>();
+    for (const row of rows) {
+      if (candidates.has(row.blockerId)) blocked.add(row.blockerId);
+      if (candidates.has(row.blockedId)) blocked.add(row.blockedId);
+    }
+    return blocked;
   }
 
   /** Union of `blockedUserIds` and `mutedUserIds` — the post-query analogue

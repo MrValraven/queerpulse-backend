@@ -7,6 +7,8 @@ import {
   DOCUMENT_UPLOAD_TYPES,
   IMAGE_UPLOAD_TYPES,
 } from './upload-content-types';
+import { parseStorageKey } from './storage-key';
+import { UPLOAD_KIND_SPECS } from './upload-kinds';
 
 // Reverse of `IMAGE_UPLOAD_TYPES`/`DOCUMENT_UPLOAD_TYPES` (content type ->
 // extension): given a key's extension, recover the single content type it must
@@ -66,6 +68,22 @@ export function inlineContentDispositionForStorageKey(key: string): string {
   const lastSlash = key.lastIndexOf('/');
   const fileName = lastSlash === -1 ? key : key.slice(lastSlash + 1);
   return `inline; filename="${fileName}"`;
+}
+
+/**
+ * The disposition to sign into a presigned GET for a key (PRD-369). A
+ * `message-document` is a file from another member, so it is always signed as
+ * an `attachment` and never renders inline in the bucket's origin; every other
+ * kind (images) keeps {@link inlineContentDispositionForStorageKey}. The
+ * filename stays the server-minted `<uuid>.<ext>`, which needs no escaping.
+ */
+export function contentDispositionForStorageKey(key: string): string {
+  if (parseStorageKey(key) === UPLOAD_KIND_SPECS['message-document']) {
+    const lastSlash = key.lastIndexOf('/');
+    const fileName = lastSlash === -1 ? key : key.slice(lastSlash + 1);
+    return `attachment; filename="${fileName}"`;
+  }
+  return inlineContentDispositionForStorageKey(key);
 }
 
 /**

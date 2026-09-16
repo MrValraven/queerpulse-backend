@@ -138,6 +138,14 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.HousingViewingRequested]: 'actorId',
   [NotificationType.HousingViewingDecided]: 'actorId',
   [NotificationType.HousingViewingCancelled]: 'actorId',
+  // PRD-334. The owner or admin who added this member to a group, the same id
+  // `GroupNotificationsListener` passes as `createForRecipients`' `actorId`, so
+  // the bell names them and block and mute apply.
+  [NotificationType.GroupAdded]: 'actorId',
+  // PRD-353. The inviter, mirroring `GroupAdded` exactly: the same id
+  // `GroupNotificationsListener` passes as `actorId` for a `GROUP_INVITE_CREATED`
+  // event, so the bell names them and block/mute apply the same way.
+  [NotificationType.GroupInvite]: 'actorId',
   // `ForumThreadReviewed` is deliberately ABSENT, on the same rule as
   // `HousingJoinDecided` directly above: it is a staff triage verdict, and the
   // bell never names which moderator returned it. Naming them would turn a
@@ -392,6 +400,19 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // the changemaker verdicts already forward. `threadSlug` needs no entry: it
     // rides in `COMMON_PAYLOAD_KEYS` and is what the deep link is built from.
     [NotificationType.ForumThreadReviewed]: ['decision', 'title', 'reviewNote'],
+    // PRD-334. `conversationId` builds the `/messages?c=<conversationId>` deep
+    // link (with `source: 'message'` from `COMMON_PAYLOAD_KEYS`), the same
+    // opaque id `Mention` already forwards. `groupTitle` names the group in the
+    // copy; the recipient is now a participant and reads that title in their
+    // own inbox, so it discloses nothing the link does not.
+    [NotificationType.GroupAdded]: ['conversationId', 'groupTitle'],
+    // PRD-353. Mirrors `GroupAdded` exactly (same payload shape, see
+    // `NotificationType.GroupInvite`'s own doc): `conversationId` builds the
+    // deep link, `groupTitle` names the group. The bell routes this one to
+    // the Messages Requests tab instead of the conversation itself, since the
+    // recipient is not a participant yet, but that is a client-side routing
+    // choice, not an extra payload field.
+    [NotificationType.GroupInvite]: ['conversationId', 'groupTitle'],
     // The verdict on a reader's story, plus the member's OWN working title so
     // the row says which one. The decider's reply note stays off the wire here
     // on purpose: it is staff-authored prose, and the member reads it on their

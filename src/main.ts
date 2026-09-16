@@ -15,11 +15,20 @@ import { DataSource } from 'typeorm';
 import { AppModule } from './app.module';
 import { withQuietBootLogging } from './common/quiet-boot-logger';
 import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
-import { DEFAULT_FRONTEND_ORIGIN } from './config/frontend-origins';
+import { resolveAllowedOrigins } from './config/frontend-origins';
 import { ensureDatabaseSchema } from './database/ensure-database-schema';
 
 // How long to let Sentry drain its buffer on shutdown before giving up.
 const SENTRY_FLUSH_TIMEOUT_MS = 2000;
+
+// ENG-262: hard ceiling on the whole shutdown sequence (Sentry flush, then
+// Nest's own `app.close()`, which runs onModuleDestroy, then
+// beforeApplicationShutdown, including the chat gateway's write drain, then
+// onApplicationShutdown). A stuck close (a write handler that never settles,
+// a DB pool that will not drain) still has to exit the process rather than
+// hang the deploy forever, so this races the real sequence and force-exits
+// once it elapses.
+const SHUTDOWN_HARD_TIMEOUT_MS = 10_000;
 
 async function bootstrap() {
   const isProd = process.env.NODE_ENV === 'production';
@@ -86,16 +95,11 @@ async function bootstrap() {
     }),
   );
 
-  // FRONTEND_URL is a comma-separated allowlist parsed by app.config via
-  // src/config/frontend-origins.ts — the same parser the chat gateway's CORS
-  // callback uses, so HTTP and socket.io can never disagree about who's allowed.
-  const frontendOrigins = configService.get<string[]>('app.frontendOrigins', [
-    DEFAULT_FRONTEND_ORIGIN,
-  ]);
-  // Only trust the localhost dev origin outside production.
-  const origins = isProd
-    ? frontendOrigins
-    : Array.from(new Set([...frontendOrigins, DEFAULT_FRONTEND_ORIGIN]));
+  // FRONTEND_URL is a comma-separated allowlist resolved by
+  // src/config/frontend-origins.ts, the same function the chat gateway's
+  // `allowHandshakeOrigin` handshake check calls, so HTTP and socket.io can
+  // never disagree about who's allowed.
+  const origins = resolveAllowedOrigins();
   app.enableCors({
     origin: origins,
     credentials: true,
@@ -148,18 +152,74 @@ async function bootstrap() {
     SwaggerModule.setup('docs', app, document);
   }
 
-  app.enableShutdownHooks();
-
-  // Drain Sentry's transport buffer before the process exits. Without this, the
-  // errors captured in the seconds before a SIGTERM are dropped — exactly the
-  // ones from a bad rollout, which is when a restart policy is cycling and you
-  // most need to see them.
-  if (configService.get<string>('app.sentryDsn')) {
-    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-      process.on(signal, () => {
-        void Sentry.close(SENTRY_FLUSH_TIMEOUT_MS).then(() => process.exit(0));
-      });
+  // ENG-262: exactly ONE handler per shutdown signal.
+  // `app.enableShutdownHooks()` used to install its own SIGTERM/SIGINT
+  // listener that ran the full Nest shutdown sequence (onModuleDestroy, then
+  // beforeApplicationShutdown, then onApplicationShutdown), while a second,
+  // independent `process.on(signal, ...)` here raced it: that handler
+  // flushed Sentry for up to `SENTRY_FLUSH_TIMEOUT_MS` and then called
+  // `process.exit(0)` outright. The Sentry-only handler almost always won
+  // the race, killing the process while `app.close()` was still mid-flight
+  // and cutting an in-flight `message:send` write or `markRead` UPDATE with
+  // no warning to the socket that held it, and no drain step for the chat
+  // gateway ever got the chance to run at all.
+  //
+  // The single handler below awaits `app.close()` directly, which runs the
+  // same lifecycle `enableShutdownHooks()` used to trigger, and then flushes
+  // Sentry (when configured) so errors thrown during the drain are still
+  // delivered, all under one hard ceiling. `enableShutdownHooks()` stays
+  // uncalled because it would add a second SIGTERM/SIGINT listener racing
+  // this one again.
+  let isShuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (isShuttingDown) {
+      // A second signal mid-shutdown should not restart or overlap the
+      // sequence already in flight.
+      return;
     }
+    isShuttingDown = true;
+    const hasSentryDsn = Boolean(configService.get<string>('app.sentryDsn'));
+    const shutdownSequence = (async () => {
+      try {
+        await app.close();
+      } finally {
+        if (hasSentryDsn) {
+          await Sentry.close(SENTRY_FLUSH_TIMEOUT_MS);
+        }
+      }
+    })();
+    const hardCeiling = new Promise<'timedOut'>((resolve) => {
+      setTimeout(() => resolve('timedOut'), SHUTDOWN_HARD_TIMEOUT_MS);
+    });
+    void Promise.race([
+      shutdownSequence.then(() => 'closed' as const),
+      hardCeiling,
+    ])
+      .then((outcome) => {
+        if (outcome === 'timedOut') {
+          logger.error(
+            `Shutdown (signal: ${signal}) exceeded ${SHUTDOWN_HARD_TIMEOUT_MS}ms; forcing exit`,
+          );
+        }
+        process.exit(outcome === 'timedOut' ? 1 : 0);
+      })
+      .catch((error: unknown) => {
+        // Sentry.close() or app.close() itself threw. A rejected shutdown
+        // promise still has to exit the process rather than surface as an
+        // unhandled rejection while the deploy waits on a process that
+        // never leaves.
+        logger.error(
+          `Shutdown (signal: ${signal}) failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        process.exit(1);
+      });
+  };
+  // SIGHUP and SIGQUIT keep the graceful path `enableShutdownHooks()` gave
+  // them; fault signals (SIGSEGV and friends) are left to Node's default.
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT'] as const) {
+    process.on(signal, () => shutdown(signal));
   }
 
   const port = configService.get<number>('app.port') ?? 3000;

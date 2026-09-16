@@ -500,6 +500,44 @@ export class HousingListingsService {
     return this.messaging.deliverEnquiry(fromUserId, listerId, dto.body);
   }
 
+  /**
+   * PRD-339 (refined PRD-340). Read-only "what will happen if I write about
+   * this home?", which the enquiry modal consults BEFORE the member types
+   * anything, mirroring the local directory's `GET /directory/:slug/contact`
+   * (`ListingEnquiriesService.getContact`). `createEnquiry` above bypasses the
+   * connection gate for the enquiry itself (`MessagingService.deliverEnquiry`).
+   * `followUpAwaitsReply` reports the truthful PRD-340 consequence: when the
+   * two are not accepted connections, the thread stays a one-message enquiry
+   * until the LISTER replies (no connection needed for their reply), and the
+   * enquirer can send more once they do. `replyRequiresConnection` is kept for
+   * existing callers.
+   *
+   * Self and no-lister-account both make `createEnquiry` refuse outright, so
+   * neither field is meaningful for either case, reported as `false` rather
+   * than consulting messaging for a send that could never happen.
+   */
+  async getEnquiryContact(
+    ref: string,
+    fromUserId: string,
+  ): Promise<{
+    replyRequiresConnection: boolean;
+    followUpAwaitsReply: boolean;
+  }> {
+    const listing = await this.loadLiveOr404(ref);
+    const listerId = listing.ownerId;
+    if (listerId === null || listerId === fromUserId) {
+      return { replyRequiresConnection: false, followUpAwaitsReply: false };
+    }
+    const contactability = await this.messaging.enquiryContactability(
+      fromUserId,
+      listerId,
+    );
+    return {
+      replyRequiresConnection: contactability.replyRequiresConnection,
+      followUpAwaitsReply: contactability.followUpAwaitsReply,
+    };
+  }
+
   /** Loads a listing that must be publicly live (used by the enquiry flow). */
   async loadLiveOr404(ref: string): Promise<HousingListing> {
     const listing = await this.listings.findOne({

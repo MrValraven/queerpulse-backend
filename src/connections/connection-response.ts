@@ -99,6 +99,14 @@ export interface ConnectionListItem {
   vouchBadge: VouchBadge | null;
   // The mutual connection who introduced the requester (network intros only).
   introducedBy: ConnectionMemberView | null;
+  /**
+   * PRD-344: has the ADDRESSEE seen this request. Only ever meaningful
+   * (non-null) on the viewer's own OUTGOING pending requests; `null` means
+   * either "not applicable" (every other direction/status) or "withheld by
+   * the read-receipts preference", which are deliberately indistinguishable
+   * to the client: see `ConnectionsService.requestReadFlagsByConnectionId`.
+   */
+  requestRead: boolean | null;
 }
 
 export function toConnectionListItem(
@@ -111,6 +119,10 @@ export function toConnectionListItem(
   // caller. Optional so the single-connection create path (which has no note by
   // definition) needs no extra argument.
   viewerNote?: string | null,
+  // PRD-344: see `ConnectionListItem.requestRead`. Optional/defaults to null
+  // so every other call site (create, respond, single-connection reads) needs
+  // no extra argument.
+  requestRead?: boolean | null,
 ): ConnectionListItem {
   // From the viewer's perspective: an incoming pending request is one where the
   // viewer is the addressee; outgoing is one they sent; accepted is "connected".
@@ -154,5 +166,6 @@ export function toConnectionListItem(
           tagline: introducerProfile.tagline ?? null,
         }
       : null,
+    requestRead: requestRead ?? null,
   };
 }

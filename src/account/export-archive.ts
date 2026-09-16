@@ -48,6 +48,10 @@ import { ExportMediaContribution, parseExportMedia } from './export-media';
 export const EXPORT_CSV_CATEGORIES = [
   'profile',
   'messages',
+  // PRD-370: the threads the member reported, a second archive key under the
+  // `messages` category (see `AccountExportService.coreContributions`). One
+  // CSV row per conversation, its messages flattened into indexed columns.
+  'reportedConversations',
   'posts',
   'events',
   'connections',

@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Logger,
   NotFoundException,
   Param,
   Res,
@@ -11,6 +12,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Response } from 'express';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
+import { buildDocumentDownloadHeaders } from './document-download-headers';
 import { Public } from '../auth/decorators/public.decorator';
 import {
   CurrentUser,
@@ -47,6 +51,11 @@ const PUBLIC_IMAGE_MAX_AGE_SECONDS = PRESIGN_EXPIRY_SECONDS - 60;
 // is reached through here. This route does NOT proxy bytes: it authorizes, then
 // 302s to a short-lived presigned GET, and the browser fetches from the bucket
 // directly. No service egress, one signature per image load.
+//
+// The one exception is a `message-document` (PRD-369): it is streamed through
+// this service with download-only, sandboxed headers, because a presigned GET
+// cannot carry `Content-Security-Policy` or `nosniff`. See
+// `streamMessageDocument`.
 //
 // It works with a plain `<img src>` because the session travels as an httpOnly
 // cookie (`jwt.strategy.ts`) rather than a Bearer header, and browsers attach
@@ -113,6 +122,13 @@ export class FilesController {
     // `message.<property>` uses entity property names so TypeORM maps them to
     // the snake_case columns; `participant.*` references the raw joined table's
     // real column names (that alias is a table name, not a registered entity).
+    //
+    // The `attachment IS NOT NULL` clause is redundant on its own (a NULL
+    // `attachment` can never match the `->>` test), but it is what lets the
+    // planner use the PARTIAL index `IDX_messages_attachment_url`, declared
+    // `WHERE attachment IS NOT NULL` so it stays tiny on a table where almost
+    // no row carries an attachment. Postgres does not infer that implication
+    // by itself.
     return this.messages
       .createQueryBuilder('message')
       .innerJoin(
@@ -125,6 +141,7 @@ export class FilesController {
         attachmentForms,
       })
       .andWhere('message.deletedAt IS NULL')
+      .andWhere('message.attachment IS NOT NULL')
       .getExists();
   }
 
@@ -134,10 +151,10 @@ export class FilesController {
   // passes. On a definite `mismatch` the object is refused with the same 404 as
   // any other unresolvable key (no existence leak). On `indeterminate` (a
   // transient storage/read error) this FAILS OPEN and serves: the bytes are
-  // inert either way (an image is never executed; a document is opened by the
-  // browser's own PDF/text viewer, never as script), the presigned GET already
-  // forces the correct content type, and blanking every object on a blip of the
-  // bucket is a worse failure than deferring one validation.
+  // inert either way (an image is never executed; a document is streamed as a
+  // sandboxed attachment download, see `streamMessageDocument`), the served
+  // content type is forced from the key's extension, and blanking every object
+  // on a blip of the bucket is a worse failure than deferring one validation.
   private async assertServableBytes(storageKey: string): Promise<void> {
     if (FilesController.validatedKeys.has(storageKey)) {
       return;
@@ -168,6 +185,134 @@ export class FilesController {
     return user?.role === UserRole.Admin || user?.role === UserRole.Moderator;
   }
 
+  private readonly logger = new Logger(FilesController.name);
+
+  // A missing object surfaces as `NoSuchKey` from GetObject and `NotFound` from
+  // HeadObject; the SDK's `$metadata.httpStatusCode` covers both shapes.
+  private static isMissingObjectError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+    const candidate = error as {
+      name?: unknown;
+      $metadata?: { httpStatusCode?: unknown };
+    };
+    return (
+      candidate.name === 'NoSuchKey' ||
+      candidate.name === 'NotFound' ||
+      candidate.$metadata?.httpStatusCode === 404
+    );
+  }
+
+  // The member-supplied display name of a document (`attachment.fileName`),
+  // used only to name the download. Runs after authorization, so the caller is
+  // already entitled to the bytes and sees this name in the bubble anyway. The
+  // name is cosmetic: any failure falls back to the server-minted `<uuid>.<ext>`
+  // rather than failing the download.
+  private async documentDisplayFileName(
+    storageKey: string,
+  ): Promise<string | null> {
+    const attachmentForms = [storageKey, `/files/${storageKey}`];
+    try {
+      const row = await this.messages
+        .createQueryBuilder('message')
+        .select("message.attachment ->> 'fileName'", 'fileName')
+        .where("message.attachment ->> 'url' IN (:...attachmentForms)", {
+          attachmentForms,
+        })
+        .andWhere('message.deletedAt IS NULL')
+        // Same partial-index predicate as `isMessageAttachmentParticipant`,
+        // for the same reason: see that method's note.
+        .andWhere('message.attachment IS NOT NULL')
+        .orderBy('message.createdAt', 'ASC')
+        .limit(1)
+        .getRawOne<{ fileName: string | null }>();
+      return row?.fileName ?? null;
+    } catch (error) {
+      this.logger.warn(
+        `Document name lookup failed for ${storageKey}: ${String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  // PRD-369 decision record. A document comes from another member, so it is
+  // treated as hostile active content and must never render inline in the
+  // QueerPulse origin or the bucket origin. It is streamed through the backend
+  // (a presigned GET cannot carry CSP or nosniff) with the headers built in
+  // `document-download-headers.ts`: attachment disposition, a `sandbox` CSP,
+  // nosniff, same-origin CORP, no-store, and text types served as opaque bytes.
+  //
+  // Deliberately out of scope by product decision: no malware scanner, no PDF
+  // content stripping or flattening, and no new infrastructure. A scanner later
+  // would need: a quarantine state on the object (for example a `pending-scan`
+  // prefix or a tag the upload path sets), an async scan worker (ClamAV or a
+  // hosted API) triggered on upload, a verdict persisted next to the message
+  // attachment, and this branch refusing to stream anything not marked clean.
+  //
+  // HEAD is answered from `HeadObject` without opening the body. A missing
+  // object is a 404. After headers are committed a stream failure cannot change
+  // the status, so `pipeline` destroys both streams and the client sees a broken
+  // transfer; a client abort destroys the bucket stream the same way.
+  private async streamMessageDocument(
+    storageKey: string,
+    response: Response,
+  ): Promise<void> {
+    const originalFileName = await this.documentDisplayFileName(storageKey);
+    const headers = buildDocumentDownloadHeaders({
+      storageKey,
+      originalFileName,
+    });
+
+    if (response.req.method === 'HEAD') {
+      let contentLength: number | null;
+      try {
+        ({ contentLength } = await this.storage.headObject(storageKey));
+      } catch (error) {
+        if (FilesController.isMissingObjectError(error)) {
+          throw new NotFoundException();
+        }
+        throw error;
+      }
+      for (const [headerName, headerValue] of Object.entries(headers)) {
+        response.setHeader(headerName, headerValue);
+      }
+      if (contentLength !== null) {
+        response.setHeader('Content-Length', String(contentLength));
+      }
+      response.status(200).end();
+      return;
+    }
+
+    let body: Readable;
+    try {
+      body = await this.storage.openObjectStream(storageKey);
+    } catch (error) {
+      if (FilesController.isMissingObjectError(error)) {
+        throw new NotFoundException();
+      }
+      throw error;
+    }
+    // Set last so these replace the global helmet CSP and CORP for this
+    // response only.
+    for (const [headerName, headerValue] of Object.entries(headers)) {
+      response.setHeader(headerName, headerValue);
+    }
+    response.status(200);
+    try {
+      await pipeline(body, response);
+    } catch (error) {
+      const isClientAbort =
+        (error as { code?: unknown } | null)?.code ===
+        'ERR_STREAM_PREMATURE_CLOSE';
+      if (!isClientAbort) {
+        this.logger.warn(
+          `Document stream failed for ${storageKey}: ${String(error)}`,
+        );
+      }
+    }
+  }
+
   // `@Public()` bypasses the global JwtAuthGuard; OptionalJwtAuthGuard then
   // populates the user when a valid cookie is present without rejecting when it
   // is not. CsrfGuard exempts GET, so no token is needed.
@@ -180,6 +325,11 @@ export class FilesController {
   @ApiResponse({
     status: 302,
     description: 'Redirect to a short-lived presigned GET URL for the object.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'A message document, streamed as a sandboxed attachment download (never redirected).',
   })
   @ApiUnauthorizedResponse({
     description: 'A session-gated kind was requested without a valid session.',
@@ -288,6 +438,12 @@ export class FilesController {
     // authorization so an unauthorized caller never triggers a bucket read, and
     // memoises passes so a hot avatar is validated once per process.
     await this.assertServableBytes(storageKey);
+    // PRD-369: a document is streamed with download-only headers instead of
+    // redirected. Every authorization check above has already run unchanged.
+    if (kindSpec === UPLOAD_KIND_SPECS['message-document']) {
+      await this.streamMessageDocument(storageKey, response);
+      return;
+    }
     const downloadUrl = await this.storage.createPresignedDownload(storageKey);
     // Railway's edge cache once served authenticated responses to the wrong
     // users (incident 2026-03-30), so shared/CDN caches are refused on every

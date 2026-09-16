@@ -1,3 +1,4 @@
+import { toBareKey } from '../storage/bare-key';
 import { UPLOAD_KIND_SPECS, UploadKind } from '../storage/upload-kinds';
 
 /**
@@ -53,6 +54,15 @@ export interface ExportMediaFile {
   sizeBytes: number;
   /** ISO timestamp of the object's last modification, or null. */
   lastModifiedAt: string | null;
+  /**
+   * PRD-370: for a `message-image` / `message-document` object, the id of the
+   * member's own message that carries it, so a file under `media/` can be
+   * matched to its row in the archive's `messages` (whose `attachment.mediaPath`
+   * points back here). Null for every other kind, and for a message file no
+   * surviving message references (an abandoned upload). Absent on listings
+   * written before this field existed.
+   */
+  messageId?: string | null;
 }
 
 /** The value written to the archive's `media` key by `MediaExportContributor`. */
@@ -153,6 +163,10 @@ export function mediaEntryNameForKey(key: string): string {
  */
 export function planExportMedia(
   objects: { key: string; size: number; lastModified: string | null }[],
+  /** Bare storage key -> the member's message id carrying it (PRD-370), from
+   *  ONE batched lookup in `MediaExportContributor`. Keys not in the map get
+   *  `messageId: null` when they are message uploads, and no field otherwise. */
+  messageIdByStorageKey: ReadonlyMap<string, string> = new Map(),
 ): ExportMediaContribution {
   const sorted = [...objects].sort((left, right) => {
     const leftModified = left.lastModified ?? '';
@@ -184,12 +198,20 @@ export function planExportMedia(
     }
     usedNames.add(name);
 
+    const uploadKind = uploadKindForStorageKey(object.key);
+    const isMessageUpload =
+      uploadKind === 'message-image' || uploadKind === 'message-document';
     const file: ExportMediaFile = {
       name,
       storageKey: object.key,
-      uploadKind: uploadKindForStorageKey(object.key),
+      uploadKind,
       sizeBytes: object.size,
       lastModifiedAt: object.lastModified,
+      ...(isMessageUpload
+        ? {
+            messageId: messageIdByStorageKey.get(toBareKey(object.key)) ?? null,
+          }
+        : {}),
     };
     totalBytes += object.size;
     if (includedBytes + object.size > MEDIA_EXPORT_MAX_TOTAL_BYTES) {

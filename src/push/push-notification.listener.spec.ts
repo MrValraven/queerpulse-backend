@@ -4,6 +4,7 @@ import {
 } from '../notifications/entities/notification.entity';
 import { NotificationBatchCreatedEvent } from '../notifications/notification.events';
 import { PushNotificationListener } from './push-notification.listener';
+import { GENERIC_PUSH_COPY } from './generic-push-copy';
 import { PushPayload } from './push.service';
 
 const NOTIFICATION_CREATED_AT = new Date('2026-01-15T12:00:00.000Z');
@@ -37,6 +38,11 @@ function build(opts: {
     slug: string;
     avatarUrl: string | null;
   } | null;
+  // PRD-336: the user ids `PushMessageListener.eligibleMessagePushRecipientUserIds`
+  // reports as already covered by its own merged message push (empty = nobody
+  // covered, matching every pre-PRD-336 test's expectation that `pushMention`
+  // always sends).
+  messagePushCoveredUserIds?: string[];
 }) {
   const profilesRepo = {
     findOne: jest.fn().mockResolvedValue(opts.actorProfile ?? null),
@@ -86,12 +92,18 @@ function build(opts: {
         ),
       ),
   };
+  const pushMessageListener = {
+    eligibleMessagePushRecipientUserIds: jest
+      .fn()
+      .mockResolvedValue(new Set(opts.messagePushCoveredUserIds ?? [])),
+  };
   const listener = new PushNotificationListener(
     profilesRepo as never,
     push as never,
     push as never,
     notificationPreferences as never,
     notificationDelivery as never,
+    pushMessageListener as never,
   );
   return {
     listener,
@@ -99,6 +111,7 @@ function build(opts: {
     notificationPreferences,
     notificationDelivery,
     profilesRepo,
+    pushMessageListener,
   };
 }
 
@@ -546,5 +559,264 @@ describe('PushNotificationListener', () => {
     expect(push.sendToUsers).toHaveBeenCalledTimes(1);
     const [userIds] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
     expect(userIds).toEqual(recipientUserIds);
+  });
+
+  // PRD-334.
+  it('pushes a GroupAdded gated on NewMessages, naming the adder and the group, deep-linking the conversation', async () => {
+    const { listener, push, notificationPreferences } = build({
+      actorProfile: ACTOR,
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupAdded, {
+          source: 'message',
+          conversationId: 'conv-1',
+          groupTitle: 'Book club',
+          actorId: 'actor-1',
+        }),
+      ),
+    );
+    expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledWith(
+      ['recipient-1'],
+      'new_messages',
+    );
+    expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+      ['recipient-1'],
+      expect.anything(),
+      GENERIC_PUSH_COPY.notification,
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.title).toBe('Added to a group');
+    expect(payload.body).toBe('Ana Silva added you to Book club.');
+    expect(payload.tag).toBe('notification:notif-1');
+    expect(payload.data.url).toBe('/messages?c=conv-1');
+    expect(payload.icon).toBe(ACTOR.avatarUrl);
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:groupAdded.title',
+      bodyKey: 'push:groupAdded.body',
+      params: { name: 'Ana Silva', group: 'Book club' },
+    });
+    expect(payload.timestamp).toBe(NOTIFICATION_CREATED_AT.getTime());
+  });
+
+  it('drops {group} from a GroupAdded push when the payload has no group title', async () => {
+    const { listener, push } = build({ actorProfile: ACTOR });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupAdded, {
+          source: 'message',
+          conversationId: 'conv-1',
+          actorId: 'actor-1',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.body).toBe('Ana Silva added you to a group.');
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:groupAdded.title',
+      bodyKey: 'push:groupAdded.bodyUntitled',
+      params: { name: 'Ana Silva' },
+    });
+  });
+
+  it('does not push a GroupAdded when the NewMessages category is off', async () => {
+    const { listener, push } = build({
+      actorProfile: ACTOR,
+      pushDisabledCategories: ['new_messages'],
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupAdded, {
+          source: 'message',
+          conversationId: 'conv-1',
+          groupTitle: 'Book club',
+          actorId: 'actor-1',
+        }),
+      ),
+    );
+    expect(push.sendToUsers).not.toHaveBeenCalled();
+  });
+
+  // PRD-353.
+  it('pushes a GroupInvite gated on NewMessages, naming the inviter and the group, deep-linking the Requests tab', async () => {
+    const { listener, push, notificationPreferences } = build({
+      actorProfile: ACTOR,
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupInvite, {
+          source: 'message',
+          conversationId: 'conv-1',
+          groupTitle: 'Book club',
+          actorId: 'actor-1',
+        }),
+      ),
+    );
+    expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledWith(
+      ['recipient-1'],
+      'new_messages',
+    );
+    expect(push.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+      ['recipient-1'],
+      expect.anything(),
+      GENERIC_PUSH_COPY.notification,
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.title).toBe('New group invite');
+    expect(payload.body).toBe('Ana Silva invited you to Book club.');
+    // Deliberately NOT the conversation itself: the invitee is not yet a
+    // participant, and `GET :id/messages` would 403 them.
+    expect(payload.data.url).toBe('/messages?tab=requests');
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:groupInvite.title',
+      bodyKey: 'push:groupInvite.body',
+      params: { name: 'Ana Silva', group: 'Book club' },
+    });
+  });
+
+  it('drops {group} from a GroupInvite push when the payload has no group title', async () => {
+    const { listener, push } = build({ actorProfile: ACTOR });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupInvite, {
+          source: 'message',
+          conversationId: 'conv-1',
+          actorId: 'actor-1',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.body).toBe('Ana Silva invited you to a group.');
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:groupInvite.title',
+      bodyKey: 'push:groupInvite.bodyUntitled',
+      params: { name: 'Ana Silva' },
+    });
+  });
+
+  it('does not push a GroupInvite when the NewMessages category is off', async () => {
+    const { listener, push } = build({
+      actorProfile: ACTOR,
+      pushDisabledCategories: ['new_messages'],
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupInvite, {
+          source: 'message',
+          conversationId: 'conv-1',
+          groupTitle: 'Book club',
+          actorId: 'actor-1',
+        }),
+      ),
+    );
+    expect(push.sendToUsers).not.toHaveBeenCalled();
+  });
+
+  // ENG-228.
+  it('pushes a SecurityNewSignIn with the service-worker body key and an unchanged English body', async () => {
+    const { listener, push } = build({});
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.SecurityNewSignIn, {
+          source: 'security',
+          deviceLabel: 'Safari on iPhone',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.body).toBe('A new device signed in to your account.');
+    expect(payload.l10n).toEqual({
+      titleKey: GENERIC_PUSH_COPY.notification.titleKey,
+      bodyKey: 'push:security.newSignIn.body',
+    });
+    expect(payload.data.url).toBe('/account/sessions');
+  });
+
+  describe('group mention fold (PRD-336)', () => {
+    it('suppresses the standalone mention push for a recipient already covered by the merged message push', async () => {
+      const { listener, push, pushMessageListener } = build({
+        actorProfile: ACTOR,
+        messagePushCoveredUserIds: ['recipient-1'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.Mention, {
+            actorId: 'actor-1',
+            source: 'message',
+            conversationId: 'conv-1',
+            messageId: 'msg-9',
+          }),
+        ),
+      );
+      expect(
+        pushMessageListener.eligibleMessagePushRecipientUserIds,
+      ).toHaveBeenCalledWith('conv-1', 'actor-1', ['recipient-1']);
+      // The recipient is fully covered, so NOTHING is sent for this
+      // notification: `PushMessageListener` already sent them one merged,
+      // mention-aware push for the identical message.
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it('still sends the standalone mention push for a recipient NOT covered by the merged message push (e.g. a thread mute)', async () => {
+      const { listener, push, pushMessageListener } = build({
+        actorProfile: ACTOR,
+        messagePushCoveredUserIds: [],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.Mention, {
+            actorId: 'actor-1',
+            source: 'message',
+            conversationId: 'conv-1',
+            messageId: 'msg-9',
+          }),
+        ),
+      );
+      expect(
+        pushMessageListener.eligibleMessagePushRecipientUserIds,
+      ).toHaveBeenCalledWith('conv-1', 'actor-1', ['recipient-1']);
+      expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+      const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(userIds).toEqual(['recipient-1']);
+      expect(payload.tag).toBe('notification:notif-1');
+      expect(payload.l10n?.titleKey).toBe('push:mention.title');
+    });
+
+    it('never consults the message-push fold for a non-message-source mention (forum/community)', async () => {
+      const { listener, push, pushMessageListener } = build({
+        actorProfile: ACTOR,
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.Mention, {
+            actorId: 'actor-1',
+            source: 'forum',
+            threadSlug: 'trans-joy',
+          }),
+        ),
+      );
+      expect(
+        pushMessageListener.eligibleMessagePushRecipientUserIds,
+      ).not.toHaveBeenCalled();
+      expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    });
   });
 });

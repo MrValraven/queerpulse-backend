@@ -37,8 +37,11 @@ export class GetMessagesQuery {
   @IsUUID('4')
   afterId?: string;
 
-  // Opaque cursor (see `src/common/cursor-pagination.ts`) the frontend sends
-  // instead of `before`/`beforeId`. Decoded server-side into the same
+  // Opaque cursor (see `src/messaging/message-history-cursor.ts`) the frontend
+  // sends instead of `before`/`beforeId`, taken from the previous page's
+  // `pageInfo.nextCursor`. It carries the boundary row's created_at at full
+  // microsecond precision, so it is exact where a millisecond `before` is not.
+  // Decoded server-side into the same
   // (createdAt, id) keyset predicate; ignored (falls back to the first page)
   // when it doesn't decode, and superseded by an explicit `before` if both
   // are present.

@@ -1,12 +1,17 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { Conversation } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { StorageModule } from '../storage/storage.module';
 import { Report } from './entities/report.entity';
 import { ReportFilingThrottlerGuard } from './report-filing-throttler.guard';
+import { ReportMessageAttachmentController } from './report-message-attachment.controller';
 import { ReportPhotoEvidenceController } from './report-photo-evidence.controller';
 import reportsConfig from './reports.config';
 import { ReportsController } from './reports.controller';
@@ -35,6 +40,22 @@ import { ReportsService } from './reports.service';
       // `ReportsService`. Same cross-module `forFeature` reuse again, rather
       // than importing `EventsModule` for one `findOne`.
       EventPhoto,
+      // Read-only: backs the group-conversation membership check and evidence
+      // snapshot in `ReportsService` (PRD-356). Same cross-module
+      // `forFeature` reuse again, rather than importing `MessagingModule`.
+      Conversation,
+      ConversationParticipant,
+      // Read-only: backs the evidence-expiry refusal in `ReportsService`, which
+      // mirrors the DTO's `canReport` and therefore has to see a moderator
+      // takedown the same way `toMessageResponses` does. Same cross-module
+      // `forFeature` reuse as the entities above.
+      ContentModeration,
+      // Written by `ReportMessageAttachmentController`, which records one audit
+      // row per staff view of a reported file. The row is written through this
+      // repository rather than `ModAuditService` because `ModerationModule`
+      // imports `ReportsModule`, so importing it back would close a module
+      // cycle; `MessagesService`'s staff-delete row is written the same way.
+      ModAuditLog,
     ]),
     // `StorageService` for `ReportPhotoEvidenceController`, which presigns the
     // reported photo for the reviewing moderator. `StorageModule` imports only
@@ -42,7 +63,15 @@ import { ReportsService } from './reports.service';
     // so nothing on that side reaches back here and no cycle is created.
     StorageModule,
   ],
-  controllers: [ReportsController, ReportPhotoEvidenceController],
+  // PRD-361: `ReportMessageAttachmentController` serves a reported message's
+  // held attachment to staff, the same shape as the photo route beside it, and
+  // needs nothing this module does not already register (`Message`,
+  // `StorageModule`).
+  controllers: [
+    ReportsController,
+    ReportPhotoEvidenceController,
+    ReportMessageAttachmentController,
+  ],
   // `ReportFilingThrottlerGuard` is bound with `@UseGuards` on `POST /reports`
   // and listed here as a provider, the same way `StorageModule` registers
   // `UserPresignThrottlerGuard` and `LinkPreviewModule` its own: the guard

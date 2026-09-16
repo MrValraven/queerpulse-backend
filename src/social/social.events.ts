@@ -25,3 +25,17 @@ export interface MemberBlockedEvent {
   blockerId: string;
   blockedId: string;
 }
+
+/**
+ * One member lifted a block they had placed (PRD-363). Emitted post-commit by
+ * both unblock entry points, `SocialService.unblockMember` and
+ * `ConnectionsService.respond('unblock')`. The consumer is
+ * `ConversationsService`, which puts back the DM's `openedAt` the block voided
+ * once no block remains in either direction.
+ */
+export const MEMBER_UNBLOCKED = 'member.unblocked';
+
+export interface MemberUnblockedEvent {
+  unblockerId: string;
+  unblockedId: string;
+}

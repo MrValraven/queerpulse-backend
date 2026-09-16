@@ -20,6 +20,8 @@ import { AppealsController } from './appeals.controller';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationController } from './moderation.controller';
 import { ModerationService } from './moderation.service';
+import { ReportConversationContextController } from './report-conversation-context.controller';
+import { ReportConversationContextService } from './report-conversation-context.service';
 import { ReportSubjectResolverService } from './report-subject-resolver.service';
 
 @Module({
@@ -90,6 +92,8 @@ import { ReportSubjectResolverService } from './report-subject-resolver.service'
     ModerationController,
     AppealsController,
     AdminMemberModerationController,
+    // PRD-360: the audited staff conversation viewer for a message report.
+    ReportConversationContextController,
   ],
   // The extracted concerns are registered so Nest owns them as singletons and
   // injects them into `ModerationService`/`AdminMemberModerationService`.
@@ -119,6 +123,10 @@ import { ReportSubjectResolverService } from './report-subject-resolver.service'
     // `BanRatification` repository directly, so the two never form a service
     // cycle and no `forwardRef` is needed anywhere.
     BanRatificationService,
+    // PRD-360. Reads `Report`/`Message` (re-exported by `ReportsModule`'s
+    // `TypeOrmModule`) and `Profile` (`UsersModule`), writes through
+    // `ModAuditService`. No new module import.
+    ReportConversationContextService,
   ],
   // `ModAuditService` is the single writer into `mod_audit_logs` and the
   // reader behind `GET /mod/audit` + its CSV export. `ForumModule` imports

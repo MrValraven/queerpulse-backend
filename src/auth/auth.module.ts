@@ -15,6 +15,7 @@ import { MembershipModule } from '../membership/membership.module';
 import { VouchModule } from '../vouch/vouch.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { PushModule } from '../push/push.module';
 import { User } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AuthController } from './auth.controller';
@@ -26,6 +27,11 @@ import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard';
+import { SocketTicketThrottlerGuard } from './socket-ticket-throttler.guard';
+import {
+  SocketTicketService,
+  socketTicketService,
+} from './socket-ticket.service';
 
 @Module({
   imports: [
@@ -41,6 +47,12 @@ import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard'
     // AuthModule — so this adds no dependency cycle.
     ConnectionsModule,
     PlatformSettingsModule,
+    // PushModule: `POST /auth/logout` removes this device's push subscription
+    // (`PushService.removeSubscription`) in the same request that revokes the
+    // session (ENG-225). A plain import with no `forwardRef`: nothing in
+    // PushModule's import graph (Users, Chat, Social, Connections,
+    // Notifications) imports AuthModule, so this adds no dependency cycle.
+    PushModule,
     // Batched crop lookup (`MediaCropService.getMany`) for `GET /auth/me`'s
     // `profile.avatarUrl` sibling `avatarCrop`.
     MediaCropsModule,
@@ -124,6 +136,18 @@ import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard'
     // about making it work. It throttles `POST /auth/refresh` per refresh
     // credential instead of per client IP.
     RefreshSessionThrottlerGuard,
+    // Same reason as `RefreshSessionThrottlerGuard` immediately above:
+    // throttles `POST /auth/socket-ticket` per signed-in member.
+    SocketTicketThrottlerGuard,
+    // A `useValue` provider, deliberately, rather than the usual
+    // `useClass`/bare-class shorthand: this MUST resolve to the same
+    // process-wide `socketTicketService` singleton `ChatGateway`
+    // (chat.gateway.ts) imports directly and redeems against. See
+    // `SocketTicketService`'s own doc ("Sharing across two modules without a
+    // DI import") for why a second, DI-constructed instance here would
+    // silently split the ticket store in two and make every redemption fail
+    // as "unknown ticket".
+    { provide: SocketTicketService, useValue: socketTicketService },
   ],
   exports: [AuthService],
 })

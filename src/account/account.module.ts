@@ -44,6 +44,7 @@ import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportu
 import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { AccountDeletionProcessorService } from './account-deletion-processor.service';
+import { ErasedSenderMessageReleaseService } from './erased-sender-message-release.service';
 import { AccountExportService } from './account-export.service';
 import { AccountRetentionService } from './account-retention.service';
 import { AccountController } from './account.controller';
@@ -199,6 +200,9 @@ import { DsarRequest } from './entities/dsar-request.entity';
     // Cron-only; registering it starts the data-export-archive and reauth-token
     // retention sweeps.
     AccountRetentionService,
+    // Cron-only; registering it starts the daily release of messages an
+    // erasure held for an open report (ENG-243).
+    ErasedSenderMessageReleaseService,
     // The newer-domain export contributors + the registry token that collects
     // them. Adding a domain to the Art. 20 archive is exactly: implement a
     // DataExportContribution and add it here.

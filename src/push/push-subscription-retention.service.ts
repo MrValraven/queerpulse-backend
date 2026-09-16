@@ -27,12 +27,19 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  * recipients), so a healthy device could go 90 days without a single successful
  * send and be pruned while the browser still held a valid subscription.
  *
- * REMAINING GAP: the web client only re-posts its subscription when the
- * endpoint has actually drifted, so a quiet, healthy, never-rotating device
- * still ages out. Closing it needs the client to re-post on boot whenever its
- * last successful sync is older than the window (see `usePushSubscription`'s
- * `syncSubscriptionHealth`, which currently returns early when the endpoint is
- * unchanged).
+ * The re-subscribe is also what keeps a quiet, healthy, never-rotating device
+ * alive (ENG-233). The web client's boot re-sync (`usePushSubscription`)
+ * re-posts an UNCHANGED endpoint whenever its last successful sync is older
+ * than 7 days (`PUSH_RESYNC_MAX_AGE_MS`), besides re-posting whenever the
+ * endpoint drifted or a different member signed in on the device. Any device
+ * the member opens the app on at least once in the window therefore refreshes
+ * `last_used_at` well inside 90 days, so only a device nobody has opened for
+ * the whole window can age out, which is the leak this job exists to close.
+ *
+ * Rows also leave outside this job: `PushService.deliverToSubscription` prunes
+ * a 404/410 (gone) or a 401/403 (made under a VAPID key this server no longer
+ * holds) at send time, and `PushService.handleSessionRevoked` removes every
+ * row for a member once no live session of theirs remains.
  *
  * Single-instance job — safe because the app runs one scheduler; the delete is
  * idempotent and batched, so an overlapping tick or a future scale-out only

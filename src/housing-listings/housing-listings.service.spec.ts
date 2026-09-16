@@ -129,7 +129,10 @@ describe('HousingListingsService', () => {
   };
   let profiles: RepoMock;
   let dataSource: { query: jest.Mock };
-  let messaging: { deliverEnquiry: jest.Mock };
+  let messaging: {
+    deliverEnquiry: jest.Mock;
+    enquiryContactability: jest.Mock;
+  };
   let verification: {
     requireLevel: jest.Mock;
     levelForUser: jest.Mock;
@@ -157,6 +160,12 @@ describe('HousingListingsService', () => {
     };
     messaging = {
       deliverEnquiry: jest.fn().mockResolvedValue({ conversationId: 'conv-1' }),
+      enquiryContactability: jest.fn().mockResolvedValue({
+        canDeliver: true,
+        blockedReason: null,
+        replyRequiresConnection: true,
+        followUpAwaitsReply: true,
+      }),
     };
     verification = {
       requireLevel: jest.fn().mockResolvedValue(undefined),
@@ -680,6 +689,59 @@ describe('HousingListingsService', () => {
         'Is it still available?',
       );
       expect(result).toEqual({ conversationId: 'conv-1' });
+    });
+  });
+
+  describe('getEnquiryContact', () => {
+    it('404s when the listing is not publicly live', async () => {
+      listings.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getEnquiryContact('QPH-x', 'sender'),
+      ).rejects.toThrow(NotFoundException);
+      expect(messaging.enquiryContactability).not.toHaveBeenCalled();
+    });
+
+    it('reports false without consulting messaging on the caller’s own listing', async () => {
+      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+
+      const result = await service.getEnquiryContact(
+        'QPH-2026-0001',
+        'owner-1',
+      );
+
+      expect(result).toEqual({
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+      expect(messaging.enquiryContactability).not.toHaveBeenCalled();
+    });
+
+    it('reports false without consulting messaging once the lister has erased their account', async () => {
+      listings.findOne.mockResolvedValue(makeListing({ ownerId: null }));
+
+      const result = await service.getEnquiryContact('QPH-2026-0001', 'sender');
+
+      expect(result).toEqual({
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+      expect(messaging.enquiryContactability).not.toHaveBeenCalled();
+    });
+
+    it('reports the messaging module’s reply-requires-connection and follow-up-awaits-reply answers for a real recipient', async () => {
+      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+
+      const result = await service.getEnquiryContact('QPH-2026-0001', 'sender');
+
+      expect(messaging.enquiryContactability).toHaveBeenCalledWith(
+        'sender',
+        'owner-1',
+      );
+      expect(result).toEqual({
+        replyRequiresConnection: true,
+        followUpAwaitsReply: true,
+      });
     });
   });
 

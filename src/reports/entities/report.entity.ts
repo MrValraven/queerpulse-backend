@@ -96,6 +96,23 @@ export enum ReportSubjectType {
   // `AddVolunteeringReportSubjectAndAnonymousFloodKey1813000000000` (adds the
   // value to `reports_subject_type_enum`).
   Volunteering = 'volunteering',
+  // PRD-356. A whole GROUP conversation (`conversations.kind = 'group'`),
+  // addressed by its uuid, reported from the group's own conversation menu
+  // ("Report group") rather than any single message in it. The reporter must
+  // be a current or former participant (`ReportsService.create` checks this
+  // subject the same way it already checks `Community`'s roster requirement).
+  //
+  // `Message` already exists and is the wrong grain here: it reports ONE
+  // bubble, and a group whose *culture* is the problem (outing, harassment
+  // that spans many messages and members) has no single message to point at.
+  //
+  // Resolved by `ReportSubjectResolverService` to the group's current owner
+  // (falling back to `createdBy` when the owner seat itself cannot be
+  // resolved) and the group's own title as the excerpt.
+  //
+  // Backed by `AddGroupConsentInvitesAndDissolve1819000000000` (adds the
+  // value to `reports_subject_type_enum`).
+  Conversation = 'conversation',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

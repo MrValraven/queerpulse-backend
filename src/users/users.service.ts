@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EntityManager, In, Repository } from 'typeorm';
+import {
+  liftExpiredRestriction as liftExpiredRestrictionRow,
+  RestrictionAware,
+} from '../auth/restriction-state';
 import { Profile } from './entities/profile.entity';
 import { User, UserRole, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
@@ -152,6 +156,18 @@ export class UsersService {
     return this.usersRepo.findOne({ where: { id } });
   }
 
+  /**
+   * ENG-242: the WS/HTTP send path's own copy of `JwtStrategy.validate`'s
+   * lazy restriction expiry, so `MessagesService.sendMessageWithOutcome` (the
+   * one shared write path both transports funnel through) can re-check a
+   * moderator `restrict` action without duplicating the write-through logic —
+   * see `liftExpiredRestriction` in `auth/restriction-state.ts` for the full
+   * contract this delegates to.
+   */
+  liftExpiredRestriction(user: RestrictionAware): Promise<boolean> {
+    return liftExpiredRestrictionRow(this.usersRepo, user);
+  }
+
   // Like `findById`, but re-includes the `select: false` email column — for the
   // token-refresh path, which re-mints an access token (with its email claim)
   // from a freshly loaded row. Ordinary `findById` deliberately omits email so
@@ -183,6 +199,26 @@ export class UsersService {
     return this.usersRepo.find({
       where: { id: In(ids) },
       relations: { profile: true },
+    });
+  }
+
+  // Batch variant used by `ChatSessionEnforcementService`'s 60s live-socket
+  // sweep, which only ever reads `status` per user. That sweep was calling
+  // `findByIdsWithProfile` above, hydrating every column plus a joined
+  // `profile` row for every online member on every tick, for a check that
+  // discards everything except `id` and `status`. Selecting only those two
+  // columns keeps the same ONE query with `IN (...)` and the same "row
+  // missing from the result means treat as inactive" semantics, with no
+  // profile join and no unused columns. Kept separate from
+  // `findByIdsWithProfile` rather than narrowing it, since that method also
+  // backs `InvitesService`'s "who accepted" column, which needs the full row.
+  findStatusesByIds(ids: string[]): Promise<User[]> {
+    if (ids.length === 0) {
+      return Promise.resolve([]);
+    }
+    return this.usersRepo.find({
+      select: { id: true, status: true },
+      where: { id: In(ids) },
     });
   }
 

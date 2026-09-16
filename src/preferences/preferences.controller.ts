@@ -8,6 +8,8 @@ import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { UpdatePushPreviewsDto } from './dto/update-push-previews.dto';
 import { UpdateContentSensitivityDto } from './dto/update-content-sensitivity.dto';
 import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibility.dto';
+import { UpdateMessagingPrivacyDto } from './dto/update-messaging-privacy.dto';
+import { UpdateGroupAddPolicyDto } from './dto/update-group-add-policy.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { PreferencesService } from './preferences.service';
 import {
@@ -262,5 +264,74 @@ export class PreferencesController {
       user.userId,
       body,
     );
+  }
+
+  // Defaults to `{ policy: 'connections' }` when no row exists (PRD-353):
+  // today's behaviour unchanged until the member says otherwise.
+  //
+  // The controller-level guard note applies here too: a deactivated member
+  // must still be able to say "every future add to a group must ask me
+  // first", the exact moment that control matters most.
+  @ApiOperation({
+    summary: 'Get who may put the member straight into a group.',
+  })
+  @ApiOkResponse({
+    description: 'The group-add-policy setting (connections by default).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('group-add-policy')
+  getGroupAddPolicy(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getGroupAddPolicy(user.userId);
+  }
+
+  @ApiOperation({
+    summary: 'Replace who may put the member straight into a group.',
+  })
+  @ApiOkResponse({ description: 'The persisted group-add-policy setting.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('group-add-policy')
+  updateGroupAddPolicy(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateGroupAddPolicyDto,
+  ) {
+    return this.preferencesService.updateGroupAddPolicy(user.userId, body);
+  }
+
+  // Defaults to sharing everything ON and `whoCanMessage: 'everyone'` when no
+  // row exists (PRD-364/PRD-366) — the platform's behaviour before this pane
+  // existed, so a member who never opened Settings sees nothing change.
+  //
+  // The controller-level guard note applies here too: a deactivated member
+  // must still be able to turn off read-receipt/typing/presence sharing, the
+  // exact moment those controls matter most.
+  @ApiOperation({
+    summary:
+      "Get the member's messaging-privacy shares (read receipts/typing/presence) and who may message them.",
+  })
+  @ApiOkResponse({
+    description: 'The messaging-privacy settings (all sharing on by default).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('messaging-privacy')
+  getMessagingPrivacy(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getMessagingPrivacy(user.userId);
+  }
+
+  // Partial replace: each of the four controls fires its own PUT the instant
+  // it changes, so a field absent from the body is left untouched rather than
+  // reset to a default. See `UpdateMessagingPrivacyDto`.
+  @ApiOperation({
+    summary: "Replace one or more of the member's messaging-privacy settings.",
+  })
+  @ApiOkResponse({ description: 'The persisted messaging-privacy settings.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('messaging-privacy')
+  updateMessagingPrivacy(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateMessagingPrivacyDto,
+  ) {
+    return this.preferencesService.updateMessagingPrivacy(user.userId, body);
   }
 }

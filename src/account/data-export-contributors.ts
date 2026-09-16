@@ -20,6 +20,8 @@ import { MyCardsService } from '../membership-cards/my-cards.service';
 import { Notification } from '../notifications/entities/notification.entity';
 import { ProfileNowHistory } from '../profiles/entities/profile-now-history.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
+import { Message } from '../messaging/entities/message.entity';
+import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportunity.entity';
@@ -29,6 +31,7 @@ import {
   ExportMediaContribution,
   MEDIA_EXPORT_MAX_TOTAL_BYTES,
   planExportMedia,
+  uploadKindForStorageKey,
 } from './export-media';
 
 /**
@@ -698,12 +701,19 @@ export class MediaExportContributor implements DataExportContribution {
 
   private readonly logger = new Logger(MediaExportContributor.name);
 
-  constructor(private readonly storage: StorageService) {}
+  constructor(
+    private readonly storage: StorageService,
+    @InjectRepository(Message) private readonly messages: Repository<Message>,
+  ) {}
 
   async buildContribution(userId: string): Promise<ExportMediaContribution> {
     try {
       const objects = await this.storage.listUserObjects(userId);
-      return planExportMedia(objects);
+      const messageIdByStorageKey = await this.messageIdsForStorageKeys(
+        userId,
+        objects.map((object) => object.key),
+      );
+      return planExportMedia(objects, messageIdByStorageKey);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.logger.error(
@@ -719,6 +729,42 @@ export class MediaExportContributor implements DataExportContribution {
         listingError: reason,
       };
     }
+  }
+
+  /**
+   * PRD-370: which of the member's own live messages carries each
+   * `message-image` / `message-document` object, in ONE query. Matches the
+   * stored `attachment.url` against both spellings of each key (as listed and
+   * bare), then keys the result by the bare key `planExportMedia` looks up.
+   * Tombstones are excluded by the default soft-delete filter, matching the
+   * archive's `messages`, so a `messageId` always names a row the member can
+   * find there.
+   */
+  private async messageIdsForStorageKeys(
+    userId: string,
+    storageKeys: string[],
+  ): Promise<Map<string, string>> {
+    const candidateKeys = new Set<string>();
+    for (const storageKey of storageKeys) {
+      const uploadKind = uploadKindForStorageKey(toBareKey(storageKey));
+      if (uploadKind === 'message-image' || uploadKind === 'message-document') {
+        candidateKeys.add(storageKey);
+        candidateKeys.add(toBareKey(storageKey));
+      }
+    }
+    if (candidateKeys.size === 0) {
+      return new Map();
+    }
+    const rows = await this.messages
+      .createQueryBuilder('message')
+      .select('message.id', 'id')
+      .addSelect(`message.attachment ->> 'url'`, 'storageKey')
+      .where('message.sender_id = :userId', { userId })
+      .andWhere(`message.attachment ->> 'url' = ANY(:candidateKeys)`, {
+        candidateKeys: [...candidateKeys],
+      })
+      .getRawMany<{ id: string; storageKey: string }>();
+    return new Map(rows.map((row) => [toBareKey(row.storageKey), row.id]));
   }
 }
 

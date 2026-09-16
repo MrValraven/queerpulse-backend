@@ -119,6 +119,15 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Connections,
   [NotificationType.ConnectionAccepted]:
     NotificationPreferenceCategory.Connections,
+  // PRD-334. Being added to a group is messaging activity, so it answers to the
+  // same "New message" switch: a member who turned message alerts down has
+  // asked for this buzz to stop too. The group still appears in their inbox.
+  [NotificationType.GroupAdded]: NotificationPreferenceCategory.NewMessages,
+  // PRD-353. A group invite is the same messaging activity as `GroupAdded`,
+  // just routed through an accept step instead of a direct seat, so it answers
+  // to the same switch. The invite itself still appears on `GET
+  // /group-invites` regardless of this category's push/in-app state.
+  [NotificationType.GroupInvite]: NotificationPreferenceCategory.NewMessages,
 
   // --- Discussion -----------------------------------------------------------
   [NotificationType.ForumReply]:

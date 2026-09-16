@@ -11,6 +11,10 @@ import {
   validateSync,
 } from 'class-validator';
 import { missingLaunchedFeatureEnv } from '../launchedFeatures';
+import {
+  declaredReplicaCount,
+  isMultiReplicaAcknowledged,
+} from '../chat/chat-replica-signals';
 import { parseDurationMs } from './duration';
 import { invalidFrontendOrigins } from './frontend-origins';
 
@@ -500,11 +504,20 @@ export function validate(
   // notes), so running >1 replica/worker silently breaks rate limits, live
   // socket delivery and presence. If the operator declares more than one
   // without explicitly acknowledging the constraint, fail fast at boot.
-  const declaredReplicas = Math.max(
-    validated.REPLICA_COUNT ?? 1,
-    validated.WEB_CONCURRENCY ?? 1,
+  //
+  // `declaredReplicaCount` and `isMultiReplicaAcknowledged` are shared with
+  // `ChatSingleInstanceGuard` (see `chat-replica-signals.ts`), which re-checks
+  // the same two things at Nest bootstrap directly off `process.env`. This
+  // gate and that one must always reach the same verdict for the same
+  // environment.
+  const declaredReplicas =
+    declaredReplicaCount({
+      REPLICA_COUNT: validated.REPLICA_COUNT,
+      WEB_CONCURRENCY: validated.WEB_CONCURRENCY,
+    }) ?? 1;
+  const allowMultiReplica = isMultiReplicaAcknowledged(
+    validated.ALLOW_MULTI_REPLICA,
   );
-  const allowMultiReplica = validated.ALLOW_MULTI_REPLICA === 'true';
   if (declaredReplicas > 1) {
     if (!allowMultiReplica) {
       problems.push(

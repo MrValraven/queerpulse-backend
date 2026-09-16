@@ -7,10 +7,13 @@ import { ConnectionsModule } from '../connections/connections.module';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingModule } from '../messaging/messaging.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { PreferencesModule } from '../preferences/preferences.module';
+import { SocialModule } from '../social/social.module'; // provides BlockFilterService (PRD-354: fan-out block filter)
 import { UsersModule } from '../users/users.module';
 import { ChatGateway } from './chat.gateway';
 import { ChatSessionEnforcementService } from './chat-session-enforcement.service';
 import { ChatSingleInstanceGuard } from './chat-single-instance.guard';
+import { ChatGatewayInstanceHeartbeat } from './entities/chat-gateway-instance-heartbeat.entity';
 import { PresenceService } from './presence.service';
 
 @Module({
@@ -19,6 +22,18 @@ import { PresenceService } from './presence.service';
     ConnectionsModule,
     UsersModule,
     PlatformSettingsModule,
+    // Exports `PreferencesService` — PRD-364's reciprocal read-receipt/typing/
+    // presence sharing gates `ChatGateway`'s typing relay, read relay, and
+    // every presence broadcast/snapshot. No cycle (see `MessagingModule`'s
+    // identical import for the reachability argument).
+    PreferencesModule,
+    // PRD-354: `ChatGateway.fanOutConversationMessage` skips a GROUP
+    // participant blocked either way with the sender, via
+    // `BlockFilterService.blockedUserIds` (one batched query, mirroring
+    // `PushMessageListener`'s identical import, `push.module.ts`). Only
+    // imports `UsersModule` + `ReportsModule` + TypeORM itself, neither of
+    // which ever imports `ChatModule`, so this stays a one-way import.
+    SocialModule,
     // RefreshToken, read-side only: `ChatGateway.authenticate` asks whether the
     // refresh-token family named by the access token's `sid` claim is still
     // live, so a device the member signed out on the security page cannot walk
@@ -36,7 +51,16 @@ import { PresenceService } from './presence.service';
     // pattern as `RefreshToken` above (and `PushMessageListener`'s identical
     // registration in `push.module.ts` for the same entity/query shape) rather
     // than importing the owning module for one query.
-    TypeOrmModule.forFeature([RefreshToken, ConversationParticipant]),
+    //
+    // ChatGatewayInstanceHeartbeat, owned entirely by this module (ENG-258):
+    // `ChatSingleInstanceGuard` both writes (its own heartbeat) and reads
+    // (its runtime scale-out detection) this table, see the entity's own
+    // doc.
+    TypeOrmModule.forFeature([
+      RefreshToken,
+      ConversationParticipant,
+      ChatGatewayInstanceHeartbeat,
+    ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -194,6 +195,30 @@ export class HousingListingsController {
   })
   remove(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     return this.service.remove(ref, user.userId);
+  }
+
+  // Read-only, so it is throttled loosely: the enquiry modal calls it once on
+  // open to decide whether to show the "reply needs a connection" notice
+  // before the member types anything (PRD-339), mirroring
+  // `ListingEnquiriesController#getContact`.
+  @Get(':ref/contact')
+  @Throttle({ default: { limit: 60, ttl: seconds(60) } })
+  @ApiOperation({
+    summary:
+      "Whether a reply to this listing's enquiry will need an accepted connection",
+  })
+  @ApiOkResponse({
+    description:
+      'Whether the ordinary send path will refuse a follow-up in this thread from either side until a connection is accepted. A courtesy read for the composer; POST :ref/enquiries is the only authority on whether the enquiry itself can be sent.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No live housing listing with that reference.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  getContact(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
+    return this.service.getEnquiryContact(ref, user.userId);
   }
 
   @Post(':ref/enquiries')

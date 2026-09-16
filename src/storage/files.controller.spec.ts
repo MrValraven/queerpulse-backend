@@ -1,5 +1,6 @@
 import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { Response } from 'express';
+import { PassThrough, Readable } from 'stream';
 import { Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -32,6 +33,7 @@ describe('FilesController', () => {
   let storage: {
     createPresignedDownload: jest.Mock;
     validateImageMagicBytes: jest.Mock;
+    openObjectStream: jest.Mock;
   };
   let users: { findOne: jest.Mock };
   let messageQueryBuilder: {
@@ -54,6 +56,11 @@ describe('FilesController', () => {
       createPresignedDownload: jest.fn().mockResolvedValue(PRESIGNED_DOWNLOAD),
       // Default: bytes match the declared image type, so serving proceeds.
       validateImageMagicBytes: jest.fn().mockResolvedValue('valid'),
+      openObjectStream: jest
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve(Readable.from([Buffer.from('%PDF-1.7')])),
+        ),
     };
     // Default: the key owner is not a withheld (suspended) member, so serving
     // proceeds. `null` stands in for "no matching owner row" — the gate only
@@ -174,10 +181,38 @@ describe('FilesController', () => {
       expect(storage.createPresignedDownload).not.toHaveBeenCalled();
     });
 
-    it('redirects for a conversation participant', async () => {
+    // PRD-369: a document is streamed through the backend with download-only
+    // headers and never redirected to a presigned URL.
+    it('streams to a conversation participant as a sandboxed attachment', async () => {
       messageQueryBuilder.getExists.mockResolvedValue(true);
-      await serve(MESSAGE_DOCUMENT_KEY, OTHER_MEMBER);
-      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+      const sink = Object.assign(new PassThrough(), {
+        req: { method: 'GET' },
+        setHeader: jest.fn(),
+        status: jest.fn(),
+      });
+      sink.status.mockReturnValue(sink);
+      sink.resume();
+      await controller.serve(
+        MESSAGE_DOCUMENT_KEY.split('/'),
+        OTHER_MEMBER as never,
+        sink as unknown as Response,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+      expect(storage.openObjectStream).toHaveBeenCalledWith(
+        MESSAGE_DOCUMENT_KEY,
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Content-Disposition',
+        expect.stringMatching(/^attachment; /),
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'Content-Security-Policy',
+        "sandbox; default-src 'none'",
+      );
+      expect(sink.setHeader).toHaveBeenCalledWith(
+        'X-Content-Type-Options',
+        'nosniff',
+      );
     });
 
     it('404s for a logged-in member who participates in no such conversation', async () => {

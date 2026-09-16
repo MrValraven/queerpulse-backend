@@ -409,14 +409,15 @@ export class ReportNotificationsListener {
 
   /**
    * The member a report is about, so they are never told about it even when
-   * they hold a staff role. Resolvable for the four subject types that name a
+   * they hold a staff role. Resolvable for the five subject types that name a
    * member: a post or reply through its author, a gathering photograph through
    * its uploader (TS-13, the only member `event_photos` records: nothing on
-   * that row says who is depicted), and a member subject through its
-   * `subjectId`, which is addressed by slug or by user id exactly as
-   * `ModerationService.resolveReportedProfiles` reads it. Every other subject
-   * type (a venue, a listing, a message) yields `null`, which only means there
-   * is nobody to exclude on that axis.
+   * that row says who is depicted), a member subject through its `subjectId`,
+   * which is addressed by slug or by user id exactly as
+   * `ModerationService.resolveReportedProfiles` reads it, and (PRD-356) a
+   * group conversation through its current owner. Every other subject type (a
+   * venue, a listing, a message) yields `null`, which only means there is
+   * nobody to exclude on that axis.
    *
    * An erased uploader yields `null` on the same terms: there is no account
    * left to leave out, and the fan-out proceeds rather than failing.
@@ -434,6 +435,9 @@ export class ReportNotificationsListener {
     if (event.subjectType === ReportSubjectType.Reply) {
       return this.membership.authorIdForReply(event.subjectId);
     }
+    if (event.subjectType === ReportSubjectType.Conversation) {
+      return this.resolveConversationOwnerId(event.subjectId);
+    }
     if (event.subjectType !== ReportSubjectType.Member) return null;
     const profile = await this.profiles.findOne({
       where: UUID_RE.test(event.subjectId)
@@ -442,5 +446,38 @@ export class ReportNotificationsListener {
       select: { userId: true },
     });
     return profile?.userId ?? null;
+  }
+
+  /**
+   * PRD-356: the current owner of a reported GROUP conversation, the seated
+   * `owner` participant, falling back to `created_by` for a group whose owner
+   * has left with nobody promoted in their place. Mirrors
+   * `ReportSubjectResolverService`'s `CONVERSATION_SQL` exactly, so the person
+   * excluded here (as the reported party) and the person the drawer names as
+   * `contentAuthor` can never disagree. Read through the shared `DataSource`
+   * rather than the messaging repositories, the same reason
+   * `resolvePhotoSubject` above gives: a scoped, read-only, parameterized
+   * lookup that adds no edge to the module graph.
+   */
+  private async resolveConversationOwnerId(
+    conversationId: string,
+  ): Promise<string | null> {
+    if (!UUID_RE.test(conversationId)) return null;
+    const ownerRow = await this.dataSource
+      .createQueryBuilder()
+      .select('cp.user_id', 'userId')
+      .from('conversation_participants', 'cp')
+      .where('cp.conversation_id = :conversationId', { conversationId })
+      .andWhere("cp.role = 'owner'")
+      .andWhere('cp.left_at IS NULL')
+      .getRawOne<{ userId: string }>();
+    if (ownerRow?.userId) return ownerRow.userId;
+    const conversationRow = await this.dataSource
+      .createQueryBuilder()
+      .select('c.created_by', 'createdBy')
+      .from('conversations', 'c')
+      .where('c.id = :conversationId', { conversationId })
+      .getRawOne<{ createdBy: string | null }>();
+    return conversationRow?.createdBy ?? null;
   }
 }

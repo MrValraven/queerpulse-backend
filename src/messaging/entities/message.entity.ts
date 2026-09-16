@@ -29,15 +29,44 @@ export enum MessageKind {
   Document = 'document',
 }
 
-/** The kinds of system event a `system` message can carry. `member_added` /
- *  `group_renamed` are seeded here for Phase 2 (add-member / rename), which
- *  reuses the same rendering path this phase builds. */
+/**
+ * The kinds of system event a `system` message can carry. `member_added` /
+ * `group_renamed` are seeded here for Phase 2 (add-member / rename), which
+ * reuses the same rendering path this phase builds.
+ *
+ * PRD-355/DES-227 (messaging scan section 8, Groups) add seven more:
+ *  - `member_promoted` (actor, target): "{actor} made {target} an admin".
+ *  - `member_demoted` (actor, target): "{actor} removed {target} as admin".
+ *  - `owner_changed` (actor = the previous owner, target = the new owner):
+ *    "{target} is now the owner", fired on both an explicit transfer and an
+ *    automatic succession (the owner left/was removed and someone inherited).
+ *  - `group_photo_changed` (actor): the group avatar was replaced.
+ *  - `group_description_changed` (actor): the group's about text changed.
+ *  - `member_joined` (actor = the joiner; `value` is `'link'` or `'invite'`):
+ *    "{actor} joined", a voluntary seat via `POST join/:token` or an accepted
+ *    `group_invites` row, as opposed to `member_added` (someone else put them
+ *    in).
+ *  - `group_dissolved` (actor = the owner, or the last leaver when nobody
+ *    remains to end it): "{actor} ended this group".
+ *
+ * Every event whose text mentions the ACTOR or the TARGET needs a
+ * viewer-is-that-person variant ("you" instead of a name), computed
+ * server-side onto `MessageResponse.systemEvent.actorIsMe`/`targetIsMe`, see
+ * `buildSystemEvent`.
+ */
 export type SystemEventType =
   | 'group_created'
   | 'member_added'
   | 'member_removed'
   | 'member_left'
-  | 'group_renamed';
+  | 'group_renamed'
+  | 'member_promoted'
+  | 'member_demoted'
+  | 'owner_changed'
+  | 'group_photo_changed'
+  | 'group_description_changed'
+  | 'member_joined'
+  | 'group_dissolved';
 
 /**
  * Structured payload of a `system` message. Actor/target are user ids; the DTO
@@ -101,10 +130,11 @@ export interface GifAttachment {
  *
  * `fileName` is the ORIGINAL, member-supplied file name — DISPLAY ONLY. It is
  * never used to derive the storage key (that's a server-minted
- * `<prefix>/<uploaderId>/<uuid>.<ext>`, exactly like an image) and never baked
- * into a served `Content-Disposition` header (see `served-object.ts`'s
- * `inlineContentDispositionForStorageKey` doc) — so it can carry arbitrary
- * member text without becoming a header- or path-injection vector. It IS
+ * `<prefix>/<uploaderId>/<uuid>.<ext>`, exactly like an image). PRD-369: the
+ * streamed download does name the file after it, but only through
+ * `storage/document-download-headers.ts`, which strips control and bidi
+ * characters, quotes and path separators, forces the key's own extension and
+ * RFC 5987-encodes it, so member text cannot inject a header or a path. It IS
  * still sanitized before persisting (see
  * `MessagingCoreService`'s `sanitizeDisplayFileName`) purely to keep a
  * pathological value (embedded newlines, control characters, absurd length)
@@ -189,6 +219,23 @@ export interface AttachmentInput {
   'conversationId',
   'createdAt',
 ])
+// Partial `(erased_sender_ref, conversation_id) WHERE erased_sender_ref IS NOT
+// NULL` from `KeepCounterpartMessagesOnSenderErasure1820530000000`: backs the
+// daily held-message release sweep (ENG-243) and indexes nothing on an ordinary
+// row. Mirrored so `migration:generate` does not propose dropping it.
+@Index(
+  'IDX_messages_erased_sender_ref',
+  ['erasedSenderRef', 'conversationId'],
+  {
+    where: '"erased_sender_ref" IS NOT NULL',
+  },
+)
+// `(sender_id, id)` from `KeepCounterpartMessagesOnSenderErasure1820530000000`:
+// backs the account erasure's keyset tombstone loop, which pages one sender's
+// messages ordered by id. `IDX_messages_sender_id` alone answers the equality
+// but not the ordering, so each page sorted the sender's whole history.
+// Mirrored so `migration:generate` does not propose dropping it.
+@Index('IDX_messages_sender_id_id', ['senderId', 'id'])
 export class Message {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -197,9 +244,29 @@ export class Message {
   @Column({ type: 'uuid' })
   conversationId!: string;
 
+  /**
+   * The author, or NULL once they have erased their account (ENG-243). The FK
+   * is `ON DELETE SET NULL` as of
+   * `KeepCounterpartMessagesOnSenderErasure1820530000000`, so the row survives
+   * in every counterpart's thread: as a readable, sender-anonymised line while
+   * an open report is tied to it, otherwise as an ordinary tombstone. Every
+   * reader maps NULL to a "Former member" author (`senderAuthorSummary`).
+   */
   @Index('IDX_messages_sender_id')
-  @Column({ type: 'uuid' })
-  senderId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  senderId!: string | null;
+
+  /**
+   * The erased author's former user id, kept ONLY while the message is held
+   * because an open or escalated report is tied to its conversation (ENG-243).
+   * Not a foreign key: the `users` row it names is gone. Written by
+   * `AccountDeletionProcessorService` inside the erasure transaction and
+   * cleared by `ErasedSenderMessageReleaseService` once no tied report remains,
+   * at which point the row is tombstoned. Never sent to a client.
+   */
+  // Indexed by the class-level partial `IDX_messages_erased_sender_ref`.
+  @Column({ type: 'uuid', nullable: true })
+  erasedSenderRef!: string | null;
 
   @Column({ type: 'text' })
   body!: string;
@@ -280,4 +347,24 @@ export class Message {
 
   @DeleteDateColumn({ type: 'timestamptz' })
   deletedAt!: Date | null;
+
+  /**
+   * PRD-361: when this tombstone's evidence hold ends. Set on "delete for
+   * everyone" (author or staff) to `now + MESSAGE_DELETE_EVIDENCE_HOLD_DAYS`,
+   * while `body` and `attachment` stay server-side so the recipient can still
+   * report it and a moderator can still see it. The hourly
+   * `MessageEvidenceHoldSweepService` purges the bytes, blanks the body and
+   * NULLs this once it has passed and no open or escalated report names the
+   * message. Account erasure stamps `now()` to hand an erased member's
+   * messages straight to that sweep. NULL means no hold. Never served to a
+   * member: every member read path blanks a tombstone's body and attachment.
+   * Partial index `IDX_messages_attachment_purge_after` (see
+   * `1820510000000-AddMessageAttachmentPurgeAfter.ts`) is mirrored here so
+   * `migration:generate` does not propose dropping it.
+   */
+  @Index('IDX_messages_attachment_purge_after', {
+    where: '"attachment_purge_after" IS NOT NULL',
+  })
+  @Column({ type: 'timestamptz', nullable: true })
+  attachmentPurgeAfter!: Date | null;
 }

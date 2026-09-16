@@ -1180,6 +1180,12 @@ describe('AccountService', () => {
     // The revoked device keeps a valid access token for the rest of its TTL and
     // ChatGateway accepts it, so without this event "sign out this device" left
     // that device's socket receiving messages and presence for up to 15 minutes.
+    //
+    // ENG-209: the event now carries `sessionId` too, so `ChatGateway.
+    // handleSessionRevoked` can single out only the sockets minted for THIS
+    // family, leaving the rest of the member's `user:<id>` room untouched.
+    // "Sign out this device" no longer costs every other signed-in device a
+    // reconnect.
     it('revokeSession drops the member live sockets', async () => {
       refreshTokens.update.mockResolvedValue({ affected: 1 });
 
@@ -1187,6 +1193,7 @@ describe('AccountService', () => {
 
       expect(events.emit).toHaveBeenCalledWith('user.session.revoked', {
         userId: 'u1',
+        sessionId: 'fam-1',
       });
     });
 

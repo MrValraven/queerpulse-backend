@@ -21,6 +21,15 @@
  * recognise a `type` must treat the entry as opaque rather than dropping it.
  */
 
+import type {
+  DocumentAttachment,
+  GifAttachment,
+} from '../messaging/entities/message.entity';
+import {
+  messageAttachmentFacts,
+  primaryMessageAttachmentStorageKey,
+} from '../messaging/message-evidence-hold';
+
 /** A link the reporter pasted into the report form. */
 export interface UrlEvidence {
   type: 'url';
@@ -35,15 +44,82 @@ export interface ScreenshotEvidence {
   uploadId?: string;
 }
 
+export const MESSAGE_SNAPSHOT_TYPE = 'message-snapshot';
+
+/**
+ * PRD-361: the reported message's attachment, BY REFERENCE, as it stood when the
+ * report was filed. Never a URL of any kind (a `/files/` URL refuses staff for a
+ * tombstone, and a presigned one expires): the bytes are reached through
+ * `GET /mod/report-message-attachment/:reportId`, which resolves the key from
+ * the report itself. A deleted message's bytes are held for
+ * `MESSAGE_DELETE_EVIDENCE_HOLD_DAYS`, and for as long as an open or escalated
+ * report names the message, so this reference stays servable for the review.
+ */
+export interface MessageSnapshotAttachment {
+  /** Bare platform key of an uploaded image or document; null for a GIF picked
+   *  from the external provider. */
+  storageKey: string | null;
+  /** A document's original, member-supplied name; null for an image or GIF. */
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  provider: string | null;
+  caption: string | null;
+}
+
 /** The reported message's body as it stood when the report was filed. */
 export interface MessageSnapshotEvidence {
-  type: 'message-snapshot';
+  type: typeof MESSAGE_SNAPSHOT_TYPE;
   messageId: string;
   body: string;
-  senderId: string;
+  /** Null once the author has erased their account. */
+  senderId: string | null;
   createdAt: string;
   editedAt: string | null;
   deletedAtTimeOfReport: boolean;
+  // PRD-360 / PRD-361. Optional because snapshots filed before these fields
+  // existed do not carry them, and readers must accept both.
+  conversationId?: string;
+  replyToId?: string | null;
+  kind?: string;
+  attachment?: MessageSnapshotAttachment | null;
+  /** When this snapshot was taken, i.e. when the report was filed. */
+  capturedAt?: string;
+}
+
+/** The snapshot shape of a stored message attachment. */
+export function messageSnapshotAttachmentFrom(
+  attachment: GifAttachment | DocumentAttachment | null,
+): MessageSnapshotAttachment | null {
+  if (!attachment) return null;
+  const facts = messageAttachmentFacts(attachment);
+  return {
+    storageKey: primaryMessageAttachmentStorageKey(attachment),
+    fileName: facts?.fileName ?? null,
+    mimeType: facts?.mimeType ?? null,
+    sizeBytes: facts?.sizeBytes ?? null,
+    provider:
+      typeof attachment.provider === 'string' ? attachment.provider : null,
+    caption: typeof attachment.caption === 'string' ? attachment.caption : null,
+  };
+}
+
+/**
+ * The `message-snapshot` entry out of a report's raw `evidence`, or null.
+ * Validates the one field every caller keys on (`messageId`) rather than
+ * casting, for the same reason `photoSnapshotFrom` does.
+ */
+export function messageSnapshotFrom(
+  evidence: unknown[] | null | undefined,
+): MessageSnapshotEvidence | null {
+  if (!evidence) return null;
+  for (const entry of evidence) {
+    if (!isRecord(entry)) continue;
+    if (entry.type !== MESSAGE_SNAPSHOT_TYPE) continue;
+    if (typeof entry.messageId !== 'string' || !entry.messageId) continue;
+    return entry as unknown as MessageSnapshotEvidence;
+  }
+  return null;
 }
 
 /** The reported home's key fields as they stood when the report was filed. */
@@ -139,12 +215,46 @@ export interface PhotoSnapshotEvidence {
   snapshotAt: string;
 }
 
+/**
+ * PRD-356: a reported GROUP conversation's key facts as they stood when the
+ * report was filed. Captured because a group's title, description and roster
+ * can all change (or the group can dissolve) between the filing and the
+ * review, and a moderator reading the live conversation would then be judging
+ * something other than what was actually reported.
+ *
+ * Discriminated on `kind` rather than `type` (every other entry above uses
+ * `type`) because this snapshot is about a `conversations.kind = 'group'`
+ * row, and naming its own discriminant `kind` keeps that fact visible at the
+ * call site instead of colliding in spirit with the column it is a snapshot
+ * of. A reader iterating this union checks `'kind' in entry` before
+ * `'type' in entry`, the same way `photoSnapshotFrom` below checks `type`.
+ */
+export interface GroupSnapshotEvidence {
+  kind: 'group';
+  title: string | null;
+  /** PRD-358's `conversations.description` column. Null for a group that has
+   *  never set one. */
+  description: string | null;
+  /** The current owner, or null for a group whose owner has left with nobody
+   *  promoted in their place. */
+  ownerId: string | null;
+  /** Every ACTIVE (not-left) participant, counted in full even when
+   *  {@link memberIds} below is truncated. */
+  memberCount: number;
+  /** Active participant ids, capped at 256 (mirrors the `MAX_GROUP_MEMBERS`
+   *  cap in `messaging.constants.ts`) so a very large roster can never make
+   *  one evidence row unbounded. */
+  memberIds: string[];
+  capturedAt: string;
+}
+
 export type ReportEvidenceEntry =
   | UrlEvidence
   | ScreenshotEvidence
   | MessageSnapshotEvidence
   | HousingSnapshotEvidence
-  | PhotoSnapshotEvidence;
+  | PhotoSnapshotEvidence
+  | GroupSnapshotEvidence;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { PublicEligibilityService } from '../public-eligibility/public-eligibility.service';
 import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
@@ -9,7 +10,11 @@ import { UpdateLoginAlertsDto } from './dto/update-login-alerts.dto';
 import { UpdatePushPreviewsDto } from './dto/update-push-previews.dto';
 import { UpdateContentSensitivityDto } from './dto/update-content-sensitivity.dto';
 import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibility.dto';
+import { UpdateMessagingPrivacyDto } from './dto/update-messaging-privacy.dto';
+import { UpdateGroupAddPolicyDto } from './dto/update-group-add-policy.dto';
 import {
+  DEFAULT_GROUP_ADD_POLICY,
+  GroupAddPolicy,
   DEFAULT_HIDE_DATING_CONTENT,
   DEFAULT_HIDE_FROM_SUGGESTIONS,
   DEFAULT_HIDE_MENTAL_HEALTH_CONTENT,
@@ -19,17 +24,29 @@ import {
   DEFAULT_OUT_AT_WORK,
   DEFAULT_PUBLIC_PROFILE_ENABLED,
   DEFAULT_SAFE_ONLY,
+  DEFAULT_SHARE_PRESENCE,
+  DEFAULT_SHARE_READ_RECEIPTS,
+  DEFAULT_SHARE_TYPING,
   MemberPreferences,
 } from './entities/member-preferences.entity';
+import { DEFAULT_WHO_CAN_MESSAGE } from './who-can-message';
+import {
+  MESSAGING_PRIVACY_SHARE_PRESENCE_CHANGED,
+  MessagingPrivacySharePresenceChangedEvent,
+} from './preferences.events';
 import {
   ContentSensitivityDTO,
+  GroupAddPolicyDTO,
   LoginAlertsDTO,
+  MessagingPrivacyDTO,
   PublicProfileDTO,
   PushPreviewsDTO,
   WorkPreferencesDTO,
   SuggestionVisibilityDTO,
   toContentSensitivityDTO,
+  toGroupAddPolicyDTO,
   toLoginAlertsDTO,
+  toMessagingPrivacyDTO,
   toPublicProfileDTO,
   toPushPreviewsDTO,
   toSuggestionVisibilityDTO,
@@ -45,6 +62,7 @@ export class PreferencesService {
     @InjectRepository(MemberPreferences)
     private readonly preferences: Repository<MemberPreferences>,
     private readonly publicEligibility: PublicEligibilityService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // The unsaved shape a member who has never opened either settings page gets.
@@ -67,6 +85,11 @@ export class PreferencesService {
     row.hideMentalHealthContent = DEFAULT_HIDE_MENTAL_HEALTH_CONTENT;
     row.hideSexualityIdentityContent = DEFAULT_HIDE_SEXUALITY_IDENTITY_CONTENT;
     row.hideFromSuggestions = DEFAULT_HIDE_FROM_SUGGESTIONS;
+    row.groupAddPolicy = DEFAULT_GROUP_ADD_POLICY;
+    row.shareReadReceipts = DEFAULT_SHARE_READ_RECEIPTS;
+    row.shareTyping = DEFAULT_SHARE_TYPING;
+    row.sharePresence = DEFAULT_SHARE_PRESENCE;
+    row.whoCanMessage = DEFAULT_WHO_CAN_MESSAGE;
     return row;
   }
 
@@ -277,5 +300,133 @@ export class PreferencesService {
     row.hideFromSuggestions = dto.hideFromSuggestions;
 
     return toSuggestionVisibilityDTO(await this.preferences.save(row));
+  }
+
+  // --- Group add consent (PRD-353) -------------------------------------------
+
+  async getGroupAddPolicy(userId: string): Promise<GroupAddPolicyDTO> {
+    return toGroupAddPolicyDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Choose who may put this member straight into a group (PRD-353).
+   *
+   * Merged onto `loadOrDefault` like every other writer here. Read by
+   * `GroupsService`'s seat-or-invite gate (`addMembers`/`createGroup`), via
+   * the batched `getGroupAddPolicyForUsers` below, never one query per
+   * candidate. `connections` (the default) keeps today's behaviour; switching
+   * to `invite_only` never re-seats an add already committed under
+   * `connections`, it only changes what a FUTURE add does.
+   */
+  async updateGroupAddPolicy(
+    userId: string,
+    dto: UpdateGroupAddPolicyDto,
+  ): Promise<GroupAddPolicyDTO> {
+    const row = await this.loadOrDefault(userId);
+    row.groupAddPolicy = dto.policy;
+
+    return toGroupAddPolicyDTO(await this.preferences.save(row));
+  }
+
+  /**
+   * Batched variant of `getGroupAddPolicy`, for `GroupsService`'s
+   * `addMembers`/`createGroup` seat-or-invite gate: mirrors
+   * `getMessagingPrivacyForUsers`'s shape exactly (one query for the whole
+   * candidate batch, a user id absent from the query result reads as the
+   * synthesised default, same as `loadOrDefault` would one at a time).
+   */
+  async getGroupAddPolicyForUsers(
+    userIds: string[],
+  ): Promise<Map<string, GroupAddPolicy>> {
+    const uniqueUserIds = [...new Set(userIds)];
+    if (!uniqueUserIds.length) {
+      return new Map();
+    }
+    const rows = await this.preferences.find({
+      where: { userId: In(uniqueUserIds) },
+      select: { userId: true, groupAddPolicy: true },
+    });
+    const byUser = new Map(rows.map((row) => [row.userId, row.groupAddPolicy]));
+    const result = new Map<string, GroupAddPolicy>();
+    for (const userId of uniqueUserIds) {
+      result.set(userId, byUser.get(userId) ?? DEFAULT_GROUP_ADD_POLICY);
+    }
+    return result;
+  }
+
+  // --- Messaging privacy (PRD-364/PRD-366) -----------------------------------
+
+  async getMessagingPrivacy(userId: string): Promise<MessagingPrivacyDTO> {
+    return toMessagingPrivacyDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Batched variant of `getMessagingPrivacy`, for `ChatGateway` (presence/
+   * typing/read-relay gating) and `MessagingCoreService.buildMemberSummaries`
+   * (group "Seen by" gating), neither of which may cost one query per
+   * participant. A `userId` with no row is absent from the query result and
+   * gets the synthesised default here, exactly as `loadOrDefault` would one
+   * at a time — a member who never opened Settings shares everything, same as
+   * every other preference on this entity.
+   */
+  async getMessagingPrivacyForUsers(
+    userIds: string[],
+  ): Promise<Map<string, MessagingPrivacyDTO>> {
+    const uniqueUserIds = [...new Set(userIds)];
+    if (!uniqueUserIds.length) {
+      return new Map();
+    }
+    const rows = await this.preferences.find({
+      where: { userId: In(uniqueUserIds) },
+    });
+    const byUser = new Map(rows.map((row) => [row.userId, row]));
+    const result = new Map<string, MessagingPrivacyDTO>();
+    for (const userId of uniqueUserIds) {
+      const row = byUser.get(userId) ?? this.defaults(userId);
+      result.set(userId, toMessagingPrivacyDTO(row));
+    }
+    return result;
+  }
+
+  /**
+   * Partial update (unlike every full-replace writer above): the pane fires
+   * one PUT per toggle/choice the instant it changes, so a field ABSENT from
+   * the body is left untouched rather than reset to its default. Merged onto
+   * `loadOrDefault` like every other writer here.
+   *
+   * Emits `MESSAGING_PRIVACY_SHARE_PRESENCE_CHANGED` only when `sharePresence`
+   * is present in the body AND actually differs from the stored value — never
+   * on a resend of the same value, and never for the other three fields, which
+   * need no live gateway reaction (see the event's own doc).
+   */
+  async updateMessagingPrivacy(
+    userId: string,
+    dto: UpdateMessagingPrivacyDto,
+  ): Promise<MessagingPrivacyDTO> {
+    const row = await this.loadOrDefault(userId);
+    const sharePresenceChanged =
+      dto.sharePresence !== undefined &&
+      dto.sharePresence !== row.sharePresence;
+    if (dto.shareReadReceipts !== undefined) {
+      row.shareReadReceipts = dto.shareReadReceipts;
+    }
+    if (dto.shareTyping !== undefined) {
+      row.shareTyping = dto.shareTyping;
+    }
+    if (dto.sharePresence !== undefined) {
+      row.sharePresence = dto.sharePresence;
+    }
+    if (dto.whoCanMessage !== undefined) {
+      row.whoCanMessage = dto.whoCanMessage;
+    }
+
+    const saved = await this.preferences.save(row);
+    if (sharePresenceChanged) {
+      this.eventEmitter.emit(MESSAGING_PRIVACY_SHARE_PRESENCE_CHANGED, {
+        userId,
+        sharePresence: saved.sharePresence,
+      } satisfies MessagingPrivacySharePresenceChangedEvent);
+    }
+    return toMessagingPrivacyDTO(saved);
   }
 }

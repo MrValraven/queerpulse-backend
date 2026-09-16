@@ -16,6 +16,7 @@ import { GATHERINGS_BOARD_PATH, gatheringPath } from '../events/event-paths';
 import { isStorageKey } from '../storage/storage-key';
 import { Profile } from '../users/entities/profile.entity';
 import { GENERIC_PUSH_COPY } from './generic-push-copy';
+import { PushMessageListener } from './push.listener';
 import { PushPreviewPrivacyService } from './push-preview-privacy.service';
 import { PushService } from './push.service';
 
@@ -76,6 +77,10 @@ export class PushNotificationListener {
     private readonly previewPrivacy: PushPreviewPrivacyService,
     private readonly notificationPreferences: NotificationPreferencesService,
     private readonly notificationDelivery: NotificationDeliveryService,
+    // PRD-336: lets `pushMention` ask, for a message-source mention, which
+    // recipients `PushMessageListener` is already covering with a merged
+    // push for the identical message (see `pushMention`'s own doc).
+    private readonly pushMessageListener: PushMessageListener,
   ) {}
 
   @OnEvent(NOTIFICATION_BATCH_CREATED)
@@ -180,6 +185,19 @@ export class PushNotificationListener {
         case NotificationType.ForumThreadReviewed:
           await this.pushForumThreadReviewed(userIds, notification);
           return;
+        // PRD-334. Somebody added this member to a group. Gated by the
+        // member's own `NewMessages` category, so the push and the bell answer
+        // to one switch.
+        case NotificationType.GroupAdded:
+          await this.pushGroupAdded(userIds, notification);
+          return;
+        // PRD-353. An add could not seat this member directly and became an
+        // invite instead. Same `NewMessages` gate as `GroupAdded`; the invite
+        // itself still appears on `GET /group-invites` regardless of push/bell
+        // preferences.
+        case NotificationType.GroupInvite:
+          await this.pushGroupInvite(userIds, notification);
+          return;
         // A sign-in from a device the member has not used before (ID-06).
         // No `NotificationPreferenceCategory` gate, deliberately: the member's
         // own switch (`member_preferences.login_alerts_enabled`) is enforced at
@@ -248,21 +266,75 @@ export class PushNotificationListener {
       NotificationPreferenceCategory.Mentions,
     );
     if (recipientUserIds.length === 0) return;
+    // PRD-336: a GROUP mention (`source: 'message'`) that ALSO qualifies for
+    // this exact message's plain "new message" push must not stack a second
+    // lock-screen row. `PushMessageListener.handleMessageCreated` already
+    // sends that recipient one merged, mention-aware push, same tag, richer
+    // body. `eligibleMessagePushRecipientUserIds` is recomputed fresh here
+    // (not read off any state that listener wrote), so there's no ordering
+    // dependency between the two listeners reacting to the same send; see
+    // its own doc. A recipient who ISN'T in that set for any reason (a thread
+    // mute, quiet hours withholding the New Messages category but not
+    // Mentions, blocked, anything at all) still gets THIS push unchanged,
+    // exactly as before this fold existed. A DM mention never reaches
+    // `pushMention` at all (excluded upstream, PRD-221), so this branch only
+    // ever narrows a group's recipients.
+    const recipientUserIdsAfterMessagePushFold =
+      this.payloadString(notification, 'source') === 'message'
+        ? await this.dropRecipientsAlreadyCoveredByMessagePush(
+            notification,
+            recipientUserIds,
+          )
+        : recipientUserIds;
+    if (recipientUserIdsAfterMessagePushFold.length === 0) return;
     const actor = await this.resolveActor(notification);
     const name = this.displayName(actor);
-    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
-      title: 'You were mentioned',
-      body: `${name} mentioned you.`,
-      tag: `notification:${notification.id}`,
-      data: { url: this.threadUrl(notification) },
-      ...this.iconOf(actor),
-      l10n: {
-        titleKey: 'push:mention.title',
-        bodyKey: 'push:mention.body',
-        params: { name },
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIdsAfterMessagePushFold,
+      {
+        title: 'You were mentioned',
+        body: `${name} mentioned you.`,
+        tag: `notification:${notification.id}`,
+        data: { url: this.threadUrl(notification) },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:mention.title',
+          bodyKey: 'push:mention.body',
+          params: { name },
+        },
+        timestamp: notification.createdAt.getTime(),
       },
-      timestamp: notification.createdAt.getTime(),
-    });
+    );
+  }
+
+  /**
+   * PRD-336: the subset of `recipientUserIds` who are NOT among the exact
+   * recipients `PushMessageListener` is (or will be) sending its own merged,
+   * mention-aware message push to for `notification`'s underlying message.
+   * Only called for a `source: 'message'` mention.
+   *
+   * Reads `conversationId` + `actorId` straight off the notification's own
+   * payload (both already written by `MentionNotificationService.notify` for
+   * every `message`-source mention) rather than looking the message back up,
+   * and fails open on a missing/malformed payload field: an unresolvable
+   * conversation or actor means "cannot fold", so nothing is dropped and this
+   * push still reaches everyone it always did.
+   */
+  private async dropRecipientsAlreadyCoveredByMessagePush(
+    notification: Notification,
+    recipientUserIds: string[],
+  ): Promise<string[]> {
+    const conversationId = this.payloadString(notification, 'conversationId');
+    const actorId = actorIdOf(notification);
+    if (!conversationId || !actorId) return recipientUserIds;
+    const coveredUserIds =
+      await this.pushMessageListener.eligibleMessagePushRecipientUserIds(
+        conversationId,
+        actorId,
+        recipientUserIds,
+      );
+    if (coveredUserIds.size === 0) return recipientUserIds;
+    return recipientUserIds.filter((userId) => !coveredUserIds.has(userId));
   }
 
   private async pushForumReply(
@@ -791,6 +863,109 @@ export class PushNotificationListener {
     });
   }
 
+  /**
+   * "Added to a group" (PRD-334): an owner or admin put this member into a
+   * group conversation, at creation or through "Add members".
+   *
+   * Gated by `NewMessages`, the same category the bell row sits behind, and
+   * sent through the preview split with the generic NOTIFICATION copy: the
+   * adder's name and the group's title are exactly what a lock screen must not
+   * show to somebody hiding previews.
+   *
+   * Opens the conversation itself (`/messages?c=<conversationId>`). A group
+   * title is required at creation and on rename, so the untitled branch is
+   * defensive only; it drops `{group}` rather than inventing a name.
+   */
+  private async pushGroupAdded(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.NewMessages,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const groupTitle = this.payloadString(notification, 'groupTitle')?.trim();
+    const conversationId = this.payloadString(notification, 'conversationId');
+    const url = conversationId
+      ? `/messages?c=${encodeURIComponent(conversationId)}`
+      : '/messages';
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Added to a group',
+        body: groupTitle
+          ? `${name} added you to ${groupTitle}.`
+          : `${name} added you to a group.`,
+        tag: `notification:${notification.id}`,
+        data: { url },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:groupAdded.title',
+          bodyKey: groupTitle
+            ? 'push:groupAdded.body'
+            : 'push:groupAdded.bodyUntitled',
+          params: groupTitle ? { name, group: groupTitle } : { name },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "Invited to a group" (PRD-353): an add could not seat this member
+   * directly (their own `group_add_policy` is `invite_only`, or they have a
+   * prior left/removed row in this exact group) and became an invite
+   * instead.
+   *
+   * Gated by `NewMessages`, same as `pushGroupAdded`, and sent through the
+   * same preview split with the generic NOTIFICATION copy: the inviter's
+   * name and the group's title are exactly what a lock screen must not show
+   * to somebody hiding previews.
+   *
+   * Opens `/messages?tab=requests`, NOT the conversation itself: unlike
+   * `pushGroupAdded`'s recipient, this member is not yet a participant, so
+   * `GET :id/messages` would 403 them. The Requests tab is where
+   * `GET /group-invites` renders the accept/decline actions.
+   */
+  private async pushGroupInvite(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.NewMessages,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const groupTitle = this.payloadString(notification, 'groupTitle')?.trim();
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'New group invite',
+        body: groupTitle
+          ? `${name} invited you to ${groupTitle}.`
+          : `${name} invited you to a group.`,
+        tag: `notification:${notification.id}`,
+        data: { url: '/messages?tab=requests' },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:groupInvite.title',
+          bodyKey: groupTitle
+            ? 'push:groupInvite.body'
+            : 'push:groupInvite.bodyUntitled',
+          params: groupTitle ? { name, group: groupTitle } : { name },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
   /** "The landlord you suggested was decided on" (LOC-19). */
   private async pushLandlordSuggestionDecided(
     userIds: string[],
@@ -890,7 +1065,10 @@ export class PushNotificationListener {
       data: { url: '/account/sessions' },
       l10n: {
         titleKey: GENERIC_PUSH_COPY.notification.titleKey,
-        bodyKey: 'notifications:type.security_new_sign_in.push',
+        // ENG-228. A key the service-worker catalog (`pushMessages.ts`) actually
+        // holds; the old `notifications:` key lived only in the app catalogs,
+        // so the worker could never localise this body.
+        bodyKey: 'push:security.newSignIn.body',
       },
       timestamp: notification.createdAt.getTime(),
     });

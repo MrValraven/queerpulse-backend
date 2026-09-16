@@ -3,14 +3,24 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { MetricsService } from '../metrics/metrics.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import {
+  ConversationParticipant,
+  ConversationRole,
+} from '../messaging/entities/conversation-participant.entity';
+import {
+  Conversation,
+  ConversationKind,
+} from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
 import {
   Report,
@@ -50,6 +60,22 @@ describe('ReportsService', () => {
   let eventPhotos: {
     findOne: jest.Mock;
   };
+  // PRD-356: the group-conversation membership check and evidence snapshot
+  // read these two. Held on variables so the group cases can seed rows and
+  // every other case can assert they are never even consulted.
+  let conversations: {
+    findOne: jest.Mock;
+  };
+  let conversationParticipants: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+  };
+  // PRD-361: the evidence-expiry refusal consults this ONLY for a tombstone, so
+  // every case filing against a live message leaves it untouched. The default
+  // below is "no moderator has hidden or removed this".
+  let contentModeration: {
+    findOne: jest.Mock;
+  };
   // Held on a variable (rather than inlined into the provider) so the flood-cap
   // cases can assert that a refused filing emits no `report.created`.
   let emitter: { emit: jest.Mock };
@@ -79,6 +105,16 @@ describe('ReportsService', () => {
     eventPhotos = {
       findOne: jest.fn().mockResolvedValue(null),
     };
+    conversations = {
+      findOne: jest.fn().mockResolvedValue(null),
+    };
+    conversationParticipants = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    contentModeration = {
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     emitter = { emit: jest.fn() };
     metrics = { incrementReportFloodRefusal: jest.fn() };
 
@@ -92,6 +128,15 @@ describe('ReportsService', () => {
           useValue: { findOne: jest.fn().mockResolvedValue(null) },
         },
         { provide: getRepositoryToken(EventPhoto), useValue: eventPhotos },
+        { provide: getRepositoryToken(Conversation), useValue: conversations },
+        {
+          provide: getRepositoryToken(ConversationParticipant),
+          useValue: conversationParticipants,
+        },
+        {
+          provide: getRepositoryToken(ContentModeration),
+          useValue: contentModeration,
+        },
         { provide: EventEmitter2, useValue: emitter },
         { provide: MetricsService, useValue: metrics },
         // Holds `REPORT_ANONYMOUS_FLOOD_PEPPER`. Returning undefined is the
@@ -540,6 +585,210 @@ describe('ReportsService', () => {
           subjectType: ReportSubjectType.MagazineComment,
         }),
       );
+    });
+
+    // PRD-356: a group conversation can be reported (`conversation` subject),
+    // gated on the reporter having belonged to it: a group's roster and
+    // messages are otherwise invisible to anyone outside it.
+    describe('group conversation report (PRD-356)', () => {
+      const GROUP_ID = 'a1b2c3d4-1111-4222-8333-444455556666';
+      const OWNER_ID = 'aaaaaaaa-1111-4222-8333-444455556666';
+
+      it('rejects a subjectId that is not a uuid without touching the database', async () => {
+        await expect(
+          service.create('reporter-1', {
+            subjectType: ReportSubjectType.Conversation,
+            subjectId: 'not-a-uuid',
+            reasonCode: 'harassment',
+          }),
+        ).rejects.toThrow(NotFoundException);
+        expect(conversations.findOne).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses an unknown conversation id', async () => {
+        conversations.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.create('reporter-1', {
+            subjectType: ReportSubjectType.Conversation,
+            subjectId: GROUP_ID,
+            reasonCode: 'harassment',
+          }),
+        ).rejects.toThrow(NotFoundException);
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a DM conversation id (never a group)', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: GROUP_ID,
+          kind: ConversationKind.Direct,
+          title: null,
+          createdBy: OWNER_ID,
+        });
+
+        await expect(
+          service.create('reporter-1', {
+            subjectType: ReportSubjectType.Conversation,
+            subjectId: GROUP_ID,
+            reasonCode: 'harassment',
+          }),
+        ).rejects.toThrow(NotFoundException);
+        expect(conversationParticipants.findOne).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a signed-out filer, who has no membership to check', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: GROUP_ID,
+          kind: ConversationKind.Group,
+          title: 'Trans Book Club',
+          createdBy: OWNER_ID,
+        });
+
+        await expect(
+          service.create(
+            null,
+            {
+              subjectType: ReportSubjectType.Conversation,
+              subjectId: GROUP_ID,
+              reasonCode: 'harassment',
+            },
+            '203.0.113.9',
+          ),
+        ).rejects.toThrow(NotFoundException);
+        expect(conversationParticipants.findOne).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a caller who never belonged to the group', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: GROUP_ID,
+          kind: ConversationKind.Group,
+          title: 'Trans Book Club',
+          createdBy: OWNER_ID,
+        });
+        conversationParticipants.findOne.mockResolvedValue(null);
+
+        await expect(
+          service.create('stranger-1', {
+            subjectType: ReportSubjectType.Conversation,
+            subjectId: GROUP_ID,
+            reasonCode: 'harassment',
+          }),
+        ).rejects.toThrow(NotFoundException);
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      // A member who has since left (or was removed) can still report a group
+      // they were once part of: the spec calls for CURRENT or FORMER
+      // standing, not ongoing membership.
+      it('allows a former participant (leftAt set) to report the group', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: GROUP_ID,
+          kind: ConversationKind.Group,
+          title: 'Trans Book Club',
+          createdBy: OWNER_ID,
+        });
+        conversationParticipants.findOne.mockResolvedValue({
+          conversationId: GROUP_ID,
+          userId: 'former-member-1',
+          leftAt: new Date('2026-01-01T00:00:00.000Z'),
+        });
+        conversationParticipants.find.mockResolvedValue([
+          { userId: OWNER_ID, role: ConversationRole.Owner },
+          { userId: 'member-2', role: ConversationRole.Member },
+        ]);
+
+        await expect(
+          service.create('former-member-1', {
+            subjectType: ReportSubjectType.Conversation,
+            subjectId: GROUP_ID,
+            reasonCode: 'harassment',
+          }),
+        ).resolves.toBeDefined();
+        expect(reports.save).toHaveBeenCalled();
+      });
+
+      it('snapshots the group into evidence, naming the seated owner', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: GROUP_ID,
+          kind: ConversationKind.Group,
+          title: 'Trans Book Club',
+          description: 'Monthly meet-up',
+          createdBy: 'original-creator',
+        });
+        conversationParticipants.findOne.mockResolvedValue({
+          conversationId: GROUP_ID,
+          userId: 'reporter-1',
+          leftAt: null,
+        });
+        conversationParticipants.find.mockResolvedValue([
+          { userId: OWNER_ID, role: ConversationRole.Owner },
+          { userId: 'reporter-1', role: ConversationRole.Member },
+          { userId: 'member-3', role: ConversationRole.Admin },
+        ]);
+
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.Conversation,
+          subjectId: GROUP_ID,
+          reasonCode: 'harassment',
+        });
+
+        expect(conversationParticipants.find).toHaveBeenCalled();
+        expect(reports.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            evidence: [
+              expect.objectContaining({
+                kind: 'group',
+                title: 'Trans Book Club',
+                description: 'Monthly meet-up',
+                // The SEATED owner wins over `createdBy` when one is seated.
+                ownerId: OWNER_ID,
+                memberCount: 3,
+                memberIds: [OWNER_ID, 'reporter-1', 'member-3'],
+              }) as unknown,
+            ],
+          }),
+        );
+      });
+
+      it('falls back to created_by when nobody is seated as owner', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: GROUP_ID,
+          kind: ConversationKind.Group,
+          title: 'Trans Book Club',
+          description: null,
+          createdBy: 'original-creator',
+        });
+        conversationParticipants.findOne.mockResolvedValue({
+          conversationId: GROUP_ID,
+          userId: 'reporter-1',
+          leftAt: null,
+        });
+        // Nobody currently holds the owner role (the last owner left with no
+        // successor promoted).
+        conversationParticipants.find.mockResolvedValue([
+          { userId: 'reporter-1', role: ConversationRole.Member },
+        ]);
+
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.Conversation,
+          subjectId: GROUP_ID,
+          reasonCode: 'harassment',
+        });
+
+        expect(reports.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            evidence: [
+              expect.objectContaining({
+                ownerId: 'original-creator',
+                memberCount: 1,
+              }) as unknown,
+            ],
+          }),
+        );
+      });
     });
 
     // TS-05: rolling caps layered on top of the controller's 60-second

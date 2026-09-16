@@ -650,20 +650,15 @@ export class AccountService {
    * `ChatGateway.authenticate` accepts it, so without this the "signed out"
    * device kept a live socket (messages, presence) for up to 15 minutes.
    *
-   * The drop is still per-MEMBER: the event carries only `userId`, so the
-   * gateway empties the whole `user:${userId}` room. The member's other devices
-   * reconnect immediately with their own still-valid cookies, so the visible
-   * cost is a socket reconnect, and the revoked device cannot come back because
-   * its refresh rows are gone.
-   *
-   * Narrowing it to the one device is now POSSIBLE: access tokens carry a `sid`
-   * claim naming this exact family (see `AccessTokenPayload`), so the event
-   * could carry `sessionId` and the gateway could drop only the sockets whose
-   * handshake token matches. That is a change inside `ChatGateway`, and it is
-   * an ergonomics fix rather than a security one: `JwtStrategy.validate` now
-   * rejects the revoked device's access token on its next request, and the
-   * gateway re-reads the same token at every handshake, so the revoked device
-   * cannot reconnect either way.
+   * The drop is now per-DEVICE (ENG-209): the event carries `sessionId` (this
+   * revoked family's id), and `ChatGateway.handleSessionRevoked` drops only
+   * the sockets whose handshake token was minted for THIS family, since
+   * access tokens have carried a `sid` claim naming their family since
+   * `AccessTokenPayload` added it. The member's OTHER live sessions stay
+   * connected untouched; only the signed-out device's socket is told and
+   * dropped, and it cannot reconnect afterward because its refresh rows are
+   * gone and `JwtStrategy.validate`/`ChatGateway.authenticate` both re-read
+   * the same revoked family on the device's next request or handshake.
    */
   async revokeSession(userId: string, sessionId: string): Promise<void> {
     const result = await this.refreshTokens.update(
@@ -678,6 +673,7 @@ export class AccountService {
     }
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
       userId,
+      sessionId,
     } satisfies UserSessionRevokedEvent);
   }
 
@@ -687,8 +683,16 @@ export class AccountService {
    *
    * Scoped by FAMILY, so the caller keeps every row of their own session (a
    * rotation race can leave two) and loses every row of every other one.
-   * Emits `USER_SESSION_REVOKED` on the same reasoning as `revokeSession`; the
-   * caller's own socket reconnects on the cookie it still holds.
+   * Emits `USER_SESSION_REVOKED` with NO `sessionId`, unlike `revokeSession`:
+   * this call cannot single out which of the member's sockets are the ones
+   * actually revoked (every device except the caller's own), so
+   * `ChatGateway.handleSessionRevoked` disconnects the whole room WITHOUT a
+   * terminal frame and leaves each socket to reconnect through its own
+   * handshake. The caller's own socket goes through that same disconnect and
+   * reconnect, and its handshake finds its `sid` still live, so it is simply
+   * readmitted on the cookie it still holds; the actually-revoked devices'
+   * handshakes find their families gone and are told `SESSION_REVOKED` there
+   * instead.
    *
    * FAILS CLOSED, and that guard is the point of the method rather than a
    * defensive flourish. "Sign out my other devices" and "sign out everything

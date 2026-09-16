@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatModule } from '../chat/chat.module';
+import { ConnectionsModule } from '../connections/connections.module';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -33,6 +34,12 @@ import { PushSubscription } from './entities/push-subscription.entity';
     UsersModule, // provides UsersService + Profile repo (re-exported TypeOrmModule)
     ChatModule, // provides PresenceService
     SocialModule, // provides BlockFilterService (P0: block check before push)
+    // Provides ConnectionsService: a 1:1 message push from a sender the
+    // recipient is not connected to carries the generic copy (ENG-232). A
+    // plain import with no `forwardRef`: `ConnectionsModule` reaches only
+    // `UsersModule`, `SocialModule` and `VouchModule`, none of which import
+    // this module, and `ChatModule` (imported above) already imports it.
+    ConnectionsModule,
     // provides NotificationPreferencesService — the new-message push honours the
     // member's "New message" category switch. One-way edge: NotificationsModule
     // imports only SocialModule + TypeOrm, so it never reaches back to PushModule.

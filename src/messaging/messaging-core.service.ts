@@ -20,6 +20,7 @@ import {
 } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
+import { MessageHide } from './entities/message-hide.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import {
@@ -31,6 +32,7 @@ import {
 } from './entities/message.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { toStoredPlainText } from '../communities/community-plain-text';
+import { sanitizeMessageBody } from './dto/trim-message-body';
 import { storageKeyFromImageUrl } from '../common/image-url';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { DOCUMENT_UPLOAD_TYPES } from '../storage/upload-content-types';
@@ -41,35 +43,27 @@ import { UsersService } from '../users/users.service';
 import {
   buildReplyTo,
   buildSystemEvent,
+  ConversationMemberPreview,
   ConversationMemberSummary,
   MessageResponse,
+  messageKindToResponseKind,
   MessageView,
+  presentSenderIds,
   ReactionSummary,
   requireAuthorSummary,
   resolveAttachment,
+  senderAuthorSummary,
   toMessageReactionSummaries,
   toMessageView,
 } from './message-response';
+import {
+  MESSAGE_SUBJECT_TYPE,
+  notModeratedMessagePredicate,
+} from './message-visibility-predicates';
 import { EDIT_WINDOW_MS } from './messaging.constants';
+import { isEvidenceHoldActive } from './message-evidence-hold';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
-
-/** `Message.kind` (the entity enum) → the frontend-contract `MessageResponse.kind`
- *  string union. Shared by `buildLastMessagePreview` and `toMessageResponses` so
- *  the mapping can't drift between the inbox-preview and full-thread paths. */
-function messageKindToResponseKind(kind: MessageKind): MessageResponse['kind'] {
-  switch (kind) {
-    case MessageKind.System:
-      return 'system';
-    case MessageKind.Gif:
-      return 'gif';
-    case MessageKind.Image:
-      return 'image';
-    case MessageKind.Document:
-      return 'document';
-    default:
-      return 'user';
-  }
-}
+import type { MessagingPrivacyDTO } from '../preferences/preferences-response';
 
 /**
  * The fields needed to build a `MessageResponse`. Structural, so both a
@@ -90,7 +84,10 @@ export type MessageLike = Pick<
   | 'kind'
   | 'systemEvent'
   | 'attachment'
->;
+> &
+  // PRD-361: optional because only a persisted row carries it (a fresh
+  // `MessageView` is never a tombstone). Read by `canReport` alone.
+  Partial<Pick<Message, 'attachmentPurgeAfter'>>;
 
 /**
  * Cross-cutting read/write helpers shared by `ConversationsService`,
@@ -108,11 +105,15 @@ export type MessageLike = Pick<
  * `MessageResponse` for any page of messages, reused by every concern that
  * returns a `MessageResponse[]`.
  */
+/** ENG-253: cap on `buildMemberPreview`'s avatar-stack preview, see its own
+ *  doc for why this is unrelated to `MAX_GROUP_MEMBERS`. */
+const MAX_MEMBER_PREVIEW = 8;
+
 @Injectable()
 export class MessagingCoreService {
   // A message is reported (and taken down) under the `message` subject code,
   // keyed by the message uuid — mirrors `ReportSubjectType.Message`.
-  private static readonly MESSAGE_SUBJECT_TYPE = 'message';
+  private static readonly MESSAGE_SUBJECT_TYPE = MESSAGE_SUBJECT_TYPE;
 
   constructor(
     @InjectRepository(Conversation)
@@ -127,6 +128,12 @@ export class MessagingCoreService {
     private readonly pins: Repository<ConversationPinnedMessage>,
     @InjectRepository(MessageStar)
     private readonly stars: Repository<MessageStar>,
+    // Read-only here: PRD-227 "delete for me" rows, needed only so
+    // `toMessageResponses` can fold the VIEWER's own hides on a page's reply
+    // parents into `hiddenReplyParentIds` (writes to this table live in
+    // `MessageAnnotationsService.hideMessageForMe`).
+    @InjectRepository(MessageHide)
+    private readonly hides: Repository<MessageHide>,
     // Read-only: the shared moderation-state table. A `hide_content` /
     // `remove_content` takedown on a `message` subject (keyed by the message
     // uuid) lands here, and `toMessageResponses` reads it to tombstone the
@@ -267,6 +274,35 @@ export class MessagingCoreService {
   }
 
   /**
+   * Whether a moderator takedown withholds this message from `viewerId`, under
+   * the exact rule `toMessageResponses` tombstones by: a removal withholds it
+   * from everyone, a hide only from non-staff. Staff is resolved the same way
+   * that read path does (the viewer's platform role is Admin or Moderator), so
+   * a per-message read route never refuses a message the thread shows staff.
+   * Writes keep `isMessageTakenDown`, which counts a hide for everyone.
+   */
+  async isMessageWithheldFromViewer(
+    messageId: string,
+    viewerId: string,
+  ): Promise<boolean> {
+    const [moderation, viewer] = await Promise.all([
+      this.moderationStates.findOne({
+        where: {
+          subjectType: MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+          subjectId: messageId,
+        },
+      }),
+      this.usersService.findById(viewerId),
+    ]);
+    if (!moderation) return false;
+    const viewerIsStaff =
+      viewer?.role === UserRole.Admin || viewer?.role === UserRole.Moderator;
+    return Boolean(
+      moderation.removedAt ?? (viewerIsStaff ? null : moderation.hiddenAt),
+    );
+  }
+
+  /**
    * A `NOT EXISTS` SQL fragment (message alias `m`) that is TRUE only when the
    * message carries no moderator takedown (neither hidden nor removed). Shared
    * by the message-counting/preview query builders so a taken-down message is
@@ -276,12 +312,7 @@ export class MessagingCoreService {
    * is varchar while `m.id` is uuid, hence the `::text` cast.
    */
   private notModeratedPredicate(): string {
-    return `NOT EXISTS (
-      SELECT 1 FROM "content_moderation" "cm"
-      WHERE "cm"."subject_type" = :messageSubjectType
-        AND "cm"."subject_id" = m.id::text
-        AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
-    )`;
+    return notModeratedMessagePredicate('m');
   }
 
   /**
@@ -377,34 +408,49 @@ export class MessagingCoreService {
   }
 
   /**
-   * How many of this user's conversations have at least one unread message —
-   * the single number behind the nav DM badge (`GET /conversations/unread-count`),
-   * so the badge never has to pull the whole inbox on every route. Uses the exact
-   * per-conversation unread rules as `unreadCountsByConversation` above (exclude
-   * the user's own messages; honour each thread's `last_read_at` and `cleared_at`
-   * watermarks; soft-deleted messages are dropped by the `@DeleteDateColumn`),
-   * but collapses them to one `COUNT(DISTINCT conversation)` — matching the
-   * frontend demo badge, which counts unread *conversations*, not messages.
+   * How many of this user's conversations count as UNREAD, the single number
+   * behind the nav DM badge (`GET /conversations/unread-count`), so the badge
+   * never has to pull the whole inbox on every route.
+   *
+   * PRD-341: this is now THE single "unread thread" definition, shared with
+   * the frontend's Unread tab (`threadFilters.ts`'s `isThreadUnread`) and the
+   * row highlight (`messages.adapters.ts`'s `unread` field). A conversation
+   * counts if it is NOT archived AND EITHER has a genuinely unread message
+   * (the same per-message rules as `unreadCountsByConversation`: not the
+   * caller's own, past their `last_read_at`/`cleared_at`/`left_at`
+   * watermarks, never a moderated or self-hidden row) OR the caller
+   * explicitly `markedUnreadAt` it (PRD-225) with nothing new to actually
+   * read. Previously this only ever counted real unread MESSAGES, so a manual
+   * mark-unread lit the row and filled the Unread tab but never moved this
+   * badge, and an archived thread (which every OTHER tab hides, the All tab
+   * included) could keep the badge lit forever with no row anywhere to clear
+   * it from.
    */
   async unreadConversationCount(userId: string): Promise<number> {
-    const raw = await this.messages
-      .createQueryBuilder('m')
-      .select('COUNT(DISTINCT m.conversation_id)', 'count')
-      // Join THIS user's participant row for its lastReadAt / clearedAt
-      // watermarks, exactly as unreadCountsByConversation does.
-      .innerJoin(
-        ConversationParticipant,
-        'p',
-        'p.conversation_id = m.conversation_id AND p.user_id = :userId',
-        { userId },
+    const raw = await this.participants
+      .createQueryBuilder('p')
+      .select('COUNT(DISTINCT p.conversation_id)', 'count')
+      .innerJoin(Conversation, 'c', 'c.id = p.conversation_id')
+      .where('p.user_id = :userId', { userId })
+      .andWhere('p.archived_at IS NULL')
+      .andWhere(
+        `(
+          p.marked_unread_at IS NOT NULL
+          OR EXISTS (
+            SELECT 1 FROM "messages" m
+            WHERE m.conversation_id = p.conversation_id
+              AND m.deleted_at IS NULL
+              AND m.sender_id != :userId
+              AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at)
+              AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
+              AND (p.left_at IS NULL OR m.created_at <= p.left_at)
+              AND ${this.notModeratedPredicate()}
+              AND ${this.notHiddenForViewerPredicate()}
+          )
+        )`,
       )
-      .where('m.sender_id != :userId', { userId })
-      .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
-      .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
-      // leftAt ceiling — see `unreadCountsByConversation` (BE-MSG-08).
-      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
       // A blocked DM does not appear in the inbox (`listConversations` drops
-      // it), so it must not appear in the nav badge either — otherwise the
+      // it), so it must not appear in the nav badge either: otherwise the
       // number permanently outruns the list beneath it, on a thread the member
       // has no UI path to open and clear. Scoped to DIRECT, non-official
       // threads for the same reason every other block gate is: a block between
@@ -413,23 +459,16 @@ export class MessagingCoreService {
       .andWhere(
         `NOT EXISTS (
           SELECT 1 FROM "conversation_participants" "__unread_other"
-          JOIN "conversations" "__unread_convo"
-            ON "__unread_convo"."id" = "__unread_other"."conversation_id"
           JOIN "blocks" "__unread_block"
             ON ("__unread_block"."blocker_id" = :userId AND "__unread_block"."blocked_id" = "__unread_other"."user_id")
             OR ("__unread_block"."blocked_id" = :userId AND "__unread_block"."blocker_id" = "__unread_other"."user_id")
-          WHERE "__unread_other"."conversation_id" = m.conversation_id
+          WHERE "__unread_other"."conversation_id" = p.conversation_id
             AND "__unread_other"."user_id" != :userId
-            AND "__unread_convo"."kind" != :unreadGroupKind
-            AND "__unread_convo"."is_official" = false
+            AND c."kind" != :unreadGroupKind
+            AND c."is_official" = false
         )`,
         { unreadGroupKind: ConversationKind.Group },
       )
-      // A moderator-taken-down message never counts toward the unread badge.
-      .andWhere(this.notModeratedPredicate())
-      // A message THIS viewer "deleted for me" (PRD-227) never counts toward
-      // their own unread badge either — see `unreadCountsByConversation`.
-      .andWhere(this.notHiddenForViewerPredicate())
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
@@ -437,6 +476,68 @@ export class MessagingCoreService {
       .setParameter('hiddenForUserId', userId)
       .getRawOne<{ count: string }>();
     return Number(raw?.count ?? 0);
+  }
+
+  /**
+   * PRD-348: does this user have at least one UNREAD message (same predicate
+   * as `unreadCountsByConversation`: after their read/cleared/left
+   * watermarks, from someone else, never a moderated or self-hidden row) in
+   * each of these conversations that `@`-mentions them by their own profile
+   * slug? Batched in ONE query for the whole inbox page, never one lookup
+   * per row (the inbox list's N+1 rule).
+   *
+   * There is no dedicated "mentions" table for messages. A member mention is
+   * persisted only as a best-effort `Notification` row
+   * (`MentionNotificationService.notify`, fired once per SEND), which isn't
+   * queryable back to "is this specific message still unread" without a
+   * second join through its JSONB payload. Rather than add that join, this
+   * re-derives the fact directly from the message body with the SAME token
+   * shape `extractMentions` (`common/mentions.ts`) uses for the member
+   * bucket: `@slug` at a whitespace/string-start boundary, lowercase only
+   * (the extractor's char class carries no `i` flag, so an uppercase `@Sam`
+   * is not a mention system-wide either), so this can never disagree with
+   * whether the fan-out actually notified this member for the same text.
+   */
+  async hasUnreadMentionByConversation(
+    convoIds: string[],
+    userId: string,
+    callerSlug: string | null | undefined,
+  ): Promise<Map<string, boolean>> {
+    if (!convoIds.length || !callerSlug) {
+      return new Map();
+    }
+    // `(^|\s)@slug([^a-z0-9-]|$)` mirrors `extractMentions`'s member token
+    // exactly: a boundary before the `@` (string start or whitespace, never
+    // any other punctuation) and a boundary after the slug (a non-slug
+    // character or the end of the body), so "@sam" doesn't false-match inside
+    // "@samantha". Postgres `~` is case-SENSITIVE, matching the extractor's
+    // own lowercase-only char class.
+    const mentionPattern = `(^|\\s)@${callerSlug}([^a-z0-9-]|$)`;
+    const rows = await this.messages
+      .createQueryBuilder('m')
+      .select('m.conversation_id', 'conversationId')
+      .innerJoin(
+        ConversationParticipant,
+        'p',
+        'p.conversation_id = m.conversation_id AND p.user_id = :userId',
+        { userId },
+      )
+      .where('m.conversation_id IN (:...convoIds)', { convoIds })
+      .andWhere('m.sender_id != :userId', { userId })
+      .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
+      .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
+      .andWhere(this.notModeratedPredicate())
+      .andWhere(this.notHiddenForViewerPredicate())
+      .andWhere('m.body ~ :mentionPattern', { mentionPattern })
+      .setParameter(
+        'messageSubjectType',
+        MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+      )
+      .setParameter('hiddenForUserId', userId)
+      .groupBy('m.conversation_id')
+      .getRawMany<{ conversationId: string }>();
+    return new Map(rows.map((r) => [r.conversationId, true]));
   }
 
   /**
@@ -490,13 +591,19 @@ export class MessagingCoreService {
     conversationId: string,
     profileByUser: Map<string, Profile>,
     reactions: ReactionSummary[],
+    // PRD-355: the caller this preview is being built FOR, so a system pill's
+    // `actorIsMe`/`targetIsMe` are correct even in an inbox row (e.g. "You
+    // created the group" for the creator, "Ana created the group" for
+    // everyone else). Optional purely so a call site that has not been
+    // threaded through yet keeps compiling; see `buildSystemEvent`'s own doc.
+    viewerId?: string,
   ): MessageResponse {
     const isSystem = message.kind === MessageKind.System;
     return {
       id: message.id,
       conversationId,
       body: message.body,
-      sender: requireAuthorSummary(profileByUser.get(message.senderId)),
+      sender: senderAuthorSummary(message.senderId, profileByUser),
       createdAt: message.createdAt.toISOString(),
       editedAt: message.editedAt ? message.editedAt.toISOString() : null,
       reactions,
@@ -517,7 +624,7 @@ export class MessagingCoreService {
       kind: messageKindToResponseKind(message.kind),
       attachment: resolveAttachment(message.attachment),
       systemEvent: isSystem
-        ? buildSystemEvent(message.systemEvent, profileByUser)
+        ? buildSystemEvent(message.systemEvent, profileByUser, viewerId)
         : null,
     };
   }
@@ -528,22 +635,43 @@ export class MessagingCoreService {
    * insertion. A left participant is excluded from the roster and the count (they
    * keep read access but are no longer "in" the group). Profiles come from the
    * pre-batched map; a missing one falls back to the generic placeholder name.
+   *
+   * PRD-364: `lastReadAt` is reciprocal read-receipt state, so it is withheld
+   * (null) for any member whose own `shareReadReceipts` is off (their read
+   * watermark must not leak to the rest of the group), AND for every row when
+   * `viewerId` (this caller) has turned their OWN sharing off (a member who
+   * stops sharing also stops seeing everyone else's watermark) — except the
+   * viewer's own row, which is never someone else's read state to begin with
+   * and stays visible to them. `privacyByUser` is caller-batched (never one
+   * query per member); an id absent from it (no row) reads as sharing on, the
+   * same default `PreferencesService.getMessagingPrivacyForUsers` applies.
+   * `deliveredAt` is untouched — delivery receipts are out of PRD-364's scope.
    */
   buildMemberSummaries(
     participants: ConversationParticipant[],
     profileByUser: Map<string, Profile>,
+    viewerId: string,
+    privacyByUser: Map<string, MessagingPrivacyDTO>,
   ): ConversationMemberSummary[] {
     const rank: Record<ConversationRole, number> = {
       [ConversationRole.Owner]: 0,
       [ConversationRole.Admin]: 1,
       [ConversationRole.Member]: 2,
     };
+    const viewerSharesReadReceipts =
+      privacyByUser.get(viewerId)?.shareReadReceipts ?? true;
     return participants
       .filter((participant) => participant.leftAt == null)
       .map((participant) => {
         const summary = requireAuthorSummary(
           profileByUser.get(participant.userId),
         );
+        const isViewerRow = participant.userId === viewerId;
+        const subjectSharesReadReceipts =
+          privacyByUser.get(participant.userId)?.shareReadReceipts ?? true;
+        const withholdReadState =
+          !isViewerRow &&
+          (!viewerSharesReadReceipts || !subjectSharesReadReceipts);
         return {
           id: participant.userId,
           handle: summary.handle,
@@ -553,11 +681,49 @@ export class MessagingCoreService {
           // Per-member watermarks for group "Seen by N" — the client compares
           // each member's read watermark against a message's createdAt without
           // an N+1 per-message receipts endpoint.
-          lastReadAt: participant.lastReadAt?.toISOString() ?? null,
+          lastReadAt: withholdReadState
+            ? null
+            : (participant.lastReadAt?.toISOString() ?? null),
           deliveredAt: participant.deliveredAt?.toISOString() ?? null,
+          // PRD-351: the real read INSTANT alongside the watermark above,
+          // withheld under the identical `withholdReadState` gate. It is
+          // just as much a read receipt as `lastReadAt` and must leak under
+          // the exact same conditions, never more or less.
+          lastReadInstant: withholdReadState
+            ? null
+            : (participant.lastReadInstant?.toISOString() ?? null),
         };
       })
       .sort((a, b) => rank[a.role] - rank[b.role]);
+  }
+
+  /**
+   * ENG-253: the lightweight avatar-stack preview `ConversationResponse.
+   * memberPreview` sends on EVERY row (list and single-conversation alike),
+   * INSTEAD of the full `members` roster on a list row. Active members only
+   * (mirrors `buildMemberSummaries`), capped at `MAX_MEMBER_PREVIEW`, enough
+   * for any avatar stack, never the group's real membership ceiling
+   * (`MAX_GROUP_MEMBERS`). Carries no role or read/delivered watermark: those
+   * are exactly the fields the inbox list never rendered and no longer ships.
+   */
+  buildMemberPreview(
+    participants: ConversationParticipant[],
+    profileByUser: Map<string, Profile>,
+  ): ConversationMemberPreview[] {
+    return participants
+      .filter((participant) => participant.leftAt == null)
+      .slice(0, MAX_MEMBER_PREVIEW)
+      .map((participant) => {
+        const summary = requireAuthorSummary(
+          profileByUser.get(participant.userId),
+        );
+        return {
+          id: participant.userId,
+          handle: summary.handle,
+          name: summary.displayName,
+          avatarUrl: summary.avatarUrl,
+        };
+      });
   }
 
   /**
@@ -599,10 +765,34 @@ export class MessagingCoreService {
    * `viewerId` is needed to compute each reaction summary's `mine` flag
    * (mirrors `CommunityPostsService.toPostDTOs` — one `IN`-batched reactions
    * query across the whole page rather than per-message lookups).
+   *
+   * `hasViewerLeftConversation` (default `false`, matching the historically
+   * lenient behaviour for a caller that cannot yet supply it, see ENG-254)
+   * is the caller's own `ConversationParticipant.leftAt` truth for THIS page's
+   * one conversation: `canPin`/`canEdit` must mirror `pinMessage`/
+   * `unpinMessage`/`editMessage`'s own `requireActiveParticipant` guard
+   * exactly, so a member who left (or was removed from) a group is never
+   * offered an action the endpoint would then reject with a 403. `canDelete`
+   * deliberately does NOT read this flag: `deleteMessage` keeps the lenient
+   * `requireParticipant` check (removing your own content stays possible
+   * after you leave), and `canReport`'s endpoint has no participant
+   * requirement at all.
+   *
+   * ENG-240: `canPin` also withholds Pin from a GROUP viewer who is not
+   * owner/admin, mirroring `MessageAnnotationsService.assertCanManageGroupPins`
+   * — looked up here (one extra pair of batched, page-level queries) rather
+   * than threaded through every caller as another parameter.
    */
   async toMessageResponses(
     rows: MessageLike[],
     viewerId: string,
+    hasViewerLeftConversation = false,
+    // ENG-240 hot-path fix: `getMessages` (and every other caller that has
+    // already looked up the conversation for its own reasons) can pass the
+    // kind straight through, so this method skips its own `conversations`
+    // lookup entirely. Left undefined by callers that have not looked it up
+    // yet, in which case the fallback `findOne` below runs exactly as before.
+    conversationKind?: ConversationKind,
   ): Promise<MessageResponse[]> {
     if (!rows.length) {
       return [];
@@ -636,10 +826,12 @@ export class MessagingCoreService {
           )
         : [],
     );
+    // `presentSenderIds` drops the NULL sender of an erased author (ENG-243),
+    // who has no profile to load and renders as a former member.
     const senderIds = [
       ...new Set([
-        ...rows.map((m) => m.senderId),
-        ...parents.map((parent) => parent.senderId),
+        ...presentSenderIds(rows),
+        ...presentSenderIds(parents),
         ...systemUserIds,
       ]),
     ];
@@ -653,17 +845,23 @@ export class MessagingCoreService {
     const [
       senders,
       reactionsByMessage,
-      otherParticipantRows,
+      // ENG-240 hot-path fix: EVERY participant row for this conversation
+      // (viewer included), one query. `viewerParticipant`/`otherParticipantRows`
+      // below are split out of this single result in memory instead of each
+      // running their own query (the viewer's row no longer needs its own
+      // `participants.findOne`, and the non-viewer rows below are filtered
+      // from the same array rather than re-querying with `userId: Not(viewerId)`).
+      allParticipantRows,
       pinRows,
       starRows,
       viewer,
       moderationRows,
+      viewerHiddenReplyParentRows,
+      resolvedConversationKind,
     ] = await Promise.all([
       this.profiles.find({ where: { userId: In(senderIds) } }),
       this.reactionSummariesByMessage(messageIds, viewerId),
-      this.participants.find({
-        where: { conversationId, userId: Not(viewerId) },
-      }),
+      this.participants.find({ where: { conversationId } }),
       // Shared pins for these messages (viewer-agnostic — both participants
       // see the same pinnedAt) and THIS viewer's private stars, batched by id.
       this.pins.find({ where: { messageId: In(messageIds) } }),
@@ -678,19 +876,93 @@ export class MessagingCoreService {
       // (subject key is the message uuid). A hidden/removed message is rendered
       // as a tombstone below — the messaging mirror of the forum/community
       // read-enforcement, gap-free because a tombstone still occupies its slot.
+      // The reply parents' takedowns ride along in the same query, so a quote
+      // of a taken-down message is withheld without a second lookup.
       this.moderationStates.find({
         where: {
           subjectType: MessagingCoreService.MESSAGE_SUBJECT_TYPE,
-          subjectId: In(messageIds),
+          subjectId: In([...new Set([...messageIds, ...replyIds])]),
         },
       }),
+      // THIS viewer's own PRD-227 "delete for me" on this page's reply
+      // parents, in one `IN(...)` query, never a per-message lookup. Without
+      // this, a reply that quotes a message the viewer hid for themself still
+      // leaked that parent's real snippet, sender, thumbnail and file name
+      // through `buildReplyTo`, even though the viewer can no longer see the
+      // parent anywhere else in the thread. Skipped entirely when this page
+      // has no reply ids.
+      replyIds.length
+        ? this.hides.find({
+            where: { userId: viewerId, messageId: In(replyIds) },
+          })
+        : Promise.resolve([]),
+      // ENG-240 hot-path fix: only look the conversation's kind up here when
+      // the caller hasn't already (the fallback for a caller that never
+      // looked it up); `getMessages` and friends now pass `conversationKind`
+      // straight through, since they already loaded it for their own
+      // block-filter branching, so this resolves with no extra query at all.
+      conversationKind !== undefined
+        ? Promise.resolve(conversationKind)
+        : this.conversations
+            .findOne({ where: { id: conversationId }, select: { kind: true } })
+            .then((found) => found?.kind ?? null),
     ]);
     const viewerIsStaff =
       viewer?.role === UserRole.Admin || viewer?.role === UserRole.Moderator;
+    // ENG-240 hot-path fix: the viewer's OWN participant row, split out of
+    // `allParticipantRows` in memory rather than its own `participants.findOne`
+    // (see that array's own comment above). Used only to gate `canPin` in a
+    // GROUP (owner/admin only).
+    const viewerParticipant =
+      allParticipantRows.find((row) => row.userId === viewerId) ?? null;
+    // Only PRESENT recipients count toward "delivered to all" — every OTHER
+    // (non-viewer) row, exactly what the old `userId: Not(viewerId)` query
+    // returned, now filtered from the same `allParticipantRows` fetch above.
+    const otherParticipantRows = allParticipantRows.filter(
+      (row) => row.userId !== viewerId,
+    );
+    // ENG-240: `pinMessage`/`unpinMessage` refuse a GROUP viewer who is not
+    // owner/admin (`MessageAnnotationsService.assertCanManageGroupPins`); a
+    // DM has no such restriction. `viewerParticipant` can be null only for a
+    // page whose viewer somehow has no participant row for this
+    // conversation (treated as "not owner/admin", fails closed).
+    const viewerCanManageGroupPins =
+      resolvedConversationKind !== ConversationKind.Group ||
+      viewerParticipant?.role === ConversationRole.Owner ||
+      viewerParticipant?.role === ConversationRole.Admin;
+    // ENG-254: `pinMessage`/`unpinMessage`/`editMessage` all gate on
+    // `requireActiveParticipant`, not the lenient `requireParticipant` a read
+    // uses, a member who left (or was removed from) the group may still
+    // read the thread but may not act in it. Mirrored here so a former
+    // member is never offered Pin, or Edit inside the window, only to have
+    // the endpoint 403 the action the overlay just promised. Conversation-
+    // level, not per-message, so it is computed once for the whole page.
+    const isViewerActiveParticipant = !hasViewerLeftConversation;
     // subjectId -> its takedown row, so each message can resolve the tombstone
     // timestamp its `deletedAt` will carry.
     const moderationByMessage = new Map(
       moderationRows.map((row) => [row.subjectId, row]),
+    );
+    const viewerHiddenReplyParentIds = new Set(
+      viewerHiddenReplyParentRows.map((hide) => hide.messageId),
+    );
+    // Reply parents quoted as deleted: either a moderator took the parent down
+    // (under the exact removed/hidden split the parent's own bubble uses
+    // below, so a quote never carries a snippet, thumbnail or file name the
+    // thread itself withholds), or THIS viewer hid the parent for themself
+    // (PRD-227), same "unavailable" quote either way.
+    const hiddenReplyParentIds = new Set(
+      replyIds.filter((parentId) => {
+        const moderation = moderationByMessage.get(parentId);
+        const isModeratedAwayFromViewer = Boolean(
+          moderation &&
+          (moderation.removedAt ??
+            (viewerIsStaff ? null : moderation.hiddenAt)),
+        );
+        return (
+          isModeratedAwayFromViewer || viewerHiddenReplyParentIds.has(parentId)
+        );
+      }),
     );
     const pinnedAtByMessage = new Map(
       pinRows.map((pin) => [pin.messageId, pin.pinnedAt]),
@@ -747,11 +1019,16 @@ export class MessagingCoreService {
       // edit the endpoint would then reject.
       const withinEditWindow =
         Date.now() - m.createdAt.getTime() <= EDIT_WINDOW_MS;
+      // ENG-241: a system pill's `senderId` is the ACTOR of the audited event
+      // ("X removed Y"), not a real author who wrote a body, it must never
+      // be offered as an editable/deletable message of its own, no matter how
+      // recent or who the viewer is.
+      const isSystemMessage = m.kind === MessageKind.System;
       return {
         id: m.id,
         conversationId: m.conversationId,
         body: isDeleted ? '' : m.body,
-        sender: requireAuthorSummary(profileByUser.get(m.senderId)),
+        sender: senderAuthorSummary(m.senderId, profileByUser),
         createdAt: m.createdAt.toISOString(),
         editedAt: m.editedAt ? m.editedAt.toISOString() : null,
         reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
@@ -765,16 +1042,49 @@ export class MessagingCoreService {
           ? null
           : (pinnedAtByMessage.get(m.id)?.toISOString() ?? null),
         starred: isDeleted ? false : starredMessageIds.has(m.id),
-        canPin: !isDeleted,
+        // `pinMessage` requires an ACTIVE participant (see
+        // `isViewerActiveParticipant` above), this flag would otherwise offer
+        // Pin to a member who already left the group. ENG-240:
+        // `viewerCanManageGroupPins` additionally withholds it from a GROUP
+        // viewer who is not owner/admin.
+        canPin:
+          !isDeleted && isViewerActiveParticipant && viewerCanManageGroupPins,
         // Mirrors `MessagesService.editMessage`/`deleteMessage`'s own guards
-        // exactly (author + window; author-or-staff) so the client never
-        // offers an action the endpoint would then reject. `canReport`
-        // excludes the author's own messages and tombstones (nothing left to
-        // report).
-        canEdit: !isDeleted && isAuthor && withinEditWindow,
-        canDelete: !isDeleted && (isAuthor || viewerIsStaff),
-        canReport: !isDeleted && !isAuthor,
-        replyTo: buildReplyTo(m.replyToId, parentById, profileByUser),
+        // exactly (active participant + author + window; author-or-staff, no
+        // active-participant requirement, `deleteMessage` keeps the lenient
+        // check on purpose) so the client never offers an action the endpoint
+        // would then reject. Both exclude a system pill (ENG-241): its
+        // `senderId` is the audited event's ACTOR, not an author with a real
+        // body to edit or delete. `canReport` excludes the author's own
+        // messages. PRD-361: a message deleted for everyone stays reportable
+        // while its evidence hold runs (the server still has its body and
+        // bytes), so a harasser cannot unsend their way out of a report; a
+        // moderator takedown (hidden or removed) is never reportable again,
+        // and neither is a tombstone whose hold has ended. `POST /reports`
+        // requires the reporter to have been a participant when the message
+        // was sent (PRD-368), which a viewer of this page already was, so this
+        // is deliberately NOT gated on `isViewerActiveParticipant`.
+        canEdit:
+          !isDeleted &&
+          !isSystemMessage &&
+          isAuthor &&
+          withinEditWindow &&
+          isViewerActiveParticipant,
+        canDelete:
+          !isDeleted && !isSystemMessage && (isAuthor || viewerIsStaff),
+        canReport:
+          !isAuthor &&
+          (!isDeleted ||
+            (Boolean(m.deletedAt) &&
+              !moderation?.removedAt &&
+              !moderation?.hiddenAt &&
+              isEvidenceHoldActive(m.attachmentPurgeAfter))),
+        replyTo: buildReplyTo(
+          m.replyToId,
+          parentById,
+          profileByUser,
+          hiddenReplyParentIds,
+        ),
         // Timeline kind + resolved system event. A `user` message carries a null
         // event; a `system` one resolves actor/target ids to display names so the
         // client renders bilingual templates ("You created the group", "Ana
@@ -783,7 +1093,7 @@ export class MessagingCoreService {
         attachment: isDeleted ? null : resolveAttachment(m.attachment),
         systemEvent:
           m.kind === MessageKind.System
-            ? buildSystemEvent(m.systemEvent, profileByUser)
+            ? buildSystemEvent(m.systemEvent, profileByUser, viewerId)
             : null,
       };
     });
@@ -987,13 +1297,19 @@ export class MessagingCoreService {
           : kind === 'document'
             ? MessageKind.Document
             : MessageKind.User;
+    // DTO callers arrive already sanitized; server-composed bodies (enquiries,
+    // a materialized connection note) get the same pass here.
+    const storedBody = sanitizeMessageBody(body);
+    if (!storedBody && !resolvedAttachment) {
+      throw new BadRequestException('body must not be empty');
+    }
     let saved: Message;
     try {
       saved = await this.messages.save(
         this.messages.create({
           conversationId,
           senderId,
-          body,
+          body: storedBody,
           replyToId: replyToId ?? null,
           clientMessageId: clientMessageId ?? null,
           forwarded: forwarded ?? false,
@@ -1184,6 +1500,11 @@ export class MessagingCoreService {
     emit: boolean,
   ): Promise<{ view: MessageView; response: MessageResponse; isNew: boolean }> {
     const view = toMessageView(message);
+    // `hasViewerLeftConversation` is deliberately omitted (defaults to
+    // `false`): every caller of `buildPostResult` reaches it only after
+    // proving `senderId` may currently write here (`sendMessage`'s own
+    // `leftAt`/block checks, or a message-request flow seeding a brand-new
+    // participant row), so `senderId` is always active at this point.
     const [response] = await this.toMessageResponses([message], senderId);
     // invariant: toMessageResponses returns one response per input row.
     if (emit) {
@@ -1223,20 +1544,54 @@ export class MessagingCoreService {
     return a < b ? `${a}:${b}` : `${b}:${a}`;
   }
 
+  /**
+   * PRD-340: `coldContactInitiatorUserId` is an explicit opt-in that only
+   * `MessageRequestsService.deliverEnquiry` (a cold, deliberately
+   * connection-bypassing delivery) passes, as the enquirer's own id.
+   * Every other caller (an already-connected `messageRequest`, `handleConnectionAccepted`,
+   * `ConversationsService.createConversation`) omits it, because those pairs
+   * are already connected and the gate never applies to them. Recording an
+   * initiator for a CONNECTED pair would wrongly let the reply gate re-open
+   * their thread with one tap if they ever disconnect, inferring "opened"
+   * from ordinary message history, which the brief explicitly forbids.
+   *
+   * On a FRESH conversation, `coldContactInitiatorUserId` (if given) seeds
+   * `initiatorUserId`. On an EXISTING one, it claims the initiator ONLY when
+   * the thread has none yet AND isn't already open. A fresh enquiry into an
+   * old, never-replied-to thread IS itself fresh cold contact, so it earns
+   * the same one-tap-reply treatment a brand new enquiry would. It never
+   * touches a thread that already has an initiator (its story is already
+   * told) or is already open (nothing to claim).
+   */
   async getOrCreateConversation(
     a: string,
     b: string,
+    coldContactInitiatorUserId?: string,
   ): Promise<{ conversation: Conversation; created: boolean }> {
     const pairKey = this.pairKey(a, b);
     const existing = await this.conversations.findOne({ where: { pairKey } });
     if (existing) {
+      if (
+        coldContactInitiatorUserId &&
+        !existing.initiatorUserId &&
+        !existing.openedAt
+      ) {
+        await this.conversations.update(existing.id, {
+          initiatorUserId: coldContactInitiatorUserId,
+        });
+        existing.initiatorUserId = coldContactInitiatorUserId;
+      }
       return { conversation: existing, created: false };
     }
     try {
       const conversation = await this.dataSource.transaction(
         async (manager) => {
           const convo = await manager.save(
-            manager.create(Conversation, { isOfficial: false, pairKey }),
+            manager.create(Conversation, {
+              isOfficial: false,
+              pairKey,
+              initiatorUserId: coldContactInitiatorUserId ?? null,
+            }),
           );
           await manager.save([
             manager.create(ConversationParticipant, {

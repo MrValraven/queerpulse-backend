@@ -14,6 +14,7 @@ import {
 } from './entities/message.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
+import { MessageHide } from './entities/message-hide.entity';
 import { MessagingCoreService } from './messaging-core.service';
 
 /**
@@ -81,6 +82,7 @@ function build(accessibleForwardCount: number) {
     empty as unknown as Repository<MessageReaction>,
     empty as unknown as Repository<ConversationPinnedMessage>,
     empty as unknown as Repository<MessageStar>,
+    empty as unknown as Repository<MessageHide>,
     empty as unknown as Repository<ContentModeration>,
     empty as unknown as Repository<Profile>,
     empty as unknown as DataSource,

@@ -31,6 +31,12 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Listing } from '../listings/entities/listing.entity';
+import { Conversation } from '../messaging/entities/conversation.entity';
+import {
+  ConversationParticipant,
+  ConversationRole,
+} from '../messaging/entities/conversation-participant.entity';
+import { Message } from '../messaging/entities/message.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
@@ -254,6 +260,9 @@ export class ModerationService {
   // visibility. `hide_content` withholds it from public/member reads;
   // `remove_content` tombstones it. Recorded in the `content_moderation` state
   // table, in the same transaction as the report status + audit row.
+  /** The "reported" name for a message whose sender erased their account. */
+  private static readonly FORMER_MEMBER_HANDLE = 'Former member';
+
   private static readonly CONTENT_ACTIONS = new Set<string>([
     'hide_content',
     'remove_content',
@@ -2705,13 +2714,22 @@ export class ModerationService {
   // exactly as `count({ subjectId, id: Not(report.id) })` computed it per-row.
   private buildReported(
     report: Report,
-    reportedProfiles: Map<string, Profile>,
+    reportedProfiles: Map<string, Profile | null>,
     priorReportCounts: Map<string, number>,
   ): ModReportedDTO {
     const priorReports = (priorReportCounts.get(report.subjectId) ?? 1) - 1;
     const profile = reportedProfiles.get(report.subjectId);
     if (profile) {
       return { id: profile.userId, handle: profile.slug, priorReports };
+    }
+    // An entry holding `null` is a reported message whose sender erased their
+    // account (see `addReportedMessageSenders`).
+    if (profile === null) {
+      return {
+        id: report.subjectId,
+        handle: ModerationService.FORMER_MEMBER_HANDLE,
+        priorReports,
+      };
     }
     return { id: report.subjectId, handle: report.subjectId, priorReports };
   }
@@ -2726,8 +2744,15 @@ export class ModerationService {
    */
   private async resolveReportedProfiles(
     reports: Report[],
-  ): Promise<Map<string, Profile>> {
-    const bySubjectId = new Map<string, Profile>();
+  ): Promise<Map<string, Profile | null>> {
+    const bySubjectId = new Map<string, Profile | null>();
+    // A `message` report names its SENDER, so the drawer's "reported" person
+    // is a member rather than the message's raw uuid.
+    await this.addReportedMessageSenders(reports, bySubjectId);
+    // PRD-356: a `conversation` (group) report names the GROUP, so the
+    // drawer's "reported" person is its current owner rather than the
+    // conversation's raw uuid.
+    await this.addReportedConversationOwners(reports, bySubjectId);
 
     const memberReports = reports.filter(
       (report) => report.subjectType === ReportSubjectType.Member,
@@ -2765,6 +2790,130 @@ export class ModerationService {
       if (match) bySubjectId.set(report.subjectId, match);
     }
     return bySubjectId;
+  }
+
+  /**
+   * The sender of every reported message on the page, keyed by `subjectId`:
+   * their profile, or `null` when the message still exists but its sender has
+   * erased their account (`messages.sender_id` is NULLed). A message that no
+   * longer exists, or a sender with no profile row, gets no entry and falls
+   * back to the raw `subjectId` like any other unresolved subject. Two batched
+   * reads for the whole page, tombstones included (`withDeleted`): a harasser
+   * unsending the message must not also unname themselves in the queue.
+   */
+  private async addReportedMessageSenders(
+    reports: Report[],
+    bySubjectId: Map<string, Profile | null>,
+  ): Promise<void> {
+    const messageIds = [
+      ...new Set(
+        reports
+          .filter(
+            (report) =>
+              report.subjectType === ReportSubjectType.Message &&
+              UUID_RE.test(report.subjectId),
+          )
+          .map((report) => report.subjectId),
+      ),
+    ];
+    if (!messageIds.length) return;
+
+    const senderRows = await this.dataSource.getRepository(Message).find({
+      where: { id: In(messageIds) },
+      withDeleted: true,
+      select: { id: true, senderId: true },
+    });
+    const senderIds = [
+      ...new Set(
+        senderRows
+          .map((row) => row.senderId)
+          .filter((senderId): senderId is string => Boolean(senderId)),
+      ),
+    ];
+    const senderProfiles = senderIds.length
+      ? await this.profiles.find({ where: { userId: In(senderIds) } })
+      : [];
+    const profileByUserId = new Map(
+      senderProfiles.map((profile) => [profile.userId, profile]),
+    );
+    for (const row of senderRows) {
+      if (!row.senderId) {
+        bySubjectId.set(row.id, null);
+        continue;
+      }
+      const senderProfile = profileByUserId.get(row.senderId);
+      if (senderProfile) bySubjectId.set(row.id, senderProfile);
+    }
+  }
+
+  /**
+   * The current owner of every reported GROUP conversation on the page
+   * (PRD-356), keyed by `subjectId` (the conversation id): the seated owner
+   * participant (`role = owner`, still active), falling back to
+   * `conversations.created_by` when nobody currently holds the seat (the
+   * owner left or was removed and ownership has not transferred). No entry,
+   * and the raw `subjectId` shows through in `buildReported`, when neither
+   * resolves to a profile — mirrors `addReportedMessageSenders`. Two batched
+   * reads for the whole page.
+   */
+  private async addReportedConversationOwners(
+    reports: Report[],
+    bySubjectId: Map<string, Profile | null>,
+  ): Promise<void> {
+    const conversationIds = [
+      ...new Set(
+        reports
+          .filter(
+            (report) =>
+              report.subjectType === ReportSubjectType.Conversation &&
+              UUID_RE.test(report.subjectId),
+          )
+          .map((report) => report.subjectId),
+      ),
+    ];
+    if (!conversationIds.length) return;
+
+    const ownerRows = await this.dataSource
+      .getRepository(ConversationParticipant)
+      .find({
+        where: {
+          conversationId: In(conversationIds),
+          role: ConversationRole.Owner,
+          leftAt: IsNull(),
+        },
+        select: { conversationId: true, userId: true },
+      });
+    const ownerIdByConversationId = new Map(
+      ownerRows.map((row) => [row.conversationId, row.userId]),
+    );
+
+    const unresolvedConversationIds = conversationIds.filter(
+      (conversationId) => !ownerIdByConversationId.has(conversationId),
+    );
+    const fallbackConversations = unresolvedConversationIds.length
+      ? await this.dataSource.getRepository(Conversation).find({
+          where: { id: In(unresolvedConversationIds) },
+          select: { id: true, createdBy: true },
+        })
+      : [];
+    for (const conversation of fallbackConversations) {
+      if (conversation.createdBy) {
+        ownerIdByConversationId.set(conversation.id, conversation.createdBy);
+      }
+    }
+
+    const ownerUserIds = [...new Set(ownerIdByConversationId.values())];
+    const ownerProfiles = ownerUserIds.length
+      ? await this.profiles.find({ where: { userId: In(ownerUserIds) } })
+      : [];
+    const profileByUserId = new Map(
+      ownerProfiles.map((profile) => [profile.userId, profile]),
+    );
+
+    for (const [conversationId, ownerId] of ownerIdByConversationId) {
+      const ownerProfile = profileByUserId.get(ownerId);
+      if (ownerProfile) bySubjectId.set(conversationId, ownerProfile);
+    }
   }
 
   /**
@@ -2903,6 +3052,20 @@ export class ModerationService {
       return { id: profile.userId, handle: profile.slug, priorReports };
     }
 
+    // A `message` report: the drawer names the message's sender through the
+    // same batched lookup the queue uses, so the two can never disagree.
+    // Read-only; the enforcement path still resolves its own target.
+    if (report.subjectType === ReportSubjectType.Message) {
+      const senders = await this.resolveReportedProfiles([report]);
+      if (senders.has(report.subjectId)) {
+        return this.buildReported(
+          report,
+          senders,
+          new Map([[report.subjectId, priorReports + 1]]),
+        );
+      }
+    }
+
     return { id: report.subjectId, handle: report.subjectId, priorReports };
   }
 
@@ -2933,10 +3096,14 @@ export class ModerationService {
       ...(report.anonymous
         ? { redactionNote: 'Reporter identity withheld.' }
         : {}),
-      // No post/message/thread lookup is available within this module's
-      // scope — the drawer's thread view degrades to empty rather than 400ing
-      // or fabricating content.
+      // Deliberately empty. For a message report the conversation around it is
+      // opened only through `GET /mod/reports/:id/conversation-context`, which
+      // writes an audit row per opening (PRD-360); loading it here would read
+      // a private conversation every time a drawer renders, with no trail.
       thread: [],
+      conversationContextAvailable:
+        report.subjectType === ReportSubjectType.Message &&
+        Boolean(subject.conversationId),
       people: [
         {
           role: 'reporter',

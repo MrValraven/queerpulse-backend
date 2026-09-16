@@ -8,6 +8,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, QueryFailedError } from 'typeorm';
+import { Notification } from '../notifications/entities/notification.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -59,6 +61,8 @@ describe('ConnectionsService', () => {
   };
   let emitter: { emit: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
+  let notifications: { find: jest.Mock };
+  let memberPreferences: { find: jest.Mock };
   let manager: {
     update: jest.Mock;
     delete: jest.Mock;
@@ -66,17 +70,28 @@ describe('ConnectionsService', () => {
     findOneByOrFail: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; query: jest.Mock };
 
   // Chainable insert query-builder stub for the `blocks` row written inside
   // `respond('block')`'s transaction (`.insert().into().values().orIgnore()
   // .execute()`).
   const insertQbStub = (): Record<string, jest.Mock> => {
     const qb: Record<string, jest.Mock> = {};
-    for (const method of ['insert', 'into', 'values', 'orIgnore']) {
+    for (const method of [
+      'insert',
+      'into',
+      'values',
+      'orIgnore',
+      // PRD-363: the sever/restore updates in `block-restore.ts`.
+      'update',
+      'set',
+      'where',
+      'andWhere',
+      'returning',
+    ]) {
       qb[method] = jest.fn().mockReturnValue(qb);
     }
-    qb.execute = jest.fn().mockResolvedValue({ raw: [] });
+    qb.execute = jest.fn().mockResolvedValue({ raw: [], affected: 1 });
     return qb;
   };
 
@@ -143,6 +158,9 @@ describe('ConnectionsService', () => {
           (runInTransaction: (entityManager: typeof manager) => unknown) =>
             runInTransaction(manager),
         ),
+      // PRD-365/366 raw reads (caps, pause, ledger, who-can-message). An empty
+      // result reads as "no counts, no preference row".
+      query: jest.fn().mockResolvedValue([]),
     };
     connectionNotes = {
       find: jest.fn().mockResolvedValue([]),
@@ -160,6 +178,10 @@ describe('ConnectionsService', () => {
     };
     emitter = { emit: jest.fn() };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
+    notifications = { find: jest.fn().mockResolvedValue([]) };
+    // No rows = sharing on for everyone (the platform default), so a test
+    // that doesn't care about PRD-344's read signal doesn't have to stub this.
+    memberPreferences = { find: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConnectionsService,
@@ -173,6 +195,11 @@ describe('ConnectionsService', () => {
           useValue: connectionDeclines,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: getRepositoryToken(Notification), useValue: notifications },
+        {
+          provide: getRepositoryToken(MemberPreferences),
+          useValue: memberPreferences,
+        },
         { provide: VouchService, useValue: vouchService },
         { provide: EventEmitter2, useValue: emitter },
         { provide: BlockFilterService, useValue: blockFilter },
@@ -180,6 +207,96 @@ describe('ConnectionsService', () => {
       ],
     }).compile();
     service = module.get(ConnectionsService);
+  });
+
+  describe('first-contact limits (PRD-365) and who can message (PRD-366)', () => {
+    /** The coded body of a rejected request, for asserting status + code. */
+    async function rejection(
+      promise: Promise<unknown>,
+    ): Promise<{ status: number; code: unknown }> {
+      try {
+        await promise;
+      } catch (error) {
+        const httpError = error as {
+          getStatus: () => number;
+          getResponse: () => { code?: unknown };
+        };
+        return {
+          status: httpError.getStatus(),
+          code: httpError.getResponse().code,
+        };
+      }
+      throw new Error('expected the request to be refused');
+    }
+
+    beforeEach(() => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+    });
+
+    it('pauses new requests once three distinct members have live reports', async () => {
+      dataSource.query.mockResolvedValueOnce([
+        { distinctReporterCount: 3, dailyCount: 0, pendingCount: 0 },
+      ]);
+      await expect(
+        rejection(service.requestConnection('me', 'them')),
+      ).resolves.toEqual({ status: 403, code: 'CONNECTION_REQUESTS_PAUSED' });
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses the 21st request in a rolling day with a 429', async () => {
+      dataSource.query.mockResolvedValueOnce([
+        { distinctReporterCount: 0, dailyCount: 20, pendingCount: 0 },
+      ]);
+      await expect(
+        rejection(service.requestConnection('me', 'them')),
+      ).resolves.toEqual({
+        status: 429,
+        code: 'CONNECTION_REQUEST_DAILY_LIMIT',
+      });
+    });
+
+    it('refuses a request past 40 open pending requests with a 429', async () => {
+      dataSource.query.mockResolvedValueOnce([
+        { distinctReporterCount: 0, dailyCount: 3, pendingCount: 40 },
+      ]);
+      await expect(
+        rejection(service.requestConnection('me', 'them')),
+      ).resolves.toEqual({
+        status: 429,
+        code: 'CONNECTION_REQUEST_PENDING_LIMIT',
+      });
+    });
+
+    it("refuses every new request to a member set to 'connections'", async () => {
+      dataSource.query
+        .mockResolvedValueOnce([]) // caps: nothing counted
+        .mockResolvedValueOnce([{ whoCanMessage: 'connections' }]);
+      await expect(
+        rejection(service.requestConnection('me', 'them')),
+      ).resolves.toEqual({
+        status: 403,
+        code: 'RECIPIENT_NOT_ACCEPTING_REQUESTS',
+      });
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it("requires an introducer for 'introduced' even on an open profile", async () => {
+      dataSource.query
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ whoCanMessage: 'introduced' }]);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('records the request in the daily ledger once every gate passes', async () => {
+      await service.requestConnection('me', 'them');
+      expect(dataSource.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO "connection_request_events"'),
+        ['me', 24],
+      );
+      expect(connections.save).toHaveBeenCalled();
+    });
   });
 
   describe('requestConnection', () => {
@@ -660,6 +777,10 @@ describe('ConnectionsService', () => {
         mutuals: 0,
         vouchBadge: null,
         introducedBy: null,
+        // Only ever non-null for a row `list()` resolved through
+        // `requestReadFlagsByConnectionId` on the "outgoing" tab; a freshly
+        // created request has nothing there to compute.
+        requestRead: null,
       });
     });
 
@@ -800,7 +921,9 @@ describe('ConnectionsService', () => {
       });
       // The conditional UPDATE matches nothing (row already Blocked), so the
       // in-transaction re-read finds the other party still owns the block.
-      manager.update.mockResolvedValue({ affected: 0 });
+      const updateQb = insertQbStub();
+      updateQb.execute!.mockResolvedValue({ raw: [], affected: 0 });
+      manager.createQueryBuilder.mockReturnValue(updateQb);
       manager.findOneByOrFail.mockResolvedValue({
         id: 'c1',
         status: ConnectionStatus.Blocked,
@@ -843,6 +966,138 @@ describe('ConnectionsService', () => {
       await expect(
         service.respond('c1', 'me', 'unblock'),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  describe('respondWithReply (PRD-340 reply-implies-accept)', () => {
+    it('404s an unknown connection, same as a plain accept', async () => {
+      connections.findOne.mockResolvedValue(null);
+      await expect(
+        service.respondWithReply('c1', 'me', 'hey!'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rejects an actor who is not part of the connection', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'a',
+        addresseeId: 'b',
+        status: ConnectionStatus.Pending,
+      });
+      await expect(
+        service.respondWithReply('c1', 'stranger', 'hey!'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('only the addressee can accept-by-reply: the requester cannot reply to their own outgoing request', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'me',
+        addresseeId: 'them',
+        status: ConnectionStatus.Pending,
+      });
+      await expect(
+        service.respondWithReply('c1', 'me', 'hey!'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a request that is no longer Pending (already answered)', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Declined,
+      });
+      await expect(
+        service.respondWithReply('c1', 'me', 'hey!'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a request a block has already severed: reply-implies-accept cannot bypass a block', async () => {
+      // `severConnectionForBlock` (placed via `respond('block', ...)` OR the
+      // separate `/blocks` resource) flips a still-pending row to `Blocked`
+      // before this is ever called, the SAME guard `respond('accept', ...)`
+      // hits, since both go through `acceptOrDecline`'s status check.
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Blocked,
+        blockedBy: 'me',
+      });
+      await expect(
+        service.respondWithReply('c1', 'me', 'hey!'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('loses a race against a simultaneous Decline (affected 0) → 409, no event, no reply posted', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Pending,
+      });
+      manager.update.mockResolvedValue({ affected: 0 });
+      await expect(
+        service.respondWithReply('c1', 'me', 'hey!'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('accepts via the same conditional claim as a plain accept, and emits CONNECTION_ACCEPTED with the reply attached', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Pending,
+        requestMessage: 'hi, would love to connect',
+      });
+      const result = await service.respondWithReply(
+        'c1',
+        'me',
+        'Hey, good to hear from you!',
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        Connection,
+        { id: 'c1', status: ConnectionStatus.Pending },
+        {
+          status: ConnectionStatus.Accepted,
+          respondedAt: expect.any(Date) as unknown,
+        },
+      );
+      expect(result.status).toBe(ConnectionStatus.Accepted);
+      // The SAME event a plain accept fires, so `MessageRequestsService`'s one
+      // listener still seeds the original request message, now also carrying
+      // the addressee's own reply, posted after it in that one sequential
+      // chain (see message-requests.service.spec.ts for that half).
+      expect(emitter.emit).toHaveBeenCalledWith(
+        CONNECTION_ACCEPTED,
+        expect.objectContaining({
+          connectionId: 'c1',
+          requesterId: 'them',
+          addresseeId: 'me',
+          requestMessage: 'hi, would love to connect',
+          replyBody: 'Hey, good to hear from you!',
+        }),
+      );
+    });
+
+    it('a plain respond("accept", ...) never carries replyBody, so the listener no-ops the reply half', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Pending,
+      });
+      await service.respond('c1', 'me', 'accept');
+      const [, payload] = emitter.emit.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(payload.replyBody).toBeUndefined();
     });
   });
 
@@ -898,6 +1153,110 @@ describe('ConnectionsService', () => {
           skip: 0,
         }),
       );
+    });
+
+    it("outgoing: reports requestRead from the addressee's ConnectionRequest notification", async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            requesterId: 'me',
+            addresseeId: 'them',
+            status: 'pending',
+          },
+        ],
+        1,
+      ]);
+      notifications.find.mockResolvedValue([
+        {
+          userId: 'them',
+          payload: { connectionId: 'c1' },
+          read: true,
+        },
+      ]);
+      const res = await service.list('me', 'outgoing');
+      expect(res.items[0]?.requestRead).toBe(true);
+    });
+
+    it('outgoing: reports a real false for a genuinely unread request', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            requesterId: 'me',
+            addresseeId: 'them',
+            status: 'pending',
+          },
+        ],
+        1,
+      ]);
+      notifications.find.mockResolvedValue([
+        { userId: 'them', payload: { connectionId: 'c1' }, read: false },
+      ]);
+      const res = await service.list('me', 'outgoing');
+      expect(res.items[0]?.requestRead).toBe(false);
+    });
+
+    it('outgoing: withholds requestRead (null) when the ADDRESSEE has turned read receipts off', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            requesterId: 'me',
+            addresseeId: 'them',
+            status: 'pending',
+          },
+        ],
+        1,
+      ]);
+      notifications.find.mockResolvedValue([
+        { userId: 'them', payload: { connectionId: 'c1' }, read: true },
+      ]);
+      memberPreferences.find.mockResolvedValue([
+        { userId: 'them', shareReadReceipts: false },
+      ]);
+      const res = await service.list('me', 'outgoing');
+      expect(res.items[0]?.requestRead).toBeNull();
+    });
+
+    it('outgoing: withholds requestRead (null) when the VIEWER has turned read receipts off, reciprocal like every other read-receipt surface', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            requesterId: 'me',
+            addresseeId: 'them',
+            status: 'pending',
+          },
+        ],
+        1,
+      ]);
+      notifications.find.mockResolvedValue([
+        { userId: 'them', payload: { connectionId: 'c1' }, read: true },
+      ]);
+      memberPreferences.find.mockResolvedValue([
+        { userId: 'me', shareReadReceipts: false },
+      ]);
+      const res = await service.list('me', 'outgoing');
+      expect(res.items[0]?.requestRead).toBeNull();
+    });
+
+    it('incoming: never computes requestRead (only the outgoing tab does), so no extra notification/preference reads happen', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            requesterId: 'them',
+            addresseeId: 'me',
+            status: 'pending',
+          },
+        ],
+        1,
+      ]);
+      const res = await service.list('me', 'incoming');
+      expect(res.items[0]?.requestRead).toBeNull();
+      expect(notifications.find).not.toHaveBeenCalled();
+      expect(memberPreferences.find).not.toHaveBeenCalled();
     });
 
     it('all: accepted connections, defaulted page', async () => {

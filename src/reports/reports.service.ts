@@ -1,19 +1,33 @@
 import {
+  BadRequestException,
   ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomBytes } from 'crypto';
-import { MoreThanOrEqual, Repository } from 'typeorm';
+import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import {
+  ConversationParticipant,
+  ConversationRole,
+} from '../messaging/entities/conversation-participant.entity';
+import {
+  Conversation,
+  ConversationKind,
+} from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { isEvidenceHoldActive } from '../messaging/message-evidence-hold';
+import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates';
+import { MAX_GROUP_MEMBERS } from '../messaging/messaging.constants';
 import {
   Report,
   ReportSeverity,
@@ -48,7 +62,11 @@ import { reasonsFor, ReasonCode, ReasonOption } from './reason-catalogue';
 import { deriveSeverity, slaDueAtFor } from './report-severity';
 import { ReportDTO, toReportDTO } from './report-response';
 import { REPORT_CREATED, ReportCreatedEvent } from './report.events';
-import { PHOTO_SNAPSHOT_TYPE } from './report-evidence';
+import {
+  GroupSnapshotEvidence,
+  messageSnapshotAttachmentFrom,
+  PHOTO_SNAPSHOT_TYPE,
+} from './report-evidence';
 
 export interface ReportEvidenceInput {
   type: 'url' | 'screenshot';
@@ -61,6 +79,28 @@ export interface ReportEvidenceInput {
 // so this only ever truncates something padded out toward the DTO's 200-char
 // ceiling to push the rest of the line out of view.
 const MAX_LOGGED_SUBJECT_ID_LENGTH = 64;
+
+/**
+ * PRD-368: a `message` report from someone who was never in that message's
+ * conversation (or had left it before the message was sent). Also the answer
+ * for a message id that names nothing, so the route is no oracle for which
+ * message ids exist.
+ */
+export const REPORT_NOT_PARTICIPANT_CODE = 'REPORT_NOT_PARTICIPANT';
+
+/**
+ * PRD-361: a `message` report the platform cannot back with any evidence,
+ * because the reported message is a tombstone whose hold has ended or one a
+ * moderator has already taken down. Accepting it opened a case whose body was
+ * `''` and whose attachment route could only answer 404.
+ */
+export const REPORT_EVIDENCE_EXPIRED_CODE = 'REPORT_EVIDENCE_EXPIRED';
+
+// PRD-356: the most active-member ids a `GroupSnapshotEvidence` entry ever
+// stores, the same number as `MAX_GROUP_MEMBERS`, a group's own hard ceiling
+// on active members, so the snapshot can never grow past what a group could
+// legitimately hold.
+const MAX_GROUP_SNAPSHOT_MEMBER_IDS = MAX_GROUP_MEMBERS;
 
 // A `subjectId` is a `varchar` the reporter's client supplies, validated only
 // as a 1-200 character string (`CreateReportDto`). The subjects addressed by a
@@ -149,6 +189,20 @@ export class ReportsService {
     // pull a whole feature module in for one `findOne`.
     @InjectRepository(EventPhoto)
     private readonly eventPhotos: Repository<EventPhoto>,
+    // Read-only lookups so a GROUP-conversation report (PRD-356) can confirm
+    // the reporter belongs to the group and snapshot its facts into
+    // `evidence` at filing time. Same cross-module `forFeature` pattern as
+    // `Message`/`HousingListing`/`EventPhoto` above, rather than importing
+    // `MessagingModule` for two `find`s.
+    @InjectRepository(Conversation)
+    private readonly conversations: Repository<Conversation>,
+    @InjectRepository(ConversationParticipant)
+    private readonly conversationParticipants: Repository<ConversationParticipant>,
+    // Read-only lookup for the evidence-expiry refusal below, which has to see
+    // a moderator takedown exactly as `toMessageResponses`'s `canReport` does.
+    // Same cross-module `forFeature` registration as the entities above.
+    @InjectRepository(ContentModeration)
+    private readonly contentModeration: Repository<ContentModeration>,
     // Fire-and-forget domain event on a genuinely new report — a community
     // auto-freeze listener reacts to it. `EventEmitter2` is globally available
     // (`EventEmitterModule.forRoot()` in the root module), so no module change
@@ -225,12 +279,19 @@ export class ReportsService {
     // `buildEvidence`.
     let reportedMessage: Message | null = null;
     if (input.subjectType === ReportSubjectType.Message) {
-      reportedMessage = await this.messages.findOne({
-        where: { id: input.subjectId },
-        // A soft-deleted message still has a real author; withDeleted so a
-        // deleted-but-still-yours message can't be self-reported either.
-        withDeleted: true,
-      });
+      // `UUID_RE` first: `messages.id` is a `uuid` column and `subjectId` a
+      // client string, so an arbitrary value would 500 the filing. A non-uuid
+      // names no message, and the participant guard below refuses it.
+      reportedMessage = UUID_RE.test(input.subjectId)
+        ? await this.messages.findOne({
+            where: { id: input.subjectId },
+            // A soft-deleted message still has a real author; withDeleted so a
+            // deleted-but-still-yours message can't be self-reported either.
+            // PRD-361: it also keeps a tombstone under its evidence hold
+            // reportable, with its retained body and attachment snapshotted.
+            withDeleted: true,
+          })
+        : null;
       // `reporterId !== null` is spelled out rather than left to the strict
       // comparison below doing the right thing by accident: a signed-out caller
       // has no messages to self-report, and an anonymous filing must never be
@@ -242,6 +303,12 @@ export class ReportsService {
       ) {
         throw new ForbiddenException('You cannot report your own message');
       }
+      // PRD-368: only someone who could have received the message may report
+      // it. Without this, anyone holding a message uuid could file against it
+      // and push its author toward the trust-network "warned" band.
+      await this.assertReporterWasInConversation(reporterId, reportedMessage);
+      // PRD-361: and only while there is still something for staff to look at.
+      await this.assertMessageEvidenceStillExists(reportedMessage);
     }
 
     // Housing-listing report (P0.9): snapshot the listing's key fields NOW, so a
@@ -274,6 +341,81 @@ export class ReportsService {
       reportedEventPhoto = await this.eventPhotos.findOne({
         where: { id: input.subjectId },
       });
+    }
+
+    // GROUP-conversation report (PRD-356): the one subject that also refuses
+    // a caller who has never belonged to the group, since a group's roster
+    // and messages are otherwise invisible to anyone outside it. Refused with
+    // the same 404 a caller gets for any other subject id nobody can name,
+    // rather than a 403, so the response never confirms a group with that id
+    // exists to somebody who is not and never was in it.
+    //
+    // `reportedGroupSnapshot` is captured NOW (one participants query) rather
+    // than left to a later read, on the same argument as the housing/photo
+    // snapshots above: a group's title, description and roster can all change,
+    // or the group can dissolve outright, between the filing and the
+    // review.
+    let reportedGroupSnapshot: GroupSnapshotEvidence | null = null;
+    if (input.subjectType === ReportSubjectType.Conversation) {
+      if (!UUID_RE.test(input.subjectId)) {
+        throw new NotFoundException('Group not found');
+      }
+      const reportedConversation = await this.conversations.findOne({
+        where: { id: input.subjectId },
+      });
+      // Only a GROUP resolves. A DM's `subjectId` can never legitimately
+      // reach here (the frontend never offers "report" against one under this
+      // subject type), so a caller passing a DM's id is refused exactly like
+      // an unknown id.
+      if (
+        !reportedConversation ||
+        reportedConversation.kind !== ConversationKind.Group
+      ) {
+        throw new NotFoundException('Group not found');
+      }
+      // A signed-out filing has no membership to check against. `member`
+      // reports and every other membership-gated subject in this file are
+      // signed-in-only for the same reason.
+      if (reporterId === null) {
+        throw new NotFoundException('Group not found');
+      }
+      const reporterParticipation = await this.conversationParticipants.findOne(
+        {
+          where: {
+            conversationId: reportedConversation.id,
+            userId: reporterId,
+          },
+        },
+      );
+      // CURRENT or FORMER participant, deliberately: `leftAt`/`removedBy` are
+      // not checked here, so a member who left or was removed can still
+      // report a group they were once part of: exactly the flexibility the
+      // spec calls for, and the same shape a message report already has (a
+      // reporter needs no ongoing standing to name something they witnessed).
+      if (!reporterParticipation) {
+        throw new NotFoundException('Group not found');
+      }
+
+      const activeParticipants = await this.conversationParticipants.find({
+        where: { conversationId: reportedConversation.id, leftAt: IsNull() },
+        select: { userId: true, role: true },
+      });
+      const seatedOwner = activeParticipants.find(
+        (participant) => participant.role === ConversationRole.Owner,
+      );
+      reportedGroupSnapshot = {
+        kind: 'group',
+        title: reportedConversation.title,
+        // `description` is PRD-358's column (`AddGroupConsentInvitesAndDissolve`).
+        // Read straight off the entity, which carries it.
+        description: reportedConversation.description ?? null,
+        ownerId: seatedOwner?.userId ?? reportedConversation.createdBy,
+        memberCount: activeParticipants.length,
+        memberIds: activeParticipants
+          .slice(0, MAX_GROUP_SNAPSHOT_MEMBER_IDS)
+          .map((participant) => participant.userId),
+        capturedAt: new Date().toISOString(),
+      };
     }
 
     // De-duplicate: one open report per (reporter, subject). A member
@@ -375,6 +517,7 @@ export class ReportsService {
             reportedMessage,
             reportedHousing,
             reportedEventPhoto,
+            reportedGroupSnapshot,
           ),
           severity,
           slaDueAt: slaDueAtFor(severity, now),
@@ -1013,6 +1156,84 @@ export class ReportsService {
     });
   }
 
+  /**
+   * PRD-368: refuse a `message` report unless the reporter was a participant
+   * of the message's conversation when the message was sent. A former
+   * participant qualifies when they left AFTER it was sent (they received it);
+   * someone who joined a group later but can read its history qualifies too,
+   * since they hold a participant row with no earlier `leftAt`. A signed-out
+   * filing is never a participant, and a message id that resolves to nothing
+   * gets the same coded 403, so the route never reveals which ids exist.
+   */
+  private async assertReporterWasInConversation(
+    reporterId: string | null,
+    message: Message | null,
+  ): Promise<void> {
+    if (reporterId !== null && message) {
+      const participant = await this.conversationParticipants.findOne({
+        where: { conversationId: message.conversationId, userId: reporterId },
+        select: { id: true, leftAt: true },
+      });
+      const wasPresentWhenSent =
+        participant !== null &&
+        (participant.leftAt === null ||
+          participant.leftAt.getTime() > message.createdAt.getTime());
+      if (wasPresentWhenSent) {
+        return;
+      }
+    }
+    throw new ForbiddenException({
+      statusCode: 403,
+      message: 'You can only report a message from a conversation you were in',
+      code: REPORT_NOT_PARTICIPANT_CODE,
+    });
+  }
+
+  /**
+   * PRD-361: refuse a `message` report the platform can no longer evidence.
+   *
+   * Mirrors the DTO's `canReport` (`MessagingCoreService.toMessageResponses`)
+   * condition for condition, which is the whole point: a tombstone is
+   * reportable only while its evidence hold is still running AND no moderator
+   * has hidden or removed it. The client already hides the affordance on that
+   * rule, and until now nothing enforced it, so a caller holding a message id
+   * could still file. What they filed was an empty case:
+   * `MessageEvidenceHoldSweepService` has blanked the body, dropped the
+   * attachment and purged the bytes by then, leaving a moderator a report with
+   * body `''` and a staff attachment route that can only 404. A moderator
+   * takedown is refused on the same ground the DTO refuses it, since that
+   * content has already been judged and withdrawn.
+   *
+   * A live message, and a tombstone still inside its hold, pass untouched. The
+   * takedown lookup runs only for a tombstone, so an ordinary filing costs no
+   * extra query, and `(subject_type, subject_id)` is unique on
+   * `content_moderation`, so it is a single index hit.
+   */
+  private async assertMessageEvidenceStillExists(
+    message: Message | null,
+  ): Promise<void> {
+    if (!message?.deletedAt) {
+      return;
+    }
+    const takedown = await this.contentModeration.findOne({
+      where: { subjectType: MESSAGE_SUBJECT_TYPE, subjectId: message.id },
+      select: { id: true, hiddenAt: true, removedAt: true },
+    });
+    const hasStaffTakedown = Boolean(takedown?.hiddenAt ?? takedown?.removedAt);
+    if (
+      isEvidenceHoldActive(message.attachmentPurgeAfter) &&
+      !hasStaffTakedown
+    ) {
+      return;
+    }
+    throw new BadRequestException({
+      statusCode: 400,
+      message:
+        'This message can no longer be reported. There is nothing left of it for the moderation team to review.',
+      code: REPORT_EVIDENCE_EXPIRED_CODE,
+    });
+  }
+
   // Server-owned reason taxonomy — always `other` plus whatever's relevant
   // to the subject type (see `reason-catalogue.ts`).
   reasonsFor(subjectType: ReportSubjectType): ReasonOption[] {
@@ -1058,6 +1279,7 @@ export class ReportsService {
     reportedMessage: Message | null,
     reportedHousing: HousingListing | null,
     reportedEventPhoto: EventPhoto | null,
+    reportedGroupSnapshot: GroupSnapshotEvidence | null,
   ): unknown[] | null {
     const evidence: unknown[] = clientEvidence ? [...clientEvidence] : [];
     if (reportedMessage) {
@@ -1069,6 +1291,15 @@ export class ReportsService {
         createdAt: reportedMessage.createdAt.toISOString(),
         editedAt: reportedMessage.editedAt?.toISOString() ?? null,
         deletedAtTimeOfReport: reportedMessage.deletedAt != null,
+        // PRD-360: where the message sits, so staff can open the conversation
+        // around it and see what it answered.
+        conversationId: reportedMessage.conversationId,
+        replyToId: reportedMessage.replyToId,
+        kind: reportedMessage.kind,
+        // PRD-361: the attachment by reference (a key, never a URL). For a
+        // tombstone this is the retained attachment under its evidence hold.
+        attachment: messageSnapshotAttachmentFrom(reportedMessage.attachment),
+        capturedAt: new Date().toISOString(),
       });
     }
     // Housing-listing snapshot (P0.9): the key fields a moderator needs to judge
@@ -1109,6 +1340,13 @@ export class ReportsService {
         uploadedAt: reportedEventPhoto.createdAt.toISOString(),
         snapshotAt: new Date().toISOString(),
       });
+    }
+    // Group-conversation snapshot (PRD-356): already fully built by `create`
+    // (it needs the participants query run before the flood caps, alongside
+    // the membership check), so this just appends it. Uses its own `kind`
+    // discriminant rather than `type`; see `GroupSnapshotEvidence`'s doc.
+    if (reportedGroupSnapshot) {
+      evidence.push(reportedGroupSnapshot);
     }
     return evidence.length ? evidence : null;
   }

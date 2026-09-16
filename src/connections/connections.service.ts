@@ -14,10 +14,33 @@ import {
   EntityManager,
   FindOptionsWhere,
   In,
-  Not,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
+import {
+  DEFAULT_WHO_CAN_MESSAGE,
+  WHO_CAN_MESSAGE_VALUES,
+  WhoCanMessage,
+} from '../preferences/who-can-message';
+import {
+  ReportStatus,
+  ReportSubjectType,
+} from '../reports/entities/report.entity';
+import {
+  restoreConnectionAfterUnblock,
+  severConnectionForBlock,
+} from './block-restore';
+import {
+  CONNECTION_REQUEST_DAILY_WINDOW_HOURS,
+  connectionRequestDailyLimitException,
+  connectionRequestPendingLimitException,
+  connectionRequestsPausedException,
+  MAX_NEW_CONNECTION_REQUESTS_PER_DAY,
+  MAX_OPEN_PENDING_REQUESTS,
+  recipientNotAcceptingRequestsException,
+  REQUEST_PAUSE_DISTINCT_REPORTERS,
+  REQUEST_PAUSE_REPORT_WINDOW_DAYS,
+} from './request-limits';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
@@ -26,10 +49,20 @@ import {
 } from './connection.events';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Block } from '../social/entities/block.entity';
-import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
+import {
+  MEMBER_BLOCKED,
+  MEMBER_UNBLOCKED,
+  MemberBlockedEvent,
+  MemberUnblockedEvent,
+} from '../social/social.events';
 import { toVisibleAvatarUrl } from '../common/member-ref';
+import {
+  Notification,
+  NotificationType,
+} from '../notifications/entities/notification.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
-import { UserStatus } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
 import {
   ConnectionCounts,
@@ -40,7 +73,12 @@ import {
   VouchBadge,
   toConnectionListItem,
 } from './connection-response';
-import { Connection, ConnectionStatus } from './entities/connection.entity';
+import {
+  Connection,
+  ConnectionStatus,
+  RestoredConnectionStatus,
+  toRestoredConnectionStatus,
+} from './entities/connection.entity';
 import { ConnectionDecline } from './entities/connection-decline.entity';
 import { ConnectionNote } from './entities/connection-note.entity';
 import { Paginated, PAGE_SIZE, normalizePage } from '../common/pagination';
@@ -120,6 +158,24 @@ export class ConnectionsService {
     @InjectRepository(ConnectionDecline)
     private readonly connectionDeclines: Repository<ConnectionDecline>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // PRD-344: read-only access to the addressee's own `ConnectionRequest`
+    // bell notification, the only existing signal a pending request's sender
+    // can learn a read state from (see `requestReadFlagsByConnectionId`).
+    // Repository-only, same as this file's existing raw `reports` query below:
+    // no NotificationsModule import, no service coupling.
+    @InjectRepository(Notification)
+    private readonly notifications: Repository<Notification>,
+    // PRD-344: read-only access to `share_read_receipts`, the same reciprocal
+    // gate `MessagingCoreService`/`ConversationsService` already read via
+    // `PreferencesService`. Injected as a bare repository, deliberately NOT
+    // `PreferencesService` itself, because `PreferencesService` transitively
+    // imports `PublicEligibilityService`, which imports THIS file
+    // (`ConnectionsService`); injecting the service back would close a real
+    // circular require that breaks `design:paramtypes` reflection (verified:
+    // it resolves to `undefined` and Nest cannot identify the token). A
+    // repository has no such cycle, exactly like the `Notification` one above.
+    @InjectRepository(MemberPreferences)
+    private readonly memberPreferences: Repository<MemberPreferences>,
     private readonly vouchService: VouchService,
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
@@ -191,6 +247,7 @@ export class ConnectionsService {
         case ConnectionStatus.Declined: {
           // PRD-20. A refusal now holds: this throws while the cooldown for
           // this direction is running, and permanently once the cap is hit.
+          await this.assertFirstContactAllowed(requesterId);
           const { hasPriorDecline } = await this.assertRequestNotOnDeclineHold(
             requesterId,
             addresseeId,
@@ -218,6 +275,11 @@ export class ConnectionsService {
           existing.introducedBy = gate.introducedBy;
           existing.flagged = gate.flagged;
           const reopened = await this.connections.save(existing);
+          // PRD-365: the daily-cap ledger records a request that EXISTS. Run
+          // before the save, a failed write (a lost unique-pair race mapped to
+          // 409, a constraint, a dropped connection) still burned one of the
+          // member's 20 daily slots for a request nobody ever received.
+          await this.recordRequestEvent(requesterId);
           this.emitRequested(reopened);
           return reopened;
         }
@@ -227,7 +289,9 @@ export class ConnectionsService {
     // Also gated on the fresh-create path, deliberately. `remove` DELETEs a
     // declined pair row, so "decline, delete, ask again" would otherwise walk
     // straight past a guard that only ran on the re-open branch. The decline
-    // record outlives the edge, so both paths meet the same hold.
+    // record outlives the edge, so both paths meet the same hold. The PRD-365
+    // volume caps and report-driven pause run first on both paths too.
+    await this.assertFirstContactAllowed(requesterId);
     const { hasPriorDecline } = await this.assertRequestNotOnDeclineHold(
       requesterId,
       addresseeId,
@@ -252,6 +316,9 @@ export class ConnectionsService {
     });
     try {
       const saved = await this.connections.save(conn);
+      // PRD-365: after the save, for the reason the re-open branch gives —
+      // the 409 below is exactly the failure that used to consume a slot.
+      await this.recordRequestEvent(requesterId);
       this.emitRequested(saved);
       return saved;
     } catch (err) {
@@ -310,21 +377,37 @@ export class ConnectionsService {
   //  - network  → existing connections re-open freely; a stranger must name an
   //               introducer connected to BOTH parties, else 403.
   //  - private  → allowed but flagged for later moderation.
+  //
+  // PRD-366: the recipient's "who can message me" preference is layered on top
+  // of visibility, and the stricter of the two wins:
+  //  - 'everyone'    → the visibility rules above, unchanged.
+  //  - 'introduced'  → a mutual-connection introducer is required whatever the
+  //                    visibility (the same rule `network` applies); a
+  //                    `private` target is still flagged.
+  //  - 'connections' → every new request is refused with 403
+  //                    RECIPIENT_NOT_ACCEPTING_REQUESTS.
+  // Enquiries about the recipient's own listing never pass through here
+  // (`MessageRequestsService.deliverEnquiry`): the recipient published that
+  // listing to be contacted, so 'connections' does not stop an enquiry.
   private async resolveRequestGate(
     requesterId: string,
     target: Profile,
     existing: Connection | null,
     introducerSlug: string | undefined,
   ): Promise<{ introducedBy: string | null; flagged: boolean }> {
-    if (target.visibility === ProfileVisibility.Private) {
-      return { introducedBy: null, flagged: true };
+    const whoCanMessage = await this.recipientWhoCanMessage(target.userId);
+    if (whoCanMessage === 'connections') {
+      throw recipientNotAcceptingRequestsException();
     }
-    if (target.visibility !== ProfileVisibility.Network) {
-      return { introducedBy: null, flagged: false }; // open
+    const flagged = target.visibility === ProfileVisibility.Private;
+    const requiresIntroduction =
+      target.visibility === ProfileVisibility.Network ||
+      whoCanMessage === 'introduced';
+    if (!requiresIntroduction) {
+      return { introducedBy: null, flagged }; // open, or private (flagged)
     }
-    // network
     if (existing?.status === ConnectionStatus.Accepted) {
-      return { introducedBy: null, flagged: false };
+      return { introducedBy: null, flagged };
     }
     if (!introducerSlug) {
       throw new ForbiddenException(
@@ -348,7 +431,7 @@ export class ConnectionsService {
     if (!knowsRequester || !knowsTarget) {
       throw new ForbiddenException('Introducer must be a mutual connection');
     }
-    return { introducedBy: introducerId, flagged: false };
+    return { introducedBy: introducerId, flagged };
   }
 
   /**
@@ -445,10 +528,15 @@ export class ConnectionsService {
     );
   }
 
-  async respond(
+  /**
+   * The two guards every `respond` action shares: the connection exists, and
+   * the actor is a party to it. Extracted so {@link respondWithReply} (PRD-340)
+   * enforces exactly these before it ever touches acceptance, never a
+   * separate, looser check written twice.
+   */
+  private async loadRespondableConnection(
     connectionId: string,
     actorId: string,
-    action: ConnectionAction,
   ): Promise<Connection> {
     const conn = await this.connections.findOne({
       where: { id: connectionId },
@@ -459,79 +547,107 @@ export class ConnectionsService {
     if (actorId !== conn.requesterId && actorId !== conn.addresseeId) {
       throw new ForbiddenException('Not your connection');
     }
+    return conn;
+  }
+
+  /**
+   * The accept/decline transition: still-pending, addressee-only, atomic
+   * claim (so a race with the OTHER action loses cleanly), and the decline
+   * ledger read/write PRD-20 depends on. Shared by `respond('accept' |
+   * 'decline', ...)` and {@link respondWithReply} (PRD-340's reply-implies-
+   * accept), so a reply can never accept anything the ordinary Accept button
+   * would have refused: same status check, same addressee check, same claim.
+   * Does NOT emit `CONNECTION_ACCEPTED`; each caller does that itself, since
+   * only `respondWithReply` has a `replyBody` to attach to the payload.
+   */
+  private async acceptOrDecline(
+    conn: Connection,
+    actorId: string,
+    action: 'accept' | 'decline',
+  ): Promise<Connection> {
+    if (conn.status !== ConnectionStatus.Pending) {
+      throw new ConflictException('There is no pending request');
+    }
+    if (actorId !== conn.addresseeId) {
+      throw new ForbiddenException(
+        'Only the addressee can respond to a request',
+      );
+    }
+    const newStatus =
+      action === 'accept'
+        ? ConnectionStatus.Accepted
+        : ConnectionStatus.Declined;
+    const respondedAt = new Date();
+    // One transaction so the status flip and the decline ledger cannot
+    // disagree (PRD-20). A decline that committed without its
+    // `connection_declines` row would leave the pair with no cooldown at
+    // all, which is precisely the hole this closes; a rollback here simply
+    // leaves the request pending, which the addressee can retry.
+    await this.dataSource.transaction(async (manager) => {
+      // Conditional claim: only one responder flips it out of pending. A
+      // concurrent accept/decline sees affected === 0 and loses, so
+      // CONNECTION_ACCEPTED (which materializes the conversation, §7) fires
+      // exactly once.
+      const claim = await manager.update(
+        Connection,
+        { id: conn.id, status: ConnectionStatus.Pending },
+        { status: newStatus, respondedAt },
+      );
+      if (claim.affected !== 1) {
+        throw new ConflictException('There is no pending request');
+      }
+      if (action === 'decline') {
+        await this.recordDecline(
+          manager,
+          conn.requesterId,
+          conn.addresseeId,
+          respondedAt,
+        );
+        return;
+      }
+      // Accepting resolves the history in BOTH directions. A connection
+      // both members ended up wanting settles whatever the earlier
+      // refusals were about, so if they ever part the count starts from
+      // nothing rather than from a hold neither of them remembers.
+      //
+      // One call per direction: `manager.delete` does not accept an array
+      // of conditions. With `invalidWhereValuesBehavior` configured, TypeORM
+      // normalizes the array into an object keyed "0"/"1" and throws
+      // `Property "0" was not found`, rolling back every accept.
+      await manager.delete(ConnectionDecline, {
+        requesterId: conn.requesterId,
+        addresseeId: conn.addresseeId,
+      });
+      await manager.delete(ConnectionDecline, {
+        requesterId: conn.addresseeId,
+        addresseeId: conn.requesterId,
+      });
+    });
+    conn.status = newStatus;
+    conn.respondedAt = respondedAt;
+    return conn;
+  }
+
+  async respond(
+    connectionId: string,
+    actorId: string,
+    action: ConnectionAction,
+  ): Promise<Connection> {
+    const conn = await this.loadRespondableConnection(connectionId, actorId);
 
     switch (action) {
       case 'accept':
       case 'decline': {
-        if (conn.status !== ConnectionStatus.Pending) {
-          throw new ConflictException('There is no pending request');
-        }
-        if (actorId !== conn.addresseeId) {
-          throw new ForbiddenException(
-            'Only the addressee can respond to a request',
-          );
-        }
-        const newStatus =
-          action === 'accept'
-            ? ConnectionStatus.Accepted
-            : ConnectionStatus.Declined;
-        const respondedAt = new Date();
-        // One transaction so the status flip and the decline ledger cannot
-        // disagree (PRD-20). A decline that committed without its
-        // `connection_declines` row would leave the pair with no cooldown at
-        // all, which is precisely the hole this closes; a rollback here simply
-        // leaves the request pending, which the addressee can retry.
-        await this.dataSource.transaction(async (manager) => {
-          // Conditional claim: only one responder flips it out of pending. A
-          // concurrent accept/decline sees affected === 0 and loses, so
-          // CONNECTION_ACCEPTED (which materializes the conversation, §7) fires
-          // exactly once.
-          const claim = await manager.update(
-            Connection,
-            { id: conn.id, status: ConnectionStatus.Pending },
-            { status: newStatus, respondedAt },
-          );
-          if (claim.affected !== 1) {
-            throw new ConflictException('There is no pending request');
-          }
-          if (action === 'decline') {
-            await this.recordDecline(
-              manager,
-              conn.requesterId,
-              conn.addresseeId,
-              respondedAt,
-            );
-            return;
-          }
-          // Accepting resolves the history in BOTH directions. A connection
-          // both members ended up wanting settles whatever the earlier
-          // refusals were about, so if they ever part the count starts from
-          // nothing rather than from a hold neither of them remembers.
-          //
-          // One call per direction: `manager.delete` does not accept an array
-          // of conditions. With `invalidWhereValuesBehavior` configured, TypeORM
-          // normalizes the array into an object keyed "0"/"1" and throws
-          // `Property "0" was not found`, rolling back every accept.
-          await manager.delete(ConnectionDecline, {
-            requesterId: conn.requesterId,
-            addresseeId: conn.addresseeId,
-          });
-          await manager.delete(ConnectionDecline, {
-            requesterId: conn.addresseeId,
-            addresseeId: conn.requesterId,
-          });
-        });
-        conn.status = newStatus;
-        conn.respondedAt = respondedAt;
+        const updated = await this.acceptOrDecline(conn, actorId, action);
         if (action === 'accept') {
           this.eventEmitter.emit(CONNECTION_ACCEPTED, {
-            connectionId: conn.id,
-            requesterId: conn.requesterId,
-            addresseeId: conn.addresseeId,
-            requestMessage: conn.requestMessage,
+            connectionId: updated.id,
+            requesterId: updated.requesterId,
+            addresseeId: updated.addresseeId,
+            requestMessage: updated.requestMessage,
           } satisfies ConnectionAcceptedEvent);
         }
-        return conn;
+        return updated;
       }
       case 'block': {
         // Two changes here close P1-3:
@@ -557,20 +673,15 @@ export class ConnectionsService {
         const { low, high } = this.pair(conn.requesterId, conn.addresseeId);
         const respondedAt = new Date();
         await this.dataSource.transaction(async (manager) => {
-          const claim = await manager.update(
-            Connection,
-            {
-              userLow: low,
-              userHigh: high,
-              status: Not(ConnectionStatus.Blocked),
-            },
-            {
-              status: ConnectionStatus.Blocked,
-              blockedBy: blockerId,
-              respondedAt,
-            },
+          // PRD-363: the same sever `SocialService.blockMember` runs, which
+          // also stashes an `accepted`/`pending` status for the unblock.
+          const affected = await severConnectionForBlock(
+            manager,
+            { low, high },
+            blockerId,
+            respondedAt,
           );
-          if (claim.affected === 0) {
+          if (affected === 0) {
             // Already blocked. If the OTHER party owns the block, refuse (no
             // seizure) and roll back so no `blocks` row is written; if this
             // actor already owns it, fall through — re-blocking is idempotent.
@@ -617,22 +728,22 @@ export class ConnectionsService {
         // exactly — both entry points now agree, whichever placed the block.
         // The connection flip is CONDITIONAL on `blockedBy = actorId` so a
         // racing seizure by the other party can't be lifted by the wrong actor,
-        // matching the in-memory guard above without a TOCTOU window. The pair
-        // returns to `Declined` (re-connecting needs a fresh request), not
-        // `Accepted`.
+        // matching the in-memory guard above without a TOCTOU window.
+        //
+        // PRD-363: the pair returns to exactly what the block took (an
+        // `accepted` connection or a `pending` request with its original
+        // requester), or to `declined` when nothing was stashed. The DM's
+        // `openedAt` is restored by `ConversationsService` on MEMBER_UNBLOCKED.
         const blockedId = this.otherId(conn, actorId);
+        const { low, high } = this.pair(conn.requesterId, conn.addresseeId);
         await this.dataSource.transaction(async (manager) => {
-          await manager.update(
-            Connection,
-            {
-              id: conn.id,
-              status: ConnectionStatus.Blocked,
-              blockedBy: actorId,
-            },
-            { status: ConnectionStatus.Declined, blockedBy: null },
-          );
+          await restoreConnectionAfterUnblock(manager, { low, high }, actorId);
           await manager.delete(Block, { blockerId: actorId, blockedId });
         });
+        this.emitBestEffort(MEMBER_UNBLOCKED, {
+          unblockerId: actorId,
+          unblockedId: blockedId,
+        } satisfies MemberUnblockedEvent);
         return this.connections.findOneByOrFail({ id: conn.id });
       }
     }
@@ -650,8 +761,90 @@ export class ConnectionsService {
     connectionId: string,
     actorId: string,
     action: ConnectionAction,
-  ): Promise<ConnectionListItem> {
+  ): Promise<
+    ConnectionListItem & { restoredStatus?: RestoredConnectionStatus }
+  > {
     const connection = await this.respond(connectionId, actorId, action);
+    const otherUserId = this.otherId(connection, actorId);
+    const [profilesById, relationshipsByUserId] = await Promise.all([
+      this.profilesByUserIds(
+        [otherUserId, connection.introducedBy].filter(
+          (userId): userId is string => userId !== null && userId !== undefined,
+        ),
+      ),
+      this.relationshipsByUserIds(actorId, [otherUserId]),
+    ]);
+    const item = toConnectionListItem(
+      connection,
+      actorId,
+      profilesById.get(otherUserId),
+      relationshipsByUserId.get(otherUserId) ?? NO_RELATIONSHIP,
+      connection.introducedBy
+        ? profilesById.get(connection.introducedBy)
+        : undefined,
+    );
+    // PRD-363: an unblock also reports what it put back, the same field
+    // `DELETE /blocks/:slug` returns. The restored row's own status is the
+    // answer: `declined` means nothing was stashed.
+    if (action === 'unblock') {
+      return {
+        ...item,
+        restoredStatus: toRestoredConnectionStatus(connection.status),
+      };
+    }
+    return item;
+  }
+
+  /**
+   * PRD-340: reply-implies-accept. The addressee of a stranger's pending
+   * message request answers it by writing their OWN reply and sending it,
+   * with no separate Accept tap first, the way WhatsApp/Instagram treat a
+   * typed reply as consent. Enforces exactly the guards `respond('accept',
+   * ...)` does, via the SAME two private helpers: the actor must be a party
+   * to the connection, it must still be `Pending` (a block via either
+   * `respond('block', ...)` or the separate `/blocks` resource already flips
+   * it to `Blocked`, see `severConnectionForBlock`, so this throws the same
+   * `ConflictException` a plain Accept would), and only the addressee may
+   * accept. It does NOT re-check "who can message me" or profile visibility:
+   * those gated the request's CREATION, and neither the ordinary Accept
+   * button nor this one re-opens that question, since accepting answers a
+   * request that already passed them.
+   *
+   * The reply itself is never posted here. `MessageRequestsService`'s
+   * existing `CONNECTION_ACCEPTED` listener does it (cross-feature via the
+   * event emitter, never a direct call, so connections stays decoupled from
+   * messaging), extended to also post `replyBody` right after the intro
+   * message it may seed, in that one sequential chain, so the two can never
+   * land out of order.
+   */
+  async respondWithReply(
+    connectionId: string,
+    actorId: string,
+    replyBody: string,
+  ): Promise<Connection> {
+    const conn = await this.loadRespondableConnection(connectionId, actorId);
+    const updated = await this.acceptOrDecline(conn, actorId, 'accept');
+    this.eventEmitter.emit(CONNECTION_ACCEPTED, {
+      connectionId: updated.id,
+      requesterId: updated.requesterId,
+      addresseeId: updated.addresseeId,
+      requestMessage: updated.requestMessage,
+      replyBody,
+    } satisfies ConnectionAcceptedEvent);
+    return updated;
+  }
+
+  /** `POST /connections/:id/reply` wrapper, mapped like {@link respondView}. */
+  async respondWithReplyView(
+    connectionId: string,
+    actorId: string,
+    replyBody: string,
+  ): Promise<ConnectionListItem> {
+    const connection = await this.respondWithReply(
+      connectionId,
+      actorId,
+      replyBody,
+    );
     const otherUserId = this.otherId(connection, actorId);
     const [profilesById, relationshipsByUserId] = await Promise.all([
       this.profilesByUserIds(
@@ -791,15 +984,25 @@ export class ConnectionsService {
     const introducerIds = rows
       .map((c) => c.introducedBy)
       .filter((id): id is string => id !== null && id !== undefined);
-    const [profilesById, relationshipsByUserId, notesByConnectionId] =
-      await Promise.all([
-        this.profilesByUserIds([...otherIds, ...introducerIds]),
-        this.relationshipsByUserIds(userId, otherIds),
-        this.viewerNotesByConnectionId(
-          userId,
-          rows.map((c) => c.id),
-        ),
-      ]);
+    const [
+      profilesById,
+      relationshipsByUserId,
+      notesByConnectionId,
+      requestReadByConnectionId,
+    ] = await Promise.all([
+      this.profilesByUserIds([...otherIds, ...introducerIds]),
+      this.relationshipsByUserIds(userId, otherIds),
+      this.viewerNotesByConnectionId(
+        userId,
+        rows.map((c) => c.id),
+      ),
+      // PRD-344: only the "outgoing" tab ever shows a sender their own
+      // pending request back, so this is the only tab worth the extra
+      // notification + privacy reads; every other tab pays nothing for it.
+      tab === 'outgoing'
+        ? this.requestReadFlagsByConnectionId(userId, rows)
+        : Promise.resolve(new Map<string, boolean | null>()),
+    ]);
     const items = rows.map((c) => {
       const otherUserId = this.otherId(c, userId);
       return toConnectionListItem(
@@ -809,9 +1012,84 @@ export class ConnectionsService {
         relationshipsByUserId.get(otherUserId) ?? NO_RELATIONSHIP,
         c.introducedBy ? profilesById.get(c.introducedBy) : undefined,
         notesByConnectionId.get(c.id) ?? null,
+        requestReadByConnectionId.get(c.id) ?? null,
       );
     });
     return { items, total, page, pageSize: PAGE_SIZE };
+  }
+
+  /**
+   * PRD-344: has the addressee of each of the viewer's own OUTGOING pending
+   * requests seen it, so the sender can tell whether their intro was read,
+   * the same fact WhatsApp/Instagram show as a read tick.
+   *
+   * A pending request has no conversation yet (that only materializes on
+   * accept), so there is no read watermark to report. The only EXISTING
+   * signal is whether the addressee's `ConnectionRequest` bell notification
+   * for this connection has been marked read. That is a proxy for having
+   * seen the notification, not literally "opened the Requests tab": it flips
+   * whenever the addressee reads that notification, including a bulk "mark
+   * all read". It is the best signal available without a new column on
+   * `connections` (a schema migration is out of scope for this change).
+   *
+   * Gated by `share_read_receipts` exactly like every other read-receipt
+   * surface in this codebase (`MessagingCoreService.buildMemberSummaries`,
+   * `ConversationsService`): reciprocal, so a withheld read state reads as
+   * `null` whenever EITHER the viewer or the addressee has turned their own
+   * sharing off, keeping a real read state from leaking through a preference
+   * meant to hide it.
+   */
+  private async requestReadFlagsByConnectionId(
+    viewerId: string,
+    rows: Connection[],
+  ): Promise<Map<string, boolean | null>> {
+    const result = new Map<string, boolean | null>();
+    if (!rows.length) {
+      return result;
+    }
+    const addresseeIds = [...new Set(rows.map((c) => c.addresseeId))];
+    const [privacyRows, notificationRows] = await Promise.all([
+      this.memberPreferences.find({
+        where: { userId: In([viewerId, ...addresseeIds]) },
+        select: { userId: true, shareReadReceipts: true },
+      }),
+      this.notifications.find({
+        where: {
+          userId: In(addresseeIds),
+          type: NotificationType.ConnectionRequest,
+        },
+        select: { userId: true, payload: true, read: true },
+      }),
+    ]);
+    // Absent row = never opened Settings = sharing on, the same default
+    // `AddMessagingPrivacyPreferences1820500000000`'s column default and
+    // `PreferencesService.defaults()` both encode.
+    const sharesReadReceiptsByUser = new Map(
+      privacyRows.map((row) => [row.userId, row.shareReadReceipts]),
+    );
+    const viewerShares = sharesReadReceiptsByUser.get(viewerId) ?? true;
+    const readByConnectionId = new Map<string, boolean>();
+    for (const row of notificationRows) {
+      const connectionId = row.payload?.connectionId;
+      if (typeof connectionId !== 'string') continue;
+      // A re-opened (declined, then re-asked) request can, in principle,
+      // carry more than one `ConnectionRequest` notification for the same
+      // connection id. Any one of them being read is enough to call it read.
+      readByConnectionId.set(
+        connectionId,
+        readByConnectionId.get(connectionId) === true || row.read,
+      );
+    }
+    for (const conn of rows) {
+      const addresseeShares =
+        sharesReadReceiptsByUser.get(conn.addresseeId) ?? true;
+      if (!viewerShares || !addresseeShares) {
+        result.set(conn.id, null);
+        continue;
+      }
+      result.set(conn.id, readByConnectionId.get(conn.id) ?? false);
+    }
+    return result;
   }
 
   /**
@@ -1142,6 +1420,50 @@ export class ConnectionsService {
   }
 
   /**
+   * When `userId` connected with each of `counterpartIds`, keyed by
+   * counterpart id: `respondedAt` (stamped the moment the request was
+   * accepted), falling back to `createdAt` for a legacy row that never
+   * recorded one. A counterpart with no ACCEPTED connection is absent from the
+   * map. ONE query over both request directions regardless of how many ids
+   * are passed, so the DM inbox (`ConversationsService.listConversations`)
+   * labels every row's "Connected since" without a per-conversation lookup.
+   */
+  async acceptedSinceByCounterpart(
+    userId: string,
+    counterpartIds: string[],
+  ): Promise<Map<string, Date>> {
+    if (!counterpartIds.length) {
+      return new Map();
+    }
+    const rows = await this.connections.find({
+      where: [
+        {
+          requesterId: userId,
+          addresseeId: In(counterpartIds),
+          status: ConnectionStatus.Accepted,
+        },
+        {
+          addresseeId: userId,
+          requesterId: In(counterpartIds),
+          status: ConnectionStatus.Accepted,
+        },
+      ],
+      select: {
+        requesterId: true,
+        addresseeId: true,
+        respondedAt: true,
+        createdAt: true,
+      },
+    });
+    return new Map(
+      rows.map((row) => [
+        row.requesterId === userId ? row.addresseeId : row.requesterId,
+        row.respondedAt ?? row.createdAt,
+      ]),
+    );
+  }
+
+  /**
    * The slugs of the viewer's accepted connections — the minimal signal the
    * client needs to flip a member's "Say hello" button to "Message". Mirrors
    * `getAcceptedConnectionUserIds`, resolving each counterpart user-id to its
@@ -1225,6 +1547,183 @@ export class ConnectionsService {
   }
 
   // --- internals ---
+
+  /**
+   * PRD-365: how many DISTINCT signed-in members have a live (open or
+   * escalated) report against `$1` filed in the last `$3` days. A report counts
+   * when it targets the member directly (`member` subject, addressed by userId
+   * `$2` or by slug, the same two shapes `AccountEnforcementService
+   * .resolveReportedProfile` accepts) or targets a message they sent. Staff
+   * (moderator/admin) always read 0, so a report pile-on can never silence the
+   * people who send moderation notices through `deliverEnquiry`.
+   *
+   * Anonymous reports (`reporter_id IS NULL`) are left out on purpose: the
+   * public report endpoint is capped per IP, which is far weaker than one
+   * account per person, so they cannot be counted as distinct people. A
+   * member's reports against themselves are left out too.
+   *
+   * The message branch guards the `uuid` cast with a shape check so a
+   * malformed `subject_id` can never abort the whole query.
+   */
+  private static readonly REQUEST_PAUSE_REPORTERS_SQL = `CASE WHEN EXISTS (
+      SELECT 1 FROM "users" staff
+      WHERE staff."id" = $1
+        AND staff."role" IN ('${UserRole.Moderator}', '${UserRole.Admin}')
+    ) THEN 0 ELSE (
+      SELECT COUNT(DISTINCT report."reporter_id")
+      FROM "reports" report
+      WHERE report."status" IN ('${ReportStatus.Open}', '${ReportStatus.Escalated}')
+        AND report."reporter_id" IS NOT NULL
+        AND report."reporter_id" <> $1
+        AND report."created_at" > now() - make_interval(days => $3::int)
+        AND (
+          (
+            report."subject_type" = '${ReportSubjectType.Member}'
+            AND report."subject_id" IN (
+              $2::text,
+              (SELECT profile."slug" FROM "profiles" profile WHERE profile."user_id" = $1)
+            )
+          )
+          OR (
+            report."subject_type" = '${ReportSubjectType.Message}'
+            AND EXISTS (
+              SELECT 1 FROM "messages" message
+              WHERE message."sender_id" = $1
+                AND message."id" = CASE
+                  WHEN report."subject_id" ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  THEN report."subject_id"::uuid
+                END
+            )
+          )
+        )
+    ) END`;
+
+  /**
+   * PRD-365: every cap a NEW connection request from `requesterId` must clear,
+   * read in one round trip, checked in order of what the member most needs to
+   * hear:
+   *
+   *  1. The report-driven pause (403 CONNECTION_REQUESTS_PAUSED). Nothing is
+   *     written to the member's account: the pause is derived live from the
+   *     reports table, so it lifts by itself the moment moderators resolve
+   *     enough of them or they age out of the window.
+   *  2. The rolling daily cap (429 CONNECTION_REQUEST_DAILY_LIMIT), read from
+   *     the `connection_request_events` ledger so withdrawing a request or
+   *     re-opening a declined pair cannot reset it.
+   *  3. The open-pending cap (429 CONNECTION_REQUEST_PENDING_LIMIT), served by
+   *     `IDX_connections_requester_status_responded_at`. It counts a request
+   *     STASHED by a block (`blocked` + `status_before_block = 'pending'`) as
+   *     open too, because it is: `severConnectionForBlock` flips a pending row
+   *     to `blocked` and keeps the `pending` for the unblock to restore. A
+   *     count over `status = 'pending'` alone let a member at the cap block
+   *     their own addressees, watch the counter fall, send a fresh batch and
+   *     unblock everyone, holding far more open requests than the cap allows.
+   *
+   * Checked before the request is written, so two requests racing at the very
+   * edge can both pass; the per-minute throttle on both request routes bounds
+   * that overshoot to a handful. The existing throttle stays in place.
+   */
+  private async assertFirstContactAllowed(requesterId: string): Promise<void> {
+    const rows = await this.dataSource.query<
+      Array<{
+        distinctReporterCount: number;
+        dailyCount: number;
+        pendingCount: number;
+      }>
+    >(
+      `SELECT
+         (${ConnectionsService.REQUEST_PAUSE_REPORTERS_SQL})::int AS "distinctReporterCount",
+         (SELECT COUNT(*) FROM "connection_request_events" request_event
+           WHERE request_event."requester_id" = $1
+             AND request_event."created_at" > now() - make_interval(hours => $4::int)
+         )::int AS "dailyCount",
+         (SELECT COUNT(*) FROM "connections" outgoing
+           WHERE outgoing."requester_id" = $1
+             AND (
+               outgoing."status" = '${ConnectionStatus.Pending}'
+               OR (
+                 outgoing."status" = '${ConnectionStatus.Blocked}'
+                 AND outgoing."status_before_block" = '${ConnectionStatus.Pending}'
+               )
+             )
+         )::int AS "pendingCount"`,
+      [
+        requesterId,
+        requesterId,
+        REQUEST_PAUSE_REPORT_WINDOW_DAYS,
+        CONNECTION_REQUEST_DAILY_WINDOW_HOURS,
+      ],
+    );
+    const counts = rows[0];
+    if (
+      (counts?.distinctReporterCount ?? 0) >= REQUEST_PAUSE_DISTINCT_REPORTERS
+    ) {
+      throw connectionRequestsPausedException();
+    }
+    if ((counts?.dailyCount ?? 0) >= MAX_NEW_CONNECTION_REQUESTS_PER_DAY) {
+      throw connectionRequestDailyLimitException();
+    }
+    if ((counts?.pendingCount ?? 0) >= MAX_OPEN_PENDING_REQUESTS) {
+      throw connectionRequestPendingLimitException();
+    }
+  }
+
+  /**
+   * PRD-365: the report-driven pause on its own, for cold contact that is
+   * exempt from the volume caps (`MessageRequestsService.deliverEnquiry`).
+   * Callers skip it for accepted connections: replies within an existing
+   * connection are never paused.
+   */
+  async assertRequestsNotPaused(userId: string): Promise<void> {
+    const rows = await this.dataSource.query<
+      Array<{ distinctReporterCount: number }>
+    >(
+      `SELECT (${ConnectionsService.REQUEST_PAUSE_REPORTERS_SQL})::int AS "distinctReporterCount"`,
+      [userId, userId, REQUEST_PAUSE_REPORT_WINDOW_DAYS],
+    );
+    if (
+      (rows[0]?.distinctReporterCount ?? 0) >= REQUEST_PAUSE_DISTINCT_REPORTERS
+    ) {
+      throw connectionRequestsPausedException();
+    }
+  }
+
+  /**
+   * PRD-365: append one row to the daily-cap ledger once a request has cleared
+   * every gate, pruning this member's rows that have left the window in the
+   * same statement (a data-modifying CTE always runs), so the ledger never
+   * holds more than a day of requests per member.
+   */
+  private async recordRequestEvent(requesterId: string): Promise<void> {
+    await this.dataSource.query(
+      `WITH pruned AS (
+         DELETE FROM "connection_request_events"
+         WHERE "requester_id" = $1
+           AND "created_at" <= now() - make_interval(hours => $2::int)
+       )
+       INSERT INTO "connection_request_events" ("requester_id") VALUES ($1)`,
+      [requesterId, CONNECTION_REQUEST_DAILY_WINDOW_HOURS],
+    );
+  }
+
+  /**
+   * PRD-366: the recipient's "who can message me" choice. A member with no
+   * `member_preferences` row, or a value outside the closed set, reads as
+   * `everyone`, the platform's behaviour before the setting existed.
+   */
+  private async recipientWhoCanMessage(userId: string): Promise<WhoCanMessage> {
+    const rows = await this.dataSource.query<
+      Array<{ whoCanMessage: string | null }>
+    >(
+      `SELECT "who_can_message" AS "whoCanMessage" FROM "member_preferences" WHERE "user_id" = $1`,
+      [userId],
+    );
+    const value = rows[0]?.whoCanMessage;
+    return (
+      WHO_CAN_MESSAGE_VALUES.find((option) => option === value) ??
+      DEFAULT_WHO_CAN_MESSAGE
+    );
+  }
 
   private emitRequested(conn: Connection): void {
     this.eventEmitter.emit(CONNECTION_REQUESTED, {

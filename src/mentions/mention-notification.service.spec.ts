@@ -4,6 +4,7 @@ import type { NotificationsService } from '../notifications/notifications.servic
 import { RosterRole } from '../communities/entities/community-member.entity';
 import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
+import { IsNull } from 'typeorm';
 
 // Minimal fake repositories; only the paths exercised below are stubbed.
 // Member-slug resolution goes through `MemberLookup` (constructed fresh
@@ -234,6 +235,30 @@ describe('MentionNotificationService.notify', () => {
       notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
     expect(notifiedRecipients).toEqual(['user-insider']);
     expect(notifiedRecipients).not.toContain('user-outsider');
+  });
+
+  it('ENG-236: restricts a message-source mention query to participants with leftAt IS NULL, so a member who left or was removed is never a candidate recipient', async () => {
+    const { service, conversationParticipants, userIdsForSlugs } = build();
+    userIdsForSlugs.mockResolvedValue(new Map([['insider', 'user-insider']]));
+    // The fake repo ignores its `where` argument and always resolves this
+    // fixture, so the only way to prove the leftAt filter is actually sent is
+    // to assert on the call arguments themselves, not on who got notified.
+    conversationParticipants.find.mockResolvedValue([
+      { userId: 'user-insider' },
+    ]);
+
+    await service.notify('@insider look here', 'author-1', {
+      source: 'message',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      excerpt: 'something said inside a thread',
+    });
+
+    expect(conversationParticipants.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ leftAt: IsNull() }),
+      }),
+    );
   });
 
   it('excludeUserIds (PRD-221) drops a mentioned recipient the same as the author, without affecting others', async () => {

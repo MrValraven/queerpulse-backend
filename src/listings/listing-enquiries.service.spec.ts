@@ -94,6 +94,7 @@ const REACHABLE = {
   canMessageOwner: true,
   unavailableReason: null,
   replyRequiresConnection: true,
+  followUpAwaitsReply: true,
   existingConversationId: null,
 };
 const UNCAPPED = {
@@ -137,6 +138,7 @@ describe('ListingEnquiriesService', () => {
         canDeliver: true,
         blockedReason: null,
         replyRequiresConnection: true,
+        followUpAwaitsReply: true,
       }),
       deliverEnquiry: jest
         .fn()
@@ -283,6 +285,7 @@ describe('ListingEnquiriesService', () => {
         conversationId: 'conversation-1',
         enquiryId: 'enquiry-1',
         replyRequiresConnection: true,
+        followUpAwaitsReply: true,
       });
     });
 

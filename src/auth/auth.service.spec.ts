@@ -644,7 +644,8 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
       familyId: 'fam-1',
       revokedAt: null,
     });
-    await service.revokeRefreshToken('raw-token');
+    // Resolves to the owner, which logout uses to remove the device's push row.
+    await expect(service.revokeRefreshToken('raw-token')).resolves.toBe('u1');
     expect(mocks.repo.findOne).toHaveBeenCalledWith({
       where: { tokenHash: sha256('raw-token') },
     });
@@ -661,9 +662,7 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
 
   it('revokeRefreshToken is a no-op when the token is unknown', async () => {
     mocks.repo.findOne.mockResolvedValue(null);
-    await expect(
-      service.revokeRefreshToken('raw-token'),
-    ).resolves.toBeUndefined();
+    await expect(service.revokeRefreshToken('raw-token')).resolves.toBeNull();
     expect(mocks.repo.update).not.toHaveBeenCalled();
     expect(mocks.events.emit).not.toHaveBeenCalled();
   });
@@ -675,7 +674,7 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
       familyId: 'fam-1',
       revokedAt: new Date(),
     });
-    await service.revokeRefreshToken('raw-token');
+    await expect(service.revokeRefreshToken('raw-token')).resolves.toBeNull();
     expect(mocks.repo.update).not.toHaveBeenCalled();
     expect(mocks.events.emit).not.toHaveBeenCalled();
   });

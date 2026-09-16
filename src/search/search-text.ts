@@ -40,6 +40,13 @@
  */
 import { foldedTextExpression } from '../connections/connection-search';
 
+// Re-exported so a caller needing to fold a one-off SQL expression (a jsonb
+// `->>` extraction, say, which has no column name `foldedHaystack` could
+// qualify) can import it from this module alongside the rest of the search
+// vocabulary, without reaching into `connections/connection-search` for a
+// single low-level helper.
+export { foldedTextExpression };
+
 /** The text-search configuration used on BOTH sides of every comparison. */
 export const SEARCH_TEXT_CONFIG = 'simple';
 

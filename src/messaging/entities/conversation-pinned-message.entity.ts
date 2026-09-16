@@ -29,9 +29,12 @@ export class ConversationPinnedMessage {
   @Column({ type: 'uuid' })
   messageId!: string;
 
-  /** The participant who pinned it. */
-  @Column({ type: 'uuid' })
-  pinnedBy!: string;
+  /** The participant who pinned it. NULL once that member has erased their
+   *  account: the pin is shared conversation state and outlives them
+   *  (`ON DELETE SET NULL`, see
+   *  `KeepCounterpartMessagesOnSenderErasure1820530000000`). */
+  @Column({ type: 'uuid', nullable: true })
+  pinnedBy!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   pinnedAt!: Date;

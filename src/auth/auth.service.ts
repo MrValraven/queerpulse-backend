@@ -1073,13 +1073,20 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  async revokeRefreshToken(rawRefreshToken: string): Promise<void> {
+  /**
+   * Revoke the session a single-device logout presents. Resolves to the member
+   * whose live session was revoked, or `null` when the token was unknown or
+   * already dead. `AuthController.logout` uses the owner to remove this
+   * device's push subscription in the same request; the id comes only from a
+   * live row the caller actually held, so a stale cookie can remove nothing.
+   */
+  async revokeRefreshToken(rawRefreshToken: string): Promise<string | null> {
     const tokenHash = this.hashToken(rawRefreshToken);
     // Look the row up first so we know whose live sockets to drop. A missing or
     // already-revoked token is a no-op (logout is best-effort).
     const row = await this.refreshTokens.findOne({ where: { tokenHash } });
     if (!row || row.revokedAt) {
-      return;
+      return null;
     }
     // Revoke the whole FAMILY, not just the presenting row. A device that lost
     // a rotation race holds one live row while its stranded sibling holds
@@ -1098,6 +1105,7 @@ export class AuthService {
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
       userId: row.userId,
     } satisfies UserSessionRevokedEvent);
+    return row.userId;
   }
 
   /**

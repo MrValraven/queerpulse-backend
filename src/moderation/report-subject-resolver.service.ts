@@ -47,6 +47,13 @@ export interface ReportSubjectResolution {
    * choosing who to punish.
    */
   isAuthorAmbiguous: boolean;
+  /**
+   * PRD-360: the conversation a reported MESSAGE lives in. Present only for a
+   * `message` subject whose row still exists; absent for every other subject.
+   * `ModerationService.buildDetail` reads it to say whether the staff
+   * conversation viewer can open anything.
+   */
+  conversationId?: string | null;
 }
 
 /**
@@ -65,6 +72,8 @@ interface RawSubjectRow {
   excerpt: string | null;
   community_id: string | null;
   is_author_ambiguous?: boolean | null;
+  /** Selected by `MESSAGE_SQL` only (PRD-360); undefined everywhere else. */
+  conversation_id?: string | null;
 }
 
 const UNRESOLVED: ReportSubjectResolution = {
@@ -314,6 +323,18 @@ export class ReportSubjectResolverService {
       // so there is genuinely nobody to resolve. Three nulls, never a guess.
       case ReportSubjectType.Venue:
         return new Map();
+
+      // PRD-356: a GROUP conversation, addressed by the conversation's own
+      // uuid. `author` is the current owner (the one participant whose role
+      // is `owner` and who has not left), falling back to `created_by` for
+      // the rare case a group has none seated (the owner left with no
+      // successor); see `CONVERSATION_SQL`. `excerpt` is the group's title,
+      // mirroring `community`'s use of its display name. A DM never resolves
+      // here: `kind = 'group'` in the WHERE clause keeps a `conversation`
+      // subject id that happens to name a DM thread answering `UNRESOLVED`,
+      // the same "nobody to guess at" answer `Venue` gives above.
+      case ReportSubjectType.Conversation:
+        return this.queryByUuid(CONVERSATION_SQL, subjectIds);
     }
   }
 
@@ -387,6 +408,7 @@ export class ReportSubjectResolverService {
         // Absent on every statement whose subject has exactly one author.
         // See `RawSubjectRow`.
         isAuthorAmbiguous: row.is_author_ambiguous === true,
+        ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
       });
     }
     return byKey;
@@ -458,10 +480,11 @@ const FORUM_POST_SQL = `
 `;
 
 const MESSAGE_SQL = `
-  SELECT m.id::text  AS key,
-         m.sender_id AS author_user_id,
-         m.body      AS excerpt,
-         NULL::uuid  AS community_id
+  SELECT m.id::text         AS key,
+         m.sender_id        AS author_user_id,
+         m.body             AS excerpt,
+         NULL::uuid         AS community_id,
+         m.conversation_id  AS conversation_id
   FROM messages m
   WHERE m.id = ANY($1::uuid[])
 `;
@@ -789,6 +812,30 @@ const COMMUNITY_SQL = `
          c.id       AS community_id
   FROM communities c
   WHERE c.slug = ANY($1::text[])
+`;
+
+// PRD-356: a GROUP messaging conversation, keyed by its own uuid. The
+// correlated subquery picks the seated `owner` participant (there is at most
+// one at a time: group role transfer always demotes the outgoing owner in
+// the same write); `COALESCE` falls back to `created_by` for a group whose
+// owner has left with nobody promoted in their place. `kind = 'group'`
+// excludes every DM, which this subject type never addresses.
+const CONVERSATION_SQL = `
+  SELECT c.id::text  AS key,
+         COALESCE(
+           (SELECT cp.user_id
+              FROM conversation_participants cp
+             WHERE cp.conversation_id = c.id
+               AND cp.role = 'owner'
+               AND cp.left_at IS NULL
+             LIMIT 1),
+           c.created_by
+         )            AS author_user_id,
+         c.title      AS excerpt,
+         NULL::uuid   AS community_id
+  FROM conversations c
+  WHERE c.id = ANY($1::uuid[])
+    AND c.kind = 'group'
 `;
 
 // `desc` is a reserved word, hence the quoting.

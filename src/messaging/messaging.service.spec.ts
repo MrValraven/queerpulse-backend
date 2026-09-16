@@ -16,10 +16,15 @@ import { ContentModeration } from '../content-moderation/entities/content-modera
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
-import { ConversationParticipant } from './entities/conversation-participant.entity';
+import {
+  ConversationParticipant,
+  ConversationRole,
+} from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
-import { Message } from './entities/message.entity';
+import { GroupInvite } from './entities/group-invite.entity';
+import { Message, MessageKind } from './entities/message.entity';
+import { buildReplyTo } from './message-response';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { MessageCreatedEvent } from './messaging.events';
@@ -29,8 +34,10 @@ import { ConversationsService } from './conversations.service';
 import { MessagesService } from './messages.service';
 import { MessageAnnotationsService } from './message-annotations.service';
 import { GroupsService } from './groups.service';
+import { GroupInvitesService } from './group-invites.service';
 import { MessageRequestsService } from './message-requests.service';
 import { StorageService } from '../storage/storage.service';
+import { PreferencesService } from '../preferences/preferences.service';
 
 /**
  * Minimal chainable stand-in for a TypeORM SelectQueryBuilder. Every builder
@@ -53,6 +60,7 @@ interface MockQb {
   getMany: jest.Mock;
   getRawMany: jest.Mock;
   getRawOne: jest.Mock;
+  getRawAndEntities: jest.Mock;
   getExists: jest.Mock;
   // `markRead` advances both watermarks through an UPDATE builder so the
   // GREATEST(...) expression is evaluated by Postgres.
@@ -81,6 +89,15 @@ function makeQb(): MockQb {
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
   qb.getRawOne = jest.fn().mockResolvedValue(undefined);
+  // The backward history page (`getMessages`) reads entities plus raw rows,
+  // where the raw row carries the exact microsecond created_at for its cursor.
+  // Default: whatever `getMany` is stubbed with, and no raw cursor text.
+  qb.getRawAndEntities = jest.fn(() =>
+    (qb.getMany() as Promise<unknown[]>).then((entities) => ({
+      entities,
+      raw: [],
+    })),
+  );
   // `MessagingCoreService.requireActiveParticipant` (BE-MSG-09) probes for a
   // blocked DM counterpart with a single `getExists()`; default: not blocked.
   qb.getExists = jest.fn().mockResolvedValue(false);
@@ -107,7 +124,12 @@ describe('MessagingService', () => {
   let service: MessagingService;
   let core: MessagingCoreService;
   let messageRequestsService: MessageRequestsService;
-  let conversations: { findOne: jest.Mock; find: jest.Mock; create: jest.Mock };
+  let conversations: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    create: jest.Mock;
+    update: jest.Mock;
+  };
   let participants: {
     find: jest.Mock;
     findOne: jest.Mock;
@@ -126,12 +148,15 @@ describe('MessagingService', () => {
   let dataSource: { transaction: jest.Mock };
   let connections: {
     areConnected: jest.Mock;
+    assertRequestsNotPaused: jest.Mock;
     requestConnection: jest.Mock;
     allAcceptedConnectionUserIds: jest.Mock;
+    acceptedSinceByCounterpart: jest.Mock;
   };
   let blockFilter: {
     isBlockedEitherWay: jest.Mock;
     blockedUserIds: jest.Mock;
+    excludeBlocked: jest.Mock;
   };
   let emitter: { emit: jest.Mock };
   let reactions: {
@@ -149,9 +174,21 @@ describe('MessagingService', () => {
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let usersService: { findById: jest.Mock };
+  let usersService: {
+    findById: jest.Mock;
+    liftExpiredRestriction: jest.Mock;
+  };
   let mentions: { notify: jest.Mock };
   let storage: { deleteObjectByReference: jest.Mock };
+  let preferences: {
+    getMessagingPrivacy: jest.Mock;
+    getMessagingPrivacyForUsers: jest.Mock;
+  };
+  // PRD-353: `GroupInvite` repository — `GroupsService.toGroupConversationResponse`
+  // reads it (owner/admin caller only); `GroupInvitesService` reads/writes it
+  // directly. No test in this file exercises those paths yet, so an empty
+  // default is enough.
+  let groupInvites: { find: jest.Mock };
   // `MessagingCoreService.toMessageResponses` now reads the shared
   // `content_moderation` table to tombstone moderator-taken-down messages; the
   // repo only needs `find` (default: no takedowns) for these tests.
@@ -162,6 +199,10 @@ describe('MessagingService', () => {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
       create: jest.fn((value: Partial<Conversation>) => value),
+      // PRD-340: `sendMessage`'s connection-gate block flips `openedAt` on the
+      // non-initiator's first reply; `ConversationsService`'s `MEMBER_BLOCKED`
+      // handler resets it. Mirrors `participants.update` above.
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     participants = {
       find: jest.fn().mockResolvedValue([]),
@@ -196,6 +237,9 @@ describe('MessagingService', () => {
     dataSource = { transaction: jest.fn() };
     connections = {
       areConnected: jest.fn().mockResolvedValue(true),
+      // PRD-365: the report-driven pause `deliverEnquiry` checks for a
+      // non-connected pair. Default: not paused.
+      assertRequestsNotPaused: jest.fn().mockResolvedValue(undefined),
       requestConnection: jest.fn(),
       // `replyRequiresConnection` (PRD-220): `listConversations` batches this
       // once per call rather than checking `areConnected` per row. Default:
@@ -205,6 +249,10 @@ describe('MessagingService', () => {
       allAcceptedConnectionUserIds: jest
         .fn()
         .mockResolvedValue(['u2', 'u3', 'x', 'y', 'them']),
+      // DES-225: `connectedSince` is batched once per inbox call. Default: no
+      // accepted-at timestamps, so every fixture's `connectedSince` is null
+      // unless a test overrides this.
+      acceptedSinceByCounterpart: jest.fn().mockResolvedValue(new Map()),
     };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
@@ -212,6 +260,11 @@ describe('MessagingService', () => {
       // ONE batched query rather than per conversation. Default: nobody
       // blocked.
       blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+      // PRD-354: `getMessages`/`getMessagesSince` append this predicate for a
+      // GROUP conversation only. Default stub just returns the same builder
+      // (mirroring the real method's chainable return), so tests that don't
+      // care about it keep working unchanged.
+      excludeBlocked: jest.fn((qb: unknown) => qb),
     };
     emitter = { emit: jest.fn() };
     reactions = {
@@ -254,6 +307,9 @@ describe('MessagingService', () => {
       findById: jest
         .fn()
         .mockResolvedValue({ id: 'me', status: UserStatus.Active }),
+      // ENG-242: no fixture in this file sets up a moderator `restrict`, so
+      // every sender reads as never-restricted unless a test overrides this.
+      liftExpiredRestriction: jest.fn().mockResolvedValue(false),
     };
     moderationStates = {
       find: jest.fn().mockResolvedValue([]),
@@ -263,6 +319,20 @@ describe('MessagingService', () => {
     };
     mentions = { notify: jest.fn().mockResolvedValue(new Set()) };
     storage = { deleteObjectByReference: jest.fn().mockResolvedValue(true) };
+    // PRD-364: default every fixture to sharing everything ON (the platform's
+    // pre-PRD-364 behaviour), so the existing `listConversations`/`markRead`
+    // expectations below — none of which anticipate the new gating — keep
+    // passing unless a test explicitly overrides these mocks.
+    preferences = {
+      getMessagingPrivacy: jest.fn().mockResolvedValue({
+        shareReadReceipts: true,
+        shareTyping: true,
+        sharePresence: true,
+        whoCanMessage: 'everyone',
+      }),
+      getMessagingPrivacyForUsers: jest.fn().mockResolvedValue(new Map()),
+    };
+    groupInvites = { find: jest.fn().mockResolvedValue([]) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -272,6 +342,7 @@ describe('MessagingService', () => {
         MessagesService,
         MessageAnnotationsService,
         GroupsService,
+        GroupInvitesService,
         MessageRequestsService,
         { provide: getRepositoryToken(Conversation), useValue: conversations },
         {
@@ -279,6 +350,7 @@ describe('MessagingService', () => {
           useValue: participants,
         },
         { provide: getRepositoryToken(Message), useValue: messages },
+        { provide: getRepositoryToken(GroupInvite), useValue: groupInvites },
         { provide: getRepositoryToken(MessageReaction), useValue: reactions },
         {
           provide: getRepositoryToken(ConversationPinnedMessage),
@@ -313,6 +385,7 @@ describe('MessagingService', () => {
           // the delete specs below.
           useValue: storage,
         },
+        { provide: PreferencesService, useValue: preferences },
       ],
     }).compile();
     service = module.get(MessagingService);
@@ -411,6 +484,10 @@ describe('MessagingService', () => {
       expect(result.map((c) => c.id)).toEqual(['c1', 'c2']); // newest-first
       expect(result[0]!.unreadCount).toBe(2);
       expect(result[1]!.unreadCount).toBe(0); // absent from unread rows
+      // ENG-195: the caller's OWN read watermark, from the participant row the
+      // inbox already loaded (c1 was never read, c2 was).
+      expect(result[0]!.myLastReadAt).toBeNull();
+      expect(result[1]!.myLastReadAt).toEqual(expect.any(String));
       // Contract shape: `otherParticipant` with handle/displayName, not the
       // internal slug/firstName/lastName.
       expect(result[0]!.otherParticipant).toEqual({
@@ -631,6 +708,137 @@ describe('MessagingService', () => {
         'me',
       );
     });
+
+    // Messaging scan section 8 (Groups), item 9: `canManageInviteLink`/
+    // `canTransferOwnership`/`canDissolve` are computed from the caller's own
+    // role/leftAt and the group's dissolvedAt, exactly like
+    // `GroupsService.toGroupConversationResponse`, instead of the old
+    // hardcoded `false` that told every owner they could never dissolve
+    // their own group.
+    it('computes canManageInviteLink/canTransferOwnership/canDissolve for a GROUP from role + dissolvedAt', async () => {
+      stubMyParticipants([
+        {
+          conversationId: 'g-owner',
+          userId: 'me',
+          muted: false,
+          lastReadAt: null,
+          role: ConversationRole.Owner,
+          leftAt: null,
+        },
+        {
+          conversationId: 'g-admin',
+          userId: 'me',
+          muted: false,
+          lastReadAt: null,
+          role: ConversationRole.Admin,
+          leftAt: null,
+        },
+        {
+          conversationId: 'g-dissolved',
+          userId: 'me',
+          muted: false,
+          lastReadAt: null,
+          role: ConversationRole.Owner,
+          leftAt: new Date('2026-04-01T00:00:00Z'),
+        },
+      ]);
+      participants.find.mockResolvedValueOnce([
+        {
+          conversationId: 'g-owner',
+          userId: 'them',
+          role: ConversationRole.Member,
+          leftAt: null,
+        },
+        {
+          conversationId: 'g-admin',
+          userId: 'them',
+          role: ConversationRole.Member,
+          leftAt: null,
+        },
+        {
+          conversationId: 'g-dissolved',
+          userId: 'them',
+          role: ConversationRole.Member,
+          leftAt: new Date('2026-04-01T00:00:00Z'),
+        },
+      ]);
+      conversations.find.mockResolvedValueOnce([
+        {
+          id: 'g-owner',
+          kind: ConversationKind.Group,
+          isOfficial: false,
+          title: 'Owner group',
+          avatarUrl: null,
+          description: null,
+          inviteToken: null,
+          dissolvedAt: null,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        {
+          id: 'g-admin',
+          kind: ConversationKind.Group,
+          isOfficial: false,
+          title: 'Admin group',
+          avatarUrl: null,
+          description: null,
+          inviteToken: null,
+          dissolvedAt: null,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        {
+          id: 'g-dissolved',
+          kind: ConversationKind.Group,
+          isOfficial: false,
+          title: 'Ended group',
+          avatarUrl: null,
+          description: null,
+          inviteToken: null,
+          dissolvedAt: new Date('2026-04-01T00:00:00Z'),
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ]);
+      profiles.find.mockResolvedValueOnce([
+        {
+          userId: 'me',
+          slug: 'me-handle',
+          firstName: 'Me',
+          lastName: 'M',
+          avatarUrl: null,
+        },
+        {
+          userId: 'them',
+          slug: 'them-handle',
+          firstName: 'Them',
+          lastName: 'T',
+          avatarUrl: null,
+        },
+      ]);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(makeQb()) // lastMessagesByConversation
+        .mockReturnValueOnce(makeQb()) // unreadCountsByConversation
+        .mockReturnValueOnce(makeQb()); // hasUnreadMentionByConversation
+
+      const result = await service.listConversations('me');
+
+      const owner = result.find((c) => c.id === 'g-owner')!;
+      const admin = result.find((c) => c.id === 'g-admin')!;
+      const dissolved = result.find((c) => c.id === 'g-dissolved')!;
+
+      expect(owner.canManageInviteLink).toBe(true);
+      expect(owner.canTransferOwnership).toBe(true);
+      expect(owner.canDissolve).toBe(true);
+
+      // An admin manages the invite link but never transfers ownership or
+      // dissolves the group.
+      expect(admin.canManageInviteLink).toBe(true);
+      expect(admin.canTransferOwnership).toBe(false);
+      expect(admin.canDissolve).toBe(false);
+
+      // Even the owner loses every can* flag once the group has ended.
+      expect(dissolved.canManageInviteLink).toBe(false);
+      expect(dissolved.canTransferOwnership).toBe(false);
+      expect(dissolved.canDissolve).toBe(false);
+    });
   });
 
   describe('getMessages', () => {
@@ -642,6 +850,8 @@ describe('MessagingService', () => {
       });
     });
 
+    // The backward page reads one row past the clamped limit to decide
+    // `hasMore` exactly, hence 100 + 1 and 30 + 1.
     it('clamps the limit to MAX_LIMIT and defaults when unset', async () => {
       const qbBig = makeQb();
       const qbDefault = makeQb();
@@ -650,10 +860,10 @@ describe('MessagingService', () => {
         .mockReturnValueOnce(qbDefault);
 
       await service.getMessages('c1', 'me', { limit: 500 });
-      expect(qbBig.take).toHaveBeenCalledWith(100);
+      expect(qbBig.take).toHaveBeenCalledWith(101);
 
       await service.getMessages('c1', 'me', {});
-      expect(qbDefault.take).toHaveBeenCalledWith(30);
+      expect(qbDefault.take).toHaveBeenCalledWith(31);
     });
 
     // INCLUSIVE (`<=`), deliberately: without `beforeId` this is a single-column
@@ -685,15 +895,17 @@ describe('MessagingService', () => {
       );
     });
 
-    it('orders created_at DESC, id DESC and reads through the QueryBuilder (soft-delete excluded)', async () => {
+    it('orders created_at DESC, id DESC and opts into soft-deleted rows with withDeleted so tombstones stay in the thread', async () => {
       const qb = makeQb();
       messages.createQueryBuilder.mockReturnValueOnce(qb);
       await service.getMessages('c1', 'me', {});
       expect(qb.orderBy).toHaveBeenCalledWith('m.created_at', 'DESC');
       expect(qb.addOrderBy).toHaveBeenCalledWith('m.id', 'DESC');
-      // Going through createQueryBuilder is what applies the @DeleteDateColumn
-      // soft-delete filter (raw SQL would not).
+      // The QueryBuilder would drop @DeleteDateColumn rows by default; the
+      // thread read calls `.withDeleted()` so a message deleted for everyone
+      // still renders as a tombstone in history.
       expect(messages.createQueryBuilder).toHaveBeenCalledWith('m');
+      expect(qb.withDeleted).toHaveBeenCalled();
     });
 
     it('rejects a non-participant', async () => {
@@ -729,7 +941,16 @@ describe('MessagingService', () => {
 
       await service.getMessages('c1', 'me', { cursor: 'not-a-real-cursor' });
 
-      expect(qb.andWhere).not.toHaveBeenCalled();
+      // The "delete for me" NOT EXISTS predicate always applies; only the
+      // keyset predicates must be absent.
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        '(m.created_at, m.id) < (:before::timestamptz, :beforeId::uuid)',
+        expect.anything(),
+      );
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        'm.created_at <= :before',
+        expect.anything(),
+      );
     });
 
     it('prefers an explicit `before`/`beforeId` over `cursor` when both are given', async () => {
@@ -790,7 +1011,8 @@ describe('MessagingService', () => {
 
       const result = await service.getMessages('c1', 'me', {});
 
-      expect(result).toEqual([
+      expect(result.pageInfo).toEqual({ nextCursor: null, hasMore: false });
+      expect(result.data).toEqual([
         {
           id: 'm2',
           conversationId: 'c1',
@@ -851,7 +1073,7 @@ describe('MessagingService', () => {
         },
       ]);
       // The internal `senderId` is gone: the frontend reads `sender` only.
-      expect(result[0]).not.toHaveProperty('senderId');
+      expect(result.data[0]).not.toHaveProperty('senderId');
       // Senders are hydrated in ONE query for the whole page, not per message.
       expect(profiles.find).toHaveBeenCalledTimes(1);
     });
@@ -875,9 +1097,10 @@ describe('MessagingService', () => {
 
       // Never null/undefined — the frontend adapter reads sender.displayName
       // unguarded and would throw a TypeError.
-      expect(result[0]!.sender).toEqual({
+      expect(result.data[0]!.sender).toEqual({
         handle: '',
         displayName: 'Member',
+        pronouns: null,
         avatarUrl: null,
       });
     });
@@ -887,8 +1110,204 @@ describe('MessagingService', () => {
       qb.getMany.mockResolvedValue([]);
       messages.createQueryBuilder.mockReturnValueOnce(qb);
 
-      await expect(service.getMessages('c1', 'me', {})).resolves.toEqual([]);
+      await expect(service.getMessages('c1', 'me', {})).resolves.toEqual({
+        data: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      });
       expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('fetches limit + 1 rows, returns `limit`, and cursors the oldest returned row at its exact timestamp', async () => {
+      const qb = makeQb();
+      const messageRow = (id: string, createdAt: string) => ({
+        id,
+        conversationId: 'c1',
+        senderId: 'them',
+        body: 'hi',
+        createdAt: new Date(createdAt),
+        editedAt: null,
+      });
+      const newestRow = messageRow(
+        '33333333-3333-4333-8333-333333333333',
+        '2026-01-01T00:00:00.125Z',
+      );
+      // The JS Date only holds .123; Postgres holds .123456 (see the raw row).
+      const boundaryRow = messageRow(
+        '22222222-2222-4222-8222-222222222222',
+        '2026-01-01T00:00:00.123Z',
+      );
+      const probeRow = messageRow(
+        '11111111-1111-4111-8111-111111111111',
+        '2026-01-01T00:00:00.123Z',
+      );
+      qb.getRawAndEntities.mockResolvedValue({
+        entities: [newestRow, boundaryRow, probeRow],
+        raw: [
+          {
+            m_id: newestRow.id,
+            cursor_created_at: '2026-01-01T00:00:00.125000Z',
+          },
+          {
+            m_id: boundaryRow.id,
+            cursor_created_at: '2026-01-01T00:00:00.123456Z',
+          },
+          {
+            m_id: probeRow.id,
+            cursor_created_at: '2026-01-01T00:00:00.123400Z',
+          },
+        ],
+      });
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      const result = await service.getMessages('c1', 'me', { limit: 2 });
+
+      expect(qb.take).toHaveBeenCalledWith(3);
+      expect(qb.addSelect).toHaveBeenCalledWith(
+        expect.stringContaining('HH24:MI:SS.US'),
+        'cursor_created_at',
+      );
+      expect(result.data.map((message) => message.id)).toEqual([
+        newestRow.id,
+        boundaryRow.id,
+      ]);
+      expect(result.pageInfo).toEqual({
+        hasMore: true,
+        nextCursor: Buffer.from(
+          `2026-01-01T00:00:00.123456Z|${boundaryRow.id}`,
+        ).toString('base64'),
+      });
+    });
+
+    // Defensive only: with no join every entity has a raw row. If one is ever
+    // missing the page still gets a cursor, at millisecond precision.
+    it('falls back to a millisecond cursor when the oldest row has no raw timestamp', async () => {
+      const qb = makeQb();
+      const messageRow = (id: string, createdAt: string) => ({
+        id,
+        conversationId: 'c1',
+        senderId: 'them',
+        body: 'hi',
+        createdAt: new Date(createdAt),
+        editedAt: null,
+      });
+      const oldestReturnedRow = messageRow(
+        '22222222-2222-4222-8222-222222222222',
+        '2026-01-01T00:00:00.123Z',
+      );
+      const probeRow = messageRow(
+        '11111111-1111-4111-8111-111111111111',
+        '2026-01-01T00:00:00.100Z',
+      );
+      qb.getRawAndEntities.mockResolvedValue({
+        entities: [oldestReturnedRow, probeRow],
+        raw: [
+          {
+            m_id: probeRow.id,
+            cursor_created_at: '2026-01-01T00:00:00.100000Z',
+          },
+        ],
+      });
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      const result = await service.getMessages('c1', 'me', { limit: 1 });
+
+      expect(result.pageInfo).toEqual({
+        hasMore: true,
+        nextCursor: Buffer.from(
+          `2026-01-01T00:00:00.123Z|${oldestReturnedRow.id}`,
+        ).toString('base64'),
+      });
+    });
+
+    it('reports no further page when at most `limit` rows come back', async () => {
+      const qb = makeQb();
+      qb.getMany.mockResolvedValue([
+        {
+          id: 'm1',
+          conversationId: 'c1',
+          senderId: 'them',
+          body: 'hi',
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+          editedAt: null,
+        },
+      ]);
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      const result = await service.getMessages('c1', 'me', { limit: 1 });
+
+      expect(qb.take).toHaveBeenCalledWith(2);
+      expect(result.data).toHaveLength(1);
+      expect(result.pageInfo).toEqual({ nextCursor: null, hasMore: false });
+    });
+
+    // Same-millisecond boundary: `messages.created_at` stores microseconds. A
+    // millisecond cursor (.123) for a boundary row at .123456 would make the
+    // strict tuple `<` treat every older row in [.123000, .123456) as newer,
+    // so those rows would never appear on any page. The cursor text is bound
+    // verbatim instead.
+    it('binds a microsecond cursor verbatim so rows sharing the boundary millisecond are not skipped', async () => {
+      const qb = makeQb();
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+      const cursor = Buffer.from(
+        '2026-01-01T00:00:00.123456Z|22222222-2222-4222-8222-222222222222',
+      ).toString('base64');
+
+      await service.getMessages('c1', 'me', { cursor });
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        '(m.created_at, m.id) < (:before::timestamptz, :beforeId::uuid)',
+        {
+          before: '2026-01-01T00:00:00.123456Z',
+          beforeId: '22222222-2222-4222-8222-222222222222',
+        },
+      );
+    });
+
+    // Both halves are cast in SQL (`::timestamptz`, `::uuid`), so a forged value
+    // must fall back to the first page instead of surfacing as a 500.
+    it.each([
+      ['a non-uuid id', '2026-01-01T00:00:00.000Z|not-a-uuid'],
+      [
+        'an impossible date',
+        '2026-02-30T00:00:00.000Z|22222222-2222-4222-8222-222222222222',
+      ],
+    ])('treats a cursor with %s as no cursor', async (_label, rawCursor) => {
+      const qb = makeQb();
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      await service.getMessages('c1', 'me', {
+        cursor: Buffer.from(rawCursor).toString('base64'),
+      });
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        '(m.created_at, m.id) < (:before::timestamptz, :beforeId::uuid)',
+        expect.anything(),
+      );
+    });
+
+    it('keeps the forward reconcile path (`after`) a bare array', async () => {
+      const qb = makeQb();
+      qb.getMany.mockResolvedValue([
+        {
+          id: 'm1',
+          conversationId: 'c1',
+          senderId: 'them',
+          body: 'hi',
+          createdAt: new Date('2026-01-02T00:00:00Z'),
+          editedAt: null,
+        },
+      ]);
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      const result = await service.getMessages('c1', 'me', {
+        after: '2026-01-01T00:00:00.000Z',
+        afterId: '11111111-1111-4111-8111-111111111111',
+      });
+
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.map((message) => message.id)).toEqual(['m1']);
+      expect(qb.take).toHaveBeenCalledWith(30);
+      expect(qb.getRawAndEntities).not.toHaveBeenCalled();
     });
   });
 
@@ -982,6 +1401,78 @@ describe('MessagingService', () => {
         .map((call: [string]) => call[0])
         .join(' | ');
       expect(predicates).toContain('m.created_at <= :leftAt');
+    });
+
+    // PRD-354: a block does not dissolve a GROUP, so a blocked-either-way
+    // sender's messages otherwise keep showing to every other member.
+    it('getMessages applies the block filter IN SQL for a GROUP conversation', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+        clearedAt: null,
+        leftAt: null,
+      });
+      conversations.findOne.mockResolvedValue({
+        id: 'conv-1',
+        kind: ConversationKind.Group,
+      });
+      const queryBuilder = makeQb();
+      queryBuilder.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getMessages('conv-1', 'user-1', {});
+
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        'user-1',
+        '"m"."sender_id"',
+      );
+    });
+
+    it('getMessages does NOT apply the block filter for a DM', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+        clearedAt: null,
+        leftAt: null,
+      });
+      conversations.findOne.mockResolvedValue({
+        id: 'conv-1',
+        kind: ConversationKind.Direct,
+      });
+      const queryBuilder = makeQb();
+      queryBuilder.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getMessages('conv-1', 'user-1', {});
+
+      expect(blockFilter.excludeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('getMessages forward reconnect-sync (`after`) also applies the block filter for a GROUP', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+        clearedAt: null,
+        leftAt: null,
+      });
+      conversations.findOne.mockResolvedValue({
+        id: 'conv-1',
+        kind: ConversationKind.Group,
+      });
+      const queryBuilder = makeQb();
+      queryBuilder.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getMessages('conv-1', 'user-1', {
+        after: '2026-01-02T00:00:00.000Z',
+      });
+
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        'user-1',
+        '"m"."sender_id"',
+      );
     });
   });
 
@@ -1143,7 +1634,7 @@ describe('MessagingService', () => {
   });
 
   describe('setMuted', () => {
-    it('saves the participant with the new muted flag', async () => {
+    it('updates the participant with the new muted flag', async () => {
       participants.findOne.mockResolvedValueOnce({
         conversationId: 'c1',
         userId: 'me',
@@ -1151,7 +1642,10 @@ describe('MessagingService', () => {
       });
       const result = await service.setMuted('c1', 'me', true);
       expect(result).toEqual({ ok: true });
-      expect(participants.save).toHaveBeenCalledWith(
+      // ENG-247: a targeted UPDATE on the columns this preference owns, not
+      // a load-then-save() of the whole participant row.
+      expect(participants.update).toHaveBeenCalledWith(
+        { conversationId: 'c1', userId: 'me' },
         expect.objectContaining({ muted: true }),
       );
     });
@@ -1343,6 +1837,116 @@ describe('MessagingService', () => {
       const [, , , excludeUserIds] = mentions.notify.mock.calls[0]!;
       expect(excludeUserIds).toEqual([]);
     });
+
+    // PRD-340 (one-tap reply): a non-connected 1:1 thread is no longer an
+    // unconditional dead end for both sides.
+    describe('the one-tap-reply gate (PRD-340)', () => {
+      it('lets the member who did NOT initiate the thread send, and opens it', async () => {
+        participants.findOne
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        conversations.findOne.mockResolvedValue({
+          id: 'c1',
+          isOfficial: false,
+          initiatorUserId: 'them', // 'me' (the sender here) did NOT start it
+          openedAt: null,
+        });
+        connections.areConnected.mockResolvedValue(false);
+
+        await expect(
+          service.sendMessage('c1', 'me', 'hi'),
+        ).resolves.toBeDefined();
+        expect(conversations.update).toHaveBeenCalledWith('c1', {
+          openedAt: expect.any(Date),
+        });
+      });
+
+      it('still refuses the INITIATOR until the other side has replied', async () => {
+        participants.findOne
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        conversations.findOne.mockResolvedValue({
+          id: 'c1',
+          isOfficial: false,
+          initiatorUserId: 'me', // the SENDER here started the thread
+          openedAt: null,
+        });
+        connections.areConnected.mockResolvedValue(false);
+
+        await expect(
+          service.sendMessage('c1', 'me', 'are you there?'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(conversations.update).not.toHaveBeenCalled();
+      });
+
+      it('lets EITHER side send once the thread has been opened', async () => {
+        participants.findOne
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        conversations.findOne.mockResolvedValue({
+          id: 'c1',
+          isOfficial: false,
+          initiatorUserId: 'me', // the sender started it, but it is now open
+          openedAt: new Date('2026-01-01T00:00:00.000Z'),
+        });
+        connections.areConnected.mockResolvedValue(false);
+
+        await expect(
+          service.sendMessage('c1', 'me', 'following up'),
+        ).resolves.toBeDefined();
+        // Already open, so no need to flip it again.
+        expect(conversations.update).not.toHaveBeenCalled();
+      });
+
+      // A pre-migration DM with no messages ever sent has no known initiator
+      // (see the backfill migration's own comment). The platform's original,
+      // unconditional rule still applies to it.
+      it('keeps refusing both sides of a pre-migration thread with no known initiator', async () => {
+        participants.findOne
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        conversations.findOne.mockResolvedValue({
+          id: 'c1',
+          isOfficial: false,
+          initiatorUserId: null,
+          openedAt: null,
+        });
+        connections.areConnected.mockResolvedValue(false);
+
+        await expect(
+          service.sendMessage('c1', 'me', 'hello?'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+
+      // BLOCKING safety case: two members were connected, exchanged messages,
+      // then disconnected. Neither the backfill migration nor the live gate
+      // may infer "opened" from that ordinary history (only the explicit
+      // mechanism opens a thread), so the thread has NO recorded initiator
+      // and BOTH sides stay refused after the disconnect, not just one.
+      it('keeps refusing BOTH sides of a formerly-connected pair whose DM has no recorded initiator', async () => {
+        conversations.findOne.mockResolvedValue({
+          id: 'c1',
+          isOfficial: false,
+          initiatorUserId: null,
+          openedAt: null,
+        });
+        connections.areConnected.mockResolvedValue(false);
+
+        participants.findOne
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+        await expect(
+          service.sendMessage('c1', 'me', 'hey, still there?'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+
+        participants.findOne
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' })
+          .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' });
+        await expect(
+          service.sendMessage('c1', 'them', 'hey, still there?'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+    });
   });
 
   describe('messageRequest', () => {
@@ -1392,6 +1996,110 @@ describe('MessagingService', () => {
     });
   });
 
+  describe('enquiryContactability (PRD-340)', () => {
+    it('never requires a connection to reply while the enquiry can be delivered, and says so truthfully whether or not they are connected', async () => {
+      connections.areConnected.mockResolvedValueOnce(false);
+      const notConnected = await messageRequestsService.enquiryContactability(
+        'me',
+        'them',
+      );
+      expect(notConnected).toEqual({
+        canDeliver: true,
+        blockedReason: null,
+        replyRequiresConnection: false,
+        followUpAwaitsReply: true,
+      });
+
+      connections.areConnected.mockResolvedValueOnce(true);
+      const alreadyConnected =
+        await messageRequestsService.enquiryContactability('me', 'them');
+      expect(alreadyConnected).toEqual({
+        canDeliver: true,
+        blockedReason: null,
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+    });
+
+    it('still refuses self-enquiry and a block either way, regardless of connection', async () => {
+      const self = await messageRequestsService.enquiryContactability(
+        'me',
+        'me',
+      );
+      expect(self).toEqual({
+        canDeliver: false,
+        blockedReason: 'self',
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      const blocked = await messageRequestsService.enquiryContactability(
+        'me',
+        'them',
+      );
+      expect(blocked).toEqual({
+        canDeliver: false,
+        blockedReason: 'blocked',
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+      // Self and block short-circuit before the connection lookup: nothing
+      // will be delivered, so there is nothing to explain to the enquirer.
+      expect(connections.areConnected).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deliverEnquiry (PRD-340)', () => {
+    it('claims the initiator on an EXISTING thread that has none yet, since a fresh enquiry is itself fresh cold contact', async () => {
+      conversations.findOne.mockResolvedValueOnce({
+        id: 'c1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        initiatorUserId: null,
+        openedAt: null,
+      });
+
+      await messageRequestsService.deliverEnquiry(
+        'me',
+        'them',
+        'Is this room still available?',
+      );
+
+      expect(conversations.update).toHaveBeenCalledWith('c1', {
+        initiatorUserId: 'me',
+      });
+    });
+
+    it('does NOT claim the initiator on an existing thread that already has one', async () => {
+      conversations.findOne.mockResolvedValueOnce({
+        id: 'c1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        initiatorUserId: 'them',
+        openedAt: null,
+      });
+
+      await messageRequestsService.deliverEnquiry('me', 'them', 'hi again');
+
+      expect(conversations.update).not.toHaveBeenCalled();
+    });
+
+    it('does NOT claim the initiator on an existing thread that is already open', async () => {
+      conversations.findOne.mockResolvedValueOnce({
+        id: 'c1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        initiatorUserId: 'them',
+        openedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      await messageRequestsService.deliverEnquiry('me', 'them', 'hi again');
+
+      expect(conversations.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createConversation', () => {
     const recipient = {
       userId: 'them',
@@ -1434,25 +2142,70 @@ describe('MessagingService', () => {
       expect(result.replyRequiresConnection).toBe(false);
     });
 
-    it('sets replyRequiresConnection (PRD-220) when the two are not accepted connections — e.g. the thread a housing enquiry opened cold', async () => {
+    // PRD-343: a FRESH thread between two non-connections is now refused
+    // outright. Cold first contact goes through a message request/enquiry
+    // instead, which seeds an explicit `initiatorUserId` this endpoint does
+    // not. Supersedes the old "sets replyRequiresConnection" case, which
+    // exercised exactly this create-a-fresh-non-connected-thread path and
+    // expected it to succeed; that is no longer this endpoint's contract.
+    it('refuses to create a FRESH thread between two members who are not accepted connections (PRD-343)', async () => {
       profiles.findOne.mockResolvedValueOnce(recipient);
+      connections.areConnected.mockResolvedValueOnce(false);
+      // The gate's own existing-thread lookup (by pairKey): no row yet.
       conversations.findOne.mockResolvedValueOnce(null);
-      const created = {
-        id: 'convo-1',
+
+      await expect(
+        service.createConversation('me', 'tam-rivera'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    // PRD-340/343: an EXISTING thread the reply gate already reads "open" for
+    // THIS caller. Here, the caller did not initiate it, so their very next
+    // ordinary reply is allowed, and it is still returned rather than
+    // refused, even though the two are not accepted connections.
+    it('reuses an EXISTING thread the reply gate already reads open for this caller (PRD-340)', async () => {
+      profiles.findOne.mockResolvedValueOnce(recipient);
+      connections.areConnected.mockResolvedValueOnce(false); // the gate's own check
+      const existingConversation = {
+        id: 'convo-open',
         isOfficial: false,
         pairKey: 'me:them',
         createdAt: new Date('2026-07-01T00:00:00.000Z'),
+        initiatorUserId: 'them', // the OTHER member started this thread
+        openedAt: null,
       };
-      dataSource.transaction.mockResolvedValueOnce(created);
+      conversations.findOne.mockResolvedValue(existingConversation);
       profiles.find.mockResolvedValueOnce([recipient]);
       messages.createQueryBuilder
         .mockReturnValueOnce(makeQb())
         .mockReturnValueOnce(makeQb());
-      connections.areConnected.mockResolvedValueOnce(false);
+      connections.areConnected.mockResolvedValueOnce(false); // toConversationResponse's own check
 
       const result = await service.createConversation('me', 'tam-rivera');
 
-      expect(result.replyRequiresConnection).toBe(true);
+      expect(result.id).toBe('convo-open');
+      expect(result.replyGate).toBe('open');
+      expect(result.replyRequiresConnection).toBe(false);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    // The mirror image: an existing thread exists, but THIS caller is the one
+    // who started it and the other side hasn't replied yet, so still refused.
+    it('still refuses when an existing thread is awaiting the OTHER side to reply, not this caller (PRD-340)', async () => {
+      profiles.findOne.mockResolvedValueOnce(recipient);
+      connections.areConnected.mockResolvedValueOnce(false);
+      conversations.findOne.mockResolvedValueOnce({
+        id: 'convo-awaiting',
+        isOfficial: false,
+        pairKey: 'me:them',
+        initiatorUserId: 'me',
+        openedAt: null,
+      });
+
+      await expect(
+        service.createConversation('me', 'tam-rivera'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
     it('is idempotent: calling twice returns the same conversation id, only creating once', async () => {
@@ -1764,6 +2517,141 @@ describe('MessagingService', () => {
 
       expect(storage.deleteObjectByReference).not.toHaveBeenCalled();
       expect(emitter.emit).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// DES-220: a reply quote carries its parent's kind plus the media a quote needs
+// (a thumbnail for a photo/GIF, a file name for a document), resolved through
+// the same `resolveAttachment` path the parent's own bubble uses, and withheld
+// once the parent is gone. Absolute `https://` URLs pass `toImageUrl` through
+// unchanged, so these cases need no image-URL base configured.
+describe('buildReplyTo (DES-220 media quote)', () => {
+  type ReplyParent = Pick<
+    Message,
+    'id' | 'body' | 'senderId' | 'deletedAt' | 'kind' | 'attachment'
+  >;
+  const profileByUser = new Map<string, Profile>([
+    ['ana', { firstName: 'Ana', lastName: 'Silva' } as Profile],
+  ]);
+  const parentMap = (parent: ReplyParent) =>
+    new Map<string, ReplyParent>([[parent.id, parent]]);
+
+  it('reports an image parent with its kind and resolved preview thumbnail', () => {
+    const quote = buildReplyTo(
+      'p1',
+      parentMap({
+        id: 'p1',
+        body: 'Photo',
+        senderId: 'ana',
+        deletedAt: null,
+        kind: MessageKind.Image,
+        attachment: {
+          url: 'https://cdn.example/full.jpg',
+          previewUrl: 'https://cdn.example/preview.jpg',
+          width: 800,
+          height: 600,
+          provider: 'upload',
+        },
+      }),
+      profileByUser,
+    );
+
+    expect(quote).toEqual({
+      id: 'p1',
+      snippet: 'Photo',
+      senderName: 'Ana Silva',
+      deleted: false,
+      kind: 'image',
+      thumbnailUrl: 'https://cdn.example/preview.jpg',
+      fileName: null,
+    });
+  });
+
+  it('reports a document parent with its file name and no thumbnail', () => {
+    const quote = buildReplyTo(
+      'p2',
+      parentMap({
+        id: 'p2',
+        body: 'Document',
+        senderId: 'ana',
+        deletedAt: null,
+        kind: MessageKind.Document,
+        attachment: {
+          url: 'https://cdn.example/lease.pdf',
+          fileName: 'lease.pdf',
+          byteSize: 2048,
+          contentType: 'application/pdf',
+          provider: 'upload',
+        },
+      }),
+      profileByUser,
+    );
+
+    expect(quote).toMatchObject({
+      kind: 'document',
+      thumbnailUrl: null,
+      fileName: 'lease.pdf',
+      deleted: false,
+    });
+  });
+
+  it('keeps the kind but nulls the thumbnail and file name for a deleted parent', () => {
+    const quote = buildReplyTo(
+      'p3',
+      parentMap({
+        id: 'p3',
+        body: 'Photo',
+        senderId: 'ana',
+        deletedAt: new Date('2026-01-01T00:00:00Z'),
+        kind: MessageKind.Image,
+        attachment: {
+          url: 'https://cdn.example/full.jpg',
+          previewUrl: 'https://cdn.example/preview.jpg',
+          width: 800,
+          height: 600,
+          provider: 'upload',
+        },
+      }),
+      profileByUser,
+    );
+
+    expect(quote).toMatchObject({
+      deleted: true,
+      snippet: '',
+      kind: 'image',
+      thumbnailUrl: null,
+      fileName: null,
+    });
+  });
+
+  it('withholds the media of a parent a moderator took down for this viewer', () => {
+    const quote = buildReplyTo(
+      'p4',
+      parentMap({
+        id: 'p4',
+        body: 'Document',
+        senderId: 'ana',
+        deletedAt: null,
+        kind: MessageKind.Document,
+        attachment: {
+          url: 'https://cdn.example/lease.pdf',
+          fileName: 'lease.pdf',
+          byteSize: 2048,
+          contentType: 'application/pdf',
+          provider: 'upload',
+        },
+      }),
+      profileByUser,
+      new Set(['p4']),
+    );
+
+    expect(quote).toMatchObject({
+      deleted: true,
+      snippet: '',
+      kind: 'document',
+      thumbnailUrl: null,
+      fileName: null,
     });
   });
 });

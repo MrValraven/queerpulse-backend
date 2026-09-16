@@ -1363,6 +1363,53 @@ export enum NotificationType {
    * See migration `AddForumThreadReviewedNotificationType1817320000000`.
    */
   ForumThreadReviewed = 'forum_thread_reviewed',
+  /**
+   * PRD-334. A group owner or admin added this member to a group conversation,
+   * either when the group was created or later through "Add members". Written
+   * by `GroupNotificationsListener` on `GROUP_MEMBERS_ADDED`, one row per added
+   * member, after the membership has committed.
+   *
+   * WHY IT EXISTS. Being added used to be silent outside the Messages inbox: the
+   * group appeared in the list, but no bell row and no push told the member
+   * somebody had put them in a room with other people. Consent-sensitive by
+   * nature, so the member hears about it the moment it happens.
+   *
+   * MEMBER-DRIVEN. `actorId` is the adder, passed to `createForRecipients` so a
+   * recipient who blocked or muted them gets no row (and so no push).
+   *
+   * CATEGORY `NewMessages`: it is messaging activity, and a member who turned
+   * message alerts down has asked for exactly this kind of buzz to stop.
+   *
+   * PAYLOAD: `{ source: 'message', conversationId, groupTitle, actorId }`.
+   * `source` + `conversationId` build the `/messages?c=<conversationId>` deep
+   * link on both the bell and the push.
+   *
+   * See migration `AddGroupAddedNotificationType1818700000000`.
+   */
+  GroupAdded = 'group_added',
+  /**
+   * PRD-353. Sent to a member when an owner/admin's add cannot seat them
+   * directly and becomes an invite instead: their own `group_add_policy` is
+   * `invite_only`, or they have a prior left/removed row in that exact group
+   * (never silently re-seated). Written off `GROUP_INVITE_CREATED`, the same
+   * shape `GroupAdded` uses.
+   *
+   * MEMBER-DRIVEN. `actorId` is the inviter, so a recipient who blocked or
+   * muted them gets no row, mirroring `GroupAdded`.
+   *
+   * CATEGORY `NewMessages`, same reasoning as `GroupAdded`: this is messaging
+   * activity, and the member who turned message alerts down asked for this
+   * buzz to stop too. The invite itself still appears on `GET /group-invites`
+   * regardless.
+   *
+   * PAYLOAD: `{ source: 'message', conversationId, groupTitle, actorId }`,
+   * mirroring `GroupAdded`. The bell deep-links to the Messages Requests tab
+   * rather than the conversation itself, since the recipient is not yet a
+   * participant.
+   *
+   * See migration `AddGroupConsentInvitesAndDissolve1819000000000`.
+   */
+  GroupInvite = 'group_invite',
 }
 
 @Entity('notifications')

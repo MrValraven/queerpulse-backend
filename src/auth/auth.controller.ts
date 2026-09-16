@@ -24,8 +24,10 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { timingSafeEqual } from 'node:crypto';
+import { isURL } from 'class-validator';
 import { Request, Response } from 'express';
-import { User } from '../users/entities/user.entity';
+import { PushService } from '../push/push.service';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { JoinRequestsService } from '../membership/join-requests.service';
 import {
@@ -51,6 +53,11 @@ import { Public } from './decorators/public.decorator';
 import { ActiveMemberGuard } from './guards/active-member.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard';
+import { SocketTicketThrottlerGuard } from './socket-ticket-throttler.guard';
+import {
+  SocketTicketMintResult,
+  SocketTicketService,
+} from './socket-ticket.service';
 import { decodeOAuthState } from './oauth-state';
 import {
   reauthFailureUrl,
@@ -67,6 +74,32 @@ import {
 } from '../consent/policy-versions';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
+
+/** Same ceiling `PushSubscribeDto.endpoint` stores, so no longer value can match a row. */
+const PUSH_ENDPOINT_MAX_LENGTH = 1024;
+
+/**
+ * The optional `pushEndpoint` a logout body carries, or `null` when it is
+ * absent or not an https URL `PushSubscribeDto` would have accepted. Never
+ * throws: logout ignores anything invalid and carries on.
+ */
+export function signedOutPushEndpoint(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const candidate = (body as Record<string, unknown>).pushEndpoint;
+  if (
+    typeof candidate !== 'string' ||
+    candidate.length === 0 ||
+    candidate.length > PUSH_ENDPOINT_MAX_LENGTH
+  ) {
+    return null;
+  }
+  const isHttpsUrl = isURL(candidate, {
+    require_protocol: true,
+    protocols: ['https'],
+    require_tld: true,
+  });
+  return isHttpsUrl ? candidate : null;
+}
 
 // This controller inherits the app-wide `defaultVersion: '1'`, so its routes
 // answer at `/v1/auth/...` — which is where the SPA's versioned API client
@@ -97,6 +130,15 @@ export class AuthController {
     // PRD-14: lets an `invite_required` rejection hand a lost status
     // token back to the applicant Google has just verified.
     private readonly joinRequestsService: JoinRequestsService,
+    // ENG-225: `logout` removes this device's push subscription in the same
+    // request that revokes its session.
+    private readonly pushService: PushService,
+    // ENG-219 (frontend half): mints the single-use `session:reauth` ticket
+    // `POST /auth/socket-ticket` hands back. This is the shared process-wide
+    // singleton `ChatGateway` also redeems against. See
+    // `SocketTicketService`'s own doc for why DI resolves it via a
+    // `useValue` provider rather than a normal class construction.
+    private readonly socketTickets: SocketTicketService,
   ) {}
 
   /**
@@ -366,13 +408,33 @@ export class AuthController {
   async logout(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    // Typed `unknown` on purpose: the global ValidationPipe skips it, so a
+    // malformed body is ignored here instead of failing the logout with a 400
+    // before the cookies are cleared. Read through `signedOutPushEndpoint`.
+    @Body() body: unknown,
   ): Promise<{ ok: true }> {
     const raw = this.presentingRefreshToken(req);
     if (raw) {
+      let ownerId: string | null = null;
       try {
-        await this.authService.revokeRefreshToken(raw);
+        ownerId = await this.authService.revokeRefreshToken(raw);
       } catch {
         // Best-effort: a bad/unknown refresh token must not block logout.
+      }
+      // ENG-225: the client names this device's push endpoint in the logout
+      // request itself, so sign-out is one request dispatched at the click and
+      // this device stops receiving the member's pushes even when the tab is
+      // closed straight after. Removed only for the owner of the live session
+      // just revoked, and only as the exact `{ userId, endpoint }` row.
+      const pushEndpoint = signedOutPushEndpoint(body);
+      if (ownerId && pushEndpoint) {
+        try {
+          await this.pushService.removeSubscription(ownerId, pushEndpoint);
+        } catch {
+          // Best-effort: a push cleanup failure must not block logout. The
+          // browser drops the subscription too, so the next delivery attempt
+          // gets a 404/410 and prunes the row.
+        }
       }
     }
     clearAuthCookies(res, this.cookieOpts());
@@ -626,5 +688,53 @@ export class AuthController {
     clearAuthCookies(res, this.cookieOpts());
     clearCsrfCookie(res);
     return result;
+  }
+
+  /**
+   * Mint a short-lived, single-use ticket for `session:reauth` (ENG-219,
+   * frontend half). Authenticated the SAME way every other non-`@Public()`
+   * route on this controller is: the global `JwtAuthGuard` reads the
+   * httpOnly `access_token` cookie, and, being a state-mutating POST, this
+   * also sits behind the global `CsrfGuard`. This adds no new auth
+   * mechanism, deliberately: the whole point of the ticket is to extend a
+   * socket while keeping the access token's own JWT out of JavaScript
+   * entirely (`access_token` is `httpOnly`), a stand-in for that JWT rather
+   * than a second credential.
+   *
+   * Costs no DB round trip: `current` is already the DB-fresh snapshot
+   * `JwtStrategy.validate` read for THIS request, so minting is pure
+   * in-memory work (`SocketTicketService.mint`). Deliberately does NOT spend
+   * a refresh-token rotation. See `SocketTicketService`'s own doc for why a
+   * ticket is a separate, cheap primitive rather than reusing `POST
+   * /auth/refresh`, which rotates a 30-day credential and is rate-limited
+   * far tighter than a routine ~15-minute socket renewal needs.
+   *
+   * `current.status` and `current.sessionId` are baked into the ticket at
+   * mint time and re-checked, unweakened, by `ChatGateway.handleReauth`'s
+   * `assertClaimsAdmitted` at REDEMPTION time: active status, platform
+   * lockdown, and session liveness, the same checks a token-based reauth or
+   * a fresh handshake would run. A suspended member, a signed-out session,
+   * or a platform lockdown enacted between mint and redeem all still refuse
+   * at redemption regardless of what this endpoint handed back.
+   */
+  @ApiOperation({
+    summary:
+      'Mint a short-lived, single-use ticket for extending an open chat socket via session:reauth.',
+  })
+  @ApiCookieAuth('access_token')
+  @ApiCreatedResponse({ description: 'Ticket minted.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded.' })
+  @UseGuards(SocketTicketThrottlerGuard, ActiveMemberGuard)
+  @Post('socket-ticket')
+  mintSocketTicket(
+    @CurrentUser() current: CurrentUserData,
+  ): SocketTicketMintResult {
+    return this.socketTickets.mint(
+      current.userId,
+      current.sessionId,
+      current.status as UserStatus,
+      this.config.getOrThrow<number>('auth.jwtAccessTtlMs'),
+    );
   }
 }

@@ -25,8 +25,8 @@ import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { isStorageKey } from './storage-key';
 import {
   MAGIC_BYTE_PREFIX_LENGTH,
+  contentDispositionForStorageKey,
   contentTypeForStorageKey,
-  inlineContentDispositionForStorageKey,
   magicBytesMatchContentType,
 } from './served-object';
 
@@ -170,13 +170,19 @@ export class StorageService {
   // into a presigned GET (S3 exposes no such override), so the controller sets
   // it as best-effort on its 302; the authoritative protection is this forced
   // `ResponseContentType` plus the magic-byte check in `validateImageMagicBytes`.
+  //
+  // PRD-369: `FilesController` streams a `message-document` itself and never
+  // redirects here for one, but other callers (the admin media console's
+  // `presignedUrl`) still mint a GET for any key. For that kind the signed
+  // disposition is `attachment` (see `contentDispositionForStorageKey`), so a
+  // document from another member never renders inline in the bucket's origin.
   async createPresignedDownload(key: string): Promise<string> {
     const contentType = contentTypeForStorageKey(key);
     const command = new GetObjectCommand({
       Bucket: this.requireConfig('storage.bucket'),
       Key: key,
       ...(contentType ? { ResponseContentType: contentType } : {}),
-      ResponseContentDisposition: inlineContentDispositionForStorageKey(key),
+      ResponseContentDisposition: contentDispositionForStorageKey(key),
     });
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,

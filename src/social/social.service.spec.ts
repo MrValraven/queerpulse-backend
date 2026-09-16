@@ -32,6 +32,10 @@ function qbStub(): Record<string, jest.Mock> {
     'into',
     'values',
     'orIgnore',
+    // PRD-363: the sever/restore updates in `connections/block-restore.ts`.
+    'update',
+    'set',
+    'returning',
   ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
@@ -233,17 +237,22 @@ describe('SocialService', () => {
         createdAt: new Date(),
       });
 
+      const updateQb = qbStub();
+      manager.createQueryBuilder.mockReturnValue(updateQb);
+
       await service.blockMember('me', 'them');
 
-      const [entity, where, set] = manager.update.mock.calls[0] as [
-        unknown,
-        { userLow: string; userHigh: string; status: unknown },
-        { status: string; blockedBy: string },
-      ];
-      expect(entity).toBeDefined();
-      // 'me' < 'them' lexicographically, so low/high resolve deterministically.
-      expect(where).toMatchObject({ userLow: 'me', userHigh: 'them' });
+      expect(updateQb.update).toHaveBeenCalledWith(Connection);
+      const [set] = updateQb.set!.mock.calls[0] as [Record<string, unknown>];
       expect(set).toMatchObject({ status: 'blocked', blockedBy: 'me' });
+      // PRD-363: the prior status is stashed in the same UPDATE.
+      expect(typeof set.statusBeforeBlock).toBe('function');
+      expect(typeof set.respondedAtBeforeBlock).toBe('function');
+      // 'me' < 'them' lexicographically, so low/high resolve deterministically.
+      expect(updateQb.where).toHaveBeenCalledWith(
+        '"user_low" = :low AND "user_high" = :high',
+        { low: 'me', high: 'them' },
+      );
     });
 
     it('emits MEMBER_BLOCKED so the gateway evicts the pair from their DM room (BE-MSG-01)', async () => {
@@ -339,21 +348,52 @@ describe('SocialService', () => {
 
     it('restores the connection edge this actor blocked (P1-3)', async () => {
       stubSlugResolution({ them: 'them' });
+      const updateQb = qbStub();
+      manager.createQueryBuilder.mockReturnValue(updateQb);
       await service.unblockMember('me', 'them');
       // Conditional flip: only a connection this actor blocked is reopened.
-      const [entity, where, set] = manager.update.mock.calls[0] as [
-        unknown,
-        Record<string, unknown>,
-        Record<string, unknown>,
-      ];
-      expect(entity).toBe(Connection);
-      expect(where).toMatchObject({
-        status: ConnectionStatus.Blocked,
-        blockedBy: 'me',
+      expect(updateQb.update).toHaveBeenCalledWith(Connection);
+      expect(updateQb.andWhere).toHaveBeenCalledWith('"status" = :blocked', {
+        blocked: ConnectionStatus.Blocked,
       });
+      expect(updateQb.andWhere).toHaveBeenCalledWith(
+        '"blocked_by" = :unblockerId',
+        { unblockerId: 'me' },
+      );
+      const [set] = updateQb.set!.mock.calls[0] as [Record<string, unknown>];
       expect(set).toMatchObject({
-        status: ConnectionStatus.Declined,
         blockedBy: null,
+        statusBeforeBlock: null,
+        respondedAtBeforeBlock: null,
+      });
+    });
+
+    it('reports the accepted connection it put back (PRD-363)', async () => {
+      stubSlugResolution({ them: 'them' });
+      const updateQb = qbStub();
+      updateQb.execute!.mockResolvedValue({
+        raw: [{ status: ConnectionStatus.Accepted }],
+        affected: 1,
+      });
+      manager.createQueryBuilder.mockReturnValue(updateQb);
+      await expect(service.unblockMember('me', 'them')).resolves.toEqual({
+        restoredStatus: 'accepted',
+      });
+    });
+
+    it('reports none when there was nothing to restore (PRD-363)', async () => {
+      stubSlugResolution({ them: 'them' });
+      await expect(service.unblockMember('me', 'them')).resolves.toEqual({
+        restoredStatus: 'none',
+      });
+    });
+
+    it('emits MEMBER_UNBLOCKED after the unblock commits (PRD-363)', async () => {
+      stubSlugResolution({ them: 'them' });
+      await service.unblockMember('me', 'them');
+      expect(eventEmitter.emit).toHaveBeenCalledWith('member.unblocked', {
+        unblockerId: 'me',
+        unblockedId: 'them',
       });
     });
   });

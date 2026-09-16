@@ -12,6 +12,18 @@ export enum ConversationRole {
   Member = 'member',
 }
 
+/**
+ * PRD-349: the mute MODE, a second axis independent of the `muted` boolean +
+ * `mutedUntil` timed expiry (see `muteMode`'s own column doc for exactly how
+ * the two interact). `All` is every pre-PRD-349 row and the default for a
+ * fresh one; `MentionsOnly` is the new choice offered alongside the 8-hour/
+ * 1-week/Always mute durations in the row menu.
+ */
+export enum ConversationMuteMode {
+  All = 'all',
+  MentionsOnly = 'mentionsOnly',
+}
+
 @Entity('conversation_participants')
 @Unique('UQ_conversation_participants', ['conversationId', 'userId'])
 export class ConversationParticipant {
@@ -39,6 +51,37 @@ export class ConversationParticipant {
   role!: ConversationRole;
 
   /**
+   * The owner/admin who removed this participant from a group (`removeMember`),
+   * else NULL. Set together with `leftAt` AND `removedAt` on a REMOVAL, left
+   * NULL on a voluntary leave. Cleared back to NULL on re-seat (an add or an
+   * accepted invite writes a fresh row's worth of state over the old one).
+   * `ON DELETE SET NULL`: a remover who later erases their account leaves no
+   * dangling reference here, so this column alone is NOT the durable record
+   * of a removal (see `removedAt`, which is). Kept for "who did it" display
+   * (a moderation/audit trail) even though it cannot anchor DES-227/228's
+   * severed-notice copy or the join-by-link removed gate on its own.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  removedBy!: string | null;
+
+  /**
+   * When this participant was REMOVED from a group (`removeMember`), else
+   * NULL: the durable counterpart to `removedBy`. Unlike `removedBy`, this
+   * column carries no FK, so it cannot be nulled out by the remover's own
+   * account later being deleted: `computeGroupLeftReason` reads THIS column's
+   * mere presence (not `removedBy`'s) to tell "removed" from "left", and
+   * `joinByToken`'s REMOVED_FROM_GROUP gate does the same, so a removed
+   * member's severed notice stays "You were removed from this group" (never
+   * quietly reading back as "You left this group") and a removed member can
+   * never rejoin via a stale invite link just because the remover's account
+   * is gone. Set together with `leftAt`/`removedBy` on a REMOVAL, left NULL
+   * on a voluntary leave, cleared back to NULL on re-seat exactly like
+   * `removedBy`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  removedAt!: Date | null;
+
+  /**
    * When this participant LEFT a group. The row is kept (not deleted) so past
    * messages still resolve the member's identity and the system-message history
    * ("Cy left") stays intact. NULL = still an active member. A left member keeps
@@ -49,6 +92,23 @@ export class ConversationParticipant {
 
   @Column({ type: 'timestamptz', nullable: true })
   lastReadAt!: Date | null;
+
+  /**
+   * PRD-351: the server clock's own timestamp at the moment `markRead` last
+   * ran for this participant, the INSTANT they read, distinct from
+   * `lastReadAt` right above. `lastReadAt` is a WATERMARK (the `created_at` of
+   * the newest message they were shown, clamped forward-only), and unread
+   * counts plus the "seen" ceiling depend on exactly that semantics, so it
+   * must never be repurposed to carry a real read time. Written
+   * unconditionally on every `markRead` call, ungated by the PRD-364
+   * read-receipt-sharing toggle at write time (the toggle withholds
+   * `otherLastReadInstant` only at RESPONSE time, the same reciprocal check
+   * already applied to `otherLastReadAt`). Never GREATEST-clamped: the exact
+   * moment of the LATEST `markRead` call is what this column means. NULL
+   * means "never read since this column existed".
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  lastReadInstant!: Date | null;
 
   /**
    * Delivered watermark: everything in this conversation created at-or-before
@@ -64,6 +124,51 @@ export class ConversationParticipant {
 
   @Column({ type: 'boolean', default: false })
   muted!: boolean;
+
+  /**
+   * PRD-349 (mentions-only mute): a SECOND axis on top of `muted`/`mutedUntil`,
+   * never a loose boolean that could contradict them. `All` (the default) is
+   * the ordinary mute the two columns above already govern: `isParticipantMuted`
+   * decides whether a plain "new message" push reaches this participant.
+   * `MentionsOnly` OVERRIDES that decision independent of `muted`/`mutedUntil`'s
+   * own value: this participant never gets the plain message push, full stop,
+   * but a message that `@`-mentions them still reaches them, exactly once (see
+   * `PushMessageListener.eligibleMessagePushRecipientUserIds`, which excludes a
+   * `MentionsOnly` participant the same way it excludes a fully muted one, so
+   * they fall through to the separate mention-notification push path instead of
+   * the merged "new message" one). Picking "Mentions only" from the row menu
+   * stands alongside the 8-hour/1-week/Always mute durations as its own
+   * distinct choice, so it does not itself touch `muted`/`mutedUntil`; a
+   * participant could in principle carry `muted: true` (from an earlier ordinary
+   * mute) alongside `muteMode: 'mentionsOnly'`; the mentions-only override still
+   * wins for push purposes either way, which is why `eligibleMessagePushRecipientUserIds`
+   * checks this column unconditionally rather than only when `muted` is false.
+   */
+  @Column({
+    type: 'enum',
+    enum: ConversationMuteMode,
+    enumName: 'conversation_participants_mute_mode_enum',
+    default: ConversationMuteMode.All,
+  })
+  muteMode!: ConversationMuteMode;
+
+  /**
+   * When a TIMED mute (PRD-349: 8 hours / 1 week) expires. NULL means either
+   * "not muted" (when `muted` is false) or "muted forever" (when `muted` is
+   * true and this is NULL, the pre-PRD-349 shape, and the "Always" choice);
+   * there is no separate forever sentinel. Once past, the mute is a stale
+   * timed grant: `isParticipantMuted` below treats it as already expired
+   * without a background job ever clearing the row, and the next write that
+   * touches this participant (`ConversationsService.setMuted`, or the
+   * inbox-list read in `ConversationsService.listConversations`) lazily
+   * clears both columns back to unmuted, so a lingering expired row can't
+   * strand `muted = true, mutedUntil <in the past>` forever. Any reader that
+   * cannot afford to wait for that lazy clear (e.g. a query builder's `WHERE`
+   * clause) should use `notCurrentlyMutedPredicate` below instead of a bare
+   * `muted = false` column check.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  mutedUntil!: Date | null;
 
   /**
    * When this participant PINNED the conversation to the top of their own inbox.
@@ -132,4 +237,63 @@ export class ConversationParticipant {
    */
   @Column({ type: 'text', nullable: true })
   draft!: string | null;
+}
+
+/**
+ * THE single definition of "is this participant CURRENTLY muted" (PRD-349):
+ * TRUE only while `muted` is set AND, for a TIMED mute, `mutedUntil` has not
+ * yet passed. `mutedUntil === null` while `muted` is true means "muted
+ * forever", so it never expires on its own. Every reader that gates on mute
+ * state (push delivery, the conversation-menu "Muted until {time}" label)
+ * must go through this, never re-derive `participant.muted` alone, so an
+ * expired timed mute can't keep silencing a member after its clock ran out,
+ * even before the lazy DB clear described on `mutedUntil` above gets a
+ * chance to run. `now` is injectable (default `new Date()`) purely for tests.
+ */
+export function isParticipantMuted(
+  participant: Pick<ConversationParticipant, 'muted' | 'mutedUntil'>,
+  now: Date = new Date(),
+): boolean {
+  if (!participant.muted) return false;
+  if (!participant.mutedUntil) return true;
+  return participant.mutedUntil.getTime() > now.getTime();
+}
+
+/**
+ * PRD-349: TRUE for a participant who must NEVER receive the PLAIN "new
+ * message" push: either an ordinary current mute (`isParticipantMuted`) OR
+ * `muteMode: 'mentionsOnly'`, checked unconditionally (see `muteMode`'s own
+ * column doc for why the mentions-only override does not require `muted` to
+ * be false first). `PushMessageListener.eligibleMessagePushRecipientUserIds`
+ * is the one caller: excluding a mentions-only participant here, the same way
+ * a fully muted one already was, is what lets them fall through to the
+ * separate `@`-mention push path instead (`PushNotificationListener
+ * .pushMention`) rather than getting the merged plain/mention message push,
+ * so a message that mentions them still reaches them, exactly once, while an
+ * ordinary message from the same thread never does.
+ */
+export function isMutedForPlainMessagePush(
+  participant: Pick<
+    ConversationParticipant,
+    'muted' | 'mutedUntil' | 'muteMode'
+  >,
+  now: Date = new Date(),
+): boolean {
+  return (
+    isParticipantMuted(participant, now) ||
+    participant.muteMode === ConversationMuteMode.MentionsOnly
+  );
+}
+
+/**
+ * SQL-fragment counterpart to `isParticipantMuted`, for a TypeORM
+ * `QueryBuilder` `.andWhere(...)`: a plain object `find({ where: { muted:
+ * false } })` can't express "OR a timed mute that has already expired" (see
+ * `isParticipantMuted`'s own doc for why a stale `muted = true` row can't be
+ * trusted alone). `alias` is the query's participant-table alias (e.g. `'p'`
+ * for `p.muted`/`p.muted_until`). Evaluates TRUE for a participant that is
+ * NOT currently muted, i.e. safe to notify/push.
+ */
+export function notCurrentlyMutedPredicate(alias: string): string {
+  return `(${alias}.muted = false OR (${alias}.muted_until IS NOT NULL AND ${alias}.muted_until <= now()))`;
 }

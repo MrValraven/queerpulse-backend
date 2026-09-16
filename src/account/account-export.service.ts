@@ -6,6 +6,17 @@ import {
   DataExportContribution,
 } from './data-export-contributor';
 import { MEDIA_ZIP_ONLY_NOTE } from './export-media';
+import {
+  attachMessageMediaPaths,
+  buildOwnMessagesExport,
+  buildReportedConversationsExport,
+  isOwnMessageListTruncated,
+  isReportedConversationListTruncated,
+  OWN_MESSAGES_EXPORT_CAP,
+  REPORTED_CONVERSATION_MESSAGES_EXPORT_CAP,
+  REPORTED_CONVERSATION_TOTAL_MESSAGES_EXPORT_CAP,
+  REPORTED_CONVERSATIONS_EXPORT_CAP,
+} from './message-export';
 import { Connection } from '../connections/entities/connection.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
@@ -79,7 +90,16 @@ export class AccountExportService {
       {
         category: 'messages',
         archiveKey: 'messages',
-        buildContribution: (userId) => this.buildMessages(userId),
+        buildContribution: (userId) =>
+          buildOwnMessagesExport(this.messages.manager, userId),
+      },
+      // PRD-370: the same category also carries the threads the member
+      // reported, under their own archive key (see `message-export.ts`).
+      {
+        category: 'messages',
+        archiveKey: 'reportedConversations',
+        buildContribution: (userId) =>
+          buildReportedConversationsExport(this.messages.manager, userId),
       },
       {
         category: 'forumPosts',
@@ -113,9 +133,14 @@ export class AccountExportService {
    * constant because the contributor list is assembled by DI at boot.
    */
   knownCategories(): string[] {
-    return [...this.coreContributions(), ...this.extraContributors].map(
-      (contribution) => contribution.category,
-    );
+    // De-duplicated: `messages` contributes two archive keys (PRD-370).
+    return [
+      ...new Set(
+        [...this.coreContributions(), ...this.extraContributors].map(
+          (contribution) => contribution.category,
+        ),
+      ),
+    ];
   }
 
   /**
@@ -164,6 +189,26 @@ export class AccountExportService {
         archive[contribution.archiveKey] =
           await contribution.buildContribution(userId);
       }
+    }
+    // PRD-370: link each own message's attachment to its file under `media/`
+    // (only knowable once both contributions exist), and say in the manifest
+    // which caps bound this archive. A per-conversation cut is marked on the
+    // `reportedConversations` entry itself; the two whole-list ceilings can
+    // only be reported here, the same way the own-message list's is.
+    if (want.has('messages')) {
+      attachMessageMediaPaths(archive.messages, archive.media);
+      (archive.manifest as Record<string, unknown>).messages = {
+        ownMessagesCap: OWN_MESSAGES_EXPORT_CAP,
+        ownMessagesTruncated: isOwnMessageListTruncated(archive.messages),
+        reportedConversationMessagesCap:
+          REPORTED_CONVERSATION_MESSAGES_EXPORT_CAP,
+        reportedConversationsCap: REPORTED_CONVERSATIONS_EXPORT_CAP,
+        reportedConversationMessagesTotalCap:
+          REPORTED_CONVERSATION_TOTAL_MESSAGES_EXPORT_CAP,
+        reportedConversationsTruncated: isReportedConversationListTruncated(
+          archive.reportedConversations,
+        ),
+      };
     }
     return archive;
   }
@@ -215,26 +260,6 @@ export class AccountExportService {
           }
         : {}),
     };
-  }
-
-  // `messages` — messages the member SENT. Messages they only received are
-  // someone else's words about them; those belong in that member's export, not
-  // this one. Soft-deleted rows are excluded by TypeORM's default
-  // `@DeleteDateColumn` filtering: the member already deleted them.
-  private async buildMessages(
-    userId: string,
-  ): Promise<Record<string, unknown>[]> {
-    const rows = await this.messages.find({
-      where: { senderId: userId },
-      order: { createdAt: 'ASC' },
-    });
-    return rows.map((m) => ({
-      id: m.id,
-      conversationId: m.conversationId,
-      body: m.body,
-      sentAt: m.createdAt.toISOString(),
-      editedAt: m.editedAt ? m.editedAt.toISOString() : null,
-    }));
   }
 
   // `posts` — forum threads the member started plus every reply they wrote.

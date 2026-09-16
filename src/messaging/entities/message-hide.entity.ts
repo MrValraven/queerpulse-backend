@@ -23,7 +23,8 @@ export class MessageHide {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Index('IDX_message_hides_user_id')
+  // No standalone index here: UNIQUE(userId, messageId) below already leads
+  // with userId, so it serves every `WHERE user_id = ...` lookup on its own.
   @Column({ type: 'uuid' })
   userId!: string;
 

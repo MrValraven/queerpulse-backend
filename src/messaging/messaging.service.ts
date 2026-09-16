@@ -1,9 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { ConversationRole } from './entities/conversation-participant.entity';
+import { DeleteMessageDto } from './dto/delete-message.dto';
+import {
+  ConversationMuteMode,
+  ConversationRole,
+} from './entities/conversation-participant.entity';
 import { AttachmentInput } from './entities/message.entity';
 import { MessageReactionKey } from './entities/message-reaction.entity';
 import {
   ConversationResponse,
+  MessageHistoryPage,
+  MessageReactorsResponse,
   MessageResponse,
   MessageSearchResponse,
   MessageView,
@@ -11,12 +17,14 @@ import {
 } from './message-response';
 import { ConversationsService } from './conversations.service';
 import { GroupsService } from './groups.service';
+import { GroupInvitesService } from './group-invites.service';
 import { MessageAnnotationsService } from './message-annotations.service';
 import {
   EnquiryContactability,
   MessageRequestsService,
 } from './message-requests.service';
-import { MessagesService } from './messages.service';
+import { GetMessagesOptions, MessagesService } from './messages.service';
+import { GroupInviteSummary, GroupJoinPreview } from './message-response';
 
 /**
  * Thin backward-compatible facade over the split messaging providers
@@ -40,6 +48,7 @@ export class MessagingService {
     private readonly messagesService: MessagesService,
     private readonly messageAnnotationsService: MessageAnnotationsService,
     private readonly groupsService: GroupsService,
+    private readonly groupInvitesService: GroupInvitesService,
     private readonly messageRequestsService: MessageRequestsService,
   ) {}
 
@@ -86,8 +95,14 @@ export class MessagingService {
     conversationId: string,
     userId: string,
     muted: boolean,
+    mutedUntil?: string | null,
   ): Promise<{ ok: true }> {
-    return this.conversationsService.setMuted(conversationId, userId, muted);
+    return this.conversationsService.setMuted(
+      conversationId,
+      userId,
+      muted,
+      mutedUntil,
+    );
   }
 
   setPinned(
@@ -96,6 +111,21 @@ export class MessagingService {
     pinned: boolean,
   ): Promise<{ ok: true }> {
     return this.conversationsService.setPinned(conversationId, userId, pinned);
+  }
+
+  /** PRD-349: facade pass-through for the mute MODE axis, independent of
+   *  `setMuted`/`mutedUntil` above (see `ConversationsService.setMuteMode`'s
+   *  own doc). */
+  setMuteMode(
+    conversationId: string,
+    userId: string,
+    muteMode: ConversationMuteMode,
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.setMuteMode(
+      conversationId,
+      userId,
+      muteMode,
+    );
   }
 
   setFavorite(
@@ -182,18 +212,29 @@ export class MessagingService {
 
   // ── Messages ────────────────────────────────────────────────────────────────
 
+  /** Forward reconcile (`after` set): a bare, oldest-first array. */
   getMessages(
     conversationId: string,
     userId: string,
-    opts: {
-      before?: string;
-      beforeId?: string;
-      after?: string;
-      afterId?: string;
-      limit?: number;
-      cursor?: string;
-    },
-  ): Promise<MessageResponse[]> {
+    opts: GetMessagesOptions & { after: string },
+  ): Promise<MessageResponse[]>;
+  /** Backward "load older" (no `after`): a newest-first page envelope. */
+  getMessages(
+    conversationId: string,
+    userId: string,
+    opts: GetMessagesOptions & { after?: undefined },
+  ): Promise<MessageHistoryPage>;
+  /** Either path, decided at runtime (the controller's raw query). */
+  getMessages(
+    conversationId: string,
+    userId: string,
+    opts: GetMessagesOptions,
+  ): Promise<MessageHistoryPage | MessageResponse[]>;
+  getMessages(
+    conversationId: string,
+    userId: string,
+    opts: GetMessagesOptions,
+  ): Promise<MessageHistoryPage | MessageResponse[]> {
     return this.messagesService.getMessages(conversationId, userId, opts);
   }
 
@@ -233,15 +274,45 @@ export class MessagingService {
     );
   }
 
+  /**
+   * ENG-222: facade for `MessagesService.sendMessageWithOutcome`, used by the
+   * HTTP `POST :id/messages` controller so it can tell a fresh create apart
+   * from an idempotent `clientMessageId` replay and answer `201`/`200`
+   * accordingly, without a second send implementation.
+   */
+  sendMessageWithOutcome(
+    conversationId: string,
+    userId: string,
+    body: string,
+    replyToId?: string,
+    clientMessageId?: string,
+    forwarded?: boolean,
+    kind?: 'user' | 'gif' | 'image' | 'document',
+    attachment?: AttachmentInput,
+  ): Promise<{ response: MessageResponse; isNew: boolean }> {
+    return this.messagesService.sendMessageWithOutcome(
+      conversationId,
+      userId,
+      body,
+      replyToId,
+      clientMessageId,
+      forwarded,
+      kind,
+      attachment,
+    );
+  }
+
   deleteMessage(
     conversationId: string,
     messageId: string,
     userId: string,
+    staffContext: DeleteMessageDto = {},
   ): Promise<{ ok: true }> {
     return this.messagesService.deleteMessage(
       conversationId,
       messageId,
       userId,
+      staffContext,
     );
   }
 
@@ -286,6 +357,18 @@ export class MessagingService {
       messageId,
       userId,
       key,
+    );
+  }
+
+  listMessageReactors(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<MessageReactorsResponse> {
+    return this.messageAnnotationsService.listMessageReactors(
+      conversationId,
+      messageId,
+      userId,
     );
   }
 
@@ -349,9 +432,9 @@ export class MessagingService {
 
   listStarredMessages(
     userId: string,
-    limit?: number,
+    options?: Parameters<MessageAnnotationsService['listStarredMessages']>[1],
   ): Promise<StarredMessagesResponse> {
-    return this.messageAnnotationsService.listStarredMessages(userId, limit);
+    return this.messageAnnotationsService.listStarredMessages(userId, options);
   }
 
   // ── Groups ──────────────────────────────────────────────────────────────────
@@ -415,9 +498,99 @@ export class MessagingService {
   updateGroup(
     conversationId: string,
     actorUserId: string,
-    changes: { title?: string; avatarUrl?: string | null },
+    changes: {
+      title?: string;
+      avatarUrl?: string | null;
+      description?: string;
+    },
   ): Promise<ConversationResponse> {
     return this.groupsService.updateGroup(conversationId, actorUserId, changes);
+  }
+
+  /** DES-228: `POST :id/owner` facade pass-through. */
+  transferOwnership(
+    conversationId: string,
+    actorUserId: string,
+    targetUserId: string,
+  ): Promise<ConversationResponse> {
+    return this.groupsService.transferOwnership(
+      conversationId,
+      actorUserId,
+      targetUserId,
+    );
+  }
+
+  /** PRD-357: `POST :id/dissolve` facade pass-through. */
+  dissolveGroup(
+    conversationId: string,
+    actorUserId: string,
+  ): Promise<ConversationResponse> {
+    return this.groupsService.dissolveGroup(conversationId, actorUserId);
+  }
+
+  /** PRD-358: `POST :id/invite-link` facade pass-through. */
+  createOrRotateInviteLink(
+    conversationId: string,
+    actorUserId: string,
+  ): Promise<{ inviteToken: string }> {
+    return this.groupsService.createOrRotateInviteLink(
+      conversationId,
+      actorUserId,
+    );
+  }
+
+  /** PRD-358: `DELETE :id/invite-link` facade pass-through. */
+  disableInviteLink(
+    conversationId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    return this.groupsService.disableInviteLink(conversationId, actorUserId);
+  }
+
+  // ── Group invites (PRD-353) / join-by-link (PRD-358) ────────────────────────
+
+  /** `GET /group-invites` facade pass-through. */
+  listGroupInvites(userId: string): Promise<GroupInviteSummary[]> {
+    return this.groupInvitesService.listMyInvites(userId);
+  }
+
+  /** `POST group-invites/:inviteId/accept` facade pass-through. */
+  acceptGroupInvite(
+    inviteId: string,
+    userId: string,
+  ): Promise<ConversationResponse> {
+    return this.groupInvitesService.accept(inviteId, userId);
+  }
+
+  /** `POST group-invites/:inviteId/decline` facade pass-through. */
+  declineGroupInvite(inviteId: string, userId: string): Promise<void> {
+    return this.groupInvitesService.decline(inviteId, userId);
+  }
+
+  /** `DELETE :id/invites/:inviteId` facade pass-through. */
+  revokeGroupInvite(
+    conversationId: string,
+    inviteId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    return this.groupInvitesService.revoke(
+      conversationId,
+      inviteId,
+      actorUserId,
+    );
+  }
+
+  /** `GET join/:token` facade pass-through. */
+  previewGroupJoin(token: string, userId: string): Promise<GroupJoinPreview> {
+    return this.groupInvitesService.previewByToken(token, userId);
+  }
+
+  /** `POST join/:token` facade pass-through. */
+  joinGroupByToken(
+    token: string,
+    userId: string,
+  ): Promise<ConversationResponse> {
+    return this.groupInvitesService.joinByToken(token, userId);
   }
 
   // ── Message requests / cross-domain enquiries ───────────────────────────────

@@ -21,7 +21,6 @@ import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
-  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -71,9 +70,14 @@ export class BlocksController {
   }
 
   @Delete(':slug')
-  @HttpCode(204)
+  @HttpCode(200)
   @ApiOperation({ summary: 'Unblock a member by slug' })
-  @ApiNoContentResponse({ description: 'Block removed.' })
+  @ApiOkResponse({
+    description:
+      'Block removed. `{ restoredStatus }` is what the unblock put back: ' +
+      '`accepted` or `pending` when the connection is exactly as it was ' +
+      'before the block, `none` when there was nothing to restore (PRD-363).',
+  })
   @ApiBadRequestResponse({ description: 'You cannot target yourself.' })
   @ApiNotFoundResponse({
     description: 'No member with that slug, or no block to remove.',

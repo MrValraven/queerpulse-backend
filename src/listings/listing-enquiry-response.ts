@@ -66,6 +66,17 @@ export interface ListingContactDTO {
    * it when their reply is rejected.
    */
   replyRequiresConnection: boolean;
+  /**
+   * PRD-340: true when the caller and the owner are NOT accepted connections,
+   * so this first enquiry stays a one-message thread until the OWNER replies
+   * to it (the owner needs no connection to do that; their reply is what
+   * opens the thread for both sides). Replaces `replyRequiresConnection`
+   * above as the honest thing to tell the ENQUIRER before they send: the
+   * owner can answer straight away, and the enquirer can send more once they
+   * do. False when already connected (an ordinary open thread, nothing to
+   * explain).
+   */
+  followUpAwaitsReply: boolean;
   /** The thread this member already has with this listing's owner, when they
    *  have written before, so the UI can offer "open the conversation" instead
    *  of a fresh compose box. */
@@ -120,4 +131,7 @@ export interface ListingEnquirySentDTO {
   /** Same meaning as on `ListingContactDTO`, repeated here so a client that
    *  posted without reading `contact` first still learns it. */
   replyRequiresConnection: boolean;
+  /** Same meaning as `ListingContactDTO.followUpAwaitsReply`, repeated here
+   *  for the same reason. */
+  followUpAwaitsReply: boolean;
 }

@@ -35,6 +35,47 @@ export const MESSAGE_PINNED = 'message.pinned';
  */
 export const CONVERSATION_MEMBERSHIP_REVOKED =
   'conversation.membership.revoked';
+/**
+ * PRD-334. Members were added to a group, at creation or through "Add members".
+ * Consumed by `GroupNotificationsListener`, which writes one `group_added` bell
+ * row per added member (and the push rides on that write).
+ *
+ * Emitted post-commit and best-effort, beside `CONVERSATION_CREATED`: a
+ * notification failure must never fail a membership write that already
+ * committed.
+ */
+export const GROUP_MEMBERS_ADDED = 'group.members.added';
+
+/** See {@link GROUP_MEMBERS_ADDED}. */
+export interface GroupMembersAddedEvent {
+  conversationId: string;
+  /** The owner or admin who added them. Never one of `addedUserIds`. */
+  actorUserId: string;
+  /** The members newly added by this write, creator and already-active
+   *  members excluded. */
+  addedUserIds: string[];
+}
+
+/**
+ * PRD-353. A single `group_invites` row was created: an add could not seat
+ * the candidate directly (their own `group_add_policy` is `invite_only`, or
+ * they have a prior left/removed row in this exact group) and became an
+ * invite instead. One event per invite, emitted post-commit and best-effort
+ * from `GroupsService.addMembers`/`createGroup`, beside `GROUP_MEMBERS_ADDED`.
+ * Consumed by `GroupNotificationsListener`, which writes one `group_invite`
+ * bell row (and the push rides on that write, mirroring `GroupAdded`).
+ */
+export const GROUP_INVITE_CREATED = 'group.invite.created';
+
+/** See {@link GROUP_INVITE_CREATED}. */
+export interface GroupInviteCreatedEvent {
+  conversationId: string;
+  inviteId: string;
+  /** The invited member, i.e. the notification recipient. */
+  inviteeUserId: string;
+  /** The owner/admin whose add produced this invite. */
+  inviterUserId: string;
+}
 
 export interface MessageCreatedEvent {
   conversationId: string;

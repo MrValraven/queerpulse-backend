@@ -63,6 +63,7 @@ import { AdminReportsModule } from './admin-reports/admin-reports.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
 import { MyMediaModule } from './my-media/my-media.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
+import { OfficialMessagesModule } from './official-messages/official-messages.module';
 import { AdminForumModule } from './admin-forum/admin-forum.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
@@ -364,6 +365,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     AdminMediaModule,
     MyMediaModule,
     AdminBotsModule,
+    OfficialMessagesModule,
     AdminForumModule,
     AdminHousingModule,
     PlatformStaffModule,

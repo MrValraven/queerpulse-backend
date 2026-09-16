@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
+import { Conversation } from '../messaging/entities/conversation.entity';
 import { Report } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -17,6 +18,7 @@ import { NotificationPreferencesService } from './notification-preferences.servi
 import { NotificationDeliveryService } from './notification-delivery.service';
 import { NotificationRetentionService } from './notification-retention.service';
 import { NotificationPushThrottleService } from './notification-push-throttle.service';
+import { GroupNotificationsListener } from './group-notifications.listener';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsListener } from './notifications.listener';
 import { NotificationsService } from './notifications.service';
@@ -40,6 +42,9 @@ import { ReportNotificationsListener } from './report-notifications.listener';
     // cycle (`CommunitiesModule` and `ReportsModule`'s dependents both reach
     // back to notifications), and TypeORM permits one entity's repository in
     // more than one module.
+    // `Conversation`: read-only, so `GroupNotificationsListener` can read a
+    // group's kind and title on `group.members.added`. Registered here for the
+    // same reason: importing `MessagingModule` is not needed for one lookup.
     TypeOrmModule.forFeature([
       Notification,
       NotificationPreference,
@@ -51,6 +56,7 @@ import { ReportNotificationsListener } from './report-notifications.listener';
       User,
       Community,
       CommunityMember,
+      Conversation,
     ]),
     // `BlockFilterService` — a notification triggered by a member the
     // recipient blocked/muted is never written (and so never pushed). Plain
@@ -78,6 +84,8 @@ import { ReportNotificationsListener } from './report-notifications.listener';
     // auto-freeze): tells platform staff and the owning community's staff that
     // a report has landed.
     ReportNotificationsListener,
+    // PRD-334. "You were added to a group": one bell row per added member.
+    GroupNotificationsListener,
     // Push-channel rate limiter, shared with `PushNotificationListener`.
     NotificationPushThrottleService,
     // Cron-only; registering it starts the daily read-notification purge.

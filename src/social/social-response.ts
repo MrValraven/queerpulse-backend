@@ -1,4 +1,5 @@
 import { MemberRef } from '../common/member-ref';
+import type { RestoredConnectionStatus } from '../connections/entities/connection.entity';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
 
@@ -45,6 +46,15 @@ export interface MuteDTO {
  */
 export interface BlockStatus {
   blocking: boolean;
+}
+
+/**
+ * `DELETE /blocks/:slug` body (PRD-363). `restoredStatus` is what the unblock
+ * put back: `accepted` or `pending` when the pair is exactly where it was
+ * before the block, `none` when there was nothing to restore.
+ */
+export interface UnblockResult {
+  restoredStatus: RestoredConnectionStatus;
 }
 
 export function toBlockDTO(

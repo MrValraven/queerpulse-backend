@@ -80,12 +80,13 @@ type EnquiryQuotaState =
  *    connection request rather than delivering it. `deliverEnquiry` deliberately
  *    does not require a connection, and that exception is the platform's own,
  *    predating this work. This service reuses it rather than inventing a second
- *    one, and reports the consequence honestly instead of hiding it:
- *    `replyRequiresConnection` tells the caller that the FIRST message lands but
- *    the thread is then closed to further messages from EITHER side until a
- *    connection is accepted. Whether a listing enquiry deserves a wider
- *    exception than that is a product decision, and it is deliberately not made
- *    here.
+ *    one, and reports the consequence honestly instead of hiding it. PRD-340:
+ *    the owner may reply to the FIRST message without a connection, and that
+ *    reply is what opens the thread to further ordinary messages from either
+ *    side, so `followUpAwaitsReply` tells the enquirer exactly that (the thread
+ *    stays a one-message enquiry until the owner answers, not until a
+ *    connection is accepted). `replyRequiresConnection` is kept for existing
+ *    callers.
  *
  * A LISTING WITH NO OWNER ACCOUNT CANNOT BE MESSAGED, and says so. `suggest`
  * and `friendly` listings do have a non-null `owner_id`, but it belongs to the
@@ -178,6 +179,7 @@ export class ListingEnquiriesService {
         canMessageOwner: false,
         unavailableReason: reachability.reason,
         replyRequiresConnection: false,
+        followUpAwaitsReply: false,
         existingConversationId: null,
         // Not evaluated at all on this path: with nobody to write to, the
         // caller's own quota is not a question, and asking would cost a query
@@ -199,6 +201,7 @@ export class ListingEnquiriesService {
         canMessageOwner: false,
         unavailableReason: 'unavailable',
         replyRequiresConnection: false,
+        followUpAwaitsReply: false,
         existingConversationId: null,
         ...ListingEnquiriesService.UNCAPPED,
       };
@@ -208,6 +211,7 @@ export class ListingEnquiriesService {
       canMessageOwner: true,
       unavailableReason: null,
       replyRequiresConnection: contactability.replyRequiresConnection,
+      followUpAwaitsReply: contactability.followUpAwaitsReply,
       existingConversationId: previous?.conversationId ?? null,
       // Hand-mapped, like everything else on the wire here: there is no global
       // serializer, and `EnquiryQuotaState` is a Date-carrying internal shape
@@ -291,6 +295,7 @@ export class ListingEnquiriesService {
       conversationId,
       enquiryId: saved.id,
       replyRequiresConnection: contactability.replyRequiresConnection,
+      followUpAwaitsReply: contactability.followUpAwaitsReply,
     };
   }
 

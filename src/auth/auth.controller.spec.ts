@@ -1,7 +1,7 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
-import { AuthController } from './auth.controller';
+import { AuthController, signedOutPushEndpoint } from './auth.controller';
 import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
@@ -13,10 +13,16 @@ import {
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 import { JoinRequestsService } from '../membership/join-requests.service';
+import { PushService } from '../push/push.service';
 import {
   CURRENT_GUIDELINES_VERSION,
   CURRENT_TERMS_VERSION,
 } from '../consent/policy-versions';
+import { Reflector } from '@nestjs/core';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
+import { IS_PUBLIC_KEY } from './decorators/public.decorator';
+import { SocketTicketService } from './socket-ticket.service';
+import { SocketTicketThrottlerGuard } from './socket-ticket-throttler.guard';
 
 const FRONTEND = 'https://app.example.com';
 
@@ -99,6 +105,12 @@ function build(configNodeEnv = 'test', domain?: string) {
   const joinRequestsService = {
     recoverStatusTokenForVerifiedEmail: jest.fn().mockResolvedValue(null),
   };
+  const pushService = {
+    removeSubscription: jest.fn().mockResolvedValue(undefined),
+  };
+  const socketTickets = {
+    mint: jest.fn().mockReturnValue({ ticket: 'st_test', ttlMs: 30_000 }),
+  };
   const controller = new AuthController(
     authService as unknown as AuthService,
     usersService as unknown as UsersService,
@@ -106,15 +118,19 @@ function build(configNodeEnv = 'test', domain?: string) {
     mediaCropService as unknown as MediaCropService,
     underAgeDisclosure as unknown as UnderAgeDisclosureService,
     joinRequestsService as unknown as JoinRequestsService,
+    pushService as unknown as PushService,
+    socketTickets as unknown as SocketTicketService,
   );
   return {
     controller,
     joinRequestsService,
+    pushService,
     authService,
     usersService,
     config,
     mediaCropService,
     underAgeDisclosure,
+    socketTickets,
   };
 }
 
@@ -458,6 +474,7 @@ describe('AuthController.logout', () => {
     const out = await controller.logout(
       makeReq({ cookies: { refresh_token: 'raw' } }),
       res as unknown as Response,
+      {},
     );
     expect(authService.revokeRefreshToken).toHaveBeenCalledWith('raw');
     expect(res.clearCookie).toHaveBeenCalledWith(
@@ -478,7 +495,11 @@ describe('AuthController.logout', () => {
   it('still logs out (clears cookies, ok) when no refresh cookie is present', async () => {
     const { controller, authService } = build();
     const res = makeRes();
-    const out = await controller.logout(makeReq(), res as unknown as Response);
+    const out = await controller.logout(
+      makeReq(),
+      res as unknown as Response,
+      {},
+    );
     expect(authService.revokeRefreshToken).not.toHaveBeenCalled();
     expect(res.clearCookie).toHaveBeenCalledWith(
       'csrf_token',
@@ -494,12 +515,113 @@ describe('AuthController.logout', () => {
     const out = await controller.logout(
       makeReq({ cookies: { refresh_token: 'raw' } }),
       res as unknown as Response,
+      {},
     );
     expect(out).toEqual({ ok: true });
     expect(res.clearCookie).toHaveBeenCalledWith(
       'access_token',
       expect.anything(),
     );
+  });
+
+  it("removes the named push endpoint for the revoked session's owner", async () => {
+    const { controller, authService, pushService } = build();
+    authService.revokeRefreshToken.mockResolvedValue('u1');
+    const res = makeRes();
+    const out = await controller.logout(
+      makeReq({ cookies: { refresh_token: 'raw' } }),
+      res as unknown as Response,
+      { pushEndpoint: 'https://fcm.googleapis.com/fcm/send/abc' },
+    );
+    expect(pushService.removeSubscription).toHaveBeenCalledWith(
+      'u1',
+      'https://fcm.googleapis.com/fcm/send/abc',
+    );
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('removes no push row when the refresh token owned no live session', async () => {
+    const { controller, authService, pushService } = build();
+    authService.revokeRefreshToken.mockResolvedValue(null);
+    const out = await controller.logout(
+      makeReq({ cookies: { refresh_token: 'raw' } }),
+      makeRes() as unknown as Response,
+      { pushEndpoint: 'https://fcm.googleapis.com/fcm/send/abc' },
+    );
+    expect(pushService.removeSubscription).not.toHaveBeenCalled();
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('removes no push row without a refresh cookie, whatever the body names', async () => {
+    const { controller, pushService } = build();
+    await controller.logout(makeReq(), makeRes() as unknown as Response, {
+      pushEndpoint: 'https://fcm.googleapis.com/fcm/send/abc',
+    });
+    expect(pushService.removeSubscription).not.toHaveBeenCalled();
+  });
+
+  it('ignores an invalid push endpoint and still logs out', async () => {
+    const { controller, authService, pushService } = build();
+    authService.revokeRefreshToken.mockResolvedValue('u1');
+    const res = makeRes();
+    const out = await controller.logout(
+      makeReq({ cookies: { refresh_token: 'raw' } }),
+      res as unknown as Response,
+      { pushEndpoint: 'http://push.example/insecure' },
+    );
+    expect(pushService.removeSubscription).not.toHaveBeenCalled();
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'refresh_token',
+      expect.anything(),
+    );
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('swallows a push cleanup error and still clears cookies and returns ok', async () => {
+    const { controller, authService, pushService } = build();
+    authService.revokeRefreshToken.mockResolvedValue('u1');
+    pushService.removeSubscription.mockRejectedValue(new Error('db down'));
+    const res = makeRes();
+    const out = await controller.logout(
+      makeReq({ cookies: { refresh_token: 'raw' } }),
+      res as unknown as Response,
+      { pushEndpoint: 'https://fcm.googleapis.com/fcm/send/abc' },
+    );
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'access_token',
+      expect.anything(),
+    );
+    expect(out).toEqual({ ok: true });
+  });
+});
+
+describe('signedOutPushEndpoint', () => {
+  it('accepts an https endpoint', () => {
+    expect(
+      signedOutPushEndpoint({
+        pushEndpoint: 'https://updates.push.services.mozilla.com/wpush/v2/abc',
+      }),
+    ).toBe('https://updates.push.services.mozilla.com/wpush/v2/abc');
+  });
+
+  it('ignores a missing body, a missing field, a non-string and an empty string', () => {
+    expect(signedOutPushEndpoint(undefined)).toBeNull();
+    expect(signedOutPushEndpoint(null)).toBeNull();
+    expect(signedOutPushEndpoint({})).toBeNull();
+    expect(signedOutPushEndpoint({ pushEndpoint: 42 })).toBeNull();
+    expect(signedOutPushEndpoint({ pushEndpoint: '' })).toBeNull();
+  });
+
+  it('ignores a non-https scheme, a non-URL and an over-long value', () => {
+    expect(
+      signedOutPushEndpoint({ pushEndpoint: 'http://push.example/abc' }),
+    ).toBeNull();
+    expect(signedOutPushEndpoint({ pushEndpoint: 'not a url' })).toBeNull();
+    expect(
+      signedOutPushEndpoint({
+        pushEndpoint: `https://push.example/${'a'.repeat(1100)}`,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -711,5 +833,45 @@ describe('AuthController.me', () => {
         role: 'member',
       }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+});
+
+describe('AuthController.mintSocketTicket', () => {
+  const reflector = new Reflector();
+
+  it('is not @Public(): only reachable behind the global JwtAuthGuard', () => {
+    // Read as a metadata target only, never invoked, so the unbound `this`
+    // ESLint otherwise warns about cannot arise here.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const handler = AuthController.prototype.mintSocketTicket;
+    expect(reflector.get(IS_PUBLIC_KEY, handler)).toBeUndefined();
+  });
+
+  it('is rate limited by SocketTicketThrottlerGuard', () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const handler = AuthController.prototype.mintSocketTicket;
+    const guards = Reflect.getMetadata(GUARDS_METADATA, handler) as
+      unknown[] | undefined;
+    expect(guards).toContain(SocketTicketThrottlerGuard);
+  });
+
+  it('mints from the current, DB-fresh session claims and the configured access TTL', () => {
+    const { controller, socketTickets } = build();
+
+    const result = controller.mintSocketTicket({
+      userId: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+      sessionId: 'family-1',
+    });
+
+    expect(socketTickets.mint).toHaveBeenCalledWith(
+      'u1',
+      'family-1',
+      'active',
+      15 * 60 * 1000,
+    );
+    expect(result).toEqual({ ticket: 'st_test', ttlMs: 30_000 });
   });
 });

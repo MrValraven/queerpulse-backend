@@ -46,6 +46,28 @@ export function resolveFrontendOrigins(): string[] {
 }
 
 /**
+ * Return the allowed origin list for the current environment: the parsed
+ * `FRONTEND_URL` allowlist, unioned with {@link DEFAULT_FRONTEND_ORIGIN}
+ * outside production. This union is what lets a developer point
+ * `FRONTEND_URL` at something other than the Vite dev server while still
+ * being able to reach the API from `localhost:5173`.
+ *
+ * This is the ONE place that union happens. `main.ts`'s HTTP CORS and the
+ * chat gateway's `allowHandshakeOrigin` handshake check both call this
+ * function rather than building the union themselves, so the two can never
+ * disagree about who is allowed to connect. Production never widens: it
+ * returns exactly the configured `FRONTEND_URL` allowlist, with no default
+ * localhost origin added.
+ */
+export function resolveAllowedOrigins(): string[] {
+  const origins = resolveFrontendOrigins();
+  const isProd = process.env.NODE_ENV === 'production';
+  return isProd
+    ? origins
+    : Array.from(new Set([...origins, DEFAULT_FRONTEND_ORIGIN]));
+}
+
+/**
  * Return the entries of a raw `FRONTEND_URL` that are not exact origins, for
  * boot-time validation. An entry is exact when it round-trips through the URL
  * parser unchanged (`new URL(x).origin === x`), which rejects paths, queries,

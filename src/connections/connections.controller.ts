@@ -20,6 +20,7 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateConnectionDto } from './dto/create-connection.dto';
 import { ListConnectionsQuery } from './dto/list-connections.query';
+import { ReplyToConnectionDto } from './dto/reply-to-connection.dto';
 import { RespondConnectionDto } from './dto/respond-connection.dto';
 import { UpsertConnectionNoteDto } from './dto/upsert-connection-note.dto';
 import { ConnectionsService } from './connections.service';
@@ -136,6 +137,35 @@ export class ConnectionsController {
     @Body() dto: RespondConnectionDto,
   ) {
     return this.connectionsService.respondView(id, user.userId, dto.action);
+  }
+
+  @Patch(':id/reply')
+  @ApiOperation({
+    summary:
+      "Reply to a stranger's pending message request: accepts it and delivers the reply in one action (PRD-340).",
+  })
+  @ApiOkResponse({ description: 'The now-accepted connection as a list item.' })
+  @ApiForbiddenResponse({
+    description: 'Not your connection, or you are not the addressee.',
+  })
+  @ApiNotFoundResponse({ description: 'Connection not found.' })
+  @ApiConflictResponse({
+    description:
+      'No pending request (already answered, withdrawn, or blocked).',
+  })
+  reply(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: ReplyToConnectionDto,
+  ) {
+    // Deliberately NO `NotRestrictedGuard` here, matching `respond` above:
+    // answering an existing request (by reply, same as by the Accept button)
+    // is never gated the way SENDING a new one is.
+    return this.connectionsService.respondWithReplyView(
+      id,
+      user.userId,
+      dto.body,
+    );
   }
 
   @Put(':id/note')

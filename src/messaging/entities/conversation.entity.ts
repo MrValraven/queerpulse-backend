@@ -28,6 +28,15 @@ export class Conversation {
   isOfficial!: boolean;
 
   /**
+   * PRD-372: the one member an official thread belongs to. NULL for every
+   * DM and group. `UQ_conversations_official_member` (partial, WHERE NOT NULL)
+   * makes "one official thread per member" a database guarantee; only
+   * `OfficialConversationsService` writes it. FK `ON DELETE CASCADE`.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  officialMemberId!: string | null;
+
+  /**
    * `direct` (1:1 DM / official thread) or `group` (member-created, titled,
    * multi-participant). Defaults to `direct` so all pre-group rows are DMs.
    */
@@ -61,6 +70,84 @@ export class Conversation {
   @Index('UQ_conversations_pair_key', { unique: true })
   @Column({ type: 'varchar', nullable: true })
   pairKey!: string | null;
+
+  /**
+   * PRD-340: who started this thread as COLD contact. Set only by a
+   * deliberately connection-bypassing delivery (today: only
+   * `MessageRequestsService.deliverEnquiry`). NULL for a group/official
+   * thread and for an ordinary DM between members who were already connected
+   * when it was created, since recording an initiator there would let a
+   * later disconnect's reply gate treat ordinary message history as consent
+   * to reopen the thread, which this feature must never infer. Set once, at
+   * creation or (for `deliverEnquiry`) the first time it reaches an existing
+   * un-initiated, un-opened thread; never updated after that. Only
+   * `openedAt` moves from then on. FK `ON DELETE SET NULL`.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  initiatorUserId!: string | null;
+
+  /**
+   * PRD-340: the instant the member who did NOT initiate this non-connected
+   * DM posted their first reply (`MessagesService.sendMessage`'s
+   * connection-gate block). From then on an ordinary send from EITHER side
+   * is allowed, exactly as if they were connected. NULL means still gated,
+   * or never needed gating at all (an already-connected DM, a group, or an
+   * official thread). A block between the two resets this to NULL
+   * (`ConversationsService`'s `MEMBER_BLOCKED` handler), so unblocking
+   * without reconnecting requires the non-initiator to re-open it instead of
+   * silently resuming. Removing an ACCEPTED connection does NOT clear this:
+   * the recipient already consented by replying, and that explicit reply is
+   * exactly the mechanism this feature is allowed to rely on.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  openedAt!: Date | null;
+
+  /**
+   * PRD-363: the `openedAt` a block voided, kept so lifting the block puts the
+   * thread back exactly as open as it was. Set by `ConversationsService`'s
+   * `MEMBER_BLOCKED` handler, restored and cleared by its `MEMBER_UNBLOCKED`
+   * handler once no block remains in either direction. NULL when there is
+   * nothing to restore.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  openedAtBeforeBlock!: Date | null;
+
+  /**
+   * PRD-358: the group's about text, member-authored, sanitised the same way a
+   * caption is (trimmed, control characters/markup stripped, max 500) at the
+   * write boundary in `GroupsService`. NULL for DMs and for a group that has
+   * never set one.
+   */
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  description!: string | null;
+
+  /**
+   * PRD-358: the active join-by-link token, or NULL when no link is live. A
+   * partial UNIQUE index (`UQ_conversations_invite_token`, WHERE NOT NULL)
+   * guards it, so rotating simply writes a fresh random token over the old one
+   * (invalidating it) and disabling clears this back to NULL. Only surfaced to
+   * an owner/admin of an active, non-dissolved group
+   * (`ConversationResponse.inviteToken`), never a plain member, never a DM.
+   */
+  // Mirrors `1819000000000-AddGroupConsentInvitesAndDissolve`'s partial
+  // UNIQUE index, same as `UQ_messages_conversation_client_id` on
+  // `message.entity.ts` mirrors its own migration-created partial index, so
+  // `migration:generate` never proposes dropping it.
+  @Index('UQ_conversations_invite_token', {
+    unique: true,
+    where: '"invite_token" IS NOT NULL',
+  })
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  inviteToken!: string | null;
+
+  /**
+   * PRD-357: when this group's owner ended it (or the last leaver did, with no
+   * successor to hand it to). NULL means active. Once set the group is
+   * read-only: every write route refuses with `GROUP_DISSOLVED`, enforced in
+   * the service layer, not here. NULL for DMs, which are never dissolved.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  dissolvedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -1,30 +1,38 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Not, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import {
-  Connection,
-  ConnectionStatus,
-} from '../connections/entities/connection.entity';
+  restoreConnectionAfterUnblock,
+  severConnectionForBlock,
+} from '../connections/block-restore';
+import { Connection } from '../connections/entities/connection.entity';
 import { ReportsService } from '../reports/reports.service';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { BlockOptionsDto } from './dto/block-options.dto';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
-import { MEMBER_BLOCKED, MemberBlockedEvent } from './social.events';
+import {
+  MEMBER_BLOCKED,
+  MEMBER_UNBLOCKED,
+  MemberBlockedEvent,
+  MemberUnblockedEvent,
+} from './social.events';
 import {
   BlockDTO,
   BlockStatus,
   MuteDTO,
   toBlockDTO,
   toMuteDTO,
+  UnblockResult,
 } from './social-response';
 
 /**
@@ -35,6 +43,7 @@ import {
  */
 @Injectable()
 export class SocialService {
+  private readonly logger = new Logger(SocialService.name);
   private readonly memberLookup: MemberLookup;
 
   constructor(
@@ -105,15 +114,35 @@ export class SocialService {
         .orIgnore()
         .execute();
 
-      await manager.update(
-        Connection,
-        { userLow: low, userHigh: high, status: Not(ConnectionStatus.Blocked) },
-        {
-          status: ConnectionStatus.Blocked,
-          blockedBy: actorId,
-          respondedAt: new Date(),
-        },
+      // PRD-363: the sever also stashes an `accepted`/`pending` status so the
+      // blocker's unblock can put it back (see `block-restore.ts`).
+      const severedRowCount = await severConnectionForBlock(
+        manager,
+        { low, high },
+        actorId,
+        new Date(),
       );
+      if (severedRowCount === 0) {
+        // The count is read, never discarded. Zero is one of three cases: the
+        // pair never had a connection row, this actor is re-blocking their own
+        // block (idempotent), or the OTHER member's block already holds the
+        // row. That last case used to lose this actor's severance silently:
+        // one row can name only one blocker, so the other member's unblock
+        // restored the pair over a block that still stood.
+        // `restoreConnectionAfterUnblock` now hands the row and its stash to
+        // whichever block survives, so the `blocks` row written above is what
+        // keeps the pair severed and this actor's own unblock is what finally
+        // gives it back. Read back rather than assumed, so operators can see
+        // which of the three it was.
+        const current = await manager.findOne(Connection, {
+          where: { userLow: low, userHigh: high },
+        });
+        if (current?.blockedBy && current.blockedBy !== actorId) {
+          this.logger.debug(
+            `Block by ${actorId} joined an existing block on the pair; the connection row stays with ${current.blockedBy} until they unblock.`,
+          );
+        }
+      }
     });
 
     const row = await this.blocks.findOneOrFail({
@@ -169,39 +198,42 @@ export class SocialService {
 
   /**
    * Transactional inverse of {@link blockMember}: deletes the `blocks` row AND
-   * restores the connection edge this actor's block severed (P1-3 — P0 left
-   * this as a flagged residual, so `blockMember` severed the connection but
-   * `unblockMember` never lifted it, leaving the pair stuck at `Blocked`). The
+   * restores the connection edge this actor's block severed (P1-3). The
    * connection flip is conditional on `blockedBy = actorId`, exactly mirroring
    * `ConnectionsService.respond('unblock')`: a `Blocked` row the OTHER party
-   * placed is left untouched (only they can lift it), and the pair is returned
-   * to `Declined` (not `Accepted` — re-connecting requires a fresh request),
-   * matching the connections-side unblock. A pair that never had a connection
-   * row (a block placed on a stranger) simply matches nothing here.
+   * placed is left untouched (only they can lift it).
+   *
+   * PRD-363: the pair goes back to exactly what the block took. An `accepted`
+   * connection is `accepted` again and a `pending` request is `pending` again
+   * with its original requester; a pair that was `declined`, or never had a
+   * connection row (a block placed on a stranger), keeps the old outcome and
+   * restores nothing. The DM's `openedAt` is put back by
+   * `ConversationsService`'s `MEMBER_UNBLOCKED` handler. `restoredStatus` tells
+   * the client which of those happened, so an "Undo" can say so honestly.
    */
-  async unblockMember(actorId: string, slug: string): Promise<void> {
+  async unblockMember(actorId: string, slug: string): Promise<UnblockResult> {
     const blockedId = await this.resolveMutationTarget(actorId, slug);
     const { low, high } = this.orderedPair(actorId, blockedId);
 
-    await this.dataSource.transaction(async (manager) => {
-      const result = await manager.delete(Block, {
-        blockerId: actorId,
-        blockedId,
-      });
-      if (!result.affected) {
-        throw new NotFoundException('Block not found');
-      }
-      await manager.update(
-        Connection,
-        {
-          userLow: low,
-          userHigh: high,
-          status: ConnectionStatus.Blocked,
-          blockedBy: actorId,
-        },
-        { status: ConnectionStatus.Declined, blockedBy: null },
-      );
-    });
+    const restoredStatus = await this.dataSource.transaction(
+      async (manager) => {
+        const result = await manager.delete(Block, {
+          blockerId: actorId,
+          blockedId,
+        });
+        if (!result.affected) {
+          throw new NotFoundException('Block not found');
+        }
+        return restoreConnectionAfterUnblock(manager, { low, high }, actorId);
+      },
+    );
+
+    this.emitBestEffort(MEMBER_UNBLOCKED, {
+      unblockerId: actorId,
+      unblockedId: blockedId,
+    } satisfies MemberUnblockedEvent);
+
+    return { restoredStatus };
   }
 
   /**

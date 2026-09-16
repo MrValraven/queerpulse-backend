@@ -47,15 +47,29 @@ export class NotRestrictedGuard implements CanActivate {
     const { user } = context
       .switchToHttp()
       .getRequest<{ user?: CurrentUserData }>();
-    if (!user?.restricted) {
-      return true;
-    }
-    throw new ForbiddenException({
-      statusCode: 403,
-      error: 'Forbidden',
-      message:
-        'This action is unavailable while a moderation restriction is in effect.',
-      code: ACCOUNT_RESTRICTED_CODE,
-    });
+    assertNotRestricted(user);
+    return true;
   }
+}
+
+/**
+ * The same check {@link NotRestrictedGuard} runs, exposed as a standalone
+ * predicate for a handler that must refuse a restricted caller only inside
+ * ONE branch of its body rather than for the whole route (ENG-237: a group's
+ * PATCH `:id` is shared between the title/avatar branch, which reaches other
+ * members, and the caller's own mute/pin/draft prefs, which must stay open).
+ * Throws the identical coded `ForbiddenException` the guard does, so both
+ * paths surface the same `ACCOUNT_RESTRICTED_CODE` to the client.
+ */
+export function assertNotRestricted(user?: CurrentUserData): void {
+  if (!user?.restricted) {
+    return;
+  }
+  throw new ForbiddenException({
+    statusCode: 403,
+    error: 'Forbidden',
+    message:
+      'This action is unavailable while a moderation restriction is in effect.',
+    code: ACCOUNT_RESTRICTED_CODE,
+  });
 }

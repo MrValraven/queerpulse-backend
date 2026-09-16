@@ -1,4 +1,12 @@
-import { Logger, UseFilters, UsePipes, ValidationPipe } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  UseFilters,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
@@ -14,12 +22,17 @@ import {
   WsException,
 } from '@nestjs/websockets';
 import { parseCookie } from 'cookie';
+import * as Sentry from '@sentry/node';
 import { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { IsNull, MoreThan, Repository } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { socketTicketService } from '../auth/socket-ticket.service';
 import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
 import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
-import { resolveFrontendOrigins } from '../config/frontend-origins';
+import {
+  resolveAllowedOrigins,
+  resolveFrontendOrigins,
+} from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   CONVERSATION_CREATED,
@@ -42,7 +55,12 @@ import {
   MessageUpdatedEvent,
 } from '../messaging/messaging.events';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import {
+  Conversation,
+  ConversationKind,
+} from '../messaging/entities/conversation.entity';
 import { MessagingService } from '../messaging/messaging.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
 import {
   NOTIFICATION_CREATED,
@@ -55,12 +73,23 @@ import {
 } from '../platform-settings/platform-settings.events';
 import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { PreferencesService } from '../preferences/preferences.service';
+import type { MessagingPrivacyDTO } from '../preferences/preferences-response';
+import {
+  MESSAGING_PRIVACY_SHARE_PRESENCE_CHANGED,
+  MessagingPrivacySharePresenceChangedEvent,
+} from '../preferences/preferences.events';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import {
+  ConversationJoinAck,
+  ConversationLeaveAck,
   DeliveredPayload,
   JoinPayload,
+  LeavePayload,
   ReadPayload,
+  ReauthAck,
+  ReauthPayload,
   SendMessagePayload,
   TypingPayload,
 } from './dto/chat-payloads';
@@ -71,26 +100,65 @@ import {
 } from './session.events';
 import { TokenBucketLimiter } from './ws-rate-limiter';
 import { WsAllExceptionsFilter } from './ws-exception.filter';
+import { ChatWsException, buildChatWsErrorFrame } from './ws-error';
 
 /**
- * Handshake refusal that the client can TELL APART from an auth failure.
- *
- * Every other handshake rejection is flattened to a generic `Unauthorized` on
- * purpose — an unauthenticated caller learns nothing about why. A lockdown is
- * the exception: it is not the client's credentials that are wrong, and a
- * client that cannot distinguish the two will treat the refusal as an expired
- * token, refresh, and reconnect — in a loop, for the whole lockdown, each
- * attempt costing a JWT verify, a settings read and a user lookup at exactly
- * the moment you want less load. Carrying `PLATFORM_LOCKED` (and the admin's
- * message, which the member is meant to see) lets it back off instead.
+ * How often {@link ChatGateway.sweepIdleRateLimitBuckets} runs. ENG-211:
+ * replaces the old "clear a user's buckets on their last disconnect"
+ * behaviour, which was itself the bypass a flooding client needed. A minute
+ * is frequent enough to keep the bucket maps from growing unbounded across a
+ * busy day without adding meaningful CPU cost: the sweep is one in-memory
+ * pass over however many DISTINCT users have sent a rate-limited event
+ * recently.
  */
-export class PlatformLockedWsException extends WsException {
+export const IDLE_BUCKET_SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * ENG-262: the longest `beforeApplicationShutdown` waits for in-flight
+ * `message:send` calls to settle before force-disconnecting every socket. A
+ * deploy's own hard ceiling (`main.ts`'s shutdown sequence) has to exceed
+ * this by a comfortable margin or the process could exit before this wait is
+ * even done, defeating the point of waiting at all.
+ */
+export const DRAIN_IN_FLIGHT_SEND_TIMEOUT_MS = 5_000;
+
+/** How often {@link ChatGateway.waitForInFlightSendsToSettle} re-checks the
+ *  in-flight count while draining. */
+export const DRAIN_POLL_INTERVAL_MS = 50;
+
+/**
+ * ENG-260: `setTimeout`'s delay is a 32-bit signed integer internally; a
+ * delay above this (~24.8 days) overflows and Node clamps it to a 1ms timer
+ * instead of throwing (see Node's own `setTimeout` docs). `JWT_ACCESS_TTL`
+ * above this (which `env.validation.ts` accepts, since it only checks that
+ * the value parses as a positive duration) used to make
+ * `scheduleTokenExpiry` arm exactly that ~1ms timer, so every socket got
+ * force-dropped with `TOKEN_EXPIRED` moments after connecting.
+ * `scheduleTokenExpiry` now chains timers of at most this length instead of
+ * trusting one `setTimeout` call to survive all the way to `exp`.
+ */
+export const MAX_SET_TIMEOUT_DELAY_MS = 2_147_483_647;
+
+/**
+ * Handshake refusal that carries an admin-authored message, unlike every
+ * other one.
+ *
+ * The handshake can refuse for several reasons (`UNAUTHORIZED`,
+ * `SESSION_REVOKED`, `RATE_LIMITED`, `SERVER_ERROR`; see `authenticate` and
+ * `handleConnection`'s catch block), and every one of those carries a fixed,
+ * internal message string this server chose, on purpose: an unauthenticated
+ * caller learns nothing about why from the text alone. A lockdown is the
+ * exception, because it is not the client's credentials that are wrong, and
+ * a client that cannot distinguish a lockdown from an ordinary refusal will
+ * treat it as an expired token, refresh, and reconnect, in a loop, for the
+ * whole lockdown, each attempt costing a JWT verify, a settings read and a
+ * user lookup at exactly the moment you want less load. Carrying
+ * `PLATFORM_LOCKED` (and the admin's own message, which the member is meant
+ * to see) lets it back off instead.
+ */
+export class PlatformLockedWsException extends ChatWsException {
   constructor(lockdownMessage: string) {
-    super({
-      status: 'error',
-      code: 'PLATFORM_LOCKED',
-      message: lockdownMessage,
-    });
+    super('PLATFORM_LOCKED', lockdownMessage);
   }
 }
 
@@ -119,6 +187,29 @@ interface ChatSocketData {
   userId?: string;
   exp?: number;
   expiryTimer?: NodeJS.Timeout;
+  /**
+   * The refresh-token FAMILY id (`AccessTokenClaims.sid`) this socket's
+   * handshake token was minted for, when the token carries one. ENG-209:
+   * `handleSessionRevoked` reads this to POSITIVELY identify the one socket
+   * that belongs to a device actually named for revocation, and to tell
+   * that one apart from every other socket in the member's `user:<id>`
+   * room. Absent for a legacy token minted before the `sid` claim existed.
+   * `assertSessionLive` admits that same legacy case at the handshake (the
+   * signature alone proves authenticity); `handleSessionRevoked` treats it
+   * oppositely and fails CLOSED there, because a legacy socket cannot be
+   * proven to belong to a device other than the one being revoked.
+   */
+  sessionId?: string;
+  /**
+   * Set by `scheduleTokenExpiry` immediately before it disconnects a socket
+   * for reaching its own token `exp`. This is a PLANNED drop the client is
+   * expected to reconnect from within moments, distinct from a genuine loss
+   * of connection.
+   * `handleDisconnect` reads this to grant `PresenceService` a grace window
+   * (ENG-219) instead of broadcasting the member offline and having
+   * `PushMessageListener` push a DM they are still looking at.
+   */
+  isExpiring?: boolean;
 }
 
 type ChatSocket = Socket<
@@ -143,6 +234,14 @@ type ChatSocket = Socket<
  * A missing `Origin` is allowed: non-browser clients (native apps, tests) do not
  * send one, and they are not the CSWSH threat model — that attack is a browser
  * on an attacker's page, which always sends its origin.
+ *
+ * ENG-261: reads `resolveAllowedOrigins()`, the SAME function `main.ts`'s
+ * HTTP CORS calls, rather than the narrower `resolveFrontendOrigins()`,
+ * which never unioned in the local Vite dev-server origin outside
+ * production. Before this, a developer who pointed `FRONTEND_URL` at
+ * something other than `localhost:5173` got HTTP CORS from both origins but
+ * a socket handshake refused from `localhost:5173`, contradicting this
+ * function's own "can never disagree" premise.
  */
 function allowHandshakeOrigin(
   req: { headers: Record<string, string | string[] | undefined> },
@@ -154,7 +253,7 @@ function allowHandshakeOrigin(
     cb(null, true);
     return;
   }
-  cb(null, resolveFrontendOrigins().includes(origin));
+  cb(null, resolveAllowedOrigins().includes(origin));
 }
 
 @WebSocketGateway({
@@ -216,9 +315,28 @@ function allowHandshakeOrigin(
     exceptionFactory: (errors) => new WsException(errors),
   }),
 )
-export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ChatGateway
+  implements
+    OnGatewayConnection,
+    OnGatewayDisconnect,
+    OnModuleInit,
+    OnModuleDestroy,
+    BeforeApplicationShutdown
+{
   @WebSocketServer() namespace!: Namespace;
   private readonly logger = new Logger(ChatGateway.name);
+  // ENG-262: set by `beforeApplicationShutdown` before anything else runs, so
+  // every write handler that checks it sees the drain from the very first
+  // event loop turn after a shutdown signal arrives. `handleSend` is the only
+  // write handler wired to it today (see its own comment for why the scope
+  // stops there).
+  private isDraining = false;
+  // Counts `handleSend` calls between "entered the handler" and "the handler
+  // settled" (its `finally` always decrements, success or throw), so
+  // `beforeApplicationShutdown` can wait out whatever writes were already
+  // accepted before it flipped `isDraining` rather than cutting one off
+  // mid-persist.
+  private inFlightSendCount = 0;
 
   // WS abuse limits — the global HTTP ThrottlerGuard skips WS contexts, so the
   // gateway owns its own per-user token buckets (keyed on client.data.userId).
@@ -269,6 +387,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     capacity: 10,
     refillPerSecond: 1,
   });
+  // `conversation:leave` (ENG-217) does no DB work at all (`client.leave` is
+  // a local socket.io room membership change), but a client flipping through
+  // threads still fires one join+leave pair per thread visited, so it stays
+  // bounded with the same numbers as `joinLimiter`.
+  private readonly leaveLimiter = new TokenBucketLimiter({
+    capacity: 10,
+    refillPerSecond: 1,
+  });
   // A read watermark is legitimately far more frequent than a join — every
   // thread the member scrolls through can advance it — so this bucket is
   // sized well above `joinLimiter` while still bounding a flood.
@@ -284,6 +410,37 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     capacity: 5,
     refillPerSecond: 1,
   });
+  // ENG-211: the handshake itself used to be unmetered, so a client could
+  // disconnect and reconnect indefinitely, paying only a JWT verify, a
+  // lockdown settings read, a refresh-token existence check and a presence
+  // fan-out each time, none of which any of the per-event buckets above ever
+  // see (they are keyed on `client.data.userId`, which does not exist until
+  // AFTER the handshake succeeds). Keyed on the VERIFIED user id
+  // (`AccessTokenClaims.sub`, always this token's own signed-and-checked
+  // subject) and consumed inside `authenticate` right after the token
+  // verifies (see that method for why it runs before the lockdown/session
+  // DB checks). 15-minute access-token
+  // rotation plus a normal run of network flaps reconnects a handful of times
+  // an hour; ten bursts with a sustained six a minute is far above that and
+  // still well short of nuisance-load territory.
+  private readonly handshakeLimiter = new TokenBucketLimiter({
+    capacity: 10,
+    refillPerSecond: 0.1,
+  });
+  // ENG-219: `session:reauth` is expected roughly once per access-token TTL
+  // (~15 minutes) per open socket, even rarer than a reconnect, since it
+  // replaces the reconnect the token's own expiry used to force. Mirrors
+  // `handshakeLimiter`'s numbers exactly for the same reason: generous
+  // headroom for a client that retries a few times after a transient
+  // failure, nowhere near enough for a flooding client to turn this into a
+  // free JWT-verification amplifier (each attempt costs a `jwt.verifyAsync`
+  // plus, on a claim that verifies, the same lockdown/session-liveness DB
+  // round-trips the handshake pays).
+  private readonly reauthLimiter = new TokenBucketLimiter({
+    capacity: 10,
+    refillPerSecond: 0.1,
+  });
+  private idleBucketSweepTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly jwt: JwtService,
@@ -313,21 +470,134 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // facade for a one-query need.
     @InjectRepository(ConversationParticipant)
     private readonly conversationParticipants: Repository<ConversationParticipant>,
+    // PRD-354: `fanOutConversationMessage` skips a GROUP participant blocked
+    // either way with the sender, one batched query per send.
+    private readonly blockFilter: BlockFilterService,
+    // PRD-364: reciprocal read-receipt/typing/presence sharing — gates
+    // `handleTyping`'s relay, `handleMessageRead`'s relay, and every presence
+    // broadcast/snapshot below.
+    private readonly preferences: PreferencesService,
   ) {}
+
+  /**
+   * ENG-211: starts the periodic sweep that keeps every token-bucket map
+   * bounded WITHOUT resetting a bucket that is still mid-drain (see
+   * `sweepIdleRateLimitBuckets` and `TokenBucketLimiter.sweepIdle` for why
+   * that distinction is the whole point). `.unref()`'d so a pending sweep
+   * never keeps the process alive on shutdown.
+   */
+  onModuleInit(): void {
+    const timer = setInterval(
+      () => this.sweepIdleRateLimitBuckets(),
+      IDLE_BUCKET_SWEEP_INTERVAL_MS,
+    );
+    timer.unref?.();
+    this.idleBucketSweepTimer = timer;
+  }
+
+  onModuleDestroy(): void {
+    if (this.idleBucketSweepTimer) {
+      clearInterval(this.idleBucketSweepTimer);
+    }
+  }
+
+  /**
+   * ENG-262: the gateway's drain step, run by Nest's shutdown sequence
+   * (`app.close()`, whether invoked directly or by a SIGTERM/SIGINT handler
+   * in `main.ts`) after every provider's `onModuleDestroy` and before the
+   * server actually stops accepting connections. Refuses new writes first,
+   * waits out whatever writes were already accepted, and only then drops
+   * every open socket, so a deploy no longer cuts an in-flight
+   * `message:send` write off mid-persist with no warning to the socket that
+   * held it.
+   *
+   * Scoped to `message:send` today (`isDraining`/`inFlightSendCount`, wired
+   * into `handleSend`) rather than every write handler in this gateway; the
+   * other write handlers (`read`, `conversation:join`, …) are not covered by
+   * this pass.
+   */
+  async beforeApplicationShutdown(signal?: string): Promise<void> {
+    this.isDraining = true;
+    this.logger.log(
+      `Draining chat gateway for shutdown (signal: ${signal ?? 'unknown'})`,
+    );
+    await this.waitForInFlightSendsToSettle();
+    // Force-drop every open socket rather than leaving them for the
+    // transport to notice this process is gone: the frontend's realtime
+    // client (queerpulse/src/shared/api/realtime.ts) treats a
+    // server-initiated `disconnect` (`reason === 'io server disconnect'`) as
+    // reconnectable, scheduling its own exponential-backoff reconnect, so
+    // `close: true` is safe here and reconnects every client against
+    // whichever instance comes up next, instead of the ~ping-timeout delay
+    // of an unannounced transport close.
+    this.namespace?.disconnectSockets(true);
+  }
+
+  /**
+   * Polls {@link inFlightSendCount} down to zero, bounded by
+   * {@link DRAIN_IN_FLIGHT_SEND_TIMEOUT_MS} so a `message:send` handler stuck
+   * on a slow query cannot hang the whole shutdown sequence indefinitely.
+   */
+  private async waitForInFlightSendsToSettle(): Promise<void> {
+    const deadline = Date.now() + DRAIN_IN_FLIGHT_SEND_TIMEOUT_MS;
+    while (this.inFlightSendCount > 0 && Date.now() < deadline) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, DRAIN_POLL_INTERVAL_MS),
+      );
+    }
+    if (this.inFlightSendCount > 0) {
+      this.logger.warn(
+        `Chat gateway shutdown proceeding with ${this.inFlightSendCount} in-flight message:send call(s) still unsettled after ${DRAIN_IN_FLIGHT_SEND_TIMEOUT_MS}ms`,
+      );
+    }
+  }
+
+  private sweepIdleRateLimitBuckets(): void {
+    const now = Date.now();
+    this.messageLimiter.sweepIdle(now);
+    this.typingLimiter.sweepIdle(now);
+    this.deliveredLimiter.sweepIdle(now);
+    this.joinLimiter.sweepIdle(now);
+    this.leaveLimiter.sweepIdle(now);
+    this.readLimiter.sweepIdle(now);
+    this.presenceSnapshotLimiter.sweepIdle(now);
+    this.handshakeLimiter.sweepIdle(now);
+    this.reauthLimiter.sweepIdle(now);
+  }
 
   async handleConnection(client: ChatSocket): Promise<void> {
     try {
-      const { userId, exp } = await this.authenticate(client);
+      const { userId, exp, sessionId } = await this.authenticate(client);
+      // `authenticate` awaits a JWT verify and up to two DB queries, and the
+      // client may have already disconnected somewhere in that window (a
+      // closed tab, a flaky network). Bail out here, BEFORE any side effect
+      // runs: `handleDisconnect` only cleans up a socket whose `userId` is
+      // set, so a dead socket that reached this point would otherwise mark
+      // itself online forever (`presence.add`) and leave the connection
+      // counter (`metrics.incrementWebsocketConnections`) permanently
+      // inflated, since nothing will ever call the balancing decrement for
+      // it.
+      if (!client.connected) {
+        return;
+      }
       client.data.userId = userId;
       client.data.exp = exp;
+      client.data.sessionId = sessionId;
       // Count the live socket now that it is authenticated. Set BEFORE any step
       // that can throw: a later failure disconnects the socket, and
       // handleDisconnect (which sees `userId` set) decrements to rebalance.
       this.metrics.incrementWebsocketConnections();
       await client.join(`user:${userId}`);
-      // A socket must not outlive its 15-min access token; drop it at expiry so
-      // the client reconnects with a freshly-refreshed cookie.
-      this.scheduleTokenExpiry(client, exp);
+      // A socket must not outlive its 15-min access token; drop it at expiry
+      // so the client reconnects with a freshly-refreshed cookie. A FALSE
+      // return means `exp` was already in the past by the time this ran (an
+      // extremely tight race between `authenticate`'s own token-expiry check
+      // and this scheduling step) and the socket was dropped immediately, so
+      // stop here: the next line must never mark that already-dead socket
+      // present.
+      if (!this.scheduleTokenExpiry(client, exp)) {
+        return;
+      }
       if (this.presence.add(userId, client.id)) {
         await this.broadcastPresence(userId, true);
       }
@@ -337,14 +607,32 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.debug(
         `WS handshake auth rejected: ${err instanceof Error ? err.message : 'unknown error'}`,
       );
-      // A lockdown says so explicitly; everything else stays a generic
-      // `Unauthorized` — do not widen what other failures disclose.
-      client.emit(
-        'exception',
-        err instanceof PlatformLockedWsException
-          ? err.getError()
-          : { status: 'error', message: 'Unauthorized' },
-      );
+      if (err instanceof ChatWsException) {
+        // Every DELIBERATE refusal (bad/missing/expired credential, inactive
+        // membership, signed-out session, lockdown, handshake rate limit)
+        // already carries its own code and, for a lockdown, the admin's
+        // actual message (see `authenticate`).
+        client.emit('exception', err.getError());
+      } else {
+        // ENG-221: anything else is an INFRASTRUCTURE failure mid-handshake
+        // (a DB error in `assertSessionLive`/`assertNotLockedOut`, a presence
+        // snapshot or broadcast failure). Before this branch existed every
+        // one of these was flattened into the same generic `Unauthorized` a
+        // bad credential gets, so the client spent a refresh-token rotation
+        // on a blip that a plain retry would have fixed, and if that
+        // rotation also failed the socket stayed disconnected with
+        // reconnection disabled.
+        this.logger.error(
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        );
+        if (process.env.SENTRY_DSN) {
+          Sentry.captureException(err);
+        }
+        client.emit(
+          'exception',
+          buildChatWsErrorFrame('SERVER_ERROR', 'Internal server error'),
+        );
+      }
       client.disconnect(true);
     }
   }
@@ -361,26 +649,56 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Balances the increment in handleConnection (only reached once `userId` is
     // set, i.e. only for sockets that were counted).
     this.metrics.decrementWebsocketConnections();
-    if (this.presence.remove(userId, client.id)) {
+    // ENG-219: a drop caused by `scheduleTokenExpiry` is a PLANNED reconnect,
+    // so grace it: a member reconnecting within the window never gets
+    // reported offline (and never has `PushMessageListener` push them a DM
+    // they are still looking at) for a gap that exists purely because the
+    // gateway enforces its own token TTL. A genuine disconnect (tab closed,
+    // network dropped) carries no such flag and gets no grace, exactly as
+    // before.
+    const wentOffline = this.presence.remove(userId, client.id, {
+      isGraced: client.data.isExpiring === true,
+      onGraceExpired: () => {
+        this.broadcastPresence(userId, false).catch((error: unknown) => {
+          // A rejected promise with no `.catch` and no SENTRY_DSN set would
+          // otherwise be an unhandled rejection, which Node's default
+          // behaviour is to crash the process over (this callback runs off a
+          // bare `setTimeout` in `PresenceService`, so there is no
+          // surrounding `try`/`catch` or gateway exception filter to save it).
+          this.logger.error(
+            `Failed to broadcast offline presence after grace expiry for ${userId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+      },
+    });
+    if (wentOffline) {
       await this.broadcastPresence(userId, false);
-      // Last socket gone — free the per-user rate-limit buckets.
-      this.messageLimiter.clear(userId);
-      this.typingLimiter.clear(userId);
-      this.deliveredLimiter.clear(userId);
-      this.joinLimiter.clear(userId);
-      this.readLimiter.clear(userId);
-      this.presenceSnapshotLimiter.clear(userId);
     }
+    // ENG-211: buckets are NO LONGER cleared here. Freeing a user's buckets
+    // the instant their last socket dropped meant a flooding client could
+    // exhaust its bucket, disconnect, reconnect, and start over on a fresh
+    // one: the rate limit only ever held for as long as a single socket
+    // stayed open. `sweepIdleRateLimitBuckets` reclaims memory for buckets
+    // that have fully refilled instead, which bounds the map without
+    // reopening that hole.
   }
 
   @SubscribeMessage('conversation:join')
   async handleJoin(
     @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: JoinPayload,
-  ): Promise<{ joined: string }> {
+  ): Promise<ConversationJoinAck> {
     const userId = this.requireUserId(client);
+    // ENG-207: RETURNS a refusal ack for either of the two EXPECTED outcomes
+    // below, so a client that reads the ack (as well as the happy path) can
+    // retry or surface the refusal instead of silently leaving the thread
+    // outside its room until the socket happens to reconnect. A validation
+    // failure never reaches here at all, since the gateway's
+    // `ValidationPipe` throws before this handler runs.
     if (!this.joinLimiter.tryConsume(userId)) {
-      throw new WsException('You are joining conversations too quickly');
+      return { ok: false, code: 'RATE_LIMITED' };
     }
     // Stricter than plain participation (P0 hardening): also refuses a
     // participant who left/was removed from a group (no live room for them —
@@ -393,10 +711,29 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         userId,
       ))
     ) {
-      throw new WsException('Not a participant');
+      return { ok: false, code: 'FORBIDDEN' };
     }
     await client.join(data.conversationId);
-    return { joined: data.conversationId };
+    return { ok: true, joined: data.conversationId };
+  }
+
+  @SubscribeMessage('conversation:leave')
+  handleLeave(
+    @ConnectedSocket() client: ChatSocket,
+    @MessageBody() data: LeavePayload,
+  ): ConversationLeaveAck {
+    const userId = this.requireUserId(client);
+    // No DB work at all (`client.leave` only mutates local socket.io room
+    // membership), so the ONLY possible refusal is the rate limit. The uuid
+    // validation on `conversationId` already stops a client from leaving a
+    // room it had no business joining in the first place (e.g. another
+    // member's `user:<id>` room), so there is no separate authorisation check
+    // to make here the way `handleJoin` has to.
+    if (!this.leaveLimiter.tryConsume(userId)) {
+      return { ok: false, code: 'RATE_LIMITED' };
+    }
+    void client.leave(data.conversationId);
+    return { ok: true, left: data.conversationId };
   }
 
   @SubscribeMessage('message:send')
@@ -404,41 +741,77 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: SendMessagePayload,
   ): Promise<void> {
-    const userId = this.requireUserId(client);
-    if (!this.messageLimiter.tryConsume(userId)) {
-      throw new WsException('You are sending messages too quickly');
+    // ENG-262: refused up front, before it counts as in-flight, once
+    // `beforeApplicationShutdown` has started draining. None of the
+    // existing `ChatWsErrorCode`s fit a transient "the server is restarting"
+    // refusal (`RATE_LIMITED`/`SERVER_ERROR` carry the wrong retry semantics
+    // for an authenticated write, `PLATFORM_LOCKED` is TERMINAL on the
+    // frontend, see queerpulse/src/shared/api/realtime.ts's `goTerminal`
+    // branch), so this falls through the gateway's existing generic path: a
+    // plain `WsException` that `WsAllExceptionsFilter` classifies as
+    // `BAD_REQUEST` and only logs at debug level.
+    if (this.isDraining) {
+      throw new WsException(
+        'Server is restarting, please retry your message shortly',
+      );
     }
-    // Single write path: persists + emits MESSAGE_CREATED → broadcast below.
-    // `clientMessageId` makes this idempotent against the HTTP POST path.
-    await this.messaging.sendMessage(
-      data.conversationId,
-      userId,
-      data.body,
-      data.replyToId,
-      data.clientMessageId,
-      undefined, // forwarded — the WS path never forwards
-      data.kind,
-      data.attachment,
-    );
+    this.inFlightSendCount += 1;
+    try {
+      const userId = this.requireUserId(client);
+      if (!this.messageLimiter.tryConsume(userId)) {
+        throw new ChatWsException(
+          'RATE_LIMITED',
+          'You are sending messages too quickly',
+        );
+      }
+      // Single write path: persists + emits MESSAGE_CREATED → broadcast below.
+      // `clientMessageId` makes this idempotent against the HTTP POST path.
+      await this.messaging.sendMessage(
+        data.conversationId,
+        userId,
+        data.body,
+        data.replyToId,
+        data.clientMessageId,
+        undefined, // forwarded — the WS path never forwards
+        data.kind,
+        data.attachment,
+      );
+    } finally {
+      this.inFlightSendCount -= 1;
+    }
   }
 
   @SubscribeMessage('typing')
-  handleTyping(
+  async handleTyping(
     @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: TypingPayload,
-  ): void {
+  ): Promise<void> {
+    // socket.io-client flushes frames it buffered while disconnected (this
+    // one included) the instant the transport reconnects, and Nest binds
+    // this handler without awaiting `handleConnection`'s `authenticate`
+    // (a JWT verify plus up to two DB queries), so a buffered frame can
+    // legitimately arrive before `client.data.userId` is set. `typing` is
+    // advisory, so that race is dropped silently here, before ever reaching
+    // `requireUserId`, which would throw `UNAUTHORIZED` at a client that did
+    // nothing wrong.
+    if (!client.data.userId) {
+      return;
+    }
     const userId = this.requireUserId(client);
     // Only members who have joined the conversation room may broadcast typing.
     // Silently drop rather than throw when the room isn't joined yet: `typing`
     // is advisory (see the rate-limit branch below), and `conversation:join` is
     // an async handler racing this fire-and-forget frame — a client that opens a
     // thread and types immediately (or reconnects) legitimately lands here for a
-    // sub-millisecond window before `client.join` completes. Erroring turned that
-    // benign race into a full stack trace + Sentry event on every occurrence
-    // (WsException is not an HttpException, so the filter logs it as a server
-    // fault). The security invariant still holds — a socket not in the room does
-    // not broadcast into it — and the composer re-emits `typing:true` every ~2s,
-    // so the indicator still appears once the join lands.
+    // sub-millisecond window before `client.join` completes. `WsAllExceptionsFilter`
+    // now correctly classifies a bare refusal here as BAD_REQUEST either way
+    // (ENG-212), so erroring would no longer burn the
+    // Sentry quota the way it originally did, but it would still hand the client
+    // an exception frame for a race that is nobody's fault, on every occurrence.
+    // The security invariant still holds regardless of which way this is
+    // handled (a socket not in the room does not broadcast into it), and the
+    // composer re-emits `typing:true` every ~2s, so the indicator still
+    // appears once the join lands.
     if (!client.rooms.has(data.conversationId)) {
       return;
     }
@@ -446,17 +819,35 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Silently drop — typing is advisory; no need to error the client.
       return;
     }
+    // PRD-364: reciprocal — a member who has turned off typing sharing never
+    // lets their own typing reach anyone else. Checked AFTER the rate limit
+    // (a cheap in-memory check) so an abusive client that has already been
+    // throttled doesn't also cost a preferences read.
+    const senderPrivacy = await this.preferences.getMessagingPrivacy(userId);
+    if (!senderPrivacy.shareTyping) {
+      return;
+    }
     // `client.to(room)` excludes only the SENDING SOCKET, not the sending user.
     // A member signed in on two devices (phone + laptop) has two sockets in this
     // room, so without `.except` their own "typing" frame echoes to their other
     // device and renders as "the other person is typing". Exclude the sender's
     // whole `user:<id>` room so none of their own devices ever see it — typing is
-    // only ever meaningful about OTHER participants.
-    client.to(data.conversationId).except(`user:${userId}`).emit('typing', {
-      conversationId: data.conversationId,
+    // only ever meaningful about OTHER participants. PRD-364 also excludes every
+    // OTHER participant who has turned off their own typing sharing: reciprocal,
+    // so opting out also means never seeing anyone else's typing.
+    const excludedUserRooms = await this.excludedUserRooms(
+      data.conversationId,
       userId,
-      isTyping: data.isTyping,
-    });
+      (privacy) => privacy.shareTyping,
+    );
+    client
+      .to(data.conversationId)
+      .except([`user:${userId}`, ...excludedUserRooms])
+      .emit('typing', {
+        conversationId: data.conversationId,
+        userId,
+        isTyping: data.isTyping,
+      });
   }
 
   @SubscribeMessage('read')
@@ -466,7 +857,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ): Promise<void> {
     const userId = this.requireUserId(client);
     if (!this.readLimiter.tryConsume(userId)) {
-      throw new WsException('You are marking messages read too quickly');
+      throw new ChatWsException(
+        'RATE_LIMITED',
+        'You are marking messages read too quickly',
+      );
     }
     await this.messaging.markRead(data.conversationId, userId, {
       upToMessageId: data.upToMessageId,
@@ -478,6 +872,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: DeliveredPayload,
   ): Promise<void> {
+    // Same buffered-frame race `handleTyping` guards against: a `delivered`
+    // ack queued while disconnected can flush on reconnect before
+    // `handleConnection`'s (unawaited, from Nest's point of view) handshake
+    // has set `client.data.userId`. Advisory and monotonic, so it is dropped
+    // silently here too, before it can throw `UNAUTHORIZED` at a legitimate
+    // client.
+    if (!client.data.userId) {
+      return;
+    }
     const userId = this.requireUserId(client);
     // Advisory like typing: over the limit we silently drop rather than error —
     // the watermark is monotonic, so a skipped ack is corrected by the next one.
@@ -495,9 +898,133 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ): Promise<void> {
     const userId = this.requireUserId(client);
     if (!this.presenceSnapshotLimiter.tryConsume(userId)) {
-      throw new WsException('You are requesting presence too quickly');
+      throw new ChatWsException(
+        'RATE_LIMITED',
+        'You are requesting presence too quickly',
+      );
     }
     await this.emitPresenceSnapshot(client, userId);
+  }
+
+  /**
+   * ENG-219: re-authenticates the OPEN socket against either a
+   * freshly-minted access token OR a redeemed single-use socket ticket, so
+   * `scheduleTokenExpiry`'s scheduled drop can be rescheduled to the new
+   * `exp` instead of the client having to drop and reconnect (a full history
+   * reconcile plus two inbox invalidates) at every access-token rotation.
+   *
+   * Exactly one of `data.token`/`data.ticket` is expected (see
+   * `ReauthPayload`'s own doc). A payload carrying neither is a malformed
+   * request rather than a credential rejection, answered `BAD_REQUEST`
+   * WITHOUT dropping the socket or spending the `reauthLimiter` bucket,
+   * ahead of every other check below.
+   *
+   * SECURITY: whichever proof is presented, it is turned into the SAME
+   * `AccessTokenClaims` shape and run through the SAME checks a fresh
+   * handshake would:
+   *   1. `data.token` → `verifyAccessToken`, the identical
+   *      `JwtService.verifyAsync` call `authenticate` uses (same secret,
+   *      `algorithms: ['HS256']` pinned), which rejects a malformed token, a
+   *      bad/absent signature, and an already-expired one, all by
+   *      construction. Usable by a non-browser client that holds its own
+   *      access token; the browser SPA never sends this field, since
+   *      `access_token` is `httpOnly` and never reaches JavaScript.
+   *      `data.ticket` → `socketTicketService.redeem`, keyed on THIS
+   *      socket's own already-authenticated `userId` (never on anything the
+   *      payload claims), so a ticket minted for a different account cannot
+   *      extend this socket. `redeem` also enforces single use (see its own
+   *      doc) and the ticket's short TTL; either failure collapses to the
+   *      same refusal a bad token gets. The ticket's `status`/`exp` were
+   *      baked in at MINT time (`AuthController.mintSocketTicket`, a
+   *      DB-fresh read at that moment) rather than re-read here, and stay
+   *      exactly as fresh as a real access token's own claims are: never
+   *      fresher and never weaker.
+   *   2. `payload.sub === userId`: the verified subject must be the SAME
+   *      user this socket authenticated as at handshake time. Without this
+   *      check a socket could present a perfectly valid token minted for a
+   *      DIFFERENT account and adopt that account's expiry/claims while
+   *      still occupying THIS user's rooms and presence, a full identity
+   *      swap smuggled through a "renew" frame. Checked before any DB work.
+   *      (For the ticket path this is redundant with `redeem`'s own
+   *      same-user check, and kept anyway for parity between the two
+   *      branches.)
+   *   3. `assertClaimsAdmitted`: the SAME status-active, platform-lockdown,
+   *      and refresh-token-family-still-live checks `authenticate` runs, so
+   *      a member who was suspended, whose device was signed out, or who is
+   *      caught by a lockdown enacted since the handshake (or since the
+   *      ticket was minted), is refused here exactly as a fresh reconnect
+   *      would refuse them. This is the check that keeps re-auth from
+   *      becoming a way to outlive a revocation, on EITHER path.
+   *
+   * ANY failure (a bad/expired/malformed/unknown-or-already-used credential
+   * (1), a different user's credential (2), or a claim `authenticate` would
+   * also refuse (3)) takes the EXACT SAME drop `scheduleTokenExpiry` already
+   * uses for a routine expiry (`dropSocketForExpiredOrInvalidCredential`):
+   * mark `isExpiring`, emit `TOKEN_EXPIRED`, disconnect. Reusing that one
+   * drop path rather than inventing a second way to end a socket is
+   * deliberate: a `session:reauth` frame is presented over an
+   * ALREADY-AUTHENTICATED connection, so a malicious or buggy client that
+   * can reach this handler at all has already cleared the handshake once;
+   * the only new capability this frame grants is "extend", never "escalate",
+   * and any rejection collapses to the one drop path already proven to
+   * leave no session live. `RATE_LIMITED` is the one exception:
+   * `reauthLimiter` guards call VOLUME alone, so it is refused without
+   * dropping the socket. The original handshake credential's own expiry
+   * timer (never cleared until a reauth actually SUCCEEDS) remains the
+   * fallback either way.
+   */
+  @SubscribeMessage('session:reauth')
+  async handleReauth(
+    @ConnectedSocket() client: ChatSocket,
+    @MessageBody() data: ReauthPayload,
+  ): Promise<ReauthAck> {
+    const userId = this.requireUserId(client);
+    if (!data.token && !data.ticket) {
+      return { ok: false, code: 'BAD_REQUEST' };
+    }
+    if (!this.reauthLimiter.tryConsume(userId)) {
+      return { ok: false, code: 'RATE_LIMITED' };
+    }
+    let payload: AccessTokenClaims;
+    try {
+      payload = data.ticket
+        ? this.claimsFromSocketTicket(data.ticket, userId)
+        : await this.verifyAccessToken(data.token!);
+      if (payload.sub !== userId) {
+        throw new ChatWsException('UNAUTHORIZED', 'Unauthorized');
+      }
+      await this.assertClaimsAdmitted(payload);
+    } catch (err) {
+      this.logger.debug(
+        `WS reauth rejected for ${userId}: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      this.dropSocketForExpiredOrInvalidCredential(client);
+      return {
+        ok: false,
+        code: err instanceof ChatWsException ? err.code : 'SERVER_ERROR',
+      };
+    }
+    // Success: the ORIGINAL expiry timer (armed for the handshake token's own
+    // `exp`) must be cleared before arming a new one, or the old timer's
+    // closure, which still captures the OLD `exp`, fires on schedule and
+    // drops a socket that just proved it holds a valid, newer credential.
+    const previousExpiryTimer = client.data.expiryTimer;
+    if (previousExpiryTimer) {
+      clearTimeout(previousExpiryTimer);
+    }
+    client.data.exp = payload.exp;
+    client.data.sessionId = payload.sid;
+    if (!this.scheduleTokenExpiry(client, payload.exp)) {
+      // The new `exp` was already in the past by the time this ran (an
+      // extremely tight race, mirroring the same one `handleConnection`
+      // guards against). `scheduleTokenExpiry` has already dropped the
+      // socket via the same shared path, so there is nothing left to
+      // acknowledge as a success.
+      return { ok: false, code: 'TOKEN_EXPIRED' };
+    }
+    return { ok: true, exp: payload.exp };
   }
 
   @OnEvent(MESSAGE_CREATED)
@@ -540,6 +1067,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * and the delivered-receipt ack, both of which are specifically about a
    * thread the recipient has OPEN — overloading it here would silently widen
    * what "delivered" means. This event carries only what the inbox needs.
+   *
+   * PRD-354: a block does not dissolve a GROUP (a blocked pair can still
+   * share one), so without a filter here a blocked-either-way member kept
+   * getting a live "new message" signal for everything the blocked sender
+   * posted, forever. A DM/official thread is exempt: a block already
+   * prevents sending there in the first place (`requireActiveParticipant`),
+   * mirroring that method's own exemption shape.
    */
   private async fanOutConversationMessage(
     payload: MessageCreatedEvent,
@@ -547,14 +1081,37 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       const participants = await this.conversationParticipants.find({
         where: { conversationId: payload.conversationId },
+        // ENG-239: only the two columns this fan-out actually reads. The
+        // default full-row `find` pulled every participant column
+        // (including each member's own possibly-5000-char `draft`) for
+        // every participant of every single message sent.
+        select: { userId: true, leftAt: true },
       });
+      // One extra lightweight lookup, shared by every participant below
+      // rather than re-queried per recipient.
+      const conversation = await this.conversationParticipants.manager.findOne(
+        Conversation,
+        { where: { id: payload.conversationId }, select: { kind: true } },
+      );
+      // A sender erased mid-flight (ENG-243 makes senderId nullable) has no
+      // block relations left to honour, so the filter is skipped for them.
+      const senderId = payload.message.senderId;
+      const blockedSenderUserIds =
+        conversation?.kind === ConversationKind.Group && senderId
+          ? await this.blockFilter.blockedUserIds(
+              senderId,
+              participants.map((participant) => participant.userId),
+            )
+          : new Set<string>();
       for (const participant of participants) {
-        // Never signal the sender about their own send, and never a member who
-        // left/was removed — mirrors `PushMessageListener`'s identical filter
-        // for the same event.
+        // Never signal the sender about their own send, never a member who
+        // left/was removed (mirrors `PushMessageListener`'s identical filter
+        // for the same event), and never a GROUP member blocked either way
+        // with the sender (PRD-354).
         if (
           participant.userId === payload.message.senderId ||
-          participant.leftAt != null
+          participant.leftAt != null ||
+          blockedSenderUserIds.has(participant.userId)
         ) {
           continue;
         }
@@ -597,8 +1154,36 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @OnEvent(MESSAGE_READ)
-  handleMessageRead(payload: MessageReadEvent): void {
-    this.namespace?.to(payload.conversationId).emit('read', payload);
+  async handleMessageRead(payload: MessageReadEvent): Promise<void> {
+    // Async `@OnEvent` doing DB work: the emitter awaits nothing, so an
+    // unhandled rejection here would surface as a process-level warning with
+    // no context rather than a logged failure. Wrapped exactly like
+    // `handleMemberBlocked`. A dropped read relay costs a stale "Seen" on
+    // someone's screen until the next fetch, never a failed request: the
+    // watermark itself is already committed by `markRead`.
+    try {
+      // PRD-364: `ConversationsService.markRead` already withholds this event
+      // entirely when the READER (`payload.userId`) has turned off read-receipt
+      // sharing (see its own doc). What remains here is the RECIPIENT side of
+      // the same reciprocal rule: a participant who has turned off their own
+      // sharing must not receive anyone else's read state either, so exclude
+      // every such participant's `user:<id>` room from the relay.
+      const excludedUserRooms = await this.excludedUserRooms(
+        payload.conversationId,
+        payload.userId,
+        (privacy) => privacy.shareReadReceipts,
+      );
+      this.namespace
+        ?.to(payload.conversationId)
+        .except(excludedUserRooms)
+        .emit('read', payload);
+    } catch (err) {
+      this.logger.error(
+        `Failed to relay a read receipt: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+    }
   }
 
   @OnEvent(MESSAGE_DELIVERED)
@@ -726,9 +1311,46 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   /**
-   * Force-drop every live socket for a member (logout / suspension / token
-   * reuse). Auth emits {@link USER_SESSION_REVOKED}; we disconnect the whole
-   * `user:${userId}` room.
+   * Force-drop a member's live sockets (logout / "sign out this device" /
+   * "log out other devices" / suspension / token reuse / the 60s liveness
+   * sweep). Auth emits {@link USER_SESSION_REVOKED}.
+   *
+   * The `SESSION_REVOKED` `exception` frame is TERMINAL on the frontend: it
+   * turns reconnection off, because the whole point of the code is "this
+   * credential is done, do not try again with it". That means the frame may
+   * ONLY go to a socket this handler can POSITIVELY identify as the revoked
+   * one. `payload.sessionId` is the refresh-token FAMILY id being revoked,
+   * when the emitter can name it:
+   * - PRESENT (`AccountService.revokeSession`, "sign out this device"): a
+   *   socket whose `data.sessionId` matches EXACTLY is the revoked device,
+   *   confirmed, so it gets the frame and is dropped. Every socket whose
+   *   `data.sessionId` is a DIFFERENT known family is left alone entirely.
+   *   A socket whose token predates the `sid` claim cannot be told apart
+   *   from the revoked device by this check, so it is disconnected too, but
+   *   WITHOUT the frame: it may well be a different, uninvolved device, and
+   *   a plain `disconnect(true)` merely sends it through its normal
+   *   reconnect, whose handshake (`assertSessionLive`) re-authenticates it
+   *   independently and only then tells it `SESSION_REVOKED` if that check
+   *   also finds it revoked. `fetchSockets` (not a blind room emit) is
+   *   required because each socket's `data.sessionId` has to be inspected;
+   *   there is no per-socket-attribute filter on a broadcast operator.
+   * - ABSENT (a single-device logout via `AuthService.revokeRefreshToken`,
+   *   "log out other devices" via `AccountService.revokeOtherSessions`, a
+   *   revoke-all, a suspension, or the 60s sweep in
+   *   `ChatSessionEnforcementService`): this handler cannot tell WHICH of the
+   *   member's sockets, if any, are the ones actually revoked (a
+   *   single-device logout affects one device out of possibly several; "log
+   *   out other devices" affects every device EXCEPT the caller's own), so
+   *   it never asserts `SESSION_REVOKED` here. The whole room gets a plain
+   *   `disconnect(true)` with no frame instead, and each socket's own
+   *   reconnect handshake sorts out the truth: a genuinely revoked device is
+   *   told `SESSION_REVOKED` there (by `assertSessionLive`/the status
+   *   check), and a device that is still signed in simply reconnects and
+   *   keeps working. Before this existed, EVERY socket on this path was told
+   *   the terminal frame regardless of whether it was actually the one being
+   *   signed out, which killed realtime on every device left standing: the
+   *   still-signed-in phone when the laptop logged out, or the clicking
+   *   device itself on "log out other devices".
    *
    * SINGLE-REPLICA ONLY. This reaches sockets held by THIS instance. There is no
    * Redis adapter configured (see ThrottlerModule's note in app.module.ts), so
@@ -737,8 +1359,26 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * wired via `app.useWebSocketAdapter` before this is safe.
    */
   @OnEvent(USER_SESSION_REVOKED)
-  handleSessionRevoked(payload: UserSessionRevokedEvent): void {
-    this.namespace?.in(`user:${payload.userId}`).disconnectSockets(true);
+  async handleSessionRevoked(payload: UserSessionRevokedEvent): Promise<void> {
+    const room = `user:${payload.userId}`;
+    if (!payload.sessionId) {
+      this.namespace?.in(room).disconnectSockets(true);
+      return;
+    }
+    const frame = buildChatWsErrorFrame(
+      'SESSION_REVOKED',
+      'This device was signed out',
+    );
+    const sockets = await this.namespace?.in(room).fetchSockets();
+    for (const socket of sockets ?? []) {
+      const socketSessionId = (socket.data as ChatSocketData).sessionId;
+      if (socketSessionId === payload.sessionId) {
+        socket.emit('exception', frame);
+        socket.disconnect(true);
+      } else if (socketSessionId === undefined) {
+        socket.disconnect(true);
+      }
+    }
   }
 
   /**
@@ -749,10 +1389,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * of its 15-minute access token: HTTP would go dark within one request while
    * chat stayed live for a quarter of an hour.
    *
-   * A BLANKET disconnect, not a filtered one. Staff reconnect immediately and
-   * pass the handshake check on their way back in, so filtering by role here
-   * would buy nothing and would cost a database lookup per connected socket at
-   * the worst possible moment.
+   * A BLANKET disconnect that emits NO `exception` frame first, in contrast
+   * to `handleSessionRevoked` above: staff are meant to reconnect anyway (the
+   * frontend already reconnects on its own after any unexplained
+   * server-initiated drop), and a non-staff member who tries is told
+   * `PLATFORM_LOCKED` at the handshake itself
+   * (`assertNotLockedOut`/`PlatformLockedWsException`), which is the frame
+   * that actually carries the admin's message. A blanket disconnect that also
+   * fanned out a frame to a role we have not looked up yet would buy nothing
+   * here that the handshake refusal doesn't already say better, at the cost
+   * of a broadcast that could not be role-filtered anyway (see below).
+   *
+   * Filtering by role here would buy nothing and would cost a database lookup
+   * per connected socket at the worst possible moment, so this stays blanket
+   * and lets the handshake do the per-role sorting on reconnect.
    *
    * SINGLE-REPLICA ONLY, for the same reason as `handleSessionRevoked` above:
    * this reaches sockets held by THIS instance, and there is no Redis adapter
@@ -774,35 +1424,104 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private requireUserId(client: ChatSocket): string {
     const userId = client.data.userId;
     if (!userId) {
-      throw new WsException('Unauthorized');
+      throw new ChatWsException('UNAUTHORIZED', 'Unauthorized');
     }
     return userId;
   }
 
-  private async authenticate(
-    client: ChatSocket,
-  ): Promise<{ userId: string; exp: number }> {
-    const fromAuth = client.handshake.auth?.token as string | undefined;
-    const fromCookie = parseCookie(client.handshake.headers.cookie ?? '')[
-      'access_token'
-    ];
-    const raw = fromAuth ?? fromCookie;
-    if (!raw) {
-      throw new WsException('Missing access token');
+  /**
+   * Verifies a raw JWT string exactly the way the handshake always has: same
+   * secret, same pinned algorithm, same "any failure is UNAUTHORIZED"
+   * collapse. Does nothing else, no rate limiting, no lockdown/session
+   * checks, so both call sites below can layer their OWN policy (the
+   * handshake bucket for `authenticate`, `reauthLimiter` for
+   * `handleReauth`) around an identical credential check. ENG-219 pulled
+   * this out of `authenticate` so `session:reauth` verifies a token exactly
+   * as strictly as a fresh handshake would, by construction, rather than by
+   * two call sites happening to agree.
+   */
+  private async verifyAccessToken(raw: string): Promise<AccessTokenClaims> {
+    // Read BEFORE the try, deliberately: a missing/misconfigured secret is
+    // OUR infrastructure problem, so it must surface as `SERVER_ERROR`
+    // (propagating uncaught to `handleConnection`'s catch block, ENG-221).
+    // Kept outside the credential-failure branch below so it stays that way.
+    const secret = this.config.getOrThrow<string>('auth.jwtAccessSecret');
+    try {
+      // verifyAsync rejects for every kind of bad token: an expired or
+      // tampered signature (a `jsonwebtoken` error), but also a malformed
+      // token whose base64 segments do not even decode to JSON, which the
+      // underlying `jws` library lets escape as a raw `SyntaxError` rather
+      // than one of `jsonwebtoken`'s own error classes. A failed verify is a
+      // credential failure BY DEFINITION regardless of which error shape it
+      // throws, so every rejection here becomes `UNAUTHORIZED` without
+      // needing to recognise the error's type first (this used to sniff for
+      // specific jsonwebtoken error names, see git history, and silently
+      // let the `SyntaxError` case fall through to `SERVER_ERROR`, an
+      // unauthenticated, Sentry-reported crash report for what was always
+      // just a bad token).
+      return await this.jwt.verifyAsync<AccessTokenClaims>(raw, {
+        secret,
+        algorithms: ['HS256'],
+      });
+    } catch {
+      throw new ChatWsException('UNAUTHORIZED', 'Unauthorized');
     }
-    // verifyAsync rejects an expired or tampered token (throws → handshake fail).
-    const payload = await this.jwt.verifyAsync<AccessTokenClaims>(raw, {
-      secret: this.config.getOrThrow<string>('auth.jwtAccessSecret'),
-      algorithms: ['HS256'],
-    });
+  }
+
+  /**
+   * The ticket half of `handleReauth`'s two credential branches. Redeems
+   * `ticket` against THIS socket's own already-authenticated `userId`, never
+   * anything the payload itself claims (mirrors `authenticate` reading
+   * `payload.sub` only from a VERIFIED token, never from client input), and,
+   * on success, reshapes the ticket's baked-in record into the same
+   * `AccessTokenClaims` a verified JWT would have produced, so every caller
+   * downstream (the `payload.sub === userId` check, `assertClaimsAdmitted`)
+   * treats the two branches identically.
+   *
+   * A `null` redemption covers unknown, already used, expired, and minted
+   * for a different user (see `SocketTicketService.redeem`'s own doc for why
+   * those cases collapse to one outcome), and becomes the exact same
+   * `UNAUTHORIZED` a bad token gets, so the caller's `catch` block cannot
+   * tell the two branches' failures apart either.
+   */
+  private claimsFromSocketTicket(
+    ticket: string,
+    userId: string,
+  ): AccessTokenClaims {
+    const record = socketTicketService.redeem(ticket, userId);
+    if (!record) {
+      throw new ChatWsException('UNAUTHORIZED', 'Unauthorized');
+    }
+    return {
+      sub: record.userId,
+      status: record.status,
+      exp: record.exp,
+      sid: record.sessionId,
+    };
+  }
+
+  /**
+   * The claims-level checks a verified token still has to clear: active
+   * membership, platform lockdown, and the refresh-token family behind it
+   * still being live. Shared between `authenticate` (the handshake) and
+   * `handleReauth` (`session:reauth`, ENG-219) so re-authenticating a live
+   * socket can never admit a credential a fresh handshake would refuse.
+   */
+  private async assertClaimsAdmitted(
+    payload: AccessTokenClaims,
+  ): Promise<void> {
     // Enforce active membership on the WS path (parity with ActiveMemberGuard).
+    // The credential itself already verified, so the refusal code is
+    // `SESSION_REVOKED`: the SESSION behind it is what is gone, the same
+    // distinction `assertSessionLive` draws below for a signed-out
+    // refresh-token family.
     if (payload.status !== UserStatus.Active) {
-      throw new WsException('Active membership required');
+      throw new ChatWsException('SESSION_REVOKED', 'Unauthorized');
     }
     // Platform lockdown, repeated here because PlatformLockdownGuard governs
-    // HTTP only — without this, websockets stay wide open during a lockdown.
-    // The role has to come from the database: the access token carries `sub`,
-    // `status` and `exp`, but no role claim.
+    // HTTP only, so without this, websockets stay wide open during a
+    // lockdown. The role has to come from the database: the access token
+    // carries `sub`, `status` and `exp`, but no role claim.
     await this.assertNotLockedOut(payload.sub);
     // Ordered AFTER the lockdown check on purpose: `platformSettings.get()` is
     // served from an in-process cache, so an unlocked platform pays nothing for
@@ -812,7 +1531,34 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // `PLATFORM_LOCKED` rather than `Unauthorized`, which is the friendlier of
     // the two answers and the one that makes the client back off hardest.
     await this.assertSessionLive(payload.sid);
-    return { userId: payload.sub, exp: payload.exp };
+  }
+
+  private async authenticate(
+    client: ChatSocket,
+  ): Promise<{ userId: string; exp: number; sessionId?: string }> {
+    const fromAuth = client.handshake.auth?.token as string | undefined;
+    const fromCookie = parseCookie(client.handshake.headers.cookie ?? '')[
+      'access_token'
+    ];
+    const raw = fromAuth ?? fromCookie;
+    if (!raw) {
+      throw new ChatWsException('UNAUTHORIZED', 'Unauthorized');
+    }
+    const payload = await this.verifyAccessToken(raw);
+    // ENG-211: metered right after the token verifies. A VERIFIED user id is
+    // required so a client cannot burn a stranger's bucket by claiming their
+    // `sub` in an unsigned/garbage token, and this runs BEFORE the
+    // lockdown/session checks below, which are the DB round-trips this
+    // exists to bound. See
+    // `handshakeLimiter`'s own doc for the numbers.
+    if (!this.handshakeLimiter.tryConsume(payload.sub)) {
+      throw new ChatWsException(
+        'RATE_LIMITED',
+        'You are reconnecting too quickly',
+      );
+    }
+    await this.assertClaimsAdmitted(payload);
+    return { userId: payload.sub, exp: payload.exp, sessionId: payload.sid };
   }
 
   /**
@@ -820,9 +1566,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * still alive.
    *
    * "Sign out this device" on the security page revokes a family and emits
-   * {@link USER_SESSION_REVOKED}, which {@link handleSessionRevoked} above turns
-   * into a one-shot drop of the member's `user:<id>` room. That drop is the
-   * whole story only for sockets that are open at that instant. The signed-out
+   * {@link USER_SESSION_REVOKED} carrying that family's id, which
+   * {@link handleSessionRevoked} above turns into a one-shot drop of the ONE
+   * socket whose handshake token matches it. That drop is the whole story
+   * only for a socket that is open at that instant. The signed-out
    * device still holds a valid access token for the rest of its 15-minute TTL,
    * so it simply reconnected and was let straight back in, because the
    * handshake asked only whether the token verified. The member was told the
@@ -863,7 +1610,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
     if (typeof sessionId !== 'string') {
-      throw new WsException('Malformed access token payload');
+      throw new ChatWsException('UNAUTHORIZED', 'Unauthorized');
     }
     // An empty string names no session, and `JwtStrategy.isSessionLive` reads
     // it the same way (its falsy guard covers both). No minted token carries
@@ -879,7 +1626,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       },
     });
     if (!isSessionLive) {
-      throw new WsException('Session has been signed out');
+      throw new ChatWsException('SESSION_REVOKED', 'Unauthorized');
     }
   }
 
@@ -928,43 +1675,289 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
   }
 
-  private scheduleTokenExpiry(client: ChatSocket, exp: number): void {
-    const msUntilExpiry = exp * 1000 - Date.now();
-    if (msUntilExpiry <= 0) {
-      client.emit('exception', { status: 'error', message: 'Token expired' });
-      client.disconnect(true);
-      return;
-    }
-    const timer = setTimeout(() => {
-      client.emit('exception', { status: 'error', message: 'Token expired' });
-      client.disconnect(true);
-    }, msUntilExpiry);
-    // Don't let a pending expiry timer keep the event loop alive on shutdown.
-    timer.unref?.();
-    client.data.expiryTimer = timer;
+  /**
+   * The single "kill this socket for a bad or expired credential" action.
+   * Shared by `scheduleTokenExpiry`'s own armed timer (a routine drop at the
+   * handshake token's `exp`) and `handleReauth`'s failure branch (ENG-219: an
+   * IMMEDIATE drop for a `session:reauth` frame that fails verification):
+   * one drop path for both, rather than a second one for reauth that could
+   * drift from this one's behaviour.
+   *
+   * Marking `isExpiring` BEFORE disconnecting is what lets `handleDisconnect`
+   * tell this PLANNED drop apart from a genuine one and grant
+   * `PresenceService` a grace window instead of reporting the member offline
+   * for the moment it takes to reconnect on a freshly-refreshed token. That
+   * grace is exactly as safe for a REJECTED reauth as for a routine expiry:
+   * it only delays a PRESENCE broadcast, never the auth decision itself
+   * (which already ran, and already failed, before this is ever called), so
+   * the socket is gone either way, and a legitimate client either reconnects
+   * with a genuinely fresh credential (indistinguishable from the routine
+   * case) or does not, in which case the grace window still lapses and
+   * reports it offline.
+   */
+  private dropSocketForExpiredOrInvalidCredential(client: ChatSocket): void {
+    client.data.isExpiring = true;
+    client.emit(
+      'exception',
+      buildChatWsErrorFrame('TOKEN_EXPIRED', 'Token expired'),
+    );
+    client.disconnect(true);
   }
 
+  /**
+   * Returns TRUE when the token expiry timer was scheduled for later, and
+   * FALSE when `exp` was already in the past and the socket was dropped
+   * immediately instead. The caller (`handleConnection`) uses that to stop
+   * before marking an already-dropped socket present in `PresenceService`;
+   * see the call site's own comment for why that race is possible at all.
+   * `handleReauth` (ENG-219) reuses this SAME method to arm a fresh timer
+   * for a NEW `exp` on an already-open socket, after clearing whatever timer
+   * this had previously armed: see that handler's own comment for why the
+   * clear has to happen first.
+   */
+  private scheduleTokenExpiry(client: ChatSocket, exp: number): boolean {
+    // ENG-260: arms a timer for at most `MAX_SET_TIMEOUT_DELAY_MS` and, if
+    // that fires before the real `exp`, re-arms against the REMAINING time
+    // rather than trusting a single `setTimeout` call to survive all the way
+    // there. Recomputing the remainder from `exp` and `Date.now()` on every
+    // re-arm (instead of subtracting `MAX_SET_TIMEOUT_DELAY_MS` from the
+    // previous delay) also keeps this correct under event-loop lag: a
+    // callback that fires late still measures against the wall clock, not
+    // against how long the PREVIOUS leg was scheduled for. Every re-arm
+    // overwrites `client.data.expiryTimer` with the CURRENT pending timer, so
+    // `handleDisconnect`'s `clearTimeout` always clears the right one no
+    // matter how many legs this has chained through.
+    const armTimer = (delayMs: number) => {
+      const timer = setTimeout(() => {
+        const remainingMs = exp * 1000 - Date.now();
+        if (remainingMs <= 0) {
+          this.dropSocketForExpiredOrInvalidCredential(client);
+          return;
+        }
+        armTimer(Math.min(remainingMs, MAX_SET_TIMEOUT_DELAY_MS));
+      }, delayMs);
+      // Don't let a pending expiry timer keep the event loop alive on shutdown.
+      timer.unref?.();
+      client.data.expiryTimer = timer;
+    };
+    const msUntilExpiry = exp * 1000 - Date.now();
+    if (msUntilExpiry <= 0) {
+      this.dropSocketForExpiredOrInvalidCredential(client);
+      return false;
+    }
+    armTimer(Math.min(msUntilExpiry, MAX_SET_TIMEOUT_DELAY_MS));
+    return true;
+  }
+
+  /**
+   * PRD-364 shared helper: every OTHER (never the caller themselves)
+   * participant of `conversationId` whose messaging-privacy row FAILS
+   * `shares`, as `user:<id>` room names — the exact shape socket.io's
+   * `.except()` wants. Used by `handleTyping` and `handleMessageRead` to
+   * exclude a participant who has turned off their own sharing from a live
+   * relay of someone else's typing/read signal, since PRD-364 makes each of
+   * those reciprocal (opting out also means never SEEING the same signal from
+   * anyone else). One extra query per relay, same cost class as
+   * `fanOutConversationMessage`'s identical per-send participant read.
+   */
+  private async excludedUserRooms(
+    conversationId: string,
+    callerUserId: string,
+    shares: (privacy: MessagingPrivacyDTO) => boolean,
+  ): Promise<string[]> {
+    const participants = await this.conversationParticipants.find({
+      where: { conversationId },
+      // ENG-239, same regression as `fanOutConversationMessage`'s own `select`
+      // above: the default full-row `find` pulled every participant column,
+      // including each member's possibly-5000-char `draft` free text, and this
+      // helper runs on EVERY typing frame and every read relay. Only the id is
+      // ever read here.
+      select: { userId: true },
+    });
+    const otherUserIds = participants
+      .map((participant) => participant.userId)
+      .filter((participantUserId) => participantUserId !== callerUserId);
+    if (!otherUserIds.length) {
+      return [];
+    }
+    const privacyByUser =
+      await this.preferences.getMessagingPrivacyForUsers(otherUserIds);
+    return otherUserIds
+      .filter((otherUserId) => {
+        const privacy = privacyByUser.get(otherUserId);
+        // An id absent from the map (no row, sharing everything) reads as
+        // sharing — never defensively withhold from a missing entry.
+        return privacy ? !shares(privacy) : false;
+      })
+      .map((otherUserId) => `user:${otherUserId}`);
+  }
+
+  /**
+   * ENG-246: uncapped — `getAcceptedConnectionUserIds`'s `DEFAULT_LIST_LIMIT`
+   * cap is fine for a rendered connections list, but presence is an internal
+   * fan-out target set: a member past the cap silently never learned when
+   * their 201st+ connection came online, and never appeared online to them
+   * either. Mirrors `ConversationsService.listConversations`'s identical swap.
+   */
   private async emitPresenceSnapshot(
     client: ChatSocket,
     userId: string,
   ): Promise<void> {
-    const connectionIds =
-      await this.connections.getAcceptedConnectionUserIds(userId);
-    const online = connectionIds.filter((id) => this.presence.isOnline(id));
+    // PRD-364, reciprocal: a member who has turned off their OWN presence
+    // sharing receives no presence signal about anyone else either — an empty
+    // snapshot now, and no live `presence` frames later (see
+    // `broadcastPresence`, which never fires FOR a member who reads this way,
+    // and this same check, re-run on their own next snapshot request/handshake,
+    // covers what they receive ABOUT others).
+    const ownPrivacy = await this.preferences.getMessagingPrivacy(userId);
+    if (!ownPrivacy.sharePresence) {
+      client.emit('presence:snapshot', { online: [] });
+      return;
+    }
+    const online = await this.visibleOnlineConnectionIds(userId);
     client.emit('presence:snapshot', { online });
   }
 
+  /** The subset of `userId`'s accepted connections who are online AND have
+   *  not turned off their own presence sharing (PRD-364) — never announce a
+   *  connection who opted out as online to anyone else. */
+  private async visibleOnlineConnectionIds(userId: string): Promise<string[]> {
+    const connectionIds =
+      await this.connections.allAcceptedConnectionUserIds(userId);
+    if (!connectionIds.length) {
+      return [];
+    }
+    const online = connectionIds.filter((id) => this.presence.isOnline(id));
+    if (!online.length) {
+      return [];
+    }
+    const privacyByUser =
+      await this.preferences.getMessagingPrivacyForUsers(online);
+    return online.filter((id) => privacyByUser.get(id)?.sharePresence ?? true);
+  }
+
+  /**
+   * Announce `userId`'s on/offline transition to every accepted connection —
+   * gated on `userId`'s OWN current presence sharing (PRD-364): a member who
+   * has opted out is never announced online in the first place, so there is
+   * nothing to retract on disconnect either. The one exception is the
+   * OFF-transition fired by a live preference change
+   * (`handleSharePresenceChanged` below), which calls
+   * {@link forceBroadcastPresence} directly to retract an announcement made
+   * before the member opted out.
+   */
   private async broadcastPresence(
     userId: string,
     online: boolean,
   ): Promise<void> {
+    const ownPrivacy = await this.preferences.getMessagingPrivacy(userId);
+    if (!ownPrivacy.sharePresence) {
+      return;
+    }
+    // Re-checked once more inside, immediately before the emit and after the
+    // connection lookup this cheap gate precedes: see
+    // `forceBroadcastPresence`'s `recheckSharePresence` for the toggle race
+    // that read closes.
+    await this.forceBroadcastPresence(userId, online, {
+      recheckSharePresence: true,
+    });
+  }
+
+  /** The unconditional broadcast `broadcastPresence` gates on
+   *  `sharePresence` — see that method's doc for why a caller ever needs the
+   *  raw version. ENG-246: uncapped connections (see `emitPresenceSnapshot`'s
+   *  doc).
+   *
+   *  PRD-364 is reciprocal on BOTH sides, so RECIPIENTS are filtered here too.
+   *  Gating only on the subject left a member who had opted out receiving live
+   *  `presence` frames about everyone else (the client merges them straight
+   *  into its online set), even though their own snapshot came back empty, so
+   *  `emitPresenceSnapshot`'s doc promised something the live path did not
+   *  keep. Subject and recipients come out of ONE batched privacy read.
+   *
+   *  `recheckSharePresence` closes the announcing-side toggle race: a member
+   *  who turns presence off while this call is still resolving its connection
+   *  list would otherwise be re-announced online by the in-flight broadcast,
+   *  with nothing left to retract it, because `handleSharePresenceChanged`'s
+   *  own retraction has already run by then. The re-check is free, since the
+   *  subject rides along in the batched read the recipient filter needs
+   *  anyway. */
+  private async forceBroadcastPresence(
+    userId: string,
+    online: boolean,
+    options?: { recheckSharePresence?: boolean },
+  ): Promise<void> {
     const connectionIds =
-      await this.connections.getAcceptedConnectionUserIds(userId);
-    for (const otherId of connectionIds) {
-      this.namespace?.to(`user:${otherId}`).emit('presence', {
-        userId,
-        online,
-      });
+      await this.connections.allAcceptedConnectionUserIds(userId);
+    if (!connectionIds.length) {
+      return;
+    }
+    const privacyByUser = await this.preferences.getMessagingPrivacyForUsers([
+      userId,
+      ...connectionIds,
+    ]);
+    // An id absent from the map (no row, sharing everything) reads as sharing,
+    // matching `excludedUserRooms` and `visibleOnlineConnectionIds`.
+    if (
+      options?.recheckSharePresence &&
+      !(privacyByUser.get(userId)?.sharePresence ?? true)
+    ) {
+      return;
+    }
+    const rooms = connectionIds
+      .filter((otherId) => privacyByUser.get(otherId)?.sharePresence ?? true)
+      .map((otherId) => `user:${otherId}`);
+    if (!rooms.length) {
+      return;
+    }
+    // ONE emit addressed to every room at once, rather than one emit per
+    // connection: socket.io de-duplicates recipients across the room list, so
+    // behaviour is identical while a member with hundreds of connections costs
+    // a single adapter call per transition instead of hundreds.
+    this.namespace?.to(rooms).emit('presence', {
+      userId,
+      online,
+    });
+  }
+
+  /**
+   * PRD-364: a `sharePresence` toggle must take effect live, not merely on
+   * this member's NEXT connect/disconnect. Turning it OFF retracts an
+   * "online" announcement already standing (bypassing `broadcastPresence`'s
+   * own gate, which by now reads the NEW, already-off value and would
+   * otherwise silently skip the retraction). Turning it ON re-announces
+   * online (if a socket is actually live) and refreshes the member's OWN
+   * snapshot, since they can now see others again too.
+   */
+  @OnEvent(MESSAGING_PRIVACY_SHARE_PRESENCE_CHANGED)
+  async handleSharePresenceChanged(
+    payload: MessagingPrivacySharePresenceChangedEvent,
+  ): Promise<void> {
+    // Async `@OnEvent` doing DB work, wrapped like `handleMemberBlocked`: the
+    // preference write has already committed, so a failure here must never
+    // surface to the member's request, but it must not vanish as a bare
+    // unhandled rejection either. A dropped retraction leaves a stale "online"
+    // standing until this member's next transition, which is worth a logged
+    // error.
+    try {
+      const isOnline = this.presence.isOnline(payload.userId);
+      if (payload.sharePresence) {
+        if (isOnline) {
+          await this.forceBroadcastPresence(payload.userId, true);
+        }
+        const online = await this.visibleOnlineConnectionIds(payload.userId);
+        this.namespace
+          ?.to(`user:${payload.userId}`)
+          .emit('presence:snapshot', { online });
+      } else if (isOnline) {
+        await this.forceBroadcastPresence(payload.userId, false);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to apply a live sharePresence change: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
     }
   }
 }

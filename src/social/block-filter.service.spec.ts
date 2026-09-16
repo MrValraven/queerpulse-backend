@@ -7,11 +7,14 @@ import { Mute } from './entities/mute.entity';
 
 describe('BlockFilterService', () => {
   let service: BlockFilterService;
-  let blocks: { exist: jest.Mock };
+  let blocks: { exist: jest.Mock; find: jest.Mock };
   let mutes: { exist: jest.Mock };
 
   beforeEach(async () => {
-    blocks = { exist: jest.fn().mockResolvedValue(false) };
+    blocks = {
+      exist: jest.fn().mockResolvedValue(false),
+      find: jest.fn().mockResolvedValue([]),
+    };
     mutes = { exist: jest.fn().mockResolvedValue(false) };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -104,6 +107,55 @@ describe('BlockFilterService', () => {
       expect(sql).toContain(':blockFilterActorId');
       expect(params).toEqual({ blockFilterActorId: 'me' });
       expect(result).toBe(qb);
+    });
+  });
+
+  // Messaging scan section 8 (Groups) fix: PRD-354 must also refuse two
+  // CANDIDATES in the same batch who blocked each other, not only a
+  // candidate blocked with a guardian.
+  describe('blockedAgainstAnyOf', () => {
+    it('flags a candidate blocked either way with a guardian', async () => {
+      blocks.find.mockResolvedValue([
+        { blockerId: 'guardian', blockedId: 'candidate-a' },
+      ]);
+      const result = await service.blockedAgainstAnyOf(
+        ['candidate-a', 'candidate-b'],
+        ['guardian'],
+      );
+      expect(result).toEqual(new Set(['candidate-a']));
+    });
+
+    it('flags BOTH sides of a block between two candidates in the same batch, with no guardians involved', async () => {
+      blocks.find.mockResolvedValue([
+        { blockerId: 'candidate-a', blockedId: 'candidate-b' },
+      ]);
+      const result = await service.blockedAgainstAnyOf(
+        ['candidate-a', 'candidate-b'],
+        [],
+      );
+      expect(result).toEqual(new Set(['candidate-a', 'candidate-b']));
+      // One batched round trip: the candidate set is folded into the
+      // guarded set so a single query catches both shapes.
+      expect(blocks.find).toHaveBeenCalledTimes(1);
+      const [{ where }] = blocks.find.mock.calls[0] as [{ where: unknown[] }];
+      expect(where).toHaveLength(2);
+    });
+
+    it('short-circuits with no query when candidates is empty', async () => {
+      await expect(
+        service.blockedAgainstAnyOf([], ['guardian']),
+      ).resolves.toEqual(new Set());
+      expect(blocks.find).not.toHaveBeenCalled();
+    });
+
+    it('still queries a single candidate with no guardians (its own batch is the guard set)', async () => {
+      // No other candidate and no guardian to pair against, so no block row
+      // could ever match, but the candidate set alone is enough to avoid
+      // the old all-guardians-empty short-circuit that this fix removed.
+      await expect(
+        service.blockedAgainstAnyOf(['candidate-a'], []),
+      ).resolves.toEqual(new Set());
+      expect(blocks.find).toHaveBeenCalledTimes(1);
     });
   });
 });

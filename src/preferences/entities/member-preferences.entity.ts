@@ -1,4 +1,5 @@
 import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
+import { DEFAULT_WHO_CAN_MESSAGE, WhoCanMessage } from '../who-can-message';
 
 // The out-at-work spectrum — a choice, never a binary toggle. Values mirror the
 // frontend's `OUT_AT_WORK` list (`features/economy/workProfile.data.ts`).
@@ -10,12 +11,28 @@ export enum OutAtWork {
   Private = 'private',
 }
 
+// PRD-353: who may put this member straight into a group conversation.
+// `connections` is today's behaviour unchanged: an owner/admin who is an
+// accepted connection seats the member directly. `invite_only` turns every
+// such add into a `group_invites` row the member accepts or declines instead.
+// There is no third "everyone" value: only accepted connections of the adder
+// can ever be added or invited in the first place, so this preference only
+// ever narrows that set further. A member who previously left or was removed
+// from the SPECIFIC group being added to is never silently re-seated by
+// either value; that case always creates an invite, enforced in
+// `GroupsService`, not by this column.
+export enum GroupAddPolicy {
+  Connections = 'connections',
+  InviteOnly = 'invite_only',
+}
+
 // Defaults live here, not only in the DB, because a member who has never opened
 // the settings page has NO ROW — the service synthesises this shape rather than
 // 404ing. The column defaults below must stay in lockstep with these.
 export const DEFAULT_OUT_AT_WORK = OutAtWork.Verified;
 export const DEFAULT_SAFE_ONLY = true;
 export const DEFAULT_PUBLIC_PROFILE_ENABLED = false;
+export const DEFAULT_GROUP_ADD_POLICY = GroupAddPolicy.Connections;
 
 /**
  * Login alerts default ON — the opposite of `publicProfileEnabled`, and for the
@@ -81,6 +98,20 @@ export const DEFAULT_HIDE_SEXUALITY_IDENTITY_CONTENT = false;
  * blackout was the only thing resembling one.
  */
 export const DEFAULT_HIDE_FROM_SUGGESTIONS = false;
+
+/**
+ * The three messaging-privacy shares all default ON (PRD-364): a member who
+ * has never opened Settings shares read receipts, typing and online status
+ * exactly like the platform's pre-PRD-364 behaviour. Each is RECIPROCAL —
+ * enforced at the read/write SITE (`ConversationsService.markRead`,
+ * `ChatGateway.handleTyping`/`emitPresenceSnapshot`/`broadcastPresence`,
+ * `MessagingCoreService.buildMemberSummaries`), never merely a display hint —
+ * so turning one off also stops that member from seeing the same signal
+ * coming from everyone else. See `PreferencesService.getMessagingPrivacy`.
+ */
+export const DEFAULT_SHARE_READ_RECEIPTS = true;
+export const DEFAULT_SHARE_TYPING = true;
+export const DEFAULT_SHARE_PRESENCE = true;
 
 /**
  * One row per member holding the owner-only SAFETY and VISIBILITY switches.
@@ -274,6 +305,38 @@ export class MemberPreferences {
    */
   @Column({ type: 'boolean', default: DEFAULT_HIDE_FROM_SUGGESTIONS })
   hideFromSuggestions!: boolean;
+
+  // --- Group add consent (GET/PUT /me/group-add-policy) ---------------------
+
+  @Column({
+    type: 'enum',
+    enum: GroupAddPolicy,
+    enumName: 'member_preferences_group_add_policy_enum',
+    default: DEFAULT_GROUP_ADD_POLICY,
+  })
+  groupAddPolicy!: GroupAddPolicy;
+
+  // --- Messaging privacy (GET/PUT /me/messaging-privacy) --------------------
+  // PRD-364. See `DEFAULT_SHARE_READ_RECEIPTS` above for the reciprocal-sharing
+  // contract these three enforce, and `who-can-message.ts` for the fourth
+  // field's closed set and its enforcement in `ConnectionsService
+  // .resolveRequestGate` (PRD-366).
+
+  @Column({ type: 'boolean', default: DEFAULT_SHARE_READ_RECEIPTS })
+  shareReadReceipts!: boolean;
+
+  @Column({ type: 'boolean', default: DEFAULT_SHARE_TYPING })
+  shareTyping!: boolean;
+
+  @Column({ type: 'boolean', default: DEFAULT_SHARE_PRESENCE })
+  sharePresence!: boolean;
+
+  @Column({
+    type: 'varchar',
+    length: 16,
+    default: DEFAULT_WHO_CAN_MESSAGE,
+  })
+  whoCanMessage!: WhoCanMessage;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

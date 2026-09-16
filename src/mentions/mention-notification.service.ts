@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { extractMentions } from '../common/mentions';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -328,8 +328,17 @@ export class MentionNotificationService {
       if (typeof conversationId !== 'string' || !conversationId) {
         return new Set();
       }
+      // ENG-236: a member who left or was removed keeps their `leftAt`
+      // watermark, but a mention posted after that must never reach them:
+      // their read ceiling stops at `leftAt`, so a mention row/push carrying
+      // an excerpt of a message they can't even see would leak talk about
+      // them after their own exit onto their lock screen.
       const participants = await this.conversationParticipants.find({
-        where: { conversationId, userId: In(candidateUserIds) },
+        where: {
+          conversationId,
+          userId: In(candidateUserIds),
+          leftAt: IsNull(),
+        },
         select: { userId: true },
       });
       return new Set(participants.map((participant) => participant.userId));

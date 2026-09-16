@@ -9,8 +9,7 @@ import { PreferencesService } from './preferences.service';
   imports: [
     TypeOrmModule.forFeature([MemberPreferences]),
     // Exports `PublicEligibilityService`: the server-side gate on turning the
-    // public profile ON. No cycle: nothing in this repo imports
-    // `PreferencesModule`, so the edge runs one way only.
+    // public profile ON.
     PublicEligibilityModule,
   ],
   controllers: [PreferencesController],

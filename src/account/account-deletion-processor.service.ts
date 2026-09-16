@@ -1,7 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, IsNull, LessThanOrEqual, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  IsNull,
+  LessThanOrEqual,
+  Repository,
+} from 'typeorm';
+import {
+  ERASED_SENDER_MESSAGE_BATCH_SIZE,
+  MARK_HELD_MESSAGES_SQL,
+  NIL_UUID,
+  REKEY_SLUG_MEMBER_REPORTS_SQL,
+  TIED_CONVERSATION_IDS_SQL,
+  TOMBSTONE_SENDER_MESSAGE_PAGE_SQL,
+} from './erased-sender-messages';
 import { CommunityOwnerOrphanService } from '../communities/community-owner-orphan.service';
 import { DAY_MS, DELETION_FINAL_WARNING_LEAD_DAYS } from './account.constants';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
@@ -332,6 +346,17 @@ export class AccountDeletionProcessorService {
         [userId],
       );
 
+      // 2b. Messages (ENG-243). `messages.sender_id` is `ON DELETE SET NULL`
+      //     as of `KeepCounterpartMessagesOnSenderErasure1820530000000`, so
+      //     step 3 no longer wipes the member's half of every conversation.
+      //     What each row becomes is decided here, while `sender_id` still
+      //     names them: HELD (readable, anonymised) in a conversation with an
+      //     open or escalated tied report, TOMBSTONED ("Message deleted")
+      //     everywhere else. `ErasedSenderMessageReleaseService` tombstones
+      //     the held rows once their reports close. The rule and every
+      //     statement live in `erased-sender-messages.ts`.
+      await this.settleErasedMemberMessages(manager, userId);
+
       // 3. Hard-delete the user. Every other member-owned table carries an
       //    `ON DELETE CASCADE` FK to `users("id")` and goes with it — 70+ FKs
       //    across the schema, verified against `src/migrations`.
@@ -448,6 +473,104 @@ export class AccountDeletionProcessorService {
         `Storage object erasure failed for account ${userId} (DB erasure already committed): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Step 2b of `eraseAccount` (ENG-243): settle every message the member sent,
+   * inside the erasure transaction and BEFORE the user row is deleted, while
+   * `messages.sender_id` still names them.
+   *
+   *  1. Re-key `member` reports that name them by slug onto their user id, so
+   *     the tie stays evaluable once the profile is gone.
+   *  2. Find the conversations holding an open or escalated tied report, and
+   *     mark their messages there HELD (`erased_sender_ref = userId`). Step 3's
+   *     `ON DELETE SET NULL` then anonymises the sender, and counterparts keep
+   *     reading those lines as "Former member".
+   *  3. Tombstone every other message they sent, in keyset-paginated batches,
+   *     exactly as a "delete for everyone" leaves one, plus the content scrub
+   *     and attachment purge queueing described on
+   *     `ERASED_SENDER_TOMBSTONE_ASSIGNMENTS_SQL`.
+   *
+   * System pills are left alone (audit lines, not authored content). Every
+   * statement is idempotent within the transaction, and the whole step rolls
+   * back with it, so the retry path `eraseDueAccounts` leaves open is safe.
+   *
+   * WHY THE WHOLE STEP STAYS IN ONE TRANSACTION WITH THE USER DELETE. The
+   * tombstone loop below is the longest thing the erasure transaction holds
+   * open, on the platform's highest-write table, so committing it per batch is
+   * the obvious way to shorten that. It is not safe, and the reason is the same
+   * for all three statements: every one of them is keyed on `sender_id` still
+   * naming a LIVE member, and each writes something that is wrong unless the
+   * user row is really deleted afterwards. A committed tombstone batch followed
+   * by a rolled-back delete blanks a live member's messages irreversibly; a
+   * committed hold marks a live member's rows with an `erased_sender_ref` the
+   * daily sweep would later tombstone; a committed re-key moves reports off a
+   * slug that still resolves. So nothing here can be committed before
+   * `manager.delete(User, ...)` without weakening exactly the atomicity this
+   * transaction exists for, and the step keeps the transaction.
+   *
+   * What was safe, and is done instead: make the loop cheaper rather than
+   * longer-lived. Each batch is now ONE statement
+   * (`TOMBSTONE_SENDER_MESSAGE_PAGE_SQL` updates and returns its page) rather
+   * than a SELECT followed by an UPDATE, and its page comes off the composite
+   * `(sender_id, id)` index added by the same migration, so a heavy chat user
+   * no longer re-scans and re-sorts their whole history once per thousand rows.
+   * The transaction does the same work in half the round trips over an index
+   * range scan.
+   */
+  private async settleErasedMemberMessages(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    const profileRows: { slug: string | null }[] = await manager.query(
+      `SELECT "slug" FROM "profiles" WHERE "user_id" = $1`,
+      [userId],
+    );
+    const slug = profileRows[0]?.slug;
+    if (slug) {
+      await manager.query(REKEY_SLUG_MEMBER_REPORTS_SQL, [userId, slug]);
+    }
+
+    const tiedRows: { conversationId: string }[] = await manager.query(
+      TIED_CONVERSATION_IDS_SQL,
+      [userId],
+    );
+    const tiedConversationIds = tiedRows.map((row) => row.conversationId);
+    if (tiedConversationIds.length > 0) {
+      await manager.query(MARK_HELD_MESSAGES_SQL, [
+        userId,
+        tiedConversationIds,
+      ]);
+    }
+
+    let cursorId = NIL_UUID;
+    let tombstonedCount = 0;
+    for (;;) {
+      const tombstonedRows: { id: string }[] = await manager.query(
+        TOMBSTONE_SENDER_MESSAGE_PAGE_SQL,
+        [userId, cursorId, ERASED_SENDER_MESSAGE_BATCH_SIZE],
+      );
+      if (tombstonedRows.length === 0) {
+        break;
+      }
+      tombstonedCount += tombstonedRows.length;
+      // `RETURNING` has no defined row order, so the next page has to start
+      // past the HIGHEST id this one wrote rather than the last one listed. A
+      // canonical lowercase uuid compares as text exactly as Postgres compares
+      // it as a uuid, so this picks the same row the database would.
+      cursorId = tombstonedRows.reduce(
+        (highestId, row) => (row.id > highestId ? row.id : highestId),
+        cursorId,
+      );
+      if (tombstonedRows.length < ERASED_SENDER_MESSAGE_BATCH_SIZE) {
+        break;
+      }
+    }
+
+    this.logger.log(
+      `Settled messages for account ${userId}: ${tombstonedCount} tombstoned, ` +
+        `held in ${tiedConversationIds.length} conversation(s) with an open report`,
+    );
   }
 
   /**

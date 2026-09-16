@@ -119,6 +119,14 @@ export interface ModReportDetail {
     flagged?: boolean;
   }[];
   people: { role: string; name: string; handle?: string; meta: string }[];
+  /**
+   * PRD-360: true when `GET /mod/reports/:id/conversation-context` can open
+   * the conversation around this report (a `message` report whose message row
+   * still exists). `thread` stays empty on purpose: every opening of a private
+   * conversation is an explicit, audited request, never a side effect of
+   * loading the drawer.
+   */
+  conversationContextAvailable: boolean;
   // Listing-report enrichment (item #13), only present on a `listing`-subject
   // report's detail. `disputeReason` is the free-text a disputer/claimer typed
   // (`POST /listings/:ref/dispute`); `listingEvidence` is the ownership/claim

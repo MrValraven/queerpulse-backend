@@ -391,6 +391,23 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // PRD-356. A whole group conversation, shaped exactly like `Community`:
+  // both are a body of member-generated activity a reporter is naming as a
+  // whole rather than one message or post inside it, and the harms are the
+  // same set. `outing`/`doxxing` lead for the same reason they lead
+  // `Community`: a group whose culture is to circulate someone's address,
+  // transition status or old name is the shape that earns the one-hour
+  // Emergency band.
+  [ReportSubjectType.Conversation]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'spam',
+    'off_topic',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */
