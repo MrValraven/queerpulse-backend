@@ -105,7 +105,9 @@ describe('FilesController', () => {
       ['story-covers', STORY_COVER_KEY],
     ])('redirects %s without a session', async (_label, key) => {
       await serve(key, null);
-      expect(storage.createPresignedDownload).toHaveBeenCalledWith(key);
+      expect(storage.createPresignedDownload).toHaveBeenCalledWith(key, {
+        asAttachment: false,
+      });
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
 
@@ -284,13 +286,30 @@ describe('FilesController', () => {
         null,
         response as unknown as Response,
       );
-      expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY);
+      expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY, {
+        asAttachment: false,
+      });
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
 
     it('still resolves when handed a single string param (defensive)', async () => {
       await controller.serve(AVATAR_KEY, null, response as unknown as Response);
-      expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY);
+      expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY, {
+        asAttachment: false,
+      });
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('signs an attachment disposition when ?download=1 is passed', async () => {
+      await controller.serve(
+        AVATAR_KEY,
+        null,
+        response as unknown as Response,
+        '1',
+      );
+      expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY, {
+        asAttachment: true,
+      });
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
   });

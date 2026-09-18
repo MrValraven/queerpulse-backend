@@ -25,6 +25,7 @@ import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { isStorageKey } from './storage-key';
 import {
   MAGIC_BYTE_PREFIX_LENGTH,
+  attachmentContentDispositionForStorageKey,
   contentDispositionForStorageKey,
   contentTypeForStorageKey,
   magicBytesMatchContentType,
@@ -176,13 +177,21 @@ export class StorageService {
   // `presignedUrl`) still mint a GET for any key. For that kind the signed
   // disposition is `attachment` (see `contentDispositionForStorageKey`), so a
   // document from another member never renders inline in the bucket's origin.
-  async createPresignedDownload(key: string): Promise<string> {
+  //
+  // `asAttachment` signs an `attachment` disposition instead, for a member
+  // explicitly saving an image (`FilesController`'s `?download=1`).
+  async createPresignedDownload(
+    key: string,
+    options: { asAttachment?: boolean } = {},
+  ): Promise<string> {
     const contentType = contentTypeForStorageKey(key);
     const command = new GetObjectCommand({
       Bucket: this.requireConfig('storage.bucket'),
       Key: key,
       ...(contentType ? { ResponseContentType: contentType } : {}),
-      ResponseContentDisposition: contentDispositionForStorageKey(key),
+      ResponseContentDisposition: options.asAttachment
+        ? attachmentContentDispositionForStorageKey(key)
+        : contentDispositionForStorageKey(key),
     });
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,

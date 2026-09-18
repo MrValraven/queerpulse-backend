@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
   Param,
+  Query,
   Res,
   UnauthorizedException,
   UseGuards,
@@ -347,6 +348,10 @@ export class FilesController {
     @Param('key') rawKey: string | string[],
     @CurrentUser() user: CurrentUserData | null,
     @Res() response: Response,
+    // `?download=1` signs an `attachment` disposition so a top-level navigation
+    // saves the image instead of rendering it (the chat viewer's Save button).
+    // It changes nothing about who may read the object.
+    @Query('download') download?: string,
   ): Promise<void> {
     // Re-join the segments path-to-regexp split apart. This is safe: the
     // anchored UUID regex in `parseStorageKey` still rejects a `%2F`-smuggled
@@ -444,7 +449,9 @@ export class FilesController {
       await this.streamMessageDocument(storageKey, response);
       return;
     }
-    const downloadUrl = await this.storage.createPresignedDownload(storageKey);
+    const downloadUrl = await this.storage.createPresignedDownload(storageKey, {
+      asAttachment: download === '1',
+    });
     // Railway's edge cache once served authenticated responses to the wrong
     // users (incident 2026-03-30), so shared/CDN caches are refused on every
     // kind via `private` — that half is non-negotiable. Browser-local caching

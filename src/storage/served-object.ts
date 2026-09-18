@@ -71,6 +71,20 @@ export function inlineContentDispositionForStorageKey(key: string): string {
 }
 
 /**
+ * An `attachment` Content-Disposition under the same server-minted
+ * `<uuid>.<ext>` filename as {@link inlineContentDispositionForStorageKey}.
+ * Signed into the presigned GET when a member explicitly asks to SAVE an image
+ * (`/files/<key>?download=1`), so the browser downloads it instead of rendering
+ * it. A cross-origin `<a download>` is ignored by browsers, so this header is
+ * the only thing that turns the bucket response into a download.
+ */
+export function attachmentContentDispositionForStorageKey(key: string): string {
+  const lastSlash = key.lastIndexOf('/');
+  const fileName = lastSlash === -1 ? key : key.slice(lastSlash + 1);
+  return `attachment; filename="${fileName}"`;
+}
+
+/**
  * The disposition to sign into a presigned GET for a key (PRD-369). A
  * `message-document` is a file from another member, so it is always signed as
  * an `attachment` and never renders inline in the bucket's origin; every other
