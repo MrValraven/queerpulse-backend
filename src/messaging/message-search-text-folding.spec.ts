@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return -- `pg` ships no bundled .d.ts and this repo has no `@types/pg` devDependency (adding one needs a package.json change outside this fix's file allowlist), so `Client` resolves untyped here. Runtime behaviour is exercised directly against the live local database by every test in this file. */
 import { Client } from 'pg';
 import { escapeLikeTerm } from '../common/like-escape';
 import { foldedTextExpression } from '../search/search-text';
