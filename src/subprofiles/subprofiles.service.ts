@@ -210,6 +210,47 @@ export function canonicalStringify(value: unknown): string {
   return JSON.stringify(canonicalize(value));
 }
 
+/** Who is writing, re-checked against the locked persona row
+ * (`SubprofilesService.lockCurrentSubprofile`). */
+interface SubprofileLockChecks {
+  /** The member making the edit: refused with the membership 403 when they
+   * no longer hold a roster row (they left, or handed the persona over). */
+  editorUserId: string;
+  /** Set for an edit only the creator may make: refused unless this user is
+   * still the creator on the locked row. */
+  requiredCreatorUserId?: string;
+}
+
+/** How `SubprofilesService.saveEditUnderLock` persists an edit. */
+interface SubprofileEditSaveOptions extends SubprofileLockChecks {
+  /** True when the edit itself sets a new `slug`; otherwise the committed
+   * slug is kept, so a slug the creator transfer suffixed is never reverted. */
+  hasEditedSlug: boolean;
+  /** True when the edit itself switches `linkVisibility` (resending the
+   * loaded value is no switch). Otherwise the committed link state is kept,
+   * the way `slug` is, so a stale edit never flips it back. */
+  hasEditedLinkVisibility: boolean;
+  /** True when the edit changes `status` or `handle` (publish, unpublish, a
+   * handle edit). Those were decided against the loaded link state, so the
+   * save is refused with a 409 when that state moved meanwhile. */
+  hasLinkDependentChange: boolean;
+  /** The `linkVisibility` and `status` the edit was decided against. A link
+   * switch whose locked row no longer matches them is refused with a 409. */
+  loadedLinkVisibility: SubprofileLinkVisibility;
+  loadedStatus: SubprofileStatus;
+}
+
+/** The 409 a write gets when the persona's link state, status or handle moved
+ * between the unlocked load and the locked write. Its own class, so `publish`
+ * can rethrow it apart from a handle-registry conflict. */
+class PersonaChangedMeanwhileException extends ConflictException {
+  constructor() {
+    super(
+      'This persona changed while you were editing. Reload it and try again.',
+    );
+  }
+}
+
 @Injectable()
 export class SubprofilesService {
   constructor(
@@ -716,6 +757,7 @@ export class SubprofilesService {
     this.assertNoForeignUploadIntroduced(userId, dto.coverUrl, [sp.coverUrl]);
     const prevLink = sp.linkVisibility;
     const prevHandle = sp.handle;
+    const prevSlug = sp.slug;
     // Creator vs. non-creator co-owner (Task 4): the creator is the persona's
     // original owner (`subprofiles.userId`). Non-creators keep normal content
     // editing but are barred from the destructive ops gated below.
@@ -824,7 +866,21 @@ export class SubprofilesService {
     // unpublish the persona. Evaluated against the fully-merged state so a
     // change reached by ANY path (explicit field, or a linkVisibility side
     // effect that nulls the handle / drafts the status) is caught uniformly.
+    //
+    // Linking (Unlinked to Linked) nests the persona under the creator's
+    // profile and shows the creator's name on it, so only the creator may
+    // make that switch. It is checked first, so a co-owner linking a
+    // published unlinked persona (which also drops its handle) gets this
+    // reason. Unlinking keeps the rules below.
+    const isLinkingToCreatorProfile =
+      prevLink === SubprofileLinkVisibility.Unlinked &&
+      sp.linkVisibility === SubprofileLinkVisibility.Linked;
     if (!isCreator) {
+      if (isLinkingToCreatorProfile) {
+        throw new ForbiddenException(
+          'Only the persona creator can link it to their profile',
+        );
+      }
       if ((sp.handle ?? null) !== (prevHandle ?? null)) {
         throw new ForbiddenException(
           'Only the persona creator can change its handle',
@@ -848,6 +904,30 @@ export class SubprofilesService {
       }
     }
 
+    // The creator-only changes the gate above refuses to non-creators. When
+    // the edit makes one, the save re-checks the creator under the row lock,
+    // since the creator role can move to another co-owner between the read
+    // above and the write (`transferCreatorWithin`).
+    const hasCreatorOnlyChange =
+      isLinkingToCreatorProfile ||
+      (sp.handle ?? null) !== (prevHandle ?? null) ||
+      SubprofilesService.VISIBILITY_RANK[sp.visibility] >
+        SubprofilesService.VISIBILITY_RANK[prevVisibility] ||
+      (prevStatus === SubprofileStatus.Published &&
+        sp.status === SubprofileStatus.Draft);
+    const saveOptions: SubprofileEditSaveOptions = {
+      editorUserId: userId,
+      hasEditedSlug: rest.slug !== undefined && rest.slug !== prevSlug,
+      // The merged state: a `null` or resent `linkVisibility` is no switch.
+      hasEditedLinkVisibility: sp.linkVisibility !== prevLink,
+      hasLinkDependentChange:
+        sp.status !== prevStatus ||
+        (sp.handle ?? null) !== (prevHandle ?? null),
+      loadedLinkVisibility: prevLink,
+      loadedStatus: prevStatus,
+      requiredCreatorUserId: hasCreatorOnlyChange ? userId : undefined,
+    };
+
     // --- Task 5: re-screen a published persona's identity text on edit -----
     // `validatePublish`'s blocked-term screen only runs at publish; without
     // this, a member could publish clean text and then PATCH a slur into a
@@ -868,19 +948,29 @@ export class SubprofilesService {
     if (releases.length) {
       try {
         await this.dataSource.transaction(async (m) => {
+          // The persona row lock comes FIRST, before any handle row is
+          // touched: every transaction here takes the persona row and then
+          // the handle row, in that order, so two of them can never wait on
+          // each other. It also refuses a former member or creator before
+          // anything is released.
+          const current = await this.lockCurrentSubprofile(
+            m,
+            sp.id,
+            saveOptions,
+          );
           for (const name of releases) {
             await this.handles.release(m, name, {
               kind: 'subprofile',
               subprofileId: sp.id,
             });
           }
-          await m.save(sp);
+          await this.applyCommittedColumnsAndSave(m, sp, current, saveOptions);
         });
       } catch (err) {
         this.throwConflictOnUniqueViolation(err);
       }
     } else {
-      await this.saveSubprofile(sp);
+      await this.saveSubprofile(sp, saveOptions);
     }
     return this.ownerDTO(sp);
   }
@@ -1396,10 +1486,18 @@ export class SubprofilesService {
     const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
 
     if (!unlinked) {
+      const loadedStatus = sp.status;
       // Linked personas render nested and never carry a global handle.
       sp.handle = null;
       sp.status = SubprofileStatus.Published;
-      await this.saveSubprofile(sp);
+      await this.saveSubprofile(sp, {
+        editorUserId: userId,
+        hasEditedSlug: false,
+        hasEditedLinkVisibility: false,
+        hasLinkDependentChange: true,
+        loadedLinkVisibility: sp.linkVisibility,
+        loadedStatus,
+      });
       // The profiles `ActivityListener` records a "Published a persona" row
       // from this. It re-reads the persona and applies its own gate (published,
       // `open` visibility, LINKED, not removed), so that rule lives in exactly
@@ -1433,6 +1531,23 @@ export class SubprofilesService {
       sp.status === SubprofileStatus.Published ? sp.handle : null;
     try {
       await this.dataSource.transaction(async (m) => {
+        // Persona row lock before the handle row, the order every
+        // transaction here keeps; it also refuses an editor who has left.
+        const current = await this.lockCurrentSubprofile(m, sp.id, {
+          editorUserId: userId,
+        });
+        // The claim below was decided on the loaded row. If the link, status
+        // or handle moved meanwhile (the creator linked it, or another
+        // publish claimed the name), claiming now would leave a registry row
+        // the persona no longer matches. `sp.status` is still the loaded
+        // value here.
+        const hasPersonaMovedMeanwhile =
+          current.linkVisibility !== SubprofileLinkVisibility.Unlinked ||
+          current.status !== sp.status ||
+          (current.handle ?? null) !== (sp.handle ?? null);
+        if (hasPersonaMovedMeanwhile) {
+          throw new PersonaChangedMeanwhileException();
+        }
         await this.handles.rename(m, existingClaimedName, sp.handle!, {
           kind: 'subprofile',
           subprofileId: sp.id,
@@ -1447,6 +1562,9 @@ export class SubprofilesService {
       // Someone claimed the name between the pre-check and the write. Surface as
       // 422 `handle_taken` to stay consistent with the publish completeness
       // contract (rather than leaking a bare 409).
+      if (err instanceof PersonaChangedMeanwhileException) {
+        throw err;
+      }
       if (err instanceof ConflictException) {
         throw new UnprocessableEntityException({
           code: 'SUBPROFILE_NOT_READY',
@@ -1492,6 +1610,14 @@ export class SubprofilesService {
       // transaction, so the registry and the row can never disagree.
       const handle = sp.handle;
       await this.dataSource.transaction(async (m) => {
+        // Persona row lock before the handle row, the order every
+        // transaction here keeps. Re-checks the creator under it: the gate
+        // above read the row before any lock, and the creator role may have
+        // moved since.
+        await this.lockCurrentSubprofile(m, sp.id, {
+          editorUserId: userId,
+          requiredCreatorUserId: userId,
+        });
         await this.handles.release(m, handle, {
           kind: 'subprofile',
           subprofileId: sp.id,
@@ -1505,8 +1631,17 @@ export class SubprofilesService {
       sp.status = SubprofileStatus.Draft;
       sp.handle = null;
     } else {
+      const loadedStatus = sp.status;
       sp.status = SubprofileStatus.Draft;
-      await this.saveSubprofile(sp);
+      await this.saveSubprofile(sp, {
+        editorUserId: userId,
+        hasEditedSlug: false,
+        hasEditedLinkVisibility: false,
+        hasLinkDependentChange: true,
+        loadedLinkVisibility: sp.linkVisibility,
+        loadedStatus,
+        requiredCreatorUserId: userId,
+      });
     }
     return this.ownerDTO(sp);
   }
@@ -1518,30 +1653,44 @@ export class SubprofilesService {
     if (sp.userId !== userId) {
       throw new ForbiddenException('Only the persona creator can delete it');
     }
-    // Capture the co-owner roster BEFORE the delete cascades away the
-    // `subprofile_members` rows — the deletion notification fans out to every
-    // co-owner except the creator who initiated it.
-    const memberRows = await this.members.find({
-      where: { subprofileId: id },
-      select: { userId: true },
+    // The gate above read the persona before any lock. The delete runs under
+    // the persona row lock that every roster writer and the creator transfer
+    // take first, and re-checks the caller as creator on the locked row: a
+    // concurrent `leave` may have handed the persona to a successor since,
+    // and a stale delete would destroy it for every remaining co-owner. Lock
+    // order stays persona row, then the handle row the delete cascades into.
+    const deleted = await this.dataSource.transaction(async (manager) => {
+      const current = await this.lockCurrentSubprofile(manager, id, {
+        editorUserId: userId,
+        requiredCreatorUserId: userId,
+      });
+      // Capture the co-owner roster BEFORE the delete cascades away the
+      // `subprofile_members` rows. The deletion notification fans out to
+      // every co-owner except the creator who initiated it.
+      const memberRows = await manager.find(SubprofileMember, {
+        where: { subprofileId: id },
+        select: { userId: true },
+      });
+      const coOwnerIds = memberRows
+        .map((row) => row.userId)
+        .filter((memberUserId) => memberUserId !== current.userId);
+      const displayName = current.displayName;
+      // `subprofile_items` AND the persona's `handles` registry row (if any)
+      // both cascade via their FK's ON DELETE CASCADE on `subprofile_id`, so
+      // deleting the subprofile auto-frees its global handle and no explicit
+      // release is needed.
+      await manager.remove(current);
+      return { coOwnerIds, displayName };
     });
-    const coOwnerIds = memberRows
-      .map((row) => row.userId)
-      .filter((memberUserId) => memberUserId !== sp.userId);
-    const displayName = sp.displayName;
-    // `subprofile_items` AND the persona's `handles` registry row (if any) both
-    // cascade via their FK's ON DELETE CASCADE on `subprofile_id` — deleting the
-    // subprofile auto-frees its global handle, so no explicit release is needed.
-    await this.subprofiles.remove(sp);
-    // Emitted AFTER the row is gone — a listener must never observe a persona
+    // Emitted AFTER the commit: a listener must never observe a persona
     // that could still exist. Best-effort: the delete already committed, so a
     // notification failure must not surface as an error to the caller.
-    if (coOwnerIds.length) {
+    if (deleted.coOwnerIds.length) {
       this.eventEmitter.emit(SUBPROFILE_DELETED, {
         subprofileId: id,
-        displayName,
+        displayName: deleted.displayName,
         deletedByUserId: userId,
-        coOwnerIds,
+        coOwnerIds: deleted.coOwnerIds,
       } satisfies SubprofileDeletedEvent);
     }
   }
@@ -1765,12 +1914,139 @@ export class SubprofilesService {
     return `${base}-${n}`;
   }
 
-  private async saveSubprofile(sp: Subprofile): Promise<void> {
+  /**
+   * Persist a whole-entity edit of `sp` (loaded earlier by `getOwned`, with no
+   * lock) in its own transaction. See `saveEditUnderLock`.
+   */
+  private async saveSubprofile(
+    sp: Subprofile,
+    options: SubprofileEditSaveOptions,
+  ): Promise<void> {
     try {
-      await this.subprofiles.save(sp);
+      await this.dataSource.transaction((manager) =>
+        this.saveEditUnderLock(manager, sp, options),
+      );
     } catch (err) {
       this.throwConflictOnUniqueViolation(err);
     }
+  }
+
+  /**
+   * Save an edit of `sp` without ever writing back a stale creator or address.
+   *
+   * `sp` was read before any lock, and the creator role can move to another
+   * co-owner meanwhile (`transferCreatorWithin`, which rewrites `user_id` and
+   * may suffix `slug`). TypeORM's `save` writes every column whose in-memory
+   * value differs from the database, so saving the stale copy as is would
+   * put the old creator and slug back. This re-reads the row under
+   * `pessimistic_write`, the lock the transfer holds while it writes, and
+   * copies the committed `userId` (and `slug` and the link state, unless
+   * this edit changes them) onto `sp` before saving. Re-reading and applying
+   * the edit to the fresh values keeps `save`'s own behaviour, including the
+   * `updatedAt` it writes back onto `sp` for the response, and the response
+   * then shows the persona's current creator and address.
+   *
+   * The same holds for the moderation-owned column: `removedAt`, the
+   * moderator removal that withholds the persona from every public read, is
+   * always taken from the locked row, so a stale edit can never lift a
+   * removal committed after it was loaded. No member edit sets it. It is the
+   * only such column on `subprofiles`: moderator takedowns live in
+   * `content_moderation`, and the row has no moderator-set visibility,
+   * verified or claimed flag.
+   *
+   * The locked read also re-checks the editor (`lockCurrentSubprofile`): a
+   * member who left meanwhile gets the membership 403, and
+   * `requiredCreatorUserId` re-runs the creator gate for an edit only the
+   * creator may make.
+   */
+  private async saveEditUnderLock(
+    manager: EntityManager,
+    sp: Subprofile,
+    options: SubprofileEditSaveOptions,
+  ): Promise<void> {
+    const current = await this.lockCurrentSubprofile(manager, sp.id, options);
+    await this.applyCommittedColumnsAndSave(manager, sp, current, options);
+  }
+
+  /** The second half of `saveEditUnderLock`, for a caller that already holds
+   * the locked row `current` (read by `lockCurrentSubprofile` in the same
+   * transaction). */
+  private async applyCommittedColumnsAndSave(
+    manager: EntityManager,
+    sp: Subprofile,
+    current: Subprofile,
+    options: SubprofileEditSaveOptions,
+  ): Promise<void> {
+    // `save` would write back the loaded `linkVisibility`, so a stale edit
+    // could re-link a persona that was unlinked meanwhile (or unlink one that
+    // was linked). An edit that does not itself switch the link keeps the
+    // committed link state, like `slug`. The link switch also owns `status`
+    // (unlinking drafts it) and `handle` (a linked persona holds none), so
+    // those follow the committed row too. A publish, unpublish or handle
+    // edit was decided against the loaded link state and is refused instead.
+    // A link switch is refused too when the committed link or status moved:
+    // switching a row published since the load would keep its handle claim
+    // on a linked persona, or silently revert that publish.
+    const hasSwitchedLinkOverMovedRow =
+      options.hasEditedLinkVisibility &&
+      (current.linkVisibility !== options.loadedLinkVisibility ||
+        current.status !== options.loadedStatus);
+    if (hasSwitchedLinkOverMovedRow) {
+      throw new PersonaChangedMeanwhileException();
+    }
+    const hasLinkMovedMeanwhile =
+      !options.hasEditedLinkVisibility &&
+      current.linkVisibility !== sp.linkVisibility;
+    if (hasLinkMovedMeanwhile) {
+      if (options.hasLinkDependentChange) {
+        throw new PersonaChangedMeanwhileException();
+      }
+      sp.linkVisibility = current.linkVisibility;
+      sp.status = current.status;
+      sp.handle = current.handle;
+    }
+    sp.userId = current.userId;
+    sp.removedAt = current.removedAt;
+    if (!options.hasEditedSlug) {
+      sp.slug = current.slug;
+    }
+    await manager.save(sp);
+  }
+
+  /** The persona row under `pessimistic_write`, the lock every roster writer
+   * and the creator transfer take first. Under it: an editor with no roster
+   * row any more gets the same 403 `getOwned` gives, and with
+   * `requiredCreatorUserId`, a caller who is no longer the creator gets the
+   * creator-only 403. Roster writers take this lock before they change the
+   * roster, so the membership read here is current. */
+  private async lockCurrentSubprofile(
+    manager: EntityManager,
+    id: string,
+    checks: SubprofileLockChecks,
+  ): Promise<Subprofile> {
+    const current = await manager.findOne(Subprofile, {
+      where: { id },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!current) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    const editorMembershipCount = await manager.count(SubprofileMember, {
+      where: { subprofileId: id, userId: checks.editorUserId },
+    });
+    if (editorMembershipCount === 0) {
+      throw new ForbiddenException('Not your subprofile');
+    }
+    const { requiredCreatorUserId } = checks;
+    if (
+      requiredCreatorUserId !== undefined &&
+      current.userId !== requiredCreatorUserId
+    ) {
+      throw new ForbiddenException(
+        'Only the persona creator can make this change',
+      );
+    }
+    return current;
   }
 
   /**

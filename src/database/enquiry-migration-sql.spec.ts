@@ -4,22 +4,13 @@
 // `describe is not defined` before any migration runs.
 //
 // The migration itself lives in the sibling `pending-migrations/` folder
-// (neither glob loads that folder either), not in `src/migrations`, until its
-// handover blockers clear; see `pending-migrations/README.md`. This spec
-// reads it in place, so it keeps guarding the file whichever folder it is in.
+// (neither glob loads that folder either) until its handover blockers clear;
+// see `pending-migrations/README.md`. This spec reads it in place, so it keeps
+// guarding the file whichever folder it is in.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** The text of the one `queryRunner.query` call that contains `marker`. */
-function statementContaining(source: string, marker: string): string {
-  const markerIndex = source.indexOf(marker);
-  expect(markerIndex).toBeGreaterThanOrEqual(0);
-  const start = source.lastIndexOf('queryRunner.query(`', markerIndex);
-  const end = source.indexOf('`', markerIndex);
-  return source.slice(start, end);
-}
-
-const sql = readFileSync(
+const source = readFileSync(
   join(
     __dirname,
     'pending-migrations',
@@ -28,65 +19,275 @@ const sql = readFileSync(
   'utf8',
 );
 
-describe('the enquiry migration protects private history', () => {
-  it('gives co-manager seats a cleared_at floor', () => {
-    expect(sql).toMatch(/cleared_at/);
-  });
+const upSource = source.slice(
+  source.indexOf('public async up('),
+  source.indexOf('public async down('),
+);
+const downSource = source.slice(source.indexOf('public async down('));
 
-  it('never seats a co-manager without that floor', () => {
-    const insertBlock = sql.slice(
-      sql.indexOf('INSERT INTO "conversation_participants"'),
+/** The SQL text of every `queryRunner.query` call in `text`, in order. */
+function statementsOf(text: string): string[] {
+  return text
+    .split('queryRunner.query(`')
+    .slice(1)
+    .map((chunk) => chunk.slice(0, chunk.indexOf('`')));
+}
+
+/** The one statement in `text` that contains `marker`. */
+function statementContaining(text: string, marker: string): string {
+  const matches = statementsOf(text).filter((statement) =>
+    statement.includes(marker),
+  );
+  expect(matches).toHaveLength(1);
+  return matches[0] ?? '';
+}
+
+const eligibleSet = statementContaining(
+  upSource,
+  'CREATE TEMP TABLE "enquiry_thread_moves"',
+);
+
+describe('the enquiry migration splits at the enquiry', () => {
+  it('carries the do-not-run banner', () => {
+    expect(source).toContain(
+      '// DO NOT RUN: authored for review only; the maintainer runs migrations.',
     );
-    expect(insertBlock.slice(0, 1200)).toMatch(/cleared_at/);
   });
 
-  it('only re-attributes messages sent at or after the first enquiry', () => {
+  it('never references the history floor column a later migration adds', () => {
+    expect(source).not.toContain('history_floor_at');
+  });
+
+  it('names no claim-release column, which a fresh database does not have yet', () => {
+    const allSql = statementsOf(source).join('\n');
+    expect(allSql).not.toMatch(/claim_released|claim_taken_over/);
+  });
+
+  it('keeps none of the retired staff-floor machinery', () => {
+    for (const retired of [
+      'latest_before_floor',
+      'owner_cleared_at',
+      'staff_cleared_at',
+      'date_trunc',
+      'noteBelowStaffFloorCount',
+      'ownerClearCoveredCount',
+      'enquiryCoveredCount',
+    ]) {
+      expect(source).not.toContain(retired);
+    }
+  });
+
+  it('takes the enquirer message nearest the enquiry row, whatever its body', () => {
+    const nearest = eligibleSet.slice(
+      eligibleSet.indexOf('LEFT JOIN LATERAL'),
+      eligibleSet.indexOf('AS "nearest_message"'),
+    );
+    expect(nearest).toMatch(/ORDER BY "message"\."created_at" DESC\s+LIMIT 1/);
+    expect(nearest).not.toMatch(/WHERE[\s\S]*LIKE/);
+    expect(eligibleSet).toContain('MIN("anchor_instant") AS "split_instant"');
+  });
+
+  it('anchors exactly on an enquiry message that was edited or deleted', () => {
+    const nearest = eligibleSet.slice(
+      eligibleSet.indexOf('LEFT JOIN LATERAL'),
+      eligibleSet.indexOf('AS "nearest_message"'),
+    );
+    expect(nearest).toMatch(
+      /"message"\."body" LIKE 'Enquiry about your QueerPulse listing "%'\s+OR "message"\."edited_at" IS NOT NULL\s+OR "message"\."deleted_at" IS NOT NULL\s+\) AS "is_enquiry_message"/,
+    );
+    expect(eligibleSet).toMatch(
+      /CASE WHEN "nearest_message"\."is_enquiry_message"\s+THEN "nearest_message"\."created_at"\s+ELSE "enquiry"\."created_at"/,
+    );
+  });
+
+  it('counts a fallback only when it set the split instant', () => {
+    expect(eligibleSet).toContain(
+      '(ARRAY_AGG("is_exact_anchor" ORDER BY "anchor_instant", "is_exact_anchor"))[1]',
+    );
+    expect(eligibleSet).not.toContain('BOOL_AND("is_exact_anchor")');
+  });
+
+  it('counts any message of any kind before the split as pre-enquiry history', () => {
+    const history = eligibleSet.slice(
+      eligibleSet.indexOf('CROSS JOIN LATERAL'),
+      eligibleSet.indexOf(') AS "thread_history"'),
+    );
+    expect(history).toContain(
+      'BOOL_OR("message"."created_at" < "thread_facts"."split_instant")',
+    );
+    expect(history).not.toContain('"kind"');
+  });
+
+  it('splits only a moving thread with pre-enquiry history and mints its business conversation', () => {
+    expect(eligibleSet).toContain(
+      '"skip_reason" IS NULL AND "has_pre_enquiry_history" AS "is_split"',
+    );
+    expect(eligibleSet).toMatch(
+      /CASE WHEN "skip_reason" IS NULL AND "has_pre_enquiry_history"\s+THEN uuid_generate_v4\(\)\s+ELSE "conversation_id"\s+END AS "business_conversation_id"/,
+    );
+  });
+
+  it('moves messages only at or after the split, and only for split threads', () => {
+    const move = statementContaining(
+      upSource,
+      'UPDATE "messages" AS "message"\n      SET "conversation_id"',
+    );
+    expect(move).toContain('"message"."created_at" >= "move"."split_instant"');
+    expect(move).toContain('AND "move"."is_split"');
+    expect(move).toContain(
+      'SET "conversation_id" = "move"."business_conversation_id"',
+    );
+  });
+
+  it('leaves reply_to_id intact and counts replies that quote across the split', () => {
+    expect(statementsOf(source).join('\n')).not.toMatch(/SET\s+"reply_to_id"/);
+    expect(eligibleSet).toContain(
+      '"reply"."created_at" >= "classified"."split_instant"',
+    );
+    expect(eligibleSet).toContain(
+      '"quoted_parent"."created_at" < "classified"."split_instant"',
+    );
+    expect(eligibleSet).toContain(
+      '"quoted_parent"."conversation_id" = "classified"."conversation_id"',
+    );
+  });
+
+  it('moves pins with their messages and repoints the enquiries of a split thread', () => {
+    const pins = statementContaining(
+      upSource,
+      'UPDATE "conversation_pinned_messages"',
+    );
+    expect(pins).toContain(
+      '"message"."conversation_id" = "move"."business_conversation_id"',
+    );
+    const enquiries = statementContaining(
+      upSource,
+      'UPDATE "listing_enquiries"',
+    );
+    expect(enquiries).toContain(
+      'SET "conversation_id" = "move"."business_conversation_id"',
+    );
+    expect(enquiries).toContain('AND "move"."is_split"');
+  });
+
+  it('seats co-managers with a NULL cleared_at on the business thread', () => {
+    const coManagerSeats = statementContaining(
+      upSource,
+      'JOIN "listing_co_managers" AS "co_manager"',
+    );
+    const columnList = coManagerSeats.slice(0, coManagerSeats.indexOf(')'));
+    expect(columnList).toContain('"cleared_at"');
+    expect(coManagerSeats).toMatch(
+      /"move"\."business_conversation_id",\s*"co_manager"\."user_id",\s*"move"\."listing_identity_id",\s*NULL::timestamptz,/,
+    );
+  });
+
+  it("copies the owner's watermarks onto co-manager seats", () => {
+    const coManagerSeats = statementContaining(
+      upSource,
+      'JOIN "listing_co_managers" AS "co_manager"',
+    );
+    const columnList = coManagerSeats.slice(0, coManagerSeats.indexOf(')'));
+    expect(columnList).toContain('"last_read_at"');
+    expect(columnList).toContain('"last_read_instant"');
+    expect(columnList).toContain('"delivered_at"');
+    expect(coManagerSeats).toContain('"owner_seat"."delivered_at"');
+    expect(coManagerSeats).toContain(
+      '"owner_seat"."conversation_id" = "move"."conversation_id"',
+    );
+  });
+
+  it("withholds the owner's read watermarks when the owner hides read receipts", () => {
+    const coManagerSeats = statementContaining(
+      upSource,
+      'JOIN "listing_co_managers" AS "co_manager"',
+    );
+    expect(coManagerSeats).toContain('"share_read_receipts"');
+    expect(coManagerSeats).toMatch(
+      /CASE WHEN "owner_privacy"\."is_owner_sharing_read_receipts" THEN "owner_seat"\."last_read_at" END/,
+    );
+    expect(coManagerSeats).toMatch(
+      /CASE WHEN "owner_privacy"\."is_owner_sharing_read_receipts" THEN "owner_seat"\."last_read_instant" END/,
+    );
+  });
+
+  it("carries the customer's and owner's clear onto a split seat only when it reaches the split", () => {
+    const splitSeats = statementContaining(
+      upSource,
+      'JOIN "conversation_participants" AS "old_seat"',
+    );
+    expect(splitSeats).toContain(
+      'CASE WHEN "old_seat"."cleared_at" >= "move"."split_instant" THEN "old_seat"."cleared_at" END',
+    );
+    for (const copied of [
+      '"old_seat"."last_read_at"',
+      '"old_seat"."last_read_instant"',
+      '"old_seat"."delivered_at"',
+      '"old_seat"."muted"',
+      '"old_seat"."mute_mode"',
+      '"old_seat"."muted_until"',
+    ]) {
+      expect(splitSeats).toContain(copied);
+    }
+    for (const leftOnTheDm of [
+      'pinned_at',
+      'favorited_at',
+      'archived_at',
+      'marked_unread_at',
+      'draft',
+    ]) {
+      expect(splitSeats).not.toContain(leftOnTheDm);
+    }
+  });
+
+  it('rekeys the owner seat in place only for a thread without pre-enquiry history', () => {
+    const ownerSeat = statementContaining(
+      upSource,
+      'UPDATE "conversation_participants" AS "owner_seat"',
+    );
+    expect(ownerSeat).toContain('AND NOT "move"."is_split"');
+    expect(ownerSeat).not.toContain('cleared_at');
+  });
+
+  it('only re-attributes owner messages at or after the split, in the business thread', () => {
     const reattribution = statementContaining(
-      sql,
+      upSource,
       'SET "sender_identity_id" = "move"."listing_identity_id"',
     );
     expect(reattribution).toContain(
-      '"message"."created_at" >= "move"."floor_instant"',
+      '"message"."created_at" >= "move"."split_instant"',
     );
     expect(reattribution).toContain(
       '"message"."sender_id" = "move"."owner_user_id"',
     );
+    expect(reattribution).toContain(
+      '"message"."conversation_id" = "move"."business_conversation_id"',
+    );
   });
 
-  it('builds every co-manager floor from whole milliseconds that cover earlier messages', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
-    );
-    expect(eligibleSet).toContain(
-      `date_trunc('milliseconds', "latest_before_floor" + interval '999 microseconds')`,
-    );
-    expect(eligibleSet).toContain(
-      '"message"."created_at" < "thread_facts"."floor_instant"',
-    );
+  it('stamps the move note just before the first business message, with no human sender', () => {
     expect(eligibleSet).toMatch(
-      /WHEN date_trunc\('milliseconds', "floor_instant"\) <= "staff_floor_base"\s+THEN GREATEST\(\s+"staff_floor_base",\s+date_trunc\('milliseconds', "floor_instant" \+ interval '999 microseconds'\)/,
+      /"first_business_message_at" - interval '1 microsecond' AS "note_created_at"/,
     );
+    const note = statementContaining(upSource, "'moved_to_business_mailbox'");
+    expect(note).toMatch(/"move"\."business_conversation_id",\s*NULL,/);
+    expect(note).toContain('"move"."note_created_at"');
   });
 
-  it('keeps a thread the owner cleared cleared for co-managers', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
+  it('writes the same fallback text the application uses for the note', () => {
+    const groupsService = readFileSync(
+      join(__dirname, '..', 'messaging', 'groups.service.ts'),
+      'utf8',
     );
-    expect(eligibleSet).toContain(
-      '"owner_seat"."cleared_at" AS "owner_cleared_at"',
+    const fallback = /moved_to_business_mailbox:\s*'([^']+)'/.exec(
+      groupsService,
     );
-    expect(eligibleSet).toContain(
-      `date_trunc('milliseconds', "owner_cleared_at" + interval '999 microseconds')`,
-    );
+    expect(fallback).not.toBeNull();
+    expect(source).toContain(`'${fallback?.[1]}'`);
+    expect(fallback?.[1]).toMatch(/^This conversation moved to /);
   });
 
   it('skips a thread whose customer blocked the business, before any other customer rule', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
-    );
     expect(eligibleSet).toMatch(
       /"business_block"\."blocker_user_id" = "thread"\."customer_user_id"\s+AND "business_block"\."identity_id" = "listing_identity"\."id"/,
     );
@@ -100,10 +301,6 @@ describe('the enquiry migration protects private history', () => {
   });
 
   it('skips a thread with a person block between the customer and the owner, in either direction', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
-    );
     expect(eligibleSet).toMatch(
       /"owner_block"\."blocker_id" = "thread"\."customer_user_id"\s+AND "owner_block"\."blocked_id" = "listing"\."owner_id"/,
     );
@@ -122,128 +319,132 @@ describe('the enquiry migration protects private history', () => {
     );
   });
 
-  it('leaves a move note from an earlier down() out of the floor and the note placement', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
-    );
-    const noteExclusion =
-      /AND NOT \("message"\."kind" = 'system'\s+AND "message"\."system_event" ->> 'type' = 'moved_to_business_mailbox'\)/;
-    for (const alias of ['"latest_before_floor"', '"latest_message"']) {
-      const aliasIndex = eligibleSet.indexOf(`) AS ${alias}`);
-      expect(aliasIndex).toBeGreaterThanOrEqual(0);
-      const subquery = eligibleSet.slice(
-        eligibleSet.lastIndexOf('SELECT MAX(', aliasIndex),
-        aliasIndex,
-      );
-      expect(subquery).toMatch(noteExclusion);
+  it('keeps every skip reason', () => {
+    for (const reason of [
+      'already_business_thread',
+      'several_listings',
+      'not_one_to_one',
+      'customer_blocked_business',
+      'customer_owner_blocked',
+      'customer_is_staff',
+      'owner_without_seat',
+      'mailbox_thread_exists',
+      'nothing_to_move',
+    ]) {
+      expect(eligibleSet).toContain(`'${reason}'`);
     }
   });
 
-  it('counts owner-clear cover apart, and describes moved threads only', () => {
-    const outcomeLog = statementContaining(sql, '"ownerClearCoveredCount"');
-    expect(outcomeLog).toMatch(
-      /AND NOT "is_enquiry_covered_by_owner_clear"\s+\) AS "enquiryCoveredCount"/,
+  it('keeps a thread with nothing at or after the split personal, as the last skip reason', () => {
+    const nothingArm = eligibleSet.indexOf(
+      `WHEN "business_message_count" = 0 THEN 'nothing_to_move'`,
     );
+    expect(nothingArm).toBeGreaterThan(
+      eligibleSet.indexOf(`THEN 'mailbox_thread_exists'`),
+    );
+    expect(eligibleSet.slice(nothingArm)).toMatch(
+      /^WHEN "business_message_count" = 0 THEN 'nothing_to_move'\s+ELSE NULL/,
+    );
+    expect(source).not.toContain('emptySplitThreadCount');
+  });
+
+  it('creates the business conversation and its split seats for split threads only', () => {
+    const conversationInsert = statementContaining(
+      upSource,
+      'INSERT INTO "conversations"',
+    );
+    expect(conversationInsert).toContain('AND "move"."is_split"');
+    const splitSeats = statementContaining(
+      upSource,
+      'JOIN "conversation_participants" AS "old_seat"',
+    );
+    expect(splitSeats).toContain('AND "move"."is_split"');
+  });
+
+  it('analyzes the temporary table and logs every counter for moved threads only', () => {
+    expect(upSource).toContain('ANALYZE "enquiry_thread_moves"');
+    const outcomeLog = statementContaining(upSource, '"crossSplitReplyCount"');
+    for (const counter of [
+      '"threadCount"',
+      '"rekeyedThreadCount"',
+      '"splitThreadCount"',
+      '"movedMessageCount"',
+      '"crossSplitReplyCount"',
+      '"fallbackAnchorCount"',
+    ]) {
+      expect(outcomeLog).toContain(counter);
+    }
     const filters = outcomeLog.split('FILTER (').slice(1);
-    expect(filters).toHaveLength(6);
+    expect(filters.length).toBeGreaterThanOrEqual(5);
     for (const filter of filters) {
       expect(filter).toMatch(/^\s*WHERE "skip_reason" IS NULL\s+AND /);
     }
+    expect(upSource).toContain('console.log(');
   });
 
-  it('keeps the note below the floor instant and below the newest message', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
+  it('records every moved thread for down() and drops that record on the way down', () => {
+    const record = statementContaining(
+      upSource,
+      'INSERT INTO "enquiry_mailbox_moves"',
     );
-    expect(eligibleSet).toMatch(
-      /LEAST\(\s+"staff_cleared_at" \+ interval '1 millisecond',\s+"floor_instant" - interval '1 microsecond',\s+"latest_message" - interval '1 microsecond'\s+\) AS "note_created_at"/,
-    );
+    expect(record).toContain('WHERE "move"."skip_reason" IS NULL');
+    expect(downSource).toContain('FROM "enquiry_mailbox_moves" AS "move"');
+    expect(downSource).toContain('DROP TABLE "enquiry_mailbox_moves"');
   });
 
-  it('takes the enquirer message nearest the enquiry row, whatever its body', () => {
-    const eligibleSet = statementContaining(
-      sql,
-      'CREATE TEMP TABLE "enquiry_thread_moves"',
+  it('reverses a split in down(): note out first, messages, pins and enquiries back, business thread gone', () => {
+    const statements = statementsOf(downSource);
+    const indexOfStatement = (marker: string): number =>
+      statements.findIndex((statement) => statement.includes(marker));
+    const noteDelete = indexOfStatement('DELETE FROM "messages" AS "note"');
+    const messagesBack = indexOfStatement(
+      'UPDATE "messages" AS "message"\n      SET "conversation_id"',
     );
-    const nearest = eligibleSet.slice(
-      eligibleSet.indexOf('LEFT JOIN LATERAL'),
-      eligibleSet.indexOf('AS "nearest_message"'),
+    expect(noteDelete).toBeGreaterThanOrEqual(0);
+    expect(messagesBack).toBeGreaterThan(noteDelete);
+    expect(
+      indexOfStatement('UPDATE "conversation_pinned_messages"'),
+    ).toBeGreaterThan(noteDelete);
+    expect(indexOfStatement('UPDATE "listing_enquiries"')).toBeGreaterThan(
+      noteDelete,
     );
-    expect(nearest).toMatch(/ORDER BY "message"\."created_at" DESC\s+LIMIT 1/);
-    expect(nearest).not.toMatch(/WHERE[\s\S]*LIKE/);
-  });
-
-  it('analyzes the temporary table and logs the pre-floor quote exposure', () => {
-    expect(sql).toContain('ANALYZE "enquiry_thread_moves"');
-    const outcomeLog = statementContaining(sql, '"preFloorQuoteThreadCount"');
-    expect(outcomeLog).toContain(
-      '"quoted_parent"."created_at" <= "enquiry_thread_moves"."staff_cleared_at"',
+    expect(
+      indexOfStatement(
+        'DELETE FROM "conversations" AS "business_conversation"',
+      ),
+    ).toBeGreaterThan(messagesBack);
+    const personalGate = indexOfStatement(
+      'UPDATE "conversations" AS "personal_conversation"',
     );
-    expect(outcomeLog).toContain(
-      '"reply"."created_at" > "enquiry_thread_moves"."staff_cleared_at"',
+    expect(personalGate).toBeGreaterThan(messagesBack);
+    expect(personalGate).toBeLessThan(
+      indexOfStatement(
+        'DELETE FROM "conversations" AS "business_conversation"',
+      ),
     );
+    expect(statements[personalGate]).toContain(
+      '"personal_conversation"."initiator_user_id" = "revert"."customer_user_id"',
+    );
+    // A person block between the customer and the owner, either way, keeps
+    // the restored DM unopened.
+    const personalGateStatement = statements[personalGate] ?? '';
+    expect(personalGateStatement).toMatch(
+      /AND NOT EXISTS \(\s*SELECT 1 FROM "blocks" AS "pair_block"/,
+    );
+    expect(personalGateStatement).toMatch(
+      /\("pair_block"\."blocker_id" = "revert"\."customer_user_id"\s+AND "pair_block"\."blocked_id" = "revert"\."owner_user_id"\)/,
+    );
+    expect(personalGateStatement).toMatch(
+      /\("pair_block"\."blocked_id" = "revert"\."customer_user_id"\s+AND "pair_block"\."blocker_id" = "revert"\."owner_user_id"\)/,
+    );
+    const identityBack = indexOfStatement(
+      'SET "sender_identity_id" = "revert"."owner_identity_id"',
+    );
+    expect(identityBack).toBeGreaterThan(messagesBack);
   });
 
   it('states when it runs and what it locks', () => {
-    expect(sql).toContain('ensureDatabaseSchema');
-    expect(sql).toContain('row locks');
-  });
-
-  it("copies the owner's watermarks onto co-manager seats", () => {
-    const insertBlock = sql.slice(
-      sql.indexOf('INSERT INTO "conversation_participants"'),
-    );
-    const statement = insertBlock.slice(0, insertBlock.indexOf('`);'));
-    const columnList = statement.slice(0, statement.indexOf(')'));
-    expect(columnList).toContain('"last_read_at"');
-    expect(columnList).toContain('"last_read_instant"');
-    expect(columnList).toContain('"delivered_at"');
-    expect(statement).toContain('"owner_seat"."last_read_at"');
-    expect(statement).toContain('"owner_seat"."last_read_instant"');
-    expect(statement).toContain('"owner_seat"."delivered_at"');
-    expect(statement).not.toMatch(/MAX\("message"\."created_at"\)/);
-  });
-
-  it("withholds the owner's read watermarks when the owner hides read receipts", () => {
-    const insertBlock = sql.slice(
-      sql.indexOf('INSERT INTO "conversation_participants"'),
-    );
-    const statement = insertBlock.slice(0, insertBlock.indexOf('`);'));
-    expect(statement).toContain('"share_read_receipts"');
-    expect(statement).toMatch(
-      /CASE WHEN "owner_privacy"\."is_owner_sharing_read_receipts" THEN "owner_seat"\."last_read_at" END/,
-    );
-    expect(statement).toMatch(
-      /CASE WHEN "owner_privacy"\."is_owner_sharing_read_receipts" THEN "owner_seat"\."last_read_instant" END/,
-    );
-  });
-
-  it('stamps the move note at the floor with no human sender', () => {
-    const noteInsert = sql.slice(sql.indexOf('INSERT INTO "messages"'));
-    const noteStatement = noteInsert.slice(0, noteInsert.indexOf('`);'));
-    expect(noteStatement).toContain('"created_at")');
-    expect(noteStatement).toContain('"move"."note_created_at"');
-    expect(noteStatement).toMatch(/"move"\."conversation_id",\s*NULL,/);
-  });
-
-  it('writes the same fallback text the application uses for the note', () => {
-    const groupsService = readFileSync(
-      join(__dirname, '..', 'messaging', 'groups.service.ts'),
-      'utf8',
-    );
-    const fallback = /moved_to_business_mailbox:\s*'([^']+)'/.exec(
-      groupsService,
-    );
-    expect(fallback).not.toBeNull();
-    expect(sql).toContain(`'${fallback?.[1]}'`);
-    expect(fallback?.[1]).toMatch(/^This conversation moved to /);
-  });
-
-  it('carries the do-not-run banner', () => {
-    expect(sql).toContain(
-      '// DO NOT RUN: authored for review only; the maintainer runs migrations.',
-    );
+    expect(source).toContain('ensureDatabaseSchema');
+    expect(source).toContain('row locks');
   });
 });

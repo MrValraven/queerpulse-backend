@@ -56,8 +56,6 @@ export interface RecognitionSignals {
   /** Magazine pieces of theirs that reached a published article or deck.
    *  Same definition `public-eligibility.service.ts` already computes. */
   piecesPublished: number;
-  /** Public questions on a directory listing that this member answered. */
-  directoryAnswers: number;
   /** Resource suggestions of theirs an admin APPROVED. */
   resourcesApproved: number;
   tenureDays: number;
@@ -87,7 +85,6 @@ export type XpSourceKey =
   | 'volunteering'
   | 'hosting'
   | 'magazine'
-  | 'answers'
   | 'resources';
 
 interface SignalRule {
@@ -140,7 +137,7 @@ interface SignalRule {
  * piece and answering the question earned nothing at all.
  *
  * The contribution half (volunteering .. resources) is the inverse: high
- * per-unit value, low cap, topping out at 3740 XP. One confirmed volunteer
+ * per-unit value, low cap, topping out at 3440 XP. One confirmed volunteer
  * session is worth 120 XP, which is 2.4 RSVPs or two vouches; one published
  * magazine piece is 150. That ratio is the whole point of the item: the work
  * the platform depends on has to outweigh consuming it. The low caps are what
@@ -304,15 +301,6 @@ export const XP_RULES: SignalRule[] = [
     cap: 6,
     needsSecondParty: true,
     units: (signals) => signals.piecesPublished,
-  },
-  // Answering "is the entrance step-free" once saves the next twenty people
-  // asking. Light work, so it sits at the connection rate.
-  {
-    key: 'answers',
-    perUnit: 25,
-    cap: 12,
-    needsSecondParty: true,
-    units: (signals) => signals.directoryAnswers,
   },
   // Only APPROVED suggestions count, so submitting volume earns nothing.
   {
@@ -516,10 +504,9 @@ export const BADGE_REQUIREMENTS: Record<string, BadgeRequirement> = {
   // `eventsHosted` would have kept 300 farmable XP on the board even after
   // the `hosting` rule moved to `eventsHeld`. They read the same held-and-
   // attended unit the XP rule does. NO badge is wired for volunteering,
-  // magazine writing, directory answers or resource suggestions, because
-  // BADGE_CATALOG holds none for them and this task deliberately did not
-  // invent any. Add the catalog entry first and the requirement follows here
-  // in one line.
+  // magazine writing or resource suggestions, because BADGE_CATALOG holds
+  // none for them and this task deliberately did not invent any. Add the
+  // catalog entry first and the requirement follows here in one line.
   'event-host': {
     units: (signals) => signals.eventsHeld,
     target: 1,

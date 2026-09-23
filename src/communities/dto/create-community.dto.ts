@@ -90,6 +90,10 @@ export class CreateCommunityDto {
   @IsOptional() @IsString() @MaxLength(120) area?: string | null;
   @IsOptional() @IsBoolean() isOnline?: boolean;
 
+  // The book a reading group is reading now (see `Community.nowReading`).
+  // Plain text, sanitized on write like `city`; `''`/`null` clears it.
+  @IsOptional() @IsString() @MaxLength(200) nowReading?: string | null;
+
   // Languages the community runs in, picked from the SAME fixed vocabulary
   // `profiles.languages` uses (`src/profiles/languages.ts`) so a member's own
   // languages and a community's are comparable values rather than two lists

@@ -36,6 +36,12 @@ const activeOwner = {
   status: UserStatus.Active,
 };
 
+const activeCoManager = {
+  id: 'co-manager-1',
+  isSystem: false,
+  status: UserStatus.Active,
+};
+
 const HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * HOUR_MS;
 
@@ -118,13 +124,23 @@ describe('ListingEnquiriesService', () => {
       [Partial<ListingEnquiry>]
     >;
   };
-  let users: { findOne: jest.Mock };
+  let users: { find: jest.Mock };
   let messaging: {
     identityEnquiryContactability: jest.Mock;
     deliverEnquiryToIdentity: jest.Mock;
   };
   let contentModeration: { statesForAnyType: jest.Mock };
-  let identities: { ensureIdentityFor: jest.Mock };
+  let identities: { ensureIdentityFor: jest.Mock; staffUserIds: jest.Mock };
+
+  /** Messaging refuses the enquiry with `blockedReason`. */
+  const refuseAs = (blockedReason: string) =>
+    messaging.identityEnquiryContactability.mockResolvedValue({
+      canDeliver: false,
+      blockedReason,
+      replyRequiresConnection: false,
+      followUpAwaitsReply: false,
+      existingConversationId: null,
+    });
 
   beforeEach(async () => {
     listings = { findOne: jest.fn().mockResolvedValue(baseListing()) };
@@ -139,7 +155,9 @@ describe('ListingEnquiriesService', () => {
         Promise.resolve({ id: 'enquiry-1', ...value }),
       ),
     };
-    users = { findOne: jest.fn().mockResolvedValue(activeOwner) };
+    // The staff's accounts, read only on a refusal to tell "nobody can
+    // receive" apart from a block.
+    users = { find: jest.fn().mockResolvedValue([activeOwner]) };
     messaging = {
       identityEnquiryContactability: jest.fn().mockResolvedValue({
         canDeliver: true,
@@ -158,6 +176,9 @@ describe('ListingEnquiriesService', () => {
       ensureIdentityFor: jest
         .fn()
         .mockResolvedValue({ id: 'listing-identity' }),
+      // The listing's staff: its owner, and no co-manager unless a test adds
+      // one.
+      staffUserIds: jest.fn().mockResolvedValue(['owner-1']),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -211,40 +232,98 @@ describe('ListingEnquiriesService', () => {
       expect(contact.unavailableReason).toBe('unclaimed');
     });
 
+    // Messaging refuses as `blocked` whenever nobody could read the message;
+    // the listing then reads the staff's accounts to say which it was.
     it('refuses a listing parked on a platform account', async () => {
-      users.findOne.mockResolvedValue({ ...activeOwner, isSystem: true });
+      refuseAs('blocked');
+      users.find.mockResolvedValue([{ ...activeOwner, isSystem: true }]);
       const contact = await service.getContact('drama-bar', 'member-1');
       expect(contact.unavailableReason).toBe('no_owner_account');
     });
 
-    it('refuses a listing whose owner account was erased', async () => {
-      users.findOne.mockResolvedValue(null);
+    // `no_owner_account` stays the wire code for "nobody who manages this
+    // listing can receive messages", which the frontend already reads.
+    it('refuses an ownerless listing with no co-manager, with the existing code', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
+      refuseAs('IDENTITY_HAS_NO_STAFF');
       const contact = await service.getContact('drama-bar', 'member-1');
-      expect(contact.unavailableReason).toBe('no_owner_account');
-    });
-
-    it('refuses a listing whose owner is suspended', async () => {
-      users.findOne.mockResolvedValue({
-        ...activeOwner,
-        status: UserStatus.Suspended,
+      expect(contact).toMatchObject({
+        canMessageOwner: false,
+        unavailableReason: 'no_owner_account',
+        ...UNCAPPED,
       });
+      expect(users.find).not.toHaveBeenCalled();
+      expect(enquiries.find).not.toHaveBeenCalled();
+    });
+
+    it('refuses a listing whose suspended owner is its only staff member', async () => {
+      refuseAs('blocked');
+      users.find.mockResolvedValue([
+        { ...activeOwner, status: UserStatus.Suspended },
+      ]);
       const contact = await service.getContact('drama-bar', 'member-1');
       expect(contact.unavailableReason).toBe('no_owner_account');
+    });
+
+    it('refuses a listing whose only co-manager is suspended and whose owner is gone', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
+      refuseAs('blocked');
+      identities.staffUserIds.mockResolvedValue(['co-manager-1']);
+      users.find.mockResolvedValue([
+        { ...activeCoManager, status: UserStatus.Suspended },
+      ]);
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact.unavailableReason).toBe('no_owner_account');
+    });
+
+    // Fix round 1: somebody could receive but is blocked with this member,
+    // while the colleague who is not blocked cannot receive. Messaging
+    // refuses, and the listing reports it as the block it is.
+    it('reports a suspended owner beside a blocked active co-manager as unavailable', async () => {
+      refuseAs('blocked');
+      identities.staffUserIds.mockResolvedValue(['owner-1', 'co-manager-1']);
+      users.find.mockResolvedValue([
+        { ...activeOwner, status: UserStatus.Suspended },
+        activeCoManager,
+      ]);
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact).toMatchObject({
+        canMessageOwner: false,
+        unavailableReason: 'unavailable',
+      });
+    });
+
+    it('offers the contact route on an ownerless listing an active co-manager still runs, asking messaging once', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact).toEqual({ ...REACHABLE, ...UNCAPPED });
+      expect(messaging.identityEnquiryContactability).toHaveBeenCalledTimes(1);
+      expect(messaging.identityEnquiryContactability).toHaveBeenCalledWith(
+        'member-1',
+        'listing-identity',
+      );
+      // Reachable: the staff are not read a second time.
+      expect(identities.staffUserIds).not.toHaveBeenCalled();
+      expect(users.find).not.toHaveBeenCalled();
     });
 
     it('tells the owner it is their own listing', async () => {
       const contact = await service.getContact('drama-bar', 'owner-1');
+      expect(contact.unavailableReason).toBe('own_listing');
+      expect(messaging.identityEnquiryContactability).not.toHaveBeenCalled();
+    });
+
+    it('tells a co-manager it is their own listing, even on an ownerless listing', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
+      refuseAs('IDENTITY_IS_YOUR_OWN');
+      const contact = await service.getContact('drama-bar', 'co-manager-1');
       expect(contact.unavailableReason).toBe('own_listing');
     });
 
     // Reported without direction, so the endpoint cannot be used to test
     // whether a particular person has blocked you.
     it('reports a block without saying which way it runs', async () => {
-      messaging.identityEnquiryContactability.mockResolvedValue({
-        canDeliver: false,
-        blockedReason: 'blocked',
-        replyRequiresConnection: false,
-      });
+      refuseAs('blocked');
       const contact = await service.getContact('drama-bar', 'member-1');
       expect(contact).toMatchObject({
         canMessageOwner: false,
@@ -333,6 +412,73 @@ describe('ListingEnquiriesService', () => {
       expect(order).toEqual(['deliver', 'record']);
     });
 
+    // Messaging (mocked here) answers for the staff; the routing spec runs
+    // the real rule. What this layer owns is the owner snapshot.
+    it('delivers to the mailbox of an ownerless listing an active co-manager runs, with no owner snapshot', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
+
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).resolves.toMatchObject({ conversationId: 'conversation-1' });
+
+      expect(messaging.deliverEnquiryToIdentity).toHaveBeenCalledWith(
+        'member-1',
+        'listing-identity',
+        expect.stringContaining('A question here.'),
+        undefined,
+      );
+      expect(enquiries.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          listingId: 'listing-1',
+          senderId: 'member-1',
+          ownerId: null,
+          conversationId: 'conversation-1',
+        }),
+      );
+    });
+
+    // The suspended owner is still the owner of record, so the snapshot
+    // names them. Who is actually reached is the mailbox's business: see
+    // `listing-enquiry-routing.spec.ts`.
+    it('delivers when the owner is suspended and a co-manager is active, keeping the owner snapshot', async () => {
+      await service.send('drama-bar', 'member-1', { body: 'A question here.' });
+
+      expect(messaging.deliverEnquiryToIdentity).toHaveBeenCalledTimes(1);
+      // The read that decided reachability is the one the send reuses.
+      expect(messaging.identityEnquiryContactability).toHaveBeenCalledTimes(1);
+      expect(enquiries.save).toHaveBeenCalledWith(
+        expect.objectContaining({ ownerId: 'owner-1' }),
+      );
+    });
+
+    it('refuses an ownerless listing with no co-manager with a 400 and delivers nothing', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
+      refuseAs('IDENTITY_HAS_NO_STAFF');
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).rejects.toThrow(
+        new BadRequestException(
+          'This listing cannot be messaged through QueerPulse',
+        ),
+      );
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
+      expect(enquiries.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a suspended owner beside a blocked active co-manager with the identity block, and delivers nothing', async () => {
+      refuseAs('blocked');
+      identities.staffUserIds.mockResolvedValue(['owner-1', 'co-manager-1']);
+      users.find.mockResolvedValue([
+        { ...activeOwner, status: UserStatus.Suspended },
+        activeCoManager,
+      ]);
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).rejects.toMatchObject({ response: { code: 'IDENTITY_BLOCKED' } });
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
+      expect(enquiries.save).not.toHaveBeenCalled();
+    });
+
     it('refuses an unclaimed listing with a 400 rather than opening a dead thread', async () => {
       listings.findOne.mockResolvedValue(baseListing({ path: 'suggest' }));
       await expect(
@@ -342,11 +488,7 @@ describe('ListingEnquiriesService', () => {
     });
 
     it('refuses when messaging says the two cannot be connected at all', async () => {
-      messaging.identityEnquiryContactability.mockResolvedValue({
-        canDeliver: false,
-        blockedReason: 'blocked',
-        replyRequiresConnection: false,
-      });
+      refuseAs('blocked');
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
       ).rejects.toThrow(ForbiddenException);

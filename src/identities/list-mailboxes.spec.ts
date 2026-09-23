@@ -235,7 +235,11 @@ function makeFixture(
       avatarUrl: null,
     },
   ]);
+  // A persona's creator holds a roster row from creation on, as
+  // `SubprofilesService` inserts it; "Band"'s creator is not the member here.
   const subprofileMembers = makeTable([
+    { subprofileId: 'drag', userId: MEMBER_ID },
+    { subprofileId: 'band', userId: OTHER_OWNER_ID },
     { subprofileId: 'band', userId: MEMBER_ID },
   ]);
   const companies = makeTable([
@@ -425,6 +429,28 @@ describe('IdentitiesService.listMailboxesFor', () => {
     ).filter((mailbox) => mailbox.identityId === 'cafe-identity');
 
     expect(cafeMailboxes).toEqual([expect.objectContaining({ isOwner: true })]);
+  });
+
+  // Final review C1: `leave` deletes a departing creator's roster row and
+  // keeps `subprofiles.user_id`, so the switcher must read the roster.
+  it('leaves out a persona its creator has left, and the send path refuses it too', async () => {
+    const fixture = makeFixture();
+    fixture.subprofileMembers.rows.splice(
+      fixture.subprofileMembers.rows.findIndex(
+        (row) => row.subprofileId === 'drag' && row.userId === MEMBER_ID,
+      ),
+      1,
+    );
+
+    const listedIdentityIds = (
+      await fixture.service.listMailboxesFor(MEMBER_ID)
+    ).map((mailbox) => mailbox.identityId);
+
+    expect(listedIdentityIds).not.toContain('drag-identity');
+    expect(listedIdentityIds).toContain('band-identity');
+    await expect(
+      fixture.service.isAllowedToActAs(MEMBER_ID, 'drag-identity'),
+    ).resolves.toBe(false);
   });
 
   it('returns only the profile mailbox for a member who staffs nothing', async () => {

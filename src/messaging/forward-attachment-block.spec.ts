@@ -51,6 +51,9 @@ const COLLEAGUE = '44444444-4444-4444-4444-444444444444';
 const DEPARTED_STAFF = '55555555-5555-5555-5555-555555555555';
 const FRIEND = '66666666-6666-6666-6666-666666666666';
 const FLOORED_STAFF = '88888888-8888-8888-8888-888888888888';
+// A co-manager of the moved thread with no history floor, who cleared the
+// thread for themself.
+const CLEARING_STAFF = '8888cccc-8888-8888-8888-888888888888';
 const OWNER = '99999999-9999-9999-9999-999999999999';
 const ASSET = '33333333-3333-3333-3333-333333333333';
 
@@ -91,6 +94,7 @@ interface FixtureSeat {
   identityId: string;
   leftAt: Date | null;
   clearedAt?: Date | null;
+  historyFloorAt?: Date | null;
 }
 
 interface FixtureMessage {
@@ -162,6 +166,14 @@ const seats: FixtureSeat[] = [
   {
     conversationId: MOVED_THREAD,
     userId: FLOORED_STAFF,
+    identityId: MAILBOX_IDENTITY,
+    leftAt: null,
+    clearedAt: HISTORY_FLOOR,
+    historyFloorAt: HISTORY_FLOOR,
+  },
+  {
+    conversationId: MOVED_THREAD,
+    userId: CLEARING_STAFF,
     identityId: MAILBOX_IDENTITY,
     leftAt: null,
     clearedAt: HISTORY_FLOOR,
@@ -344,7 +356,7 @@ function buildForwardFixtureQuery(blockPairs: ReadonlyArray<[string, string]>) {
             ({ message, seat }) =>
               !message.createdAt ||
               !isCoveredByMailboxStaffFloor(message.createdAt, {
-                clearedAt: seat.clearedAt,
+                historyFloorAt: seat.historyFloorAt,
                 identityKind: identityKindById.get(seat.identityId),
                 isGroupConversation: seat.conversationId === LEFT_GROUP,
                 isOfficialConversation: false,
@@ -575,6 +587,14 @@ describe('Task 13g G1: forwarding an attachment applies the block rule and the d
     expect(buildPostResult).toHaveBeenCalledTimes(1);
   });
 
+  it("lets a co-manager whose own clear chat covers the customer's photo, with no history floor, forward it", async () => {
+    const { service, buildPostResult } = build();
+
+    await forwardImage(service, CLEARING_STAFF, preFloorImageKey);
+
+    expect(buildPostResult).toHaveBeenCalledTimes(1);
+  });
+
   it('Task 13h: keeps the forward allowance of a personal-thread member who cleared the chat, as before this task', async () => {
     const { service, buildPostResult } = build();
 
@@ -585,8 +605,9 @@ describe('Task 13g G1: forwarding an attachment applies the block rule and the d
 
   it('Task 13h: compares the staff-scoped floor inclusively in SQL, at the seat of the source conversation', () => {
     expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
-      'message.created_at <= participant.cleared_at',
+      'message.created_at <= participant.history_floor_at',
     );
+    expect(EXPECTED_HISTORY_FLOOR_CLAUSE).not.toContain('cleared_at');
     expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
       `"floor_staff_identity"."kind" <> 'profile'`,
     );

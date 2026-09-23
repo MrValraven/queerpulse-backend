@@ -40,16 +40,23 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
   let conversations: { findOne: jest.Mock };
   let identities: { getById: jest.Mock };
 
+  // A seated staff member carries both columns at one instant, so
+  // `clearedAt` follows `historyFloorAt` unless a test sets it apart.
   const seat = (options: {
     identityKind: IdentityKind;
-    clearedAt: Date | null;
+    historyFloorAt: Date | null;
+    clearedAt?: Date | null;
     conversationKind?: ConversationKind;
     isOfficial?: boolean;
   }) => {
     conversationParticipants.findOne.mockResolvedValue({
       id: 'seat-1',
       leftAt: null,
-      clearedAt: options.clearedAt,
+      clearedAt:
+        options.clearedAt === undefined
+          ? options.historyFloorAt
+          : options.clearedAt,
+      historyFloorAt: options.historyFloorAt,
       identityId: SEAT_IDENTITY_ID,
     });
     identities.getById.mockResolvedValue({
@@ -154,7 +161,10 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
     conversationParticipants.findOne.mockResolvedValueOnce(null);
     const outsiderRefusal = await refusalOf();
 
-    seat({ identityKind: IdentityKind.Listing, clearedAt: FLOOR_AFTER_SEND });
+    seat({
+      identityKind: IdentityKind.Listing,
+      historyFloorAt: FLOOR_AFTER_SEND,
+    });
     const staffRefusal = await refusalOf();
 
     expect(staffRefusal).toEqual(outsiderRefusal);
@@ -163,14 +173,14 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
   });
 
   it('refuses a message sent at the floor instant itself', async () => {
-    seat({ identityKind: IdentityKind.Company, clearedAt: SENT_AT });
+    seat({ identityKind: IdentityKind.Company, historyFloorAt: SENT_AT });
     await refusalOf();
   });
 
   it('lets a staff seat report a message sent after its floor', async () => {
     seat({
       identityKind: IdentityKind.Subprofile,
-      clearedAt: FLOOR_BEFORE_SEND,
+      historyFloorAt: FLOOR_BEFORE_SEND,
     });
     await expect(reportMessage()).resolves.toMatchObject({
       subjectType: 'message',
@@ -213,7 +223,7 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
     async (_label, identityKind, conversationKind, isOfficial) => {
       seat({
         identityKind,
-        clearedAt: FLOOR_AFTER_SEND,
+        historyFloorAt: FLOOR_AFTER_SEND,
         conversationKind,
         isOfficial,
       });
@@ -223,8 +233,29 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
     },
   );
 
+  it('lets a staff member report a message their own clear chat hides, as in a personal chat', async () => {
+    seat({
+      identityKind: IdentityKind.Listing,
+      historyFloorAt: null,
+      clearedAt: FLOOR_AFTER_SEND,
+    });
+    await expect(reportMessage()).resolves.toMatchObject({
+      subjectType: 'message',
+    });
+    expect(identities.getById).not.toHaveBeenCalled();
+  });
+
+  it('refuses by the history floor when a later clear chat sits above it', async () => {
+    seat({
+      identityKind: IdentityKind.Listing,
+      historyFloorAt: FLOOR_AFTER_SEND,
+      clearedAt: new Date('2026-09-12T12:00:00.000Z'),
+    });
+    await refusalOf();
+  });
+
   it('runs no extra lookup for a seat with no floor', async () => {
-    seat({ identityKind: IdentityKind.Listing, clearedAt: null });
+    seat({ identityKind: IdentityKind.Listing, historyFloorAt: null });
     await expect(reportMessage()).resolves.toMatchObject({
       subjectType: 'message',
     });

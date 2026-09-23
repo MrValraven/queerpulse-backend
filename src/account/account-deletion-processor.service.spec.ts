@@ -10,6 +10,7 @@ import { EventPhoto } from '../events/entities/event-photo.entity';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
+import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 
@@ -66,6 +67,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
   let communityOwnerOrphan: { handleOwnerErasure: jest.Mock };
   let contentOwnerErasure: { eraseFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
+  let subprofileMembership: { handOverCreatedPersonasFor: jest.Mock };
   let service: AccountDeletionProcessorService;
 
   /** Entities whose repository throws, to force a degraded resolution. */
@@ -173,6 +175,9 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     communityOwnerOrphan = { handleOwnerErasure: jest.fn() };
     contentOwnerErasure = { eraseFor: jest.fn() };
     notifications = { create: jest.fn(), createForRecipients: jest.fn() };
+    subprofileMembership = {
+      handOverCreatedPersonasFor: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new AccountDeletionProcessorService(
       deletionRequests as unknown as Repository<DeletionRequest>,
@@ -182,6 +187,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       contentOwnerErasure as unknown as ContentOwnerErasureService,
       notifications as unknown as NotificationsService,
       new MediaReferenceResolver(dataSource as unknown as DataSource),
+      subprofileMembership as unknown as SubprofileMembershipService,
     );
   });
 
@@ -277,6 +283,50 @@ describe('AccountDeletionProcessorService storage erasure', () => {
         deleteOrder,
       );
       expect(manager.delete).toHaveBeenCalledWith(User, { id: USER_ID });
+    });
+
+    it('hands over the shared personas the member created before deleting the user row', async () => {
+      // `subprofiles.user_id` is ON DELETE CASCADE, so once the user row goes
+      // every persona they created goes with it, co-owners and all. The
+      // handover has to run first, and after the content steps it follows.
+      await service.processDueDeletions();
+
+      expect(
+        subprofileMembership.handOverCreatedPersonasFor,
+      ).toHaveBeenCalledWith(USER_ID);
+      const handOverOrder = firstCallOrder(
+        subprofileMembership.handOverCreatedPersonasFor,
+      );
+      expect(firstCallOrder(contentOwnerErasure.eraseFor)).toBeLessThan(
+        handOverOrder,
+      );
+      expect(handOverOrder).toBeLessThan(firstCallOrder(manager.delete));
+      // Outside the erasure transaction: the handover commits per persona and
+      // emits after each commit, so it must have finished before the
+      // transaction opens.
+      expect(handOverOrder).toBeLessThan(
+        firstCallOrder(dataSource.transaction),
+      );
+    });
+
+    it('stops before deleting anything when the persona handover fails', async () => {
+      // A failed handover must never fall through to the cascade, which would
+      // delete the shared personas it was meant to save. The request stays
+      // parked in `processing` for a human to retry.
+      subprofileMembership.handOverCreatedPersonasFor.mockRejectedValue(
+        new Error('handover failed'),
+      );
+
+      await service.processDueDeletions();
+
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(manager.delete).not.toHaveBeenCalled();
+      expect(storage.listUserObjects).not.toHaveBeenCalled();
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+      expect(deletionRequests.update).not.toHaveBeenCalledWith(
+        { id: REQUEST_ID },
+        expect.objectContaining({ status: DeletionRequestStatus.Erased }),
+      );
     });
 
     it('checks references only after the user row deletion has committed', async () => {

@@ -31,6 +31,7 @@ export function toAdminPerson(ref: MemberRef | null): AdminPersonDTO | null {
 export interface AdminReadingGroupProposalDTO {
   id: string;
   member: AdminPersonDTO | null;
+  clubName: string | null;
   book: string;
   why: string | null;
   format: ReadingGroupProposalFormat;
@@ -64,6 +65,7 @@ export function toAdminReadingGroupProposalDTO(
   return {
     id: proposal.id,
     member: toAdminPerson(member),
+    clubName: proposal.clubName ?? null,
     book: proposal.book,
     why: proposal.why ?? null,
     format: proposal.format,

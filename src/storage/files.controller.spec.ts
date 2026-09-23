@@ -339,7 +339,7 @@ describe('FilesController', () => {
             rows = rows.filter(({ seat }) => !isExcluded(seat));
           } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {
             // Task 13h: no seat in this fixture holds a history floor.
-            rows = rows.filter(({ seat }) => seat.clearedAt == null);
+            rows = rows.filter(({ seat }) => seat.historyFloorAt == null);
           } else {
             throw new Error(`Unrecognised participant clause: ${clause}`);
           }
@@ -392,14 +392,16 @@ describe('FilesController', () => {
     });
   });
 
-  // Task 13h: a mailbox staff seat's history floor (`cleared_at`) reaches
-  // the bytes. A co-manager seated in a moved business thread holds a floor
-  // at its first enquiry, so the owner's and the customer's earlier private
-  // attachments are refused exactly as a non-participant is, and later ones
-  // are served. Fix round 1: a "clear chat" on a seat that speaks for the
-  // member themself keeps its downloads. The stand-in answers the floor
-  // clause through its in-memory twin (`isCoveredByMailboxStaffFloor`) and
-  // throws on any clause it does not know.
+  // Task 13h: a mailbox staff seat's history floor (`history_floor_at`)
+  // reaches the bytes. A co-manager seated in a moved business thread holds
+  // a floor at its first enquiry, so the owner's and the customer's earlier
+  // private attachments are refused exactly as a non-participant is, and
+  // later ones are served. Fix round 1: a "clear chat" on a seat that speaks
+  // for the member themself keeps its downloads. Mailbox decisions, task 1:
+  // so does a staff member's own "clear chat", which writes `cleared_at`
+  // alone. The stand-in answers the floor clause through its in-memory twin
+  // (`isCoveredByMailboxStaffFloor`) and throws on any clause it does not
+  // know.
   describe('message attachments below a history floor (Task 13h)', () => {
     const MOVED_THREAD = 'moved-thread';
     const PERSONAL_THREAD = 'personal-thread';
@@ -447,6 +449,7 @@ describe('FilesController', () => {
       userId: string;
       identityId: string;
       clearedAt: Date | null;
+      historyFloorAt: Date | null;
     }>;
 
     beforeEach(() => {
@@ -456,18 +459,21 @@ describe('FilesController', () => {
           userId: OWNER,
           identityId: LISTING_IDENTITY,
           clearedAt: null,
+          historyFloorAt: null,
         },
         {
           conversationId: MOVED_THREAD,
           userId: CUSTOMER,
           identityId: CUSTOMER_IDENTITY,
           clearedAt: null,
+          historyFloorAt: null,
         },
         {
           conversationId: MOVED_THREAD,
           userId: CO_MANAGER,
           identityId: LISTING_IDENTITY,
           clearedAt: HISTORY_FLOOR,
+          historyFloorAt: HISTORY_FLOOR,
         },
         // A personal thread whose friend cleared the chat at the same
         // instant: a seat that speaks for the member themself.
@@ -476,12 +482,14 @@ describe('FilesController', () => {
           userId: CUSTOMER,
           identityId: CUSTOMER_IDENTITY,
           clearedAt: null,
+          historyFloorAt: null,
         },
         {
           conversationId: PERSONAL_THREAD,
           userId: FRIEND,
           identityId: FRIEND_IDENTITY,
           clearedAt: HISTORY_FLOOR,
+          historyFloorAt: null,
         },
       ];
       const parameters: Record<string, unknown> = {};
@@ -535,7 +543,7 @@ describe('FilesController', () => {
             rows = rows.filter(
               ({ attachment, seat }) =>
                 !isCoveredByMailboxStaffFloor(attachment.createdAt, {
-                  clearedAt: seat.clearedAt,
+                  historyFloorAt: seat.historyFloorAt,
                   identityKind: identityKindById.get(seat.identityId),
                   isGroupConversation: false,
                   isOfficialConversation: false,
@@ -586,6 +594,19 @@ describe('FilesController', () => {
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
 
+    it("serves a co-manager with no history floor the owner's photo their own clear chat covers", async () => {
+      const coManagerSeat = seats.find(
+        (seat) =>
+          seat.conversationId === MOVED_THREAD && seat.userId === CO_MANAGER,
+      )!;
+      coManagerSeat.historyFloorAt = null;
+      coManagerSeat.clearedAt = HISTORY_FLOOR;
+
+      await serve(PRE_FLOOR_IMAGE_KEY, { userId: CO_MANAGER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
     it('still serves a personal-thread member the photo they cleared, as before this task', async () => {
       await serve(PERSONAL_CLEARED_IMAGE_KEY, { userId: FRIEND });
 
@@ -600,8 +621,9 @@ describe('FilesController', () => {
       );
       expect(clauses).toContain(EXPECTED_HISTORY_FLOOR_CLAUSE);
       expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
-        'message.created_at <= participant.cleared_at',
+        'message.created_at <= participant.history_floor_at',
       );
+      expect(EXPECTED_HISTORY_FLOOR_CLAUSE).not.toContain('cleared_at');
       expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
         `"floor_staff_identity"."kind" <> 'profile'`,
       );

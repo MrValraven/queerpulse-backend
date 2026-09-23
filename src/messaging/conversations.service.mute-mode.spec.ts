@@ -119,6 +119,7 @@ function baseParticipant(
     lastReadInstant: null,
     deliveredAt: null,
     clearedAt: null,
+    historyFloorAt: null,
     muted: false,
     muteMode: ConversationMuteMode.All,
     mutedUntil: null,

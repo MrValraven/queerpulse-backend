@@ -1433,12 +1433,40 @@ export class MessagingCoreService {
         rows.map((m) => m.replyToId).filter((id): id is string => Boolean(id)),
       ),
     ];
-    const parents = replyIds.length
-      ? await this.messages.find({
-          where: { id: In(replyIds) },
-          withDeleted: true,
-        })
-      : [];
+    // A reply quotes a parent from its own conversation only. A parent that
+    // lives in another conversation (a thread later split in two, say) is
+    // dropped here, before its sender, identity or body is read, so the
+    // quote renders exactly like a missing parent: `deleted`, with no
+    // snippet, sender name, thumbnail or file name. A parent is kept only
+    // when a row quoting it shares its conversation, and every page this
+    // method renders belongs to one conversation (see `conversationId`
+    // below), so a kept parent matches every row that quotes it.
+    const replyingConversationIdsByParentId = new Map<string, Set<string>>();
+    for (const row of rows) {
+      if (row.replyToId) {
+        const replyingConversationIds =
+          replyingConversationIdsByParentId.get(row.replyToId) ??
+          new Set<string>();
+        replyingConversationIds.add(row.conversationId);
+        replyingConversationIdsByParentId.set(
+          row.replyToId,
+          replyingConversationIds,
+        );
+      }
+    }
+    const parents = (
+      replyIds.length
+        ? await this.messages.find({
+            where: { id: In(replyIds) },
+            withDeleted: true,
+          })
+        : []
+    ).filter(
+      (parent) =>
+        replyingConversationIdsByParentId
+          .get(parent.id)
+          ?.has(parent.conversationId) ?? false,
+    );
     const parentById = new Map(parents.map((parent) => [parent.id, parent]));
     // Sender profiles must cover the rows' own senders, the reply parents'
     // senders (so `buildReplyTo` resolves a quoted author), AND every system
@@ -1622,11 +1650,11 @@ export class MessagingCoreService {
     // `user` kind. It is left out of the map `buildReplyTo` and the
     // business-name renaming below read, which keeps the parent's author off
     // the quote too. Compared in SQL through
-    // `mailboxStaffHistoryFloorCoversPredicate`, so a personal or group
-    // "clear chat" keeps quoting as before. The query runs only for a viewer
-    // with a floor on a page that quotes something.
+    // `mailboxStaffHistoryFloorCoversPredicate`, so a "clear chat" on any
+    // seat, a staff seat included, keeps quoting as before. The query runs
+    // only for a viewer with a history floor on a page that quotes something.
     const flooredParentIds =
-      viewerParticipant?.clearedAt && parents.length > 0
+      viewerParticipant?.historyFloorAt && parents.length > 0
         ? new Set(
             (
               await this.messages
@@ -2908,8 +2936,13 @@ export class MessagingCoreService {
    * `getOrCreateConversation`: it seeds `initiatorUserId` on a new thread,
    * and claims an existing thread that has no initiator and is not open yet.
    * A reused thread is returned as it is. Seating the current staff on it is
-   * the caller's step (`IdentityMailboxSyncService.resyncMailbox`), and the
-   * member's own seat is left untouched, as a reused personal thread is.
+   * the caller's step (`IdentityMailboxSyncService.resyncConversation`), and
+   * the member's own seat is left untouched, as a reused personal thread is.
+   *
+   * A new thread seats the staff read again inside its creation
+   * transaction, under the staff source lock (`StaffReadOptions`), so a
+   * staff removal that commits after the refusal checks can never leave
+   * the removed member a seat on it.
    */
   async getOrCreateIdentityConversation(
     fromUserId: string,
@@ -2924,7 +2957,7 @@ export class MessagingCoreService {
       fromIdentityId ??
       (await this.identities.resolveProfileIdentityId(fromUserId));
     await this.assertInitiatorIsProfile(senderIdentityId);
-    const { refusal, staffUserIds } = await this.evaluateIdentityContact(
+    const { refusal } = await this.evaluateIdentityContact(
       fromUserId,
       toIdentityId,
     );
@@ -2950,6 +2983,29 @@ export class MessagingCoreService {
     try {
       const conversation = await this.dataSource.transaction(
         async (manager) => {
+          // Final review C, I1: the staff read above ran on the pool, before
+          // this transaction. A revoke, leave or removal committing since
+          // then saw no seat of this thread to end, so seating that list
+          // would hand the removed member a live seat. Read the staff again
+          // here, under the FOR SHARE lock the hourly sweep takes, first,
+          // before the thread or any seat is written: the same lock order
+          // as the sweep (the listing row, then its co-manager rows, or the
+          // persona row). A staff change still in flight waits for this
+          // thread to commit and then sees it; one already committed is
+          // seen here.
+          const lockedStaffUserIds = await this.identities.staffUserIds(
+            toIdentityId,
+            { manager, shouldLockStaffSource: true },
+          );
+          // The two refusals that rest on the staff set, checked again on
+          // the locked read, so the thread never commits with no staff seat
+          // or with a staff seat colliding with the member's own.
+          if (lockedStaffUserIds.length === 0) {
+            throw identityContactRefusalException('IDENTITY_HAS_NO_STAFF');
+          }
+          if (lockedStaffUserIds.includes(fromUserId)) {
+            throw identityContactRefusalException('IDENTITY_IS_YOUR_OWN');
+          }
           const created = await manager.save(
             manager.create(Conversation, {
               isOfficial: false,
@@ -2963,7 +3019,7 @@ export class MessagingCoreService {
               userId: fromUserId,
               identityId: senderIdentityId,
             }),
-            ...staffUserIds.map((staffUserId) =>
+            ...lockedStaffUserIds.map((staffUserId) =>
               manager.create(ConversationParticipant, {
                 conversationId: created.id,
                 userId: staffUserId,

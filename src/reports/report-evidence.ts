@@ -275,6 +275,13 @@ export interface GroupSnapshotEvidence {
  * the identity and the humans behind it whatever either attribution switch
  * says). The reporter never reads it back: `toReportDTO`, the only shape
  * `POST /reports` and `GET /reports/mine` return, carries no evidence at all.
+ *
+ * `reporterIdentityId`/`reporterIdentityKind` name the identity that held
+ * the qualifying customer seat, worked out in
+ * `ReportsService.captureReportedIdentity`: the reporter's own profile
+ * today, and a persona or company they own or staff once such a customer
+ * thread exists. Both are optional so a snapshot captured before these
+ * fields existed still parses; a reader must accept either being absent.
  */
 export interface MailboxIdentitySnapshotEvidence {
   kind: 'mailbox_identity';
@@ -290,6 +297,10 @@ export interface MailboxIdentitySnapshotEvidence {
    *  `GroupSnapshotEvidence.memberIds`. */
   staffUserIds: string[];
   capturedAt: string;
+  /** The identity that held the qualifying customer seat. */
+  reporterIdentityId?: string;
+  /** `reporterIdentityId`'s kind. */
+  reporterIdentityKind?: 'profile' | 'subprofile' | 'company';
 }
 
 export type ReportEvidenceEntry =

@@ -1,73 +1,56 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Header,
-  Param,
-  Post,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
-import { Public } from '../auth/decorators/public.decorator';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
-import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateHousingJoinRequestDto } from './dto/create-join-request.dto';
 import { HousingService } from './housing.service';
 import {
+  ApiCookieAuth,
   ApiCreatedResponse,
+  ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import {
-  PUBLIC_READ_CACHE,
-  PUBLIC_READ_CDN_CACHE,
-} from '../common/public-read-cache';
 
 /**
- * Public co-op directory. `coops` is a static segment declared before the
+ * Members-only co-op directory. `coops` is a static segment declared before the
  * `:slug`-style join-request route so route matching resolves it literally
  * (mirrors the pattern in `DirectoryController`).
  *
- * Product decision (maintainer-approved): join requests must be submittable
- * by ANYONE, including anonymous non-members — the public marketing page
- * collects a `name` field for exactly this reason. So the public routes are
- * `@Public()` and an anonymous applicant is never rejected.
+ * Product decision: housing co-ops are visible to QueerPulse members only
+ * (reversed by the maintainer 2026-09-23). Browsing the directory and applying
+ * to a co-op both require an active member, guarded the same way as the member
+ * housing board in `HousingDirectoryController`. No route here is `@Public()`,
+ * so the global `JwtAuthGuard` populates `request.user` before
+ * `ActiveMemberGuard` reads it.
  *
- * A `@Public()` route does NOT populate `request.user` on its own: the global
- * `JwtAuthGuard` (see `app.module.ts` / `src/auth/guards/jwt-auth.guard.ts`)
- * returns `true` immediately when `@Public()` is set, WITHOUT calling
- * `super.canActivate()` (the Passport JWT strategy that fills `request.user`).
- * `OptionalJwtAuthGuard` is what best-effort attaches the principal WHEN a
- * valid session cookie is present, so a signed-in applicant's `userId` is
- * recorded while an anonymous one still gets through. This is the same pairing
- * the sibling `HousingGroupsController` uses on its own join-request route.
- *
- * PRD-242: recording the applicant is what makes the outcome reachable. Without
- * a `userId` there is nobody to send the `HousingJoinDecided` bell row to and
- * nothing for `GET /housing/coops/join-requests/mine` to return, so a member
- * who applied had no way to ever learn what was decided.
+ * PRD-242: recording the applicant is what makes the outcome reachable. The
+ * `userId` is who receives the `HousingJoinDecided` bell row and what
+ * `GET /housing/coops/join-requests/mine` matches on, so a member who applied
+ * can always learn what was decided.
  */
 @Feature('housing')
 @ApiTags('Housing')
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({ description: 'Not authenticated.' })
 @Controller('housing')
 export class HousingController {
   constructor(private readonly housing: HousingService) {}
 
-  // Same published-co-op response for every anonymous visitor — see
-  // AUDIT-2026-07-30.md §I "No CDN cache headers on public GETs" /
-  // `caching-and-cost.md`.
-  @Public()
+  // Active members only. Member-private, so no cache header: a response gated
+  // on who is asking must never land in a shared or CDN cache.
+  @UseGuards(ActiveMemberGuard)
   @Get('coops')
-  @Header('Cache-Control', PUBLIC_READ_CACHE)
-  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
-  @ApiOperation({ summary: 'List published co-ops in the public directory' })
+  @ApiOperation({ summary: 'List published co-ops (members only)' })
   @ApiOkResponse({ description: 'All published co-ops.' })
+  @ApiForbiddenResponse({ description: 'Active membership required.' })
   listCoops() {
     return this.housing.listPublished();
   }
@@ -82,8 +65,7 @@ export class HousingController {
   // applies) and no further guard: reading the outcome of your own application
   // is not a member-privileged action, and gating it on active membership would
   // hand the bell row a destination that answers its own recipient with a 403.
-  // Ownership is the `user_id` match in the service, which an anonymous
-  // by-name request can never satisfy.
+  // Ownership is the `user_id` match in the service.
   //
   // Member-private, so no cache header: this is one person's application state
   // and must never reach a shared cache.
@@ -96,26 +78,26 @@ export class HousingController {
     return this.housing.listMyJoinRequests(user.userId);
   }
 
-  // Anonymous public write: tightly throttled per IP so the co-op review queue
-  // can't be flooded with junk join requests (the global bucket alone is too
-  // loose for an unauthenticated create). A real applicant submits once.
+  // Active members only. The applicant is always a signed-in member, so the
+  // decision can reach them. Still throttled per IP so the co-op review queue
+  // stays clear of junk join requests; a real applicant submits once.
   //
-  // `@Public()` + `OptionalJwtAuthGuard` means an anonymous applicant is
-  // allowed and a signed-in one is identified, so the decision can reach them.
-  @Public()
-  @UseGuards(OptionalJwtAuthGuard)
+  // `NotRestrictedGuard` stays off by the TS-09 binding rule in
+  // `not-restricted.guard.ts`: a join request sits in the admin triage queue
+  // until staff decide it, and those submissions stay open to a restricted
+  // member.
+  @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post('coops/:slug/join-requests')
-  @ApiOperation({
-    summary: 'Submit a join request to a co-op (anonymous allowed)',
-  })
+  @ApiOperation({ summary: 'Submit a join request to a co-op (members only)' })
   @ApiCreatedResponse({ description: 'The created join request.' })
+  @ApiForbiddenResponse({ description: 'Active membership required.' })
   @ApiNotFoundResponse({ description: 'No co-op with that slug.' })
   submitJoinRequest(
     @Param('slug') slug: string,
     @Body() dto: CreateHousingJoinRequestDto,
-    @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.housing.createJoinRequest(slug, dto, user?.userId ?? null);
+    return this.housing.createJoinRequest(slug, dto, user.userId);
   }
 }

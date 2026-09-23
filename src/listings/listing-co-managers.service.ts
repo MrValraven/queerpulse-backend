@@ -578,6 +578,11 @@ export class ListingCoManagersService {
    * CONDITIONAL on the row still being `invited`, so a double-tap from two tabs
    * cannot write two audit rows: the loser sees `affected === 0` and is
    * rejected.
+   *
+   * The seat row is read under a `pessimistic_write` lock, the same lock
+   * `endSeat` takes. An accept racing a revoke therefore either commits
+   * first (and the revoke then reads `active` and ends the mailbox seat) or
+   * waits and reads the revoke's terminal status (and 409s).
    */
   async respondToInvite(
     inviteId: string,
@@ -593,8 +598,14 @@ export class ListingCoManagersService {
     const { seat, listing, mailboxChanges } = await this.dataSource.transaction(
       async (manager) => {
         const seatsRepo = manager.getRepository(ListingCoManager);
+        // Row lock on the seat, held to commit. `endSeat` takes the same lock
+        // before it reads, so an accept and a revoke (or leave) of one seat
+        // serialize: whichever runs second reads the status the first one
+        // committed, and a seat is never left `revoked` with a live mailbox
+        // seat behind it.
         const current = await seatsRepo.findOne({
           where: { id: inviteId, userId },
+          lock: { mode: 'pessimistic_write' },
         });
         if (!current) {
           throw new NotFoundException('Invitation not found');
@@ -723,6 +734,17 @@ export class ListingCoManagersService {
    *
    * The status flip is conditional on the seat still being live, so two
    * concurrent removals produce one event, not two.
+   *
+   * ACCESS ENDS IN THIS TRANSACTION for every live seat. The row is read
+   * under a `pessimistic_write` lock (the lock `respondToInvite`
+   * takes), so its status cannot change between this read and the flip. The
+   * mailbox seat is then ended for every live row, `invited` included:
+   * `onStaffRemoved` only touches seats that are still live, so on a seat
+   * that was never granted it ends nothing and reports no eviction, and on a
+   * seat some earlier path left behind it closes the gap. The one exception
+   * is a member who is now the listing's OWNER (a staff-attached seat spared
+   * by an ownership transfer to its own holder): the owner is staff in their
+   * own right, so their mailbox seat stays.
    */
   private async endSeat(
     listing: Listing,
@@ -741,8 +763,12 @@ export class ListingCoManagersService {
     const mailboxChanges = await this.dataSource.transaction(
       async (manager) => {
         const seatsRepo = manager.getRepository(ListingCoManager);
+        // Locked, and held to commit, so an accept of this same seat either
+        // committed before this read or waits for this transaction. See the
+        // method doc.
         const seat = await seatsRepo.findOne({
           where: { listingId: listing.id, userId: targetUserId },
+          lock: { mode: 'pessimistic_write' },
         });
         if (!seat || !this.isLiveSeat(seat)) {
           throw new NotFoundException('Co-manager not found');
@@ -779,20 +805,30 @@ export class ListingCoManagersService {
                 : 'was removed as a co-manager of this listing.'
             }`,
           });
-          // Only an ACTIVE seat was ever access. Ending it here, in the same
-          // transaction, so a failure rolls the removal back with it. The
-          // live-room eviction event is deferred to after this transaction
-          // resolves (below), mirroring `GroupsService.leaveGroup`'s
-          // post-commit fan-out, so a rollback can never leave a client
-          // believing it lost a room it still has.
-          return this.identityMailboxSync.onStaffRemoved(
-            identity.id,
-            targetUserId,
-            manager,
-            { shouldDeferEmission: true },
-          );
         }
-        return null;
+
+        // An owner keeps their mailbox seat as the owner. Read inside the
+        // transaction so it reflects the owner of record at removal time.
+        const listingInTransaction = await manager
+          .getRepository(Listing)
+          .findOne({ where: { id: listing.id } });
+        if (listingInTransaction?.ownerId === targetUserId) {
+          return null;
+        }
+        // Every live seat ends its mailbox access here, in the same
+        // transaction, so a failure rolls the removal back with it. An
+        // `invited` seat normally holds no mailbox seat and this ends nothing;
+        // see the method doc for why it runs anyway. The live-room eviction
+        // event is deferred to after this transaction resolves (below),
+        // mirroring `GroupsService.leaveGroup`'s post-commit fan-out, so a
+        // rollback can never leave a client believing it lost a room it
+        // still has.
+        return this.identityMailboxSync.onStaffRemoved(
+          identity.id,
+          targetUserId,
+          manager,
+          { shouldDeferEmission: true },
+        );
       },
     );
     // Best-effort live fan-out AFTER commit: see the comment above. Task 25:

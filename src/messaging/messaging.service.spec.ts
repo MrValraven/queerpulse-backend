@@ -14,7 +14,7 @@ import { MentionNotificationService } from '../mentions/mention-notification.ser
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { UserStatus } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import {
   ConversationParticipant,
@@ -362,6 +362,12 @@ describe('MessagingService', () => {
           useValue: moderationStates,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        // `MessageRequestsService` reads staff account status for mailbox
+        // enquiries, which no test in this file sends.
+        {
+          provide: getRepositoryToken(User),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
         { provide: ConnectionsService, useValue: connections },

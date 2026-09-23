@@ -129,6 +129,10 @@ export interface CommunityCardDTO {
   area: string | null;
   isOnline: boolean;
   languages: string[];
+  // The book a reading group is reading now, or null. On the card so the
+  // directory can show the book beside the club's own name without a second
+  // fetch. Kept off the public gate card (`toPublicCard` allowlist).
+  nowReading: string | null;
 }
 
 export interface CommunityDetailDTO extends CommunityCardDTO {
@@ -272,6 +276,7 @@ export function toCommunityCard(
     area: c.area,
     isOnline: c.isOnline,
     languages: c.languages,
+    nowReading: c.nowReading,
   };
 }
 

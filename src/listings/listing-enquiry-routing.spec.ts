@@ -27,12 +27,22 @@ const MAILBOX_THREAD = `thread:${['profile-customer-user', LISTING_IDENTITY]
 
 function makeRouting(
   options: {
+    /** The listing's owner; null for a listing whose owner account is gone. */
+    ownerUserId?: string | null;
     coManagerUserIds?: string[];
     staffIdentityIds?: Record<string, string[]>;
     personBlockedUserIds?: string[];
+    suspendedUserIds?: string[];
   } = {},
 ) {
-  const listingStaff = ['owner-user', ...(options.coManagerUserIds ?? [])];
+  const ownerUserId =
+    options.ownerUserId === undefined ? 'owner-user' : options.ownerUserId;
+  // Built the way `IdentitiesService.staffUserIds` builds a listing's staff:
+  // the owner when there is one, then every active co-manager.
+  const listingStaff = [
+    ...(ownerUserId ? [ownerUserId] : []),
+    ...(options.coManagerUserIds ?? []),
+  ];
   const staffByIdentityId: Record<string, string[]> = {
     [LISTING_IDENTITY]: listingStaff,
     ...(options.staffIdentityIds ?? {}),
@@ -115,6 +125,21 @@ function makeRouting(
       ),
     ),
   };
+  // Every staff member's account, active unless the test suspends it. The
+  // one repository both messaging and the listing read account status from.
+  const users = {
+    find: jest.fn(() =>
+      Promise.resolve(
+        listingStaff.map((staffUserId) => ({
+          id: staffUserId,
+          isSystem: false,
+          status: (options.suspendedUserIds ?? []).includes(staffUserId)
+            ? UserStatus.Suspended
+            : UserStatus.Active,
+        })),
+      ),
+    ),
+  };
   const requests = new MessageRequestsService(
     {} as never,
     core,
@@ -124,6 +149,7 @@ function makeRouting(
     } as never,
     blockFilter as never,
     { resyncConversation: jest.fn(() => Promise.resolve([])) } as never,
+    users as never,
   );
   const messaging = Object.create(
     MessagingService.prototype,
@@ -144,7 +170,7 @@ function makeRouting(
     id: 'listing-1',
     slug: 'drama-bar',
     name: 'Drama Bar',
-    ownerId: 'owner-user',
+    ownerId: ownerUserId,
     status: ListingStatus.Live,
     path: 'own',
     badge: 'owned',
@@ -153,15 +179,7 @@ function makeRouting(
   const service = new ListingEnquiriesService(
     { findOne: jest.fn(() => Promise.resolve(listing)) } as never,
     enquiries as never,
-    {
-      findOne: jest.fn(() =>
-        Promise.resolve({
-          id: 'owner-user',
-          isSystem: false,
-          status: UserStatus.Active,
-        }),
-      ),
-    } as never,
+    users as never,
     messaging,
     { statesForAnyType: jest.fn(() => Promise.resolve(new Map())) } as never,
     identities as never,
@@ -274,6 +292,161 @@ describe('a directory enquiry lands in the listing mailbox', () => {
       },
     });
     expect(transaction).not.toHaveBeenCalled();
+    expect(enquiries.save).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Ownerless and suspended-owner listings keep working as a business
+   * mailbox while an active co-manager can answer them, which is how
+   * persona and company mailboxes already decide it: from the staff.
+   */
+  it('delivers an enquiry to an ownerless listing into the mailbox its co-manager answers', async () => {
+    const { service, savedSeats, postMessage, enquiries } = makeRouting({
+      ownerUserId: null,
+      coManagerUserIds: ['comanager-user'],
+    });
+
+    await expect(
+      service.getContact('drama-bar', 'customer-user'),
+    ).resolves.toMatchObject({
+      canMessageOwner: true,
+      unavailableReason: null,
+    });
+    await expect(
+      service.send('drama-bar', 'customer-user', { body: 'A question here.' }),
+    ).resolves.toMatchObject({ conversationId: MAILBOX_THREAD });
+
+    expect(savedSeats.map((seat) => [seat.userId, seat.identityId])).toEqual([
+      ['customer-user', 'profile-customer-user'],
+      ['comanager-user', LISTING_IDENTITY],
+    ]);
+    expect(postMessage).toHaveBeenCalledWith(
+      MAILBOX_THREAD,
+      'customer-user',
+      expect.stringContaining('A question here.'),
+    );
+    expect(enquiries.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerId: null,
+        conversationId: MAILBOX_THREAD,
+      }),
+    );
+  });
+
+  /**
+   * The suspended owner keeps a staff seat, as any suspended persona or
+   * company staff member does, and is reached through none of it: the
+   * suspension signed them out everywhere, which removed every push
+   * subscription (`PushService.handleSessionRevoked`) and closes the socket
+   * handshake to a non-active account. The co-manager's seat is the one
+   * that answers.
+   */
+  it('delivers an enquiry while the owner is suspended and a co-manager is active', async () => {
+    const { service, savedSeats, postMessage, enquiries } = makeRouting({
+      coManagerUserIds: ['comanager-user'],
+      suspendedUserIds: ['owner-user'],
+    });
+
+    await expect(
+      service.send('drama-bar', 'customer-user', { body: 'A question here.' }),
+    ).resolves.toMatchObject({ conversationId: MAILBOX_THREAD });
+
+    expect(savedSeats.map((seat) => [seat.userId, seat.identityId])).toEqual(
+      expect.arrayContaining([['comanager-user', LISTING_IDENTITY]]),
+    );
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(enquiries.save).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerId: 'owner-user' }),
+    );
+  });
+
+  it('refuses an ownerless listing nobody manages, with the existing code, and opens no thread', async () => {
+    const { service, transaction, postMessage, enquiries } = makeRouting({
+      ownerUserId: null,
+    });
+
+    await expect(
+      service.getContact('drama-bar', 'customer-user'),
+    ).resolves.toMatchObject({
+      canMessageOwner: false,
+      unavailableReason: 'no_owner_account',
+    });
+    await expect(
+      service.send('drama-bar', 'customer-user', { body: 'A question here.' }),
+    ).rejects.toThrow(BadRequestException);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(enquiries.save).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the suspended owner is the only staff member, and opens no thread', async () => {
+    const { service, transaction, postMessage } = makeRouting({
+      suspendedUserIds: ['owner-user'],
+    });
+
+    await expect(
+      service.getContact('drama-bar', 'customer-user'),
+    ).resolves.toMatchObject({
+      canMessageOwner: false,
+      unavailableReason: 'no_owner_account',
+    });
+    await expect(
+      service.send('drama-bar', 'customer-user', { body: 'A question here.' }),
+    ).rejects.toThrow(BadRequestException);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Fix round 1: a staff member who can receive but is blocked with the
+   * member, beside one who is not blocked but cannot receive, leaves nobody
+   * to read the enquiry. Messaging refuses it with the identity block, in
+   * both directions, and nothing is opened or recorded.
+   */
+  it('refuses a suspended owner beside an active co-manager blocked with the member', async () => {
+    const { service, transaction, postMessage, enquiries } = makeRouting({
+      coManagerUserIds: ['comanager-user'],
+      suspendedUserIds: ['owner-user'],
+      personBlockedUserIds: ['comanager-user'],
+    });
+
+    await expect(
+      service.getContact('drama-bar', 'customer-user'),
+    ).resolves.toMatchObject({
+      canMessageOwner: false,
+      unavailableReason: 'unavailable',
+    });
+    await expect(
+      service.send('drama-bar', 'customer-user', { body: 'A question here.' }),
+    ).rejects.toMatchObject({
+      response: {
+        code: 'IDENTITY_BLOCKED',
+        message: 'You cannot contact this business',
+      },
+    });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(enquiries.save).not.toHaveBeenCalled();
+  });
+
+  it('refuses an active owner blocked with the member beside a suspended co-manager', async () => {
+    const { service, transaction, postMessage, enquiries } = makeRouting({
+      coManagerUserIds: ['comanager-user'],
+      suspendedUserIds: ['comanager-user'],
+      personBlockedUserIds: ['owner-user'],
+    });
+
+    await expect(
+      service.getContact('drama-bar', 'customer-user'),
+    ).resolves.toMatchObject({
+      canMessageOwner: false,
+      unavailableReason: 'unavailable',
+    });
+    await expect(
+      service.send('drama-bar', 'customer-user', { body: 'A question here.' }),
+    ).rejects.toMatchObject({ response: { code: 'IDENTITY_BLOCKED' } });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
     expect(enquiries.save).not.toHaveBeenCalled();
   });
 

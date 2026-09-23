@@ -876,19 +876,23 @@ export function seatExcludedFromMailboxByStoredConversationIdPredicate(
  * definition of that rule, and the staff-seat condition lives inside it, so
  * a member's own "clear chat" on a personal or group seat never matches and
  * keeps its earlier behaviour: quotes, downloads, forwards and live frames
- * stay as they were. The comparison runs in the database at full
- * precision. `seatAlias` names a `conversation_participants` row, read
- * through its `cleared_at`, `identity_id` and `conversation_id` columns. The
- * subquery aliases are lowercase and quoted at every reference. Compose it
- * as `NOT ...` to keep only what the seat may see.
- * `isCoveredByMailboxStaffFloor` is its in-memory twin.
+ * stay as they were. The floor is the seat's `history_floor_at`, which only
+ * seating a staff member writes. A staff member's own "clear chat" writes
+ * `cleared_at` alone, so it stays personal on a mailbox seat as well: it
+ * hides history from their own list and nothing else. The comparison runs
+ * in the database at full precision. `seatAlias` names a
+ * `conversation_participants` row, read through its `history_floor_at`,
+ * `identity_id` and `conversation_id` columns. The subquery aliases are
+ * lowercase and quoted at every reference. Compose it as `NOT ...` to keep
+ * only what the seat may see. `isCoveredByMailboxStaffFloor` is its
+ * in-memory twin.
  */
 export function mailboxStaffHistoryFloorCoversPredicate(
   createdAtExpression: string,
   seatAlias: string,
 ): string {
-  return `(${seatAlias}.cleared_at IS NOT NULL
-    AND ${createdAtExpression} <= ${seatAlias}.cleared_at
+  return `(${seatAlias}.history_floor_at IS NOT NULL
+    AND ${createdAtExpression} <= ${seatAlias}.history_floor_at
     AND EXISTS (
       SELECT 1 FROM "identities" "floor_staff_identity"
       INNER JOIN "conversations" "floor_staff_conversation"
@@ -914,7 +918,7 @@ export function mailboxStaffHistoryFloorCoversPredicate(
 export function isCoveredByMailboxStaffFloor(
   createdAt: Date,
   seat: {
-    clearedAt: Date | null | undefined;
+    historyFloorAt: Date | null | undefined;
     identityKind: IdentityKind | null | undefined;
     isGroupConversation: boolean;
     isOfficialConversation: boolean;
@@ -925,7 +929,7 @@ export function isCoveredByMailboxStaffFloor(
     seat.identityKind !== IdentityKind.Profile &&
     !seat.isGroupConversation &&
     !seat.isOfficialConversation &&
-    seat.clearedAt != null &&
-    createdAt.getTime() <= seat.clearedAt.getTime()
+    seat.historyFloorAt != null &&
+    createdAt.getTime() <= seat.historyFloorAt.getTime()
   );
 }

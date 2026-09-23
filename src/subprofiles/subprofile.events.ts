@@ -62,3 +62,19 @@ export interface SubprofileMemberRemovedEvent {
   removedUserId: string;
   removedByUserId: string;
 }
+
+// Emitted by `SubprofileMembershipService` AFTER the creator role of a persona
+// has moved to another co-owner (the creator left, or their account was
+// erased), once the transaction that moved it has committed. The listener
+// tells every remaining member who creates the persona now. The payload names
+// the persona and its new creator only: the member who left is deliberately
+// absent, so no notification can name them. `memberUserIds` is every member
+// still on the roster, the new creator included.
+export const SUBPROFILE_CREATOR_CHANGED = 'subprofile.creator.changed';
+
+export interface SubprofileCreatorChangedEvent {
+  subprofileId: string;
+  displayName: string;
+  newCreatorUserId: string;
+  memberUserIds: string[];
+}

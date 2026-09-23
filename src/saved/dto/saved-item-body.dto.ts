@@ -18,12 +18,12 @@ import { SavedKind } from '../entities/saved-item.entity';
  * (`saved_item.title`/`href`/`meta`/`readTime` are `varchar` with no length,
  * `description` is `text`). That made this DTO the loosest write in the module
  * (ENG-45): five `@IsString()` fields with no ceiling, member-controlled, and
- * `title`/`meta`/`description` are echoed verbatim onto the `@Public()` share
- * read (`SharedSavedListController` → `SavedListsService.getShared` →
- * `toSavedItemDTO`), which is served to whoever holds a share link with no
- * account at all.
+ * `title`/`meta`/`description` are echoed verbatim onto the share read
+ * (`SharedSavedListController` → `SavedListsService.getShared` →
+ * `toSavedItemDTO`), which is served to any active member who holds a share
+ * link, including people the owner never sent it to.
  *
- * `href` ALSO ships on that public payload. Nothing renders it there today
+ * `href` ALSO ships on that shared payload. Nothing renders it there today
  * (`SavedListSharedPage`'s `SharedSavedListRow` prints only `title`, `meta` and
  * `description`), so the cost is a stored value waiting for the first component
  * that does link it rather than a live sink. That is precisely the state

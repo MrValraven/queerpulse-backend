@@ -11,7 +11,6 @@ import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
-import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
 import { ResourceSuggestion } from '../resources/entities/resource-suggestion.entity';
 import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
 import {
@@ -44,11 +43,10 @@ import { RecognitionListener } from './recognition.listener';
       SavedItem,
       MemberPreferences,
       // The contribution-side counts (SUS-05). Repositories only, no module
-      // import: `RecognitionAwardingService` reads these three tables and
-      // never calls into the volunteering / listings / resources services, so
-      // there is no dependency (and no cycle) on those modules.
+      // import: `RecognitionAwardingService` reads these tables and never
+      // calls into the volunteering / resources services, so there is no
+      // dependency (and no cycle) on those modules.
       VolunteerSignup,
-      ListingPublicQuestion,
       ResourceSuggestion,
     ]),
     UsersModule,

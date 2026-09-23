@@ -11,6 +11,7 @@ export type UploadKind =
   | 'gathering-photo'
   | 'group-avatar'
   | 'listing-photo'
+  | 'listing-menu'
   | 'community-cover'
   | 'event-cover'
   | 'community-avatar'
@@ -102,6 +103,15 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'listing-photo': {
     prefix: 'listing-photos',
     maxBytes: 5 * MB,
+    requiresSession: false,
+  },
+  // A listing's menu: a PDF, or a photo of the board, opened from the public
+  // listing page. Public for the same reason as `listing-photo`: logged-out
+  // visitors and link unfurlers read that page. 10 MB fits a multi-page PDF
+  // menu. The accepted content types are `LISTING_MENU_UPLOAD_TYPES`.
+  'listing-menu': {
+    prefix: 'listing-menus',
+    maxBytes: 10 * MB,
     requiresSession: false,
   },
   // A community's cover image, shown on the public (logged-out) homepage

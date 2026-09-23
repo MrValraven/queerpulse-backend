@@ -31,6 +31,8 @@ import { MessagingCoreService } from './messaging-core.service';
  * pre-floor message is refused with the same 404 as a message outside the
  * conversation. A "clear chat" on a seat that speaks for the member themself
  * (a personal thread, the customer's own seat) keeps every write it had.
+ * Mailbox decisions, task 1: the floor is the seat's `historyFloorAt`, so a
+ * staff member's own "clear chat" (`clearedAt` alone) keeps every write too.
  *
  * The floor query runs against a fixture: the stand-in builder accepts only
  * the clauses it knows and answers the floor clause through its in-memory
@@ -71,7 +73,13 @@ const EXPECTED_FLOOR_CLAUSE = mailboxStaffHistoryFloorCoversPredicate(
   'seat',
 );
 
-function callerSeat(identityId: string): ConversationParticipant {
+/** The caller's seat. By default it carries a history floor, as a seated
+ *  staff member's does, with `clearedAt` at the same instant. `isFloored:
+ *  false` models a personal "clear chat" alone: `clearedAt` set, no floor. */
+function callerSeat(
+  identityId: string,
+  { isFloored = true }: { isFloored?: boolean } = {},
+): ConversationParticipant {
   return {
     id: 'seat-caller',
     conversationId: CONVERSATION_ID,
@@ -80,6 +88,7 @@ function callerSeat(identityId: string): ConversationParticipant {
     role: ConversationRole.Member,
     leftAt: null,
     clearedAt: HISTORY_FLOOR,
+    historyFloorAt: isFloored ? HISTORY_FLOOR : null,
   } as unknown as ConversationParticipant;
 }
 
@@ -129,7 +138,7 @@ function build(seat: ConversationParticipant) {
             isBelowFloor =
               isBelowFloor &&
               isCoveredByMailboxStaffFloor(message!.createdAt, {
-                clearedAt: seat.clearedAt,
+                historyFloorAt: seat.historyFloorAt,
                 identityKind: identityKindById.get(seat.identityId),
                 isGroupConversation: false,
                 isOfficialConversation: false,
@@ -162,17 +171,18 @@ function build(seat: ConversationParticipant) {
     requireParticipant: jest.fn().mockResolvedValue(seat),
     assertMaySendAs: jest.fn().mockResolvedValue(undefined),
   };
+  const messages = {
+    findOne: jest.fn(({ where }: { where: { id: string } }) =>
+      Promise.resolve(messageById.get(where.id) ?? null),
+    ),
+    createQueryBuilder: jest.fn(floorQuery),
+  };
   const service = new MessageAnnotationsService(
     {
       findOne: jest.fn().mockResolvedValue({ kind: ConversationKind.Direct }),
     } as unknown as Repository<Conversation>,
     {} as unknown as Repository<ConversationParticipant>,
-    {
-      findOne: jest.fn(({ where }: { where: { id: string } }) =>
-        Promise.resolve(messageById.get(where.id) ?? null),
-      ),
-      createQueryBuilder: jest.fn(floorQuery),
-    } as unknown as Repository<Message>,
+    messages as unknown as Repository<Message>,
     reactions as unknown as Repository<MessageReaction>,
     pins as unknown as Repository<ConversationPinnedMessage>,
     stars as unknown as Repository<MessageStar>,
@@ -187,7 +197,15 @@ function build(seat: ConversationParticipant) {
       'reactionCountsForMessage',
     )
     .mockResolvedValue([]);
-  return { service, reactionInsert, pinInsert, starInsert, reactions, pins };
+  return {
+    service,
+    reactionInsert,
+    pinInsert,
+    starInsert,
+    reactions,
+    pins,
+    messages,
+  };
 }
 
 type Write = (
@@ -271,11 +289,27 @@ describe('Task 13h: reaction, pin and star writes honour a mailbox staff floor',
   it.each(WRITES)(
     'still lets a member who cleared a chat from their own seat %s a cleared message, as before this task',
     async (_label, write) => {
-      const { service } = build(callerSeat(PROFILE_IDENTITY_ID));
+      const { service } = build(
+        callerSeat(PROFILE_IDENTITY_ID, { isFloored: false }),
+      );
 
       await expect(write(service, PRE_FLOOR_MESSAGE_ID)).resolves.toEqual({
         ok: true,
       });
+    },
+  );
+
+  it.each(WRITES)(
+    'lets a co-manager whose own clear chat covers a message, with no history floor, %s it, with no floor query',
+    async (_label, write) => {
+      const { service, messages } = build(
+        callerSeat(STAFF_IDENTITY_ID, { isFloored: false }),
+      );
+
+      await expect(write(service, PRE_FLOOR_MESSAGE_ID)).resolves.toEqual({
+        ok: true,
+      });
+      expect(messages.createQueryBuilder).not.toHaveBeenCalled();
     },
   );
 });

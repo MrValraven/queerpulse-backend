@@ -56,6 +56,7 @@ describe('ReadingGroupProposalsService', () => {
 
       expect(repo.create).toHaveBeenCalledWith({
         memberId: 'u1',
+        clubName: null,
         book: dto.book,
         why: 'Made me feel less alone.',
         format: dto.format,
@@ -63,6 +64,7 @@ describe('ReadingGroupProposalsService', () => {
       });
       expect(result).toEqual({
         id: 'rgp-1',
+        clubName: null,
         book: dto.book,
         why: 'Made me feel less alone.',
         format: dto.format,
@@ -89,6 +91,27 @@ describe('ReadingGroupProposalsService', () => {
       const result = await service.create('u1', withoutWhy);
 
       expect(result.why).toBeNull();
+    });
+
+    it('stores the trimmed club name when one was given', async () => {
+      const result = await service.create('u1', {
+        ...dto,
+        clubName: '  The Baldwin Readers  ',
+      });
+
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ clubName: 'The Baldwin Readers' }),
+      );
+      expect(result.clubName).toBe('The Baldwin Readers');
+    });
+
+    it('stores a null club name when the optional field was whitespace', async () => {
+      const result = await service.create('u1', { ...dto, clubName: '   ' });
+
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ clubName: null }),
+      );
+      expect(result.clubName).toBeNull();
     });
 
     it('tells the reading-group-proposal queue that a proposal landed', async () => {

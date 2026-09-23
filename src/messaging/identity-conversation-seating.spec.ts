@@ -508,3 +508,131 @@ describe('getOrCreateIdentityConversation', () => {
     ).rejects.toBe(failure);
   });
 });
+
+// Final review C, I1: the refusal checks read the staff on the pool, before
+// the creation transaction. The seats come from a second read inside it,
+// under the staff source lock, so a staff change committing in between is
+// seated as it now stands.
+describe('getOrCreateIdentityConversation, the staff read under the lock', () => {
+  /** The plain read answers `beforeLock`; the locked read inside the
+   *  transaction answers `underLock`, and records whether any conversation
+   *  row had been written yet. */
+  function makeRacingCore(beforeLock: string[], underLock: string[]) {
+    const built = makeCore({
+      staffByIdentityId: { 'business-identity': beforeLock },
+    });
+    const conversationsWrittenAtLockedRead: number[] = [];
+    built.identities.staffUserIds.mockImplementation(
+      (
+        identityId: string,
+        readOptions?: { manager?: unknown; shouldLockStaffSource?: boolean },
+      ) => {
+        if (readOptions?.manager && readOptions.shouldLockStaffSource) {
+          conversationsWrittenAtLockedRead.push(
+            built.savedConversations.length,
+          );
+          return Promise.resolve(underLock);
+        }
+        return Promise.resolve(
+          identityId === 'business-identity' ? beforeLock : [],
+        );
+      },
+    );
+    return { ...built, conversationsWrittenAtLockedRead };
+  }
+
+  it('re-reads the staff inside the creation transaction, under the lock, before the thread is written', async () => {
+    const { core, identities, conversationsWrittenAtLockedRead } =
+      makeRacingCore(['owner-user'], ['owner-user']);
+
+    await core.getOrCreateIdentityConversation(
+      'customer-user',
+      'business-identity',
+      'customer-user',
+    );
+
+    expect(identities.staffUserIds).toHaveBeenCalledWith('business-identity', {
+      manager: expect.objectContaining({
+        save: expect.any(Function) as unknown,
+      }) as unknown,
+      shouldLockStaffSource: true,
+    });
+    expect(conversationsWrittenAtLockedRead).toEqual([0]);
+  });
+
+  it('leaves out a co-manager whose removal committed after the refusal checks', async () => {
+    const { core, savedSeats } = makeRacingCore(
+      ['owner-user', 'removed-comanager'],
+      ['owner-user'],
+    );
+
+    await core.getOrCreateIdentityConversation(
+      'customer-user',
+      'business-identity',
+      'customer-user',
+    );
+
+    expect(
+      savedSeats
+        .filter((seat) => seat.identityId === 'business-identity')
+        .map((seat) => seat.userId),
+    ).toEqual(['owner-user']);
+  });
+
+  it('seats a co-manager whose accept committed after the refusal checks', async () => {
+    const { core, savedSeats } = makeRacingCore(
+      ['owner-user'],
+      ['owner-user', 'new-comanager'],
+    );
+
+    await core.getOrCreateIdentityConversation(
+      'customer-user',
+      'business-identity',
+      'customer-user',
+    );
+
+    expect(
+      savedSeats
+        .filter((seat) => seat.identityId === 'business-identity')
+        .map((seat) => seat.userId),
+    ).toEqual(['owner-user', 'new-comanager']);
+  });
+
+  it('refuses, writing nothing, when the locked read finds no staff left', async () => {
+    const { core, savedConversations, savedSeats } = makeRacingCore(
+      ['owner-user'],
+      [],
+    );
+
+    expect(
+      await refusalCode(
+        core.getOrCreateIdentityConversation(
+          'customer-user',
+          'business-identity',
+          'customer-user',
+        ),
+      ),
+    ).toBe('IDENTITY_HAS_NO_STAFF');
+    expect(savedConversations).toHaveLength(0);
+    expect(savedSeats).toHaveLength(0);
+  });
+
+  it('refuses, writing nothing, when the member became staff of the mailbox meanwhile', async () => {
+    const { core, savedConversations, savedSeats } = makeRacingCore(
+      ['owner-user'],
+      ['owner-user', 'customer-user'],
+    );
+
+    expect(
+      await refusalCode(
+        core.getOrCreateIdentityConversation(
+          'customer-user',
+          'business-identity',
+          'customer-user',
+        ),
+      ),
+    ).toBe('IDENTITY_IS_YOUR_OWN');
+    expect(savedConversations).toHaveLength(0);
+    expect(savedSeats).toHaveLength(0);
+  });
+});

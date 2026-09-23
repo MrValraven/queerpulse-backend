@@ -1,4 +1,6 @@
 import { CONVERSATION_CLAIM_CHANGED } from '../messaging/conversation-claim';
+import { Conversation } from '../messaging/entities/conversation.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { CONVERSATION_MEMBERSHIP_REVOKED } from '../messaging/messaging.events';
 import { IdentityMailboxSyncService } from './identity-mailbox-sync.service';
 
@@ -15,6 +17,7 @@ interface Seat {
   identityId: string;
   leftAt: Date | null;
   clearedAt: Date | null;
+  historyFloorAt: Date | null;
 }
 
 interface ConversationRow {
@@ -41,6 +44,10 @@ function matches(row: object, where: Record<string, unknown>): boolean {
 const MAILBOX = 'business-identity';
 const THREAD = 'this-thread';
 const EARLIER = new Date('2026-09-01T10:00:00Z');
+/** The stand-in database clock's answer for a seat's floor instant. It lies
+ *  in the past of any test run, so a floor taken from the application clock
+ *  can never equal it: an equal floor provably came from the database. */
+const DATABASE_NOW = new Date('2026-09-15T09:30:00.456Z');
 
 function makeService(options: {
   staff: string[];
@@ -60,6 +67,7 @@ function makeService(options: {
     create: jest.fn((row: Partial<Seat>) => ({
       leftAt: null,
       clearedAt: null,
+      historyFloorAt: null,
       ...row,
     })),
     save: jest.fn((rows: Seat[]) => {
@@ -73,6 +81,12 @@ function makeService(options: {
         return Promise.resolve({ affected: matched.length });
       },
     ),
+    query: jest.fn((sql: string) => {
+      if (!sql.includes('clock_timestamp()')) {
+        throw new Error(`Unmodelled query: ${sql}`);
+      }
+      return Promise.resolve([{ floorInstant: DATABASE_NOW }]);
+    }),
   };
   const conversations = {
     update: jest.fn(
@@ -84,16 +98,25 @@ function makeService(options: {
     ),
   };
   const eventEmitter = { emit: jest.fn() };
+  const identitiesService = {
+    staffUserIds: jest.fn(() => Promise.resolve(options.staff)),
+  };
   const service = new IdentityMailboxSyncService(
     participants as never,
     {} as never,
     conversations as never,
-    {
-      staffUserIds: jest.fn(() => Promise.resolve(options.staff)),
-    } as never,
+    identitiesService as never,
     eventEmitter as never,
   );
-  return { service, seats, conversationRows, eventEmitter, participants };
+  return {
+    service,
+    seats,
+    conversationRows,
+    eventEmitter,
+    participants,
+    conversations,
+    identitiesService,
+  };
 }
 
 function seat(
@@ -107,6 +130,7 @@ function seat(
     identityId: MAILBOX,
     leftAt: null,
     clearedAt: null,
+    historyFloorAt: null,
     ...overrides,
   };
 }
@@ -117,9 +141,8 @@ const seatOf = (seats: Seat[], userId: string, conversationId = THREAD) =>
   );
 
 describe('IdentityMailboxSyncService.resyncConversation', () => {
-  it('seats a current staff member missing from this thread, from now on', async () => {
-    const before = Date.now();
-    const { service, seats } = makeService({
+  it('seats a current staff member missing from this thread, from the database clock on', async () => {
+    const { service, seats, participants } = makeService({
       staff: ['owner-user', 'new-colleague'],
       seats: [seat('owner-user'), seat('new-colleague', {}, 'other-thread')],
     });
@@ -128,11 +151,14 @@ describe('IdentityMailboxSyncService.resyncConversation', () => {
 
     const created = seatOf(seats, 'new-colleague');
     expect(created).toMatchObject({ identityId: MAILBOX, leftAt: null });
-    expect(created?.clearedAt?.getTime()).toBeGreaterThanOrEqual(before);
+    // Both columns carry the one database instant: the floor every staff
+    // read enforces, and the clear point that keeps the list in step.
+    expect(created?.historyFloorAt).toEqual(DATABASE_NOW);
+    expect(created?.clearedAt).toEqual(DATABASE_NOW);
+    expect(participants.query).toHaveBeenCalledTimes(1);
   });
 
-  it('reactivates a returning staff member on their own row, floored at now', async () => {
-    const before = Date.now();
+  it('reactivates a returning staff member on their own row, floored at the database clock', async () => {
     const { service, seats } = makeService({
       staff: ['owner-user', 'returning-user'],
       seats: [
@@ -146,7 +172,32 @@ describe('IdentityMailboxSyncService.resyncConversation', () => {
     const returning = seats.filter((row) => row.userId === 'returning-user');
     expect(returning).toHaveLength(1);
     expect(returning[0]?.leftAt).toBeNull();
-    expect(returning[0]?.clearedAt?.getTime()).toBeGreaterThanOrEqual(before);
+    expect(returning[0]?.historyFloorAt).toEqual(DATABASE_NOW);
+    expect(returning[0]?.clearedAt).toEqual(DATABASE_NOW);
+  });
+
+  it('reads the database clock once for several seats, and not at all when every staff member is seated', async () => {
+    const seated = makeService({
+      staff: ['owner-user'],
+      seats: [seat('owner-user')],
+    });
+    await seated.service.resyncConversation(MAILBOX, THREAD);
+    expect(seated.participants.query).not.toHaveBeenCalled();
+
+    const missing = makeService({
+      staff: ['owner-user', 'first-new', 'second-new', 'returning-user'],
+      seats: [
+        seat('owner-user'),
+        seat('returning-user', { leftAt: EARLIER, clearedAt: EARLIER }),
+      ],
+    });
+    await missing.service.resyncConversation(MAILBOX, THREAD);
+    expect(missing.participants.query).toHaveBeenCalledTimes(1);
+    for (const userId of ['first-new', 'second-new', 'returning-user']) {
+      expect(seatOf(missing.seats, userId)?.historyFloorAt).toEqual(
+        DATABASE_NOW,
+      );
+    }
   });
 
   it('ends a departed staff member’s seat in this thread only, releases their claim here, and emits the eviction and the release', async () => {
@@ -287,6 +338,196 @@ describe('IdentityMailboxSyncService.resyncConversation', () => {
 // already sits in that thread as its customer, under their own profile
 // identity. One seat per (conversation, user) means the thread keeps that
 // customer seat, and the resync leaves it alone.
+describe('IdentityMailboxSyncService.resyncConversation, inside a caller transaction', () => {
+  // The staff set and the seats must be read in the same transaction, or a
+  // caller's uncommitted staff change is invisible to the staff side.
+  it('reads the staff set through the given manager, and plainly without one', async () => {
+    const { service, participants, conversations, identitiesService } =
+      makeService({ staff: ['owner-user'], seats: [seat('owner-user')] });
+    const transactionManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === ConversationParticipant
+          ? participants
+          : entity === Conversation
+            ? conversations
+            : undefined,
+      ),
+    };
+
+    await service.resyncConversation(
+      MAILBOX,
+      THREAD,
+      transactionManager as never,
+      { shouldDeferEmission: true },
+    );
+    expect(identitiesService.staffUserIds).toHaveBeenLastCalledWith(MAILBOX, {
+      manager: transactionManager,
+      shouldLockStaffSource: false,
+    });
+
+    await service.resyncConversation(MAILBOX, THREAD);
+    expect(identitiesService.staffUserIds).toHaveBeenLastCalledWith(MAILBOX);
+  });
+
+  // Final review C, I1: a removal committing between an unlocked staff read
+  // and the seat writes had its just-ended seat reactivated here.
+  it('reads the staff source under its lock through the given manager, before any seat of the thread', async () => {
+    const { service, participants, conversations, identitiesService } =
+      makeService({ staff: ['owner-user'], seats: [seat('owner-user')] });
+    const transactionManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === ConversationParticipant
+          ? participants
+          : entity === Conversation
+            ? conversations
+            : undefined,
+      ),
+    };
+
+    await service.resyncConversation(
+      MAILBOX,
+      THREAD,
+      transactionManager as never,
+      { shouldDeferEmission: true, shouldLockStaffSource: true },
+    );
+
+    expect(identitiesService.staffUserIds).toHaveBeenCalledWith(MAILBOX, {
+      manager: transactionManager,
+      shouldLockStaffSource: true,
+    });
+    expect(
+      identitiesService.staffUserIds.mock.invocationCallOrder[0] ?? 0,
+    ).toBeLessThan(participants.find.mock.invocationCallOrder[0] ?? 0);
+  });
+});
+
+describe('IdentityMailboxSyncService.resyncConversation, locked with no caller transaction', () => {
+  function makeLockedService(options: { staff: string[]; seats: Seat[] }) {
+    const built = makeService(options);
+    const transactionManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === ConversationParticipant
+          ? built.participants
+          : entity === Conversation
+            ? built.conversations
+            : undefined,
+      ),
+    };
+    let isInsideTransaction = false;
+    const transaction = jest.fn(
+      async (
+        work: (manager: typeof transactionManager) => Promise<unknown>,
+      ) => {
+        isInsideTransaction = true;
+        try {
+          return await work(transactionManager);
+        } finally {
+          isInsideTransaction = false;
+        }
+      },
+    );
+    Object.assign(built.participants, { manager: { transaction } });
+    return {
+      ...built,
+      transaction,
+      transactionManager,
+      isInsideTransaction: () => isInsideTransaction,
+    };
+  }
+
+  it('opens its own transaction, reads staff under the lock inside it, and emits only after it commits', async () => {
+    const {
+      service,
+      seats,
+      identitiesService,
+      eventEmitter,
+      transaction,
+      transactionManager,
+      isInsideTransaction,
+    } = makeLockedService({
+      staff: ['owner-user'],
+      seats: [seat('owner-user'), seat('removed-comanager')],
+    });
+    const staffReadInsideTransaction: boolean[] = [];
+    identitiesService.staffUserIds.mockImplementation(() => {
+      staffReadInsideTransaction.push(isInsideTransaction());
+      return Promise.resolve(['owner-user']);
+    });
+    const emittedInsideTransaction: boolean[] = [];
+    eventEmitter.emit.mockImplementation(() => {
+      emittedInsideTransaction.push(isInsideTransaction());
+      return true;
+    });
+
+    const changes = await service.resyncConversation(
+      MAILBOX,
+      THREAD,
+      undefined,
+      {
+        shouldLockStaffSource: true,
+      },
+    );
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(identitiesService.staffUserIds).toHaveBeenCalledWith(MAILBOX, {
+      manager: transactionManager,
+      shouldLockStaffSource: true,
+    });
+    expect(staffReadInsideTransaction).toEqual([true]);
+    expect(seatOf(seats, 'removed-comanager')?.leftAt).toBeInstanceOf(Date);
+    expect(changes.endedSeats).toEqual([
+      { conversationId: THREAD, userId: 'removed-comanager' },
+    ]);
+    expect(eventEmitter.emit).toHaveBeenCalledWith(
+      CONVERSATION_MEMBERSHIP_REVOKED,
+      { conversationId: THREAD, userIds: ['removed-comanager'] },
+    );
+    expect(emittedInsideTransaction.length).toBeGreaterThan(0);
+    expect(emittedInsideTransaction.every((isInside) => !isInside)).toBe(true);
+  });
+
+  it('keeps the floor it gives a missing staff member on the database clock, read inside the transaction', async () => {
+    const { service, seats, participants, isInsideTransaction } =
+      makeLockedService({ staff: ['owner-user', 'new-comanager'], seats: [] });
+    const clockReadInsideTransaction: boolean[] = [];
+    participants.query.mockImplementation((sql: string) => {
+      if (!sql.includes('clock_timestamp()')) {
+        throw new Error(`Unmodelled query: ${sql}`);
+      }
+      clockReadInsideTransaction.push(isInsideTransaction());
+      return Promise.resolve([{ floorInstant: DATABASE_NOW }]);
+    });
+
+    await service.resyncConversation(MAILBOX, THREAD, undefined, {
+      shouldLockStaffSource: true,
+    });
+
+    expect(clockReadInsideTransaction).toEqual([true]);
+    expect(seatOf(seats, 'new-comanager')).toEqual(
+      expect.objectContaining({
+        leftAt: null,
+        clearedAt: DATABASE_NOW,
+        historyFloorAt: DATABASE_NOW,
+      }),
+    );
+  });
+
+  it('announces nothing when the transaction rolls back', async () => {
+    const { service, eventEmitter, conversations } = makeLockedService({
+      staff: ['owner-user'],
+      seats: [seat('owner-user'), seat('removed-comanager')],
+    });
+    conversations.update.mockRejectedValueOnce(new Error('release failed'));
+
+    await expect(
+      service.resyncConversation(MAILBOX, THREAD, undefined, {
+        shouldLockStaffSource: true,
+      }),
+    ).rejects.toThrow('release failed');
+    expect(eventEmitter.emit).not.toHaveBeenCalled();
+  });
+});
+
 describe('IdentityMailboxSyncService.resyncConversation, a former customer on staff', () => {
   const CUSTOMER_IDENTITY = 'customer-profile-identity';
 

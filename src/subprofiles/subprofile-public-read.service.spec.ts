@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In } from 'typeorm';
@@ -8,7 +9,9 @@ import { Handle } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { DIRECTORY_MAX_LIMIT } from './dto/list-directory.query';
 import {
   Subprofile,
@@ -17,6 +20,7 @@ import {
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
+import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import { SubprofileItem } from './entities/subprofile-item.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
@@ -55,6 +59,31 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     updatedAt: new Date(),
     ...overrides,
   };
+}
+
+// Answers a TypeORM `findOne({ where })` from a fixed row list: a row matches
+// when every key in `where` equals the row's own value. Enough for the plain
+// equality lookups the forwarding reads make.
+function findOneFrom<Row extends object>(rows: Row[]) {
+  return ({ where }: { where: Record<string, unknown> }): Promise<Row | null> =>
+    Promise.resolve(
+      rows.find((row) =>
+        Object.entries(where).every(
+          ([key, value]) => (row as Record<string, unknown>)[key] === value,
+        ),
+      ) ?? null,
+    );
+}
+
+// Resolves to whatever the promise rejected with, so a test can read the
+// thrown response body directly. Fails the test if the promise resolves.
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected the promise to reject');
 }
 
 // Stubs the fluent `createQueryBuilder('sp')` chain `directory()` builds:
@@ -156,15 +185,28 @@ function makeSocialCountsQueryBuilderStub(
 
 describe('SubprofilePublicReadService', () => {
   let service: SubprofilePublicReadService;
-  let subprofiles: { createQueryBuilder: jest.Mock };
-  let socialLinks: { createQueryBuilder: jest.Mock };
+  let subprofiles: { createQueryBuilder: jest.Mock; findOne: jest.Mock };
+  let socialLinks: { createQueryBuilder: jest.Mock; find: jest.Mock };
   let items: { find: jest.Mock };
-  let profiles: { find: jest.Mock };
-  let followersService: { loadFollowerCountsFor: jest.Mock };
-  let blockFilter: { excludeBlocked: jest.Mock };
+  let profiles: { find: jest.Mock; findOne: jest.Mock };
+  let addressHistory: { findOne: jest.Mock };
+  let followersService: {
+    loadFollowerCountsFor: jest.Mock;
+    viewerFollowingFor: jest.Mock;
+  };
+  let blockFilter: { excludeBlocked: jest.Mock; isBlockedEitherWay: jest.Mock };
+  let handles: {
+    previousSubprofileOwnerOf: jest.Mock;
+    previousProfileOwnerOf: jest.Mock;
+  };
+  let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
+  let membership: { isMember: jest.Mock };
 
   beforeEach(async () => {
-    subprofiles = { createQueryBuilder: jest.fn() };
+    subprofiles = {
+      createQueryBuilder: jest.fn(),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     // Neither `loadSocialCountsFor` nor its `socialLinks` dependency is
     // exercised unless a test's rows have at least one id — default to an
     // empty grouped result so a test that doesn't care about socialCount is
@@ -173,15 +215,37 @@ describe('SubprofilePublicReadService', () => {
       createQueryBuilder: jest
         .fn()
         .mockReturnValue(makeSocialCountsQueryBuilderStub([])),
+      find: jest.fn().mockResolvedValue([]),
     };
     items = { find: jest.fn().mockResolvedValue([]) };
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
+    // No old addresses by default, so every pre-existing not-found case keeps
+    // its plain 404.
+    addressHistory = { findOne: jest.fn().mockResolvedValue(null) };
     followersService = {
       loadFollowerCountsFor: jest
         .fn()
         .mockResolvedValue(new Map<string, number>()),
+      viewerFollowingFor: jest.fn().mockResolvedValue(new Set<string>()),
     };
-    blockFilter = { excludeBlocked: jest.fn() };
+    blockFilter = {
+      excludeBlocked: jest.fn(),
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+    };
+    // PRD-204 reclaim lookups. Both answer "nobody" by default, so every
+    // pre-existing not-found case here keeps its plain 404.
+    handles = {
+      previousSubprofileOwnerOf: jest.fn().mockResolvedValue(null),
+      previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
+    };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      statesFor: jest.fn().mockResolvedValue(new Map()),
+    };
+    membership = { isMember: jest.fn().mockResolvedValue(false) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -210,28 +274,16 @@ describe('SubprofilePublicReadService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         {
+          provide: getRepositoryToken(SubprofileAddressHistory),
+          useValue: addressHistory,
+        },
+        {
           provide: getRepositoryToken(Handle),
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         { provide: BlockFilterService, useValue: blockFilter },
-        {
-          // PRD-204 reclaim lookups. Both answer "nobody" by default, so every
-          // pre-existing not-found case here keeps its plain 404.
-          provide: HandlesService,
-          useValue: {
-            previousSubprofileOwnerOf: jest.fn().mockResolvedValue(null),
-            previousProfileOwnerOf: jest.fn().mockResolvedValue(null),
-          },
-        },
-        {
-          provide: ContentModerationService,
-          useValue: {
-            stateFor: jest
-              .fn()
-              .mockResolvedValue({ hidden: false, removed: false }),
-            statesFor: jest.fn().mockResolvedValue(new Map()),
-          },
-        },
+        { provide: HandlesService, useValue: handles },
+        { provide: ContentModerationService, useValue: contentModeration },
         {
           provide: SubprofileEndorsementsService,
           useValue: {
@@ -242,10 +294,7 @@ describe('SubprofilePublicReadService', () => {
           },
         },
         { provide: SubprofileFollowersService, useValue: followersService },
-        {
-          provide: SubprofileMembershipService,
-          useValue: { isMember: jest.fn().mockResolvedValue(false) },
-        },
+        { provide: SubprofileMembershipService, useValue: membership },
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
@@ -509,6 +558,384 @@ describe('SubprofilePublicReadService', () => {
       // Composed from the profile's name parts, exactly like the public DTO's
       // `SubprofileOwnerRef.name`.
       expect(starletCard?.ownerName).toBe('Ana Reis');
+    });
+  });
+
+  // --- nested persona forwarding after a creator handoff --------------------
+
+  describe('getBySlugForProfile forwarding after a creator handoff', () => {
+    interface ProfileRow {
+      userId: string;
+      slug: string;
+      firstName: string;
+      lastName: string;
+    }
+    interface AddressHistoryRow {
+      previousUserId: string;
+      slug: string;
+      subprofileId: string;
+    }
+
+    const activeViewer: CurrentUserData = {
+      userId: 'viewer-1',
+      email: 'viewer@example.com',
+      status: UserStatus.Active,
+      role: 'member',
+    };
+
+    let profileRows: ProfileRow[];
+    let personaRows: Subprofile[];
+    let historyRows: AddressHistoryRow[];
+    let rehomedPersona: Subprofile;
+
+    beforeEach(() => {
+      // Ana created "nightform", then left it. Bea, the longest-standing
+      // co-owner, became its creator, and the slug collided with one of Bea's
+      // own personas, so it now lives at /members/bea/nightform-2.
+      profileRows = [
+        {
+          userId: 'creator-old',
+          slug: 'ana',
+          firstName: 'Ana',
+          lastName: 'Reis',
+        },
+        {
+          userId: 'creator-new',
+          slug: 'bea',
+          firstName: 'Bea',
+          lastName: 'Lima',
+        },
+      ];
+      rehomedPersona = makeSubprofile({
+        id: 'sp-rehomed',
+        userId: 'creator-new',
+        slug: 'nightform-2',
+        handle: null,
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      });
+      personaRows = [rehomedPersona];
+      historyRows = [
+        {
+          previousUserId: 'creator-old',
+          slug: 'nightform',
+          subprofileId: 'sp-rehomed',
+        },
+      ];
+      profiles.findOne.mockImplementation(findOneFrom(profileRows));
+      subprofiles.findOne.mockImplementation(findOneFrom(personaRows));
+      addressHistory.findOne.mockImplementation(findOneFrom(historyRows));
+    });
+
+    function responseBodyOf(error: unknown): Record<string, unknown> {
+      expect(error).toBeInstanceOf(NotFoundException);
+      return (error as NotFoundException).getResponse() as Record<
+        string,
+        unknown
+      >;
+    }
+
+    it('forwards the old nested address to the current creator slug and persona slug', async () => {
+      const error = await rejectionOf(
+        service.getBySlugForProfile('ana', 'nightform', activeViewer),
+      );
+
+      expect(responseBodyOf(error)).toEqual({
+        code: 'PERSONA_REHOMED',
+        message: 'That persona has a new address',
+        ownerSlug: 'bea',
+        slug: 'nightform-2',
+      });
+      expect(addressHistory.findOne).toHaveBeenCalledWith({
+        where: { previousUserId: 'creator-old', slug: 'nightform' },
+        select: { subprofileId: true },
+      });
+    });
+
+    it('forwards an anonymous visitor to an open persona', async () => {
+      const error = await rejectionOf(
+        service.getBySlugForProfile('ana', 'nightform', undefined),
+      );
+
+      expect(responseBodyOf(error)).toMatchObject({
+        code: 'PERSONA_REHOMED',
+        ownerSlug: 'bea',
+        slug: 'nightform-2',
+      });
+      // An anonymous visitor has no account to block anyone, so no block
+      // lookup runs and the cacheable anonymous answer stays viewer-independent.
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+    });
+
+    it.each<{ state: string; arrange: () => void }>([
+      {
+        state: 'a draft',
+        arrange: () => {
+          rehomedPersona.status = SubprofileStatus.Draft;
+        },
+      },
+      {
+        state: 'private',
+        arrange: () => {
+          rehomedPersona.visibility = SubprofileVisibility.Private;
+        },
+      },
+    ])(
+      'forwards a co-owner of the persona even while it is $state',
+      async ({ arrange }) => {
+        arrange();
+        membership.isMember.mockImplementation(
+          (userId: string, subprofileId: string) =>
+            Promise.resolve(
+              userId === 'viewer-1' && subprofileId === 'sp-rehomed',
+            ),
+        );
+
+        const error = await rejectionOf(
+          service.getBySlugForProfile('ana', 'nightform', activeViewer),
+        );
+
+        expect(responseBodyOf(error)).toMatchObject({
+          code: 'PERSONA_REHOMED',
+          ownerSlug: 'bea',
+          slug: 'nightform-2',
+        });
+      },
+    );
+
+    it('serves a live linked persona at the requested address and never reads the history', async () => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-live',
+          userId: 'creator-old',
+          slug: 'nightform',
+          handle: null,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        }),
+      );
+
+      const view = await service.getBySlugForProfile(
+        'ana',
+        'nightform',
+        activeViewer,
+      );
+
+      expect(view.id).toBe('sp-live');
+      expect(addressHistory.findOne).not.toHaveBeenCalled();
+    });
+
+    it('still forwards when the old creator holds an UNLINKED persona under the same slug', async () => {
+      // An unlinked persona could never answer this route, and letting it
+      // suppress the forward would reveal that the member runs it.
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-anonymous',
+          userId: 'creator-old',
+          slug: 'nightform',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        }),
+      );
+
+      const error = await rejectionOf(
+        service.getBySlugForProfile('ana', 'nightform', activeViewer),
+      );
+
+      expect(responseBodyOf(error)).toMatchObject({
+        code: 'PERSONA_REHOMED',
+        ownerSlug: 'bea',
+        slug: 'nightform-2',
+      });
+    });
+
+    it('gives the plain 404 when no old address matches', async () => {
+      const error = await rejectionOf(
+        service.getBySlugForProfile('ana', 'somebody-else', activeViewer),
+      );
+
+      const body = responseBodyOf(error);
+      expect(body.message).toBe('Subprofile not found');
+      expect(body.code).toBeUndefined();
+    });
+
+    it.each<{
+      reason: string;
+      viewer: CurrentUserData | undefined;
+      arrange: () => void;
+    }>([
+      {
+        reason: 'the persona is private',
+        viewer: activeViewer,
+        arrange: () => {
+          rehomedPersona.visibility = SubprofileVisibility.Private;
+        },
+      },
+      {
+        reason: 'the persona is network-only and the visitor is anonymous',
+        viewer: undefined,
+        arrange: () => {
+          rehomedPersona.visibility = SubprofileVisibility.Network;
+        },
+      },
+      {
+        reason: 'the persona is a draft',
+        viewer: activeViewer,
+        arrange: () => {
+          rehomedPersona.status = SubprofileStatus.Draft;
+        },
+      },
+      {
+        reason: 'the persona is removed',
+        viewer: activeViewer,
+        arrange: () => {
+          rehomedPersona.removedAt = new Date();
+        },
+      },
+      {
+        reason: 'the persona is taken down',
+        viewer: activeViewer,
+        arrange: () => {
+          contentModeration.stateFor.mockResolvedValue({
+            hidden: true,
+            removed: false,
+          });
+        },
+      },
+      {
+        reason: 'the viewer and the new creator are blocked either way',
+        viewer: activeViewer,
+        arrange: () => {
+          blockFilter.isBlockedEitherWay.mockImplementation(
+            (viewerId: string, otherUserId: string) =>
+              Promise.resolve(
+                viewerId === 'viewer-1' && otherUserId === 'creator-new',
+              ),
+          );
+        },
+      },
+      {
+        // The forward would confirm the previous creator made this persona,
+        // and before the handoff this viewer got the plain 404 here.
+        reason: 'the viewer and the previous creator are blocked either way',
+        viewer: activeViewer,
+        arrange: () => {
+          blockFilter.isBlockedEitherWay.mockImplementation(
+            (viewerId: string, otherUserId: string) =>
+              Promise.resolve(
+                viewerId === 'viewer-1' && otherUserId === 'creator-old',
+              ),
+          );
+        },
+      },
+      {
+        reason: 'the persona went unlinked',
+        viewer: activeViewer,
+        arrange: () => {
+          rehomedPersona.linkVisibility = SubprofileLinkVisibility.Unlinked;
+        },
+      },
+      {
+        reason: 'the new creator has no profile',
+        viewer: activeViewer,
+        arrange: () => {
+          profileRows.splice(
+            profileRows.findIndex((row) => row.userId === 'creator-new'),
+            1,
+          );
+        },
+      },
+      {
+        reason: 'the persona no longer exists',
+        viewer: activeViewer,
+        arrange: () => {
+          personaRows.length = 0;
+        },
+      },
+    ])(
+      'withholds the forward as the plain 404 when $reason',
+      async ({ viewer, arrange }) => {
+        arrange();
+
+        const error = await rejectionOf(
+          service.getBySlugForProfile('ana', 'nightform', viewer),
+        );
+
+        const body = responseBodyOf(error);
+        expect(body.message).toBe('Subprofile not found');
+        expect(body.code).toBeUndefined();
+        expect(body.ownerSlug).toBeUndefined();
+      },
+    );
+
+    it('resolves a persona handed on twice straight to where it lives now', async () => {
+      // Ana to Bea, then Bea to Cleo. Both old addresses point at the persona
+      // id, so each lands on Cleo's current slug.
+      profileRows.push({
+        userId: 'creator-third',
+        slug: 'cleo',
+        firstName: 'Cleo',
+        lastName: 'Sousa',
+      });
+      rehomedPersona.userId = 'creator-third';
+      rehomedPersona.slug = 'nightform-3';
+      historyRows.push({
+        previousUserId: 'creator-new',
+        slug: 'nightform-2',
+        subprofileId: 'sp-rehomed',
+      });
+
+      const fromFirstAddress = await rejectionOf(
+        service.getBySlugForProfile('ana', 'nightform', activeViewer),
+      );
+      const fromSecondAddress = await rejectionOf(
+        service.getBySlugForProfile('bea', 'nightform-2', activeViewer),
+      );
+
+      for (const error of [fromFirstAddress, fromSecondAddress]) {
+        expect(responseBodyOf(error)).toMatchObject({
+          code: 'PERSONA_REHOMED',
+          ownerSlug: 'cleo',
+          slug: 'nightform-3',
+        });
+      }
+    });
+
+    describe('when the old creator has also renamed', () => {
+      beforeEach(() => {
+        // Ana is now "ana-new"; "ana" is still inside its reclaim cooldown.
+        profileRows[0]!.slug = 'ana-new';
+        handles.previousProfileOwnerOf.mockImplementation((slug: string) =>
+          Promise.resolve(slug === 'ana' ? 'creator-old' : null),
+        );
+      });
+
+      it('forwards an old address of a renamed creator to the new creator', async () => {
+        const error = await rejectionOf(
+          service.getBySlugForProfile('ana', 'nightform', activeViewer),
+        );
+
+        expect(responseBodyOf(error)).toEqual({
+          code: 'PERSONA_REHOMED',
+          message: 'That persona has a new address',
+          ownerSlug: 'bea',
+          slug: 'nightform-2',
+        });
+        expect(addressHistory.findOne).toHaveBeenCalledWith({
+          where: { previousUserId: 'creator-old', slug: 'nightform' },
+          select: { subprofileId: true },
+        });
+      });
+
+      it('withholds it with the unknown-owner message when the persona is private', async () => {
+        rehomedPersona.visibility = SubprofileVisibility.Private;
+
+        const error = await rejectionOf(
+          service.getBySlugForProfile('ana', 'nightform', activeViewer),
+        );
+
+        const body = responseBodyOf(error);
+        expect(body.message).toBe('Profile not found');
+        expect(body.code).toBeUndefined();
+      });
     });
   });
 });

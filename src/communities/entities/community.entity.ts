@@ -273,6 +273,17 @@ export class Community {
   @Column({ type: 'text', array: true, default: () => "'{}'" })
   languages!: string[];
 
+  // The book a reading group (a community tagged `book-club`) is reading now.
+  // A reading group carries its own name and moves from book to book, so the
+  // current book lives here beside the name. Approving a reading-group
+  // proposal sets it to the proposed first book, and the owner changes it from
+  // the edit form after that. Plain text, stripped by `toStoredPlainTextOrNull`
+  // on write; NULL for every community that is not reading anything. Paired
+  // migration `1821700000000-AddCommunityNowReading`, which also backfills
+  // existing reading groups with their name.
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  nowReading!: string | null;
+
   // DENORMALISED activity counter: how many distinct members posted or replied
   // in this community over the trailing week, refreshed on a schedule (with
   // `activityCountedAt` recording the last refresh) rather than computed per

@@ -11,6 +11,7 @@ export type MediaReferenceType =
   | 'event-cover' // Event.coverImageUrl
   | 'group-avatar' // Conversation.avatarUrl
   | 'listing' // Listing.photoGallery[].image
+  | 'listing-menu' // Listing.menu.file.url
   | 'listing-review' // ListingReview.photo
   | 'persona-avatar' // Subprofile.avatarUrl
   | 'persona-cover' // Subprofile.coverUrl

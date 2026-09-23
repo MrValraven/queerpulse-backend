@@ -33,7 +33,6 @@ const ZERO: RecognitionSignals = {
   workProfileComplete: false,
   volunteerSessions: 0,
   piecesPublished: 0,
-  directoryAnswers: 0,
   resourcesApproved: 0,
 };
 

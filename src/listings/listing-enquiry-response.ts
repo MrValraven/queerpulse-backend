@@ -18,8 +18,10 @@ export type ListingContactUnavailableReason =
    *  the SUBMITTER and not to the business. Writing to them would deliver a
    *  question about a bar to a stranger who once recommended it. */
   | 'unclaimed'
-  /** The listing is parked on a platform/house account, or the owning account
-   *  no longer exists or is not active. */
+  /** Nobody who manages the listing can receive messages: the owner is
+   *  missing, the house account, or not active, and no active co-manager can
+   *  answer either. The name predates co-managers and stays because clients
+   *  key off it. */
   | 'no_owner_account'
   /** The caller owns this listing. */
   | 'own_listing'

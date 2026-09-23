@@ -66,6 +66,8 @@ const CUSTOMER_ID = 'user-customer';
 const OWNER_ID = 'user-owner';
 const FLOORED_CO_MANAGER_ID = 'user-floored-co-manager';
 const PLAIN_CO_MANAGER_ID = 'user-plain-co-manager';
+// A co-manager with no history floor who cleared the thread for themself.
+const CLEARING_CO_MANAGER_ID = 'user-clearing-co-manager';
 const EARLY_FLOOR_CO_MANAGER_ID = 'user-early-floor-co-manager';
 const HIDING_CO_MANAGER_ID = 'user-hiding-co-manager';
 const SENDER_ID = 'user-sender';
@@ -95,6 +97,7 @@ const MAILBOX_VIEWER_IDS = [
   OFF_ROSTER_SEAT_ID,
   REACTING_CO_MANAGER_ID,
   STARRING_CO_MANAGER_ID,
+  CLEARING_CO_MANAGER_ID,
 ];
 const LISTING_ROSTER = MAILBOX_VIEWER_IDS.filter(
   (userId) => userId !== CUSTOMER_ID && userId !== OFF_ROSTER_SEAT_ID,
@@ -128,6 +131,7 @@ function seat(
     role: ConversationRole.Member,
     leftAt: null,
     clearedAt: null,
+    historyFloorAt: null,
     lastReadAt: null,
     lastReadInstant: null,
     deliveredAt: null,
@@ -308,6 +312,7 @@ function buildWorld({
     seat(DIRECT_CONVERSATION_ID, OWNER_ID, LISTING_IDENTITY_ID),
     seat(DIRECT_CONVERSATION_ID, FLOORED_CO_MANAGER_ID, LISTING_IDENTITY_ID, {
       clearedAt: HISTORY_FLOOR,
+      historyFloorAt: HISTORY_FLOOR,
     }),
     seat(DIRECT_CONVERSATION_ID, PLAIN_CO_MANAGER_ID, LISTING_IDENTITY_ID),
     seat(
@@ -316,8 +321,12 @@ function buildWorld({
       LISTING_IDENTITY_ID,
       {
         clearedAt: EARLY_FLOOR,
+        historyFloorAt: EARLY_FLOOR,
       },
     ),
+    seat(DIRECT_CONVERSATION_ID, CLEARING_CO_MANAGER_ID, LISTING_IDENTITY_ID, {
+      clearedAt: HISTORY_FLOOR,
+    }),
     seat(DIRECT_CONVERSATION_ID, HIDING_CO_MANAGER_ID, LISTING_IDENTITY_ID),
     seat(DIRECT_CONVERSATION_ID, SENDER_ID, LISTING_IDENTITY_ID),
     seat(DIRECT_CONVERSATION_ID, MODERATOR_CO_MANAGER_ID, LISTING_IDENTITY_ID),
@@ -592,7 +601,7 @@ function buildWorld({
                 .filter((parent): parent is Message => Boolean(parent))
                 .filter((parent) =>
                   isCoveredByMailboxStaffFloor(parent.createdAt, {
-                    clearedAt: candidate.clearedAt,
+                    historyFloorAt: candidate.historyFloorAt,
                     identityKind: identityKindById.get(candidate.identityId),
                     isGroupConversation:
                       conversation.kind === ConversationKind.Group,
@@ -844,6 +853,28 @@ describe('Final review I2: rendering a live message once per viewer class', () =
     expect(renderSpy).toHaveBeenCalledTimes(1);
     expect(isSameRender(rendered, expected)).toBe(true);
     expect(rendered).toStrictEqual(expected);
+  });
+
+  it('renders a co-manager whose own clear chat covers the quoted photo with a plain colleague, in full', async () => {
+    const world = buildWorld({ isAttributionOn: false });
+    const scenario: Scenario = {
+      messageId: 'reply-to-customer-photo',
+      viewerIds: [PLAIN_CO_MANAGER_ID, CLEARING_CO_MANAGER_ID],
+      conversationKind: ConversationKind.Direct,
+    };
+    const expected = await renderPerViewer(world, scenario);
+    const renderSpy = jest.spyOn(world.core, 'toMessageResponses');
+
+    const rendered = await renderByClass(world, scenario);
+
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+    expect(rendered).toStrictEqual(expected);
+    expect(rendered.get(CLEARING_CO_MANAGER_ID)?.replyTo).toMatchObject({
+      deleted: false,
+    });
+    expect(
+      rendered.get(CLEARING_CO_MANAGER_ID)?.replyTo?.thumbnailUrl,
+    ).toContain('bbbbbbbb-0000-4000-8000-000000000001');
   });
 
   it('never gives the customer a staff name when the roster changes mid-render', async () => {

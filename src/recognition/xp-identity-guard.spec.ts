@@ -103,7 +103,6 @@ const REVIEWED_SIGNAL_SOURCES: Record<string, string> = {
   eventsHeld: 'events, event_cohosts and event_rsvps',
   piecesPublished: 'magazine pieces, articles and decks',
   volunteerSessions: 'volunteer_signups',
-  directoryAnswers: 'listing_public_questions',
   resourcesApproved: 'resource_suggestions',
   tenureDays: 'profiles.joined_at',
   verified: 'profiles.verified',
@@ -129,7 +128,6 @@ const REVIEWED_XP_RULE_KEYS = [
   'volunteering',
   'hosting',
   'magazine',
-  'answers',
   'resources',
 ];
 
@@ -323,7 +321,6 @@ describe('recognition XP and business identities', () => {
       countAttendedGatherings: jest.fn().mockResolvedValue(0),
     };
     const service = new RecognitionAwardingService(
-      emptyRepository as never,
       emptyRepository as never,
       emptyRepository as never,
       emptyRepository as never,

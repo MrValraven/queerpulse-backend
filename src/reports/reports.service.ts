@@ -115,13 +115,26 @@ const MAX_GROUP_SNAPSHOT_MEMBER_IDS = MAX_GROUP_MEMBERS;
 const MAX_IDENTITY_SNAPSHOT_STAFF_IDS = MAX_GROUP_MEMBERS;
 
 /**
- * The reporter's CUSTOMER seat in a direct thread with the reported identity,
- * current or former: a seat of theirs whose `identity_id` is their own
- * profile identity, in a `direct` conversation where another seat carries the
- * reported identity. `left_at` and `cleared_at` are deliberately unread on
- * both seats, so a customer who cleared the thread, or a business whose
- * staff seats have all ended, still qualifies. A staff member's own seats
- * carry the business identity and never match the first join.
+ * Every direct thread the reporter is in with the reported identity, current
+ * or former, one row per thread. Each row names whichever of the reporter's
+ * own identities sat on their side of that thread (`customerIdentityId`,
+ * `customerIdentityKind`), so `captureReportedIdentity` can settle ownership
+ * in TypeScript through `IdentitiesService.isAllowedToActAs`, the same gate
+ * every messaging write path already answers to, so the rule keeps a single
+ * copy and SQL never restates it. A `profile` identity's `user_id` names its
+ * one owner directly, but a `subprofile` or `company` identity carries no
+ * such column of its own: the humans allowed to speak as it live behind
+ * `staffUserIds`, and only that method knows how to read them for each kind.
+ *
+ * `customerIdentity.kind` is restricted to `profile`, `subprofile` and
+ * `company`: `listing` is a business identity kind, and the reporter's own
+ * side of a customer thread is always one of the other three. `left_at` and
+ * `cleared_at` are deliberately unread on both seats, so a customer who
+ * cleared the thread, or a business whose staff seats have all ended, still
+ * has their thread counted. `"customerSeat"."identity_id" <> $2` keeps a
+ * seat speaking AS the reported identity itself out of its own candidate
+ * list, alongside the staff check `captureReportedIdentity` already runs
+ * before this query.
  *
  * Read as one statement through the `ConversationParticipant` repository
  * already registered here, over the same identity pair
@@ -129,16 +142,18 @@ const MAX_IDENTITY_SNAPSHOT_STAFF_IDS = MAX_GROUP_MEMBERS;
  * importing `MessagingModule` (see the constructor's note on the cycle).
  */
 const CUSTOMER_THREAD_WITH_IDENTITY_SQL = `
-  SELECT "customerSeat"."conversation_id" AS "conversationId"
+  SELECT "customerSeat"."conversation_id" AS "conversationId",
+         "customerSeat"."identity_id" AS "customerIdentityId",
+         "customerIdentity"."kind" AS "customerIdentityKind"
   FROM "conversation_participants" AS "customerSeat"
   INNER JOIN "identities" AS "customerIdentity"
     ON "customerIdentity"."id" = "customerSeat"."identity_id"
-   AND "customerIdentity"."kind" = 'profile'
-   AND "customerIdentity"."user_id" = "customerSeat"."user_id"
+   AND "customerIdentity"."kind" IN ('profile', 'subprofile', 'company')
   INNER JOIN "conversations" AS "conversation"
     ON "conversation"."id" = "customerSeat"."conversation_id"
    AND "conversation"."kind" = 'direct'
   WHERE "customerSeat"."user_id" = $1
+    AND "customerSeat"."identity_id" <> $2
     AND EXISTS (
       SELECT 1
       FROM "conversation_participants" AS "businessSeat"
@@ -146,7 +161,6 @@ const CUSTOMER_THREAD_WITH_IDENTITY_SQL = `
         AND "businessSeat"."identity_id" = $2
     )
   ORDER BY "customerSeat"."conversation_id"
-  LIMIT 1
 `;
 
 /** The one refusal body every unfileable `identity` report shares. */
@@ -1244,7 +1258,12 @@ export class ReportsService {
     if (reporterId !== null && message) {
       const participant = await this.conversationParticipants.findOne({
         where: { conversationId: message.conversationId, userId: reporterId },
-        select: { id: true, leftAt: true, clearedAt: true, identityId: true },
+        select: {
+          id: true,
+          leftAt: true,
+          historyFloorAt: true,
+          identityId: true,
+        },
       });
       const wasPresentWhenSent =
         participant !== null &&
@@ -1275,13 +1294,15 @@ export class ReportsService {
    * customer's own seat are never refused here.
    *
    * The two lookups the rule needs run only for a seat that has a floor at
-   * all (`cleared_at` set), so an ordinary filing costs no extra query.
+   * all (`history_floor_at` set), so an ordinary filing costs no extra
+   * query, and a staff member's own "clear chat" leaves their reports as
+   * they were.
    */
   private async isBehindMailboxStaffFloor(
-    participant: Pick<ConversationParticipant, 'clearedAt' | 'identityId'>,
+    participant: Pick<ConversationParticipant, 'historyFloorAt' | 'identityId'>,
     message: Message,
   ): Promise<boolean> {
-    if (!participant.clearedAt) {
+    if (!participant.historyFloorAt) {
       return false;
     }
     const [seatIdentity, conversation] = await Promise.all([
@@ -1292,7 +1313,7 @@ export class ReportsService {
       }),
     ]);
     return isCoveredByMailboxStaffFloor(message.createdAt, {
-      clearedAt: participant.clearedAt,
+      historyFloorAt: participant.historyFloorAt,
       identityKind: seatIdentity?.kind,
       isGroupConversation: conversation?.kind === ConversationKind.Group,
       isOfficialConversation: conversation?.isOfficial ?? false,
@@ -1349,14 +1370,28 @@ export class ReportsService {
    *
    * Every refusal but one is the same `404` body: a signed-out caller, a
    * non-uuid, an identity that does not exist, a `profile` identity, and a
-   * member who never held a customer seat in a direct thread with it. The
-   * exception is the identity's own staff, refused `403`: they already know
-   * the business exists, and there is nothing for them to report as its
+   * member who holds no qualifying customer seat in a direct thread with it.
+   * The exception is the identity's own staff, refused `403`: they already
+   * know the business exists, and there is nothing for them to report as its
    * customer.
    *
    * Staff are checked before the thread on purpose. A member who was a
    * customer before joining the team still holds that old customer seat, and
    * the rule is about who they are now.
+   *
+   * A qualifying seat is worked out per candidate thread
+   * `CUSTOMER_THREAD_WITH_IDENTITY_SQL` returns: each row names the identity
+   * that sat on the reporter's own side of that thread, and
+   * `IdentitiesService.isAllowedToActAs` is asked whether the reporter may
+   * act as it today, the same gate every messaging write path already
+   * answers to. That admits a reporter's own profile, a persona they own or
+   * staff, or a company they own or staff, reusing today's entitlement rules
+   * as they stand, without assuming any owner column
+   * lines up with a seat's `user_id` the way `identity.userId` does for a
+   * `profile` identity alone. The qualifying identity is recorded on the
+   * snapshot (`reporterIdentityId`/`reporterIdentityKind`), so a persona or
+   * company customer thread carries who filed it from the day one first
+   * exists.
    */
   private async captureReportedIdentity(
     reporterId: string | null,
@@ -1381,13 +1416,28 @@ export class ReportsService {
       );
     }
 
-    const customerThreadRows: Array<{ conversationId: string }> =
-      await this.conversationParticipants.query(
-        CUSTOMER_THREAD_WITH_IDENTITY_SQL,
-        [reporterId, identity.id],
-      );
-    const customerThread = customerThreadRows[0];
-    if (!customerThread) {
+    const customerThreadCandidates: Array<{
+      conversationId: string;
+      customerIdentityId: string;
+      customerIdentityKind: string;
+    }> = await this.conversationParticipants.query(
+      CUSTOMER_THREAD_WITH_IDENTITY_SQL,
+      [reporterId, identity.id],
+    );
+    let qualifyingCustomerThread:
+      (typeof customerThreadCandidates)[number] | null = null;
+    for (const candidate of customerThreadCandidates) {
+      if (
+        await this.identities.isAllowedToActAs(
+          reporterId,
+          candidate.customerIdentityId,
+        )
+      ) {
+        qualifyingCustomerThread = candidate;
+        break;
+      }
+    }
+    if (!qualifyingCustomerThread) {
       throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
     }
 
@@ -1402,9 +1452,12 @@ export class ReportsService {
       identityKind: `${identity.kind}`,
       ownerEntityId,
       displayName: descriptionById.get(identity.id)?.displayName ?? null,
-      conversationId: customerThread.conversationId,
+      conversationId: qualifyingCustomerThread.conversationId,
       staffUserIds: staffUserIds.slice(0, MAX_IDENTITY_SNAPSHOT_STAFF_IDS),
       capturedAt: new Date().toISOString(),
+      reporterIdentityId: qualifyingCustomerThread.customerIdentityId,
+      reporterIdentityKind: qualifyingCustomerThread.customerIdentityKind as
+        'profile' | 'subprofile' | 'company',
     };
   }
 

@@ -57,7 +57,11 @@ const VARY_ON_SESSION = 'Cookie';
 // exact failure this forwarding was designed around, in miniature, so a moved
 // response is downgraded to `no-store` on both headers.
 const MOVED_CACHE_CONTROL = 'no-store';
-const MOVED_CODES = new Set(['PERSONA_MOVED', 'PROFILE_MOVED']);
+const MOVED_CODES = new Set([
+  'PERSONA_MOVED',
+  'PROFILE_MOVED',
+  'PERSONA_REHOMED',
+]);
 
 // Whether a thrown response is one of the forwarding payloads. The body is the
 // object handed to `NotFoundException`, so it reaches us before any exception

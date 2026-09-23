@@ -151,6 +151,46 @@ export interface ListingServiceOffering {
   note: string;
 }
 
+/** Which priced list the public page shows. Both are kept whichever is on. */
+export type ListingPricingMode = 'services' | 'menu';
+
+/** The four fixed dietary labels, in display order. */
+export type ListingMenuDietary =
+  'vegan' | 'vegetarian' | 'glutenFree' | 'alcoholFree';
+
+/** One thing on the menu. `price` is free text like a service's price. */
+export interface ListingMenuItem {
+  name: string;
+  price: string;
+  description: string;
+  dietary: ListingMenuDietary[];
+}
+
+/** One titled part of the menu ("Coffee", "Brunch"). */
+export interface ListingMenuSection {
+  title: string;
+  items: ListingMenuItem[];
+}
+
+/**
+ * The owner's full menu as a file. `url` holds the bare `listing-menus/...`
+ * storage key when stored and the resolved `/files/<key>` URL in responses,
+ * the same convention as `photoGallery[].image`. `contentType` is derived
+ * from the key by the server, never taken from the client.
+ */
+export interface ListingMenuFile {
+  url: string;
+  contentType: string;
+  fileName: string;
+}
+
+/** Mirrors the frontend's `ListingMenu`. */
+export interface ListingMenu {
+  sections: ListingMenuSection[];
+  file: ListingMenuFile | null;
+  link: string;
+}
+
 /** Mirrors the frontend's `ListingDraft["social"]`. */
 export interface ListingSocial {
   instagram: string;
@@ -348,6 +388,20 @@ export class Listing {
    */
   @Column({ type: 'jsonb', default: () => "'[]'" })
   services!: ListingServiceOffering[];
+
+  /**
+   * A bar's, café's or restaurant's menu. See `AddListingMenu1821600000000`.
+   * Shown instead of `services` when `pricingMode` is `menu`.
+   */
+  @Column({
+    type: 'jsonb',
+    default: () => `'{"sections":[],"file":null,"link":""}'`,
+  })
+  menu!: ListingMenu;
+
+  /** Which of `services` or `menu` the public page shows. */
+  @Column({ type: 'varchar', length: 16, default: 'services' })
+  pricingMode!: ListingPricingMode;
 
   @Column({ type: 'text', array: true, default: '{}' })
   langs!: string[];

@@ -24,12 +24,14 @@ import {
 } from '../membership/membership.events';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import {
+  SUBPROFILE_CREATOR_CHANGED,
   SUBPROFILE_DELETED,
   SUBPROFILE_ENDORSED,
   SUBPROFILE_FOLLOWED,
   SUBPROFILE_INVITE_ACCEPTED,
   SUBPROFILE_INVITED,
   SUBPROFILE_MEMBER_REMOVED,
+  SubprofileCreatorChangedEvent,
   SubprofileDeletedEvent,
   SubprofileEndorsedEvent,
   SubprofileFollowedEvent,
@@ -41,6 +43,7 @@ import {
   SECURITY_NEW_SIGN_IN,
   SecurityNewSignInEvent,
 } from '../auth/security.events';
+import { Profile } from '../users/entities/profile.entity';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
 import { NotificationType } from './entities/notification.entity';
@@ -56,6 +59,13 @@ export class NotificationsListener {
     // lives entirely in `SubprofileInvitesService`.
     @InjectRepository(SubprofileMember)
     private readonly subprofileMembers: Repository<SubprofileMember>,
+    // Read-only, resolving the new creator's display name on
+    // `subprofile.creator.changed` so the row reads "Ana is now the creator"
+    // rather than a bare id. Already registered in `NotificationsModule` for
+    // `NotificationsService`'s own actor resolution, so no module change is
+    // needed to add this second injection point.
+    @InjectRepository(Profile)
+    private readonly profiles: Repository<Profile>,
   ) {}
 
   // Every `create`/`createForRecipients` call below passes the acting member as
@@ -304,5 +314,59 @@ export class NotificationsListener {
         familyId: e.familyId,
       },
     );
+  }
+
+  /**
+   * A persona's creator role transferred to its longest-standing remaining
+   * co-owner (Phase 2, option A): the creator left, or their account was
+   * erased. The orphan repair migrations (`1821500400000` and its rerun
+   * `1821700000000`) hand orphaned personas over and send none.
+   * `e.memberUserIds` is every remaining member, the successor included.
+   *
+   * NO ACTOR ARGUMENT, on purpose: the departing creator must never be able
+   * to suppress this by a block or mute against any remaining member, and the
+   * payload never names them either, keeping this focused on the role change
+   * itself.
+   *
+   * ONE VALUE, TWO FAN-OUTS. The successor's own row carries `isYou: true` so
+   * the client can render "You are now the creator of X"; every other
+   * remaining member gets `isYou: false` and reads the successor's name
+   * instead.
+   */
+  @OnEvent(SUBPROFILE_CREATOR_CHANGED)
+  async onSubprofileCreatorChanged(
+    e: SubprofileCreatorChangedEvent,
+  ): Promise<void> {
+    const successorProfile = await this.profiles.findOne({
+      where: { userId: e.newCreatorUserId },
+    });
+    const newCreatorName = successorProfile
+      ? `${successorProfile.firstName} ${successorProfile.lastName}`.trim()
+      : 'Member';
+    const otherMemberIds = e.memberUserIds.filter(
+      (userId) => userId !== e.newCreatorUserId,
+    );
+
+    await this.notifications.createForRecipients(
+      [e.newCreatorUserId],
+      NotificationType.SubprofileCreatorChanged,
+      {
+        subprofileName: e.displayName,
+        newCreatorName,
+        isYou: true,
+      },
+    );
+
+    if (otherMemberIds.length) {
+      await this.notifications.createForRecipients(
+        otherMemberIds,
+        NotificationType.SubprofileCreatorChanged,
+        {
+          subprofileName: e.displayName,
+          newCreatorName,
+          isYou: false,
+        },
+      );
+    }
   }
 }

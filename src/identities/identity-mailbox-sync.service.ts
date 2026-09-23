@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, IsNull, MoreThan, Not, Repository } from 'typeorm';
+import { EntityManager, In, IsNull, Not, Raw, Repository } from 'typeorm';
 import {
   CONVERSATION_CLAIM_CHANGED,
   ConversationClaimChangedEvent,
@@ -24,10 +24,25 @@ import {
 const DEFAULT_SWEEP_PAGE_SIZE = 200;
 
 /** What one page of the sweep did, so a caller (a scheduler, an admin
- * button, a test) can decide whether to keep paging. */
+ * button, a test) can decide whether to keep paging and can report what the
+ * page changed. */
 export interface MailboxSweepPageResult {
+  /** Identities this page visited, the failed ones included. */
   processedIdentityCount: number;
+  /** Identities whose reconciliation threw. Each one is logged and skipped,
+   * and the page carries on with the next identity. */
+  failedIdentityCount: number;
+  /** Staff members seated (or reseated) into a mailbox they were missing
+   * from, one per member per mailbox. */
+  seatedMemberCount: number;
+  /** Thread seats ended for people who are no longer staff. */
+  endedSeatCount: number;
+  /** The cursor to pass back as `afterIdentityId`: the last identity this
+   * page visited, and null only when the page was empty. */
   lastIdentityId: string | null;
+  /** True when the page came back full, so another page may follow. False
+   * means the sweep has reached the end and the caller stops paging. */
+  hasMoreIdentities: boolean;
 }
 
 /** One thread a departing staff member's seat just ended in, reported by
@@ -76,14 +91,18 @@ interface MailboxUnseating {
  * staff keeps reading private conversation they no longer have any standing
  * to see.
  *
- * A new arrival is seated with `clearedAt` set to now, so they start from the
- * present and do not inherit conversations that happened before they joined.
+ * A new arrival is seated with `clearedAt` and `historyFloorAt` both set to
+ * now, read from the database clock (`seatFloorInstant`), so they start from
+ * the present and do not inherit conversations that happened before they
+ * joined. `historyFloorAt` is the privacy floor every staff read enforces;
+ * `clearedAt` keeps that history out of their message list, and their own
+ * later "clear chat" moves `clearedAt` alone.
  * A departure marks `leftAt` and keeps the row, so message attribution
  * survives. Task 14a: that seat reads nothing of the mailbox while `leftAt`
  * stays set (`isStaffSeatExcludedFromMailbox`). A member who returns to a
  * mailbox they previously left is reactivated on their existing row, so the
- * seat stays one row per person. They resume with the SAME `clearedAt = now`
- * floor a brand-new hire gets (cleanup wave ruling: a rehired staff member is
+ * seat stays one row per person. They resume with the SAME floor a
+ * brand-new hire gets (cleanup wave ruling: a rehired staff member is
  * just a staff member again). An earlier rule floored a rehire at the later
  * of their old `clearedAt` and the moment they left, which revealed
  * everything from their departure date forward; the current floor keeps that
@@ -226,8 +245,14 @@ export class IdentityMailboxSyncService {
    * identity simply reconciles to zero seats, and one with active co-managers
    * keeps them.
    *
-   * Pass `manager` so the read of both sides happens inside a caller's open
-   * transaction and sees that transaction's own not-yet-committed writes.
+   * Pass `manager` so the read of both sides, the staff set and the seats,
+   * happens inside a caller's open transaction and sees that transaction's
+   * own not-yet-committed writes (an ownership transfer's new owner and its
+   * revoked seats, for one). `shouldLockStaffSource` additionally takes a
+   * FOR SHARE lock on the staff source rows for the rest of that
+   * transaction (see `StaffReadOptions`), which the sweep uses so a staff
+   * change committing mid-run cannot be read half before and half after.
+   * It needs `manager` and is ignored without one.
    *
    * Returns every thread a departed user's seat ended in, across every
    * departed user this run found, and (unless `shouldDeferEmission` is set) also
@@ -247,12 +272,19 @@ export class IdentityMailboxSyncService {
   async resyncMailbox(
     identityId: string,
     manager?: EntityManager,
-    options?: { shouldDeferEmission?: boolean },
+    options?: {
+      shouldDeferEmission?: boolean;
+      shouldLockStaffSource?: boolean;
+    },
   ): Promise<MailboxSeatChanges> {
     const participantsRepository = this.participantsRepository(manager);
     const conversationsRepository = this.conversationsRepository(manager);
     const staffUserIds = new Set(
-      await this.identitiesService.staffUserIds(identityId),
+      await this.readStaffUserIds(
+        identityId,
+        manager,
+        options?.shouldLockStaffSource ?? false,
+      ),
     );
     const activeSeats = await participantsRepository.find({
       where: { identityId, leftAt: IsNull() },
@@ -307,11 +339,14 @@ export class IdentityMailboxSyncService {
    * whole mailbox would be too heavy. Compares this thread's own seats for
    * `identityId` against the current staff: a staff member with no seat here
    * is seated, a staff member whose seat here has `leftAt` is reactivated on
-   * that row, both floored at `clearedAt = now` as `seatAcrossMailbox` floors
-   * a new or returning hire. An active seat of someone no longer staff is
-   * ended with `leftAt`, and a claim they hold on this thread is released,
-   * the departure semantics of `unseatUser` confined to this thread. The
-   * customer's seat carries another identity and is never changed.
+   * that row, both floored at the database clock's now (`clearedAt` and
+   * `historyFloorAt` alike) as `seatAcrossMailbox` floors a new or returning
+   * hire. The instant is read only when a seat needs it, so a customer's send
+   * into a fully seated thread costs no extra query. An active seat of
+   * someone no longer staff is ended with `leftAt`, and a claim they hold on
+   * this thread is released, the departure semantics of `unseatUser`
+   * confined to this thread. The customer's seat carries another identity
+   * and is never changed.
    *
    * A FORMER CUSTOMER WHO IS NOW STAFF. There is one seat per
    * (conversation, user) (`UQ_conversation_participants`), so a staff member
@@ -327,17 +362,53 @@ export class IdentityMailboxSyncService {
    * so colleagues stop reading the departed member as the claimant. No
    * staffing change is reported: seating or unseating people on one thread
    * leaves their standing in the mailbox as it was.
+   *
+   * `shouldLockStaffSource` reads the staff source under the same FOR SHARE
+   * lock the sweep takes (`StaffReadOptions`), before any seat of the thread
+   * is read or written, so a revoke, leave or accept committing mid-run is
+   * seen whole: without it, a removal committing between the staff read and
+   * the seat writes would have its just-ended seat reactivated here. The
+   * lock only holds inside a transaction. With `manager` it rides the
+   * caller's transaction, and the caller defers emission as usual. Without
+   * one, this opens its own transaction for the whole resync and emits
+   * after it commits (unless `shouldDeferEmission` is set, when it only
+   * returns the changes), so a rolled-back resync announces nothing.
+   * `MessageRequestsService.deliverEnquiryToIdentity` takes this second
+   * form.
    */
   async resyncConversation(
     identityId: string,
     conversationId: string,
     manager?: EntityManager,
-    options?: { shouldDeferEmission?: boolean },
+    options?: {
+      shouldDeferEmission?: boolean;
+      shouldLockStaffSource?: boolean;
+    },
   ): Promise<MailboxSeatChanges> {
+    if (options?.shouldLockStaffSource && !manager) {
+      const lockedChanges = await this.participants.manager.transaction(
+        (transactionManager) =>
+          this.resyncConversation(
+            identityId,
+            conversationId,
+            transactionManager,
+            { shouldDeferEmission: true, shouldLockStaffSource: true },
+          ),
+      );
+      // After the commit only, as the sweep does.
+      if (!options.shouldDeferEmission) {
+        this.emitSeatChanges(lockedChanges);
+      }
+      return lockedChanges;
+    }
     const participantsRepository = this.participantsRepository(manager);
     const conversationsRepository = this.conversationsRepository(manager);
     const staffUserIds = new Set(
-      await this.identitiesService.staffUserIds(identityId),
+      await this.readStaffUserIds(
+        identityId,
+        manager,
+        options?.shouldLockStaffSource ?? false,
+      ),
     );
     // Every seat in the thread, whatever its identity, so a staff member who
     // is this thread's customer is recognised by their customer seat.
@@ -350,6 +421,11 @@ export class IdentityMailboxSyncService {
       threadSeats.map((seat) => [seat.userId, seat]),
     );
     const now = new Date();
+    let floorInstant: Date | undefined;
+    const readFloorInstant = async (): Promise<Date> => {
+      floorInstant ??= await this.seatFloorInstant(participantsRepository);
+      return floorInstant;
+    };
 
     const rowsToCreate: ConversationParticipant[] = [];
     for (const staffUserId of staffUserIds) {
@@ -359,18 +435,21 @@ export class IdentityMailboxSyncService {
         continue;
       }
       if (!seat) {
+        const seatFloor = await readFloorInstant();
         rowsToCreate.push(
           participantsRepository.create({
             conversationId,
             userId: staffUserId,
             identityId,
-            clearedAt: now,
+            clearedAt: seatFloor,
+            historyFloorAt: seatFloor,
           }),
         );
       } else if (seat.leftAt) {
+        const seatFloor = await readFloorInstant();
         await participantsRepository.update(
           { identityId, userId: staffUserId, conversationId },
-          { leftAt: null, clearedAt: now },
+          { leftAt: null, clearedAt: seatFloor, historyFloorAt: seatFloor },
         );
       }
     }
@@ -437,12 +516,37 @@ export class IdentityMailboxSyncService {
    * (`listing`, `subprofile`, `company`), each reconciled against source.
    * Plain and pageable on purpose, so a scheduler can call it on a timer
    * without this method needing to change shape: pass the previous call's
-   * `lastIdentityId` back in as `afterIdentityId` to continue, and a `null`
-   * `lastIdentityId` on the result means the sweep reached the end.
+   * `lastIdentityId` back in as `afterIdentityId` to continue, and stop once
+   * `hasMoreIdentities` is false. `IdentityMailboxReconciliationService`
+   * drives it every hour.
+   *
+   * ONE TRANSACTION PER IDENTITY. Each identity is reconciled by
+   * `resyncMailbox` inside its own transaction, with the staff source read
+   * under a FOR SHARE lock (`shouldLockStaffSource`) and the seats read after
+   * it in the same transaction. A revoke, leave or accept that commits
+   * around the read is therefore seen whole: it either finished before the
+   * lock was granted, or it waits for this identity's transaction to end.
+   * Without that, a sweep could re-seat someone whose removal committed
+   * between its staff read and its seat read, or end the seat of someone
+   * whose accept did. The live events go out only after the commit.
+   *
+   * ONE IDENTITY NEVER STOPS THE PAGE. A failure rolls back that identity's
+   * own seat writes, emits nothing for it, is logged with the identity id
+   * and counted in `failedIdentityCount`, and the page carries on. The
+   * cursor still moves past a failed identity, and the next sweep retries
+   * it.
    *
    * A profile identity is excluded: its one seat is the member themselves,
    * fixed for the life of the account, and reconciling it would be work spent
    * on something that can never drift.
+   *
+   * So is a mailbox with no seat row at all. It cannot need reconciling:
+   * `seatAcrossMailbox` seats nobody in a mailbox with no threads, and there
+   * is no seat to end. Skipping it saves a transaction and a FOR SHARE lock
+   * per such identity (`ensureIdentityFor` creates identity rows on contact
+   * reads, so they can be most of the table). The check is an `EXISTS` on
+   * `IDX_conversation_participants_identity_id`, and the keyset cursor on
+   * `id` is unaffected.
    */
   async resyncNonProfileIdentitiesPage(
     afterIdentityId: string | null = null,
@@ -451,18 +555,55 @@ export class IdentityMailboxSyncService {
     const page = await this.identities.find({
       where: {
         kind: Not(IdentityKind.Profile),
-        ...(afterIdentityId ? { id: MoreThan(afterIdentityId) } : {}),
+        id: Raw(
+          (identityIdColumn) =>
+            `EXISTS (SELECT 1 FROM "conversation_participants" "sweep_seat" ` +
+            `WHERE "sweep_seat"."identity_id" = ${identityIdColumn})` +
+            (afterIdentityId
+              ? ` AND ${identityIdColumn} > :afterIdentityId`
+              : ''),
+          afterIdentityId ? { afterIdentityId } : {},
+        ),
       },
       order: { id: 'ASC' },
       take: pageSize,
     });
+    let failedIdentityCount = 0;
+    let seatedMemberCount = 0;
+    let endedSeatCount = 0;
     for (const identity of page) {
-      await this.resyncMailbox(identity.id);
+      let changes: MailboxSeatChanges;
+      try {
+        changes = await this.participants.manager.transaction((manager) =>
+          this.resyncMailbox(identity.id, manager, {
+            shouldDeferEmission: true,
+            shouldLockStaffSource: true,
+          }),
+        );
+      } catch (error) {
+        failedIdentityCount += 1;
+        this.logger.error(
+          `Mailbox sweep could not reconcile identity ${identity.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        continue;
+      }
+      // After the commit only, so a rolled-back identity announces nothing.
+      this.emitSeatChanges(changes);
+      seatedMemberCount += changes.staffingChanges.filter(
+        (staffingChange) => staffingChange.isStaff,
+      ).length;
+      endedSeatCount += changes.endedSeats.length;
     }
     const lastIdentity = page.length > 0 ? page[page.length - 1] : undefined;
     return {
       processedIdentityCount: page.length,
+      failedIdentityCount,
+      seatedMemberCount,
+      endedSeatCount,
       lastIdentityId: lastIdentity ? lastIdentity.id : null,
+      hasMoreIdentities: page.length > 0 && page.length >= pageSize,
     };
   }
 
@@ -528,6 +669,63 @@ export class IdentityMailboxSyncService {
     }
   }
 
+  /**
+   * The instant a newly seated or reseated staff member's history floor is
+   * set to, read from the DATABASE clock. Messages are stamped by the
+   * database, so an application clock running ahead of it could place the
+   * floor after the very enquiry that caused the seat and hide it from the
+   * staff member it was meant for. The read runs through
+   * `participantsRepository`, inside the caller's transaction when there is
+   * one. It reads `clock_timestamp()`, the moment of the read itself, which
+   * matches the write-time instant the earlier `new Date()` floor took.
+   * `now()` would be the transaction's start inside an acceptance
+   * transaction, and a floor that early would show a new staff member
+   * messages sent while their seat was still being granted.
+   *
+   * Truncated to a whole millisecond, the same precision the earlier
+   * application-clock floor (`new Date()`) had and the precision node-pg
+   * loads every timestamp at, so the stored floor loads back unchanged. The
+   * two comparisons still differ inside that one millisecond: SQL
+   * (`mailboxStaffHistoryFloorCoversPredicate`) compares a message's
+   * microsecond `created_at` against the floor, while the in-memory twin
+   * (`isCoveredByMailboxStaffFloor`) compares `created_at` as node-pg
+   * loaded it, truncated to the millisecond. A message stamped after the
+   * floor but within the floor's own millisecond is therefore visible to
+   * SQL and covered in memory. Every other message is judged the same way
+   * by both, and the one difference errs toward hiding.
+   */
+  private async seatFloorInstant(
+    participantsRepository: Repository<ConversationParticipant>,
+  ): Promise<Date> {
+    const [row] = await participantsRepository.query<{ floorInstant: Date }[]>(
+      `SELECT date_trunc('milliseconds', clock_timestamp()) AS "floorInstant"`,
+    );
+    if (!row) {
+      throw new Error('The database returned no clock reading');
+    }
+    return row.floorInstant;
+  }
+
+  /**
+   * The staff set for `identityId`, read through `manager` when there is
+   * one so it sees the same transaction as the seats it is compared with.
+   * Without a manager this is the plain one-argument read every other
+   * caller of `IdentitiesService.staffUserIds` makes.
+   */
+  private readStaffUserIds(
+    identityId: string,
+    manager: EntityManager | undefined,
+    shouldLockStaffSource: boolean,
+  ): Promise<string[]> {
+    if (!manager) {
+      return this.identitiesService.staffUserIds(identityId);
+    }
+    return this.identitiesService.staffUserIds(identityId, {
+      manager,
+      shouldLockStaffSource,
+    });
+  }
+
   private participantsRepository(
     manager?: EntityManager,
   ): Repository<ConversationParticipant> {
@@ -545,11 +743,12 @@ export class IdentityMailboxSyncService {
   /**
    * Seat `userId` into every conversation of `identityId`'s mailbox they are
    * not already active in. A conversation with no row for them yet gets a
-   * fresh one, floored at `clearedAt = now` so they do not inherit history
-   * from before they joined. A conversation where they hold a row with
-   * `leftAt` set (they were seated before and left, whether by removal or by
-   * a prior sync) is reactivated on that same row: `leftAt` is cleared and
-   * `clearedAt` is floored at `now`, same as a brand-new hire. A rehired
+   * fresh one, floored at now (`clearedAt` and `historyFloorAt` alike, from
+   * `seatFloorInstant`) so they do not inherit history from before they
+   * joined. A conversation where they hold a row with `leftAt` set (they
+   * were seated before and left, whether by removal or by a prior sync) is
+   * reactivated on that same row: `leftAt` is cleared and both columns are
+   * floored at now, same as a brand-new hire. A rehired
    * staff member is just a staff member again, so they get the same history
    * floor a newly added staff member gets. A conversation where they already
    * hold an active row is left untouched.
@@ -607,19 +806,27 @@ export class IdentityMailboxSyncService {
       return { hasChangedSeats: false, hasMailboxThreads: false };
     }
 
-    const now = new Date();
+    // Read once, and only when some seat is created or reactivated, so a
+    // member already active everywhere costs no clock read.
+    let floorInstant: Date | undefined;
+    const readFloorInstant = async (): Promise<Date> => {
+      floorInstant ??= await this.seatFloorInstant(participantsRepository);
+      return floorInstant;
+    };
     const rowsToCreate: ConversationParticipant[] = [];
     let hasReactivatedSeat = false;
 
     for (const conversationId of staffableConversationIds) {
       const existingSeat = existingSeatByConversationId.get(conversationId);
       if (!existingSeat) {
+        const seatFloor = await readFloorInstant();
         rowsToCreate.push(
           participantsRepository.create({
             conversationId,
             userId,
             identityId,
-            clearedAt: now,
+            clearedAt: seatFloor,
+            historyFloorAt: seatFloor,
           }),
         );
         continue;
@@ -628,13 +835,14 @@ export class IdentityMailboxSyncService {
         // Already active here; nothing to do.
         continue;
       }
-      // Rehire floor matches the new-hire floor: `now`. An earlier rule
+      // Rehire floor matches the new-hire floor: now. An earlier rule
       // floored this at the later of the old `clearedAt`/`leftAt`, which
       // revealed everything from their departure date forward, including
       // history the thread itself now hides from a returning member.
+      const seatFloor = await readFloorInstant();
       await participantsRepository.update(
         { identityId, userId, conversationId },
-        { leftAt: null, clearedAt: now },
+        { leftAt: null, clearedAt: seatFloor, historyFloorAt: seatFloor },
       );
       hasReactivatedSeat = true;
     }

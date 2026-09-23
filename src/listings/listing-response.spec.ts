@@ -1,9 +1,16 @@
-import { Listing, SafeSpaceStatus } from './entities/listing.entity';
+import {
+  Listing,
+  ListingOperatingState,
+  ListingStatus,
+  SafeSpaceStatus,
+} from './entities/listing.entity';
 import { ListingReview } from './entities/listing-review.entity';
+import { emptyAccessibilityAnswers } from './listing-accessibility';
 import {
   mapSafeSpaceCategory,
   toDirectoryCard,
   toDirectoryDetail,
+  toListingDTO,
   toReviewDTO,
   toSafeSpaceCard,
   toSafeSpaceDetail,
@@ -426,5 +433,149 @@ describe('listing photo gallery on the response DTOs', () => {
       'The kiln',
       'Every first Friday',
     ]);
+  });
+});
+
+describe('the menu and pricing mode on the response DTOs', () => {
+  const menuListing = () =>
+    makeDirectoryListing({
+      pricingMode: 'menu',
+      menu: {
+        sections: [
+          {
+            title: 'Coffee',
+            items: [
+              {
+                name: 'Bica',
+                price: '0.90 EUR',
+                description: '',
+                dietary: ['vegan'],
+              },
+            ],
+          },
+        ],
+        file: null,
+        link: '',
+      },
+    });
+
+  it('carries the pricing mode and the menu on the detail response', () => {
+    const detail = toDirectoryDetail(menuListing(), [], [], 0);
+    expect(detail.pricingMode).toBe('menu');
+    expect(detail.menu.sections[0]?.items[0]?.name).toBe('Bica');
+  });
+
+  it('keeps the menu off the card response', () => {
+    const card = toDirectoryCard(menuListing());
+    expect(card).not.toHaveProperty('menu');
+    expect(card).not.toHaveProperty('pricingMode');
+  });
+});
+
+describe('toListingDTO (the owner/managed response)', () => {
+  // Every column `toListingDTO` reads, directly or through one of the
+  // sub-mappers it calls (`accessibilityView`, `toGalleryView`,
+  // `legacyPhotoSetView`, `queerOwnedVerificationView`,
+  // `affirmingBaselineView`, `operatingStateView`, `directoryVisibilityView`).
+  function makeManagedListing(overrides: Partial<Listing> = {}): Listing {
+    return {
+      id: 'listing-1',
+      ref: 'QPL-2026-0001',
+      slug: 'lux-cafe',
+      status: ListingStatus.Live,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      path: 'claim',
+      name: 'Lux Café',
+      cats: ['food'],
+      hood: 'Arroios',
+      badge: '',
+      evidence: '',
+      price: '',
+      blurb: 'A queer café',
+      tagline: '',
+      whatItIs: [],
+      tags: [],
+      goodFor: [],
+      accessibilityAnswers: emptyAccessibilityAnswers(),
+      accessibilityNote: '',
+      services: [],
+      pricingMode: 'menu',
+      menu: {
+        sections: [
+          {
+            title: 'Coffee',
+            items: [
+              {
+                name: 'Bica',
+                price: '0.90 EUR',
+                description: '',
+                dietary: ['vegan'],
+              },
+            ],
+          },
+        ],
+        file: null,
+        link: '',
+      },
+      langs: [],
+      online: false,
+      address: 'Rua X 1',
+      geocoded: true,
+      latitude: 38.7167,
+      longitude: -9.149,
+      hours: {},
+      hoursNote: '',
+      hoursExceptions: [],
+      social: { instagram: '', website: '', email: '', phone: '' },
+      photoGallery: [],
+      photos: { wide: '', d1: '', d2: '', vibe: '' },
+      alt: { wide: '', d1: '', d2: '', vibe: '' },
+      rel: 'own',
+      ownerName: 'Inês',
+      ownerRole: 'Founder',
+      ownerBio: '',
+      visibility: 'public',
+      linkToProfile: true,
+      contactEmail: '',
+      consentOuting: true,
+      consentGuide: true,
+      queerOwnedVerified: false,
+      queerOwnedVerifier: '',
+      queerOwnedReVerifiedAt: null,
+      queerOwnedBasis: '',
+      queerOwnedExpiresAt: null,
+      affirmingBaselineAcceptedAt: null,
+      operatingState: ListingOperatingState.Open,
+      operatingStateNote: '',
+      operatingStateSetAt: null,
+      movedToAddress: '',
+      movedToListingId: null,
+      detailsConfirmedAt: null,
+      isHiddenByOwner: false,
+      ownerHiddenAt: null,
+      ...overrides,
+    } as unknown as Listing;
+  }
+
+  it('carries pricingMode and the menu, same as the public detail response', () => {
+    const dto = toListingDTO(makeManagedListing(), null);
+    expect(dto.pricingMode).toBe('menu');
+    expect(dto.menu).toEqual({
+      sections: [
+        {
+          title: 'Coffee',
+          items: [
+            {
+              name: 'Bica',
+              price: '0.90 EUR',
+              description: '',
+              dietary: ['vegan'],
+            },
+          ],
+        },
+      ],
+      file: null,
+      link: '',
+    });
   });
 });

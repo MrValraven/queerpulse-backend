@@ -3,7 +3,12 @@ import { FindOperator, IsNull } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { Event as GatheringEvent } from '../events/entities/event.entity';
-import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+  SubprofileStatus,
+  SubprofileVisibility,
+} from '../subprofiles/entities/subprofile.entity';
 import { ActivityVisibilityService } from './activity-visibility.service';
 import {
   Activity,
@@ -128,6 +133,54 @@ describe('ActivityVisibilityService.filterVisible', () => {
     });
 
     await expect(service.filterVisible([personaRow])).resolves.toEqual([]);
+  });
+
+  // The row names its author ("Published a persona: X"). After a creator
+  // handoff the successor can switch X to Unlinked and republish it at its
+  // handle, which leaves it published and open. The read gate matches the
+  // listener's write gate and requires Linked, so the row drops and the
+  // former creator stops being tied to an unattributed persona.
+  it('drops a persona row once the persona is switched to Unlinked', async () => {
+    const { service, repos } = await buildService();
+    // The lookup already filters on Linked, so an unlinked persona that is
+    // still published and open is absent from the result.
+    repos.subprofiles.find.mockResolvedValue([]);
+    const personaRow = row({
+      id: 'row-1',
+      kind: ActivityKind.Persona,
+      subjectKind: ActivitySubjectKind.Persona,
+      subjectId: 'persona-id',
+      toLink: '/members/former-creator/persona-slug',
+    });
+
+    await expect(service.filterVisible([personaRow])).resolves.toEqual([]);
+    await flush();
+
+    const [{ where }] = repos.subprofiles.find.mock.calls[0] as [
+      { where: Record<string, unknown> },
+    ];
+    expect(where).toMatchObject({
+      status: SubprofileStatus.Published,
+      visibility: SubprofileVisibility.Open,
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    expect(where.removedAt).toEqual(IsNull());
+    expect(repos.activities.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a persona row while the persona is published, open and linked', async () => {
+    const { service, repos } = await buildService();
+    repos.subprofiles.find.mockResolvedValue([{ id: 'persona-id' }]);
+    const personaRow = row({
+      id: 'row-1',
+      kind: ActivityKind.Persona,
+      subjectKind: ActivitySubjectKind.Persona,
+      subjectId: 'persona-id',
+    });
+
+    await expect(service.filterVisible([personaRow])).resolves.toEqual([
+      personaRow,
+    ]);
   });
 
   it('passes rows with no subject reference through untouched', async () => {

@@ -8,6 +8,7 @@ import {
  * itself is curated editorial content, so this isn't a re-fetch/list shape). */
 export interface ReadingGroupProposalResponseDTO {
   id: string;
+  clubName: string | null;
   book: string;
   why: string | null;
   format: ReadingGroupProposalFormat;
@@ -20,6 +21,7 @@ export function toReadingGroupProposalResponse(
 ): ReadingGroupProposalResponseDTO {
   return {
     id: entity.id,
+    clubName: entity.clubName ?? null,
     book: entity.book,
     why: entity.why,
     format: entity.format,

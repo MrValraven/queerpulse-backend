@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { IdentityKind } from '../identities/entities/identity.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { MessageRequestsService } from './message-requests.service';
 import { MessagingCoreService } from './messaging-core.service';
 
@@ -21,6 +22,7 @@ function makeChain(
     staff?: string[];
     identityBlocked?: boolean;
     personBlockedUserIds?: string[];
+    suspendedUserIds?: string[];
     existingConversations?: SavedRow[];
   } = {},
 ) {
@@ -111,12 +113,27 @@ function makeChain(
     resyncMailbox: jest.fn(() => Promise.resolve([])),
     resyncConversation: jest.fn(() => Promise.resolve([])),
   };
+  // Every staff member's account, active unless the test suspends it.
+  const users = {
+    find: jest.fn(() =>
+      Promise.resolve(
+        staff.map((staffUserId) => ({
+          id: staffUserId,
+          isSystem: false,
+          status: (options.suspendedUserIds ?? []).includes(staffUserId)
+            ? UserStatus.Suspended
+            : UserStatus.Active,
+        })),
+      ),
+    ),
+  };
   const service = new MessageRequestsService(
     {} as never,
     core,
     connections as never,
     blockFilter as never,
     mailboxSync as never,
+    users as never,
   );
   return {
     service,
@@ -223,6 +240,81 @@ describe('deliverEnquiryToIdentity', () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
+  /**
+   * Fix round 1: reachable means one and the same staff member is both
+   * unblocked with the member and behind an account that can receive. A
+   * suspended colleague who is not blocked and an active one who is leave
+   * nobody to read the message, whichever of the two is which.
+   */
+  it('refuses when the only active staff member is blocked and the unblocked one is suspended', async () => {
+    const { service, transaction, postMessage } = makeChain({
+      suspendedUserIds: ['owner-user'],
+      personBlockedUserIds: ['comanager-user'],
+    });
+
+    await expect(
+      service.deliverEnquiryToIdentity(
+        'customer-user',
+        BUSINESS,
+        'A question here.',
+      ),
+    ).rejects.toMatchObject({
+      response: {
+        code: 'IDENTITY_BLOCKED',
+        message: 'You cannot contact this business',
+      },
+    });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses the mirror case too: the blocked one is active and the unblocked one is suspended', async () => {
+    const { service, transaction, postMessage } = makeChain({
+      suspendedUserIds: ['comanager-user'],
+      personBlockedUserIds: ['owner-user'],
+    });
+
+    await expect(
+      service.deliverEnquiryToIdentity(
+        'customer-user',
+        BUSINESS,
+        'A question here.',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'IDENTITY_BLOCKED' } });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses when every staff member is suspended, with nobody blocked', async () => {
+    const { service, transaction } = makeChain({
+      suspendedUserIds: ['owner-user', 'comanager-user'],
+    });
+
+    await expect(
+      service.deliverEnquiryToIdentity(
+        'customer-user',
+        BUSINESS,
+        'A question here.',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'IDENTITY_BLOCKED' } });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('delivers while one staff member is both unblocked and active', async () => {
+    const { service, postMessage } = makeChain({
+      suspendedUserIds: ['owner-user'],
+    });
+
+    await expect(
+      service.deliverEnquiryToIdentity(
+        'customer-user',
+        BUSINESS,
+        'A question here.',
+      ),
+    ).resolves.toEqual({ conversationId: 'new-conversation' });
+    expect(postMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses a reused thread too once nobody behind it is reachable', async () => {
     const { service, postMessage } = makeChain({
       staff: ['owner-user'],
@@ -286,10 +378,14 @@ describe('deliverEnquiryToIdentity', () => {
 
     expect(result).toEqual({ conversationId: 'existing-conversation' });
     expect(transaction).not.toHaveBeenCalled();
-    // Fix round 1: this one thread, and never the whole mailbox.
+    // Fix round 1: this one thread, and never the whole mailbox. Final
+    // review C, I1: under the staff source lock, in the resync's own
+    // transaction (no caller manager), which emits after it commits.
     expect(mailboxSync.resyncConversation).toHaveBeenCalledWith(
       BUSINESS,
       'existing-conversation',
+      undefined,
+      { shouldLockStaffSource: true },
     );
     expect(mailboxSync.resyncMailbox).not.toHaveBeenCalled();
     expect(postMessage).toHaveBeenCalledWith(
@@ -399,6 +495,17 @@ describe('identityEnquiryContactability', () => {
       followUpAwaitsReply: false,
       existingConversationId: null,
     });
+  });
+
+  it('reports a suspended unblocked colleague beside a blocked active one as blocked', async () => {
+    const { service } = makeChain({
+      suspendedUserIds: ['owner-user'],
+      personBlockedUserIds: ['comanager-user'],
+    });
+
+    await expect(
+      service.identityEnquiryContactability('customer-user', BUSINESS),
+    ).resolves.toMatchObject({ canDeliver: false, blockedReason: 'blocked' });
   });
 
   it('never reports a person block with one staff member', async () => {

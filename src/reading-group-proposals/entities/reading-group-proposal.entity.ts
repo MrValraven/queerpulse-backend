@@ -46,6 +46,11 @@ export class ReadingGroupProposal {
   @Column({ type: 'uuid' })
   memberId!: string;
 
+  // The form's optional "Club name" input. Blank means the group is named
+  // after its first book, so approval uses `book` as the community name.
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  clubName!: string | null;
+
   // The form's "Book title & author" input, entered as free text (e.g.
   // "Giovanni's Room — James Baldwin").
   @Column({ type: 'varchar', length: 200 })

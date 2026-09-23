@@ -120,6 +120,7 @@ function seat(
     lastReadAt: null,
     deliveredAt: null,
     clearedAt: null,
+    historyFloorAt: null,
     ...overrides,
   } as unknown as ConversationParticipant;
 }
@@ -338,7 +339,7 @@ describe('ChatGateway live frames on a business mailbox thread (Task 13e)', () =
     );
     // Task 13h: stand-in for
     // `MessagingCoreService.loadMailboxStaffFlooredUserIds`, answered from
-    // the seats' `clearedAt`, their identity kinds and the messages'
+    // the seats' `historyFloorAt`, their identity kinds and the messages'
     // `createdAt` through the rule's in-memory twin,
     // `isCoveredByMailboxStaffFloor`.
     loadMailboxStaffFlooredUserIds = jest.fn(
@@ -353,7 +354,7 @@ describe('ChatGateway live frames on a business mailbox thread (Task 13e)', () =
                   candidate.conversationId === conversationId &&
                   createdAt !== undefined &&
                   isCoveredByMailboxStaffFloor(createdAt, {
-                    clearedAt: candidate.clearedAt,
+                    historyFloorAt: candidate.historyFloorAt,
                     identityKind: identityKinds.get(candidate.identityId),
                     isGroupConversation:
                       conversation?.kind === ConversationKind.Group,
@@ -1600,24 +1601,80 @@ describe('ChatGateway live frames on a business mailbox thread (Task 13e)', () =
       expect(namespace.framesOf(ANA.userId, 'message:new')).toHaveLength(1);
     });
   });
-  // Task 13h: a mailbox staff seat's history floor (`cleared_at`) holds on
-  // the live frames too. Rui is a co-manager seated when the thread moved
-  // into the mailbox, with his floor at the first enquiry. A "clear chat" on
-  // a seat that speaks for the member themself (the customer here, the
-  // friend in the personal thread) keeps the frames it always had.
+  // Task 13h: a mailbox staff seat's history floor (`history_floor_at`)
+  // holds on the live frames too. Rui is a co-manager seated when the thread
+  // moved into the mailbox, with his floor at the first enquiry. A "clear
+  // chat" on a seat that speaks for the member themself (the customer here,
+  // the friend in the personal thread) keeps the frames it always had.
+  // Mailbox decisions, task 1: so does a staff member's own "clear chat",
+  // which writes `cleared_at` alone.
   describe('history floor (Task 13h)', () => {
     const HISTORY_FLOOR = new Date('2026-09-10T12:00:00.000Z');
     const PRE_FLOOR = new Date('2026-09-10T11:00:00.000Z');
     const POST_FLOOR = new Date('2026-09-10T13:00:00.000Z');
 
-    function placeFloor(conversationId: string, userId: string): void {
-      const floored = seats.find(
+    function seatOf(
+      conversationId: string,
+      userId: string,
+    ): ConversationParticipant {
+      return seats.find(
         (candidate) =>
           candidate.conversationId === conversationId &&
           candidate.userId === userId,
       )!;
-      floored.clearedAt = HISTORY_FLOOR;
     }
+
+    /** Seating a staff member writes the floor and the clear point at one
+     *  instant. */
+    function placeFloor(conversationId: string, userId: string): void {
+      const floored = seatOf(conversationId, userId);
+      floored.clearedAt = HISTORY_FLOOR;
+      floored.historyFloorAt = HISTORY_FLOOR;
+    }
+
+    /** A personal "clear chat": the clear point alone. */
+    function placeClear(conversationId: string, userId: string): void {
+      seatOf(conversationId, userId).clearedAt = HISTORY_FLOOR;
+    }
+
+    it("relays an edit of a message a co-manager's own clear chat covers to that co-manager", async () => {
+      openThreadForEveryone();
+      placeClear(CONVERSATION_ID, RUI.userId);
+      const edited = {
+        id: 'm-cleared-by-rui',
+        senderId: TIAGO.userId,
+        body: 'Edited after Rui cleared',
+        createdAt: PRE_FLOOR,
+      };
+      messageRows.set(edited.id, edited);
+
+      await gateway.handleMessageUpdated({
+        conversationId: CONVERSATION_ID,
+        message: renderForViewer(edited, TIAGO.userId),
+      });
+
+      expect(namespace.framesOf(RUI.userId, 'message:updated')).toHaveLength(1);
+    });
+
+    it("relays a reaction on a message a co-manager's own clear chat covers to that co-manager", async () => {
+      openThreadForEveryone();
+      placeClear(CONVERSATION_ID, RUI.userId);
+      messageRows.set('m-cleared-by-rui', {
+        id: 'm-cleared-by-rui',
+        senderId: CUSTOMER_USER_ID,
+        body: 'A message Rui cleared',
+        createdAt: PRE_FLOOR,
+      });
+
+      await gateway.handleMessageReaction({
+        conversationId: CONVERSATION_ID,
+        messageId: 'm-cleared-by-rui',
+        userId: TIAGO.userId,
+        reactions: [],
+      });
+
+      expect(namespace.framesOf(RUI.userId, 'reaction')).toHaveLength(1);
+    });
 
     it("does not relay an edit of a pre-floor message to a co-manager's socket", async () => {
       openThreadForEveryone();
@@ -1839,7 +1896,7 @@ describe('ChatGateway live frames on a business mailbox thread (Task 13e)', () =
 
     it('still relays an edit to the customer after the customer cleared the mailbox thread', async () => {
       openThreadForEveryone();
-      placeFloor(CONVERSATION_ID, CUSTOMER_USER_ID);
+      placeClear(CONVERSATION_ID, CUSTOMER_USER_ID);
       const edited = {
         id: 'm-cleared-by-customer',
         senderId: TIAGO.userId,
@@ -1861,7 +1918,7 @@ describe('ChatGateway live frames on a business mailbox thread (Task 13e)', () =
     it('still relays an edit of a cleared message to a personal-thread member who cleared the chat', async () => {
       namespace.connect(CUSTOMER_USER_ID, [PERSONAL_CONVERSATION_ID]);
       namespace.connect(FRIEND_USER_ID, [PERSONAL_CONVERSATION_ID]);
-      placeFloor(PERSONAL_CONVERSATION_ID, FRIEND_USER_ID);
+      placeClear(PERSONAL_CONVERSATION_ID, FRIEND_USER_ID);
       const edited = {
         id: 'p-cleared',
         senderId: CUSTOMER_USER_ID,
@@ -1887,7 +1944,7 @@ describe('ChatGateway live frames on a business mailbox thread (Task 13e)', () =
     it('keeps the one room broadcast of a personal-thread reply quoting a message the friend cleared', async () => {
       namespace.connect(CUSTOMER_USER_ID, [PERSONAL_CONVERSATION_ID]);
       namespace.connect(FRIEND_USER_ID, [PERSONAL_CONVERSATION_ID]);
-      placeFloor(PERSONAL_CONVERSATION_ID, FRIEND_USER_ID);
+      placeClear(PERSONAL_CONVERSATION_ID, FRIEND_USER_ID);
       messageRows.set('p-parent', {
         id: 'p-parent',
         senderId: FRIEND_USER_ID,

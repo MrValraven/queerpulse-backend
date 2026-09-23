@@ -14,9 +14,14 @@ import {
   loadColdIdentityEnquiryMessages,
   MAX_COLD_ENQUIRIES_PER_DAY,
 } from '../identity-contact/identity-enquiry-quota';
-import { identityBlockedException } from '../messaging/message-requests.service';
+import {
+  IdentityEnquiryBlockedReason,
+  IdentityEnquiryContactability,
+  identityBlockedException,
+  loadReceivingStaffUserIds,
+} from '../messaging/message-requests.service';
 import { MessagingService } from '../messaging/messaging.service';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User } from '../users/entities/user.entity';
 import { CreateListingEnquiryDto } from './dto/create-listing-enquiry.dto';
 import { ListingEnquiry } from './entities/listing-enquiry.entity';
 import { Listing, ListingStatus } from './entities/listing.entity';
@@ -27,9 +32,21 @@ import {
   ListingEnquirySentDTO,
 } from './listing-enquiry-response';
 
-/** Either the owner is reachable, or here is precisely why not. */
-type OwnerReachability =
-  | { isReachable: true; ownerId: string }
+/**
+ * Either somebody who manages the listing can receive an enquiry from this
+ * member, or here is precisely why nobody can. `ownerSnapshot` is the owner
+ * of record written onto the enquiry row: the listing's current owner when
+ * it has one, null when its co-managers are answering an ownerless listing.
+ * `contactability` is messaging's answer that decided it, carried along so
+ * neither caller asks messaging the same question twice.
+ */
+type ListingReachability =
+  | {
+      isReachable: true;
+      listingIdentityId: string;
+      ownerSnapshot: string | null;
+      contactability: IdentityEnquiryContactability;
+    }
   | { isReachable: false; reason: ListingContactUnavailableReason };
 
 /**
@@ -70,7 +87,8 @@ type EnquiryQuotaState =
  * co-manager). This service writes
  * exactly one row of its own (`ListingEnquiry`), and that row holds no
  * message text (see the entity's docstring). Its `ownerId` stays the owner
- * at the time, as the record of who owned the listing then.
+ * at the time, as the record of who owned the listing then, and is null for
+ * an ownerless listing its co-managers answer.
  *
  * WHAT MESSAGING ENFORCES, AND WHAT THIS DOES ABOUT IT. Three rules matter and
  * none of them is bypassed here:
@@ -100,13 +118,20 @@ type EnquiryQuotaState =
  *    connection is accepted). `replyRequiresConnection` is kept for existing
  *    callers.
  *
- * A LISTING WITH NO OWNER ACCOUNT CANNOT BE MESSAGED, and says so. `suggest`
- * and `friendly` listings do have a non-null `owner_id`, but it belongs to the
+ * AN UNCLAIMED LISTING CANNOT BE MESSAGED, and says so. `suggest` and
+ * `friendly` listings do have a non-null `owner_id`, but it belongs to the
  * member who suggested or recommended the place, not to the business (the same
  * distinction `ListingClaimsService.assertClaimable` is built on). Delivering a
  * question about a venue to whoever once recommended it would be worse than not
  * offering the button, so those listings answer `unclaimed` and the flow can
  * point at the claim path instead of opening a thread nobody will ever read.
+ *
+ * A CLAIMED LISTING IS REACHABLE WHILE ANYBODY WHO MANAGES IT CAN RECEIVE.
+ * Reachability is decided from the listing's staff (`resolveReachability`),
+ * the same list persona and company mailboxes are decided from: an owner
+ * whose account was erased or is suspended leaves the mailbox working as long
+ * as one active co-manager can answer it. Only a listing that nobody
+ * reachable manages refuses.
  */
 @Injectable()
 export class ListingEnquiriesService {
@@ -170,8 +195,8 @@ export class ListingEnquiriesService {
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
     @InjectRepository(ListingEnquiry)
     private readonly enquiries: Repository<ListingEnquiry>,
-    // Read-only: tells a listing parked on the house account (or on an erased
-    // or suspended account) apart from one a reachable member runs.
+    // Read-only: tells a staff member who can receive an enquiry apart from
+    // the house account and from a suspended or deactivated member.
     @InjectRepository(User) private readonly users: Repository<User>,
     private readonly messaging: MessagingService,
     private readonly contentModeration: ContentModerationService,
@@ -182,15 +207,15 @@ export class ListingEnquiriesService {
   /**
    * Whether the caller can write to this listing's business, and what the
    * thread will allow afterwards. A read, so it never writes an enquiry row and
-   * never throws for a merely unavailable owner: "you cannot message this
-   * listing" is an answer, not an error.
+   * never throws for a listing nobody can currently answer: "you cannot
+   * message this listing" is an ordinary answer and returns normally.
    */
   async getContact(
     slug: string,
     viewerUserId: string,
   ): Promise<ListingContactDTO> {
     const listing = await this.loadLiveOr404(slug);
-    const reachability = await this.resolveOwner(listing, viewerUserId);
+    const reachability = await this.resolveReachability(listing, viewerUserId);
     if (!reachability.isReachable) {
       return {
         canMessageOwner: false,
@@ -205,35 +230,11 @@ export class ListingEnquiriesService {
       };
     }
 
-    const listingIdentity = await this.identities.ensureIdentityFor(
-      IdentityKind.Listing,
-      listing.id,
-    );
-    const [contactability, previous, quota] = await Promise.all([
-      this.messaging.identityEnquiryContactability(
-        viewerUserId,
-        listingIdentity.id,
-      ),
+    const { contactability } = reachability;
+    const [previous, quota] = await Promise.all([
       this.findLatestEnquiry(listing.id, viewerUserId),
       this.evaluateEnquiryQuota(listing.id, viewerUserId),
     ]);
-
-    if (!contactability.canDeliver) {
-      // The owner is handled as `own_listing` above, so `IDENTITY_IS_YOUR_OWN`
-      // here is a co-manager. Anything else is the member's block of the
-      // listing, reported as plainly `unavailable`.
-      return {
-        canMessageOwner: false,
-        unavailableReason:
-          contactability.blockedReason === 'IDENTITY_IS_YOUR_OWN'
-            ? 'own_listing'
-            : 'unavailable',
-        replyRequiresConnection: false,
-        followUpAwaitsReply: false,
-        existingConversationId: null,
-        ...ListingEnquiriesService.UNCAPPED,
-      };
-    }
 
     return {
       canMessageOwner: true,
@@ -260,7 +261,7 @@ export class ListingEnquiriesService {
   }
 
   /** The three quota fields when nothing is capped, or when the question does
-   *  not arise because the owner is unreachable anyway. */
+   *  not arise because nobody who manages the listing can receive anyway. */
   private static readonly UNCAPPED = {
     hasReachedEnquiryLimit: false,
     enquiryLimitReason: null,
@@ -292,36 +293,24 @@ export class ListingEnquiriesService {
     dto: CreateListingEnquiryDto,
   ): Promise<ListingEnquirySentDTO> {
     const listing = await this.loadLiveOr404(slug);
-    const reachability = await this.resolveOwner(listing, senderUserId);
+    const reachability = await this.resolveReachability(listing, senderUserId);
     if (!reachability.isReachable) {
+      // A block, or nobody reachable behind one, is the same coded 403 the
+      // delivery itself throws, so the member reads one answer either way.
+      if (reachability.reason === 'unavailable') {
+        throw identityBlockedException();
+      }
       throw new BadRequestException(
         ListingEnquiriesService.unavailableMessage(reachability.reason),
       );
     }
-    const ownerId = reachability.ownerId;
-    const listingIdentity = await this.identities.ensureIdentityFor(
-      IdentityKind.Listing,
-      listing.id,
-    );
-
-    const contactability = await this.messaging.identityEnquiryContactability(
-      senderUserId,
-      listingIdentity.id,
-    );
-    if (!contactability.canDeliver) {
-      if (contactability.blockedReason === 'IDENTITY_IS_YOUR_OWN') {
-        throw new BadRequestException(
-          ListingEnquiriesService.unavailableMessage('own_listing'),
-        );
-      }
-      throw identityBlockedException();
-    }
+    const { listingIdentityId, ownerSnapshot, contactability } = reachability;
 
     await this.assertEnquiryQuota(listing.id, senderUserId);
 
     const { conversationId } = await this.messaging.deliverEnquiryToIdentity(
       senderUserId,
-      listingIdentity.id,
+      listingIdentityId,
       ListingEnquiriesService.composeEnquiryBody(listing.name, dto.body.trim()),
       dto.asIdentityId,
     );
@@ -330,7 +319,7 @@ export class ListingEnquiriesService {
       this.enquiries.create({
         listingId: listing.id,
         senderId: senderUserId,
-        ownerId,
+        ownerId: ownerSnapshot,
         conversationId,
       }),
     );
@@ -385,45 +374,106 @@ export class ListingEnquiriesService {
   }
 
   /**
-   * Who, if anyone, an enquiry on this listing should reach.
+   * Whether anybody who manages this listing can receive an enquiry from
+   * `viewerUserId`, and the listing's mailbox identity when somebody can.
    *
-   * `Listing.ownerId` is NOT NULL, so "no owner" is a product state rather than
-   * a null, and the cases are exactly the ones
+   * UNCLAIMED FIRST. The cases are the ones
    * `ListingClaimsService.assertClaimable` treats as claimable, read from the
    * other direction: a listing anybody may claim is by definition a listing
-   * nobody is answering messages on.
+   * nobody is answering messages on, whoever its `owner_id` names.
+   *
+   * THEN MESSAGING DECIDES, with the rule persona and company mailboxes use
+   * (`MessagingService.identityEnquiryContactability`). The staff are the
+   * owner when there is one plus every active co-manager
+   * (`IdentitiesService.staffUserIds`, which also seats the thread), and the
+   * enquiry can go through while one of them is both able to receive (an
+   * active, non-system account) and not blocked with the member either way.
+   * An owner whose account was erased or is suspended therefore leaves the
+   * mailbox working as long as one active co-manager can answer. A member on
+   * the staff list is told `own_listing`, owner and co-manager alike.
+   *
+   * Refusals keep the codes the frontend already reads; see
+   * `unreachableReason`.
    */
-  private async resolveOwner(
+  private async resolveReachability(
     listing: Listing,
     viewerUserId: string,
-  ): Promise<OwnerReachability> {
+  ): Promise<ListingReachability> {
     if (listing.path === 'suggest' || listing.badge === 'friendly') {
       return { isReachable: false, reason: 'unclaimed' };
     }
     if (listing.ownerId === viewerUserId) {
       return { isReachable: false, reason: 'own_listing' };
     }
-    // NULL since `SetNullContentAuthorFksOnUserErasure1794610000000`: the
-    // owning account was erased and the entry stayed live. Same outcome the
-    // `!owner` branch below already gave for a row that had gone missing, now
-    // reachable without a query.
-    const ownerId = listing.ownerId;
-    if (ownerId === null) {
-      return { isReachable: false, reason: 'no_owner_account' };
+    const listingIdentity = await this.identities.ensureIdentityFor(
+      IdentityKind.Listing,
+      listing.id,
+    );
+    const contactability = await this.messaging.identityEnquiryContactability(
+      viewerUserId,
+      listingIdentity.id,
+    );
+    if (!contactability.canDeliver) {
+      return {
+        isReachable: false,
+        reason: await this.unreachableReason(
+          contactability.blockedReason,
+          listingIdentity.id,
+        ),
+      };
     }
-    const owner = await this.users.findOne({
-      where: { id: ownerId },
-      select: { id: true, isSystem: true, status: true },
-    });
-    // No row means the owning account was erased; a system account is the house
-    // account seeded content is parked on and has no human reading its inbox;
-    // a suspended or banned owner would have the send rejected by messaging's
-    // own account-status gate anyway, so refuse before the compose box rather
-    // than after the member has written their message.
-    if (!owner || owner.isSystem || owner.status !== UserStatus.Active) {
-      return { isReachable: false, reason: 'no_owner_account' };
+    return {
+      isReachable: true,
+      listingIdentityId: listingIdentity.id,
+      ownerSnapshot: listing.ownerId,
+      contactability,
+    };
+  }
+
+  /**
+   * Messaging's refusal, in the listing's own reason codes.
+   *
+   *  - `IDENTITY_IS_YOUR_OWN` is a co-manager writing to their own listing.
+   *  - `IDENTITY_HAS_NO_STAFF` is an ownerless listing with no co-manager.
+   *  - `blocked` covers both "blocked from everybody who could receive" and
+   *    "nobody could receive at all". Only the first is about this member,
+   *    so the staff are read once more to tell them apart: with no staff
+   *    account able to receive, the listing is unanswerable for everybody
+   *    and says `no_owner_account`, as it did before co-managers; otherwise
+   *    it is `unavailable`, which never says which way a block runs.
+   *
+   * `no_owner_account` is the wire code for "nobody who manages this listing
+   * can receive messages". The name predates co-managers and is kept because
+   * the frontend keys its copy off it.
+   */
+  private async unreachableReason(
+    blockedReason: IdentityEnquiryBlockedReason | null,
+    listingIdentityId: string,
+  ): Promise<ListingContactUnavailableReason> {
+    switch (blockedReason) {
+      case 'IDENTITY_IS_YOUR_OWN':
+        return 'own_listing';
+      case 'IDENTITY_HAS_NO_STAFF':
+        return 'no_owner_account';
+      case 'blocked':
+        return (await this.hasReceivingStaff(listingIdentityId))
+          ? 'unavailable'
+          : 'no_owner_account';
+      default:
+        return 'unavailable';
     }
-    return { isReachable: true, ownerId: owner.id };
+  }
+
+  /** True when any staff member of the listing's mailbox has an account that
+   *  can receive, blocks aside. Runs only on a refusal, through the one rule
+   *  messaging applies (`loadReceivingStaffUserIds`). */
+  private async hasReceivingStaff(listingIdentityId: string): Promise<boolean> {
+    const staffUserIds = await this.identities.staffUserIds(listingIdentityId);
+    const receivingStaffUserIds = await loadReceivingStaffUserIds(
+      this.users,
+      staffUserIds,
+    );
+    return receivingStaffUserIds.length > 0;
   }
 
   /** The caller's most recent enquiry on this listing, or null. Backs the

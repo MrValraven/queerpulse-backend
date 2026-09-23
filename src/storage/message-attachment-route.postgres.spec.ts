@@ -23,7 +23,8 @@ import { StorageService } from './storage.service';
  * photo or document to exactly the readers who may see that message:
  * the customer and live staff get the bytes; a co-manager blocked with the
  * customer, a departed co-manager, a co-manager asking for a message before
- * their history floor, and a stranger get the same 404.
+ * their history floor, and a stranger get the same 404. A co-manager whose
+ * own "clear chat" covers a message, with no history floor, still gets it.
  *
  * It runs against a real database and is skipped unless
  * `MESSAGE_ATTACHMENT_ROUTE_DATABASE_URL` names one. It builds the schema
@@ -41,6 +42,7 @@ const LIVE_COLLEAGUE = '10000000-0000-4000-8000-000000000002';
 const FLOORED_COLLEAGUE = '10000000-0000-4000-8000-000000000003';
 const DEPARTED_COLLEAGUE = '10000000-0000-4000-8000-000000000004';
 const BLOCKED_COLLEAGUE = '10000000-0000-4000-8000-000000000005';
+const CLEARING_COLLEAGUE = '10000000-0000-4000-8000-000000000006';
 const CUSTOMER = '10000000-0000-4000-8000-000000000011';
 const STRANGER = '10000000-0000-4000-8000-000000000012';
 const ALL_USERS = [
@@ -49,6 +51,7 @@ const ALL_USERS = [
   FLOORED_COLLEAGUE,
   DEPARTED_COLLEAGUE,
   BLOCKED_COLLEAGUE,
+  CLEARING_COLLEAGUE,
   CUSTOMER,
   STRANGER,
 ];
@@ -124,6 +127,13 @@ async function seedFixture(dataSource: DataSource): Promise<void> {
     {
       conversationId: CONVERSATION_ID,
       userId: FLOORED_COLLEAGUE,
+      identityId: CAFE_IDENTITY_ID,
+      clearedAt: atHour(3),
+      historyFloorAt: atHour(3),
+    },
+    {
+      conversationId: CONVERSATION_ID,
+      userId: CLEARING_COLLEAGUE,
       identityId: CAFE_IDENTITY_ID,
       clearedAt: atHour(3),
     },
@@ -317,6 +327,12 @@ describeWithDatabase(
       await expect(fetchAs(CUSTOMER, PRE_FLOOR_IMAGE_ID)).resolves.toBe(
         `bytes of ${ownerKey('message-images', 1, '.jpg')}`,
       );
+    });
+
+    it('serves a co-manager with no history floor a photo their own clear chat covers', async () => {
+      await expect(
+        fetchAs(CLEARING_COLLEAGUE, PRE_FLOOR_IMAGE_ID),
+      ).resolves.toBe(`bytes of ${ownerKey('message-images', 1, '.jpg')}`);
     });
 
     it.each([

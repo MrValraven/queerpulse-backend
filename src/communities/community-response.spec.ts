@@ -48,6 +48,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     needsOwnerReviewAt: null,
     rulesVersion: 1,
     welcomeMessage: null,
+    nowReading: null,
     avatarImageUrl: null,
     city: null,
     area: null,

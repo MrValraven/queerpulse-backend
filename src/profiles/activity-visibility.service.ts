@@ -13,6 +13,7 @@ import {
 } from '../events/entities/event.entity';
 import {
   Subprofile,
+  SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from '../subprofiles/entities/subprofile.entity';
@@ -169,10 +170,14 @@ export class ActivityVisibilityService {
 
   /**
    * Of `ids`, the personas that are still public: published, `open`
-   * visibility, and not withheld by a moderator takedown (`removedAt`). A
-   * network- or private-visibility persona is excluded even though it is
-   * "published": the activity row is served to audiences as wide as the open
-   * web, so `open` is the only visibility safe for it.
+   * visibility, Linked, and not withheld by a moderator takedown
+   * (`removedAt`). A network- or private-visibility persona is excluded even
+   * though it is "published": the activity row is served to audiences as wide
+   * as the open web, so `open` is the only visibility safe for it. Linked
+   * mirrors `ActivityListener`'s own write gate: the row names its author, and
+   * an Unlinked persona is deliberately unattributed, so a persona switched to
+   * Unlinked (and republished at its handle, possibly by a successor after a
+   * creator handoff) must not stay tied to the member who wrote the row.
    */
   private async publicPersonaIds(ids: string[]): Promise<Set<string>> {
     if (!ids.length) {
@@ -183,6 +188,7 @@ export class ActivityVisibilityService {
         id: In(ids),
         status: SubprofileStatus.Published,
         visibility: SubprofileVisibility.Open,
+        linkVisibility: SubprofileLinkVisibility.Linked,
         removedAt: IsNull(),
       },
       select: { id: true },

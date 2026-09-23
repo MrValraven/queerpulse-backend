@@ -29,7 +29,7 @@ import {
 import { MessagingCoreService } from './messaging-core.service';
 
 /**
- * Task 13h: a seat's history floor (`cleared_at`) reaches reply quotes.
+ * Task 13h: a seat's history floor (`history_floor_at`) reaches reply quotes.
  *
  * A personal thread moved into a business mailbox gives each co-manager a
  * floor at the first enquiry, so the owner's and the customer's earlier
@@ -39,7 +39,10 @@ import { MessagingCoreService } from './messaging-core.service';
  * for a mailbox staff seat whose floor covers it, and in full for everyone
  * else. Fix round 1: a "clear chat" on a seat that speaks for the member
  * themself (a personal thread, a group, the customer's own seat) keeps
- * quoting exactly as before this task.
+ * quoting exactly as before this task. Mailbox decisions, task 1: clear is
+ * personal, so a staff member's own "clear chat" (`cleared_at` alone) keeps
+ * quoting too, and a parent from another conversation always renders as a
+ * missing parent.
  *
  * The parent query runs against a fixture: the stand-in builder accepts only
  * the clauses it knows and answers the floor clause through its in-memory
@@ -94,10 +97,14 @@ const FRIEND_PROFILE = {
   photoVisible: true,
 };
 
+/** A seat. Seating a staff member writes `historyFloorAt` and `clearedAt`
+ *  at one instant, so `clearedAt` follows the floor unless a test passes a
+ *  personal "clear chat" of its own. */
 function seat(
   userId: string,
   identityId: string,
-  clearedAt: Date | null = null,
+  historyFloorAt: Date | null = null,
+  clearedAt: Date | null = historyFloorAt,
 ): ConversationParticipant {
   return {
     id: `seat-${userId}`,
@@ -107,6 +114,7 @@ function seat(
     role: ConversationRole.Member,
     leftAt: null,
     clearedAt,
+    historyFloorAt,
     lastReadAt: null,
     lastReadInstant: null,
     deliveredAt: null,
@@ -178,7 +186,7 @@ function buildCore(
         } else if (clause === EXPECTED_FLOOR_CLAUSE) {
           rows = rows.filter((parent) =>
             isCoveredByMailboxStaffFloor(parent.createdAt, {
-              clearedAt: viewerSeat.clearedAt,
+              historyFloorAt: viewerSeat.historyFloorAt,
               identityKind: IDENTITY_KIND_BY_ID.get(viewerSeat.identityId),
               isGroupConversation,
               isOfficialConversation: false,
@@ -303,6 +311,28 @@ async function renderFor(
   return response!;
 }
 
+/** `renderFor`, also handing back the messages repository, so a test can
+ *  tell whether the floor query ran. */
+async function renderWithRepositoryFor(
+  viewerId: string,
+  seats: ConversationParticipant[],
+  parent: Message,
+) {
+  const core = buildCore(seats, [parent]);
+  const messagesRepository = (
+    core as unknown as {
+      messages: { createQueryBuilder: jest.Mock };
+    }
+  ).messages;
+  const [response] = await core.toMessageResponses(
+    [replyTo(parent.id)],
+    viewerId,
+    false,
+    ConversationKind.Direct,
+  );
+  return { response: response!, messagesRepository };
+}
+
 const UNAVAILABLE_QUOTE_FIELDS = {
   snippet: '',
   senderName: 'Someone',
@@ -424,7 +454,7 @@ describe('Task 13h: reply quotes honour the viewer history floor', () => {
   it('keeps the full quote for the customer after the customer cleared the mailbox thread', async () => {
     const seats = [
       seat(OWNER_ID, LISTING_IDENTITY_ID),
-      seat(CUSTOMER_ID, CUSTOMER_IDENTITY_ID, HISTORY_FLOOR),
+      seat(CUSTOMER_ID, CUSTOMER_IDENTITY_ID, null, HISTORY_FLOOR),
       seat(CO_MANAGER_ID, LISTING_IDENTITY_ID, HISTORY_FLOOR),
     ];
 
@@ -439,7 +469,7 @@ describe('Task 13h: reply quotes honour the viewer history floor', () => {
   it('keeps the full quote of a cleared parent for a personal-thread member who cleared the chat, as before this task', async () => {
     const seats = [
       seat(CUSTOMER_ID, CUSTOMER_IDENTITY_ID),
-      seat(FRIEND_ID, FRIEND_IDENTITY_ID, HISTORY_FLOOR),
+      seat(FRIEND_ID, FRIEND_IDENTITY_ID, null, HISTORY_FLOOR),
     ];
     const parent = messageRow({
       id: 'm-cleared',
@@ -472,7 +502,7 @@ describe('Task 13h: reply quotes honour the viewer history floor', () => {
   it('keeps the full quote of a cleared parent for a group member who cleared the chat, as before this task', async () => {
     const seats = [
       seat(CUSTOMER_ID, CUSTOMER_IDENTITY_ID),
-      seat(FRIEND_ID, FRIEND_IDENTITY_ID, HISTORY_FLOOR),
+      seat(FRIEND_ID, FRIEND_IDENTITY_ID, null, HISTORY_FLOOR),
     ];
     const parent = messageRow({
       id: 'm-group-cleared',
@@ -500,19 +530,102 @@ describe('Task 13h: reply quotes honour the viewer history floor', () => {
   });
 });
 
+describe('Mailbox decisions task 1: clear is personal for staff too', () => {
+  beforeEach(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  it('keeps the full quote for a staff member whose own clear chat covers the parent, with no floor query', async () => {
+    const seats = [
+      seat(OWNER_ID, LISTING_IDENTITY_ID),
+      seat(CUSTOMER_ID, CUSTOMER_IDENTITY_ID),
+      seat(CO_MANAGER_ID, LISTING_IDENTITY_ID, null, HISTORY_FLOOR),
+    ];
+
+    const { response, messagesRepository } = await renderWithRepositoryFor(
+      CO_MANAGER_ID,
+      seats,
+      privateTextParent(),
+    );
+
+    expect(response.replyTo).toMatchObject({
+      snippet: PRIVATE_BODY,
+      senderName: 'Marta Silva',
+      deleted: false,
+    });
+    expect(messagesRepository.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('still withholds the quote by the history floor when a later clear chat sits above it', async () => {
+    const seats = [
+      seat(OWNER_ID, LISTING_IDENTITY_ID),
+      seat(CUSTOMER_ID, CUSTOMER_IDENTITY_ID),
+      seat(CO_MANAGER_ID, LISTING_IDENTITY_ID, HISTORY_FLOOR, POST_FLOOR),
+    ];
+
+    const response = await renderFor(CO_MANAGER_ID, seats, privateTextParent());
+
+    expect(response.replyTo).toMatchObject(UNAVAILABLE_QUOTE_FIELDS);
+  });
+
+  it('renders a parent from another conversation as a missing parent, for a viewer with no floor', async () => {
+    const parent = messageRow({
+      id: 'm-other-thread',
+      conversationId: 'c-other',
+      body: PRIVATE_BODY,
+      createdAt: POST_FLOOR,
+    });
+
+    const response = await renderFor(OWNER_ID, movedThreadSeats(), parent);
+
+    expect(response.replyTo).toEqual({
+      id: parent.id,
+      ...UNAVAILABLE_QUOTE_FIELDS,
+    });
+    const serialized = JSON.stringify(response);
+    expect(serialized).not.toContain('PRIVATE');
+    expect(serialized).not.toContain('Marta');
+  });
+
+  it('gives a photo parent from another conversation no thumbnail', async () => {
+    const parent = {
+      ...privatePhotoParent(),
+      conversationId: 'c-other',
+      createdAt: POST_FLOOR,
+    };
+
+    const response = await renderFor(OWNER_ID, movedThreadSeats(), parent);
+
+    expect(response.replyTo).toMatchObject(UNAVAILABLE_QUOTE_FIELDS);
+    expect(JSON.stringify(response)).not.toContain(
+      'bbbbbbbb-0000-4000-8000-000000000001',
+    );
+  });
+});
+
 describe('Task 13h: the one definition of the history floor', () => {
-  const staffSeat = (clearedAt: Date | null) => ({
-    clearedAt,
+  const staffSeat = (historyFloorAt: Date | null) => ({
+    historyFloorAt,
     identityKind: IdentityKind.Listing,
     isGroupConversation: false,
     isOfficialConversation: false,
   });
 
   it('compares in SQL, inclusively, on the seat floor', () => {
-    expect(EXPECTED_FLOOR_CLAUSE).toContain('seat.cleared_at IS NOT NULL');
     expect(EXPECTED_FLOOR_CLAUSE).toContain(
-      'parent.created_at <= seat.cleared_at',
+      'seat.history_floor_at IS NOT NULL',
     );
+    expect(EXPECTED_FLOOR_CLAUSE).toContain(
+      'parent.created_at <= seat.history_floor_at',
+    );
+  });
+
+  it('never reads the personal clear point', () => {
+    expect(EXPECTED_FLOOR_CLAUSE).not.toContain('cleared_at');
   });
 
   // Pinned by hand, independently of the function, so dropping the

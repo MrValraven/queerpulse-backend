@@ -107,6 +107,10 @@ import {
   SafeSpaceStatus,
 } from './entities/listing.entity';
 import { normalizeAccessibilityAnswers } from './listing-accessibility';
+import {
+  defaultPricingModeForCats,
+  normalizeListingMenu,
+} from './listing-menu';
 import { UpdateListingVisibilityDto } from './dto/update-listing-visibility.dto';
 import { UpdateQueerOwnedVerifiedDto } from './dto/update-queer-owned-verified.dto';
 import {
@@ -342,6 +346,8 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
     ),
     accessibilityNote: dto.accessibility?.note ?? '',
     services: normalizeServices(dto.services),
+    menu: normalizeListingMenu(dto.menu),
+    pricingMode: dto.pricingMode ?? defaultPricingModeForCats(dto.cats ?? []),
     langs: dto.langs ?? [],
     // An online-only listing carries no location, whatever the client sent.
     online: dto.online ?? false,
@@ -450,6 +456,9 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.services !== undefined
       ? { services: normalizeServices(dto.services) }
       : {}),
+    // Replaced wholesale, the same reasoning as `services`.
+    ...(dto.menu !== undefined ? { menu: normalizeListingMenu(dto.menu) } : {}),
+    ...(dto.pricingMode !== undefined ? { pricingMode: dto.pricingMode } : {}),
     ...(dto.langs !== undefined ? { langs: dto.langs } : {}),
     ...(dto.online !== undefined ? { online: dto.online } : {}),
     ...(dto.address !== undefined ? { address: dto.address } : {}),
@@ -597,6 +606,8 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   accessibilityAnswers: 'the accessibility answers',
   accessibilityNote: 'the accessibility note',
   services: 'the services and prices',
+  menu: 'the menu',
+  pricingMode: 'whether the page shows services or a menu',
   langs: 'the languages spoken',
   online: 'the online-only setting',
   address: 'the address',
@@ -624,17 +635,49 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
 };
 
 /**
+ * `JSON.stringify` with object keys sorted recursively (arrays keep their own
+ * order; only plain-object keys are reordered). `undefined` properties are
+ * dropped exactly as plain `JSON.stringify` drops them: the replacer only
+ * reorders keys, it never adds or removes one, so `{ a: undefined }` still
+ * serializes to `'{}'` here, same as `JSON.stringify({ a: undefined })`.
+ *
+ * `before[field]` is read back from Postgres jsonb, which normalizes object
+ * key order on the way out (shorter keys first) independent of the order the
+ * application wrote them in, while `after[field]` is a freshly built JS
+ * object literal in the application's own field order. A plain
+ * `JSON.stringify` comparison of the two therefore found spurious
+ * differences for every jsonb column (e.g. `menu`, `social`) even when
+ * nothing inside it had actually changed. Sorting keys before comparing
+ * removes that noise without changing what counts as a real edit.
+ *
+ * Deliberately not `isDeepStrictEqual`: it treats `{ a: undefined }` and `{}`
+ * as different objects, which `JSON.stringify` never did, so swapping to it
+ * here would flip already-correct "nothing changed" comparisons to "changed".
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, val: unknown) => {
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(val).sort()) {
+        sorted[key] = (val as Record<string, unknown>)[key];
+      }
+      return sorted;
+    }
+    return val;
+  });
+}
+
+/**
  * The given fields whose value the edit actually changed. This is what lets
  * `update()` tell a real edit from a PATCH that re-sends values already
  * stored, which must neither clear the queer-owned badge nor write an audit
  * row for nothing.
  *
- * `JSON.stringify` is total over these column types (scalars, string arrays,
- * and the flat `social`/`photos`/`whatItIs` JSON shapes) and key order within
- * them is fixed by `applyUpdate`'s spread-merge, so equal content always
- * compares equal. `applyUpdate` also replaces those nested objects rather than
- * mutating them in place, so a shallow `{ ...listing }` snapshot taken before
- * it runs stays a faithful "before" picture.
+ * Compared with {@link canonicalJson} rather than plain `JSON.stringify`: see
+ * its doc comment for why key order alone must never register as a change.
+ * `applyUpdate` replaces these nested objects rather than mutating them in
+ * place, so a shallow `{ ...listing }` snapshot taken before it runs stays a
+ * faithful "before" picture regardless.
  */
 function changedListingFields(
   before: Listing,
@@ -642,7 +685,7 @@ function changedListingFields(
   fields: readonly (keyof Listing)[],
 ): (keyof Listing)[] {
   return fields.filter(
-    (field) => JSON.stringify(before[field]) !== JSON.stringify(after[field]),
+    (field) => canonicalJson(before[field]) !== canonicalJson(after[field]),
   );
 }
 

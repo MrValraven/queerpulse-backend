@@ -21,6 +21,7 @@ import { Readable } from 'node:stream';
 import {
   DOCUMENT_UPLOAD_TYPES,
   IMAGE_UPLOAD_TYPES,
+  LISTING_MENU_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { isStorageKey, parseStorageKey } from './storage-key';
@@ -71,10 +72,21 @@ export class StorageService {
   // Kinds whose bytes are a DOCUMENT rather than an image — currently only
   // `message-document` (PRD-226). Kept as a tiny lookup rather than a naming
   // convention so a future document kind is one line here, not a guess based
-  // on its prefix string.
+  // on its prefix string. Used by `contentTypeTableFor` to route content types.
   private static readonly DOCUMENT_KINDS: ReadonlySet<UploadKind> = new Set([
     'message-document',
   ]);
+
+  // The content types a kind accepts. `listing-menu` is the one kind that
+  // mixes both tables; every other kind is images or documents.
+  private static contentTypeTableFor(
+    kind: UploadKind,
+  ): Readonly<Record<string, { extension: string }>> {
+    if (kind === 'listing-menu') return LISTING_MENU_UPLOAD_TYPES;
+    return StorageService.DOCUMENT_KINDS.has(kind)
+      ? DOCUMENT_UPLOAD_TYPES
+      : IMAGE_UPLOAD_TYPES;
+  }
 
   // Upload policy lives here (not in `UploadsController`): resolve the kind's
   // storage-key prefix + byte cap, validate the requested content type against
@@ -101,9 +113,7 @@ export class StorageService {
     byteSize?: number;
   }): Promise<PresignedUpload> {
     const { kind, userId, contentType, byteSize } = params;
-    const contentTypeTable = StorageService.DOCUMENT_KINDS.has(kind)
-      ? DOCUMENT_UPLOAD_TYPES
-      : IMAGE_UPLOAD_TYPES;
+    const contentTypeTable = StorageService.contentTypeTableFor(kind);
     const typeSpec = contentTypeTable[contentType];
     if (!typeSpec) {
       throw new BadRequestException(`Unsupported content type: ${contentType}`);

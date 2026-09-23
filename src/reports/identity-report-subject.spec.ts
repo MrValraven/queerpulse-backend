@@ -28,6 +28,14 @@ const CO_MANAGER_ID = '0a000000-0000-4000-8000-000000000003';
 const LISTING_ID = '0b000000-0000-4000-8000-000000000001';
 const LISTING_IDENTITY_ID = '0c000000-0000-4000-8000-000000000001';
 const PROFILE_IDENTITY_ID = '0c000000-0000-4000-8000-000000000002';
+// The reporter's OWN profile identity, the seat they sit in the default
+// customer thread mock as. `PROFILE_IDENTITY_ID` above is a separate id: it
+// names an identity being REPORTED, in a different test.
+const CUSTOMER_PROFILE_IDENTITY_ID = '0c000000-0000-4000-8000-000000000004';
+// A persona (`subprofile`-kind identity) the reporter owns or staffs, used
+// once a customer thread exists on that identity instead of on the
+// reporter's profile.
+const CUSTOMER_PERSONA_IDENTITY_ID = '0c000000-0000-4000-8000-000000000005';
 const THREAD_ID = '0d000000-0000-4000-8000-000000000001';
 
 function identityRow(overrides: Partial<Identity> = {}): Identity {
@@ -61,6 +69,7 @@ describe('ReportsService: the identity subject', () => {
     getById: jest.Mock;
     staffUserIds: jest.Mock;
     describeIdentities: jest.Mock;
+    isAllowedToActAs: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -80,8 +89,15 @@ describe('ReportsService: the identity subject', () => {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       // The customer-thread lookup. Default: the reporter holds a customer
-      // seat in one direct thread with the identity.
-      query: jest.fn().mockResolvedValue([{ conversationId: THREAD_ID }]),
+      // seat, sat as their own profile identity, in one direct thread with
+      // the identity.
+      query: jest.fn().mockResolvedValue([
+        {
+          conversationId: THREAD_ID,
+          customerIdentityId: CUSTOMER_PROFILE_IDENTITY_ID,
+          customerIdentityKind: 'profile',
+        },
+      ]),
     };
     identities = {
       getById: jest.fn().mockResolvedValue(identityRow()),
@@ -98,6 +114,9 @@ describe('ReportsService: the identity subject', () => {
           ],
         ]),
       ),
+      // Default: the reporter is entitled to act as whichever candidate
+      // identity the customer-thread query names.
+      isAllowedToActAs: jest.fn().mockResolvedValue(true),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -177,11 +196,80 @@ describe('ReportsService: the identity subject', () => {
       conversationId: THREAD_ID,
       staffUserIds: [OWNER_ID, CO_MANAGER_ID],
       capturedAt: expect.any(String),
+      reporterIdentityId: CUSTOMER_PROFILE_IDENTITY_ID,
+      reporterIdentityKind: 'profile',
     });
     expect(conversationParticipants.query).toHaveBeenCalledWith(
       expect.any(String),
       [CUSTOMER_ID, LISTING_IDENTITY_ID],
     );
+    expect(identities.isAllowedToActAs).toHaveBeenCalledWith(
+      CUSTOMER_ID,
+      CUSTOMER_PROFILE_IDENTITY_ID,
+    );
+  });
+
+  it('qualifies a persona customer seat and records the persona identity in the evidence', async () => {
+    conversationParticipants.query.mockResolvedValueOnce([
+      {
+        conversationId: THREAD_ID,
+        customerIdentityId: CUSTOMER_PERSONA_IDENTITY_ID,
+        customerIdentityKind: 'subprofile',
+      },
+    ]);
+
+    const dto = await fileAgainst(CUSTOMER_ID, LISTING_IDENTITY_ID);
+
+    expect(dto.subjectType).toBe('identity');
+    expect(savedSnapshot()).toMatchObject({
+      conversationId: THREAD_ID,
+      reporterIdentityId: CUSTOMER_PERSONA_IDENTITY_ID,
+      reporterIdentityKind: 'subprofile',
+    });
+    expect(identities.isAllowedToActAs).toHaveBeenCalledWith(
+      CUSTOMER_ID,
+      CUSTOMER_PERSONA_IDENTITY_ID,
+    );
+  });
+
+  it('skips a candidate thread the reporter is not entitled to act as its identity through, and falls to the next', async () => {
+    conversationParticipants.query.mockResolvedValueOnce([
+      {
+        conversationId: 'thread-not-entitled',
+        customerIdentityId: 'identity-not-entitled',
+        customerIdentityKind: 'company',
+      },
+      {
+        conversationId: THREAD_ID,
+        customerIdentityId: CUSTOMER_PROFILE_IDENTITY_ID,
+        customerIdentityKind: 'profile',
+      },
+    ]);
+    identities.isAllowedToActAs.mockImplementation(
+      (userId: string, candidateIdentityId: string) =>
+        Promise.resolve(candidateIdentityId === CUSTOMER_PROFILE_IDENTITY_ID),
+    );
+
+    const dto = await fileAgainst(CUSTOMER_ID, LISTING_IDENTITY_ID);
+
+    expect(dto.subjectType).toBe('identity');
+    expect(savedSnapshot()).toMatchObject({
+      conversationId: THREAD_ID,
+      reporterIdentityId: CUSTOMER_PROFILE_IDENTITY_ID,
+      reporterIdentityKind: 'profile',
+    });
+  });
+
+  it('the candidate query names only profile, subprofile and company identities, and excludes the reported identity itself', async () => {
+    await fileAgainst(CUSTOMER_ID, LISTING_IDENTITY_ID);
+
+    const [threadSql] = conversationParticipants.query.mock.calls[0] as [
+      string,
+    ];
+    expect(threadSql).toContain(
+      `"customerIdentity"."kind" IN ('profile', 'subprofile', 'company')`,
+    );
+    expect(threadSql).toContain(`"customerSeat"."identity_id" <> $2`);
   });
 
   describe('refuses with one identical 404 body', () => {
@@ -196,7 +284,7 @@ describe('ReportsService: the identity subject', () => {
       return (error as HttpException).getResponse();
     };
 
-    it('for a member with no thread, a signed-out caller, a profile identity and a non-uuid', async () => {
+    it('for a member with no thread, a signed-out caller, a profile identity, a non-uuid and a candidate seat nobody may act as', async () => {
       conversationParticipants.query.mockResolvedValueOnce([]);
       const noThread = await refusalOf(CUSTOMER_ID, LISTING_IDENTITY_ID);
 
@@ -217,11 +305,28 @@ describe('ReportsService: the identity subject', () => {
       identities.getById.mockResolvedValueOnce(null);
       const unknownIdentity = await refusalOf(CUSTOMER_ID, LISTING_IDENTITY_ID);
 
+      // A candidate thread comes back, but the reporter is entitled to act
+      // as none of the identities that sat on their own side of it: the
+      // same 404 as never having had a thread at all.
+      conversationParticipants.query.mockResolvedValueOnce([
+        {
+          conversationId: THREAD_ID,
+          customerIdentityId: CUSTOMER_PROFILE_IDENTITY_ID,
+          customerIdentityKind: 'profile',
+        },
+      ]);
+      identities.isAllowedToActAs.mockResolvedValueOnce(false);
+      const noQualifyingSeat = await refusalOf(
+        CUSTOMER_ID,
+        LISTING_IDENTITY_ID,
+      );
+
       for (const body of [
         signedOut,
         profileIdentity,
         notUuid,
         unknownIdentity,
+        noQualifyingSeat,
       ]) {
         expect(body).toEqual(noThread);
       }

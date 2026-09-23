@@ -26,6 +26,7 @@ describe('MessageRequestsService.handleConnectionAccepted (PRD-340)', () => {
       {} as never, // ConnectionsService, unused by this listener
       {} as never, // BlockFilterService, unused by this listener
       {} as never, // IdentityMailboxSyncService, unused by this listener
+      {} as never, // users repository, unused by this listener
     );
   });
 

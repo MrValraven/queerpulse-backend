@@ -407,6 +407,7 @@ export class CommunitiesExportContributor implements DataExportContribution {
         slug: community.slug,
         name: community.name,
         tagline: community.tagline,
+        nowReading: community.nowReading,
         purpose: community.purpose,
         whoFor: community.whoFor,
         communityType: community.type,

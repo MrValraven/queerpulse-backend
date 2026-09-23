@@ -105,7 +105,11 @@ export class ListingOwnershipService {
 
     // Reconcile the mailbox against the fresh staff set, in this same
     // transaction so it reads the ownership reassignment and the seat
-    // revocations above as already applied. This call recomputes the staff
+    // revocations above as already applied. `resyncMailbox` reads BOTH sides
+    // through `manager`: the staff set (`IdentitiesService.staffUserIds`
+    // with `{ manager }`) and the seats. A staff read on its own pool
+    // connection would see the pre-transfer owner and appointees, end
+    // nobody's seat and seat nobody new. This call recomputes the staff
     // set from source, so it needs no branch for the ownerless-listing case:
     // `IdentitiesService.staffUserIds` already returns the owner plus every
     // active co-manager, whatever that set happens to be.

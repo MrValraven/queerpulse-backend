@@ -297,6 +297,68 @@ describe('StorageService', () => {
     });
   });
 
+  describe('presignImageUpload - listing-menu (mixed image/document)', () => {
+    it('accepts a PDF for the listing-menu kind under listing-menus/', async () => {
+      const service = buildService();
+      const result = await service.presignImageUpload({
+        kind: 'listing-menu',
+        userId: 'user-1',
+        contentType: 'application/pdf',
+        byteSize: 1024,
+      });
+      expect(result.key).toMatch(
+        /^listing-menus\/user-1\/[0-9a-f]{8}-[0-9a-f-]{27}\.pdf$/,
+      );
+    });
+
+    it('accepts an image for the listing-menu kind', async () => {
+      const service = buildService();
+      const result = await service.presignImageUpload({
+        kind: 'listing-menu',
+        userId: 'user-1',
+        contentType: 'image/webp',
+        byteSize: 1024,
+      });
+      expect(result.key).toMatch(/^listing-menus\/user-1\/.+\.webp$/);
+    });
+
+    it('rejects a spreadsheet for the listing-menu kind', async () => {
+      const service = buildService();
+      await expect(
+        service.presignImageUpload({
+          kind: 'listing-menu',
+          userId: 'user-1',
+          contentType: 'text/csv',
+          byteSize: 1024,
+        }),
+      ).rejects.toThrow('Unsupported content type');
+    });
+
+    it('rejects a listing-menu file over 10 MB', async () => {
+      const service = buildService();
+      await expect(
+        service.presignImageUpload({
+          kind: 'listing-menu',
+          userId: 'user-1',
+          contentType: 'application/pdf',
+          byteSize: 10 * 1024 * 1024 + 1,
+        }),
+      ).rejects.toThrow('File too large');
+    });
+
+    it('still refuses a PDF for an image-only kind', async () => {
+      const service = buildService();
+      await expect(
+        service.presignImageUpload({
+          kind: 'listing-photo',
+          userId: 'user-1',
+          contentType: 'application/pdf',
+          byteSize: 1024,
+        }),
+      ).rejects.toThrow('Unsupported content type');
+    });
+  });
+
   describe('createPresignedDownload', () => {
     it('signs a GET for the given key with the standard expiry', async () => {
       const service = buildService();

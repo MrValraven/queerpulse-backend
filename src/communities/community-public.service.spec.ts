@@ -409,10 +409,14 @@ describe('CommunityPublicService', () => {
         frozenReason: 'reports',
         ref: 'QP-C-0004',
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        // A reading group's current book stays inside the club.
+        nowReading: 'Some book',
       });
       members.findOne.mockResolvedValue(null);
 
       const card = await service.getGateCard('queer-devs', 'stranger');
+
+      expect(card).not.toHaveProperty('nowReading');
 
       expect(Object.keys(card).sort()).toEqual(
         [

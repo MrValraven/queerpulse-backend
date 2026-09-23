@@ -32,6 +32,7 @@ import {
   DIRECTORY_MAX_LIMIT,
   ListSubprofileDirectoryQuery,
 } from './dto/list-directory.query';
+import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import {
   Subprofile,
@@ -118,6 +119,12 @@ export class SubprofilePublicReadService {
     private readonly profiles: Repository<Profile>,
     @InjectRepository(Handle)
     private readonly handleRegistry: Repository<Handle>,
+    // Read-only: the old `(creator, slug)` addresses a persona held before its
+    // creator role was handed over. Written by the creator transfer in
+    // `subprofile-creator-transfer.ts`; read here only to forward old nested
+    // links (`throwRehomedOrNotFound`).
+    @InjectRepository(SubprofileAddressHistory)
+    private readonly addressHistory: Repository<SubprofileAddressHistory>,
     private readonly blockFilter: BlockFilterService,
     // Read-only, and only for the two `previous*OwnerOf` reclaim lookups
     // (PRD-204). Every WRITE against the namespace stays on `SubprofilesService`
@@ -536,7 +543,16 @@ export class SubprofilePublicReadService {
       },
     });
     if (!sp) {
-      throw new NotFoundException('Subprofile not found');
+      // The persona may have been handed to a new creator when this member
+      // left it, which moves its nested address. A live linked persona at this
+      // exact `(owner, slug)` was looked up first, so it always wins over an
+      // old address. Always throws.
+      return this.throwRehomedOrNotFound(
+        profile.userId,
+        subslug,
+        viewer,
+        'Subprofile not found',
+      );
     }
     const owner: SubprofileOwnerRef = {
       slug: profile.slug,
@@ -590,7 +606,15 @@ export class SubprofilePublicReadService {
       },
     });
     if (!sp) {
-      throw new NotFoundException('Profile not found');
+      // Both moves at once: the member renamed, and the persona behind the old
+      // link has since been handed to a new creator. Always throws, with the
+      // message this route gives for an unknown owner slug.
+      return this.throwRehomedOrNotFound(
+        moved.userId,
+        subslug,
+        viewer,
+        'Profile not found',
+      );
     }
     await this.assertMovedTargetVisibleOrNotFound(
       sp,
@@ -604,6 +628,106 @@ export class SubprofilePublicReadService {
       code: 'PROFILE_MOVED',
       message: 'That username has moved',
       slug: moved.slug,
+    });
+  }
+
+  /**
+   * Forwarding for `/members/<ownerSlug>/<subslug>` after a creator handoff.
+   * When a persona's creator leaves it (or erases their account) and co-owners
+   * remain, the creator role passes to the longest-standing co-owner, and the
+   * persona's nested address moves under that member's profile. The transfer
+   * records the old `(previous creator, slug)` pair in
+   * `subprofile_address_history`, and this reads it back so every shared link
+   * keeps working.
+   *
+   * The history row names the persona by id, so a persona handed on more than
+   * once (A to B, then B to C) resolves straight to where it lives now: the
+   * owner slug and persona slug in the answer are the CURRENT ones, read off the
+   * live rows at request time.
+   *
+   * The same disclosure rules as the other forwards apply, because this route
+   * answers anonymous callers and the payload names a member's username:
+   *   - the target must still be linked. A persona that went unlinked is
+   *     anonymous now, and forwarding would tie it to both creators.
+   *   - its creator must still have a profile to nest it under.
+   *   - it must pass `assertMovedTargetVisibleOrNotFound`, so a persona that is
+   *     private, network-only for this viewer, a draft, removed, taken down or
+   *     blocked either way with its current creator answers exactly like an
+   *     address nobody ever held.
+   *   - the viewer must not be blocked either way with the PREVIOUS creator.
+   *     The forward names the new creator, but it also confirms that the
+   *     previous creator made this persona. Before the handoff a blocked
+   *     viewer got the plain 404 at this very address, so the handoff must not
+   *     start answering them.
+   *
+   * History rows exist only for addresses that were public: the transfer
+   * records one only for a persona that was linked when it moved, since only
+   * a linked persona ever answered `/members/<previous creator>/<slug>`.
+   *
+   * Only a live LINKED persona at the requested `(owner, slug)` outranks the
+   * history row, because only a linked persona could have answered this route.
+   * Letting an unlinked persona at the same pair suppress the forward would
+   * turn the 404-versus-forward difference into a way to learn that a member
+   * runs an anonymous persona under that slug.
+   *
+   * `notFoundMessage` is the caller's own first-miss message, so a withheld
+   * forward reads exactly like the miss it replaces.
+   *
+   * Never returns. The caller treats it as a throw.
+   */
+  private async throwRehomedOrNotFound(
+    previousCreatorUserId: string,
+    subslug: string,
+    viewer: CurrentUserData | undefined,
+    notFoundMessage: string,
+  ): Promise<never> {
+    const history = await this.addressHistory.findOne({
+      where: { previousUserId: previousCreatorUserId, slug: subslug },
+      select: { subprofileId: true },
+    });
+    if (!history) {
+      throw new NotFoundException(notFoundMessage);
+    }
+    // Skipped for an anonymous viewer, who has no account to block anyone, so
+    // the anonymous answer (the only cacheable one) is unaffected.
+    if (
+      viewer &&
+      (await this.blockFilter.isBlockedEitherWay(
+        viewer.userId,
+        previousCreatorUserId,
+      ))
+    ) {
+      throw new NotFoundException(notFoundMessage);
+    }
+    const rehomed = await this.subprofiles.findOne({
+      where: { id: history.subprofileId },
+    });
+    if (
+      !rehomed ||
+      rehomed.linkVisibility !== SubprofileLinkVisibility.Linked
+    ) {
+      throw new NotFoundException(notFoundMessage);
+    }
+    const creatorProfile = await this.profiles.findOne({
+      where: { userId: rehomed.userId },
+    });
+    if (!creatorProfile) {
+      throw new NotFoundException(notFoundMessage);
+    }
+    await this.assertMovedTargetVisibleOrNotFound(
+      rehomed,
+      viewer,
+      notFoundMessage,
+    );
+    // Same application-level 404 as `PERSONA_MOVED` / `PROFILE_MOVED`, for the
+    // reasons given in `throwPersonaMovedOrNotFound`. Both path segments can
+    // change here, so the payload carries both: the SPA rebuilds
+    // `/members/<ownerSlug>/<slug>` from them.
+    throw new NotFoundException({
+      code: 'PERSONA_REHOMED',
+      message: 'That persona has a new address',
+      ownerSlug: creatorProfile.slug,
+      slug: rehomed.slug,
     });
   }
 

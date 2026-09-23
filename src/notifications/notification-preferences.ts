@@ -359,6 +359,13 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.CommunitySupportOffered,
     NotificationType.SubprofileDeleted,
     NotificationType.SubprofileMemberRemoved,
+    // The persona creator handoff (Phase 2, option A): every remaining member
+    // learns who the creator is now, when the transfer came from the creator
+    // leaving or an account erasure. The orphan repair migrations
+    // (`1821500400000` and its rerun `1821700000000`) send none.
+    // Reaches everyone regardless of a block or mute between any of them and
+    // the departing creator, so no content-volume category may swallow it.
+    NotificationType.SubprofileCreatorChanged,
 
     // 4. A decision on something you asked for, or a gathering that changed.
     NotificationType.EventUpdated,

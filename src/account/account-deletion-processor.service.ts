@@ -23,6 +23,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
+import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
 import { User } from '../users/entities/user.entity';
 import {
@@ -84,6 +85,12 @@ export class AccountDeletionProcessorService {
     // would break silently the day it gains another. `MediaReferencesModule`
     // does not import `AccountModule`, so this needs no `forwardRef`.
     private readonly mediaReferences: MediaReferenceResolver,
+    // Hands every shared persona the erased member created to its
+    // longest-standing remaining co-owner (step 0c), under the same ordering
+    // requirement as `communityOwnerOrphan` above. `SubprofilesModule` does
+    // not import `AccountModule`, directly or transitively, so this needs no
+    // `forwardRef`.
+    private readonly subprofileMembership: SubprofileMembershipService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -246,6 +253,7 @@ export class AccountDeletionProcessorService {
    *
    * BEFORE any of that, resolve community ownership and the content other
    * members depend on (step 0) — see the calls below.
+   * Step 0c hands over the shared personas the member created.
    */
   private async eraseAccount(userId: string): Promise<void> {
     // 0. Resolve any community ownership BEFORE the user row is deleted.
@@ -291,6 +299,25 @@ export class AccountDeletionProcessorService {
     //     still attributed to `userId` AND still in the state that needs
     //     changing), so the retry path `eraseDueAccounts` leaves open is safe.
     await this.contentOwnerErasure.eraseFor(userId);
+
+    // 0c. Hand over the personas this member CREATED that other members still
+    //     co-own. `subprofiles.user_id` is `ON DELETE CASCADE`, so step 3
+    //     would otherwise delete a shared persona out from under every
+    //     co-owner. `handOverCreatedPersonasFor` moves the creator role on
+    //     each such persona to the longest-standing remaining co-owner with
+    //     an active account, or the longest-standing one when nobody
+    //     remaining is active (earliest `joined_at`, ties broken by `id`),
+    //     the same rule a creator's own Leave follows. A persona with no other member is left
+    //     alone and cascades away with the user row, as before.
+    //
+    //     Outside the transaction for the same reasons as steps 0 and 0b: the
+    //     service opens and commits one transaction per persona, and emits its
+    //     seat and creator-changed events after each commit, so they must see
+    //     committed state. It is idempotent (it acts only on personas whose
+    //     `user_id` still names this member), so the retry path
+    //     `eraseDueAccounts` leaves open is safe. A failure here throws, and
+    //     the request stays parked in `processing` before anything is deleted.
+    await this.subprofileMembership.handOverCreatedPersonasFor(userId);
 
     await this.dataSource.transaction(async (manager) => {
       // `addSelect('user.email')` re-includes the `select: false` email column:

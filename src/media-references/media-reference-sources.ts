@@ -614,6 +614,24 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
   }),
 
   arraySource({
+    type: 'listing-menu',
+    field: 'Listing.menu.file',
+    entity: Listing,
+    // Raw SQL column name (see the gallery source above).
+    column: 'menu',
+    idColumn: 'id',
+    labelColumns: ['name'],
+    slugColumn: 'slug',
+    // The menu's one file. Sections and the link are prose and URLs to other
+    // sites, never storage keys.
+    extractRefs: (row) => {
+      const fileUrl = (row.menu as { file?: { url?: unknown } | null } | null)
+        ?.file?.url;
+      return typeof fileUrl === 'string' ? [fileUrl] : [];
+    },
+  }),
+
+  arraySource({
     type: 'company-work',
     field: 'Company.work[].imageUrl',
     entity: Company,

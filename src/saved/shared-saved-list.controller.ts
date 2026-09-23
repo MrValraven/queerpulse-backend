@@ -1,55 +1,59 @@
 import { Controller, Get, Param, UseGuards } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
   ApiTooManyRequestsResponse,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
-import { Public } from '../auth/decorators/public.decorator';
-import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
-import { UserStatus } from '../users/entities/user.entity';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { SavedListsService } from './saved-lists.service';
 
 /**
  * The read behind a share link.
  *
- * `@Public()` because the whole point is sending it to a friend who has just
- * moved to the city and may not have an account yet. The token is therefore the
- * ONE credential, which is exactly the trust model
- * `GET /calendar/feed/:token` already runs on, and it is why the token is 32
- * random bytes rather than anything derived from the list or its owner.
+ * MEMBERS ONLY, by product decision. A shared list is a record of where
+ * somebody goes, so a link that leaks beyond the people it was sent to must
+ * stay unreadable to anyone without a QueerPulse account. The route carries no
+ * `@Public()`, so the global `JwtAuthGuard` answers a signed-out caller with a
+ * 401 and `ActiveMemberGuard` answers a suspended or pending one with a 403.
+ * Both run before the handler, so a caller who fails either check learns
+ * nothing about whether a token exists.
  *
- * NO `Cache-Control`. Every other public GET in this codebase carries a
- * positive one so a CDN can answer repeat requests; this one deliberately does
- * not. A cached copy would outlive a revoke, and revoking is the only defence a
+ * The token is the credential for the LIST: holding a valid session gets you
+ * past the guards, and only the token gets you a particular list. It is 32
+ * random bytes with nothing derived from the list or its owner.
+ *
+ * NO `Cache-Control`. The public GETs in this codebase carry a positive one so
+ * a CDN can answer repeat requests; this route deliberately sets none. A cached
+ * copy would outlive a revoke, and revoking is the only defence a
  * member has once a link has left their hands. A list of queer venues is a
  * record of where somebody goes, so the revoke has to be immediate.
  *
  * Throttled: the token space is far too large to walk, but there is no reason
  * for one caller to be asking hundreds of times a minute either.
  *
- * OPTIONALLY AUTHENTICATED (PRD-169). The route stays open to somebody with no
- * account, and it now also NOTICES when the recipient does have one, because
- * every saved kind but the business directory sits behind `ActiveMemberGuard`
- * on its own module. Without this, a member opening a friend's list would be
- * told a community and a thread they can plainly read are "no longer
- * available", purely because the endpoint never looked at who was asking. It
- * discloses nothing extra about the LIST (the payload is unchanged and still
- * says nothing about its owner) and nothing about the viewer to the owner.
+ * Availability is resolved through the RECIPIENT's eyes (PRD-169): every saved
+ * kind but the business directory sits behind `ActiveMemberGuard` on its own
+ * module, so the signed-in viewer's id decides which items they can open. The
+ * payload still says nothing about the list's owner, and nothing about the
+ * viewer reaches the owner.
  */
 @ApiTags('Saved')
+@ApiCookieAuth('access_token')
 @Controller('saved-lists')
+@UseGuards(ActiveMemberGuard)
 export class SharedSavedListController {
   constructor(private readonly savedListsService: SavedListsService) {}
 
-  @Public()
-  @UseGuards(OptionalJwtAuthGuard)
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get(':token')
   @ApiOperation({
@@ -63,17 +67,13 @@ export class SharedSavedListController {
     description:
       'The token is malformed, was revoked, or never existed. The three are deliberately indistinguishable.',
   })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Not an active member.' })
   @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded.' })
   getShared(
-    // Populated best-effort by `OptionalJwtAuthGuard`; undefined when
-    // anonymous. Only an ACTIVE member counts as a viewer, matching the bar
-    // `ActiveMemberGuard` sets on every subject module's own read (the same
-    // narrowing `DirectoryController.getDirectoryListing` applies).
-    @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentUser() user: CurrentUserData,
     @Param('token') token: string,
   ) {
-    const viewerId =
-      user?.status === UserStatus.Active ? (user?.userId ?? null) : null;
-    return this.savedListsService.getShared(token, viewerId);
+    return this.savedListsService.getShared(token, user.userId);
   }
 }

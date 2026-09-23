@@ -27,6 +27,10 @@ import {
 } from '../listing-accessibility';
 import { LISTING_CATEGORY_SLUGS } from '../listing-categories';
 import { MAX_LISTING_GALLERY_PHOTOS } from '../listing-photo-gallery';
+import type {
+  ListingMenuDietary,
+  ListingPricingMode,
+} from '../entities/listing.entity';
 import { IsAccessibilityAnswerMap } from './accessibility-answers.validator';
 import { IsValidDayHours } from './day-hours.validator';
 import {
@@ -279,6 +283,77 @@ export class ListingServiceOfferingDto {
   @IsOptional() @IsString() @MaxLength(140) note?: string;
 }
 
+/** The two lists a listing can show. */
+export const LISTING_PRICING_MODES = ['services', 'menu'] as const;
+
+/** The fixed dietary labels, in display order. */
+export const LISTING_MENU_DIETARY = [
+  'vegan',
+  'vegetarian',
+  'glutenFree',
+  'alcoholFree',
+] as const;
+
+/** A real menu with headroom: brunch, drinks, a bar list, specials. */
+export const MAX_LISTING_MENU_SECTIONS = 12;
+
+/**
+ * Items across ALL sections. Class-validator cannot count across nested
+ * arrays, so `normalizeListingMenu` enforces this total. The per-section
+ * `ArrayMaxSize` below uses the same number as an outer bound.
+ */
+export const MAX_LISTING_MENU_ITEMS = 150;
+
+export class ListingMenuItemDto {
+  @IsString() @IsNotEmpty() @MaxLength(120) name!: string;
+  @IsString() @IsNotEmpty() @MaxLength(80) price!: string;
+  @IsOptional() @IsString() @MaxLength(200) description?: string;
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(LISTING_MENU_DIETARY.length)
+  @IsIn(LISTING_MENU_DIETARY, { each: true })
+  dietary?: ListingMenuDietary[];
+}
+
+export class ListingMenuSectionDto {
+  // May be blank here: a section with no items is dropped on save, and a
+  // section with items and no title is refused by `normalizeListingMenu`.
+  @IsString() @MaxLength(80) title!: string;
+
+  @IsArray()
+  @ArrayMaxSize(MAX_LISTING_MENU_ITEMS)
+  @ValidateNested({ each: true })
+  @Type(() => ListingMenuItemDto)
+  items!: ListingMenuItemDto[];
+}
+
+export class ListingMenuFileDto {
+  // Any of our upload keys passes here; `normalizeListingMenu` then refuses
+  // every kind but `listing-menu`.
+  @IsNotEmpty() @IsImageReference() url!: string;
+  @IsString() @MaxLength(120) fileName!: string;
+}
+
+export class ListingMenuDto {
+  @IsArray()
+  @ArrayMaxSize(MAX_LISTING_MENU_SECTIONS)
+  @ValidateNested({ each: true })
+  @Type(() => ListingMenuSectionDto)
+  sections!: ListingMenuSectionDto[];
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingMenuFileDto)
+  file?: ListingMenuFileDto | null;
+
+  // Same validators as `social.website`.
+  @IsOptional()
+  @IsString()
+  @IsSafeExternalUrl()
+  @MaxLength(300)
+  link?: string;
+}
+
 /**
  * A field that is REQUIRED on the `claim` path but OPTIONAL on `suggest`
  * (item #2). On `claim` the field is always validated (so an absent/empty value
@@ -392,6 +467,18 @@ export class CreateListingDto {
   @ValidateNested({ each: true })
   @Type(() => ListingServiceOfferingDto)
   services?: ListingServiceOfferingDto[];
+
+  // Which list the public page shows. Omitted on create, it defaults from the
+  // categories (`defaultPricingModeForCats`).
+  @IsOptional()
+  @IsIn(LISTING_PRICING_MODES)
+  pricingMode?: ListingPricingMode;
+
+  // A bar's, café's or restaurant's menu. Optional: most listings have none.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingMenuDto)
+  menu?: ListingMenuDto;
 
   @IsOptional()
   @IsArray()

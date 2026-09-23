@@ -11,6 +11,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { Subprofile } from './entities/subprofile.entity';
+import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
@@ -37,6 +38,7 @@ import { SubprofilesService } from './subprofiles.service';
   imports: [
     TypeOrmModule.forFeature([
       Subprofile,
+      SubprofileAddressHistory,
       SubprofileAffiliation,
       SubprofileEndorsement,
       SubprofileFollower,
@@ -101,6 +103,12 @@ import { SubprofilesService } from './subprofiles.service';
   // Exported for the cross-entity SearchModule (standalone-persona search).
   // `SubprofileEndorsementsService` is also exported: `PublicEligibilityModule`
   // reads endorsement counts for the caller's public-profile eligibility signals.
-  exports: [SubprofilesService, SubprofileEndorsementsService],
+  // `SubprofileMembershipService` is exported for account erasure, which calls
+  // `handOverCreatedPersonasFor` before the user row is deleted.
+  exports: [
+    SubprofilesService,
+    SubprofileEndorsementsService,
+    SubprofileMembershipService,
+  ],
 })
 export class SubprofilesModule {}

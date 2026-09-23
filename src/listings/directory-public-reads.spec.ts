@@ -78,6 +78,8 @@ function makeListing(overrides: Partial<Listing> = {}): Listing {
     whatItIs: [],
     goodFor: [],
     services: [],
+    menu: { sections: [], file: null, link: '' },
+    pricingMode: 'services',
     accessibilityAnswers: ALL_UNKNOWN,
     accessibilityNote: '',
     social: {},

@@ -301,7 +301,7 @@ export async function loadViewerRenderInputs(
   viewerIds: ReadonlyArray<string>,
 ): Promise<ViewerRenderInputs[]> {
   const replyIds = message.replyToId ? [message.replyToId] : [];
-  const [seats, users, starRows, reactionRows, parents, hideRows] =
+  const [seats, users, starRows, reactionRows, loadedParents, hideRows] =
     await Promise.all([
       dependencies.participants.find({
         where: { conversationId: message.conversationId },
@@ -326,6 +326,12 @@ export async function loadViewerRenderInputs(
           })
         : Promise.resolve([] as MessageHide[]),
     ]);
+  // A parent from another conversation renders as a missing parent in
+  // `toMessageResponses`, so it adds no sender identity or floored parent to
+  // any viewer's class key either.
+  const parents = loadedParents.filter(
+    (parent) => parent.conversationId === message.conversationId,
+  );
 
   const firstSeatByUserId = new Map<string, ConversationParticipant>();
   const seatCountByUserId = new Map<string, number>();
@@ -343,7 +349,9 @@ export async function loadViewerRenderInputs(
   // asked once for every floored seat in the audience.
   const flooredSeatIds = viewerIds
     .map((viewerId) => firstSeatByUserId.get(viewerId))
-    .filter((seat): seat is ConversationParticipant => Boolean(seat?.clearedAt))
+    .filter((seat): seat is ConversationParticipant =>
+      Boolean(seat?.historyFloorAt),
+    )
     .map((seat) => seat.id);
   const flooredParentRows =
     parents.length > 0 && flooredSeatIds.length > 0

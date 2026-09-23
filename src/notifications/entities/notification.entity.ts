@@ -1418,6 +1418,39 @@ export enum NotificationType {
    * See migration `AddGroupConsentInvitesAndDissolve1819000000000`.
    */
   GroupInvite = 'group_invite',
+  /**
+   * Persona creator handoff (Phase 2, option A). Sent to every remaining
+   * member of a persona (`subprofile_members`) when its creator role
+   * transfers to the longest-standing co-owner, whether that happens because
+   * the creator left (`SubprofileMembershipService.leave`) or their account
+   * was erased (`handOverCreatedPersonasFor`). The orphan repair migrations
+   * (`1821500400000` and its rerun `1821700000000`) hand orphaned personas
+   * over and send none. Written by
+   * `NotificationsListener.onSubprofileCreatorChanged` off
+   * `SUBPROFILE_CREATOR_CHANGED`.
+   *
+   * NO ACTOR, deliberately, and no `actorId` argument at the emit site: this
+   * must reach every remaining member regardless of a block or mute between
+   * any of them and the departing creator, the same reasoning
+   * `CommunityOwnershipTransferred` and `ModerationOutcome` already carry. The
+   * departing creator is never named in the payload either, matching the
+   * product decision to keep this focused on the role change itself.
+   *
+   * ONE VALUE, TWO ROWS PER TRANSFER. The successor gets `isYou: true`, every
+   * other remaining member gets `isYou: false`, so the copy can read "You are
+   * now the creator of X" for one recipient and "Ana is now the creator of X"
+   * for the rest, from the same enum member.
+   *
+   * PAYLOAD: `{ subprofileName, newCreatorName, isYou }`. `subprofileName` and
+   * `newCreatorName` are read back so the row is complete without a second
+   * lookup; neither is member-authored prose, both are already public on the
+   * persona's own page. Governance of a persona you co-own, matching
+   * `SubprofileDeleted`/`SubprofileMemberRemoved` directly above:
+   * always-delivered, no `NotificationPreferenceCategory`.
+   *
+   * See migration `AddSubprofileCreatorChangedNotificationType1821500300000`.
+   */
+  SubprofileCreatorChanged = 'subprofile_creator_changed',
 }
 
 @Entity('notifications')

@@ -1,5 +1,12 @@
 import { QueryFailedError } from 'typeorm';
-import { IdentityKind } from './entities/identity.entity';
+import {
+  ListingCoManager,
+  ListingCoManagerStatus,
+} from '../listings/entities/listing-co-manager.entity';
+import { Listing } from '../listings/entities/listing.entity';
+import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { Identity, IdentityKind } from './entities/identity.entity';
 import { IdentitiesService } from './identities.service';
 
 function makeUniqueViolation(): QueryFailedError {
@@ -110,6 +117,54 @@ describe('IdentitiesService.staffUserIds', () => {
     ]);
   });
 
+  // Final review C1: `leave` deletes a departing creator's roster row and
+  // leaves `subprofiles.user_id` as it was. Reading that column as staff let
+  // every seat sync, the hourly sweep included, seat them again.
+  it('leaves out a persona creator who left the roster', async () => {
+    const { service, identities, subprofiles, subprofileMembers } =
+      makeService();
+    identities.findOne.mockResolvedValue({
+      id: 'identity-2',
+      kind: IdentityKind.Subprofile,
+      subprofileId: 'persona-1',
+    });
+    subprofiles.findOne.mockResolvedValue({
+      id: 'persona-1',
+      userId: 'departed-creator',
+    });
+    subprofileMembers.find.mockResolvedValue([{ userId: 'coowner-user' }]);
+
+    await expect(service.staffUserIds('identity-2')).resolves.toEqual([
+      'coowner-user',
+    ]);
+    await expect(
+      service.isAllowedToActAs('departed-creator', 'identity-2'),
+    ).resolves.toBe(false);
+  });
+
+  it('keeps a creator who is still on the roster first, whatever the roster order', async () => {
+    const { service, identities, subprofiles, subprofileMembers } =
+      makeService();
+    identities.findOne.mockResolvedValue({
+      id: 'identity-2',
+      kind: IdentityKind.Subprofile,
+      subprofileId: 'persona-1',
+    });
+    subprofiles.findOne.mockResolvedValue({
+      id: 'persona-1',
+      userId: 'creator-user',
+    });
+    subprofileMembers.find.mockResolvedValue([
+      { userId: 'coowner-user' },
+      { userId: 'creator-user' },
+    ]);
+
+    await expect(service.staffUserIds('identity-2')).resolves.toEqual([
+      'creator-user',
+      'coowner-user',
+    ]);
+  });
+
   it('returns just the member for a profile identity', async () => {
     const { service, identities } = makeService();
     identities.findOne.mockResolvedValue({
@@ -167,6 +222,219 @@ describe('IdentitiesService.staffUserIds', () => {
     const { service, identities } = makeService();
     identities.findOne.mockResolvedValue(null);
     await expect(service.staffUserIds('missing')).resolves.toEqual([]);
+  });
+});
+
+// Fix round 1: the mailbox seat sync reads staff inside its own transaction,
+// and the hourly sweep reads it under a share lock.
+describe('IdentitiesService.staffUserIds inside a transaction', () => {
+  function makeTransactionManager(repositories: Map<unknown, unknown>) {
+    return {
+      getRepository: jest.fn((entity: unknown) => {
+        const repository = repositories.get(entity);
+        if (!repository) {
+          throw new Error('Unmodelled repository');
+        }
+        return repository;
+      }),
+    };
+  }
+
+  it('reads every source through the given manager and leaves the injected repositories untouched', async () => {
+    const injected = makeService();
+    const transactionIdentities = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'identity-1',
+        kind: IdentityKind.Listing,
+        listingId: 'listing-1',
+      }),
+    };
+    // The transaction's own view: the ownership transfer it has not
+    // committed yet already names the new owner.
+    const transactionListings = {
+      findOne: jest
+        .fn()
+        .mockResolvedValue({ id: 'listing-1', ownerId: 'new-owner' }),
+    };
+    const transactionCoManagers = { find: jest.fn().mockResolvedValue([]) };
+    const manager = makeTransactionManager(
+      new Map<unknown, unknown>([
+        [Identity, transactionIdentities],
+        [Listing, transactionListings],
+        [ListingCoManager, transactionCoManagers],
+      ]),
+    );
+
+    await expect(
+      injected.service.staffUserIds('identity-1', {
+        manager: manager as never,
+      }),
+    ).resolves.toEqual(['new-owner']);
+
+    expect(injected.identities.findOne).not.toHaveBeenCalled();
+    expect(injected.listings.findOne).not.toHaveBeenCalled();
+    expect(injected.listingCoManagers.find).not.toHaveBeenCalled();
+    // No lock unless asked for.
+    expect(transactionListings.findOne).toHaveBeenCalledWith({
+      where: { id: 'listing-1' },
+    });
+    expect(transactionCoManagers.find).toHaveBeenCalledWith({
+      where: { listingId: 'listing-1', status: 'active' },
+    });
+  });
+
+  it('locks the listing row, then every seat row of it, FOR SHARE, and keeps only active seats', async () => {
+    const { service } = makeService();
+    const transactionIdentities = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'identity-1',
+        kind: IdentityKind.Listing,
+        listingId: 'listing-1',
+      }),
+    };
+    const transactionListings = {
+      findOne: jest
+        .fn()
+        .mockResolvedValue({ id: 'listing-1', ownerId: 'owner' }),
+    };
+    const transactionCoManagers = {
+      find: jest.fn().mockResolvedValue([
+        { userId: 'active-comanager', status: ListingCoManagerStatus.Active },
+        { userId: 'invited-member', status: ListingCoManagerStatus.Invited },
+        { userId: 'revoked-member', status: ListingCoManagerStatus.Revoked },
+      ]),
+    };
+    const manager = makeTransactionManager(
+      new Map<unknown, unknown>([
+        [Identity, transactionIdentities],
+        [Listing, transactionListings],
+        [ListingCoManager, transactionCoManagers],
+      ]),
+    );
+
+    await expect(
+      service.staffUserIds('identity-1', {
+        manager: manager as never,
+        shouldLockStaffSource: true,
+      }),
+    ).resolves.toEqual(['owner', 'active-comanager']);
+
+    expect(transactionListings.findOne).toHaveBeenCalledWith({
+      where: { id: 'listing-1' },
+      lock: { mode: 'pessimistic_read' },
+    });
+    // Every seat row, whatever its status, so an invitation turning into
+    // access waits for the lock too.
+    expect(transactionCoManagers.find).toHaveBeenCalledWith({
+      where: { listingId: 'listing-1' },
+      lock: { mode: 'pessimistic_read' },
+    });
+    expect(
+      transactionListings.findOne.mock.invocationCallOrder[0],
+    ).toBeLessThan(transactionCoManagers.find.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it('locks the persona row FOR SHARE before it reads the roster', async () => {
+    const { service } = makeService();
+    const transactionIdentities = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'identity-2',
+        kind: IdentityKind.Subprofile,
+        subprofileId: 'persona-1',
+      }),
+    };
+    const transactionSubprofiles = {
+      findOne: jest
+        .fn()
+        .mockResolvedValue({ id: 'persona-1', userId: 'creator-user' }),
+    };
+    const transactionMembers = {
+      find: jest
+        .fn()
+        .mockResolvedValue([
+          { userId: 'creator-user' },
+          { userId: 'coowner-user' },
+        ]),
+    };
+    const manager = makeTransactionManager(
+      new Map<unknown, unknown>([
+        [Identity, transactionIdentities],
+        [Subprofile, transactionSubprofiles],
+        [SubprofileMember, transactionMembers],
+      ]),
+    );
+
+    await expect(
+      service.staffUserIds('identity-2', {
+        manager: manager as never,
+        shouldLockStaffSource: true,
+      }),
+    ).resolves.toEqual(['creator-user', 'coowner-user']);
+
+    expect(transactionSubprofiles.findOne).toHaveBeenCalledWith({
+      where: { id: 'persona-1' },
+      lock: { mode: 'pessimistic_read' },
+    });
+    expect(
+      transactionSubprofiles.findOne.mock.invocationCallOrder[0],
+    ).toBeLessThan(transactionMembers.find.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it('leaves out a departed persona creator under the lock, the read the hourly sweep makes', async () => {
+    const { service } = makeService();
+    const manager = makeTransactionManager(
+      new Map<unknown, unknown>([
+        [
+          Identity,
+          {
+            findOne: jest.fn().mockResolvedValue({
+              id: 'identity-2',
+              kind: IdentityKind.Subprofile,
+              subprofileId: 'persona-1',
+            }),
+          },
+        ],
+        [
+          Subprofile,
+          {
+            findOne: jest.fn().mockResolvedValue({
+              id: 'persona-1',
+              userId: 'departed-creator',
+            }),
+          },
+        ],
+        [
+          SubprofileMember,
+          { find: jest.fn().mockResolvedValue([{ userId: 'coowner-user' }]) },
+        ],
+      ]),
+    );
+
+    await expect(
+      service.staffUserIds('identity-2', {
+        manager: manager as never,
+        shouldLockStaffSource: true,
+      }),
+    ).resolves.toEqual(['coowner-user']);
+  });
+
+  it('ignores the lock without a manager, keeping the plain read', async () => {
+    const { service, identities, listings, listingCoManagers } = makeService();
+    identities.findOne.mockResolvedValue({
+      id: 'identity-1',
+      kind: IdentityKind.Listing,
+      listingId: 'listing-1',
+    });
+    listings.findOne.mockResolvedValue({ id: 'listing-1', ownerId: 'owner' });
+
+    await service.staffUserIds('identity-1', { shouldLockStaffSource: true });
+
+    expect(listings.findOne).toHaveBeenCalledWith({
+      where: { id: 'listing-1' },
+    });
+    expect(listingCoManagers.find).toHaveBeenCalledWith({
+      where: { listingId: 'listing-1', status: 'active' },
+    });
   });
 });
 

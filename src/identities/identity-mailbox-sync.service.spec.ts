@@ -1,6 +1,11 @@
 import { CONVERSATION_CLAIM_CHANGED } from '../messaging/conversation-claim';
+import { Conversation } from '../messaging/entities/conversation.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { CONVERSATION_MEMBERSHIP_REVOKED } from '../messaging/messaging.events';
-import { IdentityKind } from './entities/identity.entity';
+import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { Identity, IdentityKind } from './entities/identity.entity';
+import { IdentitiesService } from './identities.service';
 import { IdentityMailboxSyncService } from './identity-mailbox-sync.service';
 import { IDENTITY_STAFFING_CHANGED } from './identity-staffing.events';
 
@@ -52,6 +57,22 @@ function matchesWhere(
   });
 }
 
+/** What the stand-in database clock answers for a seat's floor instant. It
+ *  lies in the past of any test run, so a floor taken from the application
+ *  clock can never equal it: an equal floor provably came from the
+ *  database. */
+const DATABASE_NOW = new Date('2026-09-15T10:00:00.123Z');
+
+/** The stand-in for the one clock read `seatFloorInstant` issues. */
+function databaseClockQuery() {
+  return jest.fn((sql: string) => {
+    if (!sql.includes('clock_timestamp()')) {
+      throw new Error(`Unmodelled query: ${sql}`);
+    }
+    return Promise.resolve([{ floorInstant: DATABASE_NOW }]);
+  });
+}
+
 // --- IdentityMailboxSyncService.onStaffAdded / onStaffRemoved --------------
 //
 // The four tests specified for this task, adapted to the constructor this
@@ -83,6 +104,7 @@ function makeService(
     save: jest.fn(async (rows: unknown[]) => rows),
     update: jest.fn(),
     create: jest.fn((row: unknown) => row),
+    query: databaseClockQuery(),
   };
   const identitiesRepository = { find: jest.fn() };
   // No claim in these tests' fixtures, so a claim-release lookup always
@@ -132,19 +154,31 @@ describe('IdentityMailboxSyncService', () => {
     );
   });
 
-  it('gives a new staff member a clearedAt floor so they do not inherit history', async () => {
-    const { service, participants } = makeService(['conversation-1']);
+  it('gives a new staff member a history floor and a clear point at the one database instant', async () => {
+    const { service, participants } = makeService([
+      'conversation-1',
+      'conversation-2',
+    ]);
     await service.onStaffAdded('business-identity', 'new-staff');
     const savedCall = participants.save.mock.calls[0];
     if (!savedCall) {
       throw new Error('Expected onStaffAdded to save the newly-seated row');
     }
-    const saved = savedCall[0] as Array<{ clearedAt: Date | null }>;
-    const [firstSavedRow] = saved;
-    if (!firstSavedRow) {
-      throw new Error('Expected at least one saved row');
+    const saved = savedCall[0] as Array<{
+      clearedAt: Date | null;
+      historyFloorAt: Date | null;
+    }>;
+    expect(saved).toHaveLength(2);
+    for (const savedRow of saved) {
+      expect(savedRow.historyFloorAt).toEqual(DATABASE_NOW);
+      expect(savedRow.clearedAt).toEqual(DATABASE_NOW);
     }
-    expect(firstSavedRow.clearedAt).toBeInstanceOf(Date);
+    // One clock read for the whole seating, truncated to a whole
+    // millisecond in SQL.
+    expect(participants.query).toHaveBeenCalledTimes(1);
+    expect(participants.query).toHaveBeenCalledWith(
+      `SELECT date_trunc('milliseconds', clock_timestamp()) AS "floorInstant"`,
+    );
   });
 
   it('is idempotent, skipping threads the member already sits in', async () => {
@@ -155,6 +189,8 @@ describe('IdentityMailboxSyncService', () => {
     await service.onStaffAdded('business-identity', 'existing-staff');
     const saved = participants.save.mock.calls[0]?.[0];
     expect(saved ?? []).toHaveLength(0);
+    // Nobody to seat, so no clock read either.
+    expect(participants.query).not.toHaveBeenCalled();
   });
 
   it('marks rows left, keeping them, when staff leave', async () => {
@@ -187,6 +223,7 @@ interface FakeParticipantRow {
   identityId: string;
   leftAt: Date | null;
   clearedAt: Date | null;
+  historyFloorAt: Date | null;
 }
 
 function makeFakeParticipantsRepository(seedRows: FakeParticipantRow[]) {
@@ -204,6 +241,7 @@ function makeFakeParticipantsRepository(seedRows: FakeParticipantRow[]) {
         id: `generated-${nextGeneratedId++}`,
         leftAt: null,
         clearedAt: null,
+        historyFloorAt: null,
         conversationId: '',
         userId: '',
         identityId: '',
@@ -232,9 +270,18 @@ function makeFakeParticipantsRepository(seedRows: FakeParticipantRow[]) {
         return { affected, raw: [], generatedMaps: [] };
       },
     ),
+    query: databaseClockQuery(),
   };
 
-  return { repository, rowsSnapshot: () => rows.map((row) => ({ ...row })) };
+  return {
+    repository,
+    rowsSnapshot: () => rows.map((row) => ({ ...row })),
+    // Stands in for a rollback: puts back the rows a transaction started
+    // from.
+    replaceRows: (savedRows: FakeParticipantRow[]) => {
+      rows = savedRows.map((row) => ({ ...row }));
+    },
+  };
 }
 
 function seatRow(overrides: Partial<FakeParticipantRow>): FakeParticipantRow {
@@ -245,6 +292,7 @@ function seatRow(overrides: Partial<FakeParticipantRow>): FakeParticipantRow {
     identityId: 'business-identity',
     leftAt: null,
     clearedAt: null,
+    historyFloorAt: null,
     ...overrides,
   };
 }
@@ -383,7 +431,8 @@ describe('IdentityMailboxSyncService.resyncMailbox', () => {
     const newRow = rows.find((row) => row.userId === 'new-comanager');
     expect(newRow).toBeDefined();
     expect(newRow?.leftAt).toBeNull();
-    expect(newRow?.clearedAt).toBeInstanceOf(Date);
+    expect(newRow?.clearedAt).toEqual(DATABASE_NOW);
+    expect(newRow?.historyFloorAt).toEqual(DATABASE_NOW);
     // The staff member who was already seated is untouched.
     expect(rows.filter((row) => row.userId === 'owner')).toHaveLength(1);
   });
@@ -513,8 +562,8 @@ describe('IdentityMailboxSyncService returning-member idempotency', () => {
 // --- CW-26: a rehire gets the same history floor a new hire gets -----------
 //
 // Cleanup wave ruling: a rehired staff member is just a staff member again,
-// so `clearedAt` on the reactivated row must be floored at `now`, the exact
-// floor a brand-new hire gets. An earlier rule floored this at the later of
+// so `clearedAt` and `historyFloorAt` on the reactivated row must be floored
+// at the database's now, the exact floor a brand-new hire gets. An earlier rule floored this at the later of
 // the row's old `clearedAt` and the moment they left, handing a returning
 // member a window back into everything since their departure date.
 describe('IdentityMailboxSyncService rehire floor (CW-26)', () => {
@@ -537,9 +586,7 @@ describe('IdentityMailboxSyncService rehire floor (CW-26)', () => {
       { emit: jest.fn() } as never,
     );
 
-    const beforeRehire = new Date();
     await service.onStaffAdded('business-identity', 'rehired-staff');
-    const afterRehire = new Date();
 
     const rehiredRows = rowsSnapshot().filter(
       (row) => row.userId === 'rehired-staff',
@@ -554,13 +601,8 @@ describe('IdentityMailboxSyncService rehire floor (CW-26)', () => {
     // prior values). The floor here must be `now`, matching a new hire.
     expect(rehiredRow.clearedAt).not.toEqual(departedAt);
     expect(rehiredRow.clearedAt).not.toEqual(oldClearedAt);
-    expect(rehiredRow.clearedAt).not.toBeNull();
-    expect(rehiredRow.clearedAt!.getTime()).toBeGreaterThanOrEqual(
-      beforeRehire.getTime(),
-    );
-    expect(rehiredRow.clearedAt!.getTime()).toBeLessThanOrEqual(
-      afterRehire.getTime(),
-    );
+    expect(rehiredRow.clearedAt).toEqual(DATABASE_NOW);
+    expect(rehiredRow.historyFloorAt).toEqual(DATABASE_NOW);
   });
 
   it('gives a rehire the identical floor a brand-new hire in the same mailbox gets', async () => {
@@ -594,13 +636,13 @@ describe('IdentityMailboxSyncService rehire floor (CW-26)', () => {
     if (!rehiredRow || !newHireRow) {
       throw new Error('Expected both rows to exist');
     }
-    // Both floors were taken within this test run, so they land on the same
-    // side of `departedAt` either way; the real assertion is that neither
-    // trails back to the old departure date.
-    expect(rehiredRow.clearedAt!.getTime()).toBeGreaterThan(
-      departedAt.getTime(),
-    );
-    expect(newHireRow.clearedAt).toBeInstanceOf(Date);
+    // Both floors come from the one stand-in database clock, so the rehire
+    // and the new hire share the exact instant, and it lies after the old
+    // departure date.
+    expect(rehiredRow.clearedAt).toEqual(DATABASE_NOW);
+    expect(rehiredRow.historyFloorAt).toEqual(newHireRow.historyFloorAt);
+    expect(newHireRow.clearedAt).toEqual(DATABASE_NOW);
+    expect(newHireRow.historyFloorAt).toEqual(DATABASE_NOW);
   });
 });
 
@@ -780,62 +822,459 @@ describe('IdentityMailboxSyncService releases a departing claimant', () => {
 });
 
 // --- The sweep ---------------------------------------------------------------
+//
+// Each identity runs in its own transaction. The stand-in transaction hands
+// the work a manager over the same stateful fakes, records whether a call
+// happened inside it, and puts the seat rows back when the work throws, the
+// way a rollback would.
+
+function buildSweep(
+  pageIdentities: { id: string; kind: IdentityKind }[],
+  seeds: FakeParticipantRow[] = [],
+) {
+  const identitiesRepository = {
+    find: jest.fn().mockResolvedValue(pageIdentities),
+  };
+  const participantsFake = makeFakeParticipantsRepository(seeds);
+  const conversationsFake = makeFakeConversationsRepository([]);
+  const transactionManager = {
+    getRepository: jest.fn((entity: unknown) =>
+      entity === ConversationParticipant
+        ? participantsFake.repository
+        : conversationsFake.repository,
+    ),
+  };
+  let isInsideTransaction = false;
+  const transaction = jest.fn(
+    async (work: (manager: typeof transactionManager) => Promise<unknown>) => {
+      const savedRows = participantsFake.rowsSnapshot();
+      isInsideTransaction = true;
+      try {
+        return await work(transactionManager);
+      } catch (error) {
+        participantsFake.replaceRows(savedRows);
+        throw error;
+      } finally {
+        isInsideTransaction = false;
+      }
+    },
+  );
+  const participants = Object.assign(participantsFake.repository, {
+    manager: { transaction },
+  });
+  const identitiesService = { staffUserIds: jest.fn() };
+  const eventEmitter = { emit: jest.fn() };
+  const service = new IdentityMailboxSyncService(
+    participants as never,
+    identitiesRepository as never,
+    conversationsFake.repository as never,
+    identitiesService as never,
+    eventEmitter as never,
+  );
+  const loggerError = jest
+    .spyOn(
+      (service as unknown as { logger: { error: jest.Mock } }).logger,
+      'error',
+    )
+    .mockImplementation(() => undefined);
+  return {
+    service,
+    identitiesRepository,
+    identitiesService,
+    transaction,
+    transactionManager,
+    eventEmitter,
+    loggerError,
+    participantsRepository: participantsFake.repository,
+    conversationsRepository: conversationsFake.repository,
+    rowsSnapshot: participantsFake.rowsSnapshot,
+    isInsideTransaction: () => isInsideTransaction,
+  };
+}
 
 describe('IdentityMailboxSyncService.resyncNonProfileIdentitiesPage', () => {
   it('reconciles every non-profile identity in the page and reports the cursor', async () => {
-    const nonProfileIdentities = [
-      { id: 'identity-1', kind: IdentityKind.Listing },
-      { id: 'identity-2', kind: IdentityKind.Subprofile },
-    ];
-    const identitiesRepository = {
-      find: jest.fn().mockResolvedValue(nonProfileIdentities),
-    };
-    const identitiesService = { staffUserIds: jest.fn().mockResolvedValue([]) };
-    const participants = {
-      find: jest.fn().mockResolvedValue([]),
-      save: jest.fn(),
-      update: jest.fn(),
-      create: jest.fn(),
-    };
-    const service = new IdentityMailboxSyncService(
-      participants as never,
-      identitiesRepository as never,
-      makeFakeConversationsRepository([]).repository as never,
-      identitiesService as never,
-      { emit: jest.fn() } as never,
-    );
+    const { service, identitiesService, transactionManager, transaction } =
+      buildSweep([
+        { id: 'identity-1', kind: IdentityKind.Listing },
+        { id: 'identity-2', kind: IdentityKind.Subprofile },
+      ]);
+    identitiesService.staffUserIds.mockResolvedValue([]);
 
     const result = await service.resyncNonProfileIdentitiesPage();
 
-    expect(identitiesService.staffUserIds).toHaveBeenCalledWith('identity-1');
-    expect(identitiesService.staffUserIds).toHaveBeenCalledWith('identity-2');
+    expect(transaction).toHaveBeenCalledTimes(2);
+    for (const identityId of ['identity-1', 'identity-2']) {
+      expect(identitiesService.staffUserIds).toHaveBeenCalledWith(identityId, {
+        manager: transactionManager,
+        shouldLockStaffSource: true,
+      });
+    }
     expect(result).toEqual({
       processedIdentityCount: 2,
+      failedIdentityCount: 0,
+      seatedMemberCount: 0,
+      endedSeatCount: 0,
       lastIdentityId: 'identity-2',
+      hasMoreIdentities: false,
     });
   });
 
   it('reports a null cursor once the page comes back empty', async () => {
-    const identitiesRepository = { find: jest.fn().mockResolvedValue([]) };
-    const identitiesService = { staffUserIds: jest.fn() };
-    const participants = {
-      find: jest.fn(),
-      save: jest.fn(),
-      update: jest.fn(),
-      create: jest.fn(),
+    const { service, identitiesService, transaction } = buildSweep([]);
+
+    const result = await service.resyncNonProfileIdentitiesPage('identity-2');
+
+    expect(result).toEqual({
+      processedIdentityCount: 0,
+      failedIdentityCount: 0,
+      seatedMemberCount: 0,
+      endedSeatCount: 0,
+      lastIdentityId: null,
+      hasMoreIdentities: false,
+    });
+    expect(identitiesService.staffUserIds).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('reads the staff source under its lock inside the transaction, before the seats', async () => {
+    const {
+      service,
+      identitiesService,
+      participantsRepository,
+      isInsideTransaction,
+    } = buildSweep([{ id: 'identity-1', kind: IdentityKind.Listing }]);
+    const staffReadInsideTransaction: boolean[] = [];
+    identitiesService.staffUserIds.mockImplementation(() => {
+      staffReadInsideTransaction.push(isInsideTransaction());
+      return Promise.resolve([]);
+    });
+
+    await service.resyncNonProfileIdentitiesPage();
+
+    expect(staffReadInsideTransaction).toEqual([true]);
+    const [, staffReadOptions] = identitiesService.staffUserIds.mock
+      .calls[0] as [string, { shouldLockStaffSource?: boolean }];
+    expect(staffReadOptions.shouldLockStaffSource).toBe(true);
+    const staffReadOrder =
+      identitiesService.staffUserIds.mock.invocationCallOrder[0] ?? 0;
+    const firstSeatReadOrder =
+      participantsRepository.find.mock.invocationCallOrder[0] ?? 0;
+    expect(staffReadOrder).toBeLessThan(firstSeatReadOrder);
+  });
+
+  it('rolls back a failing identity, emits nothing for it, and reconciles the next one', async () => {
+    const {
+      service,
+      identitiesService,
+      conversationsRepository,
+      eventEmitter,
+      loggerError,
+      rowsSnapshot,
+    } = buildSweep(
+      [
+        { id: 'identity-1', kind: IdentityKind.Listing },
+        { id: 'identity-2', kind: IdentityKind.Subprofile },
+      ],
+      [
+        seatRow({
+          identityId: 'identity-1',
+          userId: 'departed-one',
+          conversationId: 'conversation-1',
+        }),
+        seatRow({
+          identityId: 'identity-2',
+          userId: 'departed-two',
+          conversationId: 'conversation-2',
+        }),
+      ],
+    );
+    identitiesService.staffUserIds.mockResolvedValue([]);
+    // Identity 1 fails after its seat was already ended in the transaction:
+    // the claim release that follows throws.
+    conversationsRepository.createQueryBuilder.mockImplementationOnce(() => {
+      throw new Error('claim release failed');
+    });
+
+    const result = await service.resyncNonProfileIdentitiesPage();
+
+    const rows = rowsSnapshot();
+    // Rolled back: identity 1's departed member still holds the seat the
+    // failed transaction had ended, and the next sweep retries it.
+    expect(
+      rows.find((row) => row.userId === 'departed-one')?.leftAt,
+    ).toBeNull();
+    // Identity 2 was still reconciled.
+    expect(
+      rows.find((row) => row.userId === 'departed-two')?.leftAt,
+    ).toBeInstanceOf(Date);
+    const emittedUserIds = eventEmitter.emit.mock.calls.map(
+      ([, payload]) =>
+        (payload as { userIds?: string[]; userId?: string }).userIds?.[0] ??
+        (payload as { userId?: string }).userId,
+    );
+    expect(emittedUserIds).not.toContain('departed-one');
+    expect(eventEmitter.emit).toHaveBeenCalledWith(
+      CONVERSATION_MEMBERSHIP_REVOKED,
+      { conversationId: 'conversation-2', userIds: ['departed-two'] },
+    );
+    expect(result).toEqual({
+      processedIdentityCount: 2,
+      failedIdentityCount: 1,
+      seatedMemberCount: 0,
+      endedSeatCount: 1,
+      lastIdentityId: 'identity-2',
+      hasMoreIdentities: false,
+    });
+    expect(loggerError).toHaveBeenCalledTimes(1);
+    expect(loggerError.mock.calls[0]?.[0]).toContain('identity-1');
+  });
+
+  it("emits an identity's changes only after its transaction resolves", async () => {
+    const { service, identitiesService, eventEmitter, isInsideTransaction } =
+      buildSweep(
+        [{ id: 'identity-1', kind: IdentityKind.Listing }],
+        [
+          seatRow({
+            identityId: 'identity-1',
+            userId: 'departed',
+            conversationId: 'conversation-1',
+          }),
+        ],
+      );
+    identitiesService.staffUserIds.mockResolvedValue([]);
+    const emittedInsideTransaction: boolean[] = [];
+    eventEmitter.emit.mockImplementation(() => {
+      emittedInsideTransaction.push(isInsideTransaction());
+      return true;
+    });
+
+    await service.resyncNonProfileIdentitiesPage();
+
+    expect(emittedInsideTransaction.length).toBeGreaterThan(0);
+    expect(emittedInsideTransaction.every((isInside) => !isInside)).toBe(true);
+  });
+
+  it('counts the members it seats and the seats it ends, flooring each new seat at the database clock read inside the transaction', async () => {
+    const {
+      service,
+      identitiesService,
+      participantsRepository,
+      isInsideTransaction,
+      rowsSnapshot,
+    } = buildSweep(
+      [{ id: 'identity-1', kind: IdentityKind.Listing }],
+      [
+        seatRow({
+          identityId: 'identity-1',
+          userId: 'owner',
+          conversationId: 'conversation-1',
+        }),
+        seatRow({
+          identityId: 'identity-1',
+          userId: 'departed',
+          conversationId: 'conversation-1',
+        }),
+        seatRow({
+          identityId: 'identity-1',
+          userId: 'departed',
+          conversationId: 'conversation-2',
+        }),
+        seatRow({
+          identityId: 'identity-1',
+          userId: 'owner',
+          conversationId: 'conversation-2',
+        }),
+      ],
+    );
+    identitiesService.staffUserIds.mockResolvedValue(['owner', 'missing']);
+    const clockReadInsideTransaction: boolean[] = [];
+    participantsRepository.query.mockImplementation((sql: string) => {
+      if (!sql.includes('clock_timestamp()')) {
+        throw new Error(`Unmodelled query: ${sql}`);
+      }
+      clockReadInsideTransaction.push(isInsideTransaction());
+      return Promise.resolve([{ floorInstant: DATABASE_NOW }]);
+    });
+
+    const result = await service.resyncNonProfileIdentitiesPage();
+
+    expect(result.seatedMemberCount).toBe(1);
+    expect(result.endedSeatCount).toBe(2);
+    expect(result.failedIdentityCount).toBe(0);
+    // Task 1: one clock read, taken inside the identity's transaction, after
+    // the staff locks, and both columns of every new seat carry it.
+    expect(clockReadInsideTransaction).toEqual([true]);
+    const missingRows = rowsSnapshot().filter(
+      (row) => row.userId === 'missing',
+    );
+    expect(missingRows).toHaveLength(2);
+    for (const missingRow of missingRows) {
+      expect(missingRow.clearedAt).toEqual(DATABASE_NOW);
+      expect(missingRow.historyFloorAt).toEqual(DATABASE_NOW);
+    }
+  });
+
+  it('pages only mailboxes that hold a seat row, keeping the keyset cursor on the id', async () => {
+    const { service, identitiesRepository, identitiesService } = buildSweep([]);
+    identitiesService.staffUserIds.mockResolvedValue([]);
+    type RawIdOperator = {
+      type: string;
+      getSql: (column: string) => string;
+      objectLiteralParameters: Record<string, unknown> | undefined;
+    };
+    const idOperatorOfCall = (callIndex: number): RawIdOperator =>
+      (
+        identitiesRepository.find.mock.calls[callIndex] as [
+          { where: { id: RawIdOperator } },
+        ]
+      )[0].where.id;
+
+    await service.resyncNonProfileIdentitiesPage();
+    await service.resyncNonProfileIdentitiesPage('identity-2');
+
+    const firstPageId = idOperatorOfCall(0);
+    expect(firstPageId.type).toBe('raw');
+    expect(firstPageId.getSql('"identity"."id"')).toBe(
+      'EXISTS (SELECT 1 FROM "conversation_participants" "sweep_seat" ' +
+        'WHERE "sweep_seat"."identity_id" = "identity"."id")',
+    );
+    const laterPageId = idOperatorOfCall(1);
+    expect(laterPageId.getSql('"identity"."id"')).toBe(
+      'EXISTS (SELECT 1 FROM "conversation_participants" "sweep_seat" ' +
+        'WHERE "sweep_seat"."identity_id" = "identity"."id") ' +
+        'AND "identity"."id" > :afterIdentityId',
+    );
+    expect(laterPageId.objectLiteralParameters).toEqual({
+      afterIdentityId: 'identity-2',
+    });
+  });
+
+  it('reports more identities when the page comes back full, and none when it comes back short', async () => {
+    const fullPage = buildSweep([
+      { id: 'identity-1', kind: IdentityKind.Listing },
+      { id: 'identity-2', kind: IdentityKind.Listing },
+    ]);
+    fullPage.identitiesService.staffUserIds.mockResolvedValue([]);
+    const fullResult = await fullPage.service.resyncNonProfileIdentitiesPage(
+      null,
+      2,
+    );
+    expect(fullResult.hasMoreIdentities).toBe(true);
+    expect(fullResult.lastIdentityId).toBe('identity-2');
+    expect(fullPage.identitiesRepository.find).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 2, order: { id: 'ASC' } }),
+    );
+
+    const shortPage = buildSweep([
+      { id: 'identity-3', kind: IdentityKind.Listing },
+    ]);
+    shortPage.identitiesService.staffUserIds.mockResolvedValue([]);
+    const shortResult = await shortPage.service.resyncNonProfileIdentitiesPage(
+      'identity-2',
+      2,
+    );
+    expect(shortResult.hasMoreIdentities).toBe(false);
+    expect(shortResult.lastIdentityId).toBe('identity-3');
+  });
+
+  it('moves the cursor past a failed last identity, so the next page does not retry it forever', async () => {
+    const { service, identitiesService } = buildSweep([
+      { id: 'identity-1', kind: IdentityKind.Listing },
+      { id: 'identity-2', kind: IdentityKind.Listing },
+    ]);
+    identitiesService.staffUserIds.mockImplementation(
+      async (identityId: string) => {
+        if (identityId === 'identity-2') {
+          throw new Error('staff lookup failed');
+        }
+        return [];
+      },
+    );
+
+    const result = await service.resyncNonProfileIdentitiesPage(null, 2);
+
+    expect(result.lastIdentityId).toBe('identity-2');
+    expect(result.hasMoreIdentities).toBe(true);
+    expect(result.failedIdentityCount).toBe(1);
+  });
+});
+
+// --- Concern 1 (fix round 1): the staff set is read in the caller's transaction
+
+describe('IdentityMailboxSyncService.resyncMailbox reads staff through the given manager', () => {
+  it('passes the manager to the staff read, so an uncommitted transfer is seen', async () => {
+    const { repository } = makeFakeParticipantsRepository([
+      seatRow({ userId: 'previous-owner', identityId: 'listing-identity' }),
+    ]);
+    const conversationsRepository = makeFakeConversationsRepository(
+      [],
+    ).repository;
+    const transactionManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === ConversationParticipant
+          ? repository
+          : conversationsRepository,
+      ),
+    };
+    // Answers as the transaction sees it: the new owner, and the previous
+    // owner gone. A read on its own pool connection would still see the
+    // previous owner.
+    const identitiesService = {
+      staffUserIds: jest.fn(
+        (_identityId: string, options?: { manager?: unknown }) =>
+          Promise.resolve(
+            options?.manager === transactionManager
+              ? ['new-owner']
+              : ['previous-owner'],
+          ),
+      ),
     };
     const service = new IdentityMailboxSyncService(
-      participants as never,
-      identitiesRepository as never,
+      { find: jest.fn() } as never,
+      { find: jest.fn() } as never,
+      { createQueryBuilder: jest.fn() } as never,
+      identitiesService as never,
+      { emit: jest.fn() } as never,
+    );
+
+    const changes = await service.resyncMailbox(
+      'listing-identity',
+      transactionManager as never,
+      { shouldDeferEmission: true },
+    );
+
+    expect(identitiesService.staffUserIds).toHaveBeenCalledWith(
+      'listing-identity',
+      { manager: transactionManager, shouldLockStaffSource: false },
+    );
+    expect(changes.endedSeats).toEqual([
+      { conversationId: 'conversation-1', userId: 'previous-owner' },
+    ]);
+    expect(changes.staffingChanges).toContainEqual({
+      identityId: 'listing-identity',
+      userId: 'new-owner',
+      isStaff: true,
+    });
+  });
+
+  it('keeps the plain one-argument staff read when no manager is given', async () => {
+    const { repository } = makeFakeParticipantsRepository([]);
+    const identitiesService = { staffUserIds: jest.fn().mockResolvedValue([]) };
+    const service = new IdentityMailboxSyncService(
+      repository as never,
+      { find: jest.fn() } as never,
       makeFakeConversationsRepository([]).repository as never,
       identitiesService as never,
       { emit: jest.fn() } as never,
     );
 
-    const result = await service.resyncNonProfileIdentitiesPage('identity-2');
+    await service.resyncMailbox('listing-identity');
 
-    expect(result).toEqual({ processedIdentityCount: 0, lastIdentityId: null });
-    expect(identitiesService.staffUserIds).not.toHaveBeenCalled();
+    expect(identitiesService.staffUserIds).toHaveBeenCalledWith(
+      'listing-identity',
+    );
+    expect(identitiesService.staffUserIds.mock.calls[0]).toHaveLength(1);
   });
 });
 
@@ -1560,5 +1999,171 @@ describe('IdentityMailboxSyncService, a former customer who becomes staff', () =
         isActive: true,
       },
     ]);
+  });
+});
+
+// --- Final review C1: a persona creator who left stays departed -------------
+//
+// `SubprofileMembershipService.leave` deletes a departing creator's roster
+// row and keeps `subprofiles.user_id`. Here the REAL `IdentitiesService`
+// answers the staff read, through the sweep's own transaction and lock, so
+// these tests fail if that column counts as staff again.
+
+const PERSONA_IDENTITY = 'persona-identity';
+
+function buildPersonaSweep(seeds: FakeParticipantRow[]) {
+  const participantsFake = makeFakeParticipantsRepository(seeds);
+  const conversationsFake = makeFakeConversationsRepository([]);
+  const repositories = new Map<unknown, unknown>([
+    [ConversationParticipant, participantsFake.repository],
+    [Conversation, conversationsFake.repository],
+    [
+      Identity,
+      {
+        findOne: jest.fn().mockResolvedValue({
+          id: PERSONA_IDENTITY,
+          kind: IdentityKind.Subprofile,
+          subprofileId: 'persona-1',
+        }),
+      },
+    ],
+    [
+      Subprofile,
+      {
+        findOne: jest
+          .fn()
+          .mockResolvedValue({ id: 'persona-1', userId: 'departed-creator' }),
+      },
+    ],
+    [
+      SubprofileMember,
+      { find: jest.fn().mockResolvedValue([{ userId: 'coowner-user' }]) },
+    ],
+  ]);
+  const transactionManager = {
+    getRepository: jest.fn((entity: unknown) => {
+      const repository = repositories.get(entity);
+      if (!repository) {
+        throw new Error('Unmodelled repository');
+      }
+      return repository;
+    }),
+  };
+  const participants = Object.assign(participantsFake.repository, {
+    manager: {
+      transaction: jest.fn(
+        (work: (manager: typeof transactionManager) => Promise<unknown>) =>
+          work(transactionManager),
+      ),
+    },
+  });
+  // Every staff source is read through the transaction manager, so the
+  // injected repositories are never reached.
+  const identitiesService = new IdentitiesService(
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  const eventEmitter = { emit: jest.fn() };
+  const service = new IdentityMailboxSyncService(
+    participants as never,
+    {
+      find: jest
+        .fn()
+        .mockResolvedValue([
+          { id: PERSONA_IDENTITY, kind: IdentityKind.Subprofile },
+        ]),
+    } as never,
+    conversationsFake.repository as never,
+    identitiesService,
+    eventEmitter as never,
+  );
+  return {
+    service,
+    eventEmitter,
+    transactionManager,
+    rowsSnapshot: participantsFake.rowsSnapshot,
+  };
+}
+
+describe('IdentityMailboxSyncService, a persona creator who left the roster', () => {
+  const leftAt = new Date('2026-09-01T00:00:00Z');
+
+  it('the hourly sweep leaves their ended seats ended and announces nothing for them', async () => {
+    const { service, eventEmitter, rowsSnapshot } = buildPersonaSweep([
+      seatRow({
+        identityId: PERSONA_IDENTITY,
+        userId: 'departed-creator',
+        conversationId: 'conversation-1',
+        leftAt,
+      }),
+      seatRow({
+        identityId: PERSONA_IDENTITY,
+        userId: 'coowner-user',
+        conversationId: 'conversation-1',
+      }),
+    ]);
+
+    const result = await service.resyncNonProfileIdentitiesPage();
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        failedIdentityCount: 0,
+        seatedMemberCount: 0,
+        endedSeatCount: 0,
+      }),
+    );
+    expect(
+      rowsSnapshot().find((row) => row.userId === 'departed-creator'),
+    ).toEqual(expect.objectContaining({ leftAt, historyFloorAt: null }));
+    expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+      IDENTITY_STAFFING_CHANGED,
+      expect.objectContaining({ userId: 'departed-creator', isStaff: true }),
+    );
+  });
+
+  it('resyncMailbox ends a seat they still hold and does not reactivate it on the next run', async () => {
+    const { service, transactionManager, rowsSnapshot } = buildPersonaSweep([
+      seatRow({
+        identityId: PERSONA_IDENTITY,
+        userId: 'departed-creator',
+        conversationId: 'conversation-1',
+      }),
+      seatRow({
+        identityId: PERSONA_IDENTITY,
+        userId: 'coowner-user',
+        conversationId: 'conversation-1',
+      }),
+    ]);
+
+    const firstRun = await service.resyncMailbox(
+      PERSONA_IDENTITY,
+      transactionManager as never,
+      { shouldDeferEmission: true, shouldLockStaffSource: true },
+    );
+    const endedAt = rowsSnapshot().find(
+      (row) => row.userId === 'departed-creator',
+    )?.leftAt;
+    const secondRun = await service.resyncMailbox(
+      PERSONA_IDENTITY,
+      transactionManager as never,
+      { shouldDeferEmission: true, shouldLockStaffSource: true },
+    );
+
+    expect(firstRun.endedSeats).toEqual([
+      { conversationId: 'conversation-1', userId: 'departed-creator' },
+    ]);
+    expect(endedAt).toBeInstanceOf(Date);
+    expect(secondRun.staffingChanges).toEqual([]);
+    expect(
+      rowsSnapshot().find((row) => row.userId === 'departed-creator')?.leftAt,
+    ).toEqual(endedAt);
   });
 });

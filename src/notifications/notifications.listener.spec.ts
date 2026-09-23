@@ -1,6 +1,7 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
+import { Profile } from '../users/entities/profile.entity';
 import { NotificationType } from './entities/notification.entity';
 import { NotificationsListener } from './notifications.listener';
 import { NotificationsService } from './notifications.service';
@@ -9,10 +10,12 @@ describe('NotificationsListener', () => {
   let listener: NotificationsListener;
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
   let subprofileMembers: { find: jest.Mock };
+  let profiles: { findOne: jest.Mock };
 
   beforeEach(async () => {
     notifications = { create: jest.fn(), createForRecipients: jest.fn() };
     subprofileMembers = { find: jest.fn() };
+    profiles = { findOne: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsListener,
@@ -21,6 +24,7 @@ describe('NotificationsListener', () => {
           provide: getRepositoryToken(SubprofileMember),
           useValue: subprofileMembers,
         },
+        { provide: getRepositoryToken(Profile), useValue: profiles },
       ],
     }).compile();
     listener = module.get(NotificationsListener);
@@ -180,5 +184,86 @@ describe('NotificationsListener', () => {
       { source: 'cohost_invite', eventSlug: 'pride-picnic', inviteId: 'i1' },
       'host-1',
     );
+  });
+
+  describe('onSubprofileCreatorChanged', () => {
+    it('notifies the successor with isYou true and the other members with isYou false, no actor', async () => {
+      profiles.findOne.mockResolvedValue({
+        firstName: 'Ana',
+        lastName: 'Silva',
+      });
+
+      await listener.onSubprofileCreatorChanged({
+        subprofileId: 'sp1',
+        displayName: 'Persona One',
+        newCreatorUserId: 'successor',
+        memberUserIds: ['successor', 'u2', 'u3'],
+      });
+
+      expect(profiles.findOne).toHaveBeenCalledWith({
+        where: { userId: 'successor' },
+      });
+      expect(notifications.createForRecipients).toHaveBeenNthCalledWith(
+        1,
+        ['successor'],
+        NotificationType.SubprofileCreatorChanged,
+        {
+          subprofileName: 'Persona One',
+          newCreatorName: 'Ana Silva',
+          isYou: true,
+        },
+      );
+      expect(notifications.createForRecipients).toHaveBeenNthCalledWith(
+        2,
+        ['u2', 'u3'],
+        NotificationType.SubprofileCreatorChanged,
+        {
+          subprofileName: 'Persona One',
+          newCreatorName: 'Ana Silva',
+          isYou: false,
+        },
+      );
+      // No actor argument on either call: this must reach every remaining
+      // member regardless of a block or mute against the departing creator.
+      expect(notifications.createForRecipients.mock.calls[0]).toHaveLength(3);
+      expect(notifications.createForRecipients.mock.calls[1]).toHaveLength(3);
+    });
+
+    it('falls back to a neutral name when the successor has no profile row', async () => {
+      profiles.findOne.mockResolvedValue(null);
+
+      await listener.onSubprofileCreatorChanged({
+        subprofileId: 'sp1',
+        displayName: 'Persona One',
+        newCreatorUserId: 'successor',
+        memberUserIds: ['successor'],
+      });
+
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['successor'],
+        NotificationType.SubprofileCreatorChanged,
+        {
+          subprofileName: 'Persona One',
+          newCreatorName: 'Member',
+          isYou: true,
+        },
+      );
+    });
+
+    it('skips the second fan-out when the successor is the only remaining member', async () => {
+      profiles.findOne.mockResolvedValue({
+        firstName: 'Ana',
+        lastName: 'Silva',
+      });
+
+      await listener.onSubprofileCreatorChanged({
+        subprofileId: 'sp1',
+        displayName: 'Persona One',
+        newCreatorUserId: 'successor',
+        memberUserIds: ['successor'],
+      });
+
+      expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
+    });
   });
 });

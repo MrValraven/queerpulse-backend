@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { slugify } from '../common/slug.util';
 import {
   AccessTier,
   CommunityType,
@@ -35,7 +36,8 @@ export const ADMIN_READING_GROUP_PROPOSALS_PAGE_SIZE = 20;
 
 /**
  * The community a newly approved reading group is created with. A reading
- * group is a small standing group around one book, so the shape is fixed here
+ * group is a small standing group that reads together, starting with one
+ * book, so the shape is fixed here
  * rather than asked of the reviewing admin: the member already told us the
  * book, why, the meeting format and the size cap, and re-asking a moderator to
  * retype all four into a community form is exactly the friction that left this
@@ -253,16 +255,29 @@ export class AdminReadingGroupProposalsService {
 
   /**
    * The proposal, translated into the community that IS the reading group. The
-   * member's own words carry across verbatim wherever they fit: the book title
-   * becomes the community name and the desired handle, "why this book?"
-   * becomes the purpose, and the format and size cap become the tags, the
-   * online flag and the who-it-is-for line.
+   * member's own words carry across verbatim wherever they fit: the club name
+   * becomes the community name and the desired handle (the first book's title
+   * stands in when the club name was left blank), the book becomes what the
+   * club is reading now, "why this book?" becomes the purpose, and the format
+   * and size cap become the tags, the online flag and the who-it-is-for line.
+   * The tagline and who-it-is-for line say the group STARTS with this book, so
+   * they stay true after the owner moves the club on to its next read.
    */
   private communityInputFor(
     proposal: ReadingGroupProposal,
   ): CreateCommunityInput {
     const book = proposal.book.trim();
+    const clubName = proposal.clubName?.trim() || null;
+    const communityName = clubName ?? book;
     const why = proposal.why?.trim() ?? '';
+    const startingWithSentence = `A reading group, starting with ${book}.`;
+    // The tagline column caps at 200; the purpose keeps the whole sentence so a
+    // long title never ends the purpose mid-word.
+    const tagline = startingWithSentence.slice(0, 200);
+    // A club name with no Latin letters or digits (emoji, Cyrillic, bare
+    // punctuation) slugifies to nothing, so the book seeds the handle.
+    const hasSluggableClubName = slugify(communityName, '') !== '';
+    const handle = hasSluggableClubName ? communityName : book;
     const isOnline = proposal.format !== ReadingGroupProposalFormat.InPerson;
     const meetsInPerson = proposal.format !== ReadingGroupProposalFormat.Online;
 
@@ -271,13 +286,15 @@ export class AdminReadingGroupProposalsService {
     if (isOnline) tags.push('virtual-online');
 
     return {
-      // `book` is capped at 200 by the create DTO and the column, the same cap
-      // `CreateCommunityDto.name` carries, so it transfers whole.
-      name: book,
-      handle: book,
-      tagline: `A reading group for ${book}.`.slice(0, 200),
-      purpose: why || `A reading group for ${book}.`,
-      whoFor: `Members who want to read ${book} together, in a group of up to ${proposal.maxPeople}.`,
+      // `clubName` and `book` are both capped at 200 by the create DTO and the
+      // columns, the same cap `CreateCommunityDto.name` carries, so either
+      // transfers whole.
+      name: communityName,
+      handle,
+      nowReading: book,
+      tagline,
+      purpose: why || startingWithSentence,
+      whoFor: `Members who want to read together, starting with ${book}, in a group of up to ${proposal.maxPeople}.`,
       type: READING_GROUP_COMMUNITY_TYPE,
       accessTier: READING_GROUP_ACCESS_TIER,
       rosterVisible: true,

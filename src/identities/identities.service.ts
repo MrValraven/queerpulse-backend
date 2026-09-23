@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, In, QueryFailedError, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Company } from '../companies/entities/company.entity';
@@ -47,6 +47,41 @@ export interface IdentityDescription {
 const ACTIVE_LISTING_CO_MANAGER = {
   status: ListingCoManagerStatus.Active,
 } as const;
+
+/**
+ * How `staffUserIds` reads the staff source. Both fields are optional, and
+ * with neither the read is exactly what it has always been: plain reads on
+ * this service's own repositories, outside any transaction.
+ */
+export interface StaffReadOptions {
+  /** Read through a caller's open transaction, so the staff set includes the
+   * transaction's own uncommitted writes (an ownership transfer, a seat
+   * revocation) and matches the seats the same transaction reads. */
+  manager?: EntityManager;
+  /**
+   * Take a FOR SHARE lock on the staff source rows, held until the caller's
+   * transaction ends. Honoured only with `manager`: outside a transaction the
+   * lock would be released as soon as the read returned. The order is the
+   * one every application writer already uses, so no lock cycle can form
+   * with them. Account erasure is the exception: its `users` delete fires
+   * foreign key cascades in no fixed order, and one can lock a listing's
+   * co-manager rows before the listing row. Postgres then aborts one side
+   * as a deadlock: the sweep counts that identity as failed and retries it
+   * on its next run, and the deletion processor retries on its next tick.
+   * The order:
+   *  - a listing: the listing row, then EVERY `listing_co_managers` row of
+   *    it whatever its status (an `invited` row turning `active` is a staff
+   *    change too). `inviteToLoadedListing` and an ownership transfer take
+   *    the listing first and the seats second; `endSeat` and
+   *    `respondToInvite` lock one seat row and never the listing.
+   *  - a persona: the persona row, which `leave`, `removeMember` and the
+   *    invite `accept` lock FOR UPDATE before they touch the roster.
+   *  - a company: nothing, since its team is written only at creation.
+   * FOR SHARE conflicts with those writers' locks, so whichever side runs
+   * second reads what the first one committed.
+   */
+  shouldLockStaffSource?: boolean;
+}
 
 /** Task 15: one mailbox a member staffs, before its identity row is read. */
 interface StaffedMailbox {
@@ -340,9 +375,20 @@ export class IdentitiesService {
    * Every human who may read and answer this mailbox, owner first. The owner
    * leads the list because callers that need a single responsible person, such
    * as a read-only fallback, take the head.
+   *
+   * `options` (see `StaffReadOptions`) lets the mailbox seat sync read staff
+   * inside its own transaction, optionally under a share lock. Every other
+   * caller passes nothing and gets the plain read.
    */
-  async staffUserIds(identityId: string): Promise<string[]> {
-    const identity = await this.getById(identityId);
+  async staffUserIds(
+    identityId: string,
+    options: StaffReadOptions = {},
+  ): Promise<string[]> {
+    const identity = options.manager
+      ? await options.manager
+          .getRepository(Identity)
+          .findOne({ where: { id: identityId } })
+      : await this.getById(identityId);
     if (!identity) {
       return [];
     }
@@ -350,11 +396,11 @@ export class IdentitiesService {
       case IdentityKind.Profile:
         return identity.userId ? [identity.userId] : [];
       case IdentityKind.Listing:
-        return this.listingStaff(identity.listingId);
+        return this.listingStaff(identity.listingId, options);
       case IdentityKind.Subprofile:
-        return this.subprofileStaff(identity.subprofileId);
+        return this.subprofileStaff(identity.subprofileId, options);
       case IdentityKind.Company:
-        return this.companyStaff(identity.companyId);
+        return this.companyStaff(identity.companyId, options);
     }
   }
 
@@ -596,7 +642,13 @@ export class IdentitiesService {
    * Task 15: the reverse of `listingStaff`/`subprofileStaff`/`companyStaff`,
    * reading the same owner columns and the same member tables with the same
    * filters, in six queries whatever the member staffs. A member who both
-   * owns and co-manages one listing appears once, as its owner.
+   * owns and co-manages one listing appears once, as its owner. A persona
+   * they created counts only while they still hold its roster row, as in
+   * `subprofileStaff`. A creator who leaves hands the persona to a remaining
+   * co-owner in the same transaction (`transferCreatorWithin`: the
+   * longest-standing co-owner with an active account, or the longest-standing
+   * one when nobody remaining is active), so a creator without a roster row
+   * exists only as a pre-repair orphan, and is offered no mailbox for it.
    */
   private async staffedMailboxesFor(userId: string): Promise<StaffedMailbox[]> {
     const [
@@ -644,7 +696,13 @@ export class IdentitiesService {
         isOwner: false,
       });
     }
+    const rosterSubprofileIds = new Set(
+      subprofileMemberRows.map((member) => member.subprofileId),
+    );
     for (const subprofile of ownedSubprofiles) {
+      if (!rosterSubprofileIds.has(subprofile.id)) {
+        continue;
+      }
       addMailbox({
         kind: IdentityKind.Subprofile,
         ownerEntityId: subprofile.id,
@@ -833,12 +891,45 @@ export class IdentitiesService {
     return identityByMailbox;
   }
 
-  private async listingStaff(listingId: string | null): Promise<string[]> {
+  private async listingStaff(
+    listingId: string | null,
+    options: StaffReadOptions = {},
+  ): Promise<string[]> {
     if (!listingId) {
       return [];
     }
-    const listing = await this.listings.findOne({ where: { id: listingId } });
-    const coManagers = await this.listingCoManagers.find({
+    const { manager } = options;
+    const listingsRepository = manager
+      ? manager.getRepository(Listing)
+      : this.listings;
+    const coManagersRepository = manager
+      ? manager.getRepository(ListingCoManager)
+      : this.listingCoManagers;
+    if (manager && options.shouldLockStaffSource) {
+      // Listing row first, then every seat row of it: see
+      // `StaffReadOptions.shouldLockStaffSource` for the order.
+      const lockedListing = await listingsRepository.findOne({
+        where: { id: listingId },
+        lock: { mode: 'pessimistic_read' },
+      });
+      const lockedSeats = await coManagersRepository.find({
+        where: { listingId },
+        lock: { mode: 'pessimistic_read' },
+      });
+      return dedupe([
+        ...(lockedListing?.ownerId ? [lockedListing.ownerId] : []),
+        ...lockedSeats
+          .filter(
+            (coManager) =>
+              coManager.status === ACTIVE_LISTING_CO_MANAGER.status,
+          )
+          .map((coManager) => coManager.userId),
+      ]);
+    }
+    const listing = await listingsRepository.findOne({
+      where: { id: listingId },
+    });
+    const coManagers = await coManagersRepository.find({
       where: { listingId, ...ACTIVE_LISTING_CO_MANAGER },
     });
     return dedupe([
@@ -849,28 +940,66 @@ export class IdentitiesService {
 
   private async subprofileStaff(
     subprofileId: string | null,
+    options: StaffReadOptions = {},
   ): Promise<string[]> {
     if (!subprofileId) {
       return [];
     }
-    const subprofile = await this.subprofiles.findOne({
+    const { manager } = options;
+    const subprofilesRepository = manager
+      ? manager.getRepository(Subprofile)
+      : this.subprofiles;
+    const membersRepository = manager
+      ? manager.getRepository(SubprofileMember)
+      : this.subprofileMembers;
+    // The persona row is the lock every roster writer takes first; see
+    // `StaffReadOptions.shouldLockStaffSource`.
+    const subprofile = await subprofilesRepository.findOne({
       where: { id: subprofileId },
+      ...(manager && options.shouldLockStaffSource
+        ? { lock: { mode: 'pessimistic_read' as const } }
+        : {}),
     });
-    const members = await this.subprofileMembers.find({
+    const members = await membersRepository.find({
       where: { subprofileId },
     });
-    return dedupe([
-      ...(subprofile?.userId ? [subprofile.userId] : []),
-      ...members.map((member) => member.userId),
-    ]);
+    const memberUserIds = members.map((member) => member.userId);
+    // The roster is the staff set. The creator (`subprofiles.user_id`) leads
+    // it while they still hold a roster row, the "owner leads" contract.
+    // `SubprofileMembershipService.leave` deletes a departing creator's row
+    // and, in the same transaction, moves `user_id` to the longest-standing
+    // remaining co-owner with an active account, or to the longest-standing
+    // one when nobody remaining is active (`transferCreatorWithin`), so the
+    // new creator leads from then on. A creator without a roster row
+    // therefore exists only as a pre-repair orphan; such a creator is staff
+    // no more, and nothing that reads this set seats them again.
+    const creatorUserId = subprofile?.userId;
+    const leadingUserIds =
+      creatorUserId && memberUserIds.includes(creatorUserId)
+        ? [creatorUserId]
+        : [];
+    return dedupe([...leadingUserIds, ...memberUserIds]);
   }
 
-  private async companyStaff(companyId: string | null): Promise<string[]> {
+  private async companyStaff(
+    companyId: string | null,
+    options: StaffReadOptions = {},
+  ): Promise<string[]> {
     if (!companyId) {
       return [];
     }
-    const company = await this.companies.findOne({ where: { id: companyId } });
-    const teamMembers = await this.companyTeamMembers.find({
+    const { manager } = options;
+    const companiesRepository = manager
+      ? manager.getRepository(Company)
+      : this.companies;
+    const teamMembersRepository = manager
+      ? manager.getRepository(CompanyTeamMember)
+      : this.companyTeamMembers;
+    // No lock: a company team is written only when the company is created.
+    const company = await companiesRepository.findOne({
+      where: { id: companyId },
+    });
+    const teamMembers = await teamMembersRepository.find({
       where: { companyId },
     });
     return dedupe([

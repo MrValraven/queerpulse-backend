@@ -3,6 +3,7 @@ import {
   parseStorageKey,
   storageKeyOwnerId,
 } from './storage-key';
+import { UPLOAD_KIND_SPECS } from './upload-kinds';
 
 const VALID_AVATAR_KEY =
   'avatars/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg';
@@ -29,6 +30,12 @@ describe('parseStorageKey', () => {
     const spec = parseStorageKey(VALID_MESSAGE_DOCUMENT_KEY);
     expect(spec?.prefix).toBe('message-documents');
     expect(spec?.requiresSession).toBe(true);
+  });
+
+  it('parses a listing-menu PDF key to its kind', () => {
+    const key =
+      'listing-menus/0b8f7c9e-1d2a-4b3c-9e8f-7a6b5c4d3e2f/5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a.pdf';
+    expect(parseStorageKey(key)).toBe(UPLOAD_KIND_SPECS['listing-menu']);
   });
 
   it.each([

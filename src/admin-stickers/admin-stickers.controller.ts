@@ -36,10 +36,12 @@ import { StickerResponse } from '../stickers/sticker-response';
 import {
   AdminStickersService,
   AdminStickerPackResponse,
+  AdminStickerResponse,
 } from './admin-stickers.service';
 import { CreateStickerDto } from './dto/create-sticker.dto';
 import { CreateStickerPackDto } from './dto/create-sticker-pack.dto';
 import { ReorderStickersDto } from './dto/reorder-stickers.dto';
+import { UpdateStickerDto } from './dto/update-sticker.dto';
 import { UpdateStickerPackDto } from './dto/update-sticker-pack.dto';
 
 /**
@@ -54,7 +56,9 @@ import { UpdateStickerPackDto } from './dto/update-sticker-pack.dto';
  *   GET    /admin/sticker-packs                              -> AdminStickerPackResponse[]  (every status)
  *   POST   /admin/sticker-packs                               -> AdminStickerPackResponse
  *   PATCH  /admin/sticker-packs/:packId                       -> AdminStickerPackResponse
+ *   DELETE /admin/sticker-packs/:packId                       -> 204  (draft packs only)
  *   POST   /admin/sticker-packs/:packId/stickers               -> StickerResponse
+ *   PATCH  /admin/sticker-packs/:packId/stickers/:stickerId    -> AdminStickerResponse
  *   DELETE /admin/sticker-packs/:packId/stickers/:stickerId    -> 204
  *   POST   /admin/sticker-packs/:packId/stickers/reorder        -> AdminStickerPackResponse
  */
@@ -108,6 +112,19 @@ export class AdminStickersController {
     return this.adminStickers.updatePack(packId, dto);
   }
 
+  @Delete(':packId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete a draft pack, with every sticker in it.' })
+  @ApiNoContentResponse({ description: 'The pack is gone.' })
+  @ApiNotFoundResponse({ description: 'No pack with that id.' })
+  @ApiConflictResponse({
+    description:
+      'Only a draft pack can be deleted; archive a published pack instead.',
+  })
+  deletePack(@Param('packId', ParseUUIDPipe) packId: string): Promise<void> {
+    return this.adminStickers.deletePack(packId);
+  }
+
   @Post(':packId/stickers')
   @ApiOperation({ summary: 'Add a sticker to a pack.' })
   @ApiCreatedResponse({ description: 'The created sticker.' })
@@ -125,6 +142,32 @@ export class AdminStickersController {
     @Body() dto: CreateStickerDto,
   ): Promise<StickerResponse> {
     return this.adminStickers.addSticker(packId, dto, user.userId);
+  }
+
+  @Patch(':packId/stickers/:stickerId')
+  @ApiOperation({
+    summary: "Update a sticker's label, keywords or artwork.",
+  })
+  @ApiOkResponse({
+    description: 'The updated sticker, with its admin-only fields.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      "Malformed body, a body with none of label, keywords or artwork, or an artwork storage key that is not this admin's own sticker upload.",
+  })
+  @ApiNotFoundResponse({ description: 'No sticker with that id in that pack.' })
+  updateSticker(
+    @CurrentUser() user: CurrentUserData,
+    @Param('packId', ParseUUIDPipe) packId: string,
+    @Param('stickerId', ParseUUIDPipe) stickerId: string,
+    @Body() dto: UpdateStickerDto,
+  ): Promise<AdminStickerResponse> {
+    return this.adminStickers.updateSticker(
+      packId,
+      stickerId,
+      dto,
+      user.userId,
+    );
   }
 
   @Delete(':packId/stickers/:stickerId')

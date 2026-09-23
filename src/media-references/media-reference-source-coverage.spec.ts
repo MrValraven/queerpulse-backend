@@ -59,6 +59,9 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'ListingPhotoSetDto.d1': 'Listing.photoGallery',
   'ListingPhotoSetDto.d2': 'Listing.photoGallery',
   'ListingPhotoSetDto.vibe': 'Listing.photoGallery',
+  // The menu's PDF or photo. Its own source, so a menu file is kept alive by
+  // the menu alone.
+  'ListingMenuFileDto.url': 'Listing.menu.file',
   'UpdateSubprofileDTO.avatarUrl': 'Subprofile.avatarUrl',
   'UpdateSubprofileDTO.coverUrl': 'Subprofile.coverUrl',
   'SubprofileItemInputDTO.imageUrl': 'SubprofileItem.imageUrl',

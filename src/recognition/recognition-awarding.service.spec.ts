@@ -132,13 +132,10 @@ function makeService(opts: {
           : { skills: [], focusAreas: [] },
       ),
   };
-  // The three contribution-side repositories `gatherSignals` counts directly
+  // The two contribution-side repositories `gatherSignals` counts directly
   // (SUS-05). Each is a plain `count` stub returning the fixture's own value.
   const volunteerSignupsRepo = {
     count: () => Promise.resolve(opts.signals.volunteerSessions),
-  };
-  const listingQuestionsRepo = {
-    count: () => Promise.resolve(opts.signals.directoryAnswers),
   };
   const resourceSuggestionsRepo = {
     count: () => Promise.resolve(opts.signals.resourcesApproved),
@@ -173,7 +170,6 @@ function makeService(opts: {
     savedItemsRepo as never,
     memberPreferencesRepo as never,
     volunteerSignupsRepo as never,
-    listingQuestionsRepo as never,
     resourceSuggestionsRepo as never,
     eligibility as never,
     notifications as never,
@@ -236,7 +232,6 @@ const BASE: RecognitionSignals = {
   workProfileComplete: false,
   volunteerSessions: 0,
   piecesPublished: 0,
-  directoryAnswers: 0,
   resourcesApproved: 0,
 };
 

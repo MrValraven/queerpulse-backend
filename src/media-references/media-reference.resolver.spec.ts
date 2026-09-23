@@ -208,6 +208,72 @@ describe('MediaReferenceResolver', () => {
     ]);
   });
 
+  // Without this source `StorageMaintenanceService` reads every menu file's
+  // storage key as unreferenced and deletes it on the next sweep.
+  it('resolves a listing-menu reference from menu.file.url', async () => {
+    const bareKey =
+      'listing-menus/0b8f7c9e-1d2a-4b3c-9e8f-7a6b5c4d3e2f/5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a.pdf';
+    const dataSource = createMockDataSource([
+      [
+        Listing,
+        makeMockRepository({
+          queryBuilderRows: [
+            {
+              id: 'l1',
+              name: 'Café',
+              slug: 'cafe',
+              menu: {
+                sections: [],
+                file: {
+                  url: bareKey,
+                  contentType: 'application/pdf',
+                  fileName: 'Menu.pdf',
+                },
+                link: '',
+              },
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references } = await resolver.resolve([bareKey]);
+
+    expect(references.get(bareKey)).toEqual([
+      {
+        type: 'listing-menu',
+        entityId: 'l1',
+        label: 'Café',
+        slug: 'cafe',
+      },
+    ]);
+  });
+
+  it('reports no references when a listing has no menu file', async () => {
+    const bareKey = 'listing-menus/owner-1/unused.pdf';
+    const dataSource = createMockDataSource([
+      [
+        Listing,
+        makeMockRepository({
+          queryBuilderRows: [
+            {
+              id: 'l2',
+              name: 'Bar',
+              slug: 'bar',
+              menu: { sections: [], file: null, link: '' },
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references } = await resolver.resolve([bareKey]);
+
+    expect(references.has(bareKey)).toBe(false);
+  });
+
   it('resolves a company-work reference from work[].imageUrl', async () => {
     const bareKey = 'company-work/owner-1/two.jpg';
     const dataSource = createMockDataSource([

@@ -120,6 +120,8 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   accessibilityAnswers: emptyAccessibilityAnswers(),
   accessibilityNote: '',
   services: [],
+  menu: { sections: [], file: null, link: '' },
+  pricingMode: 'services',
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',

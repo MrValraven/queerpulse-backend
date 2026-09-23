@@ -273,27 +273,28 @@ export class SavedListsService {
   }
 
   /**
-   * The unauthenticated read behind a share link. 404s a malformed or revoked
-   * token with the same message it uses for a token that never existed, so the
-   * endpoint cannot be used to tell "this list was un-shared" apart from "this
-   * link was never real".
+   * The read behind a share link, open to signed-in active members only (the
+   * controller's guards enforce that before this runs). 404s a malformed or
+   * revoked token with the same message it uses for a token that never
+   * existed, so the endpoint cannot be used to tell "this list was un-shared"
+   * apart from "this link was never real".
    *
-   * Returns the list's name and its items and nothing about its owner — see
+   * Returns the list's name and its items and nothing about its owner; see
    * `SharedSavedListDTO`.
    */
   async getShared(
     token: string,
     /**
-     * The RECIPIENT, not the owner: the id of the signed-in active member
-     * following the link, or `null` for somebody with no account (the common
-     * case, and the reason the route is `@Public()` at all).
+     * The RECIPIENT, who is usually someone other than the owner: the id of the
+     * signed-in active member following the link. `SharedSavedListController`
+     * always passes it. `null` survives only as the default for direct callers
+     * such as specs, and resolves availability as a signed-out viewer would.
      *
      * Availability is resolved through their eyes, which is the whole point of
      * PRD-169 on this route. A shared list is the one place saved items are
      * read by a person who did not save any of them and cannot tell a live card
-     * from a stale one, so a friend who has just moved to the city gets told
-     * which of these places they can actually open instead of discovering it
-     * one 404 at a time.
+     * from a stale one, so the recipient gets told which of these places they
+     * can actually open instead of discovering it one 404 at a time.
      */
     viewerId: SavedViewerId = null,
   ): Promise<SharedSavedListDTO> {
@@ -305,7 +306,7 @@ export class SavedListsService {
       throw new NotFoundException('This list is not available');
     }
     // Bounded like every other whole-array read in this codebase. A shared list
-    // is a handful of places, and this is a public route.
+    // is a handful of places, and anyone holding the link can ask for it.
     const entries = await this.entries.find({
       where: { listId: list.id },
       order: { createdAt: 'DESC' },

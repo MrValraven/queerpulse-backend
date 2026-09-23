@@ -171,6 +171,8 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   accessibilityAnswers: emptyAccessibilityAnswers(),
   accessibilityNote: '',
   services: [],
+  menu: { sections: [], file: null, link: '' },
+  pricingMode: 'services',
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',
@@ -556,6 +558,35 @@ describe('ListingsService', () => {
         email: 'a@b.com',
         phone: '+351123',
       });
+    });
+
+    // Regression test: `changedListingFields` used to compare jsonb columns
+    // with a plain `JSON.stringify`, which is sensitive to key order. Postgres
+    // reorders jsonb object keys on read (shorter keys first) independent of
+    // how `applyUpdate`/`normalizeListingMenu` wrote them, so the "before"
+    // listing's `menu` carried a different key order than the freshly
+    // normalized "after" value even when nothing about the menu had changed:
+    // every owner PATCH falsely stamped `detailsConfirmedAt` and wrote an
+    // `owner_edited` audit row. This mimics that jsonb reordering directly in
+    // the fixture (`{ file, link, sections }` instead of the normalizer's own
+    // `{ sections, file, link }`) since the mocked repository does not round-
+    // trip through Postgres.
+    it('does not treat a same-content, differently-ordered menu as changed', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: 'owner-1',
+          status: ListingStatus.Live,
+          menu: { file: null, link: '', sections: [] },
+        }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        menu: { sections: [], file: null, link: '' },
+      });
+
+      expect(dto.detailsConfirmedAt).toBeNull();
+      expect(transactionManager.save).not.toHaveBeenCalled();
+      expect(listings.save).toHaveBeenCalled();
     });
 
     // Finding M1: `ListingsController.update` keeps the interceptor's

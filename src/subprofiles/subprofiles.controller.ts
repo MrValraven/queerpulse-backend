@@ -764,7 +764,7 @@ export class ProfileSubprofilesController {
   })
   @ApiNotFoundResponse({
     description:
-      'No such member/persona, or an unpublished draft viewed by a non-owner. When the member slug is one its owner renamed away from and the reclaim cooldown is still running, the body carries code PROFILE_MOVED and the current slug to redirect to.',
+      'No such member/persona, or an unpublished draft viewed by a non-owner. When the member slug is one its owner renamed away from and the reclaim cooldown is still running, the body carries code PROFILE_MOVED and the current slug to redirect to. When the persona was handed to a new creator after its creator left it, the body carries code PERSONA_REHOMED with the current ownerSlug and slug to redirect to.',
   })
   getBySlug(
     @CurrentUser() user: CurrentUserData | undefined,

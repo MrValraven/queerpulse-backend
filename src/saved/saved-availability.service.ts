@@ -38,10 +38,11 @@ import { toSavedId } from './saved-ref.util';
 export type SavedSubjectRef = Pick<SavedItem, 'subjectType' | 'subjectId'>;
 
 /**
- * Whose eyes the resolution runs through. `null` is the anonymous
- * share-link recipient (`GET /saved-lists/:token` is `@Public()`); a string is
- * the id of a signed-in ACTIVE member, which is the same bar
- * `ActiveMemberGuard` sets on every member-only read below.
+ * Whose eyes the resolution runs through. A string is the id of a signed-in
+ * ACTIVE member, which is the same bar `ActiveMemberGuard` sets on every
+ * member-only read below. `null` is a signed-out viewer. No route passes it
+ * today: `GET /saved-lists/:token` is members-only, so it survives as the
+ * default for direct callers and specs, and it resolves conservatively.
  */
 export type SavedViewerId = string | null;
 
@@ -506,8 +507,8 @@ export class SavedAvailabilityService {
    * link, bookmark and review ever pointed at it still resolves, and the page
    * renders the closure notice rather than erasing the record.
    *
-   * The one kind an anonymous share-link recipient can still open, which is
-   * also the kind a shared list is mostly made of.
+   * The one kind a signed-out viewer could still open, which is also the
+   * kind a shared list is mostly made of.
    */
   private async resolveListings(slugs: string[]): Promise<string[]> {
     const queryBuilder = this.queryBuilderFor(Listing, 'listing')

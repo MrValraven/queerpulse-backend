@@ -154,15 +154,15 @@ export class MessageAnnotationsService {
    * its first enquiry, and an unavailable quote still carries its parent's
    * id, so without this they could react to, pin or star the owner's and
    * the customer's earlier private messages by id. The rule is read through
-   * `mailboxStaffHistoryFloorCoversPredicate`, so a personal or group
-   * seat's "clear chat" keeps every write it had. A seat with no floor
-   * costs no query.
+   * `mailboxStaffHistoryFloorCoversPredicate`, which reads the seat's
+   * `historyFloorAt`, so a "clear chat" on any seat, a staff seat included,
+   * keeps every write it had. A seat with no history floor costs no query.
    */
   private async assertAboveMailboxStaffFloor(
     callerSeat: ConversationParticipant,
     messageId: string,
   ): Promise<void> {
-    if (!callerSeat.clearedAt) {
+    if (!callerSeat.historyFloorAt) {
       return;
     }
     const isBelowFloor = await this.messages

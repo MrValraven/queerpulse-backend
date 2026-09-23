@@ -340,6 +340,18 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     ],
     [NotificationType.SubprofileDeleted]: ['subprofileName'],
     [NotificationType.SubprofileMemberRemoved]: ['subprofileName'],
+    // The persona creator handoff (Phase 2, option A). `subprofileName` and
+    // `newCreatorName` are read back so the row says which persona and who
+    // the creator is now; `isYou` is the discriminator the client branches
+    // its copy on ("You are now the creator of X" vs "Ana is now the creator
+    // of X") for the one row shape this type writes to every remaining
+    // member. Nothing about the departing creator rides along, matching the
+    // enum member's own doc.
+    [NotificationType.SubprofileCreatorChanged]: [
+      'subprofileName',
+      'newCreatorName',
+      'isYou',
+    ],
     [NotificationType.SafeSpaceVouch]: ['spaceName', 'spaceSlug'],
     [NotificationType.HousingListingMatch]: ['title', 'area', 'slug'],
     // The moderator's decision on the member's OWN housing listing, plus the

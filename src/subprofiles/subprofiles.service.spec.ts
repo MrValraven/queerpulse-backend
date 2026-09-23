@@ -60,6 +60,7 @@ import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofileCreditsService } from './subprofile-credits.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { editableSnapshot, SubprofilesService } from './subprofiles.service';
+import { SUBPROFILE_DELETED } from './subprofile.events';
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -716,8 +717,20 @@ describe('SubprofilesService', () => {
     listPublicHandles: jest.Mock;
   };
   let eventEmitter: { emit: jest.Mock };
+  // The `HandlesService` stub, read back from the testing module so specs can
+  // order its calls against the persona row lock.
+  let handlesService: {
+    isTaken: jest.Mock;
+    release: jest.Mock;
+    rename: jest.Mock;
+  };
+  // A copy of the row `getOwned` last loaded, taken before the service
+  // mutates it: what the locked re-read sees as committed when a test stages
+  // no concurrent change.
+  let committedRowAtLoad: Subprofile | undefined;
 
   beforeEach(async () => {
+    committedRowAtLoad = undefined;
     subprofiles = {
       find: jest.fn<Promise<Subprofile[]>, unknown[]>().mockResolvedValue([]),
       findOne: jest
@@ -800,8 +813,25 @@ describe('SubprofilesService', () => {
       // re-count of remaining members. Defaults to "non-last member" (2) so
       // every test that doesn't touch `leave` is unaffected; the `leave`
       // describe block below overrides per-case.
+      //
+      // The `Subprofile` read is also the locked re-read every whole-entity
+      // save takes (`saveEditUnderLock`). It returns a copy of the row
+      // `getOwned` last loaded, as it was before the service mutated it, so
+      // for every test that does not stage a concurrent change the committed
+      // row equals the loaded one and the re-read changes nothing; the
+      // creator-transfer race tests below override it with a row that moved
+      // on.
       findOne: jest.fn().mockImplementation((entity: unknown) => {
-        if (entity === Subprofile) return Promise.resolve(makeSubprofile());
+        if (entity === Subprofile && committedRowAtLoad) {
+          return Promise.resolve({ ...committedRowAtLoad });
+        }
+        if (entity === Subprofile) {
+          const loads = subprofiles.findOne.mock.results;
+          const lastLoad = loads[loads.length - 1];
+          return lastLoad?.type === 'return'
+            ? lastLoad.value
+            : Promise.resolve(makeSubprofile());
+        }
         return Promise.resolve(null);
       }),
       // `replaceSection`'s revision pruning (`recordItemRevision`) re-reads
@@ -914,6 +944,7 @@ describe('SubprofilesService', () => {
         if (!(await membership.isMember(userId, id))) {
           throw new ForbiddenException('Not your subprofile');
         }
+        committedRowAtLoad = { ...sp };
         return sp;
       },
     );
@@ -1252,6 +1283,7 @@ describe('SubprofilesService', () => {
       ],
     }).compile();
     service = module.get(SubprofilesService);
+    handlesService = module.get(HandlesService);
     // Mappers resolve stored image keys through `toImageUrl`, which throws
     // `Service temporarily unavailable` when the base was never wired. Only
     // storage-key fixtures reach it (the M1 foreign-upload cases).
@@ -2556,6 +2588,327 @@ describe('SubprofilesService', () => {
     });
   });
 
+  // The creator role can move to another co-owner (`transferCreatorWithin`)
+  // between `getOwned`'s unlocked read and the save. Every whole-entity save
+  // re-reads the row under the lock the transfer holds, so a stale copy never
+  // writes the old creator or slug back.
+  describe('saves racing a creator transfer', () => {
+    // What `getOwned` read, before the transfer.
+    const loadedBeforeTransfer = (overrides: Partial<Subprofile> = {}) =>
+      makeSubprofile({ userId: 'user-1', slug: 'nightform', ...overrides });
+    // What the transfer committed: a new creator and a suffixed slug.
+    const committedAfterTransfer = (overrides: Partial<Subprofile> = {}) =>
+      makeSubprofile({
+        userId: 'successor-1',
+        slug: 'nightform-2',
+        ...overrides,
+      });
+    const savedSubprofile = () =>
+      (manager.save.mock.calls[0] as [Subprofile])[0];
+
+    it('an edit loaded before the transfer keeps the new creator and slug', async () => {
+      subprofiles.findOne.mockResolvedValue(loadedBeforeTransfer());
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+      expect(manager.findOne).toHaveBeenCalledWith(Subprofile, {
+        where: { id: 'sp-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(savedSubprofile()).toMatchObject({
+        userId: 'successor-1',
+        slug: 'nightform-2',
+        bio: 'Fresh bio',
+      });
+      expect(subprofiles.save).not.toHaveBeenCalled();
+    });
+
+    it('an edit that sets a new slug keeps it, with the committed creator', async () => {
+      subprofiles.findOne.mockResolvedValue(loadedBeforeTransfer());
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await service.update('user-1', 'sp-1', { slug: 'renamed' });
+
+      expect(savedSubprofile()).toMatchObject({
+        userId: 'successor-1',
+        slug: 'renamed',
+      });
+    });
+
+    it('an edit that resends the loaded slug unchanged keeps the committed slug', async () => {
+      subprofiles.findOne.mockResolvedValue(loadedBeforeTransfer());
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await service.update('user-1', 'sp-1', { slug: 'nightform' });
+
+      expect(savedSubprofile().slug).toBe('nightform-2');
+    });
+
+    it('keeps a moderator removal committed between load and save', async () => {
+      const removedAt = new Date('2026-09-01T12:00:00Z');
+      subprofiles.findOne.mockResolvedValue(
+        loadedBeforeTransfer({ removedAt: null }),
+      );
+      manager.findOne.mockResolvedValue(loadedBeforeTransfer({ removedAt }));
+
+      await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+      expect(savedSubprofile()).toMatchObject({
+        removedAt,
+        bio: 'Fresh bio',
+      });
+    });
+
+    // Lock order: every transaction takes the persona row, then the handle
+    // row, so a handle change and an unpublish can never deadlock.
+    const lockedPersonaReadOrder = () => {
+      const lockCallIndex = manager.findOne.mock.calls.findIndex(
+        ([entity]) => entity === Subprofile,
+      );
+      return manager.findOne.mock.invocationCallOrder[lockCallIndex] ?? 0;
+    };
+
+    it('locks the persona row before releasing the old handle on a handle change', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        completeUnlinked({ status: SubprofileStatus.Published }),
+      );
+
+      await service.update('user-1', 'sp-1', { handle: 'nightform-renamed' });
+
+      expect(handlesService.release).toHaveBeenCalledTimes(1);
+      const releaseOrder = handlesService.release.mock.invocationCallOrder[0];
+      expect(lockedPersonaReadOrder()).toBeLessThan(releaseOrder ?? 0);
+      expect(manager.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a former creator handle change before releasing anything', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        completeUnlinked({ status: SubprofileStatus.Published }),
+      );
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await expect(
+        service.update('user-1', 'sp-1', { handle: 'nightform-renamed' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(handlesService.release).not.toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('locks the persona row before claiming the handle on an unlinked publish', async () => {
+      subprofiles.findOne.mockResolvedValue(completeUnlinked());
+      items.find.mockResolvedValue(contentItems(MIN_CONTENT_ITEMS));
+
+      await service.publish('user-1', 'sp-1');
+
+      expect(handlesService.rename).toHaveBeenCalledTimes(1);
+      const renameOrder = handlesService.rename.mock.invocationCallOrder[0];
+      expect(lockedPersonaReadOrder()).toBeLessThan(renameOrder ?? 0);
+    });
+
+    it('refuses a stale edit by a member who left meanwhile', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        loadedBeforeTransfer({ userId: 'creator-9' }),
+      );
+      // No roster row for the editor on the locked read.
+      manager.count.mockResolvedValue(0);
+
+      await expect(
+        service.update('user-1', 'sp-1', { bio: 'Fresh bio' }),
+      ).rejects.toThrow(new ForbiddenException('Not your subprofile'));
+
+      expect(manager.count).toHaveBeenCalledWith(SubprofileMember, {
+        where: { subprofileId: 'sp-1', userId: 'user-1' },
+      });
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a stale edit by a creator who handed the persona over', async () => {
+      subprofiles.findOne.mockResolvedValue(loadedBeforeTransfer());
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+      manager.count.mockResolvedValue(0);
+
+      await expect(
+        service.update('user-1', 'sp-1', { bio: 'Fresh bio' }),
+      ).rejects.toThrow(new ForbiddenException('Not your subprofile'));
+
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a creator-only edit once the creator role has moved', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        loadedBeforeTransfer({ visibility: SubprofileVisibility.Open }),
+      );
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await expect(
+        service.update('user-1', 'sp-1', {
+          visibility: SubprofileVisibility.Private,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('a linked publish loaded before the transfer keeps the new creator', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        loadedBeforeTransfer({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Draft,
+        }),
+      );
+      manager.findOne.mockResolvedValue(
+        committedAfterTransfer({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        }),
+      );
+      items.find.mockResolvedValue([]);
+
+      await service.publish('user-1', 'sp-1');
+
+      expect(savedSubprofile()).toMatchObject({
+        userId: 'successor-1',
+        slug: 'nightform-2',
+        status: SubprofileStatus.Published,
+      });
+    });
+
+    it('refuses an unpublish by the former creator of a linked persona', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        loadedBeforeTransfer({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+        }),
+      );
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await expect(service.unpublish('user-1', 'sp-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses an unpublish by the former creator of an unlinked persona', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        loadedBeforeTransfer({
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          status: SubprofileStatus.Published,
+          handle: 'nightform',
+        }),
+      );
+      manager.findOne.mockResolvedValue(committedAfterTransfer());
+
+      await expect(service.unpublish('user-1', 'sp-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('remove', () => {
+    const rosterWith = (...memberUserIds: string[]) => {
+      manager.find.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === SubprofileMember
+            ? memberUserIds.map((memberUserId) => ({ userId: memberUserId }))
+            : [],
+        ),
+      );
+    };
+
+    it('deletes the locked row in one transaction and tells the co-owners after it', async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      rosterWith('user-1', 'co-owner-1');
+
+      await service.remove('user-1', 'sp-1');
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.findOne).toHaveBeenCalledWith(Subprofile, {
+        where: { id: 'sp-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(manager.find).toHaveBeenCalledWith(SubprofileMember, {
+        where: { subprofileId: 'sp-1' },
+        select: { userId: true },
+      });
+      expect(manager.remove).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sp-1', userId: 'user-1' }),
+      );
+      expect(subprofiles.remove).not.toHaveBeenCalled();
+      const lockOrder = manager.findOne.mock.invocationCallOrder[0] ?? 0;
+      const removeOrder = manager.remove.mock.invocationCallOrder[0] ?? 0;
+      const emitOrder = eventEmitter.emit.mock.invocationCallOrder[0] ?? 0;
+      expect(lockOrder).toBeLessThan(removeOrder);
+      expect(removeOrder).toBeLessThan(emitOrder);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(SUBPROFILE_DELETED, {
+        subprofileId: 'sp-1',
+        displayName: 'Nightform',
+        deletedByUserId: 'user-1',
+        coOwnerIds: ['co-owner-1'],
+      });
+    });
+
+    it('emits nothing when the creator was the only member', async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      rosterWith('user-1');
+
+      await service.remove('user-1', 'sp-1');
+
+      expect(manager.remove).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    // The race the lock closes: the gate read still names the caller as
+    // creator, but a concurrent leave committed a handoff before the lock
+    // was taken, so the persona now belongs to the successor.
+    it('refuses a stale delete by a creator who handed the persona over', async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      manager.findOne.mockResolvedValue(
+        makeSubprofile({ userId: 'successor-1', slug: 'nightform-2' }),
+      );
+      rosterWith('successor-1', 'co-owner-1');
+
+      await expect(service.remove('user-1', 'sp-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(manager.remove).not.toHaveBeenCalled();
+      expect(subprofiles.remove).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a stale delete once the caller has left the roster', async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      manager.findOne.mockResolvedValue(
+        makeSubprofile({ userId: 'successor-1', slug: 'nightform-2' }),
+      );
+      manager.count.mockResolvedValue(0);
+
+      await expect(service.remove('user-1', 'sp-1')).rejects.toThrow(
+        new ForbiddenException('Not your subprofile'),
+      );
+
+      expect(manager.remove).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('keeps the unlocked creator gate for a co-owner who never created it', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ userId: 'creator-9' }),
+      );
+
+      await expect(service.remove('user-1', 'sp-1')).rejects.toThrow(
+        new ForbiddenException('Only the persona creator can delete it'),
+      );
+
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(manager.remove).not.toHaveBeenCalled();
+    });
+  });
+
   describe('update', () => {
     it('nulls the handle when switching to linked', async () => {
       const sp = completeUnlinked({
@@ -2565,7 +2918,7 @@ describe('SubprofilesService', () => {
       await service.update('user-1', 'sp-1', {
         linkVisibility: SubprofileLinkVisibility.Linked,
       });
-      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.handle).toBeNull();
     });
 
@@ -2578,8 +2931,486 @@ describe('SubprofilesService', () => {
       await service.update('user-1', 'sp-1', {
         linkVisibility: SubprofileLinkVisibility.Unlinked,
       });
-      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.status).toBe(SubprofileStatus.Draft);
+    });
+
+    // Linking (Unlinked to Linked) nests the persona under the creator's
+    // profile and shows the creator's name, so only the creator
+    // (`subprofiles.userId`) may make that switch. Unlinking keeps its
+    // earlier rules.
+    describe('linking to the creator profile is creator-only', () => {
+      const linkRefusal = new ForbiddenException(
+        'Only the persona creator can link it to their profile',
+      );
+
+      it('refuses a co-owner who is not the creator, and saves nothing', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+        ).rejects.toThrow(linkRefusal);
+
+        expect(manager.save).not.toHaveBeenCalled();
+        expect(subprofiles.save).not.toHaveBeenCalled();
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+
+      it('refuses a co-owner linking a published unlinked persona with the link reason, and releases nothing', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            userId: 'creator-1',
+            status: SubprofileStatus.Published,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+        ).rejects.toThrow(linkRefusal);
+
+        expect(handlesService.release).not.toHaveBeenCalled();
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('lets the creator link it', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved.linkVisibility).toBe(SubprofileLinkVisibility.Linked);
+        expect(saved.userId).toBe('user-1');
+      });
+
+      it('lets a co-owner unlink a linked draft, as before', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved.linkVisibility).toBe(SubprofileLinkVisibility.Unlinked);
+        expect(saved.status).toBe(SubprofileStatus.Draft);
+      });
+
+      it('still refuses a co-owner unlinking a published persona with the unpublish reason, as before', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          }),
+        ).rejects.toThrow(
+          new ForbiddenException('Only the persona creator can unpublish it'),
+        );
+
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a former creator who handed the persona over', async () => {
+        // The handover committed before this load: `userId` already names
+        // the successor, and the former creator is now a plain co-owner.
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'successor-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+        ).rejects.toThrow(linkRefusal);
+
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('re-checks the creator under the row lock and refuses when the creator changed between load and save', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        // The creator transfer committed after the load above.
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'successor-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+        ).rejects.toThrow(
+          new ForbiddenException(
+            'Only the persona creator can make this change',
+          ),
+        );
+
+        expect(manager.findOne).toHaveBeenCalledWith(Subprofile, {
+          where: { id: 'sp-1' },
+          lock: { mode: 'pessimistic_write' },
+        });
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('an unrelated co-owner edit after a concurrent unlink saves and keeps it unlinked', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: null,
+          }),
+        );
+        // The creator unlinked it after the co-owner's load, which also
+        // drafted it.
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          status: SubprofileStatus.Draft,
+          handle: null,
+          bio: 'Fresh bio',
+        });
+      });
+
+      it('a co-owner resending the loaded link value keeps the committed unlink', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          bio: 'Fresh bio',
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved.linkVisibility).toBe(SubprofileLinkVisibility.Unlinked);
+      });
+
+      it('a creator stale edit does not re-link a persona a co-owner unlinked meanwhile', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        // A co-owner unlinked the draft after the creator's load.
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          bio: 'Fresh bio',
+        });
+      });
+
+      it('an explicit link by a co-owner is still refused when the committed row is unlinked', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+        ).rejects.toThrow(linkRefusal);
+
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a linked publish with a 409 when the persona was unlinked meanwhile', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        items.find.mockResolvedValue([]);
+
+        await expect(service.publish('user-1', 'sp-1')).rejects.toBeInstanceOf(
+          ConflictException,
+        );
+
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      const changedMeanwhileMessage =
+        'This persona changed while you were editing. Reload it and try again.';
+
+      it('refuses a creator handle edit with a 409 when the persona was linked meanwhile', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            userId: 'user-1',
+            status: SubprofileStatus.Published,
+          }),
+        );
+        // The creator linked it from another tab after this load.
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: null,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', { handle: 'nightform-renamed' }),
+        ).rejects.toThrow(new ConflictException(changedMeanwhileMessage));
+
+        // The release ran inside the transaction the 409 rolls back.
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a creator unpublish of a linked persona with a 409 when it was unlinked meanwhile', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: null,
+          }),
+        );
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'user-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await expect(service.unpublish('user-1', 'sp-1')).rejects.toThrow(
+          new ConflictException(changedMeanwhileMessage),
+        );
+
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses an unlinked publish with a 409 before claiming the handle when the creator linked it meanwhile', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            userId: 'creator-1',
+            status: SubprofileStatus.Draft,
+          }),
+        );
+        items.find.mockResolvedValue(contentItems(MIN_CONTENT_ITEMS));
+        // The creator linked it after the co-owner's load, which dropped
+        // the handle.
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        const publishing = service.publish('user-1', 'sp-1');
+
+        // The 409 passes the catch that maps a registry conflict to the
+        // 422 `handle_taken`.
+        await expect(publishing).rejects.toThrow(
+          new ConflictException(changedMeanwhileMessage),
+        );
+        expect(handlesService.rename).not.toHaveBeenCalled();
+        expect(manager.update).not.toHaveBeenCalled();
+      });
+
+      it('refuses a creator link with a 409 when the persona was published unlinked meanwhile', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            userId: 'user-1',
+            status: SubprofileStatus.Draft,
+          }),
+        );
+        // A co-owner's publish claimed the handle after this load.
+        manager.findOne.mockResolvedValue(
+          completeUnlinked({
+            userId: 'user-1',
+            status: SubprofileStatus.Published,
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+        ).rejects.toThrow(new ConflictException(changedMeanwhileMessage));
+
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('treats a null linkVisibility in the body as no switch and keeps the committed unlink', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        manager.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          // `@IsOptional()` lets a JSON null through validation.
+          linkVisibility: null as unknown as SubprofileLinkVisibility,
+          bio: 'Fresh bio',
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved.linkVisibility).toBe(SubprofileLinkVisibility.Unlinked);
+      });
+
+      it('publishing an unlinked persona as a co-owner keeps it unlinked', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            userId: 'creator-1',
+            status: SubprofileStatus.Draft,
+          }),
+        );
+        items.find.mockResolvedValue(contentItems(MIN_CONTENT_ITEMS));
+
+        const published = await service.publish('user-1', 'sp-1');
+
+        expect(published.linkVisibility).toBe(
+          SubprofileLinkVisibility.Unlinked,
+        );
+        expect(manager.update).toHaveBeenCalledWith(
+          Subprofile,
+          { id: 'sp-1' },
+          { status: SubprofileStatus.Published },
+        );
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('publishing an already linked persona as a co-owner keeps its current rule', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+        items.find.mockResolvedValue([]);
+
+        const published = await service.publish('user-1', 'sp-1');
+
+        expect(published.status).toBe(SubprofileStatus.Published);
+        expect(published.linkVisibility).toBe(SubprofileLinkVisibility.Linked);
+      });
     });
 
     // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4):
@@ -2596,7 +3427,7 @@ describe('SubprofilesService', () => {
         },
       };
       await service.update('user-1', 'sp-1', { skinData });
-      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.skinData).toEqual(skinData);
     });
 

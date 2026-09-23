@@ -38,6 +38,7 @@ import { ProfileNowHistory } from '../profiles/entities/profile-now-history.enti
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageModule } from '../storage/storage.module';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersModule } from '../users/users.module';
@@ -106,6 +107,14 @@ import { DsarRequest } from './entities/dsar-request.entity';
     // no `forwardRef`: `IdentitiesModule` registers only its own entities and
     // imports no other module, so it cannot cycle back to `AccountModule`.
     IdentitiesModule,
+    // `SubprofileMembershipService.handOverCreatedPersonasFor`: called from
+    // `AccountDeletionProcessorService.eraseAccount` before the `User` row is
+    // hard-deleted, so every shared persona the erased member created passes
+    // to its longest-standing remaining co-owner instead of cascading away
+    // with `subprofiles.user_id`. Plain import, no `forwardRef`: only
+    // `AppModule` imports `AccountModule`, so `SubprofilesModule` cannot reach
+    // it, directly or transitively.
+    SubprofilesModule,
     AdminQueueNotificationsModule,
     TypeOrmModule.forFeature([
       DeletionRequest,

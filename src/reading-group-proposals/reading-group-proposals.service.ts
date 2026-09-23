@@ -25,6 +25,7 @@ export class ReadingGroupProposalsService {
     const saved = await this.readingGroupProposals.save(
       this.readingGroupProposals.create({
         memberId,
+        clubName: dto.clubName?.trim() || null,
         book: dto.book,
         why: dto.why?.trim() ? dto.why.trim() : null,
         format: dto.format,

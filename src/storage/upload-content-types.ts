@@ -50,3 +50,16 @@ export const DOCUMENT_UPLOAD_TYPES: Readonly<
 export const ALLOWED_DOCUMENT_TYPES: readonly string[] = Object.keys(
   DOCUMENT_UPLOAD_TYPES,
 );
+
+/**
+ * The one upload kind that takes either a document or an image: a listing's
+ * menu (`listing-menu`), which an owner has as a PDF or as a photo of the
+ * board. Every image type plus PDF only; spreadsheets and text files are no
+ * use on a public page.
+ */
+export const LISTING_MENU_UPLOAD_TYPES: Readonly<
+  Record<string, ImageUploadSpec>
+> = {
+  ...IMAGE_UPLOAD_TYPES,
+  'application/pdf': { extension: '.pdf' },
+};

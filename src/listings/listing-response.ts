@@ -14,8 +14,10 @@ import {
   Listing,
   ListingDayHours,
   ListingHoursException,
+  ListingMenu,
   ListingOperatingState,
   ListingPhotoSet,
+  ListingPricingMode,
   ListingServiceOffering,
   ListingSocial,
   ListingStatus,
@@ -25,6 +27,7 @@ import {
   SafeSpaceStatus,
   SafeSpaceVouch,
 } from './entities/listing.entity';
+import { toListingMenuView } from './listing-menu';
 import {
   ListingAccessibilityAnswerMap,
   normalizeAccessibilityAnswers,
@@ -393,6 +396,10 @@ export interface ListingDTO {
   /** What the business sells and what it costs. Empty when it prices
    * nothing. The single `price` band above is unchanged. */
   services: ListingServiceOffering[];
+  /** Which list the page shows: `services` or `menu`. */
+  pricingMode: ListingPricingMode;
+  /** The menu, with `file.url` resolved to its served URL. */
+  menu: ListingMenu;
   langs: string[];
   /** Online-only business (no physical location). */
   online: boolean;
@@ -1247,6 +1254,10 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * ("from 25 EUR", "sliding scale"). Empty when it prices nothing. The
    * inherited `pills` still lead with the at-a-glance `price` band. */
   services: ListingServiceOffering[];
+  /** Which list the page shows: `services` or `menu`. */
+  pricingMode: ListingPricingMode;
+  /** The menu, with `file.url` resolved to its served URL. */
+  menu: ListingMenu;
   /** The listing's agreement to the LGBTQ+ affirming baseline, so the page can
    * state the commitment every business here has made. `isAccepted` is true on
    * every listing by definition; it is not a distinguishing badge and not a
@@ -1410,6 +1421,8 @@ export function toDirectoryDetail(
     goodFor: listing.goodFor.map((label) => ({ label, yes: true })),
     accessibility: accessibilityView(listing),
     services: listing.services ?? [],
+    pricingMode: listing.pricingMode ?? 'services',
+    menu: toListingMenuView(listing.menu),
     affirmingBaseline: affirmingBaselineView(listing),
     queerOwnedVerification: queerOwnedVerificationView(listing),
     hoursType: hoursTypeForCategory(listing.cats[0] ?? ''),
@@ -1496,6 +1509,8 @@ export function toListingDTO(
     goodFor: listing.goodFor,
     accessibility: accessibilityView(listing),
     services: listing.services ?? [],
+    pricingMode: listing.pricingMode ?? 'services',
+    menu: toListingMenuView(listing.menu),
     langs: listing.langs,
     online: listing.online ?? false,
     address: listing.address,

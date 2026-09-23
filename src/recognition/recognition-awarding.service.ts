@@ -8,7 +8,6 @@ import { Profile } from '../users/entities/profile.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
-import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
 import {
   ResourceSuggestion,
   ResourceSuggestionStatus,
@@ -96,15 +95,13 @@ export class RecognitionAwardingService {
     @InjectRepository(MemberPreferences)
     private readonly memberPreferences: Repository<MemberPreferences>,
     // ── the contribution side (SUS-05) ──────────────────────────────────────
-    // Three counts that have no home in `PublicEligibilityService` (they are
+    // Two counts that have no home in `PublicEligibilityService` (they are
     // not eligibility signals) and so are read here directly. The other two
     // contribution signals, `piecesPublished` and `eventsHosted`, come off
     // the eligibility DTO, which already computed both and simply never
     // handed them to recognition.
     @InjectRepository(VolunteerSignup)
     private readonly volunteerSignups: Repository<VolunteerSignup>,
-    @InjectRepository(ListingPublicQuestion)
-    private readonly listingQuestions: Repository<ListingPublicQuestion>,
     @InjectRepository(ResourceSuggestion)
     private readonly resourceSuggestions: Repository<ResourceSuggestion>,
     private readonly eligibility: PublicEligibilityService,
@@ -420,7 +417,6 @@ export class RecognitionAwardingService {
       articlesSaved,
       preferences,
       volunteerSessions,
-      directoryAnswers,
       resourcesApproved,
       eventsHeld,
       audiencedCommunities,
@@ -458,12 +454,6 @@ export class RecognitionAwardingService {
           completedAt: Not(IsNull()),
           hoursContributed: MoreThan(0),
         },
-      }),
-      // A public question on a directory listing that this member answered.
-      // `isAnsweredByModerator` is not filtered on: a moderator answering a
-      // question is doing the same work for the same reader.
-      this.listingQuestions.count({
-        where: { answeredById: user.userId, answeredAt: Not(IsNull()) },
       }),
       // APPROVED only, so submitting volume earns nothing.
       this.resourceSuggestions.count({
@@ -547,7 +537,6 @@ export class RecognitionAwardingService {
       eventsHeld,
       piecesPublished: signalsDto.publishedPieces.length,
       volunteerSessions,
-      directoryAnswers,
       resourcesApproved,
       tenureDays: signalsDto.tenureDays,
       verified: signalsDto.verified,

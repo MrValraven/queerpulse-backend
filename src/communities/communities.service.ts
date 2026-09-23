@@ -214,6 +214,7 @@ export interface CreateCommunityInput {
   area?: string | null; // plain text, sanitized on write
   isOnline?: boolean; // defaults to false when omitted
   languages?: string[]; // codes from LANGUAGE_CODES; defaults to [] when omitted
+  nowReading?: string | null; // reading group's current book, sanitized on write
   // Owner-level opt-in to a signed-out teaser. Only ever true while
   // `accessTier` is `public` or `request`; see `assertPublicListingAllowed`.
   isPubliclyListed?: boolean;
@@ -641,6 +642,7 @@ export class CommunitiesService {
               area: toStoredPlainTextOrNull(dto.area),
               isOnline: dto.isOnline ?? false,
               languages: dto.languages ?? [],
+              nowReading: toStoredPlainTextOrNull(dto.nowReading),
               // Guarded against the tier above (see
               // `assertPublicListingAllowed`), and off unless the creator
               // deliberately asked for it.
@@ -1431,6 +1433,9 @@ export class CommunitiesService {
         : {}),
       ...(dto.isOnline !== undefined ? { isOnline: dto.isOnline } : {}),
       ...(dto.languages !== undefined ? { languages: dto.languages } : {}),
+      ...(dto.nowReading !== undefined
+        ? { nowReading: toStoredPlainTextOrNull(dto.nowReading) }
+        : {}),
       // Included whenever the effective value moves, which covers both an
       // explicit toggle and the forced unlisting a tier change causes. Being
       // in `next` is also what puts it in the `settings_changed` diff: who

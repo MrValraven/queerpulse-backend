@@ -132,6 +132,26 @@ export class ConversationParticipant {
   @Column({ type: 'timestamptz', nullable: true })
   clearedAt!: Date | null;
 
+  /**
+   * The privacy floor of a MAILBOX STAFF seat: nothing created at or before
+   * this instant exists for this staff member, so its quotes, pins,
+   * reactions, stars, attachments, forwards, live frames and reports are
+   * withheld too (`mailboxStaffHistoryFloorCoversPredicate`). Written only
+   * when a staff member is seated or reseated (`IdentityMailboxSyncService`),
+   * together with `clearedAt` and from the same database instant, so the
+   * message list hides pre-hire history as well. The one exception is the
+   * one-time backfill in `1821500000000-AddConversationParticipantHistoryFloor`
+   * (and its documented post-deploy rerun), which copied `clearedAt` into
+   * this column on every non-profile seat of a direct, non-official thread,
+   * so a staff member's personal clear from before then also counts as a
+   * floor. A personal "clear chat"
+   * writes `clearedAt` alone: it hides history from this person's own list
+   * and leaves every other action on older messages working, as in a
+   * personal chat. NULL on every personal and group seat.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  historyFloorAt!: Date | null;
+
   @Column({ type: 'boolean', default: false })
   muted!: boolean;
 

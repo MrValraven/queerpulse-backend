@@ -9,6 +9,7 @@ import { MessageRequestsService } from '../messaging/message-requests.service';
 import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { CompanyContactController } from './company-contact.controller';
 import { IdentityContactService } from './identity-contact.service';
 import { PersonaContactController } from './persona-contact.controller';
@@ -43,6 +44,7 @@ function makeContact(
     coldMessageRows?: Array<{ conversationId: string; createdAt: Date }>;
     listingEnquiryRows?: Array<{ listingId: string; createdAt: Date }>;
     personBlockedUserIds?: string[];
+    suspendedUserIds?: string[];
     existingConversations?: SavedRow[];
   } = {},
 ) {
@@ -156,6 +158,22 @@ function makeContact(
       ),
     ),
   };
+  // Every staff member's account, active unless the test suspends it.
+  const users = {
+    find: jest.fn(() =>
+      Promise.resolve(
+        Object.values(staffByIdentityId)
+          .flat()
+          .map((staffUserId) => ({
+            id: staffUserId,
+            isSystem: false,
+            status: (options.suspendedUserIds ?? []).includes(staffUserId)
+              ? UserStatus.Suspended
+              : UserStatus.Active,
+          })),
+      ),
+    ),
+  };
   const requests = new MessageRequestsService(
     {} as never,
     core,
@@ -165,6 +183,7 @@ function makeContact(
     } as never,
     blockFilter as never,
     { resyncConversation: jest.fn(() => Promise.resolve([])) } as never,
+    users as never,
   );
   const messaging = Object.create(
     MessagingService.prototype,
@@ -455,6 +474,41 @@ describe('company contact', () => {
       },
     });
     expect(transaction).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1: the rule listings follow reaches companies too. The owner
+  // is suspended and the only active team member is blocked with the
+  // member, so nobody could read the message.
+  it('refuses as blocked when the unblocked owner is suspended and the active team member is blocked', async () => {
+    const { companyController, transaction, postMessage } = makeContact({
+      companyStaff: ['company-owner', 'team-member'],
+      suspendedUserIds: ['company-owner'],
+      personBlockedUserIds: ['team-member'],
+    });
+
+    await expect(
+      companyController.getContact(customer, 'acme'),
+    ).resolves.toMatchObject({
+      canMessage: false,
+      unavailableReason: 'unavailable',
+    });
+    await expect(
+      companyController.send(customer, 'acme', { body: 'A question here.' }),
+    ).rejects.toMatchObject({ response: { code: 'IDENTITY_BLOCKED' } });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it('delivers while the owner is suspended and an unblocked team member is active', async () => {
+    const { companyController, postMessage } = makeContact({
+      companyStaff: ['company-owner', 'team-member'],
+      suspendedUserIds: ['company-owner'],
+    });
+
+    await expect(
+      companyController.send(customer, 'acme', { body: 'A question here.' }),
+    ).resolves.toMatchObject({ conversationId: 'mailbox-conversation' });
+    expect(postMessage).toHaveBeenCalledTimes(1);
   });
 
   it('delivers into the company mailbox, seating every team member', async () => {

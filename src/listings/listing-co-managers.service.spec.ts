@@ -352,6 +352,21 @@ describe('ListingCoManagersService', () => {
       );
     });
 
+    it('reads the seat under a row lock, the lock a revoke or leave also takes', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+
+      await service.respondToInvite('seat-1', INVITEE_ID, 'accept');
+
+      expect(coManagers.findOne).toHaveBeenCalledWith({
+        where: { id: 'seat-1', userId: INVITEE_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+      // The locked read comes before the status flip.
+      expect(coManagers.findOne.mock.invocationCallOrder[0]).toBeLessThan(
+        coManagers.update.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
+
     it('404s an invitation addressed to somebody else', async () => {
       // Scoped by `{ id, userId }`, so a seat id is never an oracle for "is
       // this a real invitation".
@@ -647,12 +662,93 @@ describe('ListingCoManagersService', () => {
       expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
     });
 
-    it('does not touch the mailbox for an unanswered invitation, since it was never a seat', async () => {
+    it('reads the seat under a row lock before it flips the status', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      expect(coManagers.findOne).toHaveBeenCalledWith({
+        where: { listingId: 'listing-1', userId: INVITEE_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(coManagers.findOne.mock.invocationCallOrder[0]).toBeLessThan(
+        coManagers.update.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
+
+    // The race this closes: a revoke read the seat as `invited`, an accept
+    // committed `active` and seated the member, and the revoke's flip still
+    // matched. The lock now serializes the two, and the seat sync runs for
+    // every live row anyway, so an unanswered invitation also ends any
+    // mailbox seat, in the same transaction, with no history row.
+    it('ends the mailbox seat for an unanswered invitation too, in the same transaction', async () => {
       coManagers.findOne.mockResolvedValue(seat());
 
       await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
 
+      expect(identityMailboxSync.onStaffRemoved).toHaveBeenCalledWith(
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+      expect(transactionManager.save).not.toHaveBeenCalled();
+    });
+
+    // One side of the serialized race: the accept committed before the
+    // revoke took its lock, so the locked read sees `active`. The lock
+    // assertions above and the unanswered-invitation test cover the rest.
+    it('ends the mailbox seat of an active co-manager whose accept committed first, evicting them after commit', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+      const acceptedThenRevokedChanges = {
+        endedSeats: [{ conversationId: 'conversation-1', userId: INVITEE_ID }],
+        releasedClaims: [],
+        staffingChanges: [
+          {
+            identityId: 'listing-identity-1',
+            userId: INVITEE_ID,
+            isStaff: false,
+          },
+        ],
+      };
+      identityMailboxSync.onStaffRemoved.mockResolvedValue(
+        acceptedThenRevokedChanges,
+      );
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      expect(identityMailboxSync.onStaffRemoved).toHaveBeenCalledWith(
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledWith(
+        acceptedThenRevokedChanges,
+      );
+    });
+
+    it('keeps the mailbox seat of a member who is now the owner of record', async () => {
+      // A staff-attached seat spared by an ownership transfer to its own
+      // holder: revoking the seat leaves them the owner, and staff.
+      slugResolvesTo('owner-slug', OWNER_ID);
+      coManagers.findOne.mockResolvedValue(
+        seat({ userId: OWNER_ID, status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.staffRevokeCoManager(
+        'QPL-2026-0001',
+        'admin-1',
+        'owner-slug',
+      );
+
+      expect(coManagers.update).toHaveBeenCalled();
       expect(identityMailboxSync.onStaffRemoved).not.toHaveBeenCalled();
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
     });
 
     it('404s a seat that has already ended, so a double-click writes one event', async () => {

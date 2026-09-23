@@ -14,6 +14,7 @@ import { IdentityStaffPreference } from './entities/identity-staff-preference.en
 import { Identity } from './entities/identity.entity';
 import { IdentityAttributionSettingsService } from './identity-attribution-settings.service';
 import { IdentityAttributionService } from './identity-attribution.service';
+import { IdentityMailboxReconciliationService } from './identity-mailbox-reconciliation.service';
 import { IdentityMailboxSyncService } from './identity-mailbox-sync.service';
 import { IdentitiesController } from './identities.controller';
 import { IdentitiesService } from './identities.service';
@@ -54,6 +55,9 @@ import { IdentitiesService } from './identities.service';
     IdentityAttributionService,
     IdentityAttributionSettingsService,
     IdentityMailboxSyncService,
+    // The hourly `@Cron` safety net over `IdentityMailboxSyncService`'s
+    // sweep. Not exported: nothing outside this module calls it.
+    IdentityMailboxReconciliationService,
   ],
   exports: [
     IdentitiesService,

@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
@@ -15,6 +15,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { sanitizeMessageBody } from './dto/trim-message-body';
 import { MessageView } from './message-response';
 import {
@@ -83,6 +84,45 @@ export function identityBlockedException(): ForbiddenException {
 }
 
 /**
+ * The staff members among `staffUserIds` whose account can receive a message
+ * right now: an active account that is not a system account. A system
+ * account is the house account seeded content is parked on, with no human
+ * reading its inbox. A suspended or deactivated member is signed out
+ * everywhere and has no push subscription left (`AuthService.revokeAllForUser`,
+ * `PushService.handleSessionRevoked`), so a message only they could read
+ * would sit unread.
+ *
+ * The one home of this rule. `MessageRequestsService` applies it, with
+ * blocks, to decide whether a mailbox enquiry can reach anybody, and
+ * `ListingEnquiriesService` applies it on its own to tell a listing nobody
+ * can answer apart from one the member is blocked from. One read for the
+ * whole list, which is an owner plus a handful of colleagues.
+ */
+export async function loadReceivingStaffUserIds(
+  users: Pick<Repository<User>, 'find'>,
+  staffUserIds: string[],
+): Promise<string[]> {
+  if (staffUserIds.length === 0) {
+    return [];
+  }
+  const staffUsers = await users.find({
+    where: { id: In(staffUserIds) },
+    select: { id: true, isSystem: true, status: true },
+  });
+  const receivingUserIds = new Set(
+    staffUsers
+      .filter(
+        (staffUser) =>
+          !staffUser.isSystem && staffUser.status === UserStatus.Active,
+      )
+      .map((staffUser) => staffUser.id),
+  );
+  return staffUserIds.filter((staffUserId) =>
+    receivingUserIds.has(staffUserId),
+  );
+}
+
+/**
  * Task 18: the mailbox twin of `EnquiryContactability`, from
  * `MessageRequestsService.identityEnquiryContactability`.
  */
@@ -122,6 +162,9 @@ export class MessageRequestsService {
     private readonly blockFilter: BlockFilterService,
     // Task 18: seats the mailbox's current staff on a reused enquiry thread.
     private readonly mailboxSync: IdentityMailboxSyncService,
+    // Read-only: whose account can receive an enquiry right now
+    // (`loadReceivingStaffUserIds`). `UsersModule` exports the repository.
+    @InjectRepository(User) private readonly users: Repository<User>,
   ) {}
 
   async messageRequest(
@@ -332,8 +375,9 @@ export class MessageRequestsService {
    *    member, either way, refuses as the identity block does (fix round 1):
    *    the message could reach nobody;
    *  - a reused thread gets the current staff seated
-   *    (`IdentityMailboxSyncService.resyncConversation`, this thread only),
-   *    departed staff staying departed;
+   *    (`IdentityMailboxSyncService.resyncConversation`, this thread only,
+   *    under the staff source lock in its own transaction), departed staff
+   *    staying departed;
    *  - the message goes through `MessagingCoreService.postMessage`, whose
    *    `MESSAGE_CREATED` drives the live frames and the push, both built
    *    from the reachable mailbox seats.
@@ -368,8 +412,16 @@ export class MessageRequestsService {
       );
     if (!created) {
       // Fix round 1: this one thread only. Reconciling the whole mailbox
-      // during a customer's send was too heavy.
-      await this.mailboxSync.resyncConversation(toIdentityId, conversation.id);
+      // during a customer's send was too heavy. Final review C, I1: under
+      // the staff source lock, in a transaction of its own that the resync
+      // opens, with the live events sent once it commits, so a revoke or
+      // leave committing mid-resync is never undone on this thread.
+      await this.mailboxSync.resyncConversation(
+        toIdentityId,
+        conversation.id,
+        undefined,
+        { shouldLockStaffSource: true },
+      );
     }
     await this.core.postMessage(conversation.id, fromUserId, body);
     return { conversationId: conversation.id };
@@ -377,12 +429,17 @@ export class MessageRequestsService {
 
   /**
    * Task 18 fix round 1: the one answer the contactability read and the
-   * delivery share. `blocked` for the member's block of the identity, and
-   * for a mailbox with no reachable staff seat: every current staff member
+   * delivery share, for listings, personas and companies alike. `blocked`
+   * for the member's block of the identity, and for a mailbox with no
+   * reachable staff member. A reachable staff member is one who is neither
    * blocked with the member in either direction (the same read
-   * `loadReachableMailboxSeats` excludes a seat on). A person block with SOME
-   * staff still delivers; those seats are left out at read time. Otherwise
-   * the coded `IdentityContactRefusal`, or null.
+   * `loadReachableMailboxSeats` excludes a seat on) nor behind an account
+   * that cannot receive (`loadReceivingStaffUserIds`). Both halves hold for
+   * the SAME person, so a suspended colleague who is not blocked and an
+   * active one who is blocked leave nobody to read the message, and the
+   * enquiry is refused. A person block with SOME staff still delivers while
+   * another reachable colleague remains; the blocked seats are left out at
+   * read time. Otherwise the coded `IdentityContactRefusal`, or null.
    */
   private async identityEnquiryBlockedReason(
     fromUserId: string,
@@ -402,10 +459,14 @@ export class MessageRequestsService {
       fromUserId,
       contact.staffUserIds,
     );
-    const hasReachableStaff = contact.staffUserIds.some(
+    const unblockedStaffUserIds = contact.staffUserIds.filter(
       (staffUserId) => !blockedStaffUserIds.has(staffUserId),
     );
-    return hasReachableStaff ? null : 'blocked';
+    const reachableStaffUserIds = await loadReceivingStaffUserIds(
+      this.users,
+      unblockedStaffUserIds,
+    );
+    return reachableStaffUserIds.length > 0 ? null : 'blocked';
   }
 
   @OnEvent(CONNECTION_ACCEPTED)
