@@ -356,6 +356,18 @@ export enum NotificationType {
   // link back to the community. See migration
   // `AddCommunityTagRequestResolvedNotificationType1793400100000`.
   CommunityTagRequestResolved = 'community_tag_request_resolved',
+  /**
+   * Platform staff approved a community's request to host spaces, which also
+   * switched `allowsSubcommunities` on. Sent to the requester. Payload:
+   * `{ source: 'community', communitySlug, communityName }`.
+   */
+  CommunitySpaceRequestApproved = 'community_space_request_approved',
+  /**
+   * Platform staff declined a community's request to host spaces. Sent to the
+   * requester; the reason, if any, shows in the community's Spaces pane.
+   * Payload: `{ source: 'community', communitySlug, communityName }`.
+   */
+  CommunitySpaceRequestDeclined = 'community_space_request_declined',
   // Sent to a barter listing's OWNER when a member proposes a swap on it
   // (`BarterService.createProposal`). Before this, a proposal reached the
   // owner ONLY as a DM through `MessagingService.deliverEnquiry`, so the bell

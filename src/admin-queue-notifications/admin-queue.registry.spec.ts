@@ -158,14 +158,20 @@ const EXPECTED: Record<
     tier: UserRole.Admin,
     capabilities: ['resource_curator'],
   },
+  [AdminQueueKey.CommunitySpaceRequests]: {
+    route: '/admin/community-space-requests',
+    tier: UserRole.Admin,
+    capabilities: ['communities'],
+  },
 };
 
 describe('ADMIN_QUEUE_REGISTRY', () => {
   it('covers every key exactly once', () => {
-    // 28 as of GuideReviews. The frontend mirror at adminQueueRoutes.ts
-    // carries the same 28 keys, and the two sides have to agree.
-    expect(ADMIN_QUEUE_KEYS).toHaveLength(28);
-    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(28);
+    // 29 as of CommunitySpaceRequests. The frontend mirror at
+    // adminQueueRoutes.ts carries the same 29 keys, and the two sides have to
+    // agree.
+    expect(ADMIN_QUEUE_KEYS).toHaveLength(29);
+    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(29);
     expect(Object.keys(ADMIN_QUEUE_REGISTRY).sort()).toEqual(
       [...ADMIN_QUEUE_KEYS].sort(),
     );

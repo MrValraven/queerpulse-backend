@@ -19,6 +19,12 @@ export const PARENT_MEMBERSHIP_REQUIRED_CODE = 'PARENT_MEMBERSHIP_REQUIRED';
  */
 export const SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE =
   'SUBCOMMUNITY_FEATURE_UNAVAILABLE';
+/** A space request was filed for a community that already hosts spaces. */
+export const SPACES_ALREADY_ALLOWED_CODE = 'SPACES_ALREADY_ALLOWED';
+/** A space request was filed while another one is still open. */
+export const SPACE_REQUEST_ALREADY_OPEN_CODE = 'SPACE_REQUEST_ALREADY_OPEN';
+/** An admin tried to approve or decline a request that is no longer open. */
+export const SPACE_REQUEST_NOT_OPEN_CODE = 'SPACE_REQUEST_NOT_OPEN';
 
 export const TIER_STRICTNESS: Record<AccessTier, number> = {
   [AccessTier.Public]: 0,

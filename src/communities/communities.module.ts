@@ -51,6 +51,8 @@ import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
 import { CommunityPulseController } from './community-pulse.controller';
 import { CommunityPulseService } from './community-pulse.service';
+import { SpaceRequestsController } from './space-requests.controller';
+import { SpaceRequestsService } from './space-requests.service';
 import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityBanRatification } from './entities/community-ban-ratification.entity';
 import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
@@ -65,6 +67,7 @@ import { CommunityPostReaction } from './entities/community-post-reaction.entity
 import { CommunityPostReplyEdit } from './entities/community-post-reply-edit.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
+import { CommunitySpaceRequest } from './entities/community-space-request.entity';
 import { CommunityTagRequest } from './entities/community-tag-request.entity';
 import { Community } from './entities/community.entity';
 import { MeCommunitiesController } from './me-communities.controller';
@@ -94,6 +97,12 @@ import { SubcommunitiesService } from './subcommunities.service';
       // for the admin-side review queue, same precedent as
       // `CommunityJoinRequest`/`Community` there.
       CommunityTagRequest,
+      // A community owner or co-owner asking platform staff to switch spaces
+      // on (`SpaceRequestsService`), read+written here on the member side;
+      // `AdminCommunitiesModule` registers its own `forFeature` for the
+      // admin-side review queue, same precedent as `CommunityTagRequest`
+      // right above.
+      CommunitySpaceRequest,
       // The owner-erasure audit trail (`CommunityGovernanceLogService`) and,
       // via `CommunityOwnerOrphanService`, the sink for automatic owner→mod
       // promotion entries.
@@ -235,6 +244,9 @@ import { SubcommunitiesService } from './subcommunities.service';
     // A community's spaces (`:slug/subcommunities`), kept off
     // `CommunitiesController` like the surfaces above.
     SubcommunitiesController,
+    // A community's own request to switch spaces on
+    // (`:slug/space-requests`), decided from the admin queue.
+    SpaceRequestsController,
   ],
   providers: [
     CommunitiesService,
@@ -275,6 +287,7 @@ import { SubcommunitiesService } from './subcommunities.service';
     CommunityGovernanceHistoryService,
     CommunitySupportOffersService,
     SubcommunitiesService,
+    SpaceRequestsService,
   ],
   // `CommunityOwnerOrphanService` is exported so `AccountModule` can call
   // `handleOwnerErasure(userId)` from `AccountDeletionProcessorService.eraseAccount`,

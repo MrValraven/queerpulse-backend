@@ -17,6 +17,10 @@ import {
   CommunityOwnerReviewRequestStatus,
 } from '../communities/entities/community-owner-review-request.entity';
 import {
+  CommunitySpaceRequest,
+  CommunitySpaceRequestStatus,
+} from '../communities/entities/community-space-request.entity';
+import {
   CommunityTagRequest,
   CommunityTagRequestStatus,
 } from '../communities/entities/community-tag-request.entity';
@@ -387,6 +391,15 @@ export const ADMIN_REGISTRY_QUEUE_COUNTERS: Record<
     waiting: (column) => ({
       sql: `${column('status')} = :tagRequestStatus`,
       parameters: { tagRequestStatus: CommunityTagRequestStatus.Pending },
+    }),
+  }),
+
+  [AdminQueueKey.CommunitySpaceRequests]: queueCounter({
+    entity: CommunitySpaceRequest,
+    waitingSince: 'createdAt',
+    waiting: (column) => ({
+      sql: `${column('status')} = :spaceRequestStatus`,
+      parameters: { spaceRequestStatus: CommunitySpaceRequestStatus.Open },
     }),
   }),
 

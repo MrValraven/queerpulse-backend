@@ -7,6 +7,7 @@ import { CommunityGovernanceLog } from '../communities/entities/community-govern
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
+import { CommunitySpaceRequest } from '../communities/entities/community-space-request.entity';
 import { CommunitySupportOffer } from '../communities/entities/community-support-offer.entity';
 import { CommunityTagRequest } from '../communities/entities/community-tag-request.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -18,10 +19,13 @@ import { AdminCommunitiesController } from './admin-communities.controller';
 import { AdminCommunitiesService } from './admin-communities.service';
 import { AdminCommunityModeratorsController } from './admin-community-moderators.controller';
 import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
+import { AdminCommunitySpaceRequestsController } from './admin-community-space-requests.controller';
+import { AdminCommunitySpaceRequestsService } from './admin-community-space-requests.service';
 import { AdminCommunitySupportController } from './admin-community-support.controller';
 import { AdminCommunitySupportService } from './admin-community-support.service';
 import { AdminCommunityTagRequestsController } from './admin-community-tag-requests.controller';
 import { AdminCommunityTagRequestsService } from './admin-community-tag-requests.service';
+import { SpaceRequestApprovalsService } from './space-request-approvals.service';
 
 @Module({
   imports: [
@@ -62,14 +66,22 @@ import { AdminCommunityTagRequestsService } from './admin-community-tag-requests
       // registers the same entity in `CommunitiesModule` — the overlapping
       // `forFeature` precedent every shared community entity above follows.
       CommunitySupportOffer,
+      // The "host spaces" review queue (`AdminCommunitySpaceRequestsService`,
+      // `SpaceRequestApprovalsService`), same overlapping `forFeature`
+      // precedent as `CommunityTagRequest` and `CommunitySupportOffer` above;
+      // `CommunitiesModule` registers it separately for the member-facing
+      // write side.
+      CommunitySpaceRequest,
       Profile,
       User,
     ]),
     ReportsModule,
     // `NotificationsService` — `AdminCommunityTagRequestsService.resolve`
-    // notifies the requester when their tag request is resolved, and
+    // notifies the requester when their tag request is resolved,
     // `AdminCommunitySupportService.create` tells a community's owner,
-    // co-owners and moderators that support has been offered.
+    // co-owners and moderators that support has been offered, and
+    // `SpaceRequestApprovalsService`/`AdminCommunitySpaceRequestsService.decline`
+    // notify a space request's requester once it is approved or declined.
     NotificationsModule,
     // `SubcommunityCascadeService`: the admin freeze/unfreeze/archive/
     // unarchive/remove-member overrides cascade onto a parent's spaces the
@@ -79,15 +91,18 @@ import { AdminCommunityTagRequestsService } from './admin-community-tag-requests
   controllers: [
     AdminCommunitiesController,
     AdminCommunityModeratorsController,
+    AdminCommunitySpaceRequestsController,
     AdminCommunitySupportController,
     AdminCommunityTagRequestsController,
   ],
   providers: [
     AdminCommunitiesService,
     AdminCommunityModeratorsService,
+    AdminCommunitySpaceRequestsService,
     AdminCommunitySupportService,
     AdminCommunityTagRequestsService,
     CommunityGovernanceLogService,
+    SpaceRequestApprovalsService,
   ],
   // `AdminOverviewService` injects `AdminCommunitiesService` directly to
   // reuse its already-computed per-community health score for the overview

@@ -70,6 +70,7 @@ export enum AdminQueueKey {
    * `ResourceReviewSweeperService` announces them once per overdue period.
    */
   GuideReviews = 'guide_reviews',
+  CommunitySpaceRequests = 'community_space_requests',
 }
 
 /** The lowest account tier that may work a queue. */
@@ -169,6 +170,11 @@ export const ADMIN_QUEUE_REGISTRY: Record<AdminQueueKey, AdminQueueMeta> = {
   },
   [AdminQueueKey.CommunityTagRequests]: {
     route: '/admin/community-tag-requests',
+    tier: UserRole.Admin,
+    capabilities: ['communities'],
+  },
+  [AdminQueueKey.CommunitySpaceRequests]: {
+    route: '/admin/community-space-requests',
     tier: UserRole.Admin,
     capabilities: ['communities'],
   },

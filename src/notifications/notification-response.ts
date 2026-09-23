@@ -497,6 +497,8 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // suppress the warning.
     [NotificationType.VenueEventAttachment]: ['listingName', 'eventTitle'],
     [NotificationType.CommunityTagRequestResolved]: ['label'],
+    [NotificationType.CommunitySpaceRequestApproved]: ['communityName'],
+    [NotificationType.CommunitySpaceRequestDeclined]: ['communityName'],
     [NotificationType.CommunityRoleChanged]: ['communityName', 'role'],
     [NotificationType.CommunityMemberRemoved]: ['communityName'],
     [NotificationType.CommunityOwnershipTransferred]: ['communityName'],

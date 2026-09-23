@@ -35,6 +35,7 @@ import {
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { SpaceRequestApprovalsService } from './space-request-approvals.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = new Date('2026-07-19T12:00:00.000Z');
@@ -314,6 +315,7 @@ describe('AdminCommunitiesService', () => {
   let dataSource: { transaction: jest.Mock; createQueryBuilder: jest.Mock };
   let governanceLog: { log: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
+  let spaceRequestApprovals: { closeOpenAsApproved: jest.Mock };
   let subcommunityCascade: {
     removeParentMemberFromSpaces: jest.Mock;
     freezeSpaces: jest.Mock;
@@ -388,6 +390,9 @@ describe('AdminCommunitiesService', () => {
     };
     governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
     eventEmitter = { emit: jest.fn() };
+    spaceRequestApprovals = {
+      closeOpenAsApproved: jest.fn().mockResolvedValue(undefined),
+    };
     subcommunityCascade = {
       removeParentMemberFromSpaces: jest
         .fn()
@@ -424,6 +429,10 @@ describe('AdminCommunitiesService', () => {
           useValue: subcommunityCascade,
         },
         { provide: EventEmitter2, useValue: eventEmitter },
+        {
+          provide: SpaceRequestApprovalsService,
+          useValue: spaceRequestApprovals,
+        },
       ],
     }).compile();
     service = module.get(AdminCommunitiesService);
@@ -1400,6 +1409,55 @@ describe('AdminCommunitiesService', () => {
         ),
       ).resolves.toBeDefined();
       expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('closes an open space request when spaces are switched on', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, allowsSubcommunities: false }),
+      );
+
+      await service.updateSettings(
+        'circle-of-care',
+        { allowsSubcommunities: true },
+        'admin-1',
+        true,
+      );
+
+      expect(spaceRequestApprovals.closeOpenAsApproved).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'circle-of-care' }),
+        'admin-1',
+      );
+    });
+
+    it('closes an open space request on a re-sent true without a governance entry', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, allowsSubcommunities: true }),
+      );
+
+      await service.updateSettings(
+        'circle-of-care',
+        { allowsSubcommunities: true },
+        'admin-1',
+        true,
+      );
+
+      expect(spaceRequestApprovals.closeOpenAsApproved).toHaveBeenCalled();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('leaves space requests alone when spaces are switched off', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, allowsSubcommunities: true }),
+      );
+
+      await service.updateSettings(
+        'circle-of-care',
+        { allowsSubcommunities: false },
+        'admin-1',
+        true,
+      );
+
+      expect(spaceRequestApprovals.closeOpenAsApproved).not.toHaveBeenCalled();
     });
   });
 

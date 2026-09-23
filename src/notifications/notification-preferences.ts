@@ -351,6 +351,8 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.CommunityUnfrozen,
     NotificationType.CommunityOwnerReviewRequested,
     NotificationType.CommunityTagRequestResolved,
+    NotificationType.CommunitySpaceRequestApproved,
+    NotificationType.CommunitySpaceRequestDeclined,
     // Platform staff offering a community that is struggling some help
     // (OPS-05). It reaches only the people running the room, it arrives at
     // most once until they answer it, and it is the platform reaching out

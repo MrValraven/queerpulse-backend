@@ -65,6 +65,7 @@ import {
 } from './community-report-scope';
 import { ListAdminCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
 import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
+import { SpaceRequestApprovalsService } from './space-request-approvals.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
@@ -208,6 +209,7 @@ export class AdminCommunitiesService {
     private readonly governanceLog: CommunityGovernanceLogService,
     private readonly subcommunityCascade: SubcommunityCascadeService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly spaceRequestApprovals: SpaceRequestApprovalsService,
   ) {}
 
   async listCommunities(): Promise<AdminCommunityListDTO> {
@@ -527,6 +529,22 @@ export class AdminCommunitiesService {
         action: GovernanceLogAction.SettingsChanged,
         metadata: { adminOverride: true, changes },
       });
+    }
+    // Both the queue's Approve button and this switch land here, so either
+    // one closes an open space request. Runs on a re-sent `true` as well, so
+    // a request left open by an earlier failure still closes. A failure here
+    // leaves the switch on and the request open, which the next save closes.
+    if (dto.allowsSubcommunities === true) {
+      try {
+        await this.spaceRequestApprovals.closeOpenAsApproved(
+          community,
+          actorUserId,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Could not close the open space request for ${community.slug}: ${String(error)}`,
+        );
+      }
     }
     return this.getCommunity(slug, isPlatformStaffReader);
   }

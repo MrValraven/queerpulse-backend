@@ -161,6 +161,8 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       "NOT the raw governance-log metadata: a ban entry is read through the same narrowed shape the community's own moderators get (the note, never the raw actor ids), so a grant never sees more about a sanction than the people who issued it",
       'Decide community tag requests (admin/community-tag-requests): the community it came from, the label asked for and the requester’s note',
       'NOT the name of the member who asked for a tag: deciding a word is a decision about the word, and the resolve notifies them without a reviewer ever needing to know who they are',
+      'Decide space requests (admin/community-space-requests): approving switches spaces on for that community, declining can carry a reason its owner sees',
+      'NOT the name of the owner who asked for spaces: approving or declining is a decision about the community, and the resolve notifies them without a reviewer ever needing to know who they are',
       "Appoint and stand down a community's own moderators (admin/communities/:slug/moderators), never yourself",
       'Curate the topic directory (admin/topics)',
       'Decide reading-group proposals (admin/reading-group-proposals)',
