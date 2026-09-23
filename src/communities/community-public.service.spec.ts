@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { IsNull } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Event } from '../events/entities/event.entity';
 import { CommunityPublicService } from './community-public.service';
@@ -432,6 +433,22 @@ describe('CommunityPublicService', () => {
           'type',
         ].sort(),
       );
+    });
+  });
+
+  describe('getPublicTeaser', () => {
+    it('never resolves a space (the teaser is out of v1 for spaces)', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(service.getPublicTeaser('a-space')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(communities.findOne).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          slug: 'a-space',
+          parentId: IsNull(),
+        }) as unknown,
+      });
     });
   });
 });

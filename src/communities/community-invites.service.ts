@@ -154,18 +154,37 @@ export class CommunityInvitesService {
     );
     const resolvedUserIds = [...new Set(userIdBySlug.values())];
 
+    // A space takes only people already in its parent: joining a space
+    // requires a parent roster row and no live parent ban, and an invitation
+    // names the space (possibly private and sensitive) to whoever receives
+    // it. So for a space, the parent's roster and bans are read too, and
+    // anyone outside the parent is passed over before any row or bell.
+    const parentId = community.parentId;
     const [
       systemUserIds,
       memberUserIds,
       pendingUserIds,
-      bannedUserIds,
+      spaceBannedUserIds,
       invitedAlreadyUserIds,
+      parentRosterUserIds,
+      parentBannedUserIds,
     ] = await Promise.all([
       this.systemUserIds(resolvedUserIds),
       this.rosterUserIds(community.id, resolvedUserIds),
       this.pendingRequestUserIds(community.id, resolvedUserIds),
       this.bannedUserIds(community.id, resolvedUserIds),
       this.pendingInviteUserIds(community.id, resolvedUserIds),
+      parentId
+        ? this.rosterUserIds(parentId, resolvedUserIds)
+        : Promise.resolve(null),
+      parentId
+        ? this.bannedUserIds(parentId, resolvedUserIds)
+        : Promise.resolve(new Set<string>()),
+    ]);
+    // A ban in the parent bars every space of that parent as well.
+    const bannedUserIds = new Set([
+      ...spaceBannedUserIds,
+      ...parentBannedUserIds,
     ]);
 
     // First pass: the reason each named slug was passed over, or nothing when
@@ -183,6 +202,7 @@ export class CommunityInvitesService {
         pendingUserIds,
         bannedUserIds,
         invitedAlreadyUserIds,
+        parentRosterUserIds,
       );
       if (reason || !userId) {
         skipReasonBySlug.set(
@@ -251,7 +271,7 @@ export class CommunityInvitesService {
 
   /**
    * The first reason this member cannot be invited, or `null` when they can.
-   * Ordered so the most informative answer wins: "already in the room" is
+   * Ordered so the most informative answer wins: "already a member" is
    * more use to an owner than "they also have a pending request".
    */
   private skipReasonFor(
@@ -262,6 +282,8 @@ export class CommunityInvitesService {
     pendingUserIds: Set<string>,
     bannedUserIds: Set<string>,
     invitedAlreadyUserIds: Set<string>,
+    // The parent's roster when inviting to a space; null at top level.
+    parentRosterUserIds: Set<string> | null,
   ): CommunityInviteSkipReason | null {
     if (!userId) return CommunityInviteSkipReason.UnknownMember;
     if (userId === inviterUserId) return CommunityInviteSkipReason.Self;
@@ -272,10 +294,13 @@ export class CommunityInvitesService {
       return CommunityInviteSkipReason.AlreadyMember;
     }
     if (bannedUserIds.has(userId)) return CommunityInviteSkipReason.Banned;
+    if (parentRosterUserIds !== null && !parentRosterUserIds.has(userId)) {
+      return CommunityInviteSkipReason.NotParentMember;
+    }
     if (pendingUserIds.has(userId)) {
       return CommunityInviteSkipReason.PendingJoinRequest;
     }
-    // Last, being the least surprising of the six: the invitation this owner
+    // Last, being the least surprising of the seven: the invitation this owner
     // is trying to send is already sitting in that member's list.
     if (invitedAlreadyUserIds.has(userId)) {
       return CommunityInviteSkipReason.AlreadyInvited;

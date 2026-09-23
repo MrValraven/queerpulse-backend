@@ -159,13 +159,16 @@ export class CommunityOwnerReviewService {
     slug: string,
     userId: string,
   ): Promise<CommunityOwnerReviewStateDTO> {
-    const { community, membership } = await resolveMemberCommunity(
+    const { community, membership, role } = await resolveMemberCommunity(
       this.communities,
       this.members,
       slug,
       userId,
     );
-    return this.buildState(community, membership, userId);
+    // Parent staff reach a space through an inherited role with no roster
+    // row, and `open` requires one, so the file control must stay off for
+    // them.
+    return this.buildState(community, role, membership !== null, userId);
   }
 
   /**
@@ -245,7 +248,7 @@ export class CommunityOwnerReviewService {
 
     await this.notifyPlatformStaff(community, userId, reason);
 
-    return this.buildState(community, membership, userId, saved);
+    return this.buildState(community, membership.role, true, userId, saved);
   }
 
   /**
@@ -301,7 +304,7 @@ export class CommunityOwnerReviewService {
       community.needsOwnerReviewAt = null;
     }
 
-    return this.buildState(community, membership, userId, saved);
+    return this.buildState(community, membership.role, true, userId, saved);
   }
 
   /**
@@ -355,7 +358,10 @@ export class CommunityOwnerReviewService {
    */
   private async buildState(
     community: Community,
-    membership: CommunityMember,
+    viewerRole: RosterRole,
+    // Whether the viewer holds their OWN roster row here. `open` reads that
+    // row, so an inherited-only role (parent staff in a space) cannot file.
+    hasOwnRosterRow: boolean,
     viewerUserId: string,
     knownRequest?: CommunityOwnerReviewRequest,
   ): Promise<CommunityOwnerReviewStateDTO> {
@@ -370,8 +376,7 @@ export class CommunityOwnerReviewService {
 
     const isOpen = request?.status === CommunityOwnerReviewRequestStatus.Open;
     const isViewerTheOwner =
-      community.ownerId === viewerUserId ||
-      membership.role === RosterRole.Owner;
+      community.ownerId === viewerUserId || viewerRole === RosterRole.Owner;
 
     return {
       request: request
@@ -380,13 +385,13 @@ export class CommunityOwnerReviewService {
       needsOwnerReviewAt: community.needsOwnerReviewAt
         ? community.needsOwnerReviewAt.toISOString()
         : null,
-      // Two conditions only, since GOV-02: on the roster and not the owner
-      // (a `membership` in hand already proves the first), and no request
-      // currently open. The 24-hour per-member filing limit is deliberately
+      // Two conditions since GOV-02: on the roster and not the owner, and no
+      // request currently open. "On the roster" means the viewer's own row,
+      // which `open` requires; an inherited role on a space holds none. The 24-hour per-member filing limit is deliberately
       // NOT folded in here: it would cost an extra count query on every read
       // of this surface to hide a control the member is usually entitled to,
       // and a member who does hit it gets a 429 that explains itself.
-      canOpen: !isViewerTheOwner && !isOpen,
+      canOpen: hasOwnRosterRow && !isViewerTheOwner && !isOpen,
       canWithdraw:
         isOpen &&
         (isViewerTheOwner || request?.requestedByUserId === viewerUserId),

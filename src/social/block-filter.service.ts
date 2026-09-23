@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
+import { IdentityBlock } from '../identities/entities/identity-block.entity';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
 
@@ -16,6 +17,8 @@ export class BlockFilterService {
   constructor(
     @InjectRepository(Block) private readonly blocks: Repository<Block>,
     @InjectRepository(Mute) private readonly mutes: Repository<Mute>,
+    @InjectRepository(IdentityBlock)
+    private readonly identityBlocks: Repository<IdentityBlock>,
   ) {}
 
   /**
@@ -227,6 +230,59 @@ export class BlockFilterService {
       if (candidates.has(row.blockedId)) blocked.add(row.blockedId);
     }
     return blocked;
+  }
+
+  /**
+   * Task 14: whether `blockerUserId` blocked the business, persona or
+   * company `identityId` (`identity_blocks`). Directional: a business never
+   * blocks a member. A block of the identity's owner as a person lives in
+   * `blocks` and never answers here, and a block of the identity leaves its
+   * owner's own profile identity unblocked, since the two are separate
+   * relationships (see `IdentityBlock`).
+   */
+  async isIdentityBlocked(
+    blockerUserId: string,
+    identityId: string,
+  ): Promise<boolean> {
+    return this.identityBlocks.exist({
+      where: { blockerUserId, identityId },
+    });
+  }
+
+  /** Task 14: every identity `blockerUserId` has blocked, in one query. */
+  async blockedIdentityIds(blockerUserId: string): Promise<string[]> {
+    const rows = await this.identityBlocks.find({
+      where: { blockerUserId },
+      select: { identityId: true },
+    });
+    return rows.map((row) => row.identityId);
+  }
+
+  /**
+   * Task 14: the `identity_blocks` rows whose blocker is one of
+   * `blockerUserIds` and whose identity is one of `identityIds`, in one
+   * query however many threads asked. A caller that needs exact pairs keeps
+   * the rows it asked for (`loadMailboxIdentityBlockKeys` in
+   * `mailbox-seats.ts` does), since the cross product can return more.
+   */
+  async identityBlocksAmong(
+    blockerUserIds: string[],
+    identityIds: string[],
+  ): Promise<Array<{ blockerUserId: string; identityId: string }>> {
+    const uniqueBlockerUserIds = [...new Set(blockerUserIds)];
+    const uniqueIdentityIds = [...new Set(identityIds)];
+    if (!uniqueBlockerUserIds.length || !uniqueIdentityIds.length) return [];
+    const rows = await this.identityBlocks.find({
+      where: {
+        blockerUserId: In(uniqueBlockerUserIds),
+        identityId: In(uniqueIdentityIds),
+      },
+      select: { blockerUserId: true, identityId: true },
+    });
+    return rows.map((row) => ({
+      blockerUserId: row.blockerUserId,
+      identityId: row.identityId,
+    }));
   }
 
   /** Union of `blockedUserIds` and `mutedUserIds` — the post-query analogue

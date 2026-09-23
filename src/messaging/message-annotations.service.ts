@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
 import {
@@ -28,7 +28,11 @@ import {
   MessageReactionKey,
 } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
-import { Message, MessageKind } from './entities/message.entity';
+import {
+  isStickerAttachment,
+  Message,
+  MessageKind,
+} from './entities/message.entity';
 import {
   decodeMessageHistoryCursor,
   encodeMessageHistoryCursor,
@@ -38,13 +42,10 @@ import {
   MessageReactorsResponse,
   MessageResponse,
   MessageSearchConversationGroup,
-  presentSenderIds,
   requireAuthorSummary,
   resolveAttachment,
-  senderAuthorSummary,
   StarredMessageHit,
   StarredMessagesResponse,
-  toAuthorSummary,
 } from './message-response';
 import {
   MESSAGE_SUBJECT_TYPE,
@@ -63,6 +64,11 @@ import {
   MessageReactionCount,
   MessageReactionEvent,
 } from './messaging.events';
+import {
+  collapseBusinessReactions,
+  mailboxStaffHistoryFloorCoversPredicate,
+  seatExcludedFromMailboxPredicate,
+} from './mailbox-seats';
 import { MessagingCoreService } from './messaging-core.service';
 
 /** Cap on one message's "who reacted" list (PRD-352). */
@@ -140,6 +146,41 @@ export class MessageAnnotationsService {
     return message;
   }
 
+  /**
+   * Task 13h: a reaction, pin or star WRITE on a message at or before the
+   * history floor of the caller's mailbox staff seat is refused with the
+   * same 404 as a message outside the conversation. A co-manager seated
+   * when a personal thread moved into a business mailbox holds a floor at
+   * its first enquiry, and an unavailable quote still carries its parent's
+   * id, so without this they could react to, pin or star the owner's and
+   * the customer's earlier private messages by id. The rule is read through
+   * `mailboxStaffHistoryFloorCoversPredicate`, so a personal or group
+   * seat's "clear chat" keeps every write it had. A seat with no floor
+   * costs no query.
+   */
+  private async assertAboveMailboxStaffFloor(
+    callerSeat: ConversationParticipant,
+    messageId: string,
+  ): Promise<void> {
+    if (!callerSeat.clearedAt) {
+      return;
+    }
+    const isBelowFloor = await this.messages
+      .createQueryBuilder('message')
+      .withDeleted()
+      .innerJoin(ConversationParticipant, 'seat', 'seat.id = :callerSeatId', {
+        callerSeatId: callerSeat.id,
+      })
+      .where('message.id = :messageId', { messageId })
+      .andWhere(
+        mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'seat'),
+      )
+      .getExists();
+    if (isBelowFloor) {
+      throw new NotFoundException('Message not found');
+    }
+  }
+
   async addMessageReaction(
     conversationId: string,
     messageId: string,
@@ -149,8 +190,21 @@ export class MessageAnnotationsService {
     // Active participation, not mere participation: a removed group member or
     // a blocked DM counterpart must not be able to fire a live `reaction`
     // frame into a room they can no longer read (BE-MSG-09).
-    await this.core.requireActiveParticipant(conversationId, userId);
+    const participant = await this.core.requireActiveParticipant(
+      conversationId,
+      userId,
+    );
+    // Task 7: this seat speaks for `participant.identityId` (a business
+    // identity for a mailbox thread). Reacting under that seat requires the
+    // caller to still be entitled to act as it right now, checked fresh on
+    // every write regardless of what the seat allowed when it was created.
+    await this.core.assertMaySendAs(
+      conversationId,
+      userId,
+      participant.identityId,
+    );
     await this.requireMessageInConversation(conversationId, messageId);
+    await this.assertAboveMailboxStaffFloor(participant, messageId);
 
     // Idempotent per (message,user,key): `ON CONFLICT DO NOTHING` absorbs a
     // re-react (or a race between two concurrent ones) without a pre-check +
@@ -180,8 +234,18 @@ export class MessageAnnotationsService {
   ): Promise<{ ok: true }> {
     // Un-reacting broadcasts the same `reaction` frame as reacting, so it is
     // gated identically (BE-MSG-09).
-    await this.core.requireActiveParticipant(conversationId, userId);
+    const participant = await this.core.requireActiveParticipant(
+      conversationId,
+      userId,
+    );
+    // Task 7: see the matching comment in `addMessageReaction`.
+    await this.core.assertMaySendAs(
+      conversationId,
+      userId,
+      participant.identityId,
+    );
     await this.requireMessageInConversation(conversationId, messageId);
+    await this.assertAboveMailboxStaffFloor(participant, messageId);
 
     await this.reactions.delete({ messageId, userId, key });
 
@@ -289,14 +353,34 @@ export class MessageAnnotationsService {
       .limit(MAX_MESSAGE_REACTORS)
       .getMany()) as ReactionWithProfile[];
 
-    return {
-      reactors: rows.map((row) => ({
+    // Task 13e: a customer reading a business mailbox thread sees the
+    // business react once per key, listed where its first staff reaction
+    // under that key falls. The business's own staff see individuals.
+    const reactorView = await this.core.loadReactorView(
+      conversationId,
+      participant,
+    );
+    const businessUserIds: ReadonlySet<string> =
+      reactorView.shape === 'customerOfMailbox'
+        ? reactorView.businessUserIds
+        : new Set();
+    const visibleRows =
+      reactorView.shape === 'ownOnly'
+        ? rows.filter((row) => row.userId === userId)
+        : collapseBusinessReactions(rows, businessUserIds);
+    const reactors: MessageReactorsResponse['reactors'] = visibleRows.map(
+      (row) => ({
         key: row.key,
-        member: requireAuthorSummary(row.profile),
+        member:
+          reactorView.shape === 'customerOfMailbox' &&
+          businessUserIds.has(row.userId)
+            ? reactorView.business
+            : requireAuthorSummary(row.profile),
         isMine: row.userId === userId,
         reactedAt: null,
-      })),
-    };
+      }),
+    );
+    return { reactors };
   }
 
   // ── Pins (SHARED, per-conversation) ────────────────────────────────────────
@@ -365,8 +449,17 @@ export class MessageAnnotationsService {
       conversationId,
       userId,
     );
+    // Task 7: see the matching comment in `addMessageReaction`. Checked
+    // before the group-role gate below: whether this human may act as the
+    // seat's identity at all is the more fundamental of the two questions.
+    await this.core.assertMaySendAs(
+      conversationId,
+      userId,
+      participant.identityId,
+    );
     await this.assertCanManageGroupPins(conversationId, participant);
     await this.requireMessageInConversation(conversationId, messageId);
+    await this.assertAboveMailboxStaffFloor(participant, messageId);
 
     const alreadyPinned = await this.pins.exist({
       where: { conversationId, messageId },
@@ -419,7 +512,14 @@ export class MessageAnnotationsService {
       conversationId,
       userId,
     );
+    // Task 7: see the matching comment in `pinMessage`.
+    await this.core.assertMaySendAs(
+      conversationId,
+      userId,
+      participant.identityId,
+    );
     await this.assertCanManageGroupPins(conversationId, participant);
+    await this.assertAboveMailboxStaffFloor(participant, messageId);
     const result = await this.pins.delete({ conversationId, messageId });
     if (result.affected) {
       this.eventEmitter.emit(MESSAGE_PINNED, {
@@ -526,8 +626,12 @@ export class MessageAnnotationsService {
     // Private, but still a write into a conversation the caller may no longer
     // act in (BE-MSG-09). `unstarMessage` deliberately keeps the lenient check
     // below: removing your own bookmark emits nothing and must stay possible.
-    await this.core.requireActiveParticipant(conversationId, userId);
+    const participant = await this.core.requireActiveParticipant(
+      conversationId,
+      userId,
+    );
     await this.requireMessageInConversation(conversationId, messageId);
+    await this.assertAboveMailboxStaffFloor(participant, messageId);
     await this.stars
       .createQueryBuilder()
       .insert()
@@ -632,6 +736,7 @@ export class MessageAnnotationsService {
       q?: string;
       type?: StarredMessagesFilterType;
       cursor?: string;
+      mailboxIdentityId?: string;
     } = {},
   ): Promise<StarredMessagesResponse> {
     const cappedLimit = Math.min(
@@ -639,6 +744,11 @@ export class MessageAnnotationsService {
       MAX_SEARCH_LIMIT,
     );
     const trimmedQuery = options.q?.trim();
+    // Task 24: `?as=` narrows the participant join below to the caller's own
+    // seat that speaks for that mailbox. The caller
+    // (`MessagingService.listStarredMessages`) authorizes the mailbox first.
+    const { mailboxIdentityId } = options;
+    const hasMailboxFilter = mailboxIdentityId !== undefined;
 
     const starredQuery = this.messages
       .createQueryBuilder('m')
@@ -656,8 +766,10 @@ export class MessageAnnotationsService {
       .innerJoin(
         ConversationParticipant,
         'p',
-        'p.conversation_id = m.conversation_id AND p.user_id = :userId',
-        { userId },
+        hasMailboxFilter
+          ? 'p.conversation_id = m.conversation_id AND p.user_id = :userId AND p.identity_id = :mailboxIdentityId'
+          : 'p.conversation_id = m.conversation_id AND p.user_id = :userId',
+        hasMailboxFilter ? { userId, mailboxIdentityId } : { userId },
       )
       // Read-only lookup for the group-title / DM-counterpart-name branches of
       // `q` below; every message has a conversation, so this never drops a row.
@@ -671,6 +783,13 @@ export class MessageAnnotationsService {
       // invariant must hold identically on every listing path, not only most
       // of them.
       .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
+      // Task 13c fix round 1: a STAFF member blocked either way with a
+      // mailbox thread's customer lists nothing from that thread. Task 14a:
+      // nor does a staff member who has left the business. Task 14: nor
+      // does either side of a thread whose customer blocked the business.
+      .andWhere(
+        `NOT ${seatExcludedFromMailboxPredicate('m.conversation_id', ':userId')}`,
+      )
       // A moderator-taken-down message (hidden OR removed, keyed by the message
       // uuid) is dropped from the starred list too — its snippet below would
       // otherwise leak the withheld body. In-query so the capped page isn't
@@ -700,6 +819,11 @@ export class MessageAnnotationsService {
       // already gives a case-insensitive comparison: the `lower()` inside
       // the fold already normalized case on both sides.
       const foldedTerm = foldedSearchTerm('qPattern');
+      // Task 13c: a person's name matches only where that person speaks as
+      // themselves. A message sent AS a business (`sender_identity`) and a
+      // staff seat on a business thread (`op_identity`) are skipped, so a
+      // search for a staff member's name can never tell a customer which
+      // business messages that person wrote, or that they work there.
       // `sender_profile`/`other_profile` stay lowercase snake_case
       // throughout, matching how `foldedHaystack` always quotes the alias it
       // is given (`"alias"."column"`): a lowercase alias, quoted or bare,
@@ -719,6 +843,11 @@ export class MessageAnnotationsService {
           OR EXISTS (
             SELECT 1 FROM "profiles" "sender_profile"
             WHERE "sender_profile"."user_id" = m.sender_id
+              AND EXISTS (
+                SELECT 1 FROM "identities" "sender_identity"
+                WHERE "sender_identity"."id" = m.sender_identity_id
+                  AND "sender_identity"."kind" = 'profile'
+              )
               AND ${foldedHaystack('sender_profile', ['first_name', 'last_name'])} LIKE ${foldedTerm} ESCAPE '\\'
           )
           OR (c.kind = 'group' AND ${foldedHaystack('c', ['title'])} LIKE ${foldedTerm} ESCAPE '\\')
@@ -726,8 +855,10 @@ export class MessageAnnotationsService {
             c.kind <> 'group' AND EXISTS (
               SELECT 1 FROM "conversation_participants" "op"
               INNER JOIN "profiles" "other_profile" ON "other_profile"."user_id" = "op"."user_id"
+              INNER JOIN "identities" "op_identity" ON "op_identity"."id" = "op"."identity_id"
               WHERE "op"."conversation_id" = m.conversation_id
                 AND "op"."user_id" <> :userId
+                AND "op_identity"."kind" = 'profile'
                 AND ${foldedHaystack('other_profile', ['first_name', 'last_name'])} LIKE ${foldedTerm} ESCAPE '\\'
             )
           )
@@ -809,27 +940,18 @@ export class MessageAnnotationsService {
     );
 
     const conversationIds = [...new Set(messages.map((m) => m.conversationId))];
-    const senderIds = presentSenderIds(messages);
-    const [convos, others] = await Promise.all([
-      this.conversations.find({ where: { id: In(conversationIds) } }),
-      this.participants.find({
-        where: { conversationId: In(conversationIds), userId: Not(userId) },
-      }),
-    ]);
-    const convoById = new Map(convos.map((c) => [c.id, c]));
-    const otherByConvo = new Map<string, ConversationParticipant>();
-    for (const other of others) {
-      // A 1:1 DM has exactly one counterpart; a GROUP has many non-caller
-      // participants here too, but `otherParticipant` is null for a group
-      // below (ENG-251) so which one lands first never matters.
-      if (!otherByConvo.has(other.conversationId)) {
-        otherByConvo.set(other.conversationId, other);
-      }
-    }
-    const profiles = await this.profiles.find({
-      where: { userId: In([...senderIds, ...others.map((o) => o.userId)]) },
+    const convos = await this.conversations.find({
+      where: { id: In(conversationIds) },
     });
-    const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
+    const convoById = new Map(convos.map((c) => [c.id, c]));
+    // Task 13c: the participants and senders rendered through the same
+    // `loadMessageListContext` search uses, so a starred business message
+    // names the business, filed under the business.
+    const listContext = await this.core.loadMessageListContext(
+      convos,
+      messages,
+      userId,
+    );
 
     const conversations: MessageSearchConversationGroup[] = conversationIds.map(
       (conversationId) => {
@@ -839,13 +961,12 @@ export class MessageAnnotationsService {
         // identity, never an arbitrary member's, see the matching comment in
         // `MessagesService.searchMessages`.
         const isGroup = convo?.kind === ConversationKind.Group;
-        const other = otherByConvo.get(conversationId);
         return {
           conversationId,
           otherParticipant:
             isOfficial || isGroup
               ? null
-              : toAuthorSummary(other ? profileByUser.get(other.userId) : null),
+              : listContext.renderCounterpart(conversationId),
           isOfficial,
           kind: isGroup ? 'group' : 'direct',
           title: isGroup ? (convo?.title ?? null) : null,
@@ -854,21 +975,31 @@ export class MessageAnnotationsService {
       },
     );
 
-    const items: StarredMessageHit[] = messages.map((m) => ({
-      id: m.id,
-      conversationId: m.conversationId,
-      snippet: m.body.slice(0, 160),
-      sender: senderAuthorSummary(m.senderId, profileByUser),
-      createdAt: m.createdAt.toISOString(),
-      starredAt: starredAtById.get(m.id) ?? m.createdAt.toISOString(),
-      // Coordinator follow-up (ENG-251): `kind`/`attachment` ride the same
-      // `Message` row this query already selected in full, no extra query or
-      // join, hand-mapped through the exact same resolvers
-      // `toMessageResponses` uses (see the matching comment in
-      // `MessagesService.searchMessages`).
-      kind: messageKindToResponseKind(m.kind),
-      attachment: resolveAttachment(m.attachment),
-    }));
+    const items: StarredMessageHit[] = messages.map((m) => {
+      const attachment = resolveAttachment(m.attachment);
+      // A starred sticker stores no body text (see `MessagingCoreService.
+      // postMessage`'s sticker branch), so its snippet uses the sticker's own
+      // label.
+      const snippet =
+        attachment && isStickerAttachment(attachment)
+          ? attachment.label
+          : m.body.slice(0, 160);
+      return {
+        id: m.id,
+        conversationId: m.conversationId,
+        snippet,
+        sender: listContext.renderSender(m),
+        createdAt: m.createdAt.toISOString(),
+        starredAt: starredAtById.get(m.id) ?? m.createdAt.toISOString(),
+        // Coordinator follow-up (ENG-251): `kind`/`attachment` ride the same
+        // `Message` row this query already selected in full, no extra query or
+        // join, hand-mapped through the exact same resolvers
+        // `toMessageResponses` uses (see the matching comment in
+        // `MessagesService.searchMessages`).
+        kind: messageKindToResponseKind(m.kind),
+        attachment,
+      };
+    });
 
     return { items, conversations, nextCursor, hasMore };
   }

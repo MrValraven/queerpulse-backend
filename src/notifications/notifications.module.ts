@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
+import { IdentitiesModule } from '../identities/identities.module';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { Report } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -70,6 +71,10 @@ import { ReportNotificationsListener } from './report-notifications.listener';
     // see its docstring), so importing it pulls in no communities feature
     // surface and creates no cycle.
     CommunityMembershipModule,
+    // `IdentitiesService.staffUserIds`, so `ReportNotificationsListener` pages
+    // nobody who owns or staffs a reported business. `IdentitiesModule`
+    // imports only `TypeOrmModule.forFeature`, so there is no cycle.
+    IdentitiesModule,
   ],
   controllers: [NotificationsController, NotificationPreferencesController],
   providers: [

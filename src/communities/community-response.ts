@@ -195,6 +195,58 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // is the only reason a `private` community's detail is served to a
   // non-member at all.
   invitedAt: string | null;
+  // The space's parent, present only when this detail belongs to a space
+  // (`Community.parentId` set); null for a top-level community.
+  // `avatarImageUrl` resolves through `toImageUrl`, same as the community's
+  // own. `isMember` reflects strictly the VIEWER's OWN roster row in the
+  // parent, so parent staff walking into a space they never personally
+  // joined keeps seeing the parent's join affordance.
+  parent: {
+    slug: string;
+    name: string;
+    avatarImageUrl: string | null;
+    isMember: boolean;
+  } | null;
+  // The parent's house rules, snapshotted at read time. Non-null only on a
+  // space, which always runs under its parent's rules; the space's own
+  // `rules` field above holds only what it adds on top.
+  inheritedRules: { rules: string[]; rulesVersion: number } | null;
+  // Whether this community accepts spaces under it. Always false on a space
+  // itself, which cannot host spaces of its own.
+  allowsSubcommunities: boolean;
+  // How many non-archived spaces under this community the VIEWER can see:
+  // the same set `GET :slug/subcommunities` lists (`isSpaceVisibleTo`), so a
+  // private space outside the viewer's reach never shows in the count.
+  // Always 0 on a space.
+  subcommunityCount: number;
+  // Whether the viewer holds their OWN roster row in this community. `myRole`
+  // is the effective role, which parent staff hold in every space with no
+  // roster row; this flag drives Join/Leave and the notification control,
+  // which act on the roster row itself.
+  isRosterMember: boolean;
+}
+
+/**
+ * One item of `GET /communities/:slug/subcommunities`. `myRole` is the
+ * effective role (parent staff inherit one in every space); `isMember` is the
+ * viewer's own space roster row, which is what "joined" means on the card.
+ */
+export type SubcommunityCardDTO = CommunityCardDTO & { isMember: boolean };
+
+/**
+ * What `buildDetail` resolves about a community's place in the
+ * parent/space hierarchy, ready for `toCommunityDetail` to fold into the
+ * DTO's `parent`/`inheritedRules`/`subcommunityCount` fields. `parent` carries
+ * the loaded parent entity (or null for a top-level community);
+ * `isParentMember` is whether the viewer holds their own roster row in that
+ * parent. Irrelevant, and left `false`, when there is no parent.
+ */
+export interface SubcommunityDetailContext {
+  parent: Community | null;
+  isParentMember: boolean;
+  subcommunityCount: number;
+  // The viewer's own roster row in THIS community (see the DTO field).
+  isRosterMember: boolean;
 }
 
 export function toCommunityCard(
@@ -242,7 +294,18 @@ export function toCommunityDetail(
   // resolves it and passes null for a member and for an uninvited viewer; see
   // `CommunitiesService.buildDetail`.
   invitedAt: Date | null = null,
+  // The community's place in the parent/space hierarchy, resolved by
+  // `CommunitiesService.buildDetail` in one batch alongside everything else
+  // above. See `SubcommunityDetailContext`.
+  subcommunityContext: SubcommunityDetailContext = {
+    parent: null,
+    isParentMember: false,
+    subcommunityCount: 0,
+    isRosterMember: false,
+  },
 ): CommunityDetailDTO {
+  const { parent, isParentMember, subcommunityCount, isRosterMember } =
+    subcommunityContext;
   return {
     ...toCommunityCard(c, stats, myRole),
     purpose: c.purpose,
@@ -273,6 +336,20 @@ export function toCommunityDetail(
     // still holds: the field answers "is there a door open to you", and for
     // somebody standing inside the room the answer is no.
     invitedAt: myRole ? null : (invitedAt?.toISOString() ?? null),
+    parent: parent
+      ? {
+          slug: parent.slug,
+          name: parent.name,
+          avatarImageUrl: toImageUrl(parent.avatarImageUrl),
+          isMember: isParentMember,
+        }
+      : null,
+    inheritedRules: parent
+      ? { rules: parent.rules, rulesVersion: parent.rulesVersion }
+      : null,
+    allowsSubcommunities: c.allowsSubcommunities,
+    subcommunityCount,
+    isRosterMember,
   };
 }
 
@@ -306,6 +383,10 @@ export interface MyCommunityDTO {
    * from.
    */
   hasCardProgram: boolean;
+  // The parent community's slug, for a space; null for a top-level community.
+  // Lets the client group a member's spaces under their parent without a
+  // second lookup per row.
+  parentSlug: string | null;
 }
 
 /** Result of a role change on `PATCH /communities/:slug/members/:memberSlug`.

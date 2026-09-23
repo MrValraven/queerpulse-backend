@@ -17,6 +17,11 @@ import { ContentModeration } from '../content-moderation/entities/content-modera
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import {
+  IdentityKind,
+  ownerColumnForKind,
+} from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
+import {
   ConversationParticipant,
   ConversationRole,
 } from '../messaging/entities/conversation-participant.entity';
@@ -25,6 +30,7 @@ import {
   ConversationKind,
 } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { isCoveredByMailboxStaffFloor } from '../messaging/mailbox-seats';
 import { isEvidenceHoldActive } from '../messaging/message-evidence-hold';
 import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates';
 import { MAX_GROUP_MEMBERS } from '../messaging/messaging.constants';
@@ -64,6 +70,7 @@ import { ReportDTO, toReportDTO } from './report-response';
 import { REPORT_CREATED, ReportCreatedEvent } from './report.events';
 import {
   GroupSnapshotEvidence,
+  MailboxIdentitySnapshotEvidence,
   messageSnapshotAttachmentFrom,
   PHOTO_SNAPSHOT_TYPE,
 } from './report-evidence';
@@ -101,6 +108,49 @@ export const REPORT_EVIDENCE_EXPIRED_CODE = 'REPORT_EVIDENCE_EXPIRED';
 // on active members, so the snapshot can never grow past what a group could
 // legitimately hold.
 const MAX_GROUP_SNAPSHOT_MEMBER_IDS = MAX_GROUP_MEMBERS;
+
+// The most staff ids a `MailboxIdentitySnapshotEvidence` entry stores, capped
+// on the same number as the group snapshot's member ids so one evidence row
+// stays bounded however large a business's team grows.
+const MAX_IDENTITY_SNAPSHOT_STAFF_IDS = MAX_GROUP_MEMBERS;
+
+/**
+ * The reporter's CUSTOMER seat in a direct thread with the reported identity,
+ * current or former: a seat of theirs whose `identity_id` is their own
+ * profile identity, in a `direct` conversation where another seat carries the
+ * reported identity. `left_at` and `cleared_at` are deliberately unread on
+ * both seats, so a customer who cleared the thread, or a business whose
+ * staff seats have all ended, still qualifies. A staff member's own seats
+ * carry the business identity and never match the first join.
+ *
+ * Read as one statement through the `ConversationParticipant` repository
+ * already registered here, over the same identity pair
+ * `MessagingCoreService.identityPairKey` keys a direct thread on, without
+ * importing `MessagingModule` (see the constructor's note on the cycle).
+ */
+const CUSTOMER_THREAD_WITH_IDENTITY_SQL = `
+  SELECT "customerSeat"."conversation_id" AS "conversationId"
+  FROM "conversation_participants" AS "customerSeat"
+  INNER JOIN "identities" AS "customerIdentity"
+    ON "customerIdentity"."id" = "customerSeat"."identity_id"
+   AND "customerIdentity"."kind" = 'profile'
+   AND "customerIdentity"."user_id" = "customerSeat"."user_id"
+  INNER JOIN "conversations" AS "conversation"
+    ON "conversation"."id" = "customerSeat"."conversation_id"
+   AND "conversation"."kind" = 'direct'
+  WHERE "customerSeat"."user_id" = $1
+    AND EXISTS (
+      SELECT 1
+      FROM "conversation_participants" AS "businessSeat"
+      WHERE "businessSeat"."conversation_id" = "customerSeat"."conversation_id"
+        AND "businessSeat"."identity_id" = $2
+    )
+  ORDER BY "customerSeat"."conversation_id"
+  LIMIT 1
+`;
+
+/** The one refusal body every unfileable `identity` report shares. */
+const IDENTITY_NOT_FOUND_MESSAGE = 'Business not found';
 
 // A `subjectId` is a `varchar` the reporter's client supplies, validated only
 // as a 1-200 character string (`CreateReportDto`). The subjects addressed by a
@@ -203,6 +253,11 @@ export class ReportsService {
     // Same cross-module `forFeature` registration as the entities above.
     @InjectRepository(ContentModeration)
     private readonly contentModeration: Repository<ContentModeration>,
+    // The `identity` subject's filing gate and snapshot: which identity the
+    // report names, who staffs it, and its display name. `IdentitiesModule`
+    // imports nothing but `TypeOrmModule`, so importing it here closes no
+    // cycle.
+    private readonly identities: IdentitiesService,
     // Fire-and-forget domain event on a genuinely new report — a community
     // auto-freeze listener reacts to it. `EventEmitter2` is globally available
     // (`EventEmitterModule.forRoot()` in the root module), so no module change
@@ -418,6 +473,20 @@ export class ReportsService {
       };
     }
 
+    // Business-mailbox identity report: filed by a CUSTOMER from their own
+    // direct thread with a listing, persona or company. Refused with one 404
+    // body for a signed-out caller, a malformed id, an unknown identity, a
+    // profile identity (a person is reported through `member`) and a member
+    // with no thread with it, so the route never confirms that a business
+    // thread exists. The snapshot is taken now, on the group argument above.
+    let reportedIdentitySnapshot: MailboxIdentitySnapshotEvidence | null = null;
+    if (input.subjectType === ReportSubjectType.Identity) {
+      reportedIdentitySnapshot = await this.captureReportedIdentity(
+        reporterId,
+        input.subjectId,
+      );
+    }
+
     // De-duplicate: one open report per (reporter, subject). A member
     // double-submitting — or re-reporting a subject already in the queue — gets
     // the existing report back rather than piling identical rows on the mods'
@@ -518,6 +587,7 @@ export class ReportsService {
             reportedHousing,
             reportedEventPhoto,
             reportedGroupSnapshot,
+            reportedIdentitySnapshot,
           ),
           severity,
           slaDueAt: slaDueAtFor(severity, now),
@@ -1164,6 +1234,8 @@ export class ReportsService {
    * since they hold a participant row with no earlier `leftAt`. A signed-out
    * filing is never a participant, and a message id that resolves to nothing
    * gets the same coded 403, so the route never reveals which ids exist.
+   * A mailbox staff seat gets that same refusal for a message at or before
+   * its history floor (`isBehindMailboxStaffFloor`).
    */
   private async assertReporterWasInConversation(
     reporterId: string | null,
@@ -1172,13 +1244,16 @@ export class ReportsService {
     if (reporterId !== null && message) {
       const participant = await this.conversationParticipants.findOne({
         where: { conversationId: message.conversationId, userId: reporterId },
-        select: { id: true, leftAt: true },
+        select: { id: true, leftAt: true, clearedAt: true, identityId: true },
       });
       const wasPresentWhenSent =
         participant !== null &&
         (participant.leftAt === null ||
           participant.leftAt.getTime() > message.createdAt.getTime());
-      if (wasPresentWhenSent) {
+      if (
+        wasPresentWhenSent &&
+        !(await this.isBehindMailboxStaffFloor(participant, message))
+      ) {
         return;
       }
     }
@@ -1186,6 +1261,41 @@ export class ReportsService {
       statusCode: 403,
       message: 'You can only report a message from a conversation you were in',
       code: REPORT_NOT_PARTICIPANT_CODE,
+    });
+  }
+
+  /**
+   * Task 13h review (M1): whether `message` sits at or before the history
+   * floor of the reporter's MAILBOX STAFF seat. A staff member never sees
+   * what their mailbox thread held before their floor, so reporting such a
+   * message by id would hand moderators private content the reporter could
+   * never read. The rule is `isCoveredByMailboxStaffFloor`, the in-memory
+   * twin of the SQL every read path composes; it holds only for a staff seat
+   * in a direct, non-official thread, so a personal or group seat and a
+   * customer's own seat are never refused here.
+   *
+   * The two lookups the rule needs run only for a seat that has a floor at
+   * all (`cleared_at` set), so an ordinary filing costs no extra query.
+   */
+  private async isBehindMailboxStaffFloor(
+    participant: Pick<ConversationParticipant, 'clearedAt' | 'identityId'>,
+    message: Message,
+  ): Promise<boolean> {
+    if (!participant.clearedAt) {
+      return false;
+    }
+    const [seatIdentity, conversation] = await Promise.all([
+      this.identities.getById(participant.identityId),
+      this.conversations.findOne({
+        where: { id: message.conversationId },
+        select: { id: true, kind: true, isOfficial: true },
+      }),
+    ]);
+    return isCoveredByMailboxStaffFloor(message.createdAt, {
+      clearedAt: participant.clearedAt,
+      identityKind: seatIdentity?.kind,
+      isGroupConversation: conversation?.kind === ConversationKind.Group,
+      isOfficialConversation: conversation?.isOfficial ?? false,
     });
   }
 
@@ -1234,6 +1344,70 @@ export class ReportsService {
     });
   }
 
+  /**
+   * The `identity` subject's filing gate and its snapshot, in one pass.
+   *
+   * Every refusal but one is the same `404` body: a signed-out caller, a
+   * non-uuid, an identity that does not exist, a `profile` identity, and a
+   * member who never held a customer seat in a direct thread with it. The
+   * exception is the identity's own staff, refused `403`: they already know
+   * the business exists, and there is nothing for them to report as its
+   * customer.
+   *
+   * Staff are checked before the thread on purpose. A member who was a
+   * customer before joining the team still holds that old customer seat, and
+   * the rule is about who they are now.
+   */
+  private async captureReportedIdentity(
+    reporterId: string | null,
+    identityId: string,
+  ): Promise<MailboxIdentitySnapshotEvidence> {
+    if (reporterId === null || !UUID_RE.test(identityId)) {
+      throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
+    }
+    const identity = await this.identities.getById(identityId);
+    if (!identity || identity.kind === IdentityKind.Profile) {
+      throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
+    }
+    const ownerEntityId = identity[ownerColumnForKind(identity.kind)];
+    if (!ownerEntityId) {
+      throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
+    }
+
+    const staffUserIds = await this.identities.staffUserIds(identity.id);
+    if (staffUserIds.includes(reporterId)) {
+      throw new ForbiddenException(
+        'You are on the team of this business, so it has no customer thread of yours to report.',
+      );
+    }
+
+    const customerThreadRows: Array<{ conversationId: string }> =
+      await this.conversationParticipants.query(
+        CUSTOMER_THREAD_WITH_IDENTITY_SQL,
+        [reporterId, identity.id],
+      );
+    const customerThread = customerThreadRows[0];
+    if (!customerThread) {
+      throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
+    }
+
+    const descriptionById = await this.identities.describeIdentities([
+      identity.id,
+    ]);
+    return {
+      kind: 'mailbox_identity',
+      identityId: identity.id,
+      // The template literal turns the narrowed enum into the plain string
+      // union the snapshot type spells out.
+      identityKind: `${identity.kind}`,
+      ownerEntityId,
+      displayName: descriptionById.get(identity.id)?.displayName ?? null,
+      conversationId: customerThread.conversationId,
+      staffUserIds: staffUserIds.slice(0, MAX_IDENTITY_SNAPSHOT_STAFF_IDS),
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
   // Server-owned reason taxonomy — always `other` plus whatever's relevant
   // to the subject type (see `reason-catalogue.ts`).
   reasonsFor(subjectType: ReportSubjectType): ReasonOption[] {
@@ -1280,6 +1454,7 @@ export class ReportsService {
     reportedHousing: HousingListing | null,
     reportedEventPhoto: EventPhoto | null,
     reportedGroupSnapshot: GroupSnapshotEvidence | null,
+    reportedIdentitySnapshot: MailboxIdentitySnapshotEvidence | null,
   ): unknown[] | null {
     const evidence: unknown[] = clientEvidence ? [...clientEvidence] : [];
     if (reportedMessage) {
@@ -1347,6 +1522,11 @@ export class ReportsService {
     // discriminant rather than `type`; see `GroupSnapshotEvidence`'s doc.
     if (reportedGroupSnapshot) {
       evidence.push(reportedGroupSnapshot);
+    }
+    // Business-mailbox identity snapshot: built by `captureReportedIdentity`
+    // alongside its filing gate, appended here like the group snapshot.
+    if (reportedIdentitySnapshot) {
+      evidence.push(reportedIdentitySnapshot);
     }
     return evidence.length ? evidence : null;
   }

@@ -1,10 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { Community } from '../communities/entities/community.entity';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
+import { SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE } from '../communities/subcommunity-rules';
 import { CardSerialService } from './card-serial.service';
 import { UpsertCardProgramDto } from './dto/upsert-card-program.dto';
 import {
@@ -61,6 +66,15 @@ export class CardProgramsService {
     // start issuing credentials from behind that takedown.
     if (!community || community.archivedAt) {
       throw new NotFoundException('Community not found');
+    }
+    // Membership cards are out of v1 for spaces: a parent removal cascades
+    // space rows away without the per-space events a card listens for, so a
+    // space card could outlive the membership it vouches for.
+    if (community.parentId !== null) {
+      throw new BadRequestException({
+        message: 'A space cannot run a membership card program',
+        code: SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE,
+      });
     }
 
     const existing = await this.programForCommunity(communityId);

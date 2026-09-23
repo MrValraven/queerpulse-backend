@@ -16,8 +16,9 @@ import {
 } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { GroupInvite, GroupInviteStatus } from './entities/group-invite.entity';
-import { Message } from './entities/message.entity';
+import { Message, MessageKind } from './entities/message.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { Identity } from '../identities/entities/identity.entity';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
@@ -109,6 +110,10 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
       // spec's caller row carries no `role`, so `toGroupConversationResponse`'s
       // `canSeePendingInvites` gate is always false here).
       { find: jest.fn().mockResolvedValue([]) } as never,
+      // Task 8: `IdentitiesService`, unused by `updateGroup` (this spec's
+      // only path under test stops well before `insertSystemMessage` or
+      // `createGroup`).
+      {} as never,
     );
     // The group mapper resolves the photo through `toImageUrl`, which throws
     // `Service temporarily unavailable` when the base was never wired — and
@@ -169,6 +174,7 @@ describe('GroupsService, section 8 (Groups)', () => {
     groupCapabilities: jest.Mock;
     hasUnreadMentionByConversation: jest.Mock;
     buildPostResult: jest.Mock;
+    assertInitiatorIsProfile: jest.Mock;
   };
   let manager: {
     create: jest.Mock;
@@ -188,6 +194,13 @@ describe('GroupsService, section 8 (Groups)', () => {
     getGroupAddPolicyForUsers: jest.Mock;
   };
   let groupInvites: { find: jest.Mock };
+  let identities: { resolveProfileIdentityId: jest.Mock };
+
+  /** Task 8: each actor's own profile identity, distinct per user id so a
+   *  test asserting a stamped `senderIdentityId` fails if the wrong actor's
+   *  identity ever landed on the pill. */
+  const profileIdentityOf = (userId: string): string =>
+    `profile-identity-of-${userId}`;
 
   /** An active, non-dissolved group, mutated in place by a write under test
    *  exactly like the real `Conversation` row is, so a later
@@ -296,6 +309,9 @@ describe('GroupsService, section 8 (Groups)', () => {
       buildPostResult: jest
         .fn()
         .mockResolvedValue({ view: {}, response: { systemEvent: null } }),
+      // Task 8: `createGroup`'s reply-only guard. Every actor here starts a
+      // group as themselves, so the stub always allows it.
+      assertInitiatorIsProfile: jest.fn().mockResolvedValue(undefined),
     };
     eventEmitter = { emit: jest.fn() };
     connectionsService = {
@@ -318,6 +334,15 @@ describe('GroupsService, section 8 (Groups)', () => {
     // (an owner/admin caller reaches this); writes in `addMembers`/
     // `createGroup`/`leaveGroup`/`dissolveGroup` go through `manager` instead.
     groupInvites = { find: jest.fn().mockResolvedValue([]) };
+    // Task 8: `insertSystemMessage` stamps every pill's `senderIdentityId`
+    // with the actor's own profile identity, resolved through here.
+    identities = {
+      resolveProfileIdentityId: jest
+        .fn()
+        .mockImplementation((userId: string) =>
+          Promise.resolve(profileIdentityOf(userId)),
+        ),
+    };
 
     service = new GroupsService(
       conversations as unknown as Repository<Conversation>,
@@ -336,6 +361,7 @@ describe('GroupsService, section 8 (Groups)', () => {
       mediaCropService as never,
       preferencesService as never,
       groupInvites as never,
+      identities as never,
     );
     setImageUrlBase('https://api.test');
   });
@@ -606,6 +632,160 @@ describe('GroupsService, section 8 (Groups)', () => {
       }
       const savedPill = firstSaveCall[0] as { systemEvent: { type: string } };
       expect(savedPill.systemEvent.type).toBe('member_demoted');
+    });
+  });
+
+  describe('Task 8: system pills stamp the actor profile identity', () => {
+    it('stamps the actor profile identity on a group system pill', async () => {
+      participants.findOne.mockResolvedValue(
+        participantRow({ userId: MEMBER_ID, role: ConversationRole.Member }),
+      );
+
+      await service.changeMemberRole(
+        CONVERSATION_ID,
+        OWNER_ID,
+        MEMBER_ID,
+        ConversationRole.Admin,
+      );
+
+      expect(identities.resolveProfileIdentityId).toHaveBeenCalledWith(
+        OWNER_ID,
+      );
+      const [firstSaveCall] = manager.save.mock.calls;
+      if (!firstSaveCall) {
+        throw new Error('expected a system pill to be saved');
+      }
+      const savedPill = firstSaveCall[0] as { senderIdentityId: string };
+      // Asserts the stamped VALUE itself: a null here is exactly what
+      // `CHK_messages_sender_identity` rejects.
+      expect(savedPill.senderIdentityId).toBe(profileIdentityOf(OWNER_ID));
+    });
+  });
+
+  describe('CW-06: createGroup resolves the creator identity only once', () => {
+    it('reuses the reply-only guard resolve for the opening pill', async () => {
+      profiles.find.mockResolvedValueOnce([
+        { userId: MEMBER_ID, slug: 'newcomer' },
+      ]);
+      // The shared `manager.save` stub spreads its argument as an object,
+      // which breaks the array round trip `createGroup` needs for the
+      // (here, empty) created-invites array; this test scopes its own
+      // array-aware stub to keep the shared default untouched.
+      manager.save.mockImplementation((entity: unknown) =>
+        Array.isArray(entity)
+          ? Promise.resolve(entity)
+          : Promise.resolve({
+              id: 'pill-1',
+              createdAt: new Date('2026-02-01T00:00:00.000Z'),
+              ...(entity as object),
+            }),
+      );
+
+      await service.createGroup(OWNER_ID, 'Book club', ['newcomer']);
+
+      const ownerResolveCalls =
+        identities.resolveProfileIdentityId.mock.calls.filter(
+          ([userId]) => userId === OWNER_ID,
+        );
+      expect(ownerResolveCalls).toHaveLength(1);
+      const [firstSaveCall] = manager.save.mock.calls.filter(
+        (call) => (call[0] as { kind?: string }).kind === MessageKind.System,
+      );
+      if (!firstSaveCall) {
+        throw new Error('expected the opening system pill to be saved');
+      }
+      const savedPill = firstSaveCall[0] as { senderIdentityId: string };
+      expect(savedPill.senderIdentityId).toBe(profileIdentityOf(OWNER_ID));
+    });
+  });
+
+  // F2 (C2): `conversation_participants.identity_id` is NOT NULL, so every
+  // group seat carries its member's own profile identity. Read for the whole
+  // batch at once; get-or-create only for a member with no identity row yet.
+  describe('F2: group seats carry each member profile identity', () => {
+    const STORED_IDENTITY_OF_MEMBER = 'stored-profile-identity-of-member';
+
+    type SavedSeat = { userId: string; identityId?: string; role?: string };
+
+    const savedSeats = (): SavedSeat[] =>
+      manager.save.mock.calls
+        .flatMap(([entity]: [unknown]): unknown[] =>
+          Array.isArray(entity) ? (entity as unknown[]) : [entity],
+        )
+        .filter(
+          (entity): entity is SavedSeat =>
+            typeof entity === 'object' &&
+            entity !== null &&
+            'role' in entity &&
+            'userId' in entity,
+        );
+
+    beforeEach(() => {
+      // Array round trip for `createGroup`'s batched seat and invite saves.
+      manager.save.mockImplementation((entity: unknown) =>
+        Array.isArray(entity)
+          ? Promise.resolve(entity)
+          : Promise.resolve({
+              id: 'pill-1',
+              createdAt: new Date('2026-02-01T00:00:00.000Z'),
+              ...(entity as object),
+            }),
+      );
+      profiles.find.mockResolvedValue([
+        { userId: MEMBER_ID, slug: 'newcomer' },
+      ]);
+    });
+
+    it('createGroup seats the creator under their identity and each member under the stored one, in one read', async () => {
+      manager.find.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === Identity
+            ? [{ id: STORED_IDENTITY_OF_MEMBER, userId: MEMBER_ID }]
+            : [],
+        ),
+      );
+
+      await service.createGroup(OWNER_ID, 'Book club', ['newcomer']);
+
+      expect(savedSeats()).toEqual([
+        expect.objectContaining({
+          userId: OWNER_ID,
+          identityId: profileIdentityOf(OWNER_ID),
+        }),
+        expect.objectContaining({
+          userId: MEMBER_ID,
+          identityId: STORED_IDENTITY_OF_MEMBER,
+        }),
+      ]);
+      const identityReads = manager.find.mock.calls.filter(
+        ([entity]) => entity === Identity,
+      );
+      expect(identityReads).toHaveLength(1);
+      expect(identities.resolveProfileIdentityId).not.toHaveBeenCalledWith(
+        MEMBER_ID,
+      );
+    });
+
+    it('createGroup mints the identity of a member who has none yet', async () => {
+      await service.createGroup(OWNER_ID, 'Book club', ['newcomer']);
+
+      expect(savedSeats()).toContainEqual(
+        expect.objectContaining({
+          userId: MEMBER_ID,
+          identityId: profileIdentityOf(MEMBER_ID),
+        }),
+      );
+    });
+
+    it('addMembers seats a new member under their profile identity', async () => {
+      await service.addMembers(CONVERSATION_ID, OWNER_ID, ['newcomer']);
+
+      expect(savedSeats()).toEqual([
+        expect.objectContaining({
+          userId: MEMBER_ID,
+          identityId: profileIdentityOf(MEMBER_ID),
+        }),
+      ]);
     });
   });
 

@@ -11,10 +11,12 @@ import { Event as Gathering } from '../events/entities/event.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community, CommunityFrozenReason } from './entities/community.entity';
+import { SubcommunityCascadeService } from './subcommunity-cascade.service';
 
 // The conditional `UPDATE communities SET frozen_at = now() WHERE frozen_at IS
 // NULL` chain (`.createQueryBuilder().update().set().where().execute()`).
@@ -48,6 +50,7 @@ const COMMUNITY = {
   frozenAt: null,
   archivedAt: null,
   ownerId: 'owner-1',
+  parentId: null,
 } as unknown as Community;
 
 const PHOTO_REPORT: ReportCreatedEvent = {
@@ -60,7 +63,14 @@ const PHOTO_REPORT: ReportCreatedEvent = {
 
 describe('CommunityAutoFreezeService', () => {
   let service: CommunityAutoFreezeService;
-  let communities: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  let communities: {
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
+  // The manager the freeze transaction hands its callback.
+  let transactionManager: { createQueryBuilder: jest.Mock };
+  let subcommunityCascade: { freezeSpaces: jest.Mock };
   let posts: { findOne: jest.Mock };
   let replies: { findOne: jest.Mock };
   let eventPhotos: { findOne: jest.Mock };
@@ -73,10 +83,20 @@ describe('CommunityAutoFreezeService', () => {
 
   beforeEach(async () => {
     updateQueryBuilder = updateQbStub();
+    transactionManager = {
+      createQueryBuilder: jest.fn(() => updateQueryBuilder),
+    };
     communities = {
       findOne: jest.fn().mockResolvedValue(COMMUNITY),
       createQueryBuilder: jest.fn(() => updateQueryBuilder),
+      manager: {
+        transaction: jest.fn(
+          (callback: (manager: unknown) => Promise<unknown>) =>
+            callback(transactionManager),
+        ),
+      },
     };
+    subcommunityCascade = { freezeSpaces: jest.fn().mockResolvedValue([]) };
     posts = { findOne: jest.fn().mockResolvedValue(null) };
     replies = { findOne: jest.fn().mockResolvedValue(null) };
     eventPhotos = { findOne: jest.fn().mockResolvedValue(null) };
@@ -103,6 +123,10 @@ describe('CommunityAutoFreezeService', () => {
           useValue: governanceLog,
         },
         { provide: NotificationsService, useValue: notifications },
+        {
+          provide: SubcommunityCascadeService,
+          useValue: subcommunityCascade,
+        },
       ],
     }).compile();
     service = module.get(CommunityAutoFreezeService);
@@ -222,6 +246,68 @@ describe('CommunityAutoFreezeService', () => {
       );
       expect(photoArm?.[1].eventPhotoType).toBe(ReportSubjectType.EventPhoto);
       expect(photoArm?.[1].communityId).toBe('c1');
+    });
+  });
+
+  // A space must never stay open under a parent held for review, so the
+  // automatic freeze cascades inside the same transaction as its own write.
+  describe('the space cascade', () => {
+    const COMMUNITY_REPORT: ReportCreatedEvent = {
+      reportId: 'rep-2',
+      subjectType: ReportSubjectType.Community,
+      subjectId: 'queer-devs',
+      severity: ReportSeverity.Emergency,
+      reasonCode: 'outing',
+    };
+
+    it("freezes a top-level community's spaces in the freeze transaction", async () => {
+      await service.onReportCreated(COMMUNITY_REPORT);
+
+      expect(communities.manager.transaction).toHaveBeenCalledTimes(1);
+      expect(transactionManager.createQueryBuilder).toHaveBeenCalled();
+      expect(subcommunityCascade.freezeSpaces).toHaveBeenCalledWith(
+        transactionManager,
+        'c1',
+        null,
+      );
+    });
+
+    it('logs a parent_frozen entry on every space the cascade froze', async () => {
+      subcommunityCascade.freezeSpaces.mockResolvedValue([
+        'space-a',
+        'space-b',
+      ]);
+
+      await service.onReportCreated(COMMUNITY_REPORT);
+
+      for (const spaceId of ['space-a', 'space-b']) {
+        expect(governanceLog.log).toHaveBeenCalledWith({
+          communityId: spaceId,
+          actorUserId: null,
+          action: GovernanceLogAction.Frozen,
+          metadata: { reason: 'parent_frozen' },
+        });
+      }
+    });
+
+    it('cascades nothing when another freeze won the race', async () => {
+      updateQueryBuilder.execute!.mockResolvedValue({ affected: 0 });
+
+      await service.onReportCreated(COMMUNITY_REPORT);
+
+      expect(subcommunityCascade.freezeSpaces).not.toHaveBeenCalled();
+    });
+
+    it('cascades nothing when the frozen community is itself a space', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        parentId: 'parent-1',
+      });
+
+      await service.onReportCreated(COMMUNITY_REPORT);
+
+      expect(updateQueryBuilder.execute).toHaveBeenCalled();
+      expect(subcommunityCascade.freezeSpaces).not.toHaveBeenCalled();
     });
   });
 });

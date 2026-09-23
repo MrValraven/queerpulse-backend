@@ -15,6 +15,7 @@ import {
   RosterRole,
 } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
+import { topLevelOnly } from '../communities/subcommunity-rules';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
   Report,
@@ -371,13 +372,19 @@ export class AdminMembersService {
         },
         order: { createdAt: 'DESC' },
       }),
-      this.communityMembers
-        .createQueryBuilder('member')
-        .innerJoin(Community, 'community', 'community.id = member.community_id')
-        .select('member.role', 'role')
-        .addSelect('community.name', 'name')
-        .where('member.user_id = :userId', { userId: profile.userId })
-        .getRawMany<{ role: RosterRole; name: string }>(),
+      topLevelOnly(
+        this.communityMembers
+          .createQueryBuilder('member')
+          .innerJoin(
+            Community,
+            'community',
+            'community.id = member.community_id',
+          )
+          .select('member.role', 'role')
+          .addSelect('community.name', 'name')
+          .where('member.user_id = :userId', { userId: profile.userId }),
+        'community',
+      ).getRawMany<{ role: RosterRole; name: string }>(),
       this.vouches.find({
         where: { voucherId: profile.userId, withdrawnAt: IsNull() },
         order: { createdAt: 'DESC' },
@@ -1181,20 +1188,24 @@ export class AdminMembersService {
     return openReportCountByUserId;
   }
 
-  /** Every community name each of `userIds` belongs to, in one query. */
+  /** Every top-level community name each of `userIds` belongs to, in one
+   *  query. A space is excluded: this list names top-level communities, and
+   *  a space counts as part of its parent. */
   private async loadCommunityNames(
     userIds: string[],
   ): Promise<Map<string, string[]>> {
     const communityNamesByUserId = new Map<string, string[]>();
     if (!userIds.length) return communityNamesByUserId;
 
-    const rows = await this.communityMembers
-      .createQueryBuilder('member')
-      .innerJoin(Community, 'community', 'community.id = member.community_id')
-      .select('member.user_id', 'userId')
-      .addSelect('community.name', 'name')
-      .where('member.user_id IN (:...userIds)', { userIds })
-      .getRawMany<{ userId: string; name: string }>();
+    const rows = await topLevelOnly(
+      this.communityMembers
+        .createQueryBuilder('member')
+        .innerJoin(Community, 'community', 'community.id = member.community_id')
+        .select('member.user_id', 'userId')
+        .addSelect('community.name', 'name')
+        .where('member.user_id IN (:...userIds)', { userIds }),
+      'community',
+    ).getRawMany<{ userId: string; name: string }>();
 
     for (const row of rows) {
       const existingNames = communityNamesByUserId.get(row.userId);

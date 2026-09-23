@@ -1,8 +1,10 @@
+import { FindOperator } from 'typeorm';
 import type { FindManyOptions, FindOptionsWhere } from 'typeorm';
 import {
   Notification,
   NotificationType,
 } from '../notifications/entities/notification.entity';
+import { visibleThroughMailboxSeatRules } from '../notifications/notification-mailbox-block';
 import { MentionsInboxService } from './mentions-inbox.service';
 
 const now = new Date('2026-08-05T10:00:00.000Z');
@@ -64,9 +66,11 @@ describe('MentionsInboxService', () => {
 
       // `service.list` always calls `notifications.find` exactly once above.
       const findArgs = notifications.find.mock.calls[0]![0];
+      // Task 13g: plus the mailbox block visibility condition on `payload`.
       expect(findArgs.where).toEqual({
         userId: 'me',
         type: NotificationType.Mention,
+        payload: expect.any(FindOperator),
       });
       expect(findArgs.order).toEqual({ createdAt: 'DESC', id: 'DESC' });
       expect(findArgs.skip).toBe(20); // (page 2 - 1) * PAGE_SIZE
@@ -84,6 +88,7 @@ describe('MentionsInboxService', () => {
         userId: 'me',
         type: NotificationType.Mention,
         read: false,
+        payload: expect.any(FindOperator),
       });
     });
 
@@ -152,11 +157,35 @@ describe('MentionsInboxService', () => {
 
       const result = await service.markAllRead('me');
 
-      expect(notifications.update).toHaveBeenCalledWith(
-        { userId: 'me', type: NotificationType.Mention, read: false },
-        { read: true },
-      );
+      const [criteria, patch] = notifications.update.mock.calls[0]!;
+      expect(criteria).toMatchObject({
+        userId: 'me',
+        type: NotificationType.Mention,
+        read: false,
+      });
+      expect(patch).toEqual({ read: true });
       expect(result).toEqual({ ok: true });
+    });
+
+    // CW-22: without this filter, a mention a mailbox block currently hides
+    // from `list` still got marked read here, so lifting the block later
+    // resurfaced a row the member never actually saw, already marked read.
+    it('composes the same mailbox block visibility filter list uses, on the payload column', async () => {
+      const { service, notifications } = build();
+
+      await service.markAllRead('me');
+
+      const [criteria] = notifications.update.mock.calls[0]!;
+      const payloadCondition = (criteria as { payload: FindOperator<unknown> })
+        .payload;
+      const expectedCondition = visibleThroughMailboxSeatRules('me');
+      expect(payloadCondition).toBeInstanceOf(FindOperator);
+      expect(payloadCondition.getSql?.('Notification.payload')).toBe(
+        expectedCondition.getSql?.('Notification.payload'),
+      );
+      expect(payloadCondition.objectLiteralParameters).toEqual(
+        expectedCondition.objectLiteralParameters,
+      );
     });
   });
 });

@@ -188,6 +188,21 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
       mediaCropService as unknown as MediaCropService,
       connectionsService as unknown as ConnectionsService,
       preferencesService as unknown as PreferencesService,
+      // Task 11: `buildConversationSummaries` now batch-loads every seat's
+      // identity, so this needs a real (if empty) `getByIds`/`describeIdentities`
+      // here, in place of the bare `{}` stand-in it used to get away with as
+      // an unused dependency. This fixture is GROUP-only, so the identity
+      // branch of `otherParticipant` never actually runs either way.
+      {
+        getByIds: jest.fn().mockResolvedValue([]),
+        describeIdentities: jest.fn().mockResolvedValue(new Map()),
+      } as never,
+      // Fix round 1 (Task 11): unused for the same reason.
+      {
+        buildStaffNameResolver: jest
+          .fn()
+          .mockResolvedValue({ resolve: () => null }),
+      } as never,
     );
   });
 
@@ -476,6 +491,21 @@ describe('ConversationsService.getConversation (ENG-253 single-conversation read
       {
         getMessagingPrivacyForUsers: jest.fn().mockResolvedValue(new Map()),
       } as unknown as PreferencesService,
+      // Task 11: `buildConversationSummaries` now batch-loads every seat's
+      // identity, so this needs a real (if empty) `getByIds`/`describeIdentities`
+      // here, in place of the bare `{}` stand-in it used to get away with as
+      // an unused dependency. This fixture is GROUP-only, so the identity
+      // branch of `otherParticipant` never actually runs either way.
+      {
+        getByIds: jest.fn().mockResolvedValue([]),
+        describeIdentities: jest.fn().mockResolvedValue(new Map()),
+      } as never,
+      // Fix round 1 (Task 11): unused for the same reason.
+      {
+        buildStaffNameResolver: jest
+          .fn()
+          .mockResolvedValue({ resolve: () => null }),
+      } as never,
     );
   });
 

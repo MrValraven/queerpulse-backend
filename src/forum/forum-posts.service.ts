@@ -14,6 +14,10 @@ import {
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
+import {
+  ownRosterRowCountsSql,
+  parentStaffOfSpaceSql,
+} from '../communities/subcommunity-rules';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -343,6 +347,14 @@ export class ForumPostsService {
     // deliberately opens it. A flat/global thread (`community_id IS NULL`)
     // belongs to no roster, so no gate applies to it and its replies stay
     // searchable by everyone.
+    //
+    // `AND "__search_com"."parent_id" IS NULL`: a space never opens this arm
+    // on its own tier alone, even a public one. It only surfaces here through
+    // its parent's own public standing (the reply's thread would have to
+    // belong to the parent itself) or through the viewer's roster membership
+    // (the EXISTS below), mirroring
+    // `ForumThreadsService.applyCommunityAccessFilter` and `FeedService`'s
+    // equivalent arm.
     qb.andWhere(
       `(
         "t"."community_id" IS NULL
@@ -350,12 +362,15 @@ export class ForumPostsService {
           SELECT 1 FROM "communities" "__search_com"
           WHERE "__search_com"."id" = "t"."community_id"
             AND "__search_com"."access_tier" = :searchPublicTier
+            AND "__search_com"."parent_id" IS NULL
         )
         OR EXISTS (
           SELECT 1 FROM "community_members" "__search_mem"
           WHERE "__search_mem"."community_id" = "t"."community_id"
             AND "__search_mem"."user_id" = :searchViewerId
+            AND ${ownRosterRowCountsSql('"t"."community_id"', 'searchViewerId')}
         )
+        OR ${parentStaffOfSpaceSql('"t"."community_id"', 'searchViewerId')}
       )`,
       { searchPublicTier: AccessTier.Public },
     );

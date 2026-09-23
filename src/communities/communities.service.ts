@@ -25,6 +25,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import {
   DataSource,
   In,
+  IsNull,
   MoreThan,
   Repository,
   SelectQueryBuilder,
@@ -69,6 +70,7 @@ import {
   MemberRoleDTO,
   MyCommunityDTO,
   RosterEntryDTO,
+  SubcommunityDetailContext,
   toCommunityCard,
   toCommunityDetail,
   toJoinRequestDTO,
@@ -115,6 +117,16 @@ import {
   toCommunityTagRequest,
 } from './community-tag-request-response';
 import { resolveStaffCommunity } from './community-staff-access';
+import { CommunityMembershipService } from './community-membership.service';
+import { SubcommunityCascadeService } from './subcommunity-cascade.service';
+import {
+  isSpaceVisibleTo,
+  isTierAtLeastAsStrict,
+  PARENT_MEMBERSHIP_REQUIRED_CODE,
+  SUBCOMMUNITY_TIER_TOO_OPEN_CODE,
+  TIER_STRICTNESS,
+  topLevelOnly,
+} from './subcommunity-rules';
 import {
   CommunityMember,
   RosterRole,
@@ -389,6 +401,13 @@ export class CommunitiesService {
     // Tells whoever works the community-tag-request queue that a new
     // suggestion landed (`createTagRequest` below).
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
+    // Effective roles: a space's role is resolved against its parent's roster
+    // too (parent staff inherit standing inside every space of the parent).
+    // Every role gate in this service reads through it.
+    private readonly membership: CommunityMembershipService,
+    // Writes a parent's leave, ban, freeze, archive and tier change onto its
+    // spaces inside the caller's transaction.
+    private readonly subcommunityCascade: SubcommunityCascadeService,
   ) {}
 
   private readonly logger = new Logger(CommunitiesService.name);
@@ -792,6 +811,10 @@ export class CommunitiesService {
     // is rendered, exactly like the moderated-away exclusion just below.
     communitiesQuery.andWhere('c.archived_at IS NULL');
     this.excludeModeratedCommunities(communitiesQuery);
+    // Spaces never surface in a top-level listing: `list()`'s own grid, its
+    // facet counters and 'mine' all render top-level communities only. A
+    // space is reached through its parent's own subcommunities listing.
+    topLevelOnly(communitiesQuery, 'c');
 
     return communitiesQuery;
   }
@@ -841,7 +864,7 @@ export class CommunitiesService {
         const communityIds = rows.map((community) => community.id);
         const [stats, myRoles] = await Promise.all([
           this.statsForMany(communityIds),
-          this.myRoleByCommunity(communityIds, viewerId),
+          this.myRoleByCommunity(rows, viewerId),
         ]);
         return rows.map((community) =>
           toCommunityCard(
@@ -885,13 +908,16 @@ export class CommunitiesService {
         viewerId,
       });
     this.excludeModeratedCommunities(featuredCommunityQuery);
+    // A space is never featured on the Discover hero: `is_featured` is a
+    // top-level-only setting (`AdminCommunitiesService.updateSettings`).
+    topLevelOnly(featuredCommunityQuery, 'c');
 
     const community = await featuredCommunityQuery.getOne();
     if (!community) return null;
 
     const [stats, myRoles] = await Promise.all([
       this.statsForMany([community.id]),
-      this.myRoleByCommunity([community.id], viewerId),
+      this.myRoleByCommunity([community], viewerId),
     ]);
     return toCommunityCard(
       community,
@@ -927,6 +953,9 @@ export class CommunitiesService {
       )
       .andWhere('c.archived_at IS NULL');
     this.excludeModeratedCommunities(matchingCommunitiesQuery);
+    // Global search never surfaces a space directly: it is reached through
+    // its parent, same as every other top-level-only listing here.
+    topLevelOnly(matchingCommunitiesQuery, 'c');
     const rows = await matchingCommunitiesQuery
       .orderBy('c.name', 'ASC')
       .take(limit)
@@ -936,7 +965,7 @@ export class CommunitiesService {
     const communityIds = rows.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
       this.statsForMany(communityIds),
-      this.myRoleByCommunity(communityIds, viewerId),
+      this.myRoleByCommunity(rows, viewerId),
     ]);
     return rows.map((community) =>
       toCommunityCard(
@@ -991,6 +1020,9 @@ export class CommunitiesService {
         viewerId,
       });
     this.excludeModeratedCommunities(relatedCommunitiesQuery);
+    // Tag-overlap suggestions stay top-level only, same posture as the rest
+    // of this file's card-producing listings.
+    topLevelOnly(relatedCommunitiesQuery, 'c');
 
     relatedCommunitiesQuery
       .addSelect(
@@ -1007,7 +1039,7 @@ export class CommunitiesService {
     const communityIds = rows.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
       this.statsForMany(communityIds),
-      this.myRoleByCommunity(communityIds, viewerId),
+      this.myRoleByCommunity(rows, viewerId),
     ]);
     return rows.map((community) =>
       toCommunityCard(
@@ -1083,6 +1115,9 @@ export class CommunitiesService {
         { connectionIds },
       );
     this.excludeModeratedCommunities(suggestedCommunitiesQuery);
+    // Social-graph suggestions stay top-level only, same posture as the rest
+    // of this file's card-producing listings.
+    topLevelOnly(suggestedCommunitiesQuery, 'c');
 
     // The alias MUST be lower-case and the `orderBy` criteria MUST be the bare
     // alias with no quotes of its own, exactly as `relatedCommunities` does
@@ -1113,7 +1148,7 @@ export class CommunitiesService {
     const communityIds = rows.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
       this.statsForMany(communityIds),
-      this.myRoleByCommunity(communityIds, userId),
+      this.myRoleByCommunity(rows, userId),
     ]);
     return rows.map((community) =>
       toCommunityCard(
@@ -1126,7 +1161,7 @@ export class CommunitiesService {
 
   async getBySlug(slug: string, viewerId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
-    const role = await this.myRole(community.id, viewerId);
+    const role = await this.myRole(community, viewerId);
     // PRD-140. A non-member's standing invitation, loaded once and carried
     // into `buildDetail` for `invitedAt`. Only a non-member can hold one that
     // still means anything, so a member costs no query here.
@@ -1148,6 +1183,12 @@ export class CommunitiesService {
       !pendingInvite
     ) {
       throw new NotFoundException('Community not found');
+    }
+    // A space sits behind its parent's view gate. A parent taken down or
+    // archived hides its spaces from everyone without an effective role in
+    // the space, with the same 404 the parent itself answers.
+    if (community.parentId && !role) {
+      await this.assertParentViewable(community.parentId);
     }
     // A moderator takedown 404s the detail for everyone but the community's own
     // owner/mod — same "don't leak existence" posture as the private-tier gate.
@@ -1203,6 +1244,22 @@ export class CommunitiesService {
     );
   }
 
+  /** 404 unless the parent of a space is present, unarchived and not taken
+   *  down by moderation. Called for viewers with no effective role only. */
+  private async assertParentViewable(parentId: string): Promise<void> {
+    const parent = await this.communities.findOne({ where: { id: parentId } });
+    if (!parent || parent.archivedAt != null) {
+      throw new NotFoundException('Community not found');
+    }
+    const parentModeration = await this.contentModeration.stateFor(
+      CommunitiesService.SUBJECT_TYPE,
+      parent.slug,
+    );
+    if (parentModeration.hidden || parentModeration.removed) {
+      throw new NotFoundException('Community not found');
+    }
+  }
+
   /**
    * `PATCH /communities/:slug` — edit the community's settings.
    *
@@ -1228,7 +1285,7 @@ export class CommunitiesService {
   ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, userId);
-    const actorMembership = await this.assertOwnerOrMod(community.id, userId);
+    const actorRole = await this.assertOwnerOrMod(community, userId);
 
     if (community.archivedAt != null) {
       throw new ConflictException(
@@ -1254,9 +1311,7 @@ export class CommunitiesService {
     // `rosterVisible` are the community's privacy promise, so a plain mod
     // still cannot touch them, but a CO-OWNER can. Handing exactly this to a
     // trusted second person is what the co-owner role is for.
-    const hasOwnerLevelPowers = CommunitiesService.isOwnerLevelRole(
-      actorMembership.role,
-    );
+    const hasOwnerLevelPowers = CommunitiesService.isOwnerLevelRole(actorRole);
     if (
       !hasOwnerLevelPowers &&
       ((dto.accessTier !== undefined &&
@@ -1274,6 +1329,33 @@ export class CommunitiesService {
         'Only an owner or co-owner can change who can see or join this community',
       );
     }
+
+    // Tier rules for spaces. A space is never more open than its parent and
+    // never publicly listed: its parent's teaser is the only public face.
+    if (community.parentId) {
+      if (dto.isPubliclyListed === true) {
+        throw new BadRequestException('A space cannot be publicly listed');
+      }
+      if (dto.accessTier !== undefined) {
+        const parent = await this.loadParent(community);
+        if (
+          parent &&
+          !isTierAtLeastAsStrict(dto.accessTier, parent.accessTier)
+        ) {
+          throw new BadRequestException({
+            message: 'A space cannot be more open than its parent',
+            code: SUBCOMMUNITY_TIER_TOO_OPEN_CODE,
+          });
+        }
+      }
+    }
+    // A parent moving to a stricter tier raises every space now more open
+    // than it, in the same transaction as its own save (see below).
+    const previousAccessTier = community.accessTier;
+    const shouldRaiseSpaceTiers =
+      !community.parentId &&
+      dto.accessTier !== undefined &&
+      TIER_STRICTNESS[dto.accessTier] > TIER_STRICTNESS[previousAccessTier];
 
     // THE PUBLIC-LISTING INVARIANT, in one place.
     //
@@ -1365,7 +1447,22 @@ export class CommunitiesService {
     const changes = CommunitiesService.diffSettings(community, next);
 
     Object.assign(community, next);
-    const saved = await this.communities.save(community);
+    const { saved, raisedSpaces } = await this.dataSource.transaction(
+      async (manager) => {
+        const savedCommunity = await manager
+          .getRepository(Community)
+          .save(community);
+        const raisedSpaceTiers =
+          shouldRaiseSpaceTiers && dto.accessTier !== undefined
+            ? await this.subcommunityCascade.raiseSpaceTiers(
+                manager,
+                community.id,
+                dto.accessTier,
+              )
+            : [];
+        return { saved: savedCommunity, raisedSpaces: raisedSpaceTiers };
+      },
+    );
 
     if (Object.keys(changes).length) {
       await this.logGovernanceAction(
@@ -1376,7 +1473,16 @@ export class CommunitiesService {
         { changes },
       );
     }
-    return this.buildDetail(saved, userId);
+    for (const raisedSpace of raisedSpaces) {
+      await this.logGovernanceAction(
+        raisedSpace.id,
+        userId,
+        GovernanceLogAction.SubcommunityTierRaised,
+        null,
+        { from: raisedSpace.from, to: dto.accessTier, parentId: community.id },
+      );
+    }
+    return this.buildDetail(saved, userId, actorRole);
   }
 
   /**
@@ -1434,19 +1540,48 @@ export class CommunitiesService {
   async archive(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, userId);
-    this.assertOwner(community, userId);
+    // On a space the parent's owner holds this power as well.
+    const parent = await this.loadParent(community);
+    this.assertOwner(community, userId, parent);
 
     if (community.archivedAt == null) {
-      community.archivedAt = new Date();
-      await this.communities.save(community);
+      const archivedAt = new Date();
+      community.archivedAt = archivedAt;
+      // Archiving a parent archives every live space with it, in the same
+      // transaction, stamped so an admin unarchive restores exactly those.
+      const archivedSpaceIds = await this.dataSource.transaction(
+        async (manager) => {
+          await manager.getRepository(Community).save(community);
+          return community.parentId
+            ? []
+            : this.subcommunityCascade.archiveSpaces(
+                manager,
+                community.id,
+                archivedAt,
+              );
+        },
+      );
       await this.logGovernanceAction(
         community.id,
         userId,
         GovernanceLogAction.Archived,
       );
+      for (const spaceId of archivedSpaceIds) {
+        await this.logGovernanceAction(
+          spaceId,
+          userId,
+          GovernanceLogAction.Archived,
+          null,
+          { reason: 'parent_archived', parentId: community.id },
+        );
+      }
       await this.notifyRosterArchived(community, userId);
     }
-    return this.buildDetail(community, userId, RosterRole.Owner);
+    const actorRole =
+      community.ownerId === userId
+        ? RosterRole.Owner
+        : await this.myRole(community, userId);
+    return this.buildDetail(community, userId, actorRole);
   }
 
   /**
@@ -1475,7 +1610,7 @@ export class CommunitiesService {
   ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, userId);
-    const role = await this.myRole(community.id, userId);
+    const role = await this.myRole(community, userId);
     if (!CommunitiesService.isStaffRole(role)) {
       throw new ForbiddenException(
         'Only an owner or mod can freeze a community',
@@ -1487,20 +1622,37 @@ export class CommunitiesService {
     const frozenNote = toStoredPlainTextOrNull(input.note);
 
     if (community.frozenAt == null) {
-      const result = await this.communities
-        .createQueryBuilder()
-        .update(Community)
-        .set({
-          frozenAt: () => 'now()',
-          // Stamped with the marker so `unfreeze` can let the owner/mod lift
-          // THEIR OWN freeze freely, while an automatic one stays gated on the
-          // reports actually being handled (BE-COM-04).
-          frozenReason: CommunityFrozenReason.Manual,
-          frozenNote,
-          frozenByUserId: userId,
-        })
-        .where('id = :id AND frozen_at IS NULL', { id: community.id })
-        .execute();
+      // A parent's freeze and its spaces' freeze commit together: a space
+      // left open under a paused parent would be the one door still taking
+      // posts and members.
+      const { result, frozenSpaceIds } = await this.dataSource.transaction(
+        async (manager) => {
+          const freezeResult = await manager
+            .getRepository(Community)
+            .createQueryBuilder()
+            .update(Community)
+            .set({
+              frozenAt: () => 'now()',
+              // Stamped with the marker so `unfreeze` can let the owner/mod lift
+              // THEIR OWN freeze freely, while an automatic one stays gated on the
+              // reports actually being handled (BE-COM-04).
+              frozenReason: CommunityFrozenReason.Manual,
+              frozenNote,
+              frozenByUserId: userId,
+            })
+            .where('id = :id AND frozen_at IS NULL', { id: community.id })
+            .execute();
+          const spaceIds =
+            freezeResult.affected && !community.parentId
+              ? await this.subcommunityCascade.freezeSpaces(
+                  manager,
+                  community.id,
+                  userId,
+                )
+              : [];
+          return { result: freezeResult, frozenSpaceIds: spaceIds };
+        },
+      );
       if (result.affected) {
         community.frozenAt = new Date();
         community.frozenReason = CommunityFrozenReason.Manual;
@@ -1513,6 +1665,15 @@ export class CommunitiesService {
           null,
           { reason: 'manual', note: frozenNote },
         );
+        for (const spaceId of frozenSpaceIds) {
+          await this.logGovernanceAction(
+            spaceId,
+            userId,
+            GovernanceLogAction.Frozen,
+            null,
+            { reason: 'parent_frozen' },
+          );
+        }
         await this.notifyStaffFreezeChange(
           community,
           NotificationType.CommunityFrozen,
@@ -1551,10 +1712,17 @@ export class CommunitiesService {
   async unfreeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, userId);
-    const role = await this.myRole(community.id, userId);
+    const role = await this.myRole(community, userId);
     if (!CommunitiesService.isStaffRole(role)) {
       throw new ForbiddenException(
         'Only an owner or mod can unfreeze a community',
+      );
+    }
+    // A freeze inherited from the parent lifts only with the parent's own
+    // unfreeze. No staff role inside the space reaches past it.
+    if (community.frozenReason === CommunityFrozenReason.ParentFrozen) {
+      throw new ConflictException(
+        'This space is paused because its parent community is paused',
       );
     }
     if (community.frozenAt != null) {
@@ -1573,12 +1741,30 @@ export class CommunitiesService {
       // that is no longer paused.
       community.frozenNote = null;
       community.frozenByUserId = null;
-      await this.communities.save(community);
+      // Lifting a parent's freeze lifts only the spaces it froze
+      // (`parent_frozen`); a space frozen on its own stays frozen.
+      const unfrozenSpaceIds = await this.dataSource.transaction(
+        async (manager) => {
+          await manager.getRepository(Community).save(community);
+          return community.parentId
+            ? []
+            : this.subcommunityCascade.unfreezeSpaces(manager, community.id);
+        },
+      );
       await this.logGovernanceAction(
         community.id,
         userId,
         GovernanceLogAction.Unfrozen,
       );
+      for (const spaceId of unfrozenSpaceIds) {
+        await this.logGovernanceAction(
+          spaceId,
+          userId,
+          GovernanceLogAction.Unfrozen,
+          null,
+          { reason: 'parent_unfrozen' },
+        );
+      }
       await this.notifyStaffFreezeChange(
         community,
         NotificationType.CommunityUnfrozen,
@@ -1598,7 +1784,8 @@ export class CommunitiesService {
    *  1. **Actor must be the CURRENT owner.** Not owner-or-mod: transferring the
    *     community away is the single most consequential act on it, and only its
    *     root of authority (`Community.ownerId`) may perform it. A mod attempting
-   *     it gets Forbidden.
+   *     it gets Forbidden. On a space the parent's owner holds this power too;
+   *     the space's current owner is then the one demoted to mod.
    *  2. **Target must be a member of this community.** Unknown slug, or a member
    *     of some other community, both 404 `Member not found` — same as
    *     `setMemberRole`/`removeMember`.
@@ -1623,8 +1810,12 @@ export class CommunitiesService {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, actorId);
 
-    // 1. actor is the current owner
-    this.assertOwner(community, actorId);
+    // 1. actor is the current owner (on a space, the parent's owner too)
+    const parent = await this.loadParent(community);
+    this.assertOwner(community, actorId, parent);
+    // Captured before the swap: the owner of record the transaction demotes.
+    // It is the actor unless the parent's owner is handing a space on.
+    const previousOwnerId = community.ownerId;
 
     // 2. target is on this roster
     const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
@@ -1638,6 +1829,9 @@ export class CommunitiesService {
     //    owner is trivially their own member)
     if (targetUserId === actorId) {
       throw new BadRequestException('You already own this community');
+    }
+    if (targetUserId === previousOwnerId) {
+      throw new BadRequestException('That member already owns this community');
     }
 
     const targetMembership = await this.members.findOne({
@@ -1665,20 +1859,28 @@ export class CommunitiesService {
       community.ownerId = targetUserId;
       const savedCommunity = await communitiesRepo.save(community);
 
+      // Outgoing owner stays on the roster, demoted to mod. This is the
+      // CURRENT owner of record, which is the actor unless the parent's owner
+      // is handing a space on. Demoted BEFORE the promotion below, so the
+      // one-owner partial unique index (`UQ_community_members_one_owner`)
+      // never sees two owner rows. Guarded on the row still reading `owner`
+      // so a retry can't double-demote something already moved.
+      if (previousOwnerId !== null) {
+        const previousOwnerMembership = await membersRepo.findOne({
+          where: { communityId: community.id, userId: previousOwnerId },
+        });
+        if (
+          previousOwnerMembership &&
+          previousOwnerMembership.role === RosterRole.Owner
+        ) {
+          previousOwnerMembership.role = RosterRole.Mod;
+          await membersRepo.save(previousOwnerMembership);
+        }
+      }
+
       // New owner's roster row -> owner.
       targetMembership.role = RosterRole.Owner;
       await membersRepo.save(targetMembership);
-
-      // Outgoing owner stays on the roster, demoted to mod. Guarded on the row
-      // still reading `owner` so a retry can't double-demote something already
-      // moved.
-      const actorMembership = await membersRepo.findOne({
-        where: { communityId: community.id, userId: actorId },
-      });
-      if (actorMembership && actorMembership.role === RosterRole.Owner) {
-        actorMembership.role = RosterRole.Mod;
-        await membersRepo.save(actorMembership);
-      }
 
       return savedCommunity;
     });
@@ -1688,12 +1890,22 @@ export class CommunitiesService {
       actorId,
       GovernanceLogAction.OwnershipTransferred,
       targetUserId,
-      { fromOwnerId: actorId },
+      { fromOwnerId: previousOwnerId },
     );
-    await this.notifyOwnershipTransferred(community, actorId, targetUserId);
+    await this.notifyOwnershipTransferred(
+      community,
+      previousOwnerId,
+      targetUserId,
+      actorId,
+    );
 
-    // The actor is now a moderator of the community they handed off.
-    return this.buildDetail(saved, actorId, RosterRole.Mod);
+    // An owner handing off is now a moderator of it. The parent's owner keeps
+    // whatever role they effectively hold in the space.
+    const actorRole =
+      previousOwnerId === actorId
+        ? RosterRole.Mod
+        : await this.myRole(saved, actorId);
+    return this.buildDetail(saved, actorId, actorRole);
   }
 
   // `public` joins land on the roster instantly; `request` creates a pending
@@ -1753,6 +1965,15 @@ export class CommunitiesService {
       // so that a private community can never be inferred from a 403 either.
       throw new NotFoundException('Community not found');
     }
+    // A space admits only people its parent already admitted, and a bar in
+    // the parent bars every space under it. Checked after the private 404
+    // above, so a private space is never confirmed by this 403. The parent's
+    // view gate runs first, with the same 404 `getBySlug` answers, so a space
+    // under a taken-down or archived parent is never confirmed either.
+    if (community.parentId) {
+      await this.assertParentViewable(community.parentId);
+    }
+    await this.assertMayJoinUnderParent(community, userId);
     const moderation = await this.contentModeration.stateFor(
       CommunitiesService.SUBJECT_TYPE,
       community.slug,
@@ -1827,9 +2048,12 @@ export class CommunitiesService {
     // request rather than silently turned away — a mod (themselves a member)
     // can vouch, then approve. The `request` tier already creates a request;
     // the same gate is enforced again at approval in `triageJoinRequest`.
+    // A space skips it: the parent already admitted this person, which is
+    // the assurance the gate asks for.
     const instantJoinAllowed =
       community.accessTier === AccessTier.Public &&
-      (!community.requiresSecondVouch ||
+      (Boolean(community.parentId) ||
+        !community.requiresSecondVouch ||
         (await this.hasMemberVouch(community.id, userId)));
 
     if (instantJoinAllowed) {
@@ -2080,6 +2304,17 @@ export class CommunitiesService {
       const invitesRepo = manager.getRepository(CommunityInvite);
       const membersRepo = manager.getRepository(CommunityMember);
 
+      // Re-read inside the transaction: a parent leave landing between
+      // `join`'s check and this write must not admit a non-member to a space.
+      // Throwing rolls the claim below back, so the invitation stays unspent.
+      if (community.parentId) {
+        await CommunitiesService.assertParentMembership(
+          membersRepo,
+          community.parentId,
+          invite.invitedUserId,
+        );
+      }
+
       const claim = await invitesRepo
         .createQueryBuilder()
         .update(CommunityInvite)
@@ -2168,7 +2403,7 @@ export class CommunitiesService {
    * appeal it; a member who cannot can do neither.
    */
   private async assertNotBanned(
-    community: Community,
+    community: Pick<Community, 'id'>,
     userId: string,
   ): Promise<void> {
     const ban = await this.bans.findOne({
@@ -2199,6 +2434,44 @@ export class CommunitiesService {
       expiresAt: ban.expiresAt?.toISOString() ?? null,
       rule: ban.ruleText,
     });
+  }
+
+  /**
+   * The two parent gates on entering a space: no live bar in the parent, then
+   * a parent roster row. The ban check runs first so a member barred from the
+   * parent (whose parent row the ban removed) is told about the bar. No-op
+   * for a top-level community.
+   */
+  private async assertMayJoinUnderParent(
+    community: Pick<Community, 'parentId'>,
+    userId: string,
+  ): Promise<void> {
+    if (!community.parentId) return;
+    await this.assertNotBanned({ id: community.parentId }, userId);
+    await CommunitiesService.assertParentMembership(
+      this.members,
+      community.parentId,
+      userId,
+    );
+  }
+
+  /** 403 `PARENT_MEMBERSHIP_REQUIRED` unless `userId` holds a roster row in
+   *  the parent. Takes the repository so it can run inside a transaction. */
+  private static async assertParentMembership(
+    membersRepo: Repository<CommunityMember>,
+    parentId: string,
+    userId: string,
+  ): Promise<void> {
+    const parentMembership = await membersRepo.findOne({
+      where: { communityId: parentId, userId },
+    });
+    if (!parentMembership) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        message: 'Join the parent community first',
+        code: PARENT_MEMBERSHIP_REQUIRED_CODE,
+      });
+    }
   }
 
   /**
@@ -2293,7 +2566,7 @@ export class CommunitiesService {
     q?: string,
   ): Promise<Paginated<RosterEntryDTO>> {
     const community = await this.loadOr404(slug);
-    const role = await this.myRole(community.id, viewerId);
+    const role = await this.myRole(community, viewerId);
 
     if (community.accessTier === AccessTier.Private && !role) {
       throw new NotFoundException('Community not found');
@@ -2380,7 +2653,7 @@ export class CommunitiesService {
   ): Promise<CommunityTagRequestResponseDTO> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, actorId);
-    await this.assertOwnerOrMod(community.id, actorId);
+    await this.assertOwnerOrMod(community, actorId);
     // Nothing is left to tag on a closed room, and the queue that answers
     // these is worked by people, whose time it would spend on a community
     // nobody can post in.
@@ -2502,7 +2775,7 @@ export class CommunitiesService {
   ): Promise<Paginated<CommunityJoinRequestDTO>> {
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, actorId);
-    await this.assertOwnerOrMod(community.id, actorId);
+    await this.assertOwnerOrMod(community, actorId);
 
     const page = normalizePage(query.page);
     const joinRequestsQuery = this.joinRequests
@@ -2649,7 +2922,7 @@ export class CommunitiesService {
     const { action } = input;
     const community = await this.loadOr404(slug);
     await this.assert404IfPrivateOutsider(community, actorId);
-    await this.assertOwnerOrMod(community.id, actorId);
+    await this.assertOwnerOrMod(community, actorId);
     // Approving somebody into an archived community would walk them into a
     // room they cannot post in, and `join` has refused every new applicant
     // since it was archived. Declines are refused with it: a request left in
@@ -2676,14 +2949,18 @@ export class CommunitiesService {
     // and `assertNotBanned` treats an expired ban as no ban and clears it.
     if (action === 'approve') {
       await this.assertNotBanned(community, request.userId);
+      // A space admits only a current parent member, and never someone the
+      // parent has barred since they applied.
+      await this.assertMayJoinUnderParent(community, request.userId);
     }
 
     // Second-vouch gate at admission: even a mod can't approve until a current
     // member holds a vouch for the applicant (a mod is a member, so they can
     // vouch first, then approve). Only enforced on approve — declining is always
-    // allowed.
+    // allowed. A space skips it: the parent already admitted the applicant.
     if (
       action === 'approve' &&
+      !community.parentId &&
       community.requiresSecondVouch &&
       !(await this.hasMemberVouch(community.id, request.userId))
     ) {
@@ -2929,15 +3206,12 @@ export class CommunitiesService {
       // an archived community they can no longer leave would be a room that
       // closed with them still listed in it.
       CommunitiesService.assertNotArchived(community);
-      const actorMembership = await this.assertOwnerOrMod(
-        community.id,
-        actorId,
-      );
+      const actorRole = await this.assertOwnerOrMod(community, actorId);
       // Rule 3, checked before rule 2 because it is the stricter of the two:
       // removing a co-owner is owner-only.
       if (
         targetMembership.role === RosterRole.CoOwner &&
-        actorMembership.role !== RosterRole.Owner
+        actorRole !== RosterRole.Owner
       ) {
         throw new ForbiddenException('Only the owner can remove a co-owner');
       }
@@ -2945,7 +3219,7 @@ export class CommunitiesService {
       // comment. Owner-level, so a co-owner may remove a mod.
       if (
         targetMembership.role === RosterRole.Mod &&
-        !CommunitiesService.isOwnerLevelRole(actorMembership.role)
+        !CommunitiesService.isOwnerLevelRole(actorRole)
       ) {
         throw new ForbiddenException(
           'Only an owner or co-owner can remove a moderator',
@@ -2957,13 +3231,43 @@ export class CommunitiesService {
       throw new BadRequestException('The owner cannot be removed');
     }
 
-    await this.members.delete({ id: targetMembership.id });
+    // Leaving, removal and a ban in a parent all end the member's place in
+    // every space of that parent, in the same transaction as the parent row.
+    // A space they owned passes to the parent's owner, so every space keeps
+    // an accountable owner.
+    const { removedSpaceIds, reassignedSpaceIds } =
+      await this.dataSource.transaction(async (manager) => {
+        await manager
+          .getRepository(CommunityMember)
+          .delete({ id: targetMembership.id });
+        if (community.parentId) {
+          return { removedSpaceIds: [], reassignedSpaceIds: [] };
+        }
+        return this.subcommunityCascade.removeParentMemberFromSpaces(
+          manager,
+          community,
+          targetUserId,
+        );
+      });
+    for (const spaceId of reassignedSpaceIds) {
+      await this.logGovernanceAction(
+        spaceId,
+        actorId,
+        GovernanceLogAction.OwnershipTransferred,
+        community.ownerId,
+        { reason: 'parent_cascade', previousOwnerId: targetUserId },
+      );
+    }
     // Self-leave or staff-removal, either way the roster row is gone — the
     // card programme must not keep a former member's card working.
-    this.eventEmitter.emit(COMMUNITY_MEMBER_LEFT, {
-      communityId: community.id,
-      userId: targetUserId,
-    } satisfies CommunityMemberLeftEvent);
+    // The cascade took them out of every space of this parent too, and each
+    // of those rows is gone just the same.
+    for (const communityId of [community.id, ...removedSpaceIds]) {
+      this.eventEmitter.emit(COMMUNITY_MEMBER_LEFT, {
+        communityId,
+        userId: targetUserId,
+      } satisfies CommunityMemberLeftEvent);
+    }
 
     // A self-leave never bars the return, whatever `allowReturn` said: this
     // guard is explicit rather than relying on the caller, because the query
@@ -3247,6 +3551,13 @@ export class CommunitiesService {
       // "there was a row or there was not", and `getRawMany` hands booleans
       // back inconsistently across pg versions.
       .addSelect('card.id', 'cardProgramId')
+      // A space's parent id, resolved to `parentSlug` below in one batched
+      // lookup. Null for a top-level community. Spaces are deliberately KEPT
+      // in this listing (unlike the top-level-only browse/search/related
+      // listings): a caller's own space memberships are as real as their
+      // top-level ones, and this endpoint is the whole-set membership index
+      // every other surface keys off.
+      .addSelect('c.parent_id', 'parentId')
       .where('m.user_id = :userId', { userId })
       // An archived community drops out of the caller's membership map too, so
       // the client stops treating it as a live community they belong to.
@@ -3259,7 +3570,22 @@ export class CommunitiesService {
         role: RosterRole;
         joinedAt: Date;
         cardProgramId: string | null;
+        parentId: string | null;
       }>();
+
+    const distinctParentIds = [
+      ...new Set(
+        rows
+          .map((row) => row.parentId)
+          .filter((parentId): parentId is string => parentId !== null),
+      ),
+    ];
+    const parents = distinctParentIds.length
+      ? await this.communities.find({ where: { id: In(distinctParentIds) } })
+      : [];
+    const parentSlugById = new Map(
+      parents.map((parent) => [parent.id, parent.slug]),
+    );
 
     return rows.map((row) => ({
       slug: row.slug,
@@ -3267,6 +3593,9 @@ export class CommunitiesService {
       role: row.role,
       joinedAt: new Date(row.joinedAt).toISOString(),
       hasCardProgram: row.cardProgramId !== null,
+      parentSlug: row.parentId
+        ? (parentSlugById.get(row.parentId) ?? null)
+        : null,
     }));
   }
 
@@ -3338,7 +3667,7 @@ export class CommunitiesService {
     CommunitiesService.assertNotArchived(community);
 
     // 1. actor is owner/mod
-    const actorMembership = await this.assertOwnerOrMod(community.id, actorId);
+    const actorRole = await this.assertOwnerOrMod(community, actorId);
 
     // 2. target is on this roster
     const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
@@ -3368,7 +3697,7 @@ export class CommunitiesService {
     //     being the stricter of the two)
     if (
       targetMembership.role === RosterRole.CoOwner &&
-      actorMembership.role !== RosterRole.Owner
+      actorRole !== RosterRole.Owner
     ) {
       throw new ForbiddenException(
         "Only the owner can change a co-owner's role",
@@ -3376,17 +3705,14 @@ export class CommunitiesService {
     }
 
     // 6b. only the owner may GRANT co-owner, whoever the target is
-    if (
-      role === RosterRole.CoOwner &&
-      actorMembership.role !== RosterRole.Owner
-    ) {
+    if (role === RosterRole.CoOwner && actorRole !== RosterRole.Owner) {
       throw new ForbiddenException('Only the owner can appoint a co-owner');
     }
 
     // 5. only an owner-level actor may change a moderator's role
     if (
       targetMembership.role === RosterRole.Mod &&
-      !CommunitiesService.isOwnerLevelRole(actorMembership.role)
+      !CommunitiesService.isOwnerLevelRole(actorRole)
     ) {
       throw new ForbiddenException(
         "Only an owner or co-owner can change a moderator's role",
@@ -3448,30 +3774,29 @@ export class CommunitiesService {
     viewerId: string,
   ): Promise<void> {
     if (community.accessTier !== AccessTier.Private) return;
-    const membership = await this.members.findOne({
-      where: { communityId: community.id, userId: viewerId },
-    });
-    if (!membership) {
+    // Effective role, so parent staff (who hold no roster row in a space) can
+    // still reach a private space they moderate.
+    const role = await this.myRole(community, viewerId);
+    if (!role) {
       throw new NotFoundException('Community not found');
     }
   }
 
   /** Tier 1 of the permission model (see `isStaffRole`): the moderation gate,
-   * passed by an owner, a CO-OWNER and a mod alike. Returns the actor's roster
-   * row on success, so callers that need to tell those three apart
+   * passed by an owner, a CO-OWNER and a mod alike. Reads the EFFECTIVE role,
+   * so inside a space parent staff pass on the role they inherit. Returns that
+   * role on success, so callers that need to tell those three apart
    * (`update`, `removeMember`, `setMemberRole`) don't re-query for it.
    * Callers that only need the gate can keep ignoring the value. */
   private async assertOwnerOrMod(
-    communityId: string,
+    community: Pick<Community, 'id' | 'parentId'>,
     userId: string,
-  ): Promise<CommunityMember> {
-    const membership = await this.members.findOne({
-      where: { communityId, userId },
-    });
-    if (!membership || !CommunitiesService.isStaffRole(membership.role)) {
+  ): Promise<RosterRole> {
+    const role = await this.myRole(community, userId);
+    if (!role || !CommunitiesService.isStaffRole(role)) {
       throw new ForbiddenException('Only the owner or a moderator can do that');
     }
-    return membership;
+    return role;
   }
 
   /**
@@ -3495,21 +3820,35 @@ export class CommunitiesService {
    * read from `Community.ownerId` (the source of truth for ownership — a
    * roster row can never contradict it). Used by the two community-level
    * actions no co-owner or mod may reach (`archive`, `transferOwnership`).
-   * Throws Forbidden otherwise. */
-  private assertOwner(community: Community, userId: string): void {
-    if (community.ownerId !== userId) {
+   * On a space, `parent` is passed where the parent's owner holds the same
+   * power (`archive`). Throws Forbidden otherwise. */
+  private assertOwner(
+    community: Community,
+    userId: string,
+    parent: Community | null = null,
+  ): void {
+    const isOwner = community.ownerId === userId;
+    const isParentOwner = parent !== null && parent.ownerId === userId;
+    if (!isOwner && !isParentOwner) {
       throw new ForbiddenException('Only the owner can do that');
     }
   }
 
+  /** The caller's EFFECTIVE role (see `resolveEffectiveRole`): their own
+   *  roster role at top level, and inside a space the higher of their own
+   *  space role and the one inherited from parent staff. */
   private async myRole(
-    communityId: string,
+    community: Pick<Community, 'id' | 'parentId'>,
     userId: string,
   ): Promise<RosterRole | null> {
-    const membership = await this.members.findOne({
-      where: { communityId, userId },
-    });
-    return membership?.role ?? null;
+    return this.membership.effectiveRole(community, userId);
+  }
+
+  /** The parent of a space, or null for a top-level community (and for a
+   *  parent row that is somehow gone, which the caller treats as absent). */
+  private async loadParent(community: Community): Promise<Community | null> {
+    if (!community.parentId) return null;
+    return this.communities.findOne({ where: { id: community.parentId } });
   }
 
   // Resolves a single userId to a MemberRef, for mapping a join-request /
@@ -3574,7 +3913,7 @@ export class CommunitiesService {
     const communityIds = communities.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
       this.statsForMany(communityIds),
-      this.myRoleByCommunity(communityIds, viewerId),
+      this.myRoleByCommunity(communities, viewerId),
     ]);
     return new Map(
       communities.map((community) => [
@@ -3588,15 +3927,12 @@ export class CommunitiesService {
     );
   }
 
+  /** Batched `myRole`: one roster query over every community and parent. */
   private async myRoleByCommunity(
-    communityIds: string[],
+    communities: Pick<Community, 'id' | 'parentId'>[],
     userId: string,
   ): Promise<Map<string, RosterRole>> {
-    if (!communityIds.length) return new Map();
-    const rows = await this.members.find({
-      where: { communityId: In(communityIds), userId },
-    });
-    return new Map(rows.map((m) => [m.communityId, m.role]));
+    return this.membership.effectiveRolesFor(communities, userId);
   }
 
   /**
@@ -3679,37 +4015,72 @@ export class CommunitiesService {
     // anything.
     pendingInvite?: CommunityInvite | null,
   ): Promise<CommunityDetailDTO> {
-    const [membership, stats, ownerProfile, myJoinRequest, crops, invite] =
-      await Promise.all([
-        // The viewer's own roster row, loaded even when the caller already
-        // knows their role: `rulesVersionAccepted` lives on it, and it is what
-        // lets the detail tell an existing member their agreement is out of
-        // date after an owner edits the rules. One indexed lookup, the same
-        // one `myRole` was doing.
-        this.members.findOne({
-          where: { communityId: community.id, userId: viewerId },
-        }),
-        this.statsFor(community.id),
-        // `ownerId` is null for an ownerless (post-erasure, pre-promotion)
-        // community — no profile to look up; the detail simply renders no
-        // owner rather than throwing or querying `userId IS NULL`.
-        community.ownerId
-          ? this.profiles.findOne({ where: { userId: community.ownerId } })
-          : Promise.resolve(null),
-        this.joinRequests.findOne({
-          where: { communityId: community.id, userId: viewerId },
-          order: { createdAt: 'DESC' },
-        }),
-        this.mediaCropService.getMany(
-          community.coverImageUrl ? [community.coverImageUrl] : [],
-        ),
-        pendingInvite !== undefined || myRole
-          ? Promise.resolve(pendingInvite ?? null)
-          : this.pendingInviteFor(community.id, viewerId),
-      ]);
-    // The caller's `myRole` still wins when it passed one (it may describe a
-    // role this request just wrote and the row above predates).
-    const role = myRole !== undefined ? myRole : (membership?.role ?? null);
+    const [
+      membership,
+      stats,
+      ownerProfile,
+      myJoinRequest,
+      crops,
+      invite,
+      role,
+      parent,
+      parentMembership,
+    ] = await Promise.all([
+      // The viewer's own roster row, loaded even when the caller already
+      // knows their role: `rulesVersionAccepted` lives on it, and it is what
+      // lets the detail tell an existing member their agreement is out of
+      // date after an owner edits the rules. One indexed lookup, the same
+      // one `myRole` was doing.
+      this.members.findOne({
+        where: { communityId: community.id, userId: viewerId },
+      }),
+      this.statsFor(community.id),
+      // `ownerId` is null for an ownerless (post-erasure, pre-promotion)
+      // community, which has no profile to look up; the detail simply
+      // renders no owner, with no throw and no `userId IS NULL` query.
+      community.ownerId
+        ? this.profiles.findOne({ where: { userId: community.ownerId } })
+        : Promise.resolve(null),
+      this.joinRequests.findOne({
+        where: { communityId: community.id, userId: viewerId },
+        order: { createdAt: 'DESC' },
+      }),
+      this.mediaCropService.getMany(
+        community.coverImageUrl ? [community.coverImageUrl] : [],
+      ),
+      pendingInvite !== undefined || myRole
+        ? Promise.resolve(pendingInvite ?? null)
+        : this.pendingInviteFor(community.id, viewerId),
+      // The caller's `myRole` still wins when it passed one (it may describe
+      // a role this request just wrote, which a fresh lookup would predate).
+      // Absent one, the fallback resolves the EFFECTIVE role, so a parent
+      // mod browsing a space with no roster row of their own still gets the
+      // space's staff-only fields.
+      myRole !== undefined
+        ? Promise.resolve(myRole)
+        : this.myRole(community, viewerId),
+      this.loadParent(community),
+      // Whether the viewer holds their OWN roster row in the parent (used
+      // for the DTO's `parent.isMember`, which must not read as true off an
+      // inherited role). Only meaningful, and only queried, when there is a
+      // parent to check.
+      community.parentId
+        ? this.members.findOne({
+            where: { communityId: community.parentId, userId: viewerId },
+          })
+        : Promise.resolve(null),
+    ]);
+    // A space itself never hosts spaces, so its own count is always 0
+    // without a query.
+    const subcommunityCount = community.parentId
+      ? 0
+      : await this.visibleSubcommunityCount(community.id, viewerId);
+    const subcommunityContext: SubcommunityDetailContext = {
+      parent,
+      isParentMember: parentMembership != null,
+      subcommunityCount,
+      isRosterMember: membership != null,
+    };
     return toCommunityDetail(
       community,
       stats,
@@ -3720,7 +4091,42 @@ export class CommunitiesService {
       crops,
       membership?.rulesVersionAccepted ?? null,
       invite?.createdAt ?? null,
+      subcommunityContext,
     );
+  }
+
+  /**
+   * How many live spaces under `parentId` the viewer can see, by the same
+   * rule `SubcommunitiesService.list` filters with (`isSpaceVisibleTo`): a
+   * private space counts only for viewers holding an effective role in it,
+   * and a taken-down space only for its staff. A flat count leaked the
+   * existence of private spaces through the Spaces tab badge.
+   */
+  private async visibleSubcommunityCount(
+    parentId: string,
+    viewerId: string,
+  ): Promise<number> {
+    const spaces = await this.communities.find({
+      where: { parentId, archivedAt: IsNull() },
+      select: { id: true, slug: true, accessTier: true, parentId: true },
+    });
+    if (!spaces.length) return 0;
+    const [rolesBySpaceId, moderationBySlug] = await Promise.all([
+      this.membership.effectiveRolesFor(spaces, viewerId),
+      this.contentModeration.statesFor(
+        CommunitiesService.SUBJECT_TYPE,
+        spaces.map((space) => space.slug),
+      ),
+    ]);
+    return spaces.filter((space) => {
+      const moderation = moderationBySlug.get(space.slug);
+      return isSpaceVisibleTo({
+        accessTier: space.accessTier,
+        viewerRole: rolesBySpaceId.get(space.id) ?? null,
+        isTakenDown:
+          moderation !== undefined && (moderation.hidden || moderation.removed),
+      });
+    }).length;
   }
 
   private async statsFor(communityId: string): Promise<CommunityStats> {
@@ -3946,37 +4352,41 @@ export class CommunitiesService {
    */
   private async notifyOwnershipTransferred(
     community: Community,
-    fromOwnerId: string,
+    fromOwnerId: string | null,
     toOwnerId: string,
+    // Who made the transfer: the outgoing owner, or on a space the parent's
+    // owner. An ownerless space has no outgoing owner to tell.
+    actorId: string,
   ): Promise<void> {
     try {
       await this.notifications.create(
         toOwnerId,
         NotificationType.CommunityOwnershipTransferred,
         {
-          actorId: fromOwnerId,
+          actorId,
           source: 'community',
           communitySlug: community.slug,
           youAreNowOwner: true,
-          counterpartId: fromOwnerId,
+          counterpartId: fromOwnerId ?? actorId,
         },
-        fromOwnerId,
+        actorId,
       );
     } catch {
       // Intentionally ignored — best-effort; the transfer already committed.
     }
+    if (fromOwnerId === null) return;
     try {
       await this.notifications.create(
         fromOwnerId,
         NotificationType.CommunityOwnershipTransferred,
         {
-          actorId: fromOwnerId,
+          actorId,
           source: 'community',
           communitySlug: community.slug,
           youAreNowOwner: false,
           counterpartId: toOwnerId,
         },
-        fromOwnerId,
+        actorId,
       );
     } catch {
       // Intentionally ignored — best-effort; the transfer already committed.

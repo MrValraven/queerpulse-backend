@@ -71,6 +71,7 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
+import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
 import { CreateListingDto, ListingDayHoursDto } from './dto/create-listing.dto';
 import { UpdateOperatingStateDto } from './dto/update-operating-state.dto';
 import { ReplyToReviewDto } from './dto/reply-to-review.dto';
@@ -230,15 +231,31 @@ function normalizeHoursExceptions(
     .sort((first, second) => first.date.localeCompare(second.date));
 }
 
+/**
+ * The submission body both create paths share.
+ *
+ * The member wizard sends a `CreateListingDto`. The admin authoring path
+ * sends an `AdminCreateListingDto`, which omits the affirming acceptance and
+ * the eight owner-personal fields. Every one of those is optional on this
+ * shape, so an admin body satisfies it and the create machinery below reads
+ * a single type. The admin path's missing fields land on their `?? ''` /
+ * `?? false` defaults in `normalizeCreate`, which is exactly right: the
+ * business has said nothing about any of them yet.
+ */
+type ListingCreateInput = Omit<CreateListingDto, 'affirmingBaselineAccepted'>;
+
 /** Bridges `CreateListingDto`'s optional fields to `Listing`'s
  * fully-populated columns (mirrors `PartnersService.createWithUniqueSlug`'s
  * inline defaulting). */
-function normalizeCreate(dto: CreateListingDto): Omit<
+function normalizeCreate(dto: ListingCreateInput): Omit<
   Listing,
   | 'id'
   | 'ref'
   | 'slug'
   | 'ownerId'
+  // Set only by the staff create path, which stamps the admin who authored
+  // the listing; the member-submission wizard never supplies it.
+  | 'createdByStaffId'
   | 'status'
   | 'createdAt'
   | 'updatedAt'
@@ -778,6 +795,100 @@ export class ListingsService {
   }
 
   /**
+   * Author a listing for a business that has not joined yet.
+   *
+   * Four stamps separate this from the member path: no owner, the admin's
+   * chosen status, no affirming acceptance, and a record of who authored it.
+   * Everything else, including the ref sequence and the slug uniqueness loop,
+   * is shared with `create`.
+   *
+   * `affirmingBaselineAcceptedAt` stays null deliberately. The affirming
+   * baseline is a promise the business makes, and an admin writing a page
+   * about a venue has not made it on the venue's behalf. The owner accepts it
+   * when they take the listing, which is the only moment the stamp means
+   * anything.
+   *
+   * No transaction, matching `create`. The audit row and the queue announce
+   * follow a listing that is already committed, and wrapping them would
+   * change the shape of the member path this method shares.
+   */
+  async adminCreate(
+    adminUserId: string,
+    dto: AdminCreateListingDto,
+  ): Promise<ListingDTO> {
+    this.assertPathRequirements(dto);
+
+    const ref = await this.nextRef();
+    const saved = await this.createWithUniqueSlug(null, ref, dto, {
+      status:
+        dto.publishState === 'live' ? ListingStatus.Live : ListingStatus.Review,
+      affirmingBaselineAcceptedAt: null,
+      createdByStaffId: adminUserId,
+    });
+
+    await this.recordStaffCreated(saved, adminUserId);
+
+    // Only a listing the admin sent to the queue belongs on the queue. One
+    // published straight away has already had the decision a moderator would
+    // be asked to make, so announcing it would put a settled item on somebody
+    // else's desk.
+    if (dto.publishState === 'review') {
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.ListingSubmissions,
+        saved.id,
+      );
+    }
+
+    return this.buildDTO(saved);
+  }
+
+  /**
+   * The audit row for a listing the house wrote.
+   *
+   * `fromStatus` is null because the row is being born here and came from no
+   * earlier state. The `reason` names the publish choice in plain language,
+   * so the history panel states what the admin decided in words of its own.
+   *
+   * BEST-EFFORT, and deliberately so: a duplicate listing is worse than a
+   * missing history line. By the time this runs the listing is committed and
+   * a public page about a real business exists. Letting a failed audit write
+   * throw would answer the admin with a 500 that reads as "nothing was
+   * created", and the create carries no idempotency key, so their retry
+   * writes the business a second page. The single reader of
+   * `ListingModerationAction.StaffCreated` is the history panel's
+   * `moderationEvents.find`; nothing exports or reconciles on it, and
+   * `createdByStaffId`, `status` and `createdAt` on the listing itself still
+   * say who authored it, what they chose and when. The warning below names
+   * the ref and the admin so the gap stays traceable.
+   *
+   * Awaited, so its ordering with the queue announce is unchanged.
+   */
+  private async recordStaffCreated(
+    listing: Listing,
+    adminUserId: string,
+  ): Promise<void> {
+    try {
+      await this.moderationEvents.save({
+        listingId: listing.id,
+        actorId: adminUserId,
+        action: ListingModerationAction.StaffCreated,
+        fromStatus: null,
+        toStatus: listing.status,
+        reason:
+          listing.status === ListingStatus.Live
+            ? 'Authored by staff and published straight away.'
+            : 'Authored by staff and sent to the moderation queue.',
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Could not write the staff_created audit row for listing ${listing.ref} authored by ${adminUserId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
    * Files a dispute/claim against a listing through the SHARED report pipeline
    * (item #13) — the very same `reports` table + moderation queue every other
    * report flows through, not a parallel one. Deliberately NOT owner-gated:
@@ -938,7 +1049,7 @@ export class ListingsService {
 
   /** Claim-path presence checks for the two nested shapes the DTO can't gate
    * (see `create`). No-op on the `suggest` path. */
-  private assertPathRequirements(dto: CreateListingDto): void {
+  private assertPathRequirements(dto: ListingCreateInput): void {
     if (dto.path !== 'claim') return;
 
     const missing: string[] = [];
@@ -2969,9 +3080,15 @@ export class ListingsService {
   // `PartnersService.createWithUniqueSlug`). `ref` is computed once by the
   // caller, outside this loop, since it can never collide.
   private async createWithUniqueSlug(
-    ownerId: string,
+    ownerId: string | null,
     ref: string,
-    dto: CreateListingDto,
+    dto: ListingCreateInput,
+    overrides: Partial<
+      Pick<
+        Listing,
+        'status' | 'affirmingBaselineAcceptedAt' | 'createdByStaffId'
+      >
+    > = {},
   ): Promise<Listing> {
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -2994,6 +3111,11 @@ export class ListingsService {
             // happened.
             affirmingBaselineAcceptedAt: new Date(),
             ...normalizeCreate(dto),
+            // The staff authoring path's own stamps, spread last so they win
+            // over the member defaults above. Empty on the member path, where
+            // this line contributes nothing and the object literal stays the
+            // one it has always been.
+            ...overrides,
           }),
         );
       } catch (err) {

@@ -16,6 +16,8 @@ import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ConnectionsService } from '../connections/connections.service';
+import { Identity, IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { GroupAddPolicy } from '../preferences/entities/member-preferences.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -81,6 +83,7 @@ const SYSTEM_EVENT_FALLBACK: Record<SystemEvent['type'], string> = {
   group_description_changed: 'changed the group description',
   member_joined: 'joined',
   group_dissolved: 'ended this group',
+  moved_to_business_mailbox: 'This conversation moved to the business mailbox',
 };
 
 /**
@@ -131,6 +134,11 @@ export class GroupsService {
     // `dissolveGroup`), so this repository is read-only in practice.
     @InjectRepository(GroupInvite)
     private readonly groupInvites: Repository<GroupInvite>,
+    // Task 8: resolves the creator's own profile identity for
+    // `createGroup`'s reply-only guard and stamps every system pill's
+    // `senderIdentityId` in `insertSystemMessage`, satisfying
+    // `CHK_messages_sender_identity`.
+    private readonly identities: IdentitiesService,
   ) {}
 
   /**
@@ -148,6 +156,13 @@ export class GroupsService {
     memberHandles: string[],
     avatarUrl?: string,
   ): Promise<ConversationResponse> {
+    // Reply-only (Task 8): a group is opened by the member creating it,
+    // acting as their own profile identity. Resolved once here and reused
+    // for the opening pill below, passed straight into `insertSystemMessage`
+    // via `resolvedActorIdentityId`.
+    const initiatorIdentityId =
+      await this.identities.resolveProfileIdentityId(userId);
+    await this.core.assertInitiatorIsProfile(initiatorIdentityId);
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
       throw new BadRequestException('A group needs a name');
@@ -229,16 +244,24 @@ export class GroupsService {
             createdBy: userId,
           }),
         );
+        // Every seat carries its member's own profile identity: the column is
+        // NOT NULL, and a group member always speaks as themselves.
+        const memberIdentityIdByUserId = await this.profileIdentityIdsByUser(
+          manager,
+          seatUserIds,
+        );
         await manager.save([
           manager.create(ConversationParticipant, {
             conversationId: convo.id,
             userId,
+            identityId: initiatorIdentityId,
             role: ConversationRole.Owner,
           }),
           ...seatUserIds.map((memberId) =>
             manager.create(ConversationParticipant, {
               conversationId: convo.id,
               userId: memberId,
+              identityId: memberIdentityIdByUserId.get(memberId),
               role: ConversationRole.Member,
             }),
           ),
@@ -265,6 +288,7 @@ export class GroupsService {
             type: 'group_created',
             actorId: userId,
           },
+          initiatorIdentityId,
         );
         return { conversation: convo, systemMessage, createdInvites };
       });
@@ -572,6 +596,14 @@ export class GroupsService {
             });
           }
         }
+        // A brand-new seat carries its member's own profile identity (the
+        // column is NOT NULL); a reactivated row keeps the one it has.
+        const newSeatIdentityIdByUserId = await this.profileIdentityIdsByUser(
+          manager,
+          toSeat
+            .filter(({ existing }) => !existing)
+            .map(({ profile }) => profile.userId),
+        );
         for (const { profile, existing } of toSeat) {
           if (existing) {
             // Re-activation resumes history FROM THE RE-ADD POINT, not from
@@ -610,6 +642,7 @@ export class GroupsService {
               manager.create(ConversationParticipant, {
                 conversationId,
                 userId: profile.userId,
+                identityId: newSeatIdentityIdByUserId.get(profile.userId),
                 role: ConversationRole.Member,
               }),
             );
@@ -1243,22 +1276,77 @@ export class GroupsService {
   }
 
   /**
+   * Each member's own profile identity, for the seats `createGroup` and
+   * `addMembers` insert (`conversation_participants.identity_id` is NOT
+   * NULL). One read through the caller's transaction covers the whole batch.
+   * A member with no profile identity row yet, someone who joined after the
+   * backfill and never sent a message, gets one through
+   * `IdentitiesService.resolveProfileIdentityId`, the same get-or-create the
+   * pills use, so every requested user id is present in the result.
+   */
+  private async profileIdentityIdsByUser(
+    manager: EntityManager,
+    userIds: string[],
+  ): Promise<Map<string, string>> {
+    const uniqueUserIds = [...new Set(userIds)];
+    const identityIdByUserId = new Map<string, string>();
+    if (uniqueUserIds.length === 0) {
+      return identityIdByUserId;
+    }
+    const profileIdentities = await manager.find(Identity, {
+      where: { kind: IdentityKind.Profile, userId: In(uniqueUserIds) },
+      select: { id: true, userId: true },
+    });
+    for (const identity of profileIdentities) {
+      if (identity.userId) {
+        identityIdByUserId.set(identity.userId, identity.id);
+      }
+    }
+    for (const userId of uniqueUserIds) {
+      if (!identityIdByUserId.has(userId)) {
+        identityIdByUserId.set(
+          userId,
+          await this.identities.resolveProfileIdentityId(userId),
+        );
+      }
+    }
+    return identityIdByUserId;
+  }
+
+  /**
    * Persist a `system` message row using the supplied `manager` — the pure
    * INSERT with no broadcast, so it can run INSIDE a transaction (createGroup /
    * leaveGroup / addMembers / removeMember) and have its MESSAGE_CREATED
    * fan-out deferred to after commit via `broadcastSystemMessage`. `body` is a
    * plain-text fallback for consumers that don't understand the structured
    * event.
+   *
+   * Task 8: `CHK_messages_sender_identity` requires `senderIdentityId`
+   * whenever `senderId` is set. A pill reading "Tiago added Cy" is authored
+   * by Tiago acting as themselves, so it stamps the actor's own profile
+   * identity, resolved through `IdentitiesService` (idempotent get-or-create,
+   * so this stays correct even for an actor whose identity row is created
+   * here for the first time).
+   *
+   * `resolvedActorIdentityId` lets a caller that already resolved the same
+   * actor's profile identity earlier in the same request (`createGroup`'s
+   * reply-only guard) pass it straight through, saving a second, redundant
+   * resolve of the exact same identity.
    */
-  private insertSystemMessage(
+  private async insertSystemMessage(
     manager: EntityManager,
     conversationId: string,
     event: SystemEvent,
+    resolvedActorIdentityId?: string,
   ): Promise<Message> {
+    const senderIdentityId =
+      resolvedActorIdentityId ??
+      (await this.identities.resolveProfileIdentityId(event.actorId));
     return manager.save(
       manager.create(Message, {
         conversationId,
         senderId: event.actorId,
+        senderIdentityId,
         body: SYSTEM_EVENT_FALLBACK[event.type],
         kind: MessageKind.System,
         systemEvent: event,

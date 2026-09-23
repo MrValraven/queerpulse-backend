@@ -8,6 +8,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, Repository } from 'typeorm';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { Profile } from '../users/entities/profile.entity';
 import { Subprofile } from './entities/subprofile.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
@@ -38,6 +41,10 @@ export class SubprofileMembershipService {
     // Emits `subprofile.member.removed` so an evicted co-owner is notified
     // (Task 4). Globally available via `EventEmitterModule` at the app root.
     private readonly eventEmitter: EventEmitter2,
+    // Resolves the persona's mailbox identity and ends a departing co-owner's
+    // seat across every thread of it. See `leave` and `removeMember`.
+    private readonly identities: IdentitiesService,
+    private readonly identityMailboxSync: IdentityMailboxSyncService,
   ) {}
 
   // Co-owner-aware membership check backing `getOwned`: any row in
@@ -104,23 +111,45 @@ export class SubprofileMembershipService {
   // (bricked: `getOwned` then 403s everyone, including `remove()`).
   async leave(userId: string, id: string): Promise<void> {
     await this.getOwned(userId, id); // 404/403 gate (must be a member)
-    await this.dataSource.transaction(async (manager) => {
-      // Lock the persona row FIRST — same lock `invite()`/`accept()` take, so
-      // a concurrent leave/invite/accept on this subprofile never interleaves.
-      await manager.findOne(Subprofile, {
-        where: { id },
-        lock: { mode: 'pessimistic_write' },
-      });
-      const count = await manager.count(SubprofileMember, {
-        where: { subprofileId: id },
-      });
-      if (count <= 1) {
-        throw new ConflictException(
-          'You are the only owner — delete the persona instead of leaving.',
+    const identity = await this.identities.ensureIdentityFor(
+      IdentityKind.Subprofile,
+      id,
+    );
+    const mailboxChanges = await this.dataSource.transaction(
+      async (manager) => {
+        // Lock the persona row FIRST — same lock `invite()`/`accept()` take, so
+        // a concurrent leave/invite/accept on this subprofile never interleaves.
+        await manager.findOne(Subprofile, {
+          where: { id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        const count = await manager.count(SubprofileMember, {
+          where: { subprofileId: id },
+        });
+        if (count <= 1) {
+          throw new ConflictException(
+            'You are the only owner — delete the persona instead of leaving.',
+          );
+        }
+        await manager.delete(SubprofileMember, { subprofileId: id, userId });
+        // Ends the departing co-owner's mailbox seat in this same transaction,
+        // so a failed sync rolls the departure back with it. The live-room
+        // eviction event is deferred to after this transaction resolves
+        // (below), mirroring `GroupsService.leaveGroup`'s post-commit fan-out,
+        // so a rollback can never leave a client believing it lost a room it
+        // still has.
+        return this.identityMailboxSync.onStaffRemoved(
+          identity.id,
+          userId,
+          manager,
+          { shouldDeferEmission: true },
         );
-      }
-      await manager.delete(SubprofileMember, { subprofileId: id, userId });
-    });
+      },
+    );
+    // Best-effort live fan-out AFTER commit: see the comment above. Task 25:
+    // this also carries the departing co-owner's claim releases and their
+    // staffing change.
+    this.identityMailboxSync.emitSeatChanges(mailboxChanges);
   }
 
   // Creator-initiated "remove a co-owner" (Task 4): the persona's original
@@ -158,6 +187,17 @@ export class SubprofileMembershipService {
     if (!result.affected) {
       throw new NotFoundException('That member does not co-own this persona.');
     }
+    // The roster row is already gone, so this ends the removed co-owner's
+    // mailbox seat against already-committed state, matching the event
+    // emission just below.
+    const identity = await this.identities.ensureIdentityFor(
+      IdentityKind.Subprofile,
+      id,
+    );
+    await this.identityMailboxSync.onStaffRemoved(
+      identity.id,
+      targetProfile.userId,
+    );
     // Emitted AFTER the roster row is gone (post-commit) so the evicted co-owner
     // is told they no longer co-own the persona — best-effort, mirroring
     // `remove()`'s `SUBPROFILE_DELETED`: the delete already committed, so a

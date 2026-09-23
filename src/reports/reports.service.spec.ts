@@ -13,6 +13,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import {
   ConversationParticipant,
   ConversationRole,
@@ -137,6 +138,9 @@ describe('ReportsService', () => {
           provide: getRepositoryToken(ContentModeration),
           useValue: contentModeration,
         },
+        // Read only by the `identity` subject, which this file never files;
+        // `identity-report-subject.spec.ts` covers it.
+        { provide: IdentitiesService, useValue: {} },
         { provide: EventEmitter2, useValue: emitter },
         { provide: MetricsService, useValue: metrics },
         // Holds `REPORT_ANONYMOUS_FLOOD_PEPPER`. Returning undefined is the

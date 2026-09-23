@@ -39,4 +39,15 @@ export class SearchMessagesQuery {
   @IsOptional()
   @IsUUID()
   conversationId?: string;
+
+  /**
+   * Task 24: the mailbox to search, by identity id. Present, only threads
+   * where the caller's own seat speaks for that identity yield hits, and
+   * the caller must staff it (`IDENTITY_NOT_STAFF` otherwise). Combines with
+   * `conversationId` as a further narrowing. Omitted, the search covers the
+   * merged inbox, as before.
+   */
+  @IsOptional()
+  @IsUUID()
+  as?: string;
 }

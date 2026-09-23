@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
@@ -9,6 +8,13 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThan, Repository } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
+import {
+  loadColdIdentityEnquiryMessages,
+  MAX_COLD_ENQUIRIES_PER_DAY,
+} from '../identity-contact/identity-enquiry-quota';
+import { identityBlockedException } from '../messaging/message-requests.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { CreateListingEnquiryDto } from './dto/create-listing-enquiry.dto';
@@ -56,19 +62,25 @@ type EnquiryQuotaState =
  * the messaging the platform already has.
  *
  * IT DOES NOT STORE MESSAGES. Delivery goes through
- * `MessagingService.deliverEnquiry`, the cross-domain cold-contact seam housing
- * enquiries, job-application replies, barter proposals and moderator outreach
- * already share. This service writes exactly one row of its own
- * (`ListingEnquiry`), and that row holds no message text (see the entity's
- * docstring).
+ * `MessagingService.deliverEnquiryToIdentity` (Task 18), the mailbox form of
+ * the cross-domain cold-contact seam housing enquiries, job-application
+ * replies, barter proposals and moderator outreach share. The enquiry lands
+ * in the LISTING's mailbox, a thread keyed on the member and the listing
+ * identity with every staff member seated (the owner and each active
+ * co-manager). This service writes
+ * exactly one row of its own (`ListingEnquiry`), and that row holds no
+ * message text (see the entity's docstring). Its `ownerId` stays the owner
+ * at the time, as the record of who owned the listing then.
  *
  * WHAT MESSAGING ENFORCES, AND WHAT THIS DOES ABOUT IT. Three rules matter and
  * none of them is bypassed here:
  *
- *  - A BLOCK in either direction is a hard stop. `deliverEnquiry` throws on it
- *    and `canMessageOwner` reports it in advance, under a reason string that
- *    reads the same in both directions so this endpoint cannot be used to probe
- *    whether a specific person has blocked you.
+ *  - A BLOCK of the listing's identity by the member is a hard stop.
+ *    `deliverEnquiryToIdentity` throws on it and `canMessageOwner` reports
+ *    it in advance as `unavailable`. A person block between the member and
+ *    one staff member does not refuse: that would tell the member the person
+ *    works there. The thread seats every staff member and the read-time
+ *    mailbox rules leave the blocked one out.
  *  - MUTES are not a send-time gate anywhere in messaging (they filter
  *    notifications and listings, see `BlockFilterService.isMutedBy`), so
  *    nothing is added or removed for them here. A muted sender's enquiry is
@@ -116,8 +128,11 @@ export class ListingEnquiriesService {
    * public questions).
    *
    * Three a day to one business leaves room for a genuine follow-up and a
-   * correction without leaving room for a campaign. Twenty across the whole
-   * directory is far above any honest day of researching somewhere to go.
+   * correction without leaving room for a campaign. Twenty a day is far above
+   * any honest day of researching somewhere to go. Task 18 fix round 1: the
+   * twenty is ONE ceiling shared with persona and company enquiries
+   * (`MAX_COLD_ENQUIRIES_PER_DAY`), so spreading a day across kinds of
+   * mailbox cannot double it.
    *
    * BOTH ARE REPORTED BY `getContact` AS WELL AS ENFORCED BY `send`, out of the
    * one evaluation in `evaluateEnquiryQuota`, so a member is told they cannot
@@ -126,7 +141,7 @@ export class ListingEnquiriesService {
    * wrong thing to hand a member.
    */
   private static readonly MAX_ENQUIRIES_PER_LISTING_PER_DAY = 3;
-  private static readonly MAX_ENQUIRIES_PER_DAY = 20;
+  private static readonly MAX_ENQUIRIES_PER_DAY = MAX_COLD_ENQUIRIES_PER_DAY;
 
   private static readonly ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -160,6 +175,8 @@ export class ListingEnquiriesService {
     @InjectRepository(User) private readonly users: Repository<User>,
     private readonly messaging: MessagingService,
     private readonly contentModeration: ContentModerationService,
+    // Task 18: the listing's own identity, the mailbox an enquiry lands in.
+    private readonly identities: IdentitiesService,
   ) {}
 
   /**
@@ -188,18 +205,29 @@ export class ListingEnquiriesService {
       };
     }
 
+    const listingIdentity = await this.identities.ensureIdentityFor(
+      IdentityKind.Listing,
+      listing.id,
+    );
     const [contactability, previous, quota] = await Promise.all([
-      this.messaging.enquiryContactability(viewerUserId, reachability.ownerId),
+      this.messaging.identityEnquiryContactability(
+        viewerUserId,
+        listingIdentity.id,
+      ),
       this.findLatestEnquiry(listing.id, viewerUserId),
       this.evaluateEnquiryQuota(listing.id, viewerUserId),
     ]);
 
     if (!contactability.canDeliver) {
-      // `self` is already handled as `own_listing` above, so anything left here
-      // is a block. Reported without direction on purpose.
+      // The owner is handled as `own_listing` above, so `IDENTITY_IS_YOUR_OWN`
+      // here is a co-manager. Anything else is the member's block of the
+      // listing, reported as plainly `unavailable`.
       return {
         canMessageOwner: false,
-        unavailableReason: 'unavailable',
+        unavailableReason:
+          contactability.blockedReason === 'IDENTITY_IS_YOUR_OWN'
+            ? 'own_listing'
+            : 'unavailable',
         replyRequiresConnection: false,
         followUpAwaitsReply: false,
         existingConversationId: null,
@@ -212,7 +240,12 @@ export class ListingEnquiriesService {
       unavailableReason: null,
       replyRequiresConnection: contactability.replyRequiresConnection,
       followUpAwaitsReply: contactability.followUpAwaitsReply,
-      existingConversationId: previous?.conversationId ?? null,
+      // The mailbox thread first; an older enquiry's thread otherwise, which
+      // for an enquiry made before mailboxes may be a personal one.
+      existingConversationId:
+        contactability.existingConversationId ??
+        previous?.conversationId ??
+        null,
       // Hand-mapped, like everything else on the wire here: there is no global
       // serializer, and `EnquiryQuotaState` is a Date-carrying internal shape
       // that must not be handed to a client as-is.
@@ -235,8 +268,8 @@ export class ListingEnquiriesService {
   } as const;
 
   /**
-   * Deliver a member's private enquiry to the listing's owner and record that it
-   * happened.
+   * Deliver a member's private enquiry to the listing's mailbox and record
+   * that it happened.
    *
    * ORDERING. The DM is sent FIRST and the `listing_enquiries` row is written
    * after it, on purpose and in that order only. The message is the thing the
@@ -248,9 +281,10 @@ export class ListingEnquiriesService {
    * row was written would have told a member their message was delivered when
    * it was not.
    *
-   * No separate notification is raised. `deliverEnquiry` posts a real message,
-   * so the owner already gets the ordinary new-message notification and push;
-   * a second bell for the same event would double-notify.
+   * No separate notification is raised. `deliverEnquiryToIdentity` posts a
+   * real message, so every reachable staff seat of the listing's mailbox gets
+   * the ordinary live frame and push; a second bell for the same event would
+   * double-notify.
    */
   async send(
     slug: string,
@@ -265,21 +299,31 @@ export class ListingEnquiriesService {
       );
     }
     const ownerId = reachability.ownerId;
+    const listingIdentity = await this.identities.ensureIdentityFor(
+      IdentityKind.Listing,
+      listing.id,
+    );
 
-    const contactability = await this.messaging.enquiryContactability(
+    const contactability = await this.messaging.identityEnquiryContactability(
       senderUserId,
-      ownerId,
+      listingIdentity.id,
     );
     if (!contactability.canDeliver) {
-      throw new ForbiddenException('You cannot contact this business');
+      if (contactability.blockedReason === 'IDENTITY_IS_YOUR_OWN') {
+        throw new BadRequestException(
+          ListingEnquiriesService.unavailableMessage('own_listing'),
+        );
+      }
+      throw identityBlockedException();
     }
 
     await this.assertEnquiryQuota(listing.id, senderUserId);
 
-    const { conversationId } = await this.messaging.deliverEnquiry(
+    const { conversationId } = await this.messaging.deliverEnquiryToIdentity(
       senderUserId,
-      ownerId,
+      listingIdentity.id,
       ListingEnquiriesService.composeEnquiryBody(listing.name, dto.body.trim()),
+      dto.asIdentityId,
     );
 
     const saved = await this.enquiries.save(
@@ -401,11 +445,13 @@ export class ListingEnquiriesService {
    * a send; neither counts anything of its own, so the hint and the enforcement
    * cannot drift apart.
    *
-   * ONE QUERY, NOT TWO COUNTS. The caller's rows inside the rolling day are
-   * fetched once, newest first and hard-bounded (see `QUOTA_WINDOW_ROW_LIMIT`),
-   * and both caps are read off that slice. It replaces the two COUNTs the send
-   * path used to run, so this is a query cheaper on the write path and one query
-   * on the read path.
+   * ONE READ OF THIS TABLE, NOT TWO COUNTS. The caller's rows inside the
+   * rolling day are fetched once, newest first and hard-bounded (see
+   * `QUOTA_WINDOW_ROW_LIMIT`), and both caps are read off that slice. Task 18
+   * fix round 1: a second bounded read, run alongside, brings in the caller's
+   * persona and company cold messages (`COLD_IDENTITY_ENQUIRY_MESSAGES_SQL`),
+   * which count toward the shared daily ceiling and never toward the
+   * per-listing cap.
    *
    * INDEX. The predicate is `sender_id = ? AND created_at > ?`, ordered by
    * `created_at DESC` and limited, which is exactly
@@ -422,12 +468,29 @@ export class ListingEnquiriesService {
   ): Promise<EnquiryQuotaState> {
     const since = new Date(Date.now() - ListingEnquiriesService.ONE_DAY_MS);
 
-    const recentEnquiries = await this.enquiries.find({
-      where: { senderId, createdAt: MoreThan(since) },
-      select: { id: true, listingId: true, createdAt: true },
-      order: { createdAt: 'DESC' },
-      take: ListingEnquiriesService.QUOTA_WINDOW_ROW_LIMIT,
-    });
+    const [recentEnquiries, identityEnquiryMessages] = await Promise.all([
+      this.enquiries.find({
+        where: { senderId, createdAt: MoreThan(since) },
+        select: { id: true, listingId: true, createdAt: true },
+        order: { createdAt: 'DESC' },
+        take: ListingEnquiriesService.QUOTA_WINDOW_ROW_LIMIT,
+      }),
+      // Task 18 fix round 1: the member's persona and company cold messages
+      // in the same window, the same bounded read `IdentityContactService`
+      // counts, so the daily ceiling is one number across every kind.
+      loadColdIdentityEnquiryMessages(this.enquiries, senderId, since),
+    ]);
+    // Every cold enquiry of every kind, newest first. Each read is bounded
+    // at one more than the ceiling, so the ceiling-th newest of the merge
+    // lies inside both slices and its release time is exact.
+    const coldEnquiries = [
+      ...recentEnquiries.map((enquiry) => ({ createdAt: enquiry.createdAt })),
+      ...identityEnquiryMessages.map((message) => ({
+        createdAt: message.createdAt,
+      })),
+    ].sort(
+      (first, second) => second.createdAt.getTime() - first.createdAt.getTime(),
+    );
 
     // Both arrays stay newest-first, which is what `clearsAt` wants.
     const onThisListing = recentEnquiries.filter(
@@ -438,7 +501,7 @@ export class ListingEnquiriesService {
       onThisListing.length >=
       ListingEnquiriesService.MAX_ENQUIRIES_PER_LISTING_PER_DAY;
     const isDirectoryCapped =
-      recentEnquiries.length >= ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY;
+      coldEnquiries.length >= ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY;
 
     if (!isListingCapped && !isDirectoryCapped) {
       return { hasReachedLimit: false };
@@ -456,7 +519,7 @@ export class ListingEnquiriesService {
     if (isDirectoryCapped) {
       releaseTimes.push(
         ListingEnquiriesService.clearsAt(
-          recentEnquiries,
+          coldEnquiries,
           ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY,
         ),
       );

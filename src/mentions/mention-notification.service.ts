@@ -17,6 +17,7 @@ import { Listing } from '../listings/entities/listing.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { seatExcludedFromMailboxPredicate } from '../messaging/mailbox-seats';
 import { Profile } from '../users/entities/profile.entity';
 
 type EntityKind = 'member' | 'community' | 'business' | 'event' | 'thread';
@@ -341,7 +342,13 @@ export class MentionNotificationService {
         },
         select: { userId: true },
       });
-      return new Set(participants.map((participant) => participant.userId));
+      const participantUserIds = new Set(
+        participants.map((participant) => participant.userId),
+      );
+      if (!participantUserIds.size) {
+        return participantUserIds;
+      }
+      return this.dropExcludedMailboxSeats(conversationId, participantUserIds);
     }
     const communitySlug = payloadBase.communitySlug;
     if (
@@ -362,5 +369,52 @@ export class MentionNotificationService {
       select: { userId: true },
     });
     return new Set(memberships.map((membership) => membership.userId));
+  }
+
+  /**
+   * Task 13f: `candidateUserIds` with every staff seat the asymmetric block
+   * rule (`mailbox-seats.ts`) evicts from `conversationId` removed. A `@`
+   * mention written inside a mailbox thread still resolves a colleague's own
+   * personal handle to their live participant row, so without this a staff
+   * member blocked either way with the thread's customer kept receiving a
+   * mention notification (and its excerpt of the customer's thread) after
+   * every other surface had already stopped showing them that thread. A
+   * person block never excludes the customer's own row, so under it the
+   * customer and every unblocked colleague pass through unchanged. Reuses
+   * the exact SQL predicate every other read composes, keeping the rule in
+   * that one place. Task 14a: that predicate also carries the
+   * departed-staff rule, which the `leftAt: IsNull()` filter above already
+   * applies to this path. Task 14: read through
+   * `seatExcludedFromMailboxPredicate`, which also drops the customer and
+   * every staff member of a thread whose customer blocked the business, so
+   * the function is named for seats of either side.
+   */
+  private async dropExcludedMailboxSeats(
+    conversationId: string,
+    candidateUserIds: ReadonlySet<string>,
+  ): Promise<Set<string>> {
+    const excludedRows = await this.conversationParticipants
+      .createQueryBuilder('participant')
+      .select('participant.user_id', 'userId')
+      .where('participant.conversation_id = :conversationId', {
+        conversationId,
+      })
+      .andWhere('participant.user_id IN (:...candidateUserIds)', {
+        candidateUserIds: [...candidateUserIds],
+      })
+      .andWhere(
+        seatExcludedFromMailboxPredicate(
+          'participant.conversation_id',
+          'participant.user_id',
+        ),
+      )
+      .getRawMany<{ userId: string }>();
+    const excludedUserIds = new Set(excludedRows.map((row) => row.userId));
+    if (!excludedUserIds.size) {
+      return new Set(candidateUserIds);
+    }
+    return new Set(
+      [...candidateUserIds].filter((userId) => !excludedUserIds.has(userId)),
+    );
   }
 }

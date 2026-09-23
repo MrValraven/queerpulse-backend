@@ -66,6 +66,22 @@ function buildService(options: { participant: ConversationParticipant }) {
         new Map([[participant.userId, { shareReadReceipts: true }]]),
       ),
   };
+  // Task 11: `buildConversationSummaries` always batch-loads every seat's
+  // identity now, even on this DM fixture with no counterpart, so
+  // `getByIds`/`describeIdentities` need a real (if empty) implementation
+  // here, in place of the bare `{}` stand-in this used to get away with.
+  const identities = {
+    getByIds: jest.fn().mockResolvedValue([]),
+    describeIdentities: jest.fn().mockResolvedValue(new Map()),
+  };
+  // Fix round 1 (Task 11): unused on this DM fixture with no counterpart
+  // (`otherParticipant`'s identity branch never runs with an empty
+  // `others` array), same reasoning as `identities` above.
+  const identityAttribution = {
+    buildStaffNameResolver: jest
+      .fn()
+      .mockResolvedValue({ resolve: () => null }),
+  };
   const service = new ConversationsService(
     conversationsRepo as never,
     participantsRepo as never,
@@ -77,9 +93,15 @@ function buildService(options: { participant: ConversationParticipant }) {
     mediaCropService as never,
     connectionsService as never,
     preferencesService as never,
+    identities as never,
+    identityAttribution as never,
   );
   return { service, participantsRepo, core };
 }
+
+// Reads as the member's own profile identity rather than an arbitrary uuid,
+// since later tasks (identity-keyed conversations) copy this fixture.
+const MEMBER_PROFILE_IDENTITY_ID = 'profile-identity-of-user-1';
 
 function baseParticipant(
   overrides: Partial<ConversationParticipant> = {},
@@ -88,6 +110,7 @@ function baseParticipant(
     id: 'part-1',
     conversationId: 'conv-1',
     userId: 'user-1',
+    identityId: MEMBER_PROFILE_IDENTITY_ID,
     role: ConversationRole.Member,
     removedBy: null,
     removedAt: null,

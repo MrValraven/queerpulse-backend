@@ -354,4 +354,29 @@ describe('EventAudienceGateService', () => {
       );
     });
   });
+
+  describe('scopedVisibilityWhere', () => {
+    it('keeps every space gathering out of browse for a viewer outside the space', async () => {
+      const { service } = build();
+
+      const { clause, params } = await service.scopedVisibilityWhere(VIEWER_ID);
+
+      expect(clause).toContain('"evc"."parent_id" IS NOT NULL');
+      expect(clause).toContain('e.community_id IS NULL');
+      expect(clause).not.toContain(':...viewerCommunityIds');
+      expect(params.viewerCommunityIds).toBeUndefined();
+    });
+
+    it('admits space gatherings through the viewer community set', async () => {
+      const { service, membership } = build();
+      membership.communityIdsForUser.mockResolvedValue(['space-1']);
+
+      const { clause, params } = await service.scopedVisibilityWhere(VIEWER_ID);
+
+      expect(clause).toMatch(
+        /"evc"\."parent_id" IS NOT NULL\s*\)\s*OR e\.community_id IN \(:\.\.\.viewerCommunityIds\)/,
+      );
+      expect(params.viewerCommunityIds).toEqual(['space-1']);
+    });
+  });
 });

@@ -8,6 +8,8 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { ListingEnquiry } from './entities/listing-enquiry.entity';
@@ -109,6 +111,7 @@ describe('ListingEnquiriesService', () => {
   let enquiries: {
     findOne: jest.Mock;
     find: jest.Mock;
+    query: jest.Mock;
     create: jest.Mock;
     save: jest.Mock<
       Promise<Partial<ListingEnquiry>>,
@@ -117,16 +120,20 @@ describe('ListingEnquiriesService', () => {
   };
   let users: { findOne: jest.Mock };
   let messaging: {
-    enquiryContactability: jest.Mock;
-    deliverEnquiry: jest.Mock;
+    identityEnquiryContactability: jest.Mock;
+    deliverEnquiryToIdentity: jest.Mock;
   };
   let contentModeration: { statesForAnyType: jest.Mock };
+  let identities: { ensureIdentityFor: jest.Mock };
 
   beforeEach(async () => {
     listings = { findOne: jest.fn().mockResolvedValue(baseListing()) };
     enquiries = {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
+      // Task 18 fix round 1: the persona and company cold messages the
+      // shared daily ceiling counts beside this table's own rows.
+      query: jest.fn().mockResolvedValue([]),
       create: jest.fn((value: Partial<ListingEnquiry>) => value),
       save: jest.fn((value: Partial<ListingEnquiry>) =>
         Promise.resolve({ id: 'enquiry-1', ...value }),
@@ -134,17 +141,24 @@ describe('ListingEnquiriesService', () => {
     };
     users = { findOne: jest.fn().mockResolvedValue(activeOwner) };
     messaging = {
-      enquiryContactability: jest.fn().mockResolvedValue({
+      identityEnquiryContactability: jest.fn().mockResolvedValue({
         canDeliver: true,
         blockedReason: null,
         replyRequiresConnection: true,
         followUpAwaitsReply: true,
+        existingConversationId: null,
       }),
-      deliverEnquiry: jest
+      deliverEnquiryToIdentity: jest
         .fn()
         .mockResolvedValue({ conversationId: 'conversation-1' }),
     };
     contentModeration = { statesForAnyType: jest.fn(() => new Map()) };
+    // Task 18: the listing's mailbox identity, where every enquiry lands.
+    identities = {
+      ensureIdentityFor: jest
+        .fn()
+        .mockResolvedValue({ id: 'listing-identity' }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -157,6 +171,7 @@ describe('ListingEnquiriesService', () => {
           provide: ContentModerationService,
           useValue: contentModeration,
         },
+        { provide: IdentitiesService, useValue: identities },
       ],
     }).compile();
 
@@ -187,7 +202,7 @@ describe('ListingEnquiriesService', () => {
         canMessageOwner: false,
         unavailableReason: 'unclaimed',
       });
-      expect(messaging.enquiryContactability).not.toHaveBeenCalled();
+      expect(messaging.identityEnquiryContactability).not.toHaveBeenCalled();
     });
 
     it('refuses a friendly recommendation for the same reason', async () => {
@@ -225,7 +240,7 @@ describe('ListingEnquiriesService', () => {
     // Reported without direction, so the endpoint cannot be used to test
     // whether a particular person has blocked you.
     it('reports a block without saying which way it runs', async () => {
-      messaging.enquiryContactability.mockResolvedValue({
+      messaging.identityEnquiryContactability.mockResolvedValue({
         canDeliver: false,
         blockedReason: 'blocked',
         replyRequiresConnection: false,
@@ -260,17 +275,21 @@ describe('ListingEnquiriesService', () => {
         body: 'Is the upstairs room step-free?',
       });
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+      // Task 18: delivered into the listing's mailbox identity, and the
+      // listing identity is the one `ensureIdentityFor` resolves.
+      expect(identities.ensureIdentityFor).toHaveBeenCalledWith(
+        IdentityKind.Listing,
+        'listing-1',
+      );
+      expect(messaging.deliverEnquiryToIdentity).toHaveBeenCalledWith(
         'member-1',
-        'owner-1',
+        'listing-identity',
         expect.stringContaining('Drama Bar'),
+        undefined,
       );
       // The member's own words survive the context header untouched.
-      const [, , deliveredBody] = messaging.deliverEnquiry.mock.calls[0] as [
-        string,
-        string,
-        string,
-      ];
+      const [, , deliveredBody] = messaging.deliverEnquiryToIdentity.mock
+        .calls[0] as [string, string, string];
       expect(deliveredBody).toContain('Is the upstairs room step-free?');
 
       expect(enquiries.save).toHaveBeenCalledWith(
@@ -300,7 +319,7 @@ describe('ListingEnquiriesService', () => {
 
     it('sends the DM before writing its own row, so a retry cannot duplicate it', async () => {
       const order: string[] = [];
-      messaging.deliverEnquiry.mockImplementation(() => {
+      messaging.deliverEnquiryToIdentity.mockImplementation(() => {
         order.push('deliver');
         return Promise.resolve({ conversationId: 'conversation-1' });
       });
@@ -319,11 +338,11 @@ describe('ListingEnquiriesService', () => {
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
       ).rejects.toThrow(BadRequestException);
-      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
     });
 
     it('refuses when messaging says the two cannot be connected at all', async () => {
-      messaging.enquiryContactability.mockResolvedValue({
+      messaging.identityEnquiryContactability.mockResolvedValue({
         canDeliver: false,
         blockedReason: 'blocked',
         replyRequiresConnection: false,
@@ -331,7 +350,61 @@ describe('ListingEnquiriesService', () => {
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
       ).rejects.toThrow(ForbiddenException);
-      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+      // Task 18 fix round 1 (c4): the stable code the frontend keys off.
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).rejects.toMatchObject({ response: { code: 'IDENTITY_BLOCKED' } });
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
+    });
+
+    // Task 18 fix round 1: ONE daily ceiling across directory, persona and
+    // company enquiries.
+    it('429s once directory, persona and company enquiries together reach the shared ceiling', async () => {
+      enquiries.find.mockResolvedValue(
+        enquiryRows(
+          'listing-elsewhere',
+          Array.from({ length: 10 }, (unused, index) => index + 1),
+        ),
+      );
+      enquiries.query.mockResolvedValue(
+        Array.from({ length: 10 }, (unused, index) => ({
+          conversationId: index < 5 ? 'persona-thread' : 'company-thread',
+          createdAt: new Date(Date.now() - (index + 0.5) * HOUR_MS),
+        })),
+      );
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).rejects.toThrow(
+        new HttpException(DIRECTORY_CAP_SENTENCE, HttpStatus.TOO_MANY_REQUESTS),
+      );
+      await expect(
+        service.getContact('drama-bar', 'member-1'),
+      ).resolves.toMatchObject({
+        hasReachedEnquiryLimit: true,
+        enquiryLimitReason: 'wrote_across_directory_today',
+      });
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
+    });
+
+    it('lets the send through at 19 across all kinds, and persona or company messages never count toward the per-listing cap', async () => {
+      enquiries.find.mockResolvedValue(
+        newestFirst(
+          enquiryRows('listing-1', [3, 4]),
+          enquiryRows(
+            'listing-elsewhere',
+            Array.from({ length: 7 }, (unused, index) => index + 5),
+          ),
+        ),
+      );
+      enquiries.query.mockResolvedValue(
+        Array.from({ length: 10 }, (unused, index) => ({
+          conversationId: 'persona-thread',
+          createdAt: new Date(Date.now() - (index + 0.5) * HOUR_MS),
+        })),
+      );
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).resolves.toMatchObject({ conversationId: 'conversation-1' });
     });
 
     it('429s the fourth enquiry to one business in a day', async () => {
@@ -341,7 +414,7 @@ describe('ListingEnquiriesService', () => {
       ).rejects.toThrow(
         new HttpException(LISTING_CAP_SENTENCE, HttpStatus.TOO_MANY_REQUESTS),
       );
-      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
     });
 
     it('429s once the across-the-directory daily cap is hit', async () => {
@@ -357,7 +430,7 @@ describe('ListingEnquiriesService', () => {
       ).rejects.toThrow(
         new HttpException(DIRECTORY_CAP_SENTENCE, HttpStatus.TOO_MANY_REQUESTS),
       );
-      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+      expect(messaging.deliverEnquiryToIdentity).not.toHaveBeenCalled();
     });
 
     it('lets a member who is under both caps through', async () => {

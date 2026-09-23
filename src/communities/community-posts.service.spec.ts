@@ -12,6 +12,7 @@ import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { CommunityMembershipService } from './community-membership.service';
 import { CommunityPostsService } from './community-posts.service';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
@@ -150,6 +151,9 @@ const COMMUNITY: Community = {
   frozenReason: null,
   frozenNote: null,
   frozenByUserId: null,
+  parentId: null,
+  allowsSubcommunities: false,
+  archivedWithParent: false,
   rulesVersion: 1,
   welcomeMessage: null,
   avatarImageUrl: null,
@@ -245,6 +249,10 @@ describe('CommunityPostsService', () => {
   // empty) — the `posts`/`replies` repos it also reads from are the same
   // mocks every other test in this file already sets up.
   let reports: { createQueryBuilder: jest.Mock };
+  // The effective-role resolver. By default it reads the caller's own roster
+  // row through `members.findOne`, so the top-level cases below keep seeding
+  // roles there; the space cases override it with the resolved role.
+  let communityMembership: { effectiveRole: jest.Mock };
   // TS-13: the `event_photo` arm of that queue. Both default to empty, so a
   // page with no photo report never touches either repository.
   let eventPhotos: { find: jest.Mock };
@@ -359,6 +367,16 @@ describe('CommunityPostsService', () => {
     reports = { createQueryBuilder: jest.fn(() => reportsQbStub()) };
     eventPhotos = { find: jest.fn().mockResolvedValue([]) };
     events = { find: jest.fn().mockResolvedValue([]) };
+    communityMembership = {
+      effectiveRole: jest.fn(
+        async (community: { id: string }, userId: string) => {
+          const row = (await members.findOne({
+            where: { communityId: community.id, userId },
+          })) as { role?: RosterRole } | null;
+          return row?.role ?? null;
+        },
+      ),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -390,9 +408,85 @@ describe('CommunityPostsService', () => {
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: StorageService, useValue: storage },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        {
+          provide: CommunityMembershipService,
+          useValue: communityMembership,
+        },
       ],
     }).compile();
     service = module.get(CommunityPostsService);
+  });
+
+  // Spec gate matrix: parent staff hold full mod powers in every space with
+  // no space roster row, and a space row without a parent row grants nothing.
+  describe('spaces (effective role)', () => {
+    const PRIVATE_SPACE: Community = {
+      ...COMMUNITY,
+      id: 'space-1',
+      slug: 'queer-devs-parents',
+      accessTier: AccessTier.Private,
+      parentId: 'c1',
+    };
+
+    beforeEach(() => {
+      communities.findOne.mockResolvedValue(PRIVATE_SPACE);
+      // No space roster row for anyone: the role comes from the resolver.
+      members.findOne.mockResolvedValue(null);
+    });
+
+    it('lets a parent mod list the posts of a private space', async () => {
+      communityMembership.effectiveRole.mockResolvedValue(RosterRole.Mod);
+      await expect(
+        service.listPosts('queer-devs-parents', 'parent-mod'),
+      ).resolves.toEqual(expect.objectContaining({ items: [] }));
+      expect(communityMembership.effectiveRole).toHaveBeenCalledWith(
+        PRIVATE_SPACE,
+        'parent-mod',
+      );
+    });
+
+    it('lets a parent mod delete another member post in a private space', async () => {
+      communityMembership.effectiveRole.mockResolvedValue(RosterRole.Mod);
+      await service.deletePost('queer-devs-parents', 'p1', 'parent-mod');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deletedAt: expect.any(Date) as unknown,
+          deletedById: 'parent-mod',
+        }),
+      );
+    });
+
+    it('lets a parent mod open the space report queue', async () => {
+      communityMembership.effectiveRole.mockResolvedValue(RosterRole.Mod);
+      await expect(
+        service.listCommunityReports('queer-devs-parents', 'parent-mod'),
+      ).resolves.toEqual([]);
+    });
+
+    it('404s a private space to a caller with no effective role', async () => {
+      communityMembership.effectiveRole.mockResolvedValue(null);
+      await expect(
+        service.listPosts('queer-devs-parents', 'outsider'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses createPost to a space member whose parent row is gone (403)', async () => {
+      communities.findOne.mockResolvedValue({
+        ...PRIVATE_SPACE,
+        accessTier: AccessTier.Public,
+      });
+      // The leftover space row is still there, but the resolver answers null
+      // because the parent row is missing.
+      members.findOne.mockResolvedValue({
+        userId: 'left-parent',
+        role: RosterRole.Member,
+      });
+      communityMembership.effectiveRole.mockResolvedValue(null);
+      await expect(
+        service.createPost('queer-devs-parents', 'left-parent', { body: 'hi' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
   });
 
   describe('createPost', () => {

@@ -338,6 +338,7 @@ describe('Platform kill switches (e2e)', () => {
           message: 'I would love to join the community.',
           ageAttested: true,
           termsVersion: '1.0',
+          heardFrom: 'A friend',
         })
         .expect(201);
     });
@@ -360,6 +361,7 @@ describe('Platform kill switches (e2e)', () => {
           message: 'I would love to join the community.',
           ageAttested: true,
           termsVersion: '1.0',
+          heardFrom: 'A friend',
         })
         .expect(403);
 

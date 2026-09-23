@@ -30,8 +30,11 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
+import { AcceptListingOwnerOfferDto } from './dto/accept-listing-owner-offer.dto';
 import { InviteListingCoManagerDto } from './dto/invite-listing-co-manager.dto';
 import { ListingCoManagersService } from './listing-co-managers.service';
+import { ListingOwnerOfferDTO } from './listing-owner-offer-response';
+import { ListingOwnerOffersService } from './listing-owner-offers.service';
 
 /**
  * Co-manager seats on a business directory listing.
@@ -70,6 +73,7 @@ import { ListingCoManagersService } from './listing-co-managers.service';
 export class ListingCoManagersController {
   constructor(
     private readonly listingCoManagersService: ListingCoManagersService,
+    private readonly listingOwnerOffersService: ListingOwnerOffersService,
   ) {}
 
   // --- The invited member's own surface -------------------------------------
@@ -142,6 +146,83 @@ export class ListingCoManagersController {
       user.userId,
       'decline',
     );
+  }
+
+  // --- The offered member's own surface --------------------------------------
+  // Also on the literal group, per the class doc comment: `owner-offers` must
+  // sit above `ListingsController`'s `@Get(':ref')` for the same reason
+  // `co-manager-invites` does.
+
+  @Get('owner-offers')
+  @ApiOperation({
+    summary: 'List the current member’s open owner offers',
+  })
+  @ApiOkResponse({
+    description: 'Open offers naming the caller as offeree, newest first.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listOwnerOffers(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<ListingOwnerOfferDTO[]> {
+    return this.listingOwnerOffersService.listForMember(user.userId);
+  }
+
+  @Post('owner-offers/:id/accept')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({ summary: 'Accept an offer to own a listing' })
+  @ApiOkResponse({ description: 'The accepted offer.' })
+  @ApiNotFoundResponse({
+    description: 'No open offer with that id for the caller.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The offer has already been answered, or the listing has gained an owner since it was made.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Malformed offer id, or the affirming baseline was not accepted.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  acceptOwnerOffer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AcceptListingOwnerOfferDto,
+  ): Promise<ListingOwnerOfferDTO> {
+    // `dto` is unused past the pipe on purpose. Its own `@Equals(true)` is
+    // the entire gate that keeps `affirmingBaselineAcceptedAt` honest: the
+    // service takes a plain boolean and never sees this body, so binding it
+    // here as a typed `@Body()` parameter is what makes the global
+    // ValidationPipe run against it and reject a caller who has not agreed.
+    // Deleting the parameter, or renaming it in a way the pipe stops seeing,
+    // silently removes that gate.
+    void dto;
+    return this.listingOwnerOffersService.respond(id, user.userId, true);
+  }
+
+  @Post('owner-offers/:id/decline')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Decline an offer to own a listing' })
+  @ApiOkResponse({ description: 'The declined offer.' })
+  @ApiNotFoundResponse({
+    description: 'No open offer with that id for the caller.',
+  })
+  @ApiConflictResponse({
+    description: 'The offer has already been answered.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed offer id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  declineOwnerOffer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<ListingOwnerOfferDTO> {
+    return this.listingOwnerOffersService.respond(id, user.userId, false);
   }
 
   // --- The listing's roster --------------------------------------------------

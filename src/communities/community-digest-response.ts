@@ -29,6 +29,11 @@ export interface CommunityDigestExcerpt {
 export interface CommunityDigestEntry {
   slug: string;
   name: string;
+  /** The parent community's name when this entry is a space, or null for a
+   *  top-level community. A space's digest card names its parent alongside
+   *  itself, so "Photography" reads in the context of the community it
+   *  belongs to. */
+  parentName: string | null;
   /** Resolved through `toImageUrl`, or null when the community has no avatar. */
   avatarImageUrl: string | null;
   /** The viewer's own role on this roster. */

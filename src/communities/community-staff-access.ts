@@ -1,10 +1,11 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
 import { Community } from './entities/community.entity';
+import { resolveEffectiveRole } from './subcommunity-rules';
 
 /**
  * Shared "resolve a community by slug, then place the caller on its roster"
@@ -79,24 +80,75 @@ export async function loadMembershipOr403(
 }
 
 /**
+ * What the two resolvers below hand back. `role` is the caller's effective
+ * role (see `resolveEffectiveRole`). `membership` is the caller's own roster
+ * row, and is null when the role is inherited from parent staff on a space,
+ * because inheritance writes no row.
+ */
+export interface ResolvedCommunityAccess {
+  community: Community;
+  membership: CommunityMember | null;
+  role: RosterRole;
+}
+
+/**
+ * The caller's own roster row plus their effective role. A top-level
+ * community reads the one row, the same query as before spaces existed; a
+ * space reads its own row and the parent's in one `find`.
+ */
+async function loadEffectiveAccess(
+  members: Repository<CommunityMember>,
+  community: Pick<Community, 'id' | 'parentId'>,
+  userId: string,
+): Promise<{ membership: CommunityMember | null; role: RosterRole | null }> {
+  if (!community.parentId) {
+    const membership = await members.findOne({
+      where: { communityId: community.id, userId },
+    });
+    return { membership, role: membership?.role ?? null };
+  }
+  const rows = await members.find({
+    where: { communityId: In([community.id, community.parentId]), userId },
+  });
+  const membership =
+    rows.find((row) => row.communityId === community.id) ?? null;
+  const parentRow =
+    rows.find((row) => row.communityId === community.parentId) ?? null;
+  const role = resolveEffectiveRole({
+    isSpace: true,
+    ownRole: membership?.role ?? null,
+    parentRole: parentRow?.role ?? null,
+  });
+  return { membership, role };
+}
+
+/**
  * Resolve the community and assert the caller holds a staff role on it
- * (owner, co-owner or moderator). 404 for an unknown or archived slug, 403
- * for anyone else, including a plain member.
+ * (owner, co-owner or moderator), own or inherited from parent staff on a
+ * space. 404 for an unknown or archived slug, 403 for anyone else, including
+ * a plain member.
  */
 export async function resolveStaffCommunity(
   communities: Repository<Community>,
   members: Repository<CommunityMember>,
   slug: string,
   userId: string,
-): Promise<{ community: Community; membership: CommunityMember }> {
+): Promise<ResolvedCommunityAccess> {
   const community = await loadActiveCommunityOr404(communities, slug);
-  const membership = await loadMembershipOr403(members, community.id, userId);
-  if (!isCommunityStaffRole(membership.role)) {
+  const { membership, role } = await loadEffectiveAccess(
+    members,
+    community,
+    userId,
+  );
+  if (role === null) {
+    throw new ForbiddenException('Only roster members can do that');
+  }
+  if (!isCommunityStaffRole(role)) {
     throw new ForbiddenException(
       'Only the community owner, a co-owner or a moderator can do that',
     );
   }
-  return { community, membership };
+  return { community, membership, role };
 }
 
 /**
@@ -111,8 +163,15 @@ export async function resolveMemberCommunity(
   members: Repository<CommunityMember>,
   slug: string,
   userId: string,
-): Promise<{ community: Community; membership: CommunityMember }> {
+): Promise<ResolvedCommunityAccess> {
   const community = await loadActiveCommunityOr404(communities, slug);
-  const membership = await loadMembershipOr403(members, community.id, userId);
-  return { community, membership };
+  const { membership, role } = await loadEffectiveAccess(
+    members,
+    community,
+    userId,
+  );
+  if (role === null) {
+    throw new ForbiddenException('Only roster members can do that');
+  }
+  return { community, membership, role };
 }

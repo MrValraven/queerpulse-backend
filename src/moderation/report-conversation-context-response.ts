@@ -5,6 +5,7 @@ import {
 } from '../messaging/message-evidence-hold';
 import { MessageSnapshotEvidence } from '../reports/report-evidence';
 import { Profile } from '../users/entities/profile.entity';
+import type { SentAsIdentityDTO } from './sent-as-identity';
 
 /** PRD-360: messages shown on EACH side of the reported one. */
 export const CONVERSATION_CONTEXT_WINDOW_SIZE = 20;
@@ -24,6 +25,10 @@ export interface ConversationContextMessageDTO {
   /** Null exactly when `senderId` is null. */
   senderDisplayName: string | null;
   senderSlug: string | null;
+  /** Business mailboxes, design section 9: the business, persona or company
+   *  this message was sent as, beside the human sender above. Null for a
+   *  personal message. */
+  sentAsIdentity: SentAsIdentityDTO | null;
   kind: MessageKind;
   /** Null for a tombstone, except the reported message itself, which shows
    *  its retained body (or the report's snapshot of it). */
@@ -55,6 +60,7 @@ export function toConversationContextMessage(
   profileByUserId: Map<string, Profile>,
   reportedMessageId: string,
   reportedSnapshot: MessageSnapshotEvidence | null,
+  sentAsByIdentityId: ReadonlyMap<string, SentAsIdentityDTO> = new Map(),
 ): ConversationContextMessageDTO {
   const isReportedMessage = message.id === reportedMessageId;
   const isDeleted = message.deletedAt !== null;
@@ -90,6 +96,9 @@ export function toConversationContextMessage(
     senderId,
     senderDisplayName: senderId ? profileName || 'Member' : null,
     senderSlug: profile?.slug ?? null,
+    sentAsIdentity: message.senderIdentityId
+      ? (sentAsByIdentityId.get(message.senderIdentityId) ?? null)
+      : null,
     kind: message.kind,
     body,
     attachment,

@@ -1080,6 +1080,9 @@ describe('ProfilesService replace-list endpoints', () => {
     groups?: RepoMock;
     groupMemberships?: RepoMock;
     workItems?: RepoMock;
+    communities?: RepoMock;
+    featuredCommunities?: RepoMock;
+    communityMembers?: RepoMock;
   }) => {
     const module = await Test.createTestingModule({
       providers: [
@@ -1123,15 +1126,21 @@ describe('ProfilesService replace-list endpoints', () => {
         },
         {
           provide: getRepositoryToken(ProfileFeaturedCommunity),
-          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+          useValue: overrides.featuredCommunities ?? {
+            createQueryBuilder: jest.fn(() => qbStub()),
+          },
         },
         {
           provide: getRepositoryToken(Community),
-          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+          useValue: overrides.communities ?? {
+            createQueryBuilder: jest.fn(() => qbStub()),
+          },
         },
         {
           provide: getRepositoryToken(CommunityMember),
-          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+          useValue: overrides.communityMembers ?? {
+            createQueryBuilder: jest.fn(() => qbStub()),
+          },
         },
         {
           provide: getRepositoryToken(ProfileNowHistory),
@@ -1380,5 +1389,100 @@ describe('ProfilesService replace-list endpoints', () => {
         { groupSlug: 'devs', role: 'Organiser' },
       ]),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('updateMe rejects a space slug in featuredCommunities the same way it rejects an unknown one', async () => {
+    const p = {
+      userId: 'u1',
+      slug: 'jo',
+      firstName: 'Jo',
+      lastName: 'Lee',
+      pronouns: null,
+      tagline: null,
+      bio: null,
+      location: null,
+      now: null,
+      avatarUrl: null,
+      visibility: ProfileVisibility.Open,
+      openTo: [],
+      identities: [],
+      discoverableIdentities: [],
+      lookingFor: [],
+      tags: [],
+      verified: false,
+      joinedAt: new Date('2024-03-01T00:00:00.000Z'),
+    } as unknown as Profile;
+    const profilesRepo = {
+      findOne: jest.fn().mockResolvedValue(p),
+      createQueryBuilder: jest.fn(() => qbStub()),
+      save: jest.fn().mockResolvedValue(p),
+    };
+    const communityQueryBuilder = qbStub();
+    const communitiesRepo = {
+      createQueryBuilder: jest.fn(() => communityQueryBuilder),
+    };
+    // `topLevelOnly` drops a space's row from the eligibility query the same
+    // way it would drop a row for a slug that never existed at all. The
+    // stub's default `getRawMany` resolving `[]` is exactly that: no row
+    // came back, so `resolveFeaturedCommunityIds` cannot tell "a space" apart
+    // from "unknown", and neither can the member. Asserting on `andWhere`
+    // below, alongside the rejection, proves the filter produced the empty
+    // result; the stub's own default alone would give the same rejection.
+    service = await build({
+      profiles: profilesRepo,
+      communities: communitiesRepo,
+    });
+
+    await expect(
+      service.updateMe('u1', { featuredCommunities: ['a-space'] }),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: 'Unknown or ineligible community: a-space',
+    });
+    expect(communityQueryBuilder.andWhere).toHaveBeenCalledWith(
+      'c.parent_id IS NULL',
+    );
+  });
+
+  it('scopes loadFeaturedCommunities (the pin read) to top-level communities', async () => {
+    const featuredCommunityQueryBuilder = qbStub();
+    const featuredCommunitiesRepo = {
+      createQueryBuilder: jest.fn(() => featuredCommunityQueryBuilder),
+    };
+    service = await build({ featuredCommunities: featuredCommunitiesRepo });
+
+    // Private method, reached directly the way `updateMe`'s deep
+    // `getBySlug`/`buildFullProfile` assembly reaches it, without wiring
+    // every other batched read that assembly makes.
+    await (
+      service as unknown as {
+        loadFeaturedCommunities: (userId: string) => Promise<unknown>;
+      }
+    ).loadFeaturedCommunities('u1');
+
+    expect(featuredCommunityQueryBuilder.andWhere).toHaveBeenCalledWith(
+      'c.parent_id IS NULL',
+    );
+  });
+
+  it('scopes sharedCommunityNames to top-level communities', async () => {
+    const membershipQueryBuilder = qbStub();
+    const communityMembersRepo = {
+      createQueryBuilder: jest.fn(() => membershipQueryBuilder),
+    };
+    service = await build({ communityMembers: communityMembersRepo });
+
+    await (
+      service as unknown as {
+        sharedCommunityNames: (
+          ownerUserId: string,
+          otherIds: string[],
+        ) => Promise<Map<string, string>>;
+      }
+    ).sharedCommunityNames('u1', ['u2']);
+
+    expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
+      'c.parent_id IS NULL',
+    );
   });
 });

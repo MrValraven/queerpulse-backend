@@ -150,6 +150,20 @@ export class ActivityListener {
     if (event.accessTier !== AccessTier.Public) {
       return;
     }
+    // A space is skipped outright, the same way `onCommunityMemberJoined`
+    // skips a space join below: "Posted in X" on a profile names a
+    // community, and naming a space would show the exact space membership a profile must
+    // never reveal. The event carries no `parentId` of its own (only
+    // `communitySlug`/`communityName`/`accessTier`), so this is the one
+    // extra lookup that check costs; a community that no longer resolves by
+    // slug falls through unchanged, matching this handler's prior behaviour.
+    const community = await this.communities.findOne({
+      where: { slug: event.communitySlug },
+      select: { parentId: true },
+    });
+    if (community?.parentId) {
+      return;
+    }
     await this.activity.record({
       userId: event.authorId,
       kind: ActivityKind.Post,
@@ -166,8 +180,10 @@ export class ActivityListener {
 
   /**
    * Joining a PUBLIC community. The join event carries only ids, so the
-   * community is loaded here to read its access tier and name — the same gate
-   * `onCommunityPostCreated` gets handed on its event.
+   * community is loaded here to read its access tier and name, the same gate
+   * `onCommunityPostCreated` gets handed on its event. A space is skipped
+   * outright: "Joined X" on a profile names a community, and naming a space
+   * would show the exact space membership a profile must never reveal.
    */
   @OnEvent(COMMUNITY_MEMBER_JOINED)
   async onCommunityMemberJoined(
@@ -179,7 +195,8 @@ export class ActivityListener {
     if (
       !community ||
       community.accessTier !== AccessTier.Public ||
-      community.archivedAt
+      community.archivedAt ||
+      community.parentId !== null
     ) {
       return;
     }

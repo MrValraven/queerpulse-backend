@@ -575,6 +575,97 @@ describe('ReportSubjectResolverService', () => {
     });
   });
 
+  describe('a business-mailbox identity', () => {
+    const identityId = '0c000000-0000-4000-8000-000000000001';
+
+    const resolveIdentity = (row: Row | null) =>
+      build((sql, keys) =>
+        sql.includes('FROM identities i') && row
+          ? [{ ...row, key: keys[0]! }]
+          : [],
+      );
+
+    it.each([
+      ['listing', 'owner-listing', 'Cafe Lisboa'],
+      ['subprofile', 'owner-persona', 'Drag Brunch'],
+      ['company', 'owner-company', 'Rainbow Logistics'],
+    ])(
+      'names the %s owner as the author and its display name as the excerpt',
+      async (_kind, ownerId, displayName) => {
+        const { service, query } = resolveIdentity({
+          key: identityId,
+          author_user_id: ownerId,
+          excerpt: displayName,
+          community_id: null,
+        });
+
+        const resolution = await service.resolve(
+          baseReport({
+            subjectType: ReportSubjectType.Identity,
+            subjectId: identityId,
+          }),
+        );
+
+        expect(resolution).toEqual({
+          authorUserId: ownerId,
+          excerpt: displayName,
+          communityId: null,
+          isAuthorAmbiguous: false,
+        });
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(askedKeys(query)).toEqual([[identityId]]);
+      },
+    );
+
+    it('names nobody for an ownerless listing', async () => {
+      const { service } = resolveIdentity({
+        key: identityId,
+        author_user_id: null,
+        excerpt: 'Cafe Lisboa',
+        community_id: null,
+      });
+
+      const resolution = await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.Identity,
+          subjectId: identityId,
+        }),
+      );
+
+      expect(resolution.authorUserId).toBeNull();
+      expect(resolution.excerpt).toBe('Cafe Lisboa');
+    });
+
+    it('joins each kind to its own owner column and display name', async () => {
+      const { service, query } = resolveIdentity(null);
+      await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.Identity,
+          subjectId: identityId,
+        }),
+      );
+      const [sql] = (query.mock.calls as [string, unknown[]][])[0]!;
+      expect(sql).toMatch(/WHEN 'listing'\s+THEN l\.owner_id/);
+      expect(sql).toMatch(/WHEN 'subprofile' THEN s\.user_id/);
+      expect(sql).toMatch(/WHEN 'company'\s+THEN co\.owner_id/);
+      expect(sql).toMatch(/WHEN 'listing'\s+THEN l\.name/);
+      expect(sql).toMatch(/WHEN 'subprofile' THEN s\.display_name/);
+      expect(sql).toMatch(/WHEN 'company'\s+THEN co\.name_text/);
+    });
+
+    it('never queries for a non-uuid identity id', async () => {
+      const { service, query } = resolveIdentity(null);
+      const resolution = await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.Identity,
+          subjectId: 'cafe-lisboa',
+        }),
+      );
+      expect(query).not.toHaveBeenCalled();
+      expect(resolution.authorUserId).toBeNull();
+    });
+  });
+
   describe('a subject with nothing to resolve', () => {
     it('answers three nulls rather than guessing', async () => {
       const { service } = build();

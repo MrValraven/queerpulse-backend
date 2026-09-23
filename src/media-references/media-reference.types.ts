@@ -32,7 +32,8 @@ export type MediaReferenceType =
   | 'magazine-article' // MagazineArticle.blocks[].src / .socialImage
   | 'magazine-deck' // MagazineDeck.cover / .slides[] image refs
   | 'message-photo' // Message.attachment (a photo sent in a conversation)
-  | 'press-contact'; // PressContact.avatarUrl
+  | 'press-contact' // PressContact.avatarUrl
+  | 'sticker'; // Sticker.storageKey
 
 export interface MediaReference {
   type: MediaReferenceType;

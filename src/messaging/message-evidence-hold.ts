@@ -6,6 +6,8 @@ import {
   DocumentAttachment,
   GifAttachment,
   isDocumentAttachment,
+  isStickerAttachment,
+  StickerAttachment,
 } from './entities/message.entity';
 
 /**
@@ -55,9 +57,18 @@ export function isMessageAttachmentStorageKey(key: string): boolean {
  * today, read anyway so a future separate thumbnail key is never orphaned); a
  * document has only `url`. A picked GIF holds an absolute provider URL, which
  * is filtered out.
+ *
+ * A sticker's `url`/`previewUrl` are also a platform storage key, minted
+ * under the separate `sticker` upload kind (`UPLOAD_KIND_SPECS.sticker`).
+ * `isMessageAttachmentStorageKey` only recognises the `message-image`/
+ * `message-document` kinds, so that prefix check alone already keeps a
+ * sticker's admin-owned, shared artwork out of this member's own
+ * purge/download surfaces, with no separate `isStickerAttachment` branch
+ * needed here.
  */
 export function messageAttachmentStorageKeys(
-  attachment: GifAttachment | DocumentAttachment | null | undefined,
+  attachment:
+    GifAttachment | DocumentAttachment | StickerAttachment | null | undefined,
 ): string[] {
   if (!attachment) {
     return [];
@@ -76,9 +87,11 @@ export function messageAttachmentStorageKeys(
 }
 
 /** The one key a staff download serves for an attachment: its `url`, when that
- *  is a platform message-attachment key. */
+ *  is a platform message-attachment key. Never a sticker's key, for the same
+ *  prefix reason `messageAttachmentStorageKeys` above documents. */
 export function primaryMessageAttachmentStorageKey(
-  attachment: GifAttachment | DocumentAttachment | null | undefined,
+  attachment:
+    GifAttachment | DocumentAttachment | StickerAttachment | null | undefined,
 ): string | null {
   if (!attachment || typeof attachment.url !== 'string') {
     return null;
@@ -88,9 +101,10 @@ export function primaryMessageAttachmentStorageKey(
 }
 
 /**
- * The display facts of an attachment a moderator needs, never a URL of any kind:
+ * The display facts of an attachment a moderator needs, none of them a URL:
  * a document's original name, format and size; an image's format (derived from
- * its server-minted key extension, which is trustworthy); nulls for a GIF.
+ * its server-minted key extension, which is trustworthy); a sticker's own
+ * label as its "name"; nulls for a GIF.
  */
 export interface MessageAttachmentFacts {
   fileName: string | null;
@@ -99,10 +113,21 @@ export interface MessageAttachmentFacts {
 }
 
 export function messageAttachmentFacts(
-  attachment: GifAttachment | DocumentAttachment | null | undefined,
+  attachment:
+    GifAttachment | DocumentAttachment | StickerAttachment | null | undefined,
 ): MessageAttachmentFacts | null {
   if (!attachment) {
     return null;
+  }
+  // Checked before `isDocumentAttachment` (see that discriminator's own doc):
+  // a sticker has no `fileName`/`contentType`/`byteSize` to fall back to, so
+  // its facts come straight from the row baked at send time.
+  if (isStickerAttachment(attachment)) {
+    return {
+      fileName: attachment.label,
+      mimeType: 'image/png',
+      sizeBytes: null,
+    };
   }
   if (isDocumentAttachment(attachment)) {
     return {

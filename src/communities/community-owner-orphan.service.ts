@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { SubcommunityCascadeService } from './subcommunity-cascade.service';
 import {
   CommunityMember,
   RosterRole,
@@ -19,7 +20,10 @@ import { Community } from './entities/community.entity';
  */
 interface OwnerPromotionOutcome {
   promotedUserId: string;
-  promotedFromRole: RosterRole;
+  // `null` when the new owner held no role in the space before (the parent
+  // owner fallback below can land on somebody with no roster row there).
+  promotedFromRole: RosterRole | null;
+  isParentOwnerFallback: boolean;
 }
 
 /**
@@ -43,7 +47,9 @@ interface OwnerPromotionOutcome {
  *
  * 1. The longest-tenured `co_owner`.
  * 2. Failing that, the longest-tenured `mod`.
- * 3. Failing that, nobody: `owner_id` stays NULL and `needsOwnerReviewAt` is
+ * 3. Failing that, for a space only, the parent community's owner (see
+ *    `promoteParentOwner`).
+ * 4. Failing that, nobody: `owner_id` stays NULL and `needsOwnerReviewAt` is
  *    stamped for the admin surface.
  *
  * The co-owner tier is first because `co_owner` is the role an owner
@@ -89,6 +95,9 @@ export class CommunityOwnerOrphanService {
     private readonly communities: Repository<Community>,
     private readonly dataSource: DataSource,
     private readonly governanceLog: CommunityGovernanceLogService,
+    // The shared space owner upsert (`assignSpaceOwner`), also used when a
+    // parent removal passes a space to the parent's owner.
+    private readonly subcommunityCascade: SubcommunityCascadeService,
   ) {}
 
   /**
@@ -104,6 +113,12 @@ export class CommunityOwnerOrphanService {
     const ownedCommunities = await this.communities.find({
       where: { ownerId: userId },
     });
+    // Top-level communities first, so a space whose parent the same person
+    // owned sees the parent's new owner when it falls back to it.
+    ownedCommunities.sort(
+      (first, second) =>
+        Number(first.parentId !== null) - Number(second.parentId !== null),
+    );
     for (const community of ownedCommunities) {
       try {
         await this.resolveOrphanedOwnership(community.id, userId);
@@ -171,6 +186,15 @@ export class CommunityOwnerOrphanService {
           .limit(1)
           .getOne();
 
+        if (!promotionCandidate && community.parentId) {
+          const parentOwnerFallback = await this.promoteParentOwner(
+            manager,
+            community,
+            erasedOwnerId,
+          );
+          if (parentOwnerFallback) return parentOwnerFallback;
+        }
+
         if (!promotionCandidate) {
           await manager.update(Community, communityId, {
             ownerId: null,
@@ -193,7 +217,11 @@ export class CommunityOwnerOrphanService {
           ownerId: promotionCandidate.userId,
           needsOwnerReviewAt: null,
         });
-        return { promotedUserId: promotionCandidate.userId, promotedFromRole };
+        return {
+          promotedUserId: promotionCandidate.userId,
+          promotedFromRole,
+          isParentOwnerFallback: false,
+        };
       },
     );
 
@@ -210,7 +238,9 @@ export class CommunityOwnerOrphanService {
         action: GovernanceLogAction.OwnerAutoPromoted,
         targetUserId: promotion.promotedUserId,
         metadata: {
-          reason: 'owner account erased',
+          reason: promotion.isParentOwnerFallback
+            ? 'parent_owner_fallback'
+            : 'owner account erased',
           previousOwnerId: erasedOwnerId,
           // Which tier the automatic promotion drew from, so the audit trail
           // answers "was this the co-owner the departed owner named, or a
@@ -225,5 +255,39 @@ export class CommunityOwnerOrphanService {
           `writing the governance log entry failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
       );
     }
+  }
+
+  /**
+   * A space with no co-owner or mod left falls back to its parent's owner,
+   * who already holds co-owner powers there by inheritance.
+   * `SubcommunityCascadeService.assignSpaceOwner` upserts their roster row in
+   * the space to `owner`, points `owner_id` at them and clears the review
+   * stamp. `null` when the parent has no owner either (or the
+   * erased account owned both), so the caller keeps the NULL owner and
+   * review stamp path.
+   */
+  private async promoteParentOwner(
+    manager: EntityManager,
+    space: Community,
+    erasedOwnerId: string,
+  ): Promise<OwnerPromotionOutcome | null> {
+    if (!space.parentId) return null;
+    const parent = await manager.findOne(Community, {
+      where: { id: space.parentId },
+      select: { id: true, ownerId: true },
+    });
+    const parentOwnerId = parent?.ownerId ?? null;
+    if (parentOwnerId === null || parentOwnerId === erasedOwnerId) return null;
+
+    const promotedFromRole = await this.subcommunityCascade.assignSpaceOwner(
+      manager,
+      space.id,
+      parentOwnerId,
+    );
+    return {
+      promotedUserId: parentOwnerId,
+      promotedFromRole,
+      isParentOwnerFallback: true,
+    };
   }
 }

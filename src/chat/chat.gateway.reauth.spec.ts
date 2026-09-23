@@ -12,8 +12,10 @@ import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { socketTicketService } from '../auth/socket-ticket.service';
 import { UserStatus } from '../users/entities/user.entity';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingService } from '../messaging/messaging.service';
+import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { PreferencesService } from '../preferences/preferences.service';
@@ -78,6 +80,11 @@ describe('ChatGateway session:reauth', () => {
       providers: [
         ChatGateway,
         PresenceService,
+        // Task 13e: renders a mailbox thread's message frames per viewer.
+        {
+          provide: MessagingCoreService,
+          useValue: { toMessageResponses: jest.fn() },
+        },
         { provide: JwtService, useValue: { verifyAsync } },
         {
           provide: ConfigService,
@@ -96,6 +103,16 @@ describe('ChatGateway session:reauth', () => {
         {
           provide: UsersService,
           useValue: { findById: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: IdentitiesService,
+          // Task 13: unused by `session:reauth` (this file's only path under
+          // test): only `handleTyping`/`handlePresenceSnapshot` read it.
+          useValue: {
+            getById: jest.fn(),
+            describeIdentities: jest.fn(),
+            staffUserIds: jest.fn(),
+          },
         },
         { provide: getRepositoryToken(RefreshToken), useValue: refreshTokens },
         {
@@ -383,6 +400,11 @@ describe('ChatGateway session:reauth (ticket path)', () => {
       providers: [
         ChatGateway,
         PresenceService,
+        // Task 13e: renders a mailbox thread's message frames per viewer.
+        {
+          provide: MessagingCoreService,
+          useValue: { toMessageResponses: jest.fn() },
+        },
         { provide: JwtService, useValue: { verifyAsync } },
         {
           provide: ConfigService,
@@ -401,6 +423,16 @@ describe('ChatGateway session:reauth (ticket path)', () => {
         {
           provide: UsersService,
           useValue: { findById: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: IdentitiesService,
+          // Task 13: unused by `session:reauth` (this file's only path under
+          // test): only `handleTyping`/`handlePresenceSnapshot` read it.
+          useValue: {
+            getById: jest.fn(),
+            describeIdentities: jest.fn(),
+            staffUserIds: jest.fn(),
+          },
         },
         { provide: getRepositoryToken(RefreshToken), useValue: refreshTokens },
         {

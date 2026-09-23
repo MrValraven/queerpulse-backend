@@ -294,6 +294,14 @@ export enum NotificationType {
   ListingCoManagerInvite = 'listing_co_manager_invite',
   ListingCoManagerInviteAccepted = 'listing_co_manager_invite_accepted',
   ListingCoManagerInviteDeclined = 'listing_co_manager_invite_declined',
+
+  /**
+   * An admin has offered a member ownership of a listing that has none.
+   * Emitted by `ListingOwnerOffersService.offer`. Actor is the offering
+   * admin. Payload: `listingSlug`, `listingName`. Preference category:
+   * listings. Migration: AddListingOwnerOfferNotificationType1821300300000.
+   */
+  ListingOwnerOffer = 'listing_owner_offer',
   // Sent to a business listing's OWNER when a member's gathering attaches
   // itself to their venue (LOC-16). The attachment starts `pending`, and this
   // is the ask: until the owner confirms it, the gathering is withheld from

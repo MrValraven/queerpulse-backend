@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { IdentitiesModule } from '../identities/identities.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
@@ -9,6 +10,7 @@ import { Report } from '../reports/entities/report.entity';
 import { MessageEvidenceHoldSweepService } from './message-evidence-hold-sweep.service';
 import { PreferencesModule } from '../preferences/preferences.module';
 import { SocialModule } from '../social/social.module';
+import { StickersModule } from '../stickers/stickers.module';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationMediaService } from './conversation-media.service';
@@ -73,6 +75,12 @@ import { MessagingService } from './messaging.service';
     // `MessagingCoreService` can inject the moderation-state repository to
     // tombstone moderator-taken-down messages in thread reads.
     ContentModerationModule,
+    // Exports `IdentitiesService`, which `MessagingCoreService` now injects to
+    // resolve a user's profile identity for the identity-keyed `pair_key`
+    // (`getOrCreateConversation`/`resolveProfilePairKey`). No cycle:
+    // `IdentitiesModule` registers only its own entities and imports nothing
+    // from `MessagingModule`.
+    IdentitiesModule,
     // Batched crop lookup (`MediaCropService.getMany`) for a group's
     // `avatarUrl` sibling `avatarCrop`.
     MediaCropsModule,
@@ -97,6 +105,11 @@ import { MessagingService } from './messaging.service';
     // `ContentModerationModule`/`VouchModule` (via `PublicEligibilityModule`),
     // none of which import `MessagingModule`.
     PreferencesModule,
+    // Exports `TypeOrmModule` (the `Sticker` repository) so
+    // `MessagingCoreService.postMessage` can resolve a `kind:'sticker'`
+    // send's `stickerId` at write time. No cycle: `StickersModule` imports
+    // nothing from `MessagingModule`.
+    StickersModule,
   ],
   controllers: [ConversationsController, MessageRequestController],
   providers: [

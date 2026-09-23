@@ -67,7 +67,7 @@ describe('AccountService', () => {
   // test drops the count to one.
   let usersService: { countAdmins: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; query: jest.Mock };
   let events: { emit: jest.Mock };
 
   const now = new Date('2026-07-15T12:00:00.000Z');
@@ -223,6 +223,12 @@ describe('AccountService', () => {
     };
     dataSource = {
       transaction: jest.fn((cb: (m: typeof manager) => unknown) => cb(manager)),
+      // `isArchiveOvertakenByMailboxExclusion` reads this directly; every job
+      // fixture below carries no `reportedConversations`/`notifications`
+      // conversation ids, so `archivedThreadConversationIds` returns `[]` and
+      // the query is skipped for the existing tests. Tests that DO need the
+      // query reached set this per-test.
+      query: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -739,6 +745,58 @@ describe('AccountService', () => {
       expect(result.status).toBe('processing');
       expect(result.downloadUrl).toBeUndefined();
       expect(result.expiresAt).toBeUndefined();
+    });
+
+    // CW-21: `downloadExport` already refuses a Ready job's bytes once
+    // `isArchiveOvertakenByMailboxExclusion` holds; the status poll has to
+    // agree, or the member's Settings page keeps advertising a link that
+    // 404s the moment they click it.
+    it('getExportJob reports a Ready job as expired once a block/exclusion overtakes its archive', async () => {
+      exportJobs.findOne.mockResolvedValue({
+        id: 'job-3',
+        userId: 'u1',
+        status: 'ready',
+        generatedAt: now,
+        requestedAt: now,
+        data: {
+          reportedConversations: [
+            { conversationId: '11111111-1111-1111-1111-111111111111' },
+          ],
+        },
+        error: null,
+      });
+      dataSource.query.mockResolvedValue([
+        { isArchiveOvertakenByMailboxExclusion: true },
+      ]);
+
+      const result = await service.getExportJob('u1', 'job-3');
+      expect(result.status).toBe('expired');
+      expect(result.downloadUrl).toBeUndefined();
+      expect(result.expiresAt).toBeUndefined();
+    });
+
+    it('getExportJob still reports a Ready job as ready when no exclusion overtakes its archive', async () => {
+      exportJobs.findOne.mockResolvedValue({
+        id: 'job-4',
+        userId: 'u1',
+        status: 'ready',
+        generatedAt: now,
+        requestedAt: now,
+        data: {
+          reportedConversations: [
+            { conversationId: '11111111-1111-1111-1111-111111111111' },
+          ],
+        },
+        error: null,
+      });
+      dataSource.query.mockResolvedValue([
+        { isArchiveOvertakenByMailboxExclusion: false },
+      ]);
+
+      const result = await service.getExportJob('u1', 'job-4');
+      expect(result.status).toBe('ready');
+      expect(result.downloadUrl).toBe('/account/export/job-4/download');
+      expect(result.expiresAt).toEqual(expect.any(String));
     });
 
     describe('getExportDownload', () => {

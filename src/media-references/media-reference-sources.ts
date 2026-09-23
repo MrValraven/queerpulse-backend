@@ -34,6 +34,7 @@ import { ListingReview } from '../listings/entities/listing-review.entity';
 import { Company } from '../companies/entities/company.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { PressContact } from '../press-kit/entities/press-contact.entity';
+import { Sticker } from '../stickers/entities/sticker.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
 
 // Re-exported so every existing importer of `toBareKey` from this module
@@ -370,6 +371,21 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'avatarUrl',
     idColumn: 'id',
     labelColumns: ['name'],
+  }),
+  plainSource({
+    // A published sticker's rasterised PNG (see `UPLOAD_KIND_SPECS.sticker` in
+    // `storage/upload-kinds.ts`). Modelled directly on `EventPhoto.storageKey`
+    // above: a bare storage-key column with no slug of its own. Without this
+    // source a live sticker reads as "no references" to
+    // `StorageMaintenanceService`'s orphan sweep and becomes a deletion
+    // candidate the moment it clears the grace window, which would blank it in
+    // every conversation that has ever sent it.
+    type: 'sticker',
+    field: 'Sticker.storageKey',
+    entity: Sticker,
+    column: 'storageKey',
+    idColumn: 'id',
+    labelColumns: ['label'],
   }),
 ];
 

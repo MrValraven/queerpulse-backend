@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { IsNull } from 'typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { ConnectionsService } from '../connections/connections.service';
@@ -427,6 +428,23 @@ describe('MemberSuggestionsService', () => {
           where: expect.objectContaining({ rosterVisible: true }),
         }),
       );
+    });
+
+    it('excludes a space (subcommunity) from the viewer’s own communities', async () => {
+      seedSharedCommunity(['candidate-1']);
+      profiles.createQueryBuilder.mockImplementation(() => {
+        const builder = new QueryBuilderStub();
+        builder.rows = [profileFixture({ userId: 'candidate-1' })];
+        profileBuilders.push(builder);
+        return builder;
+      });
+
+      await service.suggest(VIEWER_ID);
+
+      const [{ where }] = communities.find.mock.calls[0] as [
+        { where: { parentId?: unknown } },
+      ];
+      expect(where.parentId).toEqual(IsNull());
     });
 
     it('never explains a suggestion with an identity', async () => {

@@ -3,6 +3,8 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -29,22 +31,56 @@ import {
   GifAttachment,
   Message,
   MessageKind,
+  StickerAttachment,
 } from './entities/message.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { toStoredPlainText } from '../communities/community-plain-text';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { sanitizeMessageBody } from './dto/trim-message-body';
-import { storageKeyFromImageUrl } from '../common/image-url';
+import {
+  messageAttachmentReferenceFromImageUrl,
+  storageKeyFromImageUrl,
+} from '../common/image-url';
+import { parseMessageAttachmentReference } from '../storage/message-attachment-reference';
+import {
+  messageAttachmentRouteStorageKey,
+  viewableMessageAttachmentQuery,
+  withMessageAttachmentRoute,
+} from '../storage/message-attachment-route';
+import { StorageService } from '../storage/storage.service';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { DOCUMENT_UPLOAD_TYPES } from '../storage/upload-content-types';
 import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
+import { StickerPackStatus } from '../stickers/entities/sticker-pack.entity';
+import { Sticker } from '../stickers/entities/sticker.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { UserRole } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import {
+  buildAuthorSummary,
+  loadSenderIdentityContext,
+  renderMessageSender,
+  SenderIdentityContext,
+} from './author-summary';
+import {
+  businessSeatUserIdsForViewer,
+  collapseBusinessReactions,
+  describeDirectThreadSeats,
+  DirectThreadSeats,
+  mailboxStaffHistoryFloorCoversPredicate,
+  mailboxThreadPredicate,
+  renderDirectCounterpart,
+  seatExcludedFromMailboxPredicate,
+} from './mailbox-seats';
+import {
+  AuthorSummary,
   buildReplyTo,
   buildSystemEvent,
   ConversationMemberPreview,
   ConversationMemberSummary,
+  FORMER_IDENTITY_AUTHOR,
   MessageResponse,
   messageKindToResponseKind,
   MessageView,
@@ -60,10 +96,48 @@ import {
   MESSAGE_SUBJECT_TYPE,
   notModeratedMessagePredicate,
 } from './message-visibility-predicates';
+import {
+  applyUnreadConversationScope,
+  notHiddenForViewerMessagePredicate,
+  NOT_SENT_AS_SEAT_IDENTITY_PREDICATE,
+} from './unread-conversations-query';
 import { EDIT_WINDOW_MS } from './messaging.constants';
+import {
+  renderMessageByViewerClass,
+  ViewerRenderClassKeyComponent,
+} from './viewer-render-classes';
 import { isEvidenceHoldActive } from './message-evidence-hold';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
+import {
+  claimUnclaimedConversation,
+  CONVERSATION_CLAIM_CHANGED,
+  ConversationClaimChangedEvent,
+} from './conversation-claim';
+import {
+  isSentByViewerField,
+  movedNoteMailboxIdentityIds,
+  toViewerMessageResponse,
+  ViewerMessageResponse,
+  withMovedNoteMailbox,
+} from './viewer-message-fields';
 import type { MessagingPrivacyDTO } from '../preferences/preferences-response';
+
+/**
+ * Final fix F1 (C3): whether `error` is `assertMaySendAs`'s seat refusal,
+ * `IDENTITY_NOT_IN_CONVERSATION`, the one refusal a house-account official
+ * send is exempt from.
+ */
+function isIdentityNotInConversationError(error: unknown): boolean {
+  if (!(error instanceof ForbiddenException)) {
+    return false;
+  }
+  const body = error.getResponse();
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    (body as { code?: unknown }).code === 'IDENTITY_NOT_IN_CONVERSATION'
+  );
+}
 
 /**
  * The fields needed to build a `MessageResponse`. Structural, so both a
@@ -74,6 +148,10 @@ export type MessageLike = Pick<
   | 'id'
   | 'conversationId'
   | 'senderId'
+  // Fix round 1 (Task 11): which identity this message was sent AS, read by
+  // `toMessageResponses` to render a business/persona/company sender as
+  // itself instead of the staff member's own profile.
+  | 'senderIdentityId'
   | 'body'
   | 'replyToId'
   | 'createdAt'
@@ -88,6 +166,24 @@ export type MessageLike = Pick<
   // PRD-361: optional because only a persisted row carries it (a fresh
   // `MessageView` is never a tombstone). Read by `canReport` alone.
   Partial<Pick<Message, 'attachmentPurgeAfter'>>;
+
+/**
+ * Task 13e: how the reactors of a message are shown to one reader.
+ * `individuals` names every reactor, as a group, an ordinary DM and a
+ * business's own staff see them. `customerOfMailbox` is a customer reading a
+ * business mailbox thread: every reaction made by a seat of the business
+ * appears once per key as the business itself. `ownOnly` is a thread whose
+ * seats cannot be attributed, where only the reader's own reactions are
+ * listed, so no reactor who might be a staff member is named.
+ */
+export type ReactorView =
+  | { shape: 'individuals' }
+  | { shape: 'ownOnly' }
+  | {
+      shape: 'customerOfMailbox';
+      businessUserIds: ReadonlySet<string>;
+      business: AuthorSummary;
+    };
 
 /**
  * Cross-cutting read/write helpers shared by `ConversationsService`,
@@ -108,6 +204,12 @@ export type MessageLike = Pick<
 /** ENG-253: cap on `buildMemberPreview`'s avatar-stack preview, see its own
  *  doc for why this is unrelated to `MAX_GROUP_MEMBERS`. */
 const MAX_MEMBER_PREVIEW = 8;
+
+/**
+ * Task 23: logs a claim relay that threw after a reply claimed its thread.
+ * Module-level, like `ConversationsService`'s own claim relay logger.
+ */
+const implicitClaimRelayLogger = new Logger('MessagingCoreService');
 
 @Injectable()
 export class MessagingCoreService {
@@ -144,9 +246,32 @@ export class MessagingCoreService {
     @InjectRepository(ContentModeration)
     private readonly moderationStates: Repository<ContentModeration>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // Read-only here: resolves a `kind:'sticker'` send's `stickerId` to its
+    // row (and published pack status) at write time. `StickersModule` exports
+    // `TypeOrmModule` for exactly this, so no cycle and no re-registration of
+    // the `Sticker` entity.
+    @InjectRepository(Sticker)
+    private readonly stickers: Repository<Sticker>,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
     private readonly usersService: UsersService,
+    // Resolves a user to their own profile identity for the identity-keyed
+    // `pair_key` (see `identityPairKey`/`getOrCreateConversation` below).
+    // Tasks 7 and 8 also read `this.identities` for the mailbox and enquiry
+    // flows, so every concern shares this one lookup rather than holding
+    // its own copy.
+    private readonly identities: IdentitiesService,
+    // Fix round 1 (Task 11): `toMessageResponses`'s own identity-aware
+    // sender wiring, resolving the staff first name (if any) a business
+    // sender's message carries for THIS viewer.
+    private readonly identityAttribution: IdentityAttributionService,
+    // Final fix F1 (C1): copies a business, persona or company attachment
+    // that a member forwards as themselves under their own key, see
+    // `resolveForwardedAttachmentReference`. `StorageModule` is already
+    // imported by `MessagingModule`. Typed optional so a spec that builds
+    // this service by position keeps compiling; the module always injects
+    // it.
+    private readonly storage?: StorageService,
   ) {}
 
   /**
@@ -166,7 +291,71 @@ export class MessagingCoreService {
     if (!part) {
       throw new ForbiddenException('You are not a participant');
     }
+    // Task 13c fix round 1: a STAFF member blocked either way with a mailbox
+    // thread's customer is out of that thread. Task 14a: so is a staff
+    // member who has left the business, whose seat keeps its row with
+    // `leftAt` stamped. Both rules live in
+    // `staffSeatExcludedFromMailboxPredicate`. Every read and write in the
+    // messaging services passes through here, so this one check covers
+    // history, media, pins, reactions, read receipts, sends and claims alike.
+    // The refusal is the plain "not a participant" one, so it says nothing
+    // about the block, the departure or the person behind either. Task 14:
+    // a customer who blocked the business is refused here the same way, as
+    // is every staff member of it (`seatExcludedFromMailboxPredicate`).
+    const isExcludedFromMailbox = await this.participants
+      .createQueryBuilder('seat')
+      .where('seat.id = :seatId', { seatId: part.id })
+      .andWhere(
+        seatExcludedFromMailboxPredicate(
+          'seat.conversation_id',
+          'seat.user_id',
+        ),
+      )
+      .getExists();
+    if (isExcludedFromMailbox) {
+      throw new ForbiddenException('You are not a participant');
+    }
     return part;
+  }
+
+  /**
+   * Task 13h: the users of `conversationId` whose seat is a mailbox staff
+   * seat with a history floor covering the message `messageId`, compared in
+   * SQL through `mailboxStaffHistoryFloorCoversPredicate`, the one
+   * definition of that rule. A live frame about such a message (an edit, a
+   * reaction) skips them. A thread with no floored staff seat returns an
+   * empty set, which is the common case, and a personal or group seat never
+   * appears here. The join skips a soft-deleted message, which is never
+   * edited. Task 13h review M5: a delete frame is about a message the
+   * delete has just soft-deleted, so `shouldIncludeDeletedMessage` reads
+   * the row whatever its `deleted_at`.
+   */
+  async loadMailboxStaffFlooredUserIds(
+    conversationId: string,
+    messageId: string,
+    { shouldIncludeDeletedMessage = false } = {},
+  ): Promise<Set<string>> {
+    const queryBuilder = this.participants.createQueryBuilder('seat');
+    if (shouldIncludeDeletedMessage) {
+      queryBuilder.withDeleted();
+    }
+    const rows = await queryBuilder
+      .select('seat.user_id', 'userId')
+      .innerJoin(
+        'messages',
+        'floored_message',
+        '"floored_message"."id" = :messageId AND "floored_message"."conversation_id" = seat.conversation_id',
+        { messageId },
+      )
+      .where('seat.conversation_id = :conversationId', { conversationId })
+      .andWhere(
+        mailboxStaffHistoryFloorCoversPredicate(
+          '"floored_message"."created_at"',
+          'seat',
+        ),
+      )
+      .getRawMany<{ userId: string }>();
+    return new Set(rows.map((row) => row.userId));
   }
 
   /**
@@ -175,7 +364,9 @@ export class MessagingCoreService {
    * conversation.
    *
    * `requireParticipant` deliberately returns a row regardless of `leftAt`,
-   * because reads still serve a former member their ceilinged history. Every
+   * because reads still serve a former member their ceilinged history (Task
+   * 14a: a departed STAFF seat of a mailbox thread is the one exception, and
+   * `requireParticipant` refuses it outright). Every
    * WRITE, though, was gating on that same lenient check, so a member removed
    * from a group could keep reacting to and pinning/unpinning messages — each
    * one broadcasting a live `reaction` / `message:pinned` frame the remaining
@@ -211,6 +402,11 @@ export class MessagingCoreService {
       .andWhere('other.user_id != :userId', { userId })
       .andWhere('c.kind != :groupKind', { groupKind: ConversationKind.Group })
       .andWhere('c.is_official = false')
+      // Task 13c: a business mailbox thread takes the staff-seat rule that
+      // `requireParticipant` above already applied: a block with the
+      // customer removes that staff member alone (`blockedStaffSeatPredicate`),
+      // the rule the inbox, the send-time gate and the live-room gate share.
+      .andWhere(`NOT ${mailboxThreadPredicate('other.conversation_id')}`)
       .andWhere(
         `EXISTS (
           SELECT 1 FROM "blocks" "b"
@@ -225,6 +421,287 @@ export class MessagingCoreService {
       );
     }
     return participant;
+  }
+
+  /**
+   * The two questions every write path must answer before a message is
+   * stored: may this human speak for that identity at all, and does that
+   * identity hold a seat in this thread. Both are needed. Staff of Cafe
+   * Lisboa may act as Cafe Lisboa, and that says nothing about a thread they
+   * were never part of.
+   *
+   * Called by every write in this module and its sibling messaging
+   * services (send, edit, delete, react, pin) before the write itself, so a
+   * caller who fails either question leaves no row behind.
+   *
+   * CW-28: `options` forwards to `IdentitiesService.assertMayActAs` as-is.
+   * `deleteMessage`'s author branch is the only caller that ever sets
+   * `isDeletingOwnMessage`, and only after it has confirmed the human is
+   * that message's own author; every other write keeps calling this with no
+   * options, so a moderation-removed persona still refuses there.
+   *
+   * CW-05: queries the seat directly by `(conversationId, identityId)`, an
+   * existence check on the exact pair this call needs. The earlier shape
+   * loaded every seat of the conversation and scanned it in JS, a cost that
+   * grew with the thread's whole membership on every call.
+   */
+  async assertMaySendAs(
+    conversationId: string,
+    userId: string,
+    identityId: string,
+    options: { isDeletingOwnMessage?: boolean } = {},
+  ): Promise<void> {
+    await this.identities.assertMayActAs(userId, identityId, options);
+    const isIdentityInThread = await this.participants.exist({
+      where: { conversationId, identityId },
+    });
+    if (!isIdentityInThread) {
+      throw new ForbiddenException({
+        code: 'IDENTITY_NOT_IN_CONVERSATION',
+        message: 'That identity is not part of this conversation',
+      });
+    }
+  }
+
+  /**
+   * Task 13c: every seat of one DIRECT, non-official thread, described from
+   * `callerSeat`'s side by the shared `describeDirectThreadSeats`, with the
+   * seat identities resolved in one batched call. For a single-thread gate
+   * (`sendMessageWithOutcome`, `canJoinConversationLive`) that must agree
+   * with what `ConversationsService.buildConversationSummaries` shows.
+   */
+  async loadDirectThreadSeats(
+    conversationId: string,
+    callerSeat: ConversationParticipant,
+  ): Promise<{
+    threadSeats: DirectThreadSeats;
+    otherSeats: ConversationParticipant[];
+  }> {
+    const seats = await this.participants.find({ where: { conversationId } });
+    const otherSeats = seats.filter(
+      (seat) => seat.userId !== callerSeat.userId,
+    );
+    const identities = await this.identities.getByIds([
+      ...new Set([
+        callerSeat.identityId,
+        ...otherSeats.map((seat) => seat.identityId),
+      ]),
+    ]);
+    const identityKindById = new Map(
+      identities.map((identity) => [identity.id, identity.kind]),
+    );
+    return {
+      threadSeats: describeDirectThreadSeats(
+        callerSeat.identityId,
+        otherSeats,
+        identityKindById,
+      ),
+      otherSeats,
+    };
+  }
+
+  /**
+   * Task 13e: the {@link ReactorView} for `callerSeat`'s person in
+   * `conversationId`, read from the same seat description every other
+   * mailbox read surface uses (`loadDirectThreadSeats`). The business is
+   * rendered as the thread header renders it for a customer: the mailbox
+   * identity's own name, handle and avatar, with no staff first name.
+   * The business's seats are `businessSeatUserIdsForViewer`'s, the set the
+   * REST reaction counts and the live `reaction` frame collapse too.
+   */
+  async loadReactorView(
+    conversationId: string,
+    callerSeat: ConversationParticipant,
+  ): Promise<ReactorView> {
+    const conversation = await this.conversations.findOne({
+      where: { id: conversationId },
+      select: { id: true, kind: true, isOfficial: true },
+    });
+    if (!conversation) {
+      return { shape: 'ownOnly' };
+    }
+    if (
+      conversation.kind === ConversationKind.Group ||
+      conversation.isOfficial
+    ) {
+      return { shape: 'individuals' };
+    }
+    const { threadSeats } = await this.loadDirectThreadSeats(
+      conversationId,
+      callerSeat,
+    );
+    if (threadSeats.isCallerMailboxSeat) {
+      return { shape: 'individuals' };
+    }
+    const mailboxIdentityId = threadSeats.mailboxIdentityId;
+    if (mailboxIdentityId) {
+      const [mailboxIdentities, descriptionById] = await Promise.all([
+        this.identities.getByIds([mailboxIdentityId]),
+        this.identities.describeIdentities([mailboxIdentityId]),
+      ]);
+      const mailboxIdentity = mailboxIdentities[0];
+      const description = descriptionById.get(mailboxIdentityId);
+      return {
+        shape: 'customerOfMailbox',
+        businessUserIds: businessSeatUserIdsForViewer(threadSeats),
+        business:
+          mailboxIdentity && description
+            ? buildAuthorSummary({
+                identity: { id: mailboxIdentityId, kind: mailboxIdentity.kind },
+                identityDisplayName: description.displayName,
+                identityHandle: description.handle ?? '',
+                identityAvatarUrl: description.avatarUrl,
+                staffFirstName: null,
+              })
+            : FORMER_IDENTITY_AUTHOR,
+      };
+    }
+    return threadSeats.hasUnresolvedSeatIdentity
+      ? { shape: 'ownOnly' }
+      : { shape: 'individuals' };
+  }
+
+  /**
+   * Task 13c: the rendering context for a list of messages drawn from many
+   * conversations (search hits, the starred list), for one viewer. Loads
+   * every seat of those conversations, every identity those seats and
+   * messages speak for, and every profile needed, in a fixed number of
+   * batched queries, then renders each conversation's counterpart with the
+   * inbox header's own `renderDirectCounterpart` and each message's sender
+   * with the thread's own `renderMessageSender`.
+   *
+   * Final fix F1 (C1): it also gives each message row that carries its
+   * `id`, `kind` and `attachment` the attachment every read renders
+   * (`withMessageAttachmentRoute`), IN PLACE, so the callers' own
+   * `resolveAttachment` of those rows (search hits, starred items) serves an
+   * image or document sent as a business by its message reference, which
+   * names no staff member. The rows are read-only results those callers
+   * render and discard.
+   */
+  async loadMessageListContext(
+    conversations: ReadonlyArray<
+      Pick<Conversation, 'id' | 'kind' | 'isOfficial'>
+    >,
+    messages: ReadonlyArray<
+      Pick<Message, 'senderId' | 'senderIdentityId'> &
+        Partial<Pick<Message, 'id' | 'kind' | 'attachment'>>
+    >,
+    viewerId: string,
+  ): Promise<{
+    renderCounterpart: (conversationId: string) => AuthorSummary | null;
+    renderSender: (
+      message: Pick<Message, 'senderId' | 'senderIdentityId'>,
+    ) => AuthorSummary;
+  }> {
+    const conversationIds = conversations.map(
+      (conversation) => conversation.id,
+    );
+    const seats = conversationIds.length
+      ? await this.participants.find({
+          where: { conversationId: In(conversationIds) },
+        })
+      : [];
+    const identityIds = [
+      ...seats.map((seat) => seat.identityId),
+      ...messages.flatMap((message) =>
+        message.senderIdentityId ? [message.senderIdentityId] : [],
+      ),
+    ];
+    const profileUserIds = [
+      ...new Set([
+        ...seats.map((seat) => seat.userId),
+        ...presentSenderIds(messages),
+      ]),
+    ];
+    const [profiles, senderIdentityContext] = await Promise.all([
+      profileUserIds.length
+        ? this.profiles.find({ where: { userId: In(profileUserIds) } })
+        : Promise.resolve([]),
+      loadSenderIdentityContext(
+        {
+          identities: this.identities,
+          identityAttribution: this.identityAttribution,
+        },
+        identityIds,
+        viewerId,
+      ),
+    ]);
+    const profileByUser = new Map(
+      profiles.map((profile) => [profile.userId, profile]),
+    );
+    for (const message of messages) {
+      if (
+        message.id !== undefined &&
+        message.kind !== undefined &&
+        message.attachment !== undefined
+      ) {
+        message.attachment = withMessageAttachmentRoute(
+          {
+            id: message.id,
+            kind: message.kind,
+            senderIdentityId: message.senderIdentityId,
+            attachment: message.attachment,
+          },
+          senderIdentityContext.identityKindById,
+        ).attachment;
+      }
+    }
+    const counterpartByConversationId = new Map<string, AuthorSummary | null>();
+    for (const conversation of conversations) {
+      if (
+        conversation.kind === ConversationKind.Group ||
+        conversation.isOfficial
+      ) {
+        continue;
+      }
+      const conversationSeats = seats.filter(
+        (seat) => seat.conversationId === conversation.id,
+      );
+      const callerSeat = conversationSeats.find(
+        (seat) => seat.userId === viewerId,
+      );
+      const otherSeats = conversationSeats.filter(
+        (seat) => seat.userId !== viewerId,
+      );
+      counterpartByConversationId.set(
+        conversation.id,
+        callerSeat
+          ? renderDirectCounterpart(
+              describeDirectThreadSeats(
+                callerSeat.identityId,
+                otherSeats,
+                senderIdentityContext.identityKindById,
+              ),
+              senderIdentityContext.identityKindById,
+              senderIdentityContext.identityDescriptionById,
+              profileByUser,
+            )
+          : null,
+      );
+    }
+    return {
+      renderCounterpart: (conversationId) =>
+        counterpartByConversationId.get(conversationId) ?? null,
+      renderSender: (message) =>
+        renderMessageSender(message, profileByUser, senderIdentityContext),
+    };
+  }
+
+  /**
+   * A business, persona or company only answers inside a thread a member
+   * already opened. This is the whole of the reply-only rule, so it sits at
+   * conversation creation, where every entry point already passes:
+   * `getOrCreateConversation`, `messageRequest`, `deliverEnquiry` and group
+   * creation.
+   */
+  async assertInitiatorIsProfile(identityId: string): Promise<void> {
+    const identity = await this.identities.getById(identityId);
+    if (!identity || identity.kind !== IdentityKind.Profile) {
+      throw new ForbiddenException({
+        code: 'IDENTITY_CANNOT_INITIATE',
+        message: 'Only a member can start a conversation',
+      });
+    }
   }
 
   /**
@@ -324,10 +801,7 @@ export class MessagingCoreService {
    * `hiddenForUserId` parameter (`.setParameter('hiddenForUserId', viewerId)`).
    */
   private notHiddenForViewerPredicate(): string {
-    return `NOT EXISTS (
-      SELECT 1 FROM "message_hides" "mh"
-      WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hiddenForUserId
-    )`;
+    return notHiddenForViewerMessagePredicate();
   }
 
   /** Newest message per conversation THIS viewer hasn't hidden (PRD-227), in
@@ -384,6 +858,9 @@ export class MessagingCoreService {
       )
       .where('m.conversation_id IN (:...convoIds)', { convoIds })
       .andWhere('m.sender_id != :userId', { userId })
+      // Task 15 fix round 1: a colleague's reply sent as the business is not
+      // unread for this staff seat (`NOT_SENT_AS_SEAT_IDENTITY_PREDICATE`).
+      .andWhere(NOT_SENT_AS_SEAT_IDENTITY_PREDICATE)
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
       // leftAt ceiling, matching `MessagesService.getMessages`: a member
@@ -427,54 +904,15 @@ export class MessagingCoreService {
    * it from.
    */
   async unreadConversationCount(userId: string): Promise<number> {
-    const raw = await this.participants
-      .createQueryBuilder('p')
-      .select('COUNT(DISTINCT p.conversation_id)', 'count')
-      .innerJoin(Conversation, 'c', 'c.id = p.conversation_id')
-      .where('p.user_id = :userId', { userId })
-      .andWhere('p.archived_at IS NULL')
-      .andWhere(
-        `(
-          p.marked_unread_at IS NOT NULL
-          OR EXISTS (
-            SELECT 1 FROM "messages" m
-            WHERE m.conversation_id = p.conversation_id
-              AND m.deleted_at IS NULL
-              AND m.sender_id != :userId
-              AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at)
-              AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
-              AND (p.left_at IS NULL OR m.created_at <= p.left_at)
-              AND ${this.notModeratedPredicate()}
-              AND ${this.notHiddenForViewerPredicate()}
-          )
-        )`,
-      )
-      // A blocked DM does not appear in the inbox (`listConversations` drops
-      // it), so it must not appear in the nav badge either: otherwise the
-      // number permanently outruns the list beneath it, on a thread the member
-      // has no UI path to open and clear. Scoped to DIRECT, non-official
-      // threads for the same reason every other block gate is: a block between
-      // two members does not dissolve a group, and nobody is blocked out of
-      // the platform's own official thread (BE-MSG-08).
-      .andWhere(
-        `NOT EXISTS (
-          SELECT 1 FROM "conversation_participants" "__unread_other"
-          JOIN "blocks" "__unread_block"
-            ON ("__unread_block"."blocker_id" = :userId AND "__unread_block"."blocked_id" = "__unread_other"."user_id")
-            OR ("__unread_block"."blocked_id" = :userId AND "__unread_block"."blocker_id" = "__unread_other"."user_id")
-          WHERE "__unread_other"."conversation_id" = p.conversation_id
-            AND "__unread_other"."user_id" != :userId
-            AND c."kind" != :unreadGroupKind
-            AND c."is_official" = false
-        )`,
-        { unreadGroupKind: ConversationKind.Group },
-      )
-      .setParameter(
-        'messageSubjectType',
-        MessagingCoreService.MESSAGE_SUBJECT_TYPE,
-      )
-      .setParameter('hiddenForUserId', userId)
-      .getRawOne<{ count: string }>();
+    // Task 15: the scope itself lives in `applyUnreadConversationScope`, so
+    // the mailbox switcher's per-identity counts
+    // (`countUnreadConversationsByIdentity`) read the same definition.
+    const raw = await applyUnreadConversationScope(
+      this.participants
+        .createQueryBuilder('p')
+        .select('COUNT(DISTINCT p.conversation_id)', 'count'),
+      userId,
+    ).getRawOne<{ count: string }>();
     return Number(raw?.count ?? 0);
   }
 
@@ -524,6 +962,7 @@ export class MessagingCoreService {
       )
       .where('m.conversation_id IN (:...convoIds)', { convoIds })
       .andWhere('m.sender_id != :userId', { userId })
+      .andWhere(NOT_SENT_AS_SEAT_IDENTITY_PREDICATE)
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
       .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
@@ -553,9 +992,16 @@ export class MessagingCoreService {
     if (!messageIds.length) {
       return new Map();
     }
-    const reactionRows = await this.reactions.find({
+    const allReactionRows = await this.reactions.find({
       where: { messageId: In(messageIds) },
     });
+    // Task 13e: a customer reading a business mailbox thread counts the
+    // business once per key, whichever of its staff reacted, the same count
+    // the live `reaction` frame and the "who reacted" list give.
+    const reactionRows = await this.collapseBusinessReactionsForViewer(
+      allReactionRows,
+      viewerId,
+    );
     const rowsByMessage = new Map<string, MessageReaction[]>();
     for (const reaction of reactionRows) {
       const list = rowsByMessage.get(reaction.messageId);
@@ -579,6 +1025,119 @@ export class MessagingCoreService {
   }
 
   /**
+   * Task 13e: `reactionRows` as `viewerId` counts them. Every row of a
+   * message in a thread where `businessSeatUserIdsForViewer` names a
+   * business for this viewer goes through `collapseBusinessReactions`; any
+   * other row is returned as it is. Costs nothing when there are no rows,
+   * and otherwise one query for the messages' conversations plus
+   * `businessSeatUserIdsByConversation`'s own.
+   */
+  private async collapseBusinessReactionsForViewer(
+    reactionRows: MessageReaction[],
+    viewerId: string,
+  ): Promise<MessageReaction[]> {
+    if (!reactionRows.length) {
+      return reactionRows;
+    }
+    const reactedMessages = await this.messages.find({
+      where: { id: In([...new Set(reactionRows.map((row) => row.messageId))]) },
+      select: { id: true, conversationId: true },
+      withDeleted: true,
+    });
+    const conversationIdByMessage = new Map(
+      reactedMessages.map((message) => [message.id, message.conversationId]),
+    );
+    const businessUserIdsByConversation =
+      await this.businessSeatUserIdsByConversation(
+        [...new Set(conversationIdByMessage.values())],
+        viewerId,
+      );
+    if (businessUserIdsByConversation.size === 0) {
+      return reactionRows;
+    }
+    const rowsByMessage = new Map<string, MessageReaction[]>();
+    for (const row of reactionRows) {
+      rowsByMessage.set(row.messageId, [
+        ...(rowsByMessage.get(row.messageId) ?? []),
+        row,
+      ]);
+    }
+    return [...rowsByMessage].flatMap(([messageId, rows]) => {
+      const conversationId = conversationIdByMessage.get(messageId);
+      const businessUserIds = conversationId
+        ? businessUserIdsByConversation.get(conversationId)
+        : undefined;
+      return businessUserIds
+        ? collapseBusinessReactions(rows, businessUserIds)
+        : rows;
+    });
+  }
+
+  /**
+   * Task 13e: for each DIRECT, non-official conversation in
+   * `conversationIds` where `viewerId` holds a seat, the business seat set
+   * `businessSeatUserIdsForViewer` gives from that seat. Conversations with
+   * an empty set are left out. Three batched queries whatever the count.
+   */
+  async businessSeatUserIdsByConversation(
+    conversationIds: string[],
+    viewerId: string,
+  ): Promise<Map<string, ReadonlySet<string>>> {
+    const businessUserIdsByConversation = new Map<
+      string,
+      ReadonlySet<string>
+    >();
+    if (!conversationIds.length) {
+      return businessUserIdsByConversation;
+    }
+    const directConversationIds = (
+      await this.conversations.find({
+        where: { id: In(conversationIds) },
+        select: { id: true, kind: true, isOfficial: true },
+      })
+    )
+      .filter(
+        (conversation) =>
+          conversation.kind !== ConversationKind.Group &&
+          !conversation.isOfficial,
+      )
+      .map((conversation) => conversation.id);
+    if (!directConversationIds.length) {
+      return businessUserIdsByConversation;
+    }
+    const seats = await this.participants.find({
+      where: { conversationId: In(directConversationIds) },
+      select: { conversationId: true, userId: true, identityId: true },
+    });
+    const seatIdentities = await this.identities.getByIds([
+      ...new Set(seats.map((seat) => seat.identityId)),
+    ]);
+    const identityKindById = new Map(
+      seatIdentities.map((identity) => [identity.id, identity.kind]),
+    );
+    for (const conversationId of directConversationIds) {
+      const threadSeats = seats.filter(
+        (seat) => seat.conversationId === conversationId,
+      );
+      const viewerSeat = threadSeats.find((seat) => seat.userId === viewerId);
+      if (!viewerSeat) {
+        continue;
+      }
+      const businessUserIds = businessSeatUserIdsForViewer(
+        describeDirectThreadSeats(
+          viewerSeat.identityId,
+          threadSeats.filter((seat) => seat !== viewerSeat),
+          identityKindById,
+        ),
+      );
+      if (businessUserIds.size > 0) {
+        businessUserIdsByConversation.set(conversationId, businessUserIds);
+      }
+    }
+    return businessUserIdsByConversation;
+  }
+
+  /**
    * Builds the `lastMessage` inbox-preview `MessageResponse` shared by
    * `ConversationsService.listConversations` and `toConversationResponse`/
    * `toGroupConversationResponse`. Previews carry no delivery/pin/star/reply
@@ -597,13 +1156,39 @@ export class MessagingCoreService {
     // everyone else). Optional purely so a call site that has not been
     // threaded through yet keeps compiling; see `buildSystemEvent`'s own doc.
     viewerId?: string,
-  ): MessageResponse {
+    // Task 13c: the viewer's identity context, so a message sent AS a
+    // business previews as the business, exactly as `toMessageResponses`
+    // renders it in the thread (`renderMessageSender`). Every direct-thread
+    // caller passes one. Omitted only by the GROUP callers, whose senders
+    // always speak as their own profile: `assertMaySendAs` requires the
+    // sending identity to hold a seat, and every group seat is a profile.
+    senderIdentityContext?: SenderIdentityContext,
+    // Task 23 cleanup: the identity of the viewer's own seat in this thread,
+    // so the `moved_to_business_mailbox` note previews exactly as the thread
+    // renders it (`withMovedNoteMailbox`): staff of the business keep the
+    // owner as its actor, and every other viewer reads the business itself.
+    // A caller that passes no seat or no identity context previews the note
+    // with the business as its actor, the customer's rendering.
+    viewerSeatIdentityId?: string,
+  ): ViewerMessageResponse {
     const isSystem = message.kind === MessageKind.System;
+    // Final fix F1 (C1): an image or document sent as a business previews by
+    // its message reference, exactly as the thread renders it. A group
+    // caller passes no identity context, and every group sender speaks as
+    // their own profile.
+    const previewAttachment = senderIdentityContext
+      ? withMessageAttachmentRoute(
+          message,
+          senderIdentityContext.identityKindById,
+        ).attachment
+      : message.attachment;
     return {
       id: message.id,
       conversationId,
       body: message.body,
-      sender: senderAuthorSummary(message.senderId, profileByUser),
+      sender: senderIdentityContext
+        ? renderMessageSender(message, profileByUser, senderIdentityContext)
+        : senderAuthorSummary(message.senderId, profileByUser),
       createdAt: message.createdAt.toISOString(),
       editedAt: message.editedAt ? message.editedAt.toISOString() : null,
       reactions,
@@ -622,10 +1207,35 @@ export class MessagingCoreService {
       canReport: false,
       replyTo: null,
       kind: messageKindToResponseKind(message.kind),
-      attachment: resolveAttachment(message.attachment),
+      attachment: resolveAttachment(previewAttachment),
       systemEvent: isSystem
-        ? buildSystemEvent(message.systemEvent, profileByUser, viewerId)
+        ? withMovedNoteMailbox(
+            buildSystemEvent(message.systemEvent, profileByUser, viewerId),
+            {
+              viewerSeatIdentityId,
+              identityDescriptionById:
+                senderIdentityContext?.identityDescriptionById ?? new Map(),
+            },
+          )
         : null,
+      // Final fix F1 (B2): the inbox row carries `isSentByViewer` under the
+      // thread's own rule (`isSentByViewerField`), so staff of the business
+      // read "You:" on a reply they typed themselves, as the thread shows
+      // it. A customer, a personal message and a system row get no key.
+      // `isGroupOrOfficialConversation` is false here because this path
+      // needs no flag: a group caller passes no identity context, and a
+      // group or official thread's sender speaks as a profile, for which
+      // the rule returns no key.
+      ...(senderIdentityContext && viewerId
+        ? isSentByViewerField(message, {
+            viewerId,
+            viewerSeatIdentityId,
+            identityKindById: senderIdentityContext.identityKindById,
+            identityDescriptionById:
+              senderIdentityContext.identityDescriptionById,
+            isGroupOrOfficialConversation: false,
+          })
+        : {}),
     };
   }
 
@@ -793,7 +1403,22 @@ export class MessagingCoreService {
     // lookup entirely. Left undefined by callers that have not looked it up
     // yet, in which case the fallback `findOne` below runs exactly as before.
     conversationKind?: ConversationKind,
-  ): Promise<MessageResponse[]> {
+    // Final review I2: `renderMessageForViewerClasses` passes a loader that
+    // shares the identity rows, staff and preferences across the classes it
+    // renders. Every other caller loads them for this call alone.
+    loadSenderIdentities: (
+      identityIds: string[],
+      readerUserId: string,
+    ) => Promise<SenderIdentityContext> = (identityIds, readerUserId) =>
+      loadSenderIdentityContext(
+        {
+          identities: this.identities,
+          identityAttribution: this.identityAttribution,
+        },
+        identityIds,
+        readerUserId,
+      ),
+  ): Promise<ViewerMessageResponse[]> {
     if (!rows.length) {
       return [];
     }
@@ -835,6 +1460,19 @@ export class MessagingCoreService {
         ...systemUserIds,
       ]),
     ];
+    // Fix round 1 (Task 11): every distinct identity this page's OWN rows
+    // were sent as, so the batch below costs the same one-time fixed price
+    // whether this page holds one message or fifty. Task 13c: the reply
+    // parents' sender identities ride the same batch, so a quote of a
+    // business reply names the business (see `replyTo` below). System actors
+    // still render off their author's plain profile.
+    const senderIdentityIds = [
+      ...new Set(
+        [...rows, ...parents]
+          .map((m) => m.senderIdentityId)
+          .filter((identityId): identityId is string => identityId != null),
+      ),
+    ];
     // Delivered watermark for the "double check": how far the OTHER
     // participant(s) have acked receipt. All rows in a call share one
     // conversation, so one query suffices. `otherDeliveredAt` is the EARLIEST
@@ -858,6 +1496,12 @@ export class MessagingCoreService {
       moderationRows,
       viewerHiddenReplyParentRows,
       resolvedConversationKind,
+      // Fix round 1 (Task 11): this page's sender identities, kind-resolved
+      // and display-resolved, and one `StaffNameResolver` covering every one
+      // of them for THIS viewer, so a business sender renders as itself with
+      // no per-message query. Task 13c: loaded through the shared
+      // `loadSenderIdentityContext`, the same loader the inbox preview uses.
+      senderIdentityContext,
     ] = await Promise.all([
       this.profiles.find({ where: { userId: In(senderIds) } }),
       this.reactionSummariesByMessage(messageIds, viewerId),
@@ -906,6 +1550,12 @@ export class MessagingCoreService {
         : this.conversations
             .findOne({ where: { id: conversationId }, select: { kind: true } })
             .then((found) => found?.kind ?? null),
+      // Task 23: the businesses this page's moved notes name ride the same
+      // batch, so a note costs no query of its own.
+      loadSenderIdentities(
+        [...senderIdentityIds, ...movedNoteMailboxIdentityIds(rows)],
+        viewerId,
+      ),
     ]);
     const viewerIsStaff =
       viewer?.role === UserRole.Admin || viewer?.role === UserRole.Moderator;
@@ -964,6 +1614,57 @@ export class MessagingCoreService {
         );
       }),
     );
+    // Task 13h: when THIS viewer's seat is a mailbox staff seat with a
+    // history floor (a co-manager of a thread moved into a business
+    // mailbox), a parent at or before the floor does not exist for them, so
+    // a later reply quoting it renders the missing-parent quote: `deleted`,
+    // with no snippet, sender name, thumbnail or file name, and the generic
+    // `user` kind. It is left out of the map `buildReplyTo` and the
+    // business-name renaming below read, which keeps the parent's author off
+    // the quote too. Compared in SQL through
+    // `mailboxStaffHistoryFloorCoversPredicate`, so a personal or group
+    // "clear chat" keeps quoting as before. The query runs only for a viewer
+    // with a floor on a page that quotes something.
+    const flooredParentIds =
+      viewerParticipant?.clearedAt && parents.length > 0
+        ? new Set(
+            (
+              await this.messages
+                .createQueryBuilder('parent')
+                .withDeleted()
+                .select('parent.id', 'parentId')
+                .innerJoin(
+                  ConversationParticipant,
+                  'seat',
+                  'seat.id = :viewerSeatId',
+                  { viewerSeatId: viewerParticipant.id },
+                )
+                .where('parent.id IN (:...parentIds)', {
+                  parentIds: parents.map((parent) => parent.id),
+                })
+                .andWhere(
+                  mailboxStaffHistoryFloorCoversPredicate(
+                    'parent.created_at',
+                    'seat',
+                  ),
+                )
+                .getRawMany<{ parentId: string }>()
+            ).map((row) => row.parentId),
+          )
+        : new Set<string>();
+    // Final fix F1 (C1): a quoted parent sent as a business carries its
+    // message reference, so the quote's thumbnail names no staff member.
+    const quotableParentById = new Map(
+      [...parentById]
+        .filter(([parentId]) => !flooredParentIds.has(parentId))
+        .map(([parentId, parent]): [string, Message] => [
+          parentId,
+          withMessageAttachmentRoute(
+            parent,
+            senderIdentityContext.identityKindById,
+          ),
+        ]),
+    );
     const pinnedAtByMessage = new Map(
       pinRows.map((pin) => [pin.messageId, pin.pinnedAt]),
     );
@@ -971,24 +1672,51 @@ export class MessagingCoreService {
     // Only PRESENT recipients count toward "delivered to all" — a member who left
     // a group will never ack, so including them would peg the tick at one check
     // forever. For a 1:1 DM this is just the single counterpart.
+    //
+    // Task 13c: in a direct thread, a seat sharing the viewer's own identity
+    // is a colleague on the same side of a business mailbox, so it is never
+    // a recipient. When every remaining recipient speaks for ONE identity
+    // (the staff seats of a business, read by its customer), the business
+    // counts as having received a message the moment ANY of its seats has,
+    // the LATEST watermark, matching the inbox's own `otherDeliveredAt`.
+    // Taking the earliest there would tie the customer's ticks to the least
+    // active staff member, and a newly seated colleague who has acked
+    // nothing would turn every earlier message back to one tick, showing the
+    // customer a change in the roster.
+    const viewerIdentityId = viewerParticipant?.identityId;
     const presentRecipients = otherParticipantRows.filter(
-      (row) => row.leftAt == null,
+      (row) =>
+        row.leftAt == null &&
+        (resolvedConversationKind === ConversationKind.Group ||
+          viewerIdentityId === undefined ||
+          row.identityId !== viewerIdentityId),
     );
+    const isOneRecipientIdentity =
+      resolvedConversationKind !== ConversationKind.Group &&
+      presentRecipients.length > 0 &&
+      presentRecipients.every(
+        (row) => row.identityId === presentRecipients[0]!.identityId,
+      );
     const deliveredWatermarks = presentRecipients
       .map((row) => row.deliveredAt)
       .filter((value): value is Date => value != null);
     // "Delivered to all present recipients": every present non-viewer participant
     // must have acked, then take the EARLIEST of their watermarks (for a 1:1 DM
-    // that is just the single counterpart's).
-    const otherDeliveredAt =
-      presentRecipients.length > 0 &&
-      deliveredWatermarks.length === presentRecipients.length
-        ? deliveredWatermarks.reduce((earliest, value) =>
-            value < earliest ? value : earliest,
+    // that is just the single counterpart's). One recipient identity: the
+    // LATEST acked watermark, see above.
+    const otherDeliveredAt: Date | null =
+      isOneRecipientIdentity && deliveredWatermarks.length > 0
+        ? deliveredWatermarks.reduce((latest, value) =>
+            value > latest ? value : latest,
           )
-        : null;
+        : presentRecipients.length > 0 &&
+            deliveredWatermarks.length === presentRecipients.length
+          ? deliveredWatermarks.reduce((earliest, value) =>
+              value < earliest ? value : earliest,
+            )
+          : null;
     const profileByUser = new Map(senders.map((p) => [p.userId, p]));
-    return rows.map((m) => {
+    const responses = rows.map((m): MessageResponse => {
       // A moderator takedown tombstones the message the same way an author's
       // own soft-delete does. A `remove_content` takedown (`removedAt`) hides
       // it from EVERYONE; a `hide_content` takedown (`hiddenAt` without
@@ -1024,11 +1752,55 @@ export class MessagingCoreService {
       // be offered as an editable/deletable message of its own, no matter how
       // recent or who the viewer is.
       const isSystemMessage = m.kind === MessageKind.System;
+      // Fix round 1 (Task 11), corrected in fix round 2: a business/persona/
+      // company sender renders as the identity itself, with the staff first
+      // name alongside only when attribution allows it for THIS viewer. Task
+      // 13c moved the rule into the shared `renderMessageSender`, where its
+      // full reasoning lives, so the inbox preview, search and the starred
+      // list render a sender exactly as the thread does.
+      const sender = renderMessageSender(
+        m,
+        profileByUser,
+        senderIdentityContext,
+      );
+      // Task 13c: `buildReplyTo` names a quoted parent after its human
+      // author's profile. A parent sent AS a business is quoted under the
+      // business's own name, through the same renderer as the parent's own
+      // bubble, so replying to a business message never shows the customer
+      // the staff member who typed it.
+      const plainReplyTo = buildReplyTo(
+        m.replyToId,
+        quotableParentById,
+        profileByUser,
+        hiddenReplyParentIds,
+      );
+      const replyParent = m.replyToId
+        ? quotableParentById.get(m.replyToId)
+        : undefined;
+      const replyParentSenderIdentityKind = replyParent?.senderIdentityId
+        ? senderIdentityContext.identityKindById.get(
+            replyParent.senderIdentityId,
+          )
+        : undefined;
+      const replyTo =
+        plainReplyTo &&
+        replyParent?.senderId &&
+        replyParent.senderIdentityId &&
+        replyParentSenderIdentityKind !== IdentityKind.Profile
+          ? {
+              ...plainReplyTo,
+              senderName: renderMessageSender(
+                replyParent,
+                profileByUser,
+                senderIdentityContext,
+              ).displayName,
+            }
+          : plainReplyTo;
       return {
         id: m.id,
         conversationId: m.conversationId,
         body: isDeleted ? '' : m.body,
-        sender: senderAuthorSummary(m.senderId, profileByUser),
+        sender,
         createdAt: m.createdAt.toISOString(),
         editedAt: m.editedAt ? m.editedAt.toISOString() : null,
         reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
@@ -1079,24 +1851,114 @@ export class MessagingCoreService {
               !moderation?.removedAt &&
               !moderation?.hiddenAt &&
               isEvidenceHoldActive(m.attachmentPurgeAfter))),
-        replyTo: buildReplyTo(
-          m.replyToId,
-          parentById,
-          profileByUser,
-          hiddenReplyParentIds,
-        ),
+        replyTo,
         // Timeline kind + resolved system event. A `user` message carries a null
         // event; a `system` one resolves actor/target ids to display names so the
         // client renders bilingual templates ("You created the group", "Ana
         // added Bea") without ever seeing a user id.
         kind: messageKindToResponseKind(m.kind),
-        attachment: isDeleted ? null : resolveAttachment(m.attachment),
+        // Final fix F1 (C1): an image or document sent as a business,
+        // persona or company is rendered by its message reference
+        // (`withMessageAttachmentRoute`), the same URL for every viewer, so
+        // the storage key naming the staff member who uploaded it never
+        // reaches the thread, the gallery, the pins or a live frame.
+        attachment: isDeleted
+          ? null
+          : resolveAttachment(
+              withMessageAttachmentRoute(
+                m,
+                senderIdentityContext.identityKindById,
+              ).attachment,
+            ),
         systemEvent:
           m.kind === MessageKind.System
             ? buildSystemEvent(m.systemEvent, profileByUser, viewerId)
             : null,
       };
     });
+    // Task 23: the per-viewer fields, added once every response is built.
+    // `isSentByViewer` tells staff of the sending business their own
+    // replies from a colleague's, and the moved note names the business,
+    // with the business as its actor for anyone outside its staff. Both
+    // read the viewer's own seat and the identity batch above.
+    // Task 23 cleanup: `isSentByViewer` is left off a group or official
+    // thread whatever its seats hold. The official flag costs a query only
+    // when the viewer's seat speaks for a business, the one case in which a
+    // row of this page could carry the key, so a personal or group page
+    // reads nothing more.
+    const viewerSeatIdentityKind = viewerIdentityId
+      ? senderIdentityContext.identityKindById.get(viewerIdentityId)
+      : undefined;
+    const isGroupOrOfficialConversation =
+      resolvedConversationKind === ConversationKind.Group ||
+      (viewerSeatIdentityKind !== undefined &&
+        viewerSeatIdentityKind !== IdentityKind.Profile &&
+        (await this.isOfficialConversation(conversationId)));
+    const viewerMessageContext = {
+      viewerId,
+      viewerSeatIdentityId: viewerIdentityId,
+      identityKindById: senderIdentityContext.identityKindById,
+      identityDescriptionById: senderIdentityContext.identityDescriptionById,
+      isGroupOrOfficialConversation,
+    };
+    return responses.map((response, index) =>
+      toViewerMessageResponse(response, rows[index]!, viewerMessageContext),
+    );
+  }
+
+  /**
+   * Final review I2: `message` as `toMessageResponses` renders it for each
+   * of `viewerIds`, rendered once per class of viewers whose inputs to that
+   * method are identical (`renderMessageByViewerClass`). A live frame on a
+   * business thread reaches every staff member, and this keeps its cost
+   * flat in the staff count. `keyComponents` exists for the equivalence
+   * spec; every caller leaves it at its default.
+   */
+  renderMessageForViewerClasses(
+    message: MessageLike,
+    viewerIds: ReadonlyArray<string>,
+    conversationKind: ConversationKind,
+    onRenderError: (error: unknown) => void,
+    keyComponents?: ReadonlyArray<ViewerRenderClassKeyComponent>,
+  ): Promise<Map<string, ViewerMessageResponse>> {
+    return renderMessageByViewerClass(
+      {
+        participants: this.participants,
+        messages: this.messages,
+        reactions: this.reactions,
+        stars: this.stars,
+        hides: this.hides,
+        users: this.dataSource.getRepository(User),
+        identities: this.identities,
+        identityAttribution: this.identityAttribution,
+        render: async (row, viewerId, loadSenderIdentities) =>
+          (
+            await this.toMessageResponses(
+              [row],
+              viewerId,
+              false,
+              conversationKind,
+              loadSenderIdentities,
+            )
+          )[0],
+      },
+      message,
+      viewerIds,
+      onRenderError,
+      keyComponents,
+    );
+  }
+
+  /** Whether `conversationId` is an official thread. A missing row reads
+   *  as false. */
+  private async isOfficialConversation(
+    conversationId: string,
+  ): Promise<boolean> {
+    const conversation = await this.conversations.findOne({
+      where: { id: conversationId },
+      select: { isOfficial: true },
+    });
+    return conversation?.isOfficial ?? false;
   }
 
   /**
@@ -1117,8 +1979,10 @@ export class MessagingCoreService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image' | 'document',
+    kind?: 'user' | 'gif' | 'image' | 'document' | 'sticker',
     attachment?: AttachmentInput,
+    stickerId?: string,
+    asIdentityId?: string,
   ): Promise<{ view: MessageView; response: MessageResponse; isNew: boolean }> {
     if (clientMessageId) {
       const existing = await this.messages.findOne({
@@ -1130,6 +1994,42 @@ export class MessagingCoreService {
         return this.buildPostResult(existing, senderId, false);
       }
     }
+    // Task 7: the identity this message is sent AS, defaulting to the
+    // sender's own profile identity when nobody chose a business one. Both
+    // questions `assertMaySendAs` answers must hold before anything below is
+    // validated or persisted: this call sits before every other check in this
+    // method precisely so a refused identity leaves no row behind.
+    const senderIdentityId =
+      asIdentityId ??
+      (await this.identities.resolveProfileIdentityId(senderId));
+    // Final fix F1 (C3): the house account posts every official message and
+    // broadcast, and it holds no seat in any official thread by design
+    // (`OfficialConversationsService`), so the seat half of the guard would
+    // refuse every one of them. That one refusal is waived, only for a send
+    // with no chosen identity, by the house account itself, into an official
+    // thread (`isHouseAccountOfficialSend`). The lookup runs only on that
+    // refusal, so an ordinary send reads nothing more, and every other
+    // sender without a seat is still refused.
+    await this.assertMaySendAs(
+      conversationId,
+      senderId,
+      senderIdentityId,
+    ).catch(async (error: unknown) => {
+      if (
+        asIdentityId === undefined &&
+        isIdentityNotInConversationError(error) &&
+        (await this.isHouseAccountOfficialSend(conversationId, senderId))
+      ) {
+        return;
+      }
+      throw error;
+    });
+    // Task 23 (spec 4.3): a reply sent as a business, persona or company
+    // identity claims an unclaimed thread for its sender. A send with no
+    // chosen identity speaks as the sender's own profile and needs no read.
+    const shouldClaimOnReply =
+      asIdentityId !== undefined &&
+      (await this.isMailboxIdentity(senderIdentityId));
     if (
       (kind === 'gif' || kind === 'image' || kind === 'document') &&
       !attachment
@@ -1138,12 +2038,31 @@ export class MessagingCoreService {
         `attachment is required for a ${kind} message`,
       );
     }
+    // Defence in depth: `attachment.provider` is free-form client input
+    // (`GifAttachmentDto.provider`'s only bound is `@IsString()
+    // @MaxLength(32)`), and the gif/image/document branches below copy it
+    // verbatim into the stored attachment. Left unchecked, a forged
+    // `provider: 'sticker'` on an ordinary photo/GIF/document would persist
+    // on a row the tightened `isStickerAttachment`
+    // (`entities/message.entity.ts`) now refuses to read back as a real
+    // sticker anywhere, corrupting reply quotes, moderation evidence, and
+    // exports for that row. A legitimate client never sends this
+    // combination, so this is a plain 400.
+    if (
+      (kind === 'gif' || kind === 'image' || kind === 'document') &&
+      attachment?.provider === 'sticker'
+    ) {
+      throw new BadRequestException(
+        `attachment.provider cannot be "sticker" for a ${kind} message`,
+      );
+    }
     // Narrowed from the loose wire-level `AttachmentInput` (see its own doc —
     // one DTO class carries every kind's fields, all but `url`/`provider`
     // optional) to a fully-typed, ready-to-persist attachment once the branch
     // below validates it against the specific fields ITS kind requires. Stays
     // null for a plain text/system/gif-without-attachment send.
-    let resolvedAttachment: GifAttachment | DocumentAttachment | null = null;
+    let resolvedAttachment:
+      GifAttachment | DocumentAttachment | StickerAttachment | null = null;
     if (kind === 'gif' && attachment) {
       if (!/^https:\/\//.test(attachment.url)) {
         throw new BadRequestException('A gif attachment must be an https URL');
@@ -1181,8 +2100,21 @@ export class MessagingCoreService {
       // other image field via `storageKeyFromImageUrl`), and this is also what
       // makes the ownership check below correct for a forward, not just a
       // fresh send.
-      const url = storageKeyFromImageUrl(attachment.url);
-      const previewUrl = storageKeyFromImageUrl(attachment.previewUrl);
+      //
+      // Final fix F1 (C1): a forward of an image a business, persona or
+      // company sent arrives as its message reference, and resolves to a key
+      // through `resolveForwardedAttachmentReference`, `previewUrl` included.
+      const forwardedAttachmentKey =
+        await this.resolveForwardedAttachmentReference(
+          attachment.url,
+          senderId,
+          MessageKind.Image,
+          shouldClaimOnReply,
+        );
+      const url =
+        forwardedAttachmentKey ?? storageKeyFromImageUrl(attachment.url);
+      const previewUrl =
+        forwardedAttachmentKey ?? storageKeyFromImageUrl(attachment.previewUrl);
       // The attachment's `url` must be a well-formed `message-image` storage
       // key — otherwise any authenticated member could attach an arbitrary
       // key (an unrelated kind's, or a malformed string) to a message. 404-
@@ -1239,8 +2171,17 @@ export class MessagingCoreService {
       // attachment arrives already resolved to `GET /files/<key>` (see
       // `resolveAttachment`), never a bare key. `storageKeyFromImageUrl` is
       // format-agnostic (it only strips the app's own `/files/` prefix), so it
-      // applies unchanged to a document key.
-      const url = storageKeyFromImageUrl(attachment.url);
+      // applies unchanged to a document key. Final fix F1 (C1): a forwarded
+      // message reference resolves as on the image branch.
+      const forwardedAttachmentKey =
+        await this.resolveForwardedAttachmentReference(
+          attachment.url,
+          senderId,
+          MessageKind.Document,
+          shouldClaimOnReply,
+        );
+      const url =
+        forwardedAttachmentKey ?? storageKeyFromImageUrl(attachment.url);
       // The attachment's `url` must be a well-formed `message-document`
       // storage key — same reasoning as the image branch's own check.
       if (parseStorageKey(url) !== UPLOAD_KIND_SPECS['message-document']) {
@@ -1289,6 +2230,40 @@ export class MessagingCoreService {
         caption: this.sanitizeAttachmentCaption(attachment.caption),
       };
     }
+    if (kind === 'sticker') {
+      // A sticker carries no member-authored text. The frontend sends its
+      // localized "Sticker" fallback as `body` so the existing `@MinLength(1)`
+      // still holds; it is dropped below before storage, so a sticker
+      // message is always a bare picture bubble with no attached text.
+      if (attachment) {
+        throw new BadRequestException(
+          'A sticker send requires a stickerId and carries no attachment',
+        );
+      }
+      if (!stickerId) {
+        throw new BadRequestException('Missing stickerId');
+      }
+      const sticker = await this.stickers.findOne({
+        where: { id: stickerId },
+        relations: { pack: true },
+      });
+      // An unknown sticker and one in an unpublished pack are the same 400:
+      // nothing here is worth disclosing, and a draft pack must not be
+      // sendable from a client that guessed an id.
+      if (!sticker || sticker.pack?.status !== StickerPackStatus.Published) {
+        throw new BadRequestException('Unknown or unavailable sticker');
+      }
+      body = '';
+      resolvedAttachment = {
+        url: sticker.storageKey,
+        previewUrl: sticker.storageKey,
+        width: sticker.width,
+        height: sticker.height,
+        provider: 'sticker',
+        stickerId: sticker.id,
+        label: sticker.label,
+      };
+    }
     const entityKind =
       kind === 'gif'
         ? MessageKind.Gif
@@ -1296,19 +2271,24 @@ export class MessagingCoreService {
           ? MessageKind.Image
           : kind === 'document'
             ? MessageKind.Document
-            : MessageKind.User;
+            : kind === 'sticker'
+              ? MessageKind.Sticker
+              : MessageKind.User;
     // DTO callers arrive already sanitized; server-composed bodies (enquiries,
-    // a materialized connection note) get the same pass here.
+    // a materialized connection note) get the same pass here. A sticker send's
+    // `body` was already dropped to '' above, so it stores no text.
     const storedBody = sanitizeMessageBody(body);
     if (!storedBody && !resolvedAttachment) {
       throw new BadRequestException('body must not be empty');
     }
     let saved: Message;
+    let implicitClaimedAt: Date | null;
     try {
-      saved = await this.messages.save(
+      const persisted = await this.persistSentMessage(
         this.messages.create({
           conversationId,
           senderId,
+          senderIdentityId,
           body: storedBody,
           replyToId: replyToId ?? null,
           clientMessageId: clientMessageId ?? null,
@@ -1319,7 +2299,10 @@ export class MessagingCoreService {
           // validated) — never persist a raw, unvalidated `attachment` here.
           attachment: resolvedAttachment,
         }),
+        shouldClaimOnReply ? { conversationId, senderId } : null,
       );
+      saved = persisted.message;
+      implicitClaimedAt = persisted.implicitClaimedAt;
     } catch (error) {
       // Lost the race with a concurrent identical write (the partial unique
       // index fired, code 23505): fetch and return the winner — still idempotent.
@@ -1339,7 +2322,163 @@ export class MessagingCoreService {
       }
       throw error;
     }
+    // Task 23: the claim event goes out after the transaction has committed
+    // and BEFORE `buildPostResult` emits MESSAGE_CREATED, so the push
+    // listener, which narrows staff push to the claimant, reads the claim
+    // this reply just committed.
+    if (implicitClaimedAt) {
+      this.emitImplicitClaim({
+        conversationId,
+        mailboxIdentityId: senderIdentityId,
+        change: 'claimed',
+        isImplicit: true,
+        actorUserId: senderId,
+        claimedByUserId: senderId,
+        previousClaimantUserId: null,
+        changedAt: implicitClaimedAt,
+      });
+    }
     return this.buildPostResult(saved, senderId, true);
+  }
+
+  /**
+   * Final fix F1 (C3): whether `senderId` is the house account posting into
+   * the official thread `conversationId`. Both must hold: the thread is
+   * official, and the sender is a system account (`users.is_system`, which
+   * only the house account carries). A member replying in their own official
+   * thread holds a seat and never reaches this.
+   */
+  private async isHouseAccountOfficialSend(
+    conversationId: string,
+    senderId: string,
+  ): Promise<boolean> {
+    const [isOfficial, sender] = await Promise.all([
+      this.isOfficialConversation(conversationId),
+      this.usersService.findById(senderId),
+    ]);
+    return isOfficial && sender?.isSystem === true;
+  }
+
+  /**
+   * Final fix F1 (C1): the storage key a forwarded attachment reference
+   * stands for, or `null` when `value` is no reference (a fresh upload or a
+   * forward of a personal message, both of which keep their key path).
+   *
+   * The sender must be able to see the referenced message by the same rules
+   * its download applies (`viewableMessageAttachmentQuery`), and it must be of
+   * the kind being sent; otherwise the forward is refused as the key path
+   * refuses one. A forward sent AS a business, persona or company
+   * (`isSentAsMailboxIdentity`) keeps the original key, since its own reads
+   * render the new message by reference too. A forward sent as the member
+   * themself gets a copy under the member's own key, unless the key is
+   * already theirs, so the personal message never carries another person's
+   * user id.
+   */
+  private async resolveForwardedAttachmentReference(
+    value: string,
+    senderId: string,
+    attachmentKind: MessageKind.Image | MessageKind.Document,
+    isSentAsMailboxIdentity: boolean,
+  ): Promise<string | null> {
+    const reference = messageAttachmentReferenceFromImageUrl(value);
+    const parsedReference = reference
+      ? parseMessageAttachmentReference(reference)
+      : null;
+    if (!parsedReference) {
+      return null;
+    }
+    const source = await viewableMessageAttachmentQuery(
+      this.messages,
+      parsedReference.messageId,
+      senderId,
+    )
+      .andWhere('message.kind = :forwardedKind', {
+        forwardedKind: attachmentKind,
+      })
+      .getOne();
+    const sourceKey = source ? messageAttachmentRouteStorageKey(source) : null;
+    if (!sourceKey) {
+      throw new ForbiddenException(
+        attachmentKind === MessageKind.Image
+          ? 'You may only attach an image you uploaded'
+          : 'You may only attach a document you uploaded',
+      );
+    }
+    if (isSentAsMailboxIdentity || storageKeyOwnerId(sourceKey) === senderId) {
+      return sourceKey;
+    }
+    // Controller ruling after fix round N1: the uploader's account status is
+    // not read here. Every source this path accepts was sent as a business,
+    // persona or company (`viewableMessageAttachmentQuery`), whose bytes the
+    // reference route serves to this same member whatever the uploader's
+    // status, so refusing the copy would protect nothing and would tell the
+    // member that some staff member is suspended. A personal source never
+    // reaches this line: the query refuses it, and a key-based forward of it
+    // keeps the uploader's key, which the key route goes on withholding.
+    // A suspended forwarder is refused by the send path before this runs.
+    if (!this.storage) {
+      throw new InternalServerErrorException('Service temporarily unavailable');
+    }
+    return this.storage.copyObjectToOwner(sourceKey, senderId);
+  }
+
+  /**
+   * Task 23: whether `identityId` is a business, persona or company
+   * identity. One batched identity read per send, made only for a send
+   * with a chosen identity.
+   */
+  private async isMailboxIdentity(identityId: string): Promise<boolean> {
+    const [identity] = await this.identities.getByIds([identityId]);
+    return identity !== undefined && identity.kind !== IdentityKind.Profile;
+  }
+
+  /**
+   * Task 23: saves a fresh message. With a `claimant` (a reply sent as a
+   * business identity), the insert and the claim run in ONE transaction:
+   * `claimUnclaimedConversation`, the same write `ConversationsService.claim`
+   * makes, claims the thread for the sender only while nobody holds it, so a
+   * reply never moves a colleague's claim. An insert that fails rolls the
+   * claim back with it, and the caller's `23505` branch then returns the
+   * winner as before. `implicitClaimedAt` is the database's claim time when the
+   * UPDATE matched a row, and null otherwise.
+   */
+  private async persistSentMessage(
+    draft: Message,
+    claimant: { conversationId: string; senderId: string } | null,
+  ): Promise<{ message: Message; implicitClaimedAt: Date | null }> {
+    if (!claimant) {
+      return {
+        message: await this.messages.save(draft),
+        implicitClaimedAt: null,
+      };
+    }
+    return this.dataSource.transaction(async (manager) => {
+      const message = await manager.getRepository(Message).save(draft);
+      const implicitClaimedAt = await claimUnclaimedConversation(
+        manager.getRepository(Conversation),
+        claimant.conversationId,
+        claimant.senderId,
+      );
+      return { message, implicitClaimedAt };
+    });
+  }
+
+  /**
+   * Task 23: announces a claim a reply took, exactly as a manual claim is
+   * announced (`CONVERSATION_CLAIM_CHANGED`, relayed to staff seats by
+   * `MailboxStaffRelayListener`). Best-effort: the reply has committed, so
+   * a relay failure is logged and the send still succeeds.
+   */
+  private emitImplicitClaim(event: ConversationClaimChangedEvent): void {
+    try {
+      this.eventEmitter.emit(CONVERSATION_CLAIM_CHANGED, event);
+    } catch (error) {
+      implicitClaimRelayLogger.error(
+        `Failed to relay the claim a reply took on conversation ${
+          event.conversationId
+        }: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    }
   }
 
   /**
@@ -1372,9 +2511,21 @@ export class MessagingCoreService {
    * your own upload" ownership check WITHOUT trusting any client-supplied flag
    * or id — closing the client-controlled `forwarded` bypass.
    * `attachmentKey` is the canonical bare storage key (callers collapse the
-   * resolved `/files/<key>` URL back to the key before this runs). A left
-   * (`leftAt`) participant still qualifies: they retain read access to
+   * resolved `/files/<key>` URL back to the key before this runs). A member
+   * who left a group (`leftAt`) still qualifies: they retain read access to
    * history, so they genuinely saw the attachment and may forward it.
+   *
+   * Task 13g: two seats no longer qualify, since a forward re-serves the
+   * bytes to everyone in the destination thread (`FilesController`). A staff
+   * seat excluded by the block rule, so a staff member a customer blocked
+   * cannot pass that customer's photos and documents on. And a departed
+   * staff seat, one that speaks for a business identity and has `leftAt`
+   * set, so a member who no longer works for the business cannot pass its
+   * customers' files on either. Task 14a: both rules are read from
+   * `staffSeatExcludedFromMailboxPredicate`, their one home. A seat that
+   * speaks for the member themself keeps the group leaver's allowance above.
+   * Task 14: read through `seatExcludedFromMailboxPredicate`, so a customer
+   * who blocked the business cannot forward from that thread either.
    */
   private async senderCanForwardAttachment(
     senderId: string,
@@ -1393,6 +2544,17 @@ export class MessagingCoreService {
       .andWhere("message.attachment ->> 'url' = :attachmentKey", {
         attachmentKey,
       })
+      .andWhere(
+        `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':senderId')}`,
+      )
+      // Task 13h: a message at or before the history floor of the sender's
+      // mailbox staff seat in its thread is one they cannot see, so it
+      // proves no access. Forwarding it would hand a co-manager the owner's
+      // and the customer's pre-floor files. A personal or group seat's
+      // "clear chat" keeps its earlier allowance.
+      .andWhere(
+        `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
+      )
       .getCount();
     return accessibleCount > 0;
   }
@@ -1540,8 +2702,35 @@ export class MessagingCoreService {
     return { view, response: response!, isNew: emit };
   }
 
-  pairKey(a: string, b: string): string {
-    return a < b ? `${a}:${b}` : `${b}:${a}`;
+  /**
+   * The canonical key for a one-to-one thread, sorted so argument order cannot
+   * create a duplicate. It keys on IDENTITIES, which is what lets a member
+   * hold both a personal thread with a shop's owner and a separate thread with
+   * the shop without colliding on the unique index.
+   */
+  identityPairKey(identityIdA: string, identityIdB: string): string {
+    if (identityIdA === identityIdB) {
+      throw new Error('A conversation needs two different identities');
+    }
+    return [identityIdA, identityIdB].sort().join(':');
+  }
+
+  /**
+   * The `identityPairKey` for two members each acting as themselves, resolving
+   * both to their own profile identity first. For a caller that only ever
+   * looks up or opens a PERSONAL thread and never one where either side is
+   * acting as a business identity (`ConversationsService.createConversation`'s
+   * pre-connection existing-thread check is the one caller today).
+   */
+  async resolveProfilePairKey(
+    userIdA: string,
+    userIdB: string,
+  ): Promise<string> {
+    const [identityIdA, identityIdB] = await Promise.all([
+      this.identities.resolveProfileIdentityId(userIdA),
+      this.identities.resolveProfileIdentityId(userIdB),
+    ]);
+    return this.identityPairKey(identityIdA, identityIdB);
   }
 
   /**
@@ -1562,13 +2751,24 @@ export class MessagingCoreService {
    * the same one-tap-reply treatment a brand new enquiry would. It never
    * touches a thread that already has an initiator (its story is already
    * told) or is already open (nothing to claim).
+   *
+   * `identityIdB` is who `userIdB` is being reached AS: a listing or company
+   * mailbox rather than their own profile. It defaults to `userIdB`'s own
+   * profile identity, which is every call site today (Tasks 7/8 pass a real
+   * mailbox identity). `userIdA` always acts as their own profile identity
+   * here; a caller sending AS a business identity goes through the identity
+   * send path instead.
    */
   async getOrCreateConversation(
-    a: string,
-    b: string,
+    userIdA: string,
+    userIdB: string,
     coldContactInitiatorUserId?: string,
+    identityIdB?: string,
   ): Promise<{ conversation: Conversation; created: boolean }> {
-    const pairKey = this.pairKey(a, b);
+    const identityIdA = await this.identities.resolveProfileIdentityId(userIdA);
+    const resolvedIdentityIdB =
+      identityIdB ?? (await this.identities.resolveProfileIdentityId(userIdB));
+    const pairKey = this.identityPairKey(identityIdA, resolvedIdentityIdB);
     const existing = await this.conversations.findOne({ where: { pairKey } });
     if (existing) {
       if (
@@ -1583,6 +2783,10 @@ export class MessagingCoreService {
       }
       return { conversation: existing, created: false };
     }
+    // Reply-only: only a member acting as themselves may open a fresh
+    // thread. This check sits right before creation; the reuse branch
+    // above hands back an already-open thread, so it needs no guard here.
+    await this.assertInitiatorIsProfile(identityIdA);
     try {
       const conversation = await this.dataSource.transaction(
         async (manager) => {
@@ -1596,11 +2800,13 @@ export class MessagingCoreService {
           await manager.save([
             manager.create(ConversationParticipant, {
               conversationId: convo.id,
-              userId: a,
+              userId: userIdA,
+              identityId: identityIdA,
             }),
             manager.create(ConversationParticipant, {
               conversationId: convo.id,
-              userId: b,
+              userId: userIdB,
+              identityId: resolvedIdentityIdB,
             }),
           ]);
           return convo;
@@ -1622,5 +2828,206 @@ export class MessagingCoreService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Task 18: whether `fromUserId` may write to the mailbox `toIdentityId`,
+   * as a refusal code or null, with the mailbox's current staff. The one
+   * answer both the read-only contactability hint and the write
+   * (`getOrCreateIdentityConversation`) use, so the two cannot disagree.
+   *
+   * A person block between the member and one staff member is deliberately
+   * absent here. Refusing on it would tell the member that person works for
+   * the business; the thread seats every staff member and the read-time
+   * rules (`isSeatExcludedFromMailbox` and its SQL twin) leave the blocked
+   * one out. The member's block of the identity itself is a
+   * `BlockFilterService` question, answered by `MessageRequestsService`.
+   */
+  async evaluateIdentityContact(
+    fromUserId: string,
+    toIdentityId: string,
+  ): Promise<{
+    refusal: IdentityContactRefusal | null;
+    staffUserIds: string[];
+  }> {
+    const identity = await this.identities.getById(toIdentityId);
+    if (!identity || identity.kind === IdentityKind.Profile) {
+      return { refusal: 'IDENTITY_NOT_A_MAILBOX', staffUserIds: [] };
+    }
+    if (await this.identities.isRemovedPersona(identity)) {
+      return { refusal: 'IDENTITY_REMOVED', staffUserIds: [] };
+    }
+    const staffUserIds = await this.identities.staffUserIds(toIdentityId);
+    if (staffUserIds.length === 0) {
+      return { refusal: 'IDENTITY_HAS_NO_STAFF', staffUserIds };
+    }
+    if (staffUserIds.includes(fromUserId)) {
+      return { refusal: 'IDENTITY_IS_YOUR_OWN', staffUserIds };
+    }
+    return { refusal: null, staffUserIds };
+  }
+
+  /**
+   * Task 18: the thread `fromUserId`, as themselves, already has with the
+   * mailbox `toIdentityId`, or null. Read-only; keyed exactly as
+   * `getOrCreateIdentityConversation` keys the thread it opens.
+   */
+  async findIdentityConversation(
+    fromUserId: string,
+    toIdentityId: string,
+  ): Promise<Conversation | null> {
+    const fromIdentityId =
+      await this.identities.resolveProfileIdentityId(fromUserId);
+    if (fromIdentityId === toIdentityId) {
+      return null;
+    }
+    return this.conversations.findOne({
+      where: { pairKey: this.identityPairKey(fromIdentityId, toIdentityId) },
+    });
+  }
+
+  /**
+   * Task 18: open or reuse the thread between a member and a mailbox
+   * identity (a listing, persona or company). The business side is one seat
+   * per staff member, each stamped with the mailbox identity, which keeps
+   * unread, mute, pin and drafts per person while the thread belongs to the
+   * mailbox. The thread is keyed on the identity pair, so the member's
+   * personal thread with the owner stays a separate conversation.
+   *
+   * `fromIdentityId` is the identity the member is acting as, when the
+   * request names one (the mailbox switcher sends it on every write). It must
+   * be one they may act as, and the reply-only rule
+   * (`assertInitiatorIsProfile`) then refuses anything but their own profile,
+   * on a reuse as much as on a creation.
+   *
+   * Refusals, each coded (`evaluateIdentityContact`): the target is no
+   * mailbox, a removed persona, a mailbox with no staff (nobody could ever
+   * answer), or one the member staffs.
+   *
+   * `coldContactInitiatorUserId` works exactly as it does in
+   * `getOrCreateConversation`: it seeds `initiatorUserId` on a new thread,
+   * and claims an existing thread that has no initiator and is not open yet.
+   * A reused thread is returned as it is. Seating the current staff on it is
+   * the caller's step (`IdentityMailboxSyncService.resyncMailbox`), and the
+   * member's own seat is left untouched, as a reused personal thread is.
+   */
+  async getOrCreateIdentityConversation(
+    fromUserId: string,
+    toIdentityId: string,
+    coldContactInitiatorUserId?: string,
+    fromIdentityId?: string,
+  ): Promise<{ conversation: Conversation; created: boolean }> {
+    if (fromIdentityId) {
+      await this.identities.assertMayActAs(fromUserId, fromIdentityId);
+    }
+    const senderIdentityId =
+      fromIdentityId ??
+      (await this.identities.resolveProfileIdentityId(fromUserId));
+    await this.assertInitiatorIsProfile(senderIdentityId);
+    const { refusal, staffUserIds } = await this.evaluateIdentityContact(
+      fromUserId,
+      toIdentityId,
+    );
+    if (refusal) {
+      throw identityContactRefusalException(refusal);
+    }
+
+    const pairKey = this.identityPairKey(senderIdentityId, toIdentityId);
+    const existing = await this.conversations.findOne({ where: { pairKey } });
+    if (existing) {
+      if (
+        coldContactInitiatorUserId &&
+        !existing.initiatorUserId &&
+        !existing.openedAt
+      ) {
+        await this.conversations.update(existing.id, {
+          initiatorUserId: coldContactInitiatorUserId,
+        });
+        existing.initiatorUserId = coldContactInitiatorUserId;
+      }
+      return { conversation: existing, created: false };
+    }
+    try {
+      const conversation = await this.dataSource.transaction(
+        async (manager) => {
+          const created = await manager.save(
+            manager.create(Conversation, {
+              isOfficial: false,
+              pairKey,
+              initiatorUserId: coldContactInitiatorUserId ?? null,
+            }),
+          );
+          await manager.save([
+            manager.create(ConversationParticipant, {
+              conversationId: created.id,
+              userId: fromUserId,
+              identityId: senderIdentityId,
+            }),
+            ...staffUserIds.map((staffUserId) =>
+              manager.create(ConversationParticipant, {
+                conversationId: created.id,
+                userId: staffUserId,
+                identityId: toIdentityId,
+              }),
+            ),
+          ]);
+          return created;
+        },
+      );
+      return { conversation, created: true };
+    } catch (error) {
+      // Lost a concurrent create race on the UNIQUE pair_key: return the
+      // winner, as `getOrCreateConversation` does.
+      if (
+        error instanceof QueryFailedError &&
+        (error.driverError as { code?: string })?.code === '23505'
+      ) {
+        const winner = await this.conversations.findOne({
+          where: { pairKey },
+        });
+        if (winner) {
+          return { conversation: winner, created: false };
+        }
+      }
+      throw error;
+    }
+  }
+}
+
+/**
+ * Task 18: why a member may not write to a mailbox identity. Each is the
+ * stable `code` of the refusal `identityContactRefusalException` builds.
+ */
+export type IdentityContactRefusal =
+  | 'IDENTITY_NOT_A_MAILBOX'
+  | 'IDENTITY_REMOVED'
+  | 'IDENTITY_HAS_NO_STAFF'
+  | 'IDENTITY_IS_YOUR_OWN';
+
+/** Task 18: the coded HTTP refusal for one `IdentityContactRefusal`. */
+export function identityContactRefusalException(
+  refusal: IdentityContactRefusal,
+): BadRequestException | ForbiddenException {
+  switch (refusal) {
+    case 'IDENTITY_NOT_A_MAILBOX':
+      return new BadRequestException({
+        code: refusal,
+        message: 'There is no mailbox to write to here',
+      });
+    case 'IDENTITY_REMOVED':
+      return new ForbiddenException({
+        code: refusal,
+        message: 'This persona was removed and cannot be messaged',
+      });
+    case 'IDENTITY_HAS_NO_STAFF':
+      return new BadRequestException({
+        code: refusal,
+        message: 'Nobody can answer for this yet',
+      });
+    case 'IDENTITY_IS_YOUR_OWN':
+      return new BadRequestException({
+        code: refusal,
+        message: 'You cannot message a mailbox you answer',
+      });
   }
 }

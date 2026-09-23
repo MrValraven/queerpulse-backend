@@ -12,11 +12,16 @@ import {
   ConnectionAcceptedEvent,
 } from '../connections/connection.events';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { sanitizeMessageBody } from './dto/trim-message-body';
 import { MessageView } from './message-response';
-import { MessagingCoreService } from './messaging-core.service';
+import {
+  IdentityContactRefusal,
+  identityContactRefusalException,
+  MessagingCoreService,
+} from './messaging-core.service';
 
 /** Why a cold enquiry cannot be delivered. `self` is a caller bug (enquiring on
  *  your own thing); `blocked` is a block in either direction, the one hard stop
@@ -52,6 +57,54 @@ export interface EnquiryContactability {
 }
 
 /**
+ * Task 18: why a cold enquiry cannot reach a mailbox identity. `blocked` is
+ * the member's own block of that business, persona or company, or (fix round
+ * 1) a mailbox whose every staff member is person-blocked with the member,
+ * either way, so that nobody could read the message. The two read the same
+ * on purpose. Every other value is the `IdentityContactRefusal` the write
+ * would throw.
+ */
+export type IdentityEnquiryBlockedReason = 'blocked' | IdentityContactRefusal;
+
+/** Task 18 fix round 1: the stable code of the `blocked` refusal. */
+export const IDENTITY_BLOCKED_CODE = 'IDENTITY_BLOCKED';
+
+/**
+ * Task 18 fix round 1: the 403 for a `blocked` enquiry, the one body every
+ * enquiry entry point (directory, persona, company) and the delivery itself
+ * throw, so a client keys off `code` and the sentence reads the same
+ * whichever of the two causes it was.
+ */
+export function identityBlockedException(): ForbiddenException {
+  return new ForbiddenException({
+    code: IDENTITY_BLOCKED_CODE,
+    message: 'You cannot contact this business',
+  });
+}
+
+/**
+ * Task 18: the mailbox twin of `EnquiryContactability`, from
+ * `MessageRequestsService.identityEnquiryContactability`.
+ */
+export interface IdentityEnquiryContactability {
+  canDeliver: boolean;
+  blockedReason: IdentityEnquiryBlockedReason | null;
+  /** Always false: a staff member may always answer a cold enquiry, and
+   *  that answer is what opens the thread. Kept so callers built against
+   *  `EnquiryContactability` read the same field. */
+  replyRequiresConnection: boolean;
+  /**
+   * True until the business has answered: personal connections do not apply
+   * to a mailbox thread, so the member's follow-ups wait on the first reply
+   * however the two humans are connected. False once the existing thread is
+   * open, and whenever `canDeliver` is false.
+   */
+  followUpAwaitsReply: boolean;
+  /** The thread the member already has with this mailbox, or null. */
+  existingConversationId: string | null;
+}
+
+/**
  * Message-requests concern of the split `MessagingService`: cold-contact flows
  * that seed or bypass a 1:1 conversation without the caller already being a
  * participant — the "message a stranger" connection-request flow
@@ -67,6 +120,8 @@ export class MessageRequestsService {
     private readonly core: MessagingCoreService,
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
+    // Task 18: seats the mailbox's current staff on a reused enquiry thread.
+    private readonly mailboxSync: IdentityMailboxSyncService,
   ) {}
 
   async messageRequest(
@@ -219,6 +274,138 @@ export class MessageRequestsService {
     );
     await this.core.postMessage(conversation.id, fromUserId, body);
     return { conversationId: conversation.id };
+  }
+
+  /**
+   * Task 18: can `fromUserId` deliver a cold enquiry to the mailbox
+   * `toIdentityId` (a listing, persona or company) right now, and what will
+   * the thread allow afterwards? The read-only twin of
+   * `deliverEnquiryToIdentity`, answering from the same two rules it
+   * enforces: the member's own block of that identity, and
+   * `MessagingCoreService.evaluateIdentityContact`. Nothing here names or
+   * implies any staff member.
+   */
+  async identityEnquiryContactability(
+    fromUserId: string,
+    toIdentityId: string,
+  ): Promise<IdentityEnquiryContactability> {
+    const blockedReason = await this.identityEnquiryBlockedReason(
+      fromUserId,
+      toIdentityId,
+    );
+    if (blockedReason) {
+      return {
+        canDeliver: false,
+        blockedReason,
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+        existingConversationId: null,
+      };
+    }
+    const existing = await this.core.findIdentityConversation(
+      fromUserId,
+      toIdentityId,
+    );
+    return {
+      canDeliver: true,
+      blockedReason: null,
+      replyRequiresConnection: false,
+      followUpAwaitsReply: !existing?.openedAt,
+      existingConversationId: existing?.id ?? null,
+    };
+  }
+
+  /**
+   * Task 18: `deliverEnquiry` for a mailbox. Delivers a one-off message from
+   * `fromUserId` to the business, persona or company `toIdentityId`, in the
+   * thread keyed on the pair of identities, seating every current staff
+   * member. Every step of the personal path happens here too, with the
+   * audience the mailbox gives it:
+   *
+   *  - the member's block of the identity is a hard stop, a 403 coded
+   *    `IDENTITY_BLOCKED` (`identityBlockedException`);
+   *  - the report-driven pause applies. Personal connection never reaches a
+   *    mailbox thread, so it applies whoever the staff are;
+   *  - `initiatorUserId` is seeded or claimed as the member, so any staff
+   *    member can answer with one tap and that answer opens the thread;
+   *  - a mailbox whose every staff member is person-blocked with the
+   *    member, either way, refuses as the identity block does (fix round 1):
+   *    the message could reach nobody;
+   *  - a reused thread gets the current staff seated
+   *    (`IdentityMailboxSyncService.resyncConversation`, this thread only),
+   *    departed staff staying departed;
+   *  - the message goes through `MessagingCoreService.postMessage`, whose
+   *    `MESSAGE_CREATED` drives the live frames and the push, both built
+   *    from the reachable mailbox seats.
+   *
+   * `asIdentityId` is the identity the member is acting as, when the request
+   * names one. Only their own profile may open or reuse a thread
+   * (`MessagingCoreService.assertInitiatorIsProfile`, `IDENTITY_CANNOT_INITIATE`).
+   */
+  async deliverEnquiryToIdentity(
+    fromUserId: string,
+    toIdentityId: string,
+    body: string,
+    asIdentityId?: string,
+  ): Promise<{ conversationId: string }> {
+    const blockedReason = await this.identityEnquiryBlockedReason(
+      fromUserId,
+      toIdentityId,
+    );
+    if (blockedReason === 'blocked') {
+      throw identityBlockedException();
+    }
+    if (blockedReason) {
+      throw identityContactRefusalException(blockedReason);
+    }
+    await this.connectionsService.assertRequestsNotPaused(fromUserId);
+    const { conversation, created } =
+      await this.core.getOrCreateIdentityConversation(
+        fromUserId,
+        toIdentityId,
+        fromUserId,
+        asIdentityId,
+      );
+    if (!created) {
+      // Fix round 1: this one thread only. Reconciling the whole mailbox
+      // during a customer's send was too heavy.
+      await this.mailboxSync.resyncConversation(toIdentityId, conversation.id);
+    }
+    await this.core.postMessage(conversation.id, fromUserId, body);
+    return { conversationId: conversation.id };
+  }
+
+  /**
+   * Task 18 fix round 1: the one answer the contactability read and the
+   * delivery share. `blocked` for the member's block of the identity, and
+   * for a mailbox with no reachable staff seat: every current staff member
+   * blocked with the member in either direction (the same read
+   * `loadReachableMailboxSeats` excludes a seat on). A person block with SOME
+   * staff still delivers; those seats are left out at read time. Otherwise
+   * the coded `IdentityContactRefusal`, or null.
+   */
+  private async identityEnquiryBlockedReason(
+    fromUserId: string,
+    toIdentityId: string,
+  ): Promise<IdentityEnquiryBlockedReason | null> {
+    const [isIdentityBlocked, contact] = await Promise.all([
+      this.blockFilter.isIdentityBlocked(fromUserId, toIdentityId),
+      this.core.evaluateIdentityContact(fromUserId, toIdentityId),
+    ]);
+    if (isIdentityBlocked) {
+      return 'blocked';
+    }
+    if (contact.refusal) {
+      return contact.refusal;
+    }
+    const blockedStaffUserIds = await this.blockFilter.blockedUserIds(
+      fromUserId,
+      contact.staffUserIds,
+    );
+    const hasReachableStaff = contact.staffUserIds.some(
+      (staffUserId) => !blockedStaffUserIds.has(staffUserId),
+    );
+    return hasReachableStaff ? null : 'blocked';
   }
 
   @OnEvent(CONNECTION_ACCEPTED)

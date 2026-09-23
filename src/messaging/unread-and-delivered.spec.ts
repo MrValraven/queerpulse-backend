@@ -2,6 +2,9 @@ import { ForbiddenException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, Repository } from 'typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
+import { Sticker } from '../stickers/entities/sticker.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationsService } from './conversations.service';
@@ -86,9 +89,13 @@ describe('MessagingCoreService.unreadConversationCount (nav DM badge, PRD-341)',
       empty as unknown as Repository<MessageHide>,
       empty as unknown as Repository<ContentModeration>,
       empty as unknown as Repository<Profile>,
+      empty as unknown as Repository<Sticker>,
       empty as unknown as DataSource,
       empty as unknown as EventEmitter2,
       empty as unknown as UsersService,
+      empty as unknown as IdentitiesService,
+      // Task 11: unused by the unread/delivered counting under test here.
+      empty as unknown as IdentityAttributionService,
     );
   });
 
@@ -260,6 +267,10 @@ describe('ConversationsService.markDelivered (delivered watermark)', () => {
       empty as never,
       // PRD-364: `PreferencesService`, unused by `markDelivered` (this describe
       // block's only path under test).
+      empty as never,
+      // Task 9: `IdentitiesService`, likewise unused here.
+      empty as never,
+      // Task 11: `IdentityAttributionService`, likewise unused here.
       empty as never,
     );
   });

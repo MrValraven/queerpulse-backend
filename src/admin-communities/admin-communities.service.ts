@@ -1,14 +1,20 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Not, Repository } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import {
+  COMMUNITY_MEMBER_LEFT,
+  CommunityMemberLeftEvent,
+} from '../communities/community.events';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
   CommunityMember,
@@ -20,6 +26,7 @@ import {
   Community,
   CommunityFrozenReason,
 } from '../communities/entities/community.entity';
+import { SubcommunityCascadeService } from '../communities/subcommunity-cascade.service';
 // TS-13: a reported gathering photograph resolves to the community through its
 // album's gathering. `Event` is imported under the name `Gathering` because
 // this file already talks about weekly activity "events" in prose and the
@@ -34,10 +41,15 @@ import {
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import {
+  SUBCOMMUNITIES_NOT_ALLOWED_CODE,
+  TOP_LEVEL_WHERE,
+} from '../communities/subcommunity-rules';
+import {
   AdminCommunityDetailDTO,
   AdminCommunityListDTO,
   AdminCommunityModeratorDTO,
   AdminCommunityQueueItemDTO,
+  AdminCommunitySpaceDTO,
   AdminGovernanceLogEntryDTO,
   CommunityAggregates,
   toAdminCommunityCard,
@@ -194,6 +206,8 @@ export class AdminCommunitiesService {
     private readonly users: Repository<User>,
     private readonly dataSource: DataSource,
     private readonly governanceLog: CommunityGovernanceLogService,
+    private readonly subcommunityCascade: SubcommunityCascadeService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async listCommunities(): Promise<AdminCommunityListDTO> {
@@ -201,7 +215,10 @@ export class AdminCommunitiesService {
     // (`1785700200000-AddCommunitiesCreatedAtIndex`) lets Postgres serve this
     // `ORDER BY created_at ASC LIMIT` as an `Index Scan ... Limit` that stops
     // after the cap, rather than sorting the whole table first.
+    // Top-level only: this dashboard lists top-level communities, and each
+    // space appears under its parent on the admin detail.
     const allCommunities = await this.communities.find({
+      where: TOP_LEVEL_WHERE,
       order: { createdAt: 'ASC' },
       take: MAX_LISTED_COMMUNITIES,
     });
@@ -279,12 +296,19 @@ export class AdminCommunitiesService {
 
     const now = new Date();
     const reportScopePromise = this.loadReportScope([community]);
-    const [aggregatesByCommunityId, moderators, reportScope] =
-      await Promise.all([
-        this.aggregatesForMany([community], now, reportScopePromise),
-        this.moderatorsFor(community.id),
-        reportScopePromise,
-      ]);
+    const [
+      aggregatesByCommunityId,
+      moderators,
+      reportScope,
+      parentSummary,
+      subcommunitySummaries,
+    ] = await Promise.all([
+      this.aggregatesForMany([community], now, reportScopePromise),
+      this.moderatorsFor(community.id),
+      reportScopePromise,
+      this.loadParentSummary(community),
+      this.loadSubcommunitySummaries(community.id),
+    ]);
 
     return toAdminCommunityDetail(
       community,
@@ -292,7 +316,50 @@ export class AdminCommunitiesService {
       moderators,
       this.scopedQueueFor(community, reportScope, now, isPlatformStaffReader),
       reportScope.truncated,
+      parentSummary,
+      subcommunitySummaries,
     );
+  }
+
+  /** The space's parent, present only when this community is a space
+   *  (`Community.parentId` set); null for a top-level community. */
+  private async loadParentSummary(
+    community: Community,
+  ): Promise<{ slug: string; name: string } | null> {
+    if (!community.parentId) return null;
+    const parent = await this.communities.findOne({
+      where: { id: community.parentId },
+      select: { slug: true, name: true },
+    });
+    if (!parent) return null;
+    return { slug: parent.slug, name: parent.name };
+  }
+
+  /** Every space open under this community, oldest first, with each space's
+   *  own member count loaded through the same grouped-count query
+   *  `aggregatesForMany` uses for the parent's own `memberCount`. Always
+   *  empty for a space itself, which cannot host spaces of its own. */
+  private async loadSubcommunitySummaries(
+    communityId: string,
+  ): Promise<AdminCommunitySpaceDTO[]> {
+    const spaces = await this.communities.find({
+      where: { parentId: communityId },
+      order: { createdAt: 'ASC' },
+      select: { id: true, slug: true, name: true, accessTier: true },
+    });
+    if (!spaces.length) return [];
+    const memberCountRows = await this.loadMemberCounts(
+      spaces.map((space) => space.id),
+    );
+    const memberCountBySpaceId = new Map<string, number>(
+      memberCountRows.map((row) => [row.communityId, Number(row.count)]),
+    );
+    return spaces.map((space) => ({
+      slug: space.slug,
+      name: space.name,
+      accessTier: space.accessTier,
+      memberCount: memberCountBySpaceId.get(space.id) ?? 0,
+    }));
   }
 
   /**
@@ -371,6 +438,25 @@ export class AdminCommunitiesService {
     // though the neighbouring freeze/archive/reassign-owner overrides all
     // write a governance-log row — and `requiresSecondVouch` in particular
     // changes who can join the community at all.
+    // A space never hosts spaces of its own (one level deep) and is never
+    // featured (the featured flag stays false on a space, per the
+    // subcommunities spec). Both are refused with the one 409 code
+    // `POST /communities/:slug/subcommunities` gives a parent that does not
+    // allow spaces, so the admin client branches on a single code. Featuring
+    // a space would also clear the real featured community while
+    // `getFeatured` filters spaces out, leaving Discover without its hero.
+    // Turning either switch off is always allowed; turning
+    // `allowsSubcommunities` off leaves any spaces already open in place,
+    // since it only gates the CREATE check in `SubcommunitiesService.create`.
+    if (
+      community.parentId !== null &&
+      (dto.isFeatured === true || dto.allowsSubcommunities === true)
+    ) {
+      throw new ConflictException({
+        message: 'A space cannot be featured or host spaces of its own',
+        code: SUBCOMMUNITIES_NOT_ALLOWED_CODE,
+      });
+    }
     const changes: Record<string, { from: boolean; to: boolean }> = {};
     if (
       dto.requiresSecondVouch !== undefined &&
@@ -396,6 +482,15 @@ export class AdminCommunitiesService {
     ) {
       changes.isFeatured = { from: community.isFeatured, to: dto.isFeatured };
     }
+    if (
+      dto.allowsSubcommunities !== undefined &&
+      dto.allowsSubcommunities !== community.allowsSubcommunities
+    ) {
+      changes.allowsSubcommunities = {
+        from: community.allowsSubcommunities,
+        to: dto.allowsSubcommunities,
+      };
+    }
     if (dto.requiresSecondVouch !== undefined) {
       community.requiresSecondVouch = dto.requiresSecondVouch;
     }
@@ -404,6 +499,9 @@ export class AdminCommunitiesService {
     }
     if (dto.isFeatured !== undefined) {
       community.isFeatured = dto.isFeatured;
+    }
+    if (dto.allowsSubcommunities !== undefined) {
+      community.allowsSubcommunities = dto.allowsSubcommunities;
     }
     if (dto.isFeatured === true) {
       // `isFeatured` is a platform-wide singleton (only ever one `true` row)
@@ -448,6 +546,12 @@ export class AdminCommunitiesService {
    * NULL`), so two concurrent freezes can't double-write, and a governance-log
    * entry is only written when this call is the one that actually changed the
    * state.
+   *
+   * On a parent, the freeze cascades onto every live space in the same
+   * transaction as the parent's own write, mirroring
+   * `CommunitiesService.freeze`'s own cascade, so a space is never left open
+   * under a parent an admin just paused. A space carries no spaces of its
+   * own, so the cascade is skipped when `community.parentId` is set.
    */
   async freeze(
     slug: string,
@@ -458,25 +562,39 @@ export class AdminCommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
-    const result = await this.communities
-      .createQueryBuilder()
-      .update(Community)
-      // Stamped `manual`: a platform-staff freeze is a human decision, and
-      // `CommunitiesService.unfreeze`'s automatic-freeze gate (BE-COM-04) is
-      // there to stop a community's own owner clearing MODERATION's freeze,
-      // not to trap them under one an admin can already lift here.
-      // `frozenByUserId` records the staff member who froze it, matching what
-      // `CommunitiesService.freeze` stamps on the owner/mod path. No
-      // `frozenNote`: the member-facing note is written by a community's own
-      // moderators, and platform staff explaining a takedown to the roster is
-      // a different decision that belongs to the moderation surface.
-      .set({
-        frozenAt: () => 'now()',
-        frozenReason: CommunityFrozenReason.Manual,
-        frozenByUserId: actorUserId,
-      })
-      .where('id = :id AND frozen_at IS NULL', { id: community.id })
-      .execute();
+    const { result, frozenSpaceIds } = await this.dataSource.transaction(
+      async (manager: EntityManager) => {
+        const freezeResult = await manager
+          .getRepository(Community)
+          .createQueryBuilder()
+          .update(Community)
+          // Stamped `manual`: a platform-staff freeze is a human decision, and
+          // `CommunitiesService.unfreeze`'s automatic-freeze gate (BE-COM-04)
+          // exists to stop a community's own owner clearing MODERATION's
+          // freeze; an admin can always lift one here. `frozenByUserId` records the staff member who froze it,
+          // matching what `CommunitiesService.freeze` stamps on the
+          // owner/mod path. No `frozenNote`: the member-facing note is
+          // written by a community's own moderators, and platform staff
+          // explaining a takedown to the roster is a different decision
+          // that belongs to the moderation surface.
+          .set({
+            frozenAt: () => 'now()',
+            frozenReason: CommunityFrozenReason.Manual,
+            frozenByUserId: actorUserId,
+          })
+          .where('id = :id AND frozen_at IS NULL', { id: community.id })
+          .execute();
+        const spaceIds =
+          freezeResult.affected && !community.parentId
+            ? await this.subcommunityCascade.freezeSpaces(
+                manager,
+                community.id,
+                actorUserId,
+              )
+            : [];
+        return { result: freezeResult, frozenSpaceIds: spaceIds };
+      },
+    );
 
     if (result.affected) {
       await this.governanceLog.log({
@@ -485,6 +603,14 @@ export class AdminCommunitiesService {
         action: GovernanceLogAction.Frozen,
         metadata: { adminOverride: true },
       });
+      for (const spaceId of frozenSpaceIds) {
+        await this.governanceLog.log({
+          communityId: spaceId,
+          actorUserId,
+          action: GovernanceLogAction.Frozen,
+          metadata: { adminOverride: true, reason: 'parent_frozen' },
+        });
+      }
     }
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
@@ -502,6 +628,11 @@ export class AdminCommunitiesService {
    * (`WHERE frozen_at IS NOT NULL`): unfreezing a community that isn't frozen
    * is a no-op 200, and the governance log only gets an entry when this call
    * actually lifted something.
+   *
+   * On a parent, the lift cascades onto every space this same freeze paused,
+   * in the same transaction as the parent's own write, mirroring
+   * `CommunitiesService.unfreeze`. A space carries no spaces of its own, so
+   * the cascade is skipped when `community.parentId` is set.
    */
   async unfreeze(
     slug: string,
@@ -512,24 +643,38 @@ export class AdminCommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
-    const result = await this.communities
-      .createQueryBuilder()
-      .update(Community)
-      // The override path: no roster role and no open-report condition — this
-      // is deliberately the escape hatch `CommunitiesService.unfreeze` points
-      // an owner at when its own automatic-freeze gate (BE-COM-04) holds.
-      // Clears the whole freeze, `frozenNote`/`frozenByUserId` included.
-      // Leaving those behind would strand a stale explanation on the row,
-      // ready to reappear the next time the community is frozen for an
-      // unrelated reason. Mirrors `CommunitiesService.unfreeze`.
-      .set({
-        frozenAt: null,
-        frozenReason: null,
-        frozenNote: null,
-        frozenByUserId: null,
-      })
-      .where('id = :id AND frozen_at IS NOT NULL', { id: community.id })
-      .execute();
+    const { result, unfrozenSpaceIds } = await this.dataSource.transaction(
+      async (manager: EntityManager) => {
+        const unfreezeResult = await manager
+          .getRepository(Community)
+          .createQueryBuilder()
+          .update(Community)
+          // The override path: no roster role and no open-report condition.
+          // This is deliberately the escape hatch `CommunitiesService.unfreeze`
+          // points an owner at when its own automatic-freeze gate (BE-COM-04)
+          // holds. Clears the whole freeze, `frozenNote`/`frozenByUserId`
+          // included. Leaving those behind would strand a stale explanation
+          // on the row, ready to reappear the next time the community is
+          // frozen for an unrelated reason. Mirrors
+          // `CommunitiesService.unfreeze`.
+          .set({
+            frozenAt: null,
+            frozenReason: null,
+            frozenNote: null,
+            frozenByUserId: null,
+          })
+          .where('id = :id AND frozen_at IS NOT NULL', { id: community.id })
+          .execute();
+        const spaceIds =
+          unfreezeResult.affected && !community.parentId
+            ? await this.subcommunityCascade.unfreezeSpaces(
+                manager,
+                community.id,
+              )
+            : [];
+        return { result: unfreezeResult, unfrozenSpaceIds: spaceIds };
+      },
+    );
 
     if (result.affected) {
       await this.governanceLog.log({
@@ -538,6 +683,14 @@ export class AdminCommunitiesService {
         action: GovernanceLogAction.Unfrozen,
         metadata: { adminOverride: true },
       });
+      for (const spaceId of unfrozenSpaceIds) {
+        await this.governanceLog.log({
+          communityId: spaceId,
+          actorUserId,
+          action: GovernanceLogAction.Unfrozen,
+          metadata: { adminOverride: true, reason: 'parent_unfrozen' },
+        });
+      }
     }
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
@@ -560,6 +713,12 @@ export class AdminCommunitiesService {
    * stands), and the governance log only gets an entry when this call is the
    * one that actually archived it. Reversible via `unarchive` below
    * (COM-18) — archiving a community is no longer a one-way door.
+   *
+   * On a parent, the archive cascades onto every live space in the same
+   * transaction as the parent's own write, stamped `archivedWithParent` so
+   * `unarchive` restores exactly those, mirroring
+   * `CommunitiesService.archive`'s own cascade. A space carries no spaces of
+   * its own, so the cascade is skipped when `community.parentId` is set.
    */
   async archive(
     slug: string,
@@ -570,12 +729,30 @@ export class AdminCommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
-    const result = await this.communities
-      .createQueryBuilder()
-      .update(Community)
-      .set({ archivedAt: () => 'now()' })
-      .where('id = :id AND archived_at IS NULL', { id: community.id })
-      .execute();
+    // Computed once in the app and shared with the cascade below, so every
+    // space archived alongside the parent carries the exact same
+    // `archivedAt` timestamp as the parent itself.
+    const archivedAt = new Date();
+    const { result, archivedSpaceIds } = await this.dataSource.transaction(
+      async (manager: EntityManager) => {
+        const archiveResult = await manager
+          .getRepository(Community)
+          .createQueryBuilder()
+          .update(Community)
+          .set({ archivedAt })
+          .where('id = :id AND archived_at IS NULL', { id: community.id })
+          .execute();
+        const spaceIds =
+          archiveResult.affected && !community.parentId
+            ? await this.subcommunityCascade.archiveSpaces(
+                manager,
+                community.id,
+                archivedAt,
+              )
+            : [];
+        return { result: archiveResult, archivedSpaceIds: spaceIds };
+      },
+    );
 
     if (result.affected) {
       await this.governanceLog.log({
@@ -584,6 +761,18 @@ export class AdminCommunitiesService {
         action: GovernanceLogAction.Archived,
         metadata: { adminOverride: true },
       });
+      for (const spaceId of archivedSpaceIds) {
+        await this.governanceLog.log({
+          communityId: spaceId,
+          actorUserId,
+          action: GovernanceLogAction.Archived,
+          metadata: {
+            adminOverride: true,
+            reason: 'parent_archived',
+            parentId: community.id,
+          },
+        });
+      }
     }
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
@@ -598,6 +787,13 @@ export class AdminCommunitiesService {
    * in reverse (`WHERE archived_at IS NOT NULL`): unarchiving a community that
    * isn't archived is a no-op 200, and the governance log only gets an entry
    * when this call actually lifted the archive.
+   *
+   * On a parent, the lift cascades onto every space `archive` took down with
+   * it (`archivedWithParent`), in the same transaction as the parent's own
+   * write, mirroring `SubcommunityCascadeService.unarchiveSpaces`. A space
+   * that archived itself independently is left alone, and a space carries no
+   * spaces of its own, so the cascade is skipped when `community.parentId`
+   * is set.
    */
   async unarchive(
     slug: string,
@@ -608,12 +804,25 @@ export class AdminCommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
-    const result = await this.communities
-      .createQueryBuilder()
-      .update(Community)
-      .set({ archivedAt: null })
-      .where('id = :id AND archived_at IS NOT NULL', { id: community.id })
-      .execute();
+    const { result, unarchivedSpaceIds } = await this.dataSource.transaction(
+      async (manager: EntityManager) => {
+        const unarchiveResult = await manager
+          .getRepository(Community)
+          .createQueryBuilder()
+          .update(Community)
+          .set({ archivedAt: null })
+          .where('id = :id AND archived_at IS NOT NULL', { id: community.id })
+          .execute();
+        const spaceIds =
+          unarchiveResult.affected && !community.parentId
+            ? await this.subcommunityCascade.unarchiveSpaces(
+                manager,
+                community.id,
+              )
+            : [];
+        return { result: unarchiveResult, unarchivedSpaceIds: spaceIds };
+      },
+    );
 
     if (result.affected) {
       await this.governanceLog.log({
@@ -622,6 +831,14 @@ export class AdminCommunitiesService {
         action: GovernanceLogAction.Unarchived,
         metadata: { adminOverride: true },
       });
+      for (const spaceId of unarchivedSpaceIds) {
+        await this.governanceLog.log({
+          communityId: spaceId,
+          actorUserId,
+          action: GovernanceLogAction.Unarchived,
+          metadata: { adminOverride: true, reason: 'parent_unarchived' },
+        });
+      }
     }
 
     // Admin-only override (empty `@StaffRoles()` on the route), so the caller
@@ -758,6 +975,14 @@ export class AdminCommunitiesService {
    *    guardrail `removeMember` enforces, worded identically. An admin who
    *    needs the owner gone reassigns ownership first (`reassignOwner`), then
    *    removes the now-demoted-to-mod former owner if that's still wanted.
+   *
+   * On a parent, the removal ends the member's place in every space of that
+   * parent too, in the same transaction as the roster row's own delete, the
+   * same cascade `CommunitiesService.removeMember` runs. A space they owned
+   * passes to the parent's owner through
+   * `SubcommunityCascadeService.removeParentMemberFromSpaces`, so every space
+   * keeps an accountable owner. A space carries no spaces of its own, so the
+   * cascade is skipped when `community.parentId` is set.
    */
   async removeMember(
     slug: string,
@@ -786,7 +1011,30 @@ export class AdminCommunitiesService {
       throw new BadRequestException('The owner cannot be removed');
     }
 
-    await this.communityMembers.delete({ id: targetMembership.id });
+    const { removedSpaceIds, reassignedSpaceIds } =
+      await this.dataSource.transaction(async (manager: EntityManager) => {
+        await manager
+          .getRepository(CommunityMember)
+          .delete({ id: targetMembership.id });
+        if (community.parentId) {
+          return { removedSpaceIds: [], reassignedSpaceIds: [] };
+        }
+        return this.subcommunityCascade.removeParentMemberFromSpaces(
+          manager,
+          community,
+          targetUserId,
+        );
+      });
+    // Every roster row this removal deleted, the community's own and one per
+    // space of it, so listeners (membership cards, the activity feed) retire
+    // what hung off each. Same emission `CommunitiesService.removeMember`
+    // makes.
+    for (const communityId of [community.id, ...removedSpaceIds]) {
+      this.eventEmitter.emit(COMMUNITY_MEMBER_LEFT, {
+        communityId,
+        userId: targetUserId,
+      } satisfies CommunityMemberLeftEvent);
+    }
 
     await this.governanceLog.log({
       communityId: community.id,
@@ -795,6 +1043,19 @@ export class AdminCommunitiesService {
       targetUserId,
       metadata: { adminOverride: true },
     });
+    for (const spaceId of reassignedSpaceIds) {
+      await this.governanceLog.log({
+        communityId: spaceId,
+        actorUserId,
+        action: GovernanceLogAction.OwnershipTransferred,
+        targetUserId: community.ownerId,
+        metadata: {
+          adminOverride: true,
+          reason: 'parent_cascade',
+          previousOwnerId: targetUserId,
+        },
+      });
+    }
   }
 
   /**

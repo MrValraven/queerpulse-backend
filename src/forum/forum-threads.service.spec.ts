@@ -712,6 +712,32 @@ describe('ForumThreadsService', () => {
       expect(sql).toContain('t.community_id IS NULL');
     });
 
+    it("never opens the public-tier arm for a space's thread to a non-member", async () => {
+      // A space's own public tier alone must not admit its thread here. Only
+      // the roster branch (tested above) or the space's PARENT being public
+      // does, mirroring `FeedService`'s equivalent arm.
+      const { sql } = await browseGate();
+
+      expect(sql).toMatch(
+        /"com"\."access_tier" = :publicTier\s*AND "com"\."parent_id" IS NULL/,
+      );
+    });
+
+    it('admits a gated space thread to parent staff and requires the parent row on the roster arm', async () => {
+      // Spec gate matrix: parent owners, co-owners and mods act in every
+      // space with no space roster row, and a space row whose parent row is
+      // gone grants nothing.
+      const { sql } = await browseGate();
+
+      expect(sql).toContain(
+        "\"staff_pm\".\"role\" IN ('owner', 'co_owner', 'mod')",
+      );
+      expect(sql).toMatch(
+        /"mem"\."user_id" = :viewerId\s*AND EXISTS \(\s*SELECT 1 FROM "communities" "own_c"/,
+      );
+      expect(sql).toContain('"own_pm"."community_id" = "own_c"."parent_id"');
+    });
+
     it('binds the same gate on counts and listPinned', async () => {
       // One private helper serves `list`/`counts`/`listPinned`/`searchByText`,
       // and a badge or a sticky row that counts a thread the list will not
@@ -780,6 +806,21 @@ describe('ForumThreadsService', () => {
       );
     });
 
+    it('does not hide a public space thread from a reader who clears the parent gate, including parent staff with no space roster row', async () => {
+      // `isCommunityHiddenFrom` is a single-thread read gate reached from a
+      // direct link, the same door the space's own page and posts stay open
+      // through. Narrowing it to roster-membership-only would 404 a thread
+      // for a parent owner/co-owner/mod, who inherits staff standing in the
+      // space without holding a roster row there.
+      const probeQb = communityAccessQbStub(false);
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'space-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(probeQb);
+
+      const thread = await service.loadOr404('hello-world', 'parent-staff-1');
+
+      expect(thread.slug).toBe('hello-world');
+    });
+
     const hiddenTierCases: ReadonlyArray<[string, AccessTier]> = [
       ['request', AccessTier.Request],
       ['invite', AccessTier.Invite],
@@ -816,6 +857,25 @@ describe('ForumThreadsService', () => {
       );
       expect(String(membershipCall?.[0])).toContain('NOT EXISTS');
       expect(membershipCall?.[1]).toEqual({ viewerId: 'outsider-1' });
+    });
+
+    it('lets parent staff through a gated space and drops a space row without its parent row', async () => {
+      const probeQb = communityAccessQbStub(true);
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'space-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(probeQb);
+
+      await expect(
+        service.loadOr404('hello-world', 'outsider-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      const membershipCall = probeQb.andWhere.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' && call[0].includes('community_members'),
+      );
+      const predicateSql = String(membershipCall?.[0]);
+      expect(predicateSql).toContain('AND NOT EXISTS (');
+      expect(predicateSql).toContain('"staff_pm"."role" IN');
+      expect(predicateSql).toContain('"own_pm"."user_id" = :viewerId');
     });
   });
 

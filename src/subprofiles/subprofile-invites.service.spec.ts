@@ -7,6 +7,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import {
@@ -124,6 +126,12 @@ function makeUniqueViolation(): Error & { code: string } {
   );
 }
 
+const NO_MAILBOX_CHANGES = {
+  endedSeats: [],
+  releasedClaims: [],
+  staffingChanges: [],
+};
+
 describe('SubprofileInvitesService', () => {
   let service: SubprofileInvitesService;
   let invitesRepo: jest.Mocked<
@@ -140,6 +148,11 @@ describe('SubprofileInvitesService', () => {
   let blockFilter: { isBlockedEitherWay: jest.Mock };
   let subprofilesService: { assertMember: jest.Mock };
   let events: { emit: jest.Mock };
+  let identities: { ensureIdentityFor: jest.Mock };
+  let identityMailboxSync: {
+    onStaffAdded: jest.Mock;
+    emitSeatChanges: jest.Mock;
+  };
   // The transactional manager `dataSource.transaction(cb)` hands to `cb` in
   // `invite()`/`accept()`. Dispatches on the entity CLASS passed as the first
   // arg (mirrors how `manager.findOne(Entity, ...)`/`manager.count(Entity, ...)`
@@ -194,6 +207,15 @@ describe('SubprofileInvitesService', () => {
       assertMember: jest.fn().mockResolvedValue(makeSubprofile()),
     };
     events = { emit: jest.fn() };
+    identities = {
+      ensureIdentityFor: jest
+        .fn()
+        .mockResolvedValue({ id: 'subprofile-identity-1' }),
+    };
+    identityMailboxSync = {
+      onStaffAdded: jest.fn().mockResolvedValue(NO_MAILBOX_CHANGES),
+      emitSeatChanges: jest.fn(),
+    };
 
     // Sane defaults for the locked-transaction path: the persona-row lock
     // resolves to something truthy, no pre-existing member/pending-invite row,
@@ -225,8 +247,11 @@ describe('SubprofileInvitesService', () => {
       transaction: jest
         .fn()
         .mockImplementation(
-          (runInTransaction: (m: typeof manager) => Promise<unknown>) =>
-            runInTransaction(manager),
+          (
+            runInTransaction: (
+              transactionManager: typeof manager,
+            ) => Promise<unknown>,
+          ) => runInTransaction(manager),
         ),
     };
 
@@ -247,6 +272,8 @@ describe('SubprofileInvitesService', () => {
         { provide: SubprofilesService, useValue: subprofilesService },
         { provide: EventEmitter2, useValue: events },
         { provide: DataSource, useValue: dataSource },
+        { provide: IdentitiesService, useValue: identities },
+        { provide: IdentityMailboxSyncService, useValue: identityMailboxSync },
       ],
     }).compile();
 
@@ -381,6 +408,63 @@ describe('SubprofileInvitesService', () => {
   // --- accept ------------------------------------------------------------------
 
   describe('accept', () => {
+    // Task 25: the new co-owner hears `mailbox:staffing` only once the
+    // acceptance has committed.
+    const acceptedChanges = {
+      ...NO_MAILBOX_CHANGES,
+      staffingChanges: [
+        { identityId: 'subprofile-identity-1', userId: 'bob', isStaff: true },
+      ],
+    };
+
+    it('tells the new co-owner about their mailbox only after the transaction resolves', async () => {
+      invitesRepo.findOne.mockResolvedValue(
+        makeInvite({ id: 'inv1', subprofileId: 'sp1', invitedUserId: 'bob' }),
+      );
+      identityMailboxSync.onStaffAdded.mockImplementation(async () => {
+        expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+        return acceptedChanges;
+      });
+
+      await service.accept('bob', 'inv1');
+
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenCalledWith(
+        'subprofile-identity-1',
+        'bob',
+        manager,
+        { shouldDeferEmission: true },
+      );
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledTimes(1);
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledWith(
+        acceptedChanges,
+      );
+    });
+
+    it('never tells anyone about a mailbox when the acceptance rolls back', async () => {
+      invitesRepo.findOne.mockResolvedValue(
+        makeInvite({ id: 'inv1', subprofileId: 'sp1', invitedUserId: 'bob' }),
+      );
+      identityMailboxSync.onStaffAdded.mockResolvedValue(acceptedChanges);
+      // The callback runs to the end, seat included, and the commit fails.
+      dataSource.transaction.mockImplementationOnce(
+        async (
+          runInTransaction: (
+            transactionManager: typeof manager,
+          ) => Promise<unknown>,
+        ) => {
+          await runInTransaction(manager);
+          throw new Error('commit failed');
+        },
+      );
+
+      await expect(service.accept('bob', 'inv1')).rejects.toThrow(
+        'commit failed',
+      );
+
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenCalled();
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+    });
+
     it('adds a member row and marks the invite accepted (inside the locked transaction)', async () => {
       invitesRepo.findOne.mockResolvedValue(
         makeInvite({ id: 'inv1', subprofileId: 'sp1', invitedUserId: 'bob' }),

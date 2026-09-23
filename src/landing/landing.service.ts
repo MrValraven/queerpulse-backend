@@ -15,6 +15,7 @@ import {
   Community,
 } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { topLevelOnly } from '../communities/subcommunity-rules';
 import {
   Changemaker,
   ChangemakerStatus,
@@ -89,7 +90,9 @@ function isMemberEligible(profile: Profile): boolean {
  *  `communityEligibilityQuery`'s SQL. */
 function isCommunityEligible(community: Community): boolean {
   return (
-    community.accessTier === AccessTier.Public && community.archivedAt === null
+    community.accessTier === AccessTier.Public &&
+    community.archivedAt === null &&
+    community.parentId === null
   );
 }
 
@@ -461,15 +464,18 @@ export class LandingService {
       .andWhere('profile.featuredConsent = true');
   }
 
-  /** SQL form of `isCommunityEligible` (Public accessTier + not archived).
-   *  Keep in sync with `isCommunityEligible`. */
+  /** SQL form of `isCommunityEligible` (Public accessTier + not archived + not
+   *  a space). Keep in sync with `isCommunityEligible`. */
   private communityEligibilityQuery(): SelectQueryBuilder<Community> {
-    return this.communities
-      .createQueryBuilder('community')
-      .where('community.accessTier = :accessTier', {
-        accessTier: AccessTier.Public,
-      })
-      .andWhere('community.archivedAt IS NULL');
+    return topLevelOnly(
+      this.communities
+        .createQueryBuilder('community')
+        .where('community.accessTier = :accessTier', {
+          accessTier: AccessTier.Public,
+        })
+        .andWhere('community.archivedAt IS NULL'),
+      'community',
+    );
   }
 
   /** SQL form of `isChangemakerEligible` (Published status). Keep in sync

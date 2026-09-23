@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Connection } from '../connections/entities/connection.entity';
+import { IdentityBlock } from '../identities/entities/identity-block.entity';
+import { IdentitiesModule } from '../identities/identities.module';
 import { ReportsModule } from '../reports/reports.module';
 import { UsersModule } from '../users/users.module';
 import { BlockFilterService } from './block-filter.service';
@@ -10,6 +12,8 @@ import { HiddenFromMember } from './entities/hidden-from.entity';
 import { Mute } from './entities/mute.entity';
 import { HiddenFromController } from './hidden-from.controller';
 import { HiddenFromService } from './hidden-from.service';
+import { IdentityBlocksController } from './identity-blocks.controller';
+import { IdentityBlocksService } from './identity-blocks.service';
 import { MutesController } from './mutes.controller';
 import { SocialService } from './social.service';
 
@@ -43,15 +47,38 @@ import { SocialService } from './social.service';
  * `HiddenFromController` builds its own `MemberLookup` from the `Profile`
  * repo (available via `UsersModule`, imported below) instead of importing
  * `ProfilesModule`, which also imports `SocialModule`.
+ *
+ * Task 14: registers `IdentityBlock` for `BlockFilterService`'s identity
+ * checks and `IdentityBlocksService`, and imports `IdentitiesModule` for the
+ * identity's kind, staff and display fields. `IdentitiesModule` imports
+ * nothing but its own entities, so this is a plain one-way import with no
+ * `forwardRef`.
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Block, Mute, Connection, HiddenFromMember]),
+    TypeOrmModule.forFeature([
+      Block,
+      Mute,
+      Connection,
+      HiddenFromMember,
+      IdentityBlock,
+    ]),
     UsersModule,
     ReportsModule,
+    IdentitiesModule,
   ],
-  controllers: [BlocksController, MutesController, HiddenFromController],
-  providers: [SocialService, BlockFilterService, HiddenFromService],
+  controllers: [
+    BlocksController,
+    MutesController,
+    HiddenFromController,
+    IdentityBlocksController,
+  ],
+  providers: [
+    SocialService,
+    BlockFilterService,
+    HiddenFromService,
+    IdentityBlocksService,
+  ],
   exports: [BlockFilterService, SocialService, HiddenFromService],
 })
 export class SocialModule {}

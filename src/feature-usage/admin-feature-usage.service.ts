@@ -14,6 +14,7 @@ import { HousingListing } from '../housing-listings/entities/housing-listing.ent
 import { HousingSavedSearch } from '../housing-saved-searches/entities/housing-saved-search.entity';
 import { HousingViewing } from '../housing-viewings/entities/housing-viewing.entity';
 import { runWithConcurrency } from '../common/run-with-concurrency';
+import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { FeatureKey, launchedFeatures } from '../launchedFeatures';
 import { FEATURE_DEPTH } from './feature-depth';
 import { FeatureUsageDaily } from './entities/feature-usage-daily.entity';
@@ -177,10 +178,12 @@ export class AdminFeatureUsageService {
       // with the same figure shown elsewhere in the admin surface. The DTO
       // field is named `stillPostingThisWeek` so the rolling window is
       // explicit in the field name.
+      // Top-level only: this drill-down counts top-level communities, and a
+      // space is a separate row this count was never meant to add in.
       () =>
-        this.dataSource
-          .getRepository(Community)
-          .count({ where: { activeThisWeek: MoreThan(0) } }),
+        this.dataSource.getRepository(Community).count({
+          where: { activeThisWeek: MoreThan(0), ...TOP_LEVEL_WHERE },
+        }),
     ];
 
     const allResults = await runWithConcurrency(

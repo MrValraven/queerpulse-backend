@@ -1,4 +1,14 @@
-import { EntityManager, In, Not, SelectQueryBuilder } from 'typeorm';
+import { EntityManager, In, SelectQueryBuilder } from 'typeorm';
+import { toImageUrl } from '../common/image-url';
+import type { IdentityKind } from '../identities/entities/identity.entity';
+import type {
+  IdentitiesService,
+  IdentityDescription,
+} from '../identities/identities.service';
+import {
+  renderMessageSender,
+  type SenderIdentityContext,
+} from '../messaging/author-summary';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import {
   Conversation,
@@ -8,10 +18,19 @@ import {
   DocumentAttachment,
   GifAttachment,
   isDocumentAttachment,
+  isStickerAttachment,
   Message,
   MessageKind,
+  StickerAttachment,
 } from '../messaging/entities/message.entity';
 import { EXACT_CREATED_AT_SELECT } from '../messaging/message-history-cursor';
+import {
+  describeDirectThreadSeats,
+  isEverySeatPersonal,
+  renderDirectCounterpart,
+  seatExcludedFromMailboxPredicate,
+  staffSeatExcludedFromMailboxPredicate,
+} from '../messaging/mailbox-seats';
 import { FORMER_MEMBER_DISPLAY_NAME } from '../messaging/message-response';
 import {
   MESSAGE_SUBJECT_TYPE,
@@ -20,6 +39,18 @@ import {
 import { toBareKey } from '../storage/bare-key';
 import { contentTypeForStorageKey } from '../storage/served-object';
 import { Profile } from '../users/entities/profile.entity';
+
+/**
+ * Everything this file needs from `IdentitiesService` to render a business
+ * mailbox counterpart or sender: the identity's own kind (`getByIds`, to
+ * partition a direct thread's seats) and its display fields (`describeIdentities`,
+ * to name the business). This narrow `Pick` lets a caller building the export
+ * pass the real injected `IdentitiesService` straight through.
+ */
+export type ExportIdentities = Pick<
+  IdentitiesService,
+  'getByIds' | 'describeIdentities'
+>;
 
 /**
  * PRD-370: the `messages` category of the Art. 20 archive, bounded.
@@ -82,8 +113,13 @@ export interface ExportedOwnMessageAttachment {
   mimeType: string | null;
   sizeBytes: number | null;
   /** The file's path inside the export's `media/` folder when the zip carries
-   *  it, else null. Filled by `attachMessageMediaPaths`. */
+   *  it, else null. Filled by `attachMessageMediaPaths`. Always null for a
+   *  sticker: its artwork is admin-owned, shared platform catalogue, so it is
+   *  never bundled into this member's own personal media zip. */
   mediaPath: string | null;
+  /** A sticker's resolved, fetchable image URL. Null for every other
+   *  attachment kind, which instead resolve through `mediaPath`. */
+  url: string | null;
 }
 
 export interface ExportedOwnMessage {
@@ -108,7 +144,13 @@ export interface ExportedReportedConversationMessage {
   isOwnMessage: boolean;
   kind: MessageKind;
   body: string;
-  attachment: { fileName: string | null; mimeType: string | null } | null;
+  attachment: {
+    fileName: string | null;
+    mimeType: string | null;
+    /** A sticker's resolved, fetchable image URL; null for every other
+     *  attachment kind. */
+    url: string | null;
+  } | null;
   sentAt: string;
 }
 
@@ -165,9 +207,15 @@ interface MessagePageRow {
   id: string;
   conversationId: string;
   senderId: string | null;
+  /** Business mailboxes: which identity this message was sent AS, mirroring
+   *  `Message.senderIdentityId`'s own doc. Null for a genuinely personal
+   *  message and wherever `senderId` is null. Read so `renderMessageSender`
+   *  can name a mailbox message's sender as the business it was sent for,
+   *  the same way every in-app read already does. */
+  senderIdentityId: string | null;
   body: string;
   kind: MessageKind;
-  attachment: GifAttachment | DocumentAttachment | null;
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null;
   replyToId: string | null;
   forwarded: boolean;
   createdAt: Date | string;
@@ -185,10 +233,6 @@ function chunked<Item>(items: Item[], size: number): Item[][] {
     chunks.push(items.slice(start, start + size));
   }
   return chunks;
-}
-
-function displayNameOf(profile: Pick<Profile, 'firstName' | 'lastName'>) {
-  return `${profile.firstName} ${profile.lastName}`.trim();
 }
 
 /**
@@ -217,6 +261,7 @@ async function readNewestMessages(
       .select('m.id', 'id')
       .addSelect('m.conversation_id', 'conversationId')
       .addSelect('m.sender_id', 'senderId')
+      .addSelect('m.sender_identity_id', 'senderIdentityId')
       .addSelect('m.body', 'body')
       .addSelect('m.kind', 'kind')
       .addSelect('m.attachment', 'attachment')
@@ -255,15 +300,35 @@ interface AttachmentFacts {
   mimeType: string | null;
   sizeBytes: number | null;
   storageKey: string | null;
+  /** A sticker's resolved, fetchable image URL; null for every other
+   *  attachment kind (those resolve through `storageKey`/`mediaPath` instead). */
+  url: string | null;
 }
 
-/** What the archive can say about an attachment without touching storage. */
+/**
+ * What the archive can say about an attachment without touching storage.
+ *
+ * Checks `isStickerAttachment` before `isDocumentAttachment` (see that
+ * discriminator's own doc): a sticker's bytes are admin-owned, shared
+ * platform catalogue, so it gets `storageKey: null` (excluded from the
+ * personal media zip) and its own resolved `url`, built from its `label` and
+ * `toImageUrl`.
+ */
 function describeAttachment(
   kind: MessageKind,
-  attachment: GifAttachment | DocumentAttachment | null,
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null,
 ): AttachmentFacts | null {
   if (!attachment) {
     return null;
+  }
+  if (isStickerAttachment(attachment)) {
+    return {
+      fileName: attachment.label,
+      mimeType: 'image/png',
+      sizeBytes: null,
+      storageKey: null,
+      url: toImageUrl(attachment.url),
+    };
   }
   if (isDocumentAttachment(attachment)) {
     return {
@@ -273,6 +338,7 @@ function describeAttachment(
       sizeBytes:
         typeof attachment.byteSize === 'number' ? attachment.byteSize : null,
       storageKey: attachment.url,
+      url: null,
     };
   }
   if (kind === MessageKind.Image) {
@@ -283,6 +349,7 @@ function describeAttachment(
       mimeType: contentTypeForStorageKey(bareKey),
       sizeBytes: null,
       storageKey: attachment.url,
+      url: null,
     };
   }
   // A picked GIF: a third-party URL, no file of the member's to point at.
@@ -291,6 +358,7 @@ function describeAttachment(
     mimeType: 'image/gif',
     sizeBytes: null,
     storageKey: null,
+    url: null,
   };
 }
 
@@ -299,11 +367,121 @@ interface ConversationContext {
   kind: ExportedConversationKind;
 }
 
+/**
+ * The conversationTitle for one DIRECT, non-official thread, from `userId`'s
+ * own seat: the counterpart's display name for an ordinary DM, and Task 13f's
+ * fix for a business mailbox thread, the business's own name for a customer
+ * and the customer's own name for a staff exporter, exactly as
+ * `renderDirectCounterpart` renders it for every in-app header. The export is
+ * the customer's own legal record, so accuracy here means naming whichever
+ * side of the conversation the app itself showed them.
+ *
+ * Falls back to {@link FORMER_MEMBER_DISPLAY_NAME} whenever `ownSeat` itself
+ * could not be found (defensive; every conversation id here came from
+ * `userId`'s own participation), whenever `renderDirectCounterpart` returns
+ * null (a staff exporter's ambiguous customer seat, a data integrity
+ * anomaly), or whenever `otherSeats` is empty, mirroring the "other member
+ * erased their account" fallback this function replaces.
+ *
+ * Fix round 1: `otherSeats` empty is an ORDINARY personal DM whose
+ * counterpart erased their account. `conversation_participants.user_id`
+ * cascades on delete, so their seat row is simply gone, mailbox or not.
+ * `renderDirectCounterpart` reads an empty `otherSeats` as "no counterpart
+ * seat at all" and answers with `FORMER_IDENTITY_AUTHOR` ("Former business"),
+ * the placeholder for a deleted MAILBOX, because it has no way to tell "the
+ * seat is gone" from "the seat was never a business" once the row itself is
+ * gone. This function is the one place that still knows which of the two
+ * this actually is, so it checks `otherSeats.length` itself and answers
+ * "Former member" before `renderDirectCounterpart` ever gets a chance to
+ * guess wrong. A genuinely deleted BUSINESS mailbox is a distinct case: an
+ * identity's own row is never deleted on a member's account erasure (see
+ * `Message.senderIdentityId`'s own doc), so a mailbox thread's seats persist
+ * across every staff member's own account being erased, one at a time.
+ * Deleting the business itself is a different event: the listing/persona/
+ * company row's own identities cascade away with it (see
+ * `1821200000000-AddIdentities.ts`'s FK), which empties `otherSeats` the
+ * same way an ordinary DM counterpart's account erasure does, and the
+ * `otherSeats.length === 0` branch above answers "Former member" for both
+ * cases alike.
+ *
+ * Task 13g: `isOwnSeatExcludedFromMailbox` is true when the block rule takes
+ * the exporter's own staff seat out of this thread. The exporter's own
+ * messages stay in their archive, and the thread is then titled with the
+ * business's own name, so the export does not keep telling a blocked staff
+ * member how the customer who blocked them currently presents themself.
+ * Task 14a: a departed staff seat is taken out the same way, both rules read
+ * from `staffSeatExcludedFromMailboxPredicate`, so a former employee's
+ * archive does not keep naming the customers of a business they left.
+ */
+export function resolveDirectConversationTitleForExport(
+  ownSeat: ConversationParticipant | undefined,
+  otherSeats: ConversationParticipant[],
+  identityKindById: ReadonlyMap<string, IdentityKind>,
+  identityDescriptionById: ReadonlyMap<string, IdentityDescription>,
+  profileByUser: ReadonlyMap<string, Profile>,
+  isOwnSeatExcludedFromMailbox = false,
+): string {
+  if (!ownSeat || otherSeats.length === 0) {
+    return FORMER_MEMBER_DISPLAY_NAME;
+  }
+  const ownThreadSeats = describeDirectThreadSeats(
+    ownSeat.identityId,
+    otherSeats,
+    identityKindById,
+  );
+  if (isOwnSeatExcludedFromMailbox && ownThreadSeats.isCallerMailboxSeat) {
+    return (
+      identityDescriptionById.get(ownSeat.identityId)?.displayName ??
+      FORMER_MEMBER_DISPLAY_NAME
+    );
+  }
+  const counterpart = renderDirectCounterpart(
+    ownThreadSeats,
+    identityKindById,
+    identityDescriptionById,
+    profileByUser,
+  );
+  return counterpart?.displayName ?? FORMER_MEMBER_DISPLAY_NAME;
+}
+
+/**
+ * Task 13g: which of the exporter's own STAFF seats the block rule takes out
+ * of their thread, answered in one query. Task 14a: the departed-staff rule
+ * too, both read from `staffSeatExcludedFromMailboxPredicate`. Only a staff
+ * seat can be excluded, so an exporter holding none costs no query.
+ */
+async function loadMailboxExcludedConversationIds(
+  manager: EntityManager,
+  userId: string,
+  ownStaffSeats: ReadonlyArray<ConversationParticipant>,
+): Promise<Set<string>> {
+  if (ownStaffSeats.length === 0) {
+    return new Set();
+  }
+  const rows = await manager
+    .getRepository(ConversationParticipant)
+    .createQueryBuilder('export_seat')
+    .select('export_seat.conversation_id', 'conversationId')
+    .where('export_seat.user_id = :exporterUserId', { exporterUserId: userId })
+    .andWhere('export_seat.conversation_id IN (:...staffConversationIds)', {
+      staffConversationIds: ownStaffSeats.map((seat) => seat.conversationId),
+    })
+    .andWhere(
+      staffSeatExcludedFromMailboxPredicate(
+        'export_seat.conversation_id',
+        'export_seat.user_id',
+      ),
+    )
+    .getRawMany<{ conversationId: string }>();
+  return new Set(rows.map((row) => row.conversationId));
+}
+
 /** Title and kind for each conversation, in a few batched lookups per chunk. */
 async function loadConversationContexts(
   manager: EntityManager,
   userId: string,
   conversationIds: string[],
+  identities: ExportIdentities,
 ): Promise<Map<string, ConversationContext>> {
   const contexts = new Map<string, ConversationContext>();
   for (const idChunk of chunked(conversationIds, ID_LOOKUP_CHUNK_SIZE)) {
@@ -318,36 +496,63 @@ async function loadConversationContexts(
           conversation.kind === ConversationKind.Direct,
       )
       .map((conversation) => conversation.id);
-    const counterparts = directConversationIds.length
+    // The full seat list of every direct conversation in this chunk,
+    // counterpart AND `userId`'s own seat alike: Task 13f needs the caller's
+    // own seat too, to tell a mailbox thread from an ordinary DM through
+    // `describeDirectThreadSeats`.
+    const seats = directConversationIds.length
       ? await manager.getRepository(ConversationParticipant).find({
-          where: {
-            conversationId: In(directConversationIds),
-            userId: Not(userId),
+          where: { conversationId: In(directConversationIds) },
+          select: {
+            id: true,
+            conversationId: true,
+            userId: true,
+            identityId: true,
+            leftAt: true,
           },
-          select: { id: true, conversationId: true, userId: true },
         })
       : [];
-    const counterpartUserIds = [
-      ...new Set(counterparts.map((participant) => participant.userId)),
+    const seatsByConversation = new Map<string, ConversationParticipant[]>();
+    for (const seat of seats) {
+      const seatsForConversation =
+        seatsByConversation.get(seat.conversationId) ?? [];
+      seatsForConversation.push(seat);
+      seatsByConversation.set(seat.conversationId, seatsForConversation);
+    }
+    const identityKindById = new Map(
+      (await identities.getByIds(seats.map((seat) => seat.identityId))).map(
+        (identity) => [identity.id, identity.kind],
+      ),
+    );
+    const identityDescriptionById = await identities.describeIdentities(
+      seats.map((seat) => seat.identityId),
+    );
+    const otherUserIds = [
+      ...new Set(
+        seats
+          .filter((seat) => seat.userId !== userId)
+          .map((seat) => seat.userId),
+      ),
     ];
-    const counterpartProfiles = counterpartUserIds.length
+    const profileRows = otherUserIds.length
       ? await manager.getRepository(Profile).find({
-          where: { userId: In(counterpartUserIds) },
-          select: { userId: true, firstName: true, lastName: true },
+          where: { userId: In(otherUserIds) },
         })
       : [];
-    const nameByUserId = new Map(
-      counterpartProfiles.map((profile) => [
-        profile.userId,
-        displayNameOf(profile),
-      ]),
+    const profileByUser = new Map(
+      profileRows.map((profile) => [profile.userId, profile]),
     );
-    const counterpartNameByConversation = new Map(
-      counterparts.map((participant) => [
-        participant.conversationId,
-        nameByUserId.get(participant.userId) || FORMER_MEMBER_DISPLAY_NAME,
-      ]),
-    );
+    const mailboxExcludedConversationIds =
+      await loadMailboxExcludedConversationIds(
+        manager,
+        userId,
+        seats.filter(
+          (seat) =>
+            seat.userId === userId &&
+            identityKindById.has(seat.identityId) &&
+            !isEverySeatPersonal([seat], identityKindById),
+        ),
+      );
     for (const conversation of conversations) {
       if (conversation.isOfficial) {
         contexts.set(conversation.id, {
@@ -360,11 +565,21 @@ async function loadConversationContexts(
           kind: 'group',
         });
       } else {
-        // No counterpart row left means the other member erased their account.
+        const conversationSeats =
+          seatsByConversation.get(conversation.id) ?? [];
+        const ownSeat = conversationSeats.find(
+          (seat) => seat.userId === userId,
+        );
+        const otherSeats = conversationSeats.filter((seat) => seat !== ownSeat);
         contexts.set(conversation.id, {
-          title:
-            counterpartNameByConversation.get(conversation.id) ??
-            FORMER_MEMBER_DISPLAY_NAME,
+          title: resolveDirectConversationTitleForExport(
+            ownSeat,
+            otherSeats,
+            identityKindById,
+            identityDescriptionById,
+            profileByUser,
+            mailboxExcludedConversationIds.has(conversation.id),
+          ),
           kind: 'direct',
         });
       }
@@ -377,6 +592,7 @@ async function loadConversationContexts(
 export async function buildOwnMessagesExport(
   manager: EntityManager,
   userId: string,
+  identities: ExportIdentities,
 ): Promise<ExportedOwnMessage[]> {
   const { rows, isTruncated } = await readNewestMessages(
     manager,
@@ -389,9 +605,12 @@ export async function buildOwnMessagesExport(
     },
     OWN_MESSAGES_EXPORT_CAP,
   );
-  const contexts = await loadConversationContexts(manager, userId, [
-    ...new Set(rows.map((row) => row.conversationId)),
-  ]);
+  const contexts = await loadConversationContexts(
+    manager,
+    userId,
+    [...new Set(rows.map((row) => row.conversationId))],
+    identities,
+  );
   const exported = rows.map((row): ExportedOwnMessage => {
     const facts = describeAttachment(row.kind, row.attachment);
     const attachment: ExportedOwnMessageAttachment | null = facts
@@ -400,6 +619,7 @@ export async function buildOwnMessagesExport(
           mimeType: facts.mimeType,
           sizeBytes: facts.sizeBytes,
           mediaPath: null,
+          url: facts.url,
         }
       : null;
     if (attachment && facts?.storageKey) {
@@ -440,6 +660,45 @@ export async function buildOwnMessagesExport(
  *
  * Every arm requires the member's own participant row, so nothing outside
  * their own inbox can be named.
+ *
+ * Fix round 1, three findings, one per arm, all aliases read back against the
+ * final string character by character:
+ *
+ *  - EVERY arm now carries `AND NOT seatExcludedFromMailboxPredicate(...)` on
+ *    `own`, the exporting member's own seat. The asymmetric block rule
+ *    applies here exactly as it applies to the live REST reads: a staff
+ *    member blocked, either direction, with a mailbox thread's customer
+ *    loses their OWN access to that thread. Before this fix a blocked staff
+ *    exporter's `reportedConversations` category was a way around that rule,
+ *    since `buildReportedConversationsExport` read the thread's newest
+ *    messages with no block check of its own, handing a blocked-out staff
+ *    member the customer's and their colleagues' messages the REST layer
+ *    already refuses them. A customer's own seat is always a `profile`
+ *    identity and never matches the predicate, so this only ever removes a
+ *    blocked-out staff member's own access. Task 14a: the arms now compose
+ *    `staffSeatExcludedFromMailboxPredicate`, which carries this block rule
+ *    and the departed-staff rule together, so a staff member who has left
+ *    the business loses their own access here as well. Task 14: the arms
+ *    compose `seatExcludedFromMailboxPredicate`, which adds a customer's
+ *    block of the business, for the customer's seat and every staff seat.
+ *  - Arm 2 (`member` report by user id or profile slug) no longer excludes
+ *    every mailbox thread wholesale. It instead requires the matched
+ *    `counterpart` seat's OWN identity to be `profile`: a mailbox seat's
+ *    `identity_id` always names the business it speaks for, whichever human
+ *    holds it, so a customer's report that happens to match a staff
+ *    member's seat (their `user_id`, with the mailbox's identity) is
+ *    excluded, while a STAFF member's OWN report against a harassing
+ *    customer, filed from inside that same mailbox thread, keeps it: the
+ *    matched counterpart there is the customer's own `profile` seat.
+ *  - Arm 3 (a `member` report about someone since erased, matched through
+ *    `erased_sender_ref`) now also excludes a held message whose
+ *    `sender_identity_id` names a non-`profile` identity. `erased_sender_ref`
+ *    is set per SENDER, spanning every conversation that holds a tied
+ *    report, so a member report against an erased PERSONAL profile, P,
+ *    otherwise still lists a business thread where P once held a staff
+ *    seat: `held.sender_identity_id` there names the mailbox, and those
+ *    rows would render under `FORMER_MEMBER_DISPLAY_NAME` besides, telling
+ *    the customer P was staff.
  */
 const REPORTED_CONVERSATION_IDS_SQL = `
   SELECT "own"."conversation_id" AS "conversationId"
@@ -454,6 +713,7 @@ const REPORTED_CONVERSATION_IDS_SQL = `
    AND "own"."user_id" = $1
   WHERE "report"."reporter_id" = $1
     AND "report"."subject_type" = 'message'
+    AND NOT ${seatExcludedFromMailboxPredicate('"own"."conversation_id"', '$1')}
   UNION
   SELECT "own"."conversation_id"
   FROM "reports" "report"
@@ -465,6 +725,9 @@ const REPORTED_CONVERSATION_IDS_SQL = `
     END
   JOIN "conversation_participants" "counterpart"
     ON "counterpart"."user_id" = "reported_profile"."user_id"
+  JOIN "identities" "counterpart_identity"
+    ON "counterpart_identity"."id" = "counterpart"."identity_id"
+   AND "counterpart_identity"."kind" = 'profile'
   JOIN "conversation_participants" "own"
     ON "own"."conversation_id" = "counterpart"."conversation_id"
    AND "own"."user_id" = $1
@@ -474,6 +737,7 @@ const REPORTED_CONVERSATION_IDS_SQL = `
    AND "conversation"."is_official" = false
   WHERE "report"."reporter_id" = $1
     AND "report"."subject_type" = 'member'
+    AND NOT ${seatExcludedFromMailboxPredicate('"own"."conversation_id"', '$1')}
   UNION
   SELECT "own"."conversation_id"
   FROM "reports" "report"
@@ -487,6 +751,12 @@ const REPORTED_CONVERSATION_IDS_SQL = `
    AND "own"."user_id" = $1
   WHERE "report"."reporter_id" = $1
     AND "report"."subject_type" = 'member'
+    AND NOT EXISTS (
+      SELECT 1 FROM "identities" "held_identity"
+      WHERE "held_identity"."id" = "held"."sender_identity_id"
+        AND "held_identity"."kind" <> 'profile'
+    )
+    AND NOT ${seatExcludedFromMailboxPredicate('"own"."conversation_id"', '$1')}
   ORDER BY 1
 `;
 
@@ -512,6 +782,7 @@ const REPORTED_CONVERSATION_IDS_SQL = `
 export async function buildReportedConversationsExport(
   manager: EntityManager,
   userId: string,
+  identities: ExportIdentities,
 ): Promise<ExportedReportedConversation[]> {
   const idRows: { conversationId: string }[] = await manager.query(
     REPORTED_CONVERSATION_IDS_SQL,
@@ -530,7 +801,7 @@ export async function buildReportedConversationsExport(
   let isListTruncated = allConversationIds.length > conversationIds.length;
   let remainingMessageBudget = REPORTED_CONVERSATION_TOTAL_MESSAGES_EXPORT_CAP;
   const [contexts, ownParticipants] = await Promise.all([
-    loadConversationContexts(manager, userId, conversationIds),
+    loadConversationContexts(manager, userId, conversationIds, identities),
     manager.getRepository(ConversationParticipant).find({
       where: { conversationId: In(conversationIds), userId },
       select: { id: true, conversationId: true, clearedAt: true, leftAt: true },
@@ -555,8 +826,9 @@ export async function buildReportedConversationsExport(
     }
     if (remainingMessageBudget <= 0) {
       // The total ceiling bound before this conversation was reached, so it and
-      // everything after it are missing from the archive rather than merely cut
-      // short. That is a truncated LIST, not a truncated entry.
+      // everything after it is missing from the archive entirely: whole
+      // conversations are absent, and each conversation that did make it in
+      // stays complete. That is a truncated LIST.
       isListTruncated = true;
       break;
     }
@@ -597,24 +869,48 @@ export async function buildReportedConversationsExport(
     readConversations.push({ conversationId, rows, isTruncated });
   }
 
+  // Task 13f: sender resolution reuses `renderMessageSender`, the same
+  // function every in-app read renders a bubble's author from, so a mailbox
+  // message's sender exports as the business itself, whichever staff member
+  // typed it, and an ordinary sender exports under their own name exactly as
+  // before. `staffNameResolver` is a fixed no-op: this plain-string export
+  // carries no per-reader staff-first-name attribution, so what it shows a
+  // customer reader stays within what the app itself already showed them.
   const senderUserIds = new Set<string>([userId]);
+  const senderIdentityIds = new Set<string>();
   for (const conversation of readConversations) {
     for (const row of conversation.rows) {
       if (row.senderId !== null) {
         senderUserIds.add(row.senderId);
       }
+      if (row.senderIdentityId !== null) {
+        senderIdentityIds.add(row.senderIdentityId);
+      }
     }
   }
-  const nameByUserId = new Map<string, string>();
+  const profileByUser = new Map<string, Profile>();
   for (const idChunk of chunked([...senderUserIds], ID_LOOKUP_CHUNK_SIZE)) {
     const profiles = await manager.getRepository(Profile).find({
       where: { userId: In(idChunk) },
-      select: { userId: true, firstName: true, lastName: true },
     });
     for (const profile of profiles) {
-      nameByUserId.set(profile.userId, displayNameOf(profile));
+      profileByUser.set(profile.userId, profile);
     }
   }
+  const senderIdentityKindById = new Map(
+    (await identities.getByIds([...senderIdentityIds])).map((identity) => [
+      identity.id,
+      identity.kind,
+    ]),
+  );
+  const senderIdentityDescriptionById = await identities.describeIdentities([
+    ...senderIdentityIds,
+  ]);
+  const senderContext: SenderIdentityContext = {
+    identityKindById: senderIdentityKindById,
+    identityDescriptionById: senderIdentityDescriptionById,
+    staffNameResolver: { resolve: () => null },
+  };
 
   const exported = readConversations.map((conversation) => {
     const context = contexts.get(conversation.conversationId);
@@ -627,15 +923,20 @@ export async function buildReportedConversationsExport(
         const facts = describeAttachment(row.kind, row.attachment);
         return {
           id: row.id,
-          senderDisplayName:
-            row.senderId === null
-              ? FORMER_MEMBER_DISPLAY_NAME
-              : nameByUserId.get(row.senderId) || FORMER_MEMBER_DISPLAY_NAME,
+          senderDisplayName: renderMessageSender(
+            row,
+            profileByUser,
+            senderContext,
+          ).displayName,
           isOwnMessage: row.senderId === userId,
           kind: row.kind,
           body: row.body,
           attachment: facts
-            ? { fileName: facts.fileName, mimeType: facts.mimeType }
+            ? {
+                fileName: facts.fileName,
+                mimeType: facts.mimeType,
+                url: facts.url,
+              }
             : null,
           sentAt: toIsoString(row.createdAt),
         };

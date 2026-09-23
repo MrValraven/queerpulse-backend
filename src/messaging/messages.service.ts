@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository, SelectQueryBuilder } from 'typeorm';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
 import { DeleteMessageDto } from './dto/delete-message.dto';
@@ -37,6 +37,7 @@ import {
   GifAttachment,
   Message,
   MessageKind,
+  StickerAttachment,
 } from './entities/message.entity';
 import {
   decodeMessageHistoryCursor,
@@ -49,10 +50,7 @@ import {
   MessageResponse,
   MessageSearchConversationGroup,
   MessageSearchResponse,
-  presentSenderIds,
   resolveAttachment,
-  senderAuthorSummary,
-  toAuthorSummary,
   toMessageView,
 } from './message-response';
 import {
@@ -73,6 +71,7 @@ import {
   MessageUpdatedEvent,
 } from './messaging.events';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { seatExcludedFromMailboxPredicate } from './mailbox-seats';
 import { MessagingCoreService } from './messaging-core.service';
 import { StorageService } from '../storage/storage.service';
 
@@ -481,6 +480,7 @@ export class MessagesService {
     rawQuery: string,
     limit?: number,
     conversationId?: string,
+    mailboxIdentityId?: string,
   ): Promise<MessageSearchResponse> {
     const query = rawQuery.trim();
     const cappedLimit = Math.min(
@@ -500,6 +500,14 @@ export class MessagesService {
     // escape character explicitly, matching `listStarredMessages`' own
     // folded `LIKE` comparison.
     const foldedTerm = foldedSearchTerm('pattern');
+    // Task 24: `?as=` narrows the participation `EXISTS` below to the
+    // caller's own seat that speaks for that mailbox. It sits inside the
+    // subquery, so `.take()` stays a plain `LIMIT` (ENG-252). The caller
+    // (`MessagingService.searchMessages`) authorizes the mailbox first.
+    const hasMailboxFilter = mailboxIdentityId !== undefined;
+    const mailboxSeatPredicate = hasMailboxFilter
+      ? 'AND "p"."identity_id" = :mailboxIdentityId'
+      : '';
     const searchQuery = this.messages
       .createQueryBuilder('m')
       .where(
@@ -519,8 +527,16 @@ export class MessagesService {
             AND "p"."user_id" = :userId
             AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
             AND (p.left_at IS NULL OR m.created_at <= p.left_at)
+            ${mailboxSeatPredicate}
         )`,
-        { userId },
+        hasMailboxFilter ? { userId, mailboxIdentityId } : { userId },
+      )
+      // Task 13c fix round 1: a STAFF member blocked either way with a
+      // mailbox thread's customer finds nothing from that thread. Task 14a:
+      // nor does a staff member who has left the business. Task 14: nor
+      // does either side of a thread whose customer blocked the business.
+      .andWhere(
+        `NOT ${seatExcludedFromMailboxPredicate('m.conversation_id', ':userId')}`,
       )
       // Single-thread scope ("search in this chat", opened from an already-open
       // conversation), additive on top of the participation gate above, so a
@@ -579,31 +595,19 @@ export class MessagesService {
     }
 
     const conversationIds = [...new Set(rows.map((m) => m.conversationId))];
-    const senderIds = presentSenderIds(rows);
-    // Batch: the conversations (for isOfficial/kind/title/avatarUrl), every
-    // non-caller participant (the DM counterpart per conversation), and the
-    // profiles for both those counterparts and the hit senders, three
-    // queries, no per-row lookups.
-    const [convos, others] = await Promise.all([
-      this.conversations.find({ where: { id: In(conversationIds) } }),
-      this.participants.find({
-        where: { conversationId: In(conversationIds), userId: Not(userId) },
-      }),
-    ]);
-    const convoById = new Map(convos.map((c) => [c.id, c]));
-    const otherByConvo = new Map<string, ConversationParticipant>();
-    for (const other of others) {
-      // A 1:1 DM has exactly one counterpart; a GROUP has many non-caller
-      // participants here too, but `otherParticipant` is null for a group
-      // below (ENG-251) so which one lands first never matters.
-      if (!otherByConvo.has(other.conversationId)) {
-        otherByConvo.set(other.conversationId, other);
-      }
-    }
-    const profiles = await this.profiles.find({
-      where: { userId: In([...senderIds, ...others.map((o) => o.userId)]) },
+    // Batch: the conversations (for isOfficial/kind/title/avatarUrl), and
+    // the participants and hit senders rendered through one shared
+    // `loadMessageListContext` (Task 13c), a fixed number of queries, no
+    // per-row lookups.
+    const convos = await this.conversations.find({
+      where: { id: In(conversationIds) },
     });
-    const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
+    const convoById = new Map(convos.map((c) => [c.id, c]));
+    const listContext = await this.core.loadMessageListContext(
+      convos,
+      rows,
+      userId,
+    );
 
     const conversations: MessageSearchConversationGroup[] = conversationIds.map(
       (conversationId) => {
@@ -611,17 +615,16 @@ export class MessagesService {
         const isOfficial = Boolean(convo?.isOfficial);
         // ENG-251: a GROUP hit is filed under the group's own identity, never
         // an arbitrary member's, `otherParticipant` (a single counterpart)
-        // makes no sense for an N-member thread, and picking one via
-        // `otherByConvo`'s "first wins" above used to mislabel the whole
-        // group with whichever member happened to load first.
+        // makes no sense for an N-member thread. Task 13c: a direct thread's
+        // counterpart is rendered the way the inbox header renders it, so a
+        // business thread files under the business and names no staff member.
         const isGroup = convo?.kind === ConversationKind.Group;
-        const other = otherByConvo.get(conversationId);
         return {
           conversationId,
           otherParticipant:
             isOfficial || isGroup
               ? null
-              : toAuthorSummary(other ? profileByUser.get(other.userId) : null),
+              : listContext.renderCounterpart(conversationId),
           isOfficial,
           kind: isGroup ? 'group' : 'direct',
           title: isGroup ? (convo?.title ?? null) : null,
@@ -634,7 +637,7 @@ export class MessagesService {
       id: m.id,
       conversationId: m.conversationId,
       snippet: buildSearchSnippet(m.body, query),
-      sender: senderAuthorSummary(m.senderId, profileByUser),
+      sender: listContext.renderSender(m),
       createdAt: m.createdAt.toISOString(),
       // Coordinator follow-up (ENG-251): `kind`/`attachment` ride the same
       // `Message` row this query already selected in full, no extra query or
@@ -661,8 +664,10 @@ export class MessagesService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image' | 'document',
+    kind?: 'user' | 'gif' | 'image' | 'document' | 'sticker',
     attachment?: AttachmentInput,
+    stickerId?: string,
+    asIdentityId?: string,
   ): Promise<MessageResponse> {
     const { response } = await this.sendMessageWithOutcome(
       conversationId,
@@ -673,6 +678,8 @@ export class MessagesService {
       forwarded,
       kind,
       attachment,
+      stickerId,
+      asIdentityId,
     );
     return response;
   }
@@ -691,8 +698,10 @@ export class MessagesService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image' | 'document',
+    kind?: 'user' | 'gif' | 'image' | 'document' | 'sticker',
     attachment?: AttachmentInput,
+    stickerId?: string,
+    asIdentityId?: string,
   ): Promise<{ response: MessageResponse; isNew: boolean }> {
     // Sending is the ONE messaging write both transports share (HTTP POST and
     // the gateway's `message:send`), so the sender's CURRENT account status is
@@ -764,21 +773,58 @@ export class MessagesService {
     //
     // Hoisted (rather than scoped to the `if` below): PRD-221 reuses it after
     // the send succeeds to keep an `@`-mention of this exact person out of the
-    // mention fan-out — see the `directCounterpartUserId` comment down there.
-    let directCounterpartUserId: string | null = null;
+    // mention fan-out; see the `directCounterpartUserIds` comment down there.
+    //
+    // Task 13c: `directCounterpartUserIds` holds every user this send already
+    // reaches as its one counterpart: the ordinary DM's other member, the
+    // customer for a staff sender on a business mailbox thread, or every
+    // staff seat for a customer writing to one.
+    let directCounterpartUserIds: string[] = [];
     if (convo.kind !== ConversationKind.Group && !convo.isOfficial) {
-      const other = await this.participants.findOne({
-        where: { conversationId, userId: Not(userId) },
-      });
-      if (other) {
-        directCounterpartUserId = other.userId;
+      // Task 13c: the enforcement twin of `ConversationsService.replyGateFor`
+      // as `buildConversationSummaries` feeds it, reading the same seats
+      // through the same `describeDirectThreadSeats`. An unordered
+      // `findOne({ userId: Not(userId) })` could return a staff sender's
+      // COLLEAGUE, whose personal connection skipped this gate and left
+      // `openedAt` unset, so the customer stayed refused although the
+      // business had replied.
+      const { threadSeats, otherSeats } = await this.core.loadDirectThreadSeats(
+        conversationId,
+        participant,
+      );
+      if (threadSeats.mailboxIdentityId) {
+        // A business mailbox thread. Personal connection does not apply on
+        // either side, the same `false` the inbox's `replyGate` reads. A
+        // person-to-person block is enforced one step earlier: a staff member
+        // blocked either way with the customer is refused by
+        // `requireParticipant` above (fix round 1), and everyone else sends
+        // as usual. Blocking a business as a whole is identity-level
+        // blocking, applied by Task 14's `identity_blocks`.
+        directCounterpartUserIds = threadSeats.isCallerMailboxSeat
+          ? threadSeats.counterpartSeats.map((seat) => seat.userId)
+          : threadSeats.mailboxStaffSeats.map((seat) => seat.userId);
+        if (!convo.openedAt) {
+          if (convo.initiatorUserId && convo.initiatorUserId !== userId) {
+            await this.conversations.update(convo.id, {
+              openedAt: new Date(),
+            });
+          } else {
+            throw new ForbiddenException(
+              'You can only message accepted connections',
+            );
+          }
+        }
+      } else if (otherSeats.length) {
+        directCounterpartUserIds = otherSeats.map((seat) => seat.userId);
         // P0 hardening: a `blocks` row is a hard stop even if the
         // `connections` edge somehow still reads Accepted (e.g. a stale read
         // racing `SocialService.blockMember`'s transactional sever) —
         // defense-in-depth, checked before (and independent of) the
-        // connection gate below.
-        if (await this.blockFilter.isBlockedEitherWay(userId, other.userId)) {
-          throw new ForbiddenException('You cannot message this member');
+        // connection gate below. An ordinary DM has exactly one other seat.
+        for (const other of otherSeats) {
+          if (await this.blockFilter.isBlockedEitherWay(userId, other.userId)) {
+            throw new ForbiddenException('You cannot message this member');
+          }
         }
         // PRD-340 (one-tap reply): a non-connected 1:1 thread is no longer an
         // unconditional dead end for BOTH sides. `convo.openedAt` set means
@@ -790,9 +836,22 @@ export class MessagesService {
         // which keeps the anti-spam property this gate exists for. A
         // pre-migration thread with no known initiator keeps the platform's
         // original, unconditional rule (see the migration's own comment).
+        // Task 13c: a thread whose seats cannot be attributed
+        // (`counterpartSeats` empty) counts as unconnected, as it does in the
+        // inbox.
+        const counterpartSeat =
+          threadSeats.counterpartSeats.length === 1
+            ? threadSeats.counterpartSeats[0]
+            : undefined;
         if (
           !convo.openedAt &&
-          !(await this.connectionsService.areConnected(userId, other.userId))
+          !(
+            counterpartSeat &&
+            (await this.connectionsService.areConnected(
+              userId,
+              counterpartSeat.userId,
+            ))
+          )
         ) {
           if (convo.initiatorUserId && convo.initiatorUserId !== userId) {
             await this.conversations.update(convo.id, {
@@ -857,6 +916,8 @@ export class MessagesService {
       forwarded,
       kind,
       attachment,
+      stickerId,
+      asIdentityId,
     );
     // `@`-mention fan-out: the same best-effort `MentionNotificationService`
     // community posts and forum threads already use, wired into the ONE write
@@ -868,7 +929,7 @@ export class MessagesService {
     // — an idempotency-key replay (retry, or the dual HTTP+WS write path
     // racing itself) must not re-notify a mention that already fired once.
     //
-    // PRD-221: `directCounterpartUserId` (set above, non-null only for a
+    // PRD-221: `directCounterpartUserIds` (set above, non-empty only for a
     // DIRECT non-official DM) is excluded from the fan-out. In a 1:1 thread
     // the mentioned member and the message's only possible recipient are
     // necessarily the same person — `PushMessageListener` already tells them
@@ -894,7 +955,7 @@ export class MessagesService {
           messageId: response.id,
           excerpt: body.slice(0, 140),
         },
-        directCounterpartUserId ? [directCounterpartUserId] : [],
+        directCounterpartUserIds,
       );
     }
     return { response, isNew };
@@ -960,6 +1021,25 @@ export class MessagesService {
       if (!isStaff) {
         throw new ForbiddenException('You can only delete your own messages');
       }
+    } else if (message.senderIdentityId) {
+      // Task 7: an author who has since lost their staff standing on the
+      // identity this message was sent as (e.g. removed from the business's
+      // team) must not keep deleting messages sent under it. A platform
+      // staff takedown (the branch above) is a moderation action and carries
+      // no such requirement.
+      //
+      // CW-28: `isDeletingOwnMessage` is set here alone, after `isAuthor`
+      // above has already confirmed this human wrote the message being
+      // deleted, so a moderation-removed persona may still remove its own
+      // past content. `editMessage`'s identical guard call below omits it,
+      // so every other write still meets the plain `IDENTITY_REMOVED`
+      // refusal.
+      await this.core.assertMaySendAs(
+        conversationId,
+        userId,
+        message.senderIdentityId,
+        { isDeletingOwnMessage: true },
+      );
     }
 
     // Conditional soft-delete: only the row still un-deleted is tombstoned. Two
@@ -1100,7 +1180,7 @@ export class MessagesService {
    */
   async purgeReleasedAttachmentBytes(
     messageId: string,
-    attachment: GifAttachment | DocumentAttachment | null,
+    attachment: GifAttachment | DocumentAttachment | StickerAttachment | null,
   ): Promise<void> {
     for (const key of messageAttachmentStorageKeys(attachment)) {
       try {
@@ -1189,6 +1269,17 @@ export class MessagesService {
     }
     if (message.senderId !== userId) {
       throw new ForbiddenException('You can only edit your own messages');
+    }
+    if (message.senderIdentityId) {
+      // Task 7: the author must still be entitled to act as the identity
+      // this message was sent as. A staff member removed from a business's
+      // team since the original send must not keep rewriting messages sent
+      // under its name.
+      await this.core.assertMaySendAs(
+        conversationId,
+        userId,
+        message.senderIdentityId,
+      );
     }
     if (Date.now() - message.createdAt.getTime() > EDIT_WINDOW_MS) {
       throw new ForbiddenException('The edit window has expired');

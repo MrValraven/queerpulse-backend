@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatModule } from '../chat/chat.module';
 import { ConnectionsModule } from '../connections/connections.module';
+import { IdentitiesModule } from '../identities/identities.module';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -40,6 +41,11 @@ import { PushSubscription } from './entities/push-subscription.entity';
     // `UsersModule`, `SocialModule` and `VouchModule`, none of which import
     // this module, and `ChatModule` (imported above) already imports it.
     ConnectionsModule,
+    // Task 13d: provides `IdentitiesService` and `IdentityAttributionService`,
+    // so a business mailbox reply's push renders the business the way the
+    // in-app sender does. No cycle: `IdentitiesModule` imports only its own
+    // TypeORM entities.
+    IdentitiesModule,
     // provides NotificationPreferencesService — the new-message push honours the
     // member's "New message" category switch. One-way edge: NotificationsModule
     // imports only SocialModule + TypeOrm, so it never reaches back to PushModule.

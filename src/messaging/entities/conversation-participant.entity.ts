@@ -39,6 +39,16 @@ export class ConversationParticipant {
   userId!: string;
 
   /**
+   * Which identity this seat speaks for. A member's own threads carry their
+   * profile identity. A business thread carries one row per staff member, each
+   * with the business identity here, which is what keeps unread, mute, pin,
+   * archive and drafts per person while the thread belongs to the mailbox.
+   */
+  @Index('IDX_conversation_participants_identity_id')
+  @Column({ type: 'uuid' })
+  identityId!: string;
+
+  /**
    * Group standing. `member` for DMs and every pre-group row; a group creator is
    * `owner`. Set at creation in Phase 1; role-gated actions arrive in Phase 2.
    */

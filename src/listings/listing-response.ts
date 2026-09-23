@@ -1258,6 +1258,35 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   queerOwnedVerification: QueerOwnedVerificationView;
   hoursType: DirectoryHoursType;
   hoursNote: string;
+  /**
+   * True when this listing has no owner (`Listing.ownerId === null`): it is
+   * house-authored and awaiting the real owner (`createdByStaffId` set), or
+   * a former owner's account was erased. The page uses this to say the
+   * listing is unclaimed and invite the real owner to claim it.
+   *
+   * A FACT ABOUT THE LISTING. It lives beside `owner`, kept as its own
+   * field, because `owner` (via `ownerIdentity`) answers a different
+   * question: what the OWNER chose to reveal. An owned listing with
+   * `visibility: 'anon'` blanks `owner.name`/`owner.role`/`owner.bio`/
+   * `owner.first` exactly as an unowned listing does. Deriving this flag
+   * from those blank fields would make an owner who asked not to be named
+   * read identically to a business nobody has claimed yet, and inviting a
+   * claim on the former outs that owner. `isUnclaimed` is derived from
+   * `ownerId` alone, so the two cases stay distinguishable no matter what
+   * `visibility` the real owner picked.
+   *
+   * `createdByStaffId` itself never reaches this or any public response. It
+   * is a staff-only column; this boolean is the only thing the public
+   * learns from it.
+   *
+   * Detail-only: the grid card has no owner block and no claim entry point
+   * (the claim flow lives in the detail page's aside, see
+   * `DirectoryContestControl`/`DirectoryClaimModal` on the frontend), and
+   * `DirectoryCardDTO` is reused by search results and member-profile
+   * listing lists where this signal has no surface to render on. Adding it
+   * there would ship a field with nowhere to go.
+   */
+  isUnclaimed: boolean;
   owner: DirectoryOwner;
   social: ListingSocial;
   address: string;
@@ -1385,6 +1414,9 @@ export function toDirectoryDetail(
     queerOwnedVerification: queerOwnedVerificationView(listing),
     hoursType: hoursTypeForCategory(listing.cats[0] ?? ''),
     hoursNote: listing.hoursNote,
+    // See `isUnclaimed` on `DirectoryDetailDTO`: derived from ownership
+    // alone.
+    isUnclaimed: listing.ownerId === null,
     // Redacted per the owner's chosen `visibility` — `anon` reveals nothing,
     // `role` shows only the role. Initials derive from the already-redacted
     // name so they can't leak the real name's initials for an anon owner.

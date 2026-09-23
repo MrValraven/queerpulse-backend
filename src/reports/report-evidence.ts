@@ -24,6 +24,7 @@
 import type {
   DocumentAttachment,
   GifAttachment,
+  StickerAttachment,
 } from '../messaging/entities/message.entity';
 import {
   messageAttachmentFacts,
@@ -87,9 +88,16 @@ export interface MessageSnapshotEvidence {
   capturedAt?: string;
 }
 
-/** The snapshot shape of a stored message attachment. */
+/**
+ * The snapshot shape of a stored message attachment. `storageKey` is null for
+ * a sticker (see `primaryMessageAttachmentStorageKey`'s own doc: its key is
+ * never a `message-image`/`message-document` platform key, so there is
+ * nothing here for the report evidence byte-serving route to point at); its
+ * `label` still survives into the snapshot through `fileName`, via
+ * `messageAttachmentFacts`.
+ */
 export function messageSnapshotAttachmentFrom(
-  attachment: GifAttachment | DocumentAttachment | null,
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null,
 ): MessageSnapshotAttachment | null {
   if (!attachment) return null;
   const facts = messageAttachmentFacts(attachment);
@@ -100,7 +108,14 @@ export function messageSnapshotAttachmentFrom(
     sizeBytes: facts?.sizeBytes ?? null,
     provider:
       typeof attachment.provider === 'string' ? attachment.provider : null,
-    caption: typeof attachment.caption === 'string' ? attachment.caption : null,
+    // `StickerAttachment` declares no `caption` field at all (a sticker send
+    // carries only a `stickerId`). `GifAttachment`/`DocumentAttachment` both
+    // declare it optional. The `in` check confirms the property's presence
+    // before reading it, safely handling the three-shape union.
+    caption:
+      'caption' in attachment && typeof attachment.caption === 'string'
+        ? attachment.caption
+        : null,
   };
 }
 
@@ -248,13 +263,43 @@ export interface GroupSnapshotEvidence {
   capturedAt: string;
 }
 
+/**
+ * A reported business-mailbox identity (`ReportSubjectType.Identity`) as it
+ * stood when its customer filed the report, captured for the reason the group
+ * snapshot above is: the business can rename itself, change its staff or be
+ * deleted between the filing and the review.
+ *
+ * Discriminated on `kind`, like `GroupSnapshotEvidence`.
+ *
+ * `staffUserIds` is moderator evidence only (spec 9: the moderator view shows
+ * the identity and the humans behind it whatever either attribution switch
+ * says). The reporter never reads it back: `toReportDTO`, the only shape
+ * `POST /reports` and `GET /reports/mine` return, carries no evidence at all.
+ */
+export interface MailboxIdentitySnapshotEvidence {
+  kind: 'mailbox_identity';
+  identityId: string;
+  identityKind: 'listing' | 'subprofile' | 'company';
+  /** The listing, subprofile or company id the identity belongs to. */
+  ownerEntityId: string;
+  /** The business's own display name; null when it could not be described. */
+  displayName: string | null;
+  /** The reporter's direct thread with the identity. */
+  conversationId: string;
+  /** Everyone staffing the mailbox, owner first, capped like
+   *  `GroupSnapshotEvidence.memberIds`. */
+  staffUserIds: string[];
+  capturedAt: string;
+}
+
 export type ReportEvidenceEntry =
   | UrlEvidence
   | ScreenshotEvidence
   | MessageSnapshotEvidence
   | HousingSnapshotEvidence
   | PhotoSnapshotEvidence
-  | GroupSnapshotEvidence;
+  | GroupSnapshotEvidence
+  | MailboxIdentitySnapshotEvidence;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

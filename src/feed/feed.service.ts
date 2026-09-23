@@ -15,6 +15,7 @@ import {
   AccessTier,
   Community,
 } from '../communities/entities/community.entity';
+import { ownRosterRowCountsSql } from '../communities/subcommunity-rules';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   Event,
@@ -902,6 +903,13 @@ export class FeedService {
         // added later stays closed until somebody deliberately opens it, which
         // is the safe direction for a privacy rule to drift in.
         //
+        // `AND "com"."parent_id" IS NULL`: a space never opens this arm on its
+        // own tier alone, even a public one. Content reaches this arm through
+        // a top-level community's own public standing, and a space's content
+        // reaches a feed through the membership arm below. A viewer who
+        // belongs to the space still sees it, on the `communities` tab's
+        // membership-scoped branch above, which this predicate never touches.
+        //
         // A flat/global post (`community_id IS NULL`, see
         // `CommunityPost.communityId`) is scoped to no community's roster, so
         // no gate applies to it and it stays visible to everyone.
@@ -927,7 +935,8 @@ export class FeedService {
           qb.andWhere(
             `cp.community_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM "community_members" "mem"
-               WHERE "mem"."community_id" = cp.community_id AND "mem"."user_id" = :viewerId)`,
+               WHERE "mem"."community_id" = cp.community_id AND "mem"."user_id" = :viewerId
+                 AND ${ownRosterRowCountsSql('cp.community_id', 'viewerId')})`,
             { viewerId },
           );
         } else {
@@ -938,11 +947,13 @@ export class FeedService {
                 SELECT 1 FROM "communities" "com"
                 WHERE "com"."id" = cp.community_id
                   AND "com"."access_tier" = :publicTier
+                  AND "com"."parent_id" IS NULL
               )
               OR EXISTS (
                 SELECT 1 FROM "community_members" "mem"
                 WHERE "mem"."community_id" = cp.community_id
                   AND "mem"."user_id" = :viewerId
+                  AND ${ownRosterRowCountsSql('cp.community_id', 'viewerId')}
               )
             )`,
             { publicTier: AccessTier.Public, viewerId },
@@ -1027,7 +1038,8 @@ export class FeedService {
           qb.andWhere(
             `t.community_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM "community_members" "mem"
-               WHERE "mem"."community_id" = t.community_id AND "mem"."user_id" = :viewerId)`,
+               WHERE "mem"."community_id" = t.community_id AND "mem"."user_id" = :viewerId
+                 AND ${ownRosterRowCountsSql('t.community_id', 'viewerId')})`,
             { viewerId },
           );
         } else {
@@ -1044,6 +1056,10 @@ export class FeedService {
           // it (see `isGatedTier` in `src/communities/community-gate.ts`). A
           // flat/global thread (`community_id IS NULL`) belongs to no roster,
           // so no gate applies to it and it stays visible to everyone.
+          // `AND "com"."parent_id" IS NULL`, same reasoning as the
+          // `community_post` branch above: a space's public tier alone never
+          // opens this arm, only membership (above) or the parent's own public
+          // standing does.
           qb.andWhere(
             `(
               t.community_id IS NULL
@@ -1051,11 +1067,13 @@ export class FeedService {
                 SELECT 1 FROM "communities" "com"
                 WHERE "com"."id" = t.community_id
                   AND "com"."access_tier" = :publicTier
+                  AND "com"."parent_id" IS NULL
               )
               OR EXISTS (
                 SELECT 1 FROM "community_members" "mem"
                 WHERE "mem"."community_id" = t.community_id
                   AND "mem"."user_id" = :viewerId
+                  AND ${ownRosterRowCountsSql('t.community_id', 'viewerId')}
               )
             )`,
             { publicTier: AccessTier.Public, viewerId },
@@ -1153,7 +1171,35 @@ export class FeedService {
           qb.andWhere(
             `e.community_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM "community_members" "mem"
-               WHERE "mem"."community_id" = e.community_id AND "mem"."user_id" = :viewerId)`,
+               WHERE "mem"."community_id" = e.community_id AND "mem"."user_id" = :viewerId
+                 AND ${ownRosterRowCountsSql('e.community_id', 'viewerId')})`,
+            { viewerId },
+          );
+        } else {
+          // This arm filters gatherings purely on `EventVisibility`, so a
+          // space's Public/Members gathering would otherwise reach every
+          // viewer's general feed regardless of whether they belong to that
+          // space. Admits a flat/global event, an event hosted by a
+          // top-level community, or an event hosted by a space the viewer
+          // has a roster row in. Mirrors the `community_post`/`forum_thread`
+          // arms' space exclusion, expressed against `EXISTS`/`NOT EXISTS`
+          // since this source carries no access-tier gate of its own to
+          // extend.
+          qb.andWhere(
+            `(
+              e.community_id IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM "communities" "evc"
+                WHERE "evc"."id" = e.community_id
+                  AND "evc"."parent_id" IS NOT NULL
+              )
+              OR EXISTS (
+                SELECT 1 FROM "community_members" "mem"
+                WHERE "mem"."community_id" = e.community_id
+                  AND "mem"."user_id" = :viewerId
+                  AND ${ownRosterRowCountsSql('e.community_id', 'viewerId')}
+              )
+            )`,
             { viewerId },
           );
         }
@@ -1314,6 +1360,7 @@ export class FeedService {
               SELECT 1 FROM "community_members" "self"
               WHERE "self"."community_id" = m.community_id
                 AND "self"."user_id" = :viewerId
+                AND ${ownRosterRowCountsSql('m.community_id', 'viewerId')}
             )`,
             { viewerId },
           )
@@ -1643,8 +1690,17 @@ export class FeedService {
     );
   }
 
-  /** Batched community lookup shared by the ranking window and the final
-   *  mapping, so a ranked page resolves its communities exactly once. */
+  /**
+   * Batched community lookup shared by the ranking window and the final
+   * mapping, so a ranked page resolves its communities exactly once.
+   *
+   * Also resolves each community's PARENT row (a second batched `IN` query,
+   * only when at least one candidate community is a space), and folds those
+   * parent rows into the SAME map. A space's parent is never one of
+   * `communityIds` on its own, so without this it would be invisible to
+   * `sourceFor`, which reads a candidate's parent name straight off this map
+   * with no lookup of its own.
+   */
   private async communitiesByIds(
     communityIds: string[],
   ): Promise<Map<string, Community>> {
@@ -1652,7 +1708,28 @@ export class FeedService {
     const rows = await this.communities.find({
       where: { id: In(communityIds) },
     });
-    return new Map(rows.map((community) => [community.id, community]));
+    const communityById = new Map(
+      rows.map((community) => [community.id, community]),
+    );
+    const parentIds = [
+      ...new Set(
+        rows
+          .map((community) => community.parentId)
+          .filter(
+            (parentId): parentId is string =>
+              parentId !== null && !communityById.has(parentId),
+          ),
+      ),
+    ];
+    if (parentIds.length) {
+      const parentRows = await this.communities.find({
+        where: { id: In(parentIds) },
+      });
+      for (const parent of parentRows) {
+        communityById.set(parent.id, parent);
+      }
+    }
+    return communityById;
   }
 
   /**
@@ -1773,6 +1850,11 @@ export class FeedService {
      * it sits in: the card is one conversation, and quieting the whole room
      * from it would be a bigger act than the member asked for. Everything
      * else names its community, and a flat/global item names nothing.
+     *
+     * `parentName` is the community's own parent, resolved off the SAME
+     * `communityById` map `communitiesByIds` already folded the parent rows
+     * into. Null for a top-level community, and always null for a forum
+     * thread's self-named source, which carries no community at all.
      */
     const sourceFor = (
       candidate: Candidate,
@@ -1780,10 +1862,23 @@ export class FeedService {
     ): FeedItemSource | null => {
       if (candidate.type === 'forum_thread') {
         const thread = candidate.row as ForumThread;
-        return { kind: 'forum_thread', id: thread.id, name: thread.title };
+        return {
+          kind: 'forum_thread',
+          id: thread.id,
+          name: thread.title,
+          parentName: null,
+        };
       }
       if (!community) return null;
-      return { kind: 'community', id: community.id, name: community.name };
+      const parentName = community.parentId
+        ? (communityById.get(community.parentId)?.name ?? null)
+        : null;
+      return {
+        kind: 'community',
+        id: community.id,
+        name: community.name,
+        parentName,
+      };
     };
 
     /** The reason line for one candidate, resolved to something a member can

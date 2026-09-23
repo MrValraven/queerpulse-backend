@@ -20,6 +20,7 @@ import { SaveCropDto } from './dto/save-crop.dto';
 import { storageKeyOwnerId } from './storage-key';
 import { StorageService, PresignedUpload } from './storage.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
+import { UserRole } from '../users/entities/user.entity';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
@@ -121,6 +122,14 @@ export class UploadsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignRequestDto,
   ): Promise<PresignedUpload> {
+    // Every other kind is member media. A sticker is platform artwork served
+    // publicly to every member of every conversation, so only an admin may
+    // mint a write credential under the `stickers/` prefix. The spec table in
+    // `upload-kinds.ts` has no role field, which is why this one kind's rule
+    // lives here rather than there.
+    if (dto.kind === 'sticker' && (user.role as UserRole) !== UserRole.Admin) {
+      throw new ForbiddenException('Only an admin may upload a sticker');
+    }
     return this.storage.presignImageUpload({
       kind: dto.kind,
       userId: user.userId,

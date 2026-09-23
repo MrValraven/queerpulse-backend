@@ -614,10 +614,49 @@ describe('ForumPostsService.searchByText visibility', () => {
       );
     });
 
+    // A leftover space membership row a cascade missed must not resurface a
+    // space's reply through search: `ownRosterRowCountsSql` is ANDed onto the
+    // same roster EXISTS above, mirroring
+    // `ForumThreadsService.applyCommunityAccessFilter`.
+    it('ANDs the parent-row condition onto the roster EXISTS, so a leftover space membership row grants nothing', async () => {
+      const { sql } = await communityGate();
+
+      expect(sql).toMatch(
+        /"__search_mem"\."user_id" = :searchViewerId\s*AND EXISTS \(\s*SELECT 1 FROM "communities" "own_c"\s*WHERE "own_c"\."id" = "t"\."community_id"/,
+      );
+      expect(sql).toContain('"own_c"."parent_id" IS NULL');
+    });
+
+    // The inherited role every space's parent staff carries: an owner,
+    // co-owner or mod of the parent reaches the space's replies through
+    // search with no roster row of their own in the space.
+    it('ORs in the parent-staff arm, so a parent owner/co-owner/mod reaches a space reply with no space roster row', async () => {
+      const { sql } = await communityGate();
+
+      expect(sql).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "communities" "staff_sc"\s*JOIN "community_members" "staff_pm"\s*ON "staff_pm"\."community_id" = "staff_sc"\."parent_id"\s*WHERE "staff_sc"\."id" = "t"\."community_id"\s*AND "staff_pm"\."user_id" = :searchViewerId/,
+      );
+      expect(sql).toContain(
+        "\"staff_pm\".\"role\" IN ('owner', 'co_owner', 'mod')",
+      );
+    });
+
     it('leaves flat/global threads (community_id IS NULL) searchable by everyone', async () => {
       const { sql } = await communityGate();
 
       expect(sql).toContain('"t"."community_id" IS NULL');
+    });
+
+    it("never opens the public-tier arm for a space's reply to a non-member", async () => {
+      // A space's own public tier alone must not admit its reply here. Only
+      // the roster branch (tested above) or the space's PARENT being public
+      // does, mirroring `ForumThreadsService.applyCommunityAccessFilter` and
+      // `FeedService`'s equivalent arm.
+      const { sql } = await communityGate();
+
+      expect(sql).toMatch(
+        /"__search_com"\."access_tier" = :searchPublicTier\s*AND "__search_com"\."parent_id" IS NULL/,
+      );
     });
   });
 

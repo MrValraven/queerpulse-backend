@@ -198,6 +198,12 @@ export class PushNotificationListener {
         case NotificationType.GroupInvite:
           await this.pushGroupInvite(userIds, notification);
           return;
+        // An admin has offered this member ownership of a listing that has
+        // none. Gated by the member's own `Listings` category, so the push
+        // and the bell answer to one switch.
+        case NotificationType.ListingOwnerOffer:
+          await this.pushListingOwnerOffer(userIds, notification);
+          return;
         // A sign-in from a device the member has not used before (ID-06).
         // No `NotificationPreferenceCategory` gate, deliberately: the member's
         // own switch (`member_preferences.login_alerts_enabled`) is enforced at
@@ -959,6 +965,56 @@ export class PushNotificationListener {
             ? 'push:groupInvite.body'
             : 'push:groupInvite.bodyUntitled',
           params: groupTitle ? { name, group: groupTitle } : { name },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "An admin has offered you ownership of Lux Cafe" (admin-authored
+   * listing ownership offers).
+   *
+   * Gated by `Listings`, the same category the bell row sits behind, and
+   * sent through the preview split with the generic NOTIFICATION copy: the
+   * offering admin's name and the listing's own public name are exactly what
+   * a lock screen must not show to somebody hiding previews.
+   *
+   * Opens the account profile's Places section (`/account/profile#places`),
+   * where the accept/decline controls actually live. The listing's own
+   * public page (`/local/directory/<listingSlug>`) has no accept button on
+   * it at all, which is exactly the mistake this route used to make: the
+   * in-app bell notification for this same event was already corrected to
+   * the Places section (`notifications.adapters.ts`'s `listing_owner_offer`
+   * branch), and this push route was the one place left disagreeing with it.
+   */
+  private async pushListingOwnerOffer(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Listings,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const listingName =
+      this.payloadString(notification, 'listingName') ?? 'a listing';
+    const url = '/account/profile#places';
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Ownership offer',
+        body: `${name} has offered you ownership of ${listingName}.`,
+        tag: `notification:${notification.id}`,
+        data: { url },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:listingOwnerOffer.title',
+          bodyKey: 'push:listingOwnerOffer.body',
+          params: { name, listingName },
         },
         timestamp: notification.createdAt.getTime(),
       },

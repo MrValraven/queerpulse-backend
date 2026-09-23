@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 
 /**
  * Query for `GET /conversations` (ENG-253). `cursor` is the opaque keyset
@@ -22,4 +22,14 @@ export class ListConversationsQuery {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  /**
+   * Task 24: the mailbox to list, by identity id. Present, the page holds
+   * only the threads where the caller's own seat speaks for that identity,
+   * and the caller must staff it (`IDENTITY_NOT_STAFF` otherwise). Omitted,
+   * the page is the merged inbox across every mailbox, as before.
+   */
+  @IsOptional()
+  @IsUUID()
+  as?: string;
 }

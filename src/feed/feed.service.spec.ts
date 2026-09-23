@@ -290,6 +290,9 @@ const communityDefaults: Community = {
   isPubliclyListed: false,
   frozenNote: null,
   frozenByUserId: null,
+  parentId: null,
+  allowsSubcommunities: false,
+  archivedWithParent: false,
 };
 
 const baseCommunity = (overrides: Partial<Community> = {}): Community =>
@@ -728,7 +731,7 @@ describe('FeedService', () => {
       // `community_members` keyed to the viewer — no access-tier fallback.
       expect(qb.andWhere).toHaveBeenCalledWith(
         expect.stringMatching(
-          /EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = cp\.community_id AND "mem"\."user_id" = :viewerId\)/,
+          /EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = cp\.community_id AND "mem"\."user_id" = :viewerId/,
         ),
         { viewerId: 'viewer-1' },
       );
@@ -737,6 +740,32 @@ describe('FeedService', () => {
       expect(qb.andWhere).not.toHaveBeenCalledWith(
         expect.stringContaining('access_tier'),
         expect.anything(),
+      );
+    });
+
+    // A leftover space membership row a cascade missed must not resurface a
+    // space's posts on the "communities" tab: `ownRosterRowCountsSql` is
+    // ANDed onto the same EXISTS above, so the viewer's own roster row only
+    // counts while they still hold the parent roster row too.
+    it('ANDs the parent-row condition onto the community_post membership EXISTS on the "communities" tab', async () => {
+      const communityPostQueryBuilder = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(
+        communityPostQueryBuilder,
+      );
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      const membershipCall = communityPostQueryBuilder.andWhere.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          call[0].includes('cp.community_id IS NOT NULL AND EXISTS'),
+      );
+      expect(membershipCall).toBeDefined();
+      expect(String(membershipCall?.[0])).toMatch(
+        /"own_c"\."id" = cp\.community_id/,
+      );
+      expect(String(membershipCall?.[0])).toContain(
+        '"own_c"."parent_id" IS NULL',
       );
     });
 
@@ -768,9 +797,31 @@ describe('FeedService', () => {
 
       expect(qb.andWhere).toHaveBeenCalledWith(
         expect.stringMatching(
-          /e\.community_id IS NOT NULL AND EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = e\.community_id AND "mem"\."user_id" = :viewerId\)/,
+          /e\.community_id IS NOT NULL AND EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = e\.community_id AND "mem"\."user_id" = :viewerId/,
         ),
         { viewerId: 'viewer-1' },
+      );
+    });
+
+    // A leftover space membership row a cascade missed must not resurface a
+    // space's gatherings on the "communities" tab either.
+    it('ANDs the parent-row condition onto the gathering membership EXISTS on the "communities" tab', async () => {
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      const membershipCall = eventQueryBuilder.andWhere.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          call[0].includes('e.community_id IS NOT NULL AND EXISTS'),
+      );
+      expect(membershipCall).toBeDefined();
+      expect(String(membershipCall?.[0])).toMatch(
+        /"own_c"\."id" = e\.community_id/,
+      );
+      expect(String(membershipCall?.[0])).toContain(
+        '"own_c"."parent_id" IS NULL',
       );
     });
 
@@ -825,6 +876,62 @@ describe('FeedService', () => {
       );
     });
 
+    it('keeps a space’s Public/Members gathering out of a non-member’s "gatherings" tab', async () => {
+      // This arm filters on `EventVisibility` alone, so without the space
+      // clause a space's Public/Members gathering would reach every
+      // viewer's feed whatever their membership.
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      expect(eventQueryBuilder.andWhere).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /e\.community_id IS NULL\s*OR NOT EXISTS \(\s*SELECT 1 FROM "communities" "evc"\s*WHERE "evc"\."id" = e\.community_id\s*AND "evc"\."parent_id" IS NOT NULL\s*\)\s*OR EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = e\.community_id\s*AND "mem"\."user_id" = :viewerId/,
+        ),
+        { viewerId: 'viewer-1' },
+      );
+    });
+
+    it('still admits a space’s gathering to a viewer on its roster', async () => {
+      // The `EXISTS` roster arm inside the same predicate: without it, a
+      // space's own member would lose the space's gatherings from every
+      // feed tab, "communities" included.
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      const spaceGateCall = eventQueryBuilder.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes('"evc"'),
+      );
+      expect(spaceGateCall).toBeDefined();
+      expect(String(spaceGateCall?.[0])).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "community_members" "mem"/,
+      );
+    });
+
+    // A leftover space membership row a cascade missed must not resurface a
+    // space's gathering on the general "gatherings" tab either: the same
+    // parent-row condition rides the OR EXISTS roster arm above.
+    it('ANDs the parent-row condition onto the gathering OR EXISTS roster arm on the "gatherings" tab', async () => {
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      const spaceGateCall = eventQueryBuilder.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes('"evc"'),
+      );
+      expect(spaceGateCall).toBeDefined();
+      expect(String(spaceGateCall?.[0])).toMatch(
+        /OR EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = e\.community_id\s*AND "mem"\."user_id" = :viewerId\s*AND EXISTS \(\s*SELECT 1 FROM "communities" "own_c"/,
+      );
+      expect(String(spaceGateCall?.[0])).toContain(
+        '"own_c"."parent_id" IS NULL',
+      );
+    });
+
     it('applies the community_id + membership EXISTS predicate to the forum_thread source on the "communities" tab', async () => {
       const qb = qbStub([]);
       forumThreads.createQueryBuilder.mockReturnValue(qb);
@@ -833,9 +940,31 @@ describe('FeedService', () => {
 
       expect(qb.andWhere).toHaveBeenCalledWith(
         expect.stringMatching(
-          /t\.community_id IS NOT NULL AND EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = t\.community_id AND "mem"\."user_id" = :viewerId\)/,
+          /t\.community_id IS NOT NULL AND EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = t\.community_id AND "mem"\."user_id" = :viewerId/,
         ),
         { viewerId: 'viewer-1' },
+      );
+    });
+
+    // A leftover space membership row a cascade missed must not resurface a
+    // space's threads on the "communities" tab either.
+    it('ANDs the parent-row condition onto the forum_thread membership EXISTS on the "communities" tab', async () => {
+      const forumThreadQueryBuilder = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(forumThreadQueryBuilder);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      const membershipCall = forumThreadQueryBuilder.andWhere.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          call[0].includes('t.community_id IS NOT NULL AND EXISTS'),
+      );
+      expect(membershipCall).toBeDefined();
+      expect(String(membershipCall?.[0])).toMatch(
+        /"own_c"\."id" = t\.community_id/,
+      );
+      expect(String(membershipCall?.[0])).toContain(
+        '"own_c"."parent_id" IS NULL',
       );
     });
 
@@ -849,6 +978,57 @@ describe('FeedService', () => {
         expect.stringContaining('t.community_id IS NOT NULL'),
         expect.anything(),
       );
+    });
+
+    // Task B6: a space member still sees the space's own posts on the
+    // "communities" tab (the membership EXISTS predicate above proves that),
+    // and the card names both the space and its parent, so "Photography"
+    // reads in the context of the community it belongs to.
+    it('carries source.parentName for a space’s post on the "communities" tab', async () => {
+      const qb = qbStub([basePost({ id: 'post-1', communityId: 'space-1' })]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+      // `communitiesByIds` resolves the candidate set first (the space), then
+      // its parents (the space's own parent), the same call order the service
+      // issues them in.
+      communities.find
+        .mockResolvedValueOnce([
+          baseCommunity({
+            id: 'space-1',
+            slug: 'photography',
+            name: 'Photography',
+            parentId: 'parent-1',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          baseCommunity({
+            id: 'parent-1',
+            slug: 'bristol-queer-collective',
+            name: 'Bristol Queer Collective',
+          }),
+        ]);
+
+      const page = await service.getFeed('viewer-1', 'communities', undefined);
+
+      const item = page.data.find((entry) => entry.id === 'post-1');
+      expect(item?.source).toEqual({
+        kind: 'community',
+        id: 'space-1',
+        name: 'Photography',
+        parentName: 'Bristol Queer Collective',
+      });
+    });
+
+    it('leaves source.parentName null for a top-level community’s post', async () => {
+      const qb = qbStub([
+        basePost({ id: 'post-1', communityId: 'community-1' }),
+      ]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+      communities.find.mockResolvedValueOnce([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'communities', undefined);
+
+      const item = page.data.find((entry) => entry.id === 'post-1');
+      expect(item?.source?.parentName).toBeNull();
     });
   });
 
@@ -928,10 +1108,35 @@ describe('FeedService', () => {
       expect(parameters.viewerId).toBe('viewer-1');
     });
 
+    // A leftover space membership row a cascade missed must not resurface a
+    // space's post to the general feed either: `ownRosterRowCountsSql` is
+    // ANDed onto the same roster EXISTS above.
+    it('ANDs the parent-row condition onto the community_post roster EXISTS on the general feed', async () => {
+      const { sql } = await communityPostGate();
+
+      expect(sql).toMatch(
+        /"mem"\."user_id" = :viewerId\s*AND EXISTS \(\s*SELECT 1 FROM "communities" "own_c"\s*WHERE "own_c"\."id" = cp\.community_id/,
+      );
+      expect(sql).toContain('"own_c"."parent_id" IS NULL');
+    });
+
     it('leaves flat/global posts (community_id IS NULL) visible to everyone', async () => {
       const { sql } = await communityPostGate();
 
       expect(sql).toContain('cp.community_id IS NULL');
+    });
+
+    it("never opens the public-tier arm for a space's post to a non-member", async () => {
+      // A space's own public tier alone must not admit its posts here. Only
+      // the roster branch (tested above) or the space's PARENT being public
+      // does. Without this, a non-member of a public space would see its
+      // posts on the general feed, which the `communities` tab's
+      // membership-scoped branch already covers on its own terms.
+      const { sql } = await communityPostGate();
+
+      expect(sql).toMatch(
+        /"com"\."access_tier" = :publicTier\s*AND "com"\."parent_id" IS NULL/,
+      );
     });
 
     it('gates forum threads on "is public", binding the public tier', async () => {
@@ -971,10 +1176,28 @@ describe('FeedService', () => {
       expect(parameters.viewerId).toBe('viewer-1');
     });
 
+    // Same leftover-space-row guard as the community_post arm above.
+    it('ANDs the parent-row condition onto the forum_thread roster EXISTS on the general feed', async () => {
+      const { sql } = await forumThreadGate();
+
+      expect(sql).toMatch(
+        /"mem"\."user_id" = :viewerId\s*AND EXISTS \(\s*SELECT 1 FROM "communities" "own_c"\s*WHERE "own_c"\."id" = t\.community_id/,
+      );
+      expect(sql).toContain('"own_c"."parent_id" IS NULL');
+    });
+
     it('leaves flat/global threads (community_id IS NULL) visible to everyone', async () => {
       const { sql } = await forumThreadGate();
 
       expect(sql).toContain('t.community_id IS NULL');
+    });
+
+    it("never opens the public-tier arm for a space's thread to a non-member", async () => {
+      const { sql } = await forumThreadGate();
+
+      expect(sql).toMatch(
+        /"com"\."access_tier" = :publicTier\s*AND "com"\."parent_id" IS NULL/,
+      );
     });
   });
 
@@ -1148,6 +1371,38 @@ describe('FeedService', () => {
         authorId: 'member-2',
         createdAt: t('2026-07-12T00:00:00.000Z'),
       });
+    });
+
+    // A leftover space membership row a cascade missed must not announce
+    // "X joined {space}" to a viewer whose own space roster row survived
+    // (or never applied) while their parent membership was removed:
+    // `ownRosterRowCountsSql` is ANDed onto the self-membership EXISTS above.
+    it('ANDs the parent-row condition onto the self-membership EXISTS', async () => {
+      const communityMemberQueryBuilder = qbStub([]);
+      communityMembers.createQueryBuilder.mockReturnValue(
+        communityMemberQueryBuilder,
+      );
+
+      await fetchCommunityNewMemberCandidates(
+        service,
+        'viewer-1',
+        undefined,
+        21,
+      );
+
+      const selfMembershipCall =
+        communityMemberQueryBuilder.andWhere.mock.calls.find(
+          (call) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('"self"."user_id" = :viewerId'),
+        );
+      expect(selfMembershipCall).toBeDefined();
+      expect(String(selfMembershipCall?.[0])).toMatch(
+        /AND EXISTS \(\s*SELECT 1 FROM "communities" "own_c"\s*WHERE "own_c"\."id" = m\.community_id/,
+      );
+      expect(String(selfMembershipCall?.[0])).toContain(
+        '"own_c"."parent_id" IS NULL',
+      );
     });
 
     it('threads a supplied cursor into the underlying query as the keyset predicate', async () => {

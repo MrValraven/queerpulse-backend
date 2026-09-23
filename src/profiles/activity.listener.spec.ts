@@ -124,6 +124,21 @@ describe('ActivityListener write gate: communities', () => {
     });
   });
 
+  it('records nothing for a post in a public space', async () => {
+    const { listener, record, communities } = await buildListener();
+    communities.findOne.mockResolvedValue({
+      id: 'space-1',
+      slug: 'trans-joy',
+      parentId: 'community-1',
+    });
+
+    await listener.onCommunityPostCreated(post(AccessTier.Public));
+
+    // "Posted in X" on a profile names a community; naming a space would
+    // show the exact space membership a profile must never reveal.
+    expect(record).not.toHaveBeenCalled();
+  });
+
   it.each([AccessTier.Request, AccessTier.Invite, AccessTier.Private])(
     'records nothing for a post in a %s community',
     async (accessTier) => {
@@ -142,6 +157,7 @@ describe('ActivityListener write gate: communities', () => {
       name: 'Trans Joy',
       accessTier: AccessTier.Public,
       archivedAt: null,
+      parentId: null,
     });
 
     await listener.onCommunityMemberJoined({
@@ -196,6 +212,27 @@ describe('ActivityListener write gate: communities', () => {
       userId: 'member-1',
     });
 
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when joining a space (a community with a parent)', async () => {
+    const { listener, record, communities } = await buildListener();
+    communities.findOne.mockResolvedValue({
+      id: 'space-1',
+      slug: 'photography',
+      name: 'Photography',
+      accessTier: AccessTier.Public,
+      archivedAt: null,
+      parentId: 'community-1',
+    });
+
+    await listener.onCommunityMemberJoined({
+      communityId: 'space-1',
+      userId: 'member-1',
+    });
+
+    // "Joined X" names a community; naming a space would show the exact
+    // space membership a profile must never reveal.
     expect(record).not.toHaveBeenCalled();
   });
 

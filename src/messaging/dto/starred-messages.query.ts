@@ -4,6 +4,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -57,4 +58,15 @@ export class StarredMessagesQuery {
   @IsOptional()
   @IsString()
   cursor?: string;
+
+  /**
+   * Task 24: the mailbox to list stars from, by identity id. Present, only
+   * stars on messages in threads where the caller's own seat speaks for that
+   * identity are listed, and the caller must staff it
+   * (`IDENTITY_NOT_STAFF` otherwise). Omitted, every starred message in the
+   * merged inbox is listed, as before.
+   */
+  @IsOptional()
+  @IsUUID()
+  as?: string;
 }

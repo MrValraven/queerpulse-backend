@@ -90,7 +90,10 @@ export class ListingEnquiriesController {
     description:
       'The listing has no business account to write to, or it is the caller’s own.',
   })
-  @ApiForbiddenResponse({ description: 'The two members cannot message.' })
+  @ApiForbiddenResponse({
+    description:
+      'The members cannot message. If the member blocked this business or can reach nobody behind it, the body carries code IDENTITY_BLOCKED.',
+  })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
   @ApiTooManyRequestsResponse({
     description: 'The caller has hit a per-listing or per-day enquiry cap.',

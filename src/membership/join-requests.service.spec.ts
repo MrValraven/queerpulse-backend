@@ -40,6 +40,7 @@ const dto = (overrides: Partial<CreateMembershipJoinRequestDto> = {}) =>
     message: 'let me in',
     ageAttested: true,
     termsVersion: '2.4',
+    heardFrom: 'A friend',
     ...overrides,
   }) as CreateMembershipJoinRequestDto;
 
@@ -899,6 +900,7 @@ describe('JoinRequestsService', () => {
         city: null,
         message: 'hi',
         source: null,
+        heardFrom: null,
         mutualMemberEmail: null,
         referenceUserId: null,
         status: PlatformJoinRequestStatus.Pending,

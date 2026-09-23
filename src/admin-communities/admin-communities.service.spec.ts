@@ -1,9 +1,17 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, FindManyOptions, FindOperator, In } from 'typeorm';
+import { DataSource, FindManyOptions, FindOperator, In, IsNull } from 'typeorm';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
+import { SubcommunityCascadeService } from '../communities/subcommunity-cascade.service';
+import { SUBCOMMUNITIES_NOT_ALLOWED_CODE } from '../communities/subcommunity-rules';
+import { COMMUNITY_MEMBER_LEFT } from '../communities/community.events';
 import {
   CommunityMember,
   CommunityNotificationLevel,
@@ -78,6 +86,9 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     frozenReason: null,
     frozenNote: null,
     frozenByUserId: null,
+    parentId: null,
+    allowsSubcommunities: false,
+    archivedWithParent: false,
     rulesVersion: 1,
     welcomeMessage: null,
     avatarImageUrl: null,
@@ -283,6 +294,7 @@ describe('AdminCommunitiesService', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
+    save: jest.Mock;
   };
   let communityMembers: {
     find: jest.Mock;
@@ -300,6 +312,14 @@ describe('AdminCommunitiesService', () => {
   let users: { findOne: jest.Mock };
   let dataSource: { transaction: jest.Mock; createQueryBuilder: jest.Mock };
   let governanceLog: { log: jest.Mock };
+  let eventEmitter: { emit: jest.Mock };
+  let subcommunityCascade: {
+    removeParentMemberFromSpaces: jest.Mock;
+    freezeSpaces: jest.Mock;
+    unfreezeSpaces: jest.Mock;
+    archiveSpaces: jest.Mock;
+    unarchiveSpaces: jest.Mock;
+  };
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(FIXED_NOW);
@@ -311,6 +331,8 @@ describe('AdminCommunitiesService', () => {
       // affects one row — individual tests override for the idempotent
       // no-op (`affected: 0`) case.
       createQueryBuilder: jest.fn(() => makeUpdateQueryBuilderStub(1)),
+      // `updateSettings`'s non-`isFeatured` write path.
+      save: jest.fn((row: unknown) => Promise.resolve(row)),
     };
     communityMembers = {
       find: jest.fn().mockResolvedValue([]),
@@ -344,7 +366,16 @@ describe('AdminCommunitiesService', () => {
         work({
           getRepository: (entity: unknown) =>
             entity === Community
-              ? { update: jest.fn().mockResolvedValue(undefined) }
+              ? {
+                  update: jest.fn().mockResolvedValue(undefined),
+                  find: jest.fn().mockResolvedValue([]),
+                  // `freeze`/`unfreeze`/`archive`/`unarchive`'s conditional
+                  // UPDATE runs through the transaction's own repository;
+                  // reusing the same mock function means a test's
+                  // `communities.createQueryBuilder.mockReturnValue(...)`
+                  // still governs what the transacted UPDATE sees.
+                  createQueryBuilder: communities.createQueryBuilder,
+                }
               : communityMembers,
         }),
       ),
@@ -355,6 +386,16 @@ describe('AdminCommunitiesService', () => {
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub([])),
     };
     governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
+    eventEmitter = { emit: jest.fn() };
+    subcommunityCascade = {
+      removeParentMemberFromSpaces: jest
+        .fn()
+        .mockResolvedValue({ removedSpaceIds: [], reassignedSpaceIds: [] }),
+      freezeSpaces: jest.fn().mockResolvedValue([]),
+      unfreezeSpaces: jest.fn().mockResolvedValue([]),
+      archiveSpaces: jest.fn().mockResolvedValue([]),
+      unarchiveSpaces: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -377,6 +418,11 @@ describe('AdminCommunitiesService', () => {
         { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
         { provide: CommunityGovernanceLogService, useValue: governanceLog },
+        {
+          provide: SubcommunityCascadeService,
+          useValue: subcommunityCascade,
+        },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
     service = module.get(AdminCommunitiesService);
@@ -684,6 +730,17 @@ describe('AdminCommunitiesService', () => {
       const { truncated } = await service.listCommunities();
 
       expect(truncated).toBe(false);
+    });
+
+    it('scans only top-level communities, excluding spaces', async () => {
+      communities.find.mockResolvedValue([makeCommunity()]);
+
+      await service.listCommunities();
+
+      const [{ where }] = communities.find.mock.calls[0] as [
+        FindManyOptions & { where: { parentId?: unknown } },
+      ];
+      expect(where.parentId).toEqual(IsNull());
     });
 
     it('reports truncated when the community scan hits MAX_LISTED_COMMUNITIES', async () => {
@@ -1175,6 +1232,174 @@ describe('AdminCommunitiesService', () => {
 
       expect(result.truncated).toBe(false);
     });
+
+    it('carries allowsSubcommunities, a null parent and no spaces for a plain top-level community', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, allowsSubcommunities: true }),
+      );
+
+      const result = await service.getCommunity('circle-of-care', true);
+
+      expect(result.allowsSubcommunities).toBe(true);
+      expect(result.parent).toBeNull();
+      expect(result.subcommunities).toEqual([]);
+    });
+
+    it('loads the parent summary for a space', async () => {
+      const space = makeCommunity({
+        id: 'community-space',
+        slug: 'book-club',
+        name: 'Book Club',
+        parentId: 'community-1',
+      });
+      communities.findOne.mockImplementation(
+        (options: { where: { slug?: string; id?: string } }) => {
+          if (options.where.slug === 'book-club') {
+            return Promise.resolve(space);
+          }
+          if (options.where.id === 'community-1') {
+            return Promise.resolve(makeCommunity());
+          }
+          return Promise.resolve(null);
+        },
+      );
+
+      const result = await service.getCommunity('book-club', true);
+
+      expect(result.parent).toEqual({
+        slug: 'circle-of-care',
+        name: 'Circle of Care',
+      });
+    });
+
+    it('lists every space under a parent with its own member count', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, allowsSubcommunities: true }),
+      );
+      communities.find.mockResolvedValue([
+        makeCommunity({
+          id: 'community-space',
+          slug: 'book-club',
+          name: 'Book Club',
+          parentId: 'community-1',
+          accessTier: AccessTier.Public,
+        }),
+      ]);
+      communityMembers.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub([{ communityId: 'community-space', count: '5' }]),
+      );
+
+      const result = await service.getCommunity('circle-of-care', true);
+
+      expect(result.subcommunities).toEqual([
+        {
+          slug: 'book-club',
+          name: 'Book Club',
+          accessTier: AccessTier.Public,
+          memberCount: 5,
+        },
+      ]);
+    });
+  });
+
+  describe('updateSettings', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateSettings(
+          'no-such-place',
+          { requiresSecondVouch: true },
+          'user-admin',
+          true,
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('409s turning allowsSubcommunities on for a space', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({
+          parentId: 'community-parent',
+          allowsSubcommunities: false,
+        }),
+      );
+
+      const failure = service.updateSettings(
+        'circle-of-care',
+        { allowsSubcommunities: true },
+        'user-admin',
+        true,
+      );
+
+      await expect(failure).rejects.toBeInstanceOf(ConflictException);
+      await expect(failure).rejects.toMatchObject({
+        response: { code: SUBCOMMUNITIES_NOT_ALLOWED_CODE },
+      });
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('409s featuring a space and leaves the featured community alone', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: 'community-parent', isFeatured: false }),
+      );
+
+      const failure = service.updateSettings(
+        'circle-of-care',
+        { isFeatured: true },
+        'user-admin',
+        true,
+      );
+
+      await expect(failure).rejects.toBeInstanceOf(ConflictException);
+      await expect(failure).rejects.toMatchObject({
+        response: { code: SUBCOMMUNITIES_NOT_ALLOWED_CODE },
+      });
+      expect(communities.save).not.toHaveBeenCalled();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('turns allowsSubcommunities on for a parent and logs the diff', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, allowsSubcommunities: false }),
+      );
+
+      await service.updateSettings(
+        'circle-of-care',
+        { allowsSubcommunities: true },
+        'user-admin',
+        true,
+      );
+
+      expect(communities.save).toHaveBeenCalled();
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.SettingsChanged,
+        metadata: {
+          adminOverride: true,
+          changes: { allowsSubcommunities: { from: false, to: true } },
+        },
+      });
+    });
+
+    it('allows turning the switch off on a space without a guard error', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({
+          parentId: 'community-parent',
+          allowsSubcommunities: false,
+        }),
+      );
+
+      await expect(
+        service.updateSettings(
+          'circle-of-care',
+          { allowsSubcommunities: false },
+          'user-admin',
+          true,
+        ),
+      ).resolves.toBeDefined();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
   });
 
   describe('freeze', () => {
@@ -1216,6 +1441,43 @@ describe('AdminCommunitiesService', () => {
 
       expect(governanceLog.log).not.toHaveBeenCalled();
     });
+
+    it('cascades the freeze onto every live space of a parent, in the same transaction', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ frozenAt: null, parentId: null }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+      subcommunityCascade.freezeSpaces.mockResolvedValue(['space-1']);
+
+      await service.freeze('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.freezeSpaces).toHaveBeenCalledWith(
+        expect.anything(),
+        'community-1',
+        'user-admin',
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'space-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Frozen,
+        metadata: { adminOverride: true, reason: 'parent_frozen' },
+      });
+    });
+
+    it('does not cascade when the community is itself a space', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ frozenAt: null, parentId: 'community-parent' }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.freeze('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.freezeSpaces).not.toHaveBeenCalled();
+    });
   });
 
   describe('unfreeze', () => {
@@ -1254,6 +1516,42 @@ describe('AdminCommunitiesService', () => {
       await service.unfreeze('circle-of-care', 'user-admin');
 
       expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('cascades the lift onto every space this freeze paused, in the same transaction', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ frozenAt: daysAgo(1), parentId: null }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+      subcommunityCascade.unfreezeSpaces.mockResolvedValue(['space-1']);
+
+      await service.unfreeze('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.unfreezeSpaces).toHaveBeenCalledWith(
+        expect.anything(),
+        'community-1',
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'space-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Unfrozen,
+        metadata: { adminOverride: true, reason: 'parent_unfrozen' },
+      });
+    });
+
+    it('does not cascade when the community is itself a space', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ frozenAt: daysAgo(1), parentId: 'community-parent' }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.unfreeze('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.unfreezeSpaces).not.toHaveBeenCalled();
     });
   });
 
@@ -1295,6 +1593,124 @@ describe('AdminCommunitiesService', () => {
       await service.archive('circle-of-care', 'user-admin');
 
       expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('cascades the archive onto every live space of a parent, in the same transaction', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: null, parentId: null }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+      subcommunityCascade.archiveSpaces.mockResolvedValue(['space-1']);
+
+      await service.archive('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.archiveSpaces).toHaveBeenCalledWith(
+        expect.anything(),
+        'community-1',
+        FIXED_NOW,
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'space-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Archived,
+        metadata: {
+          adminOverride: true,
+          reason: 'parent_archived',
+          parentId: 'community-1',
+        },
+      });
+    });
+
+    it('does not cascade when the community is itself a space', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: null, parentId: 'community-parent' }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.archive('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.archiveSpaces).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unarchive', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.unarchive('no-such-place', 'user-admin'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('unarchives the community and logs the admin override', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: daysAgo(1) }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.unarchive('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Unarchived,
+        metadata: { adminOverride: true },
+      });
+    });
+
+    it('is idempotent: no governance-log entry when not archived', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: null }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(0),
+      );
+
+      await service.unarchive('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('cascades the lift onto every space this archive took down, in the same transaction', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: daysAgo(1), parentId: null }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+      subcommunityCascade.unarchiveSpaces.mockResolvedValue(['space-1']);
+
+      await service.unarchive('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.unarchiveSpaces).toHaveBeenCalledWith(
+        expect.anything(),
+        'community-1',
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'space-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Unarchived,
+        metadata: { adminOverride: true, reason: 'parent_unarchived' },
+      });
+    });
+
+    it('does not cascade when the community is itself a space', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: daysAgo(1), parentId: 'community-parent' }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.unarchive('circle-of-care', 'user-admin');
+
+      expect(subcommunityCascade.unarchiveSpaces).not.toHaveBeenCalled();
     });
   });
 
@@ -1447,6 +1863,100 @@ describe('AdminCommunitiesService', () => {
         action: GovernanceLogAction.MemberRemoved,
         targetUserId: 'user-plain',
         metadata: { adminOverride: true },
+      });
+    });
+
+    it('cascades onto every space of a parent, in the same transaction as the removal', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity({ parentId: null }));
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-plain', slug: 'plain-pat' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({
+          id: 'member-plain',
+          userId: 'user-plain',
+          role: RosterRole.Member,
+        }),
+      );
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      expect(
+        subcommunityCascade.removeParentMemberFromSpaces,
+      ).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ id: 'community-1' }),
+        'user-plain',
+      );
+    });
+
+    it('does not cascade when the community is itself a space', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: 'community-parent' }),
+      );
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-plain', slug: 'plain-pat' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({
+          id: 'member-plain',
+          userId: 'user-plain',
+          role: RosterRole.Member,
+        }),
+      );
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      expect(
+        subcommunityCascade.removeParentMemberFromSpaces,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("reassigns a removed member's owned spaces to the parent's owner", async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ parentId: null, ownerId: 'user-owner' }),
+      );
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-plain', slug: 'plain-pat' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({
+          id: 'member-plain',
+          userId: 'user-plain',
+          role: RosterRole.Member,
+        }),
+      );
+      // The cascade cleared one space row and passed that space, which the
+      // removed member owned, to the parent's owner. The reassignment itself
+      // is pinned in `subcommunity-cascade.service.spec.ts`.
+      subcommunityCascade.removeParentMemberFromSpaces.mockResolvedValue({
+        removedSpaceIds: ['space-owned-by-plain'],
+        reassignedSpaceIds: ['space-owned-by-plain'],
+      });
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(COMMUNITY_MEMBER_LEFT, {
+        communityId: 'space-owned-by-plain',
+        userId: 'user-plain',
+      });
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'space-owned-by-plain',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.OwnershipTransferred,
+        targetUserId: 'user-owner',
+        metadata: {
+          adminOverride: true,
+          reason: 'parent_cascade',
+          previousOwnerId: 'user-plain',
+        },
       });
     });
   });

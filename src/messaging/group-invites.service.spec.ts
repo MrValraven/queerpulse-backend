@@ -62,6 +62,13 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
   let eventEmitter: { emit: jest.Mock };
   let mediaCropService: { getMany: jest.Mock };
   let preferencesService: { getMessagingPrivacyForUsers: jest.Mock };
+  let identities: { resolveProfileIdentityId: jest.Mock };
+
+  /** Task 8: each actor's own profile identity, distinct per user id so a
+   *  test asserting a stamped `senderIdentityId` fails if the wrong actor's
+   *  identity ever landed on the pill. */
+  const profileIdentityOf = (userId: string): string =>
+    `profile-identity-of-${userId}`;
 
   const activeGroup = (): Conversation =>
     ({
@@ -171,6 +178,15 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
     preferencesService = {
       getMessagingPrivacyForUsers: jest.fn().mockResolvedValue(new Map()),
     };
+    // Task 8: `insertJoinPill` stamps `senderIdentityId` with the joiner's
+    // own profile identity, resolved through here.
+    identities = {
+      resolveProfileIdentityId: jest
+        .fn()
+        .mockImplementation((userId: string) =>
+          Promise.resolve(profileIdentityOf(userId)),
+        ),
+    };
 
     service = new GroupInvitesService(
       invites as unknown as Repository<GroupInvite>,
@@ -183,6 +199,7 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       eventEmitter as unknown as EventEmitter2,
       mediaCropService as never,
       preferencesService as never,
+      identities as never,
     );
     setImageUrlBase('https://api.test');
   });
@@ -222,6 +239,24 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
         actorId: INVITEE_ID,
         value: 'invite',
       });
+    });
+
+    it('stamps the actor profile identity on a member_joined pill', async () => {
+      await service.accept(INVITE_ID, INVITEE_ID);
+
+      expect(identities.resolveProfileIdentityId).toHaveBeenCalledWith(
+        INVITEE_ID,
+      );
+      const [pillCall] = manager.save.mock.calls.filter(
+        ([entity]: [{ systemEvent?: unknown }]) => entity.systemEvent,
+      );
+      if (!pillCall) {
+        throw new Error('expected a system pill to be saved');
+      }
+      const pillEntity = pillCall[0] as { senderIdentityId: string };
+      // Asserts the stamped VALUE itself: a null here is exactly what
+      // `CHK_messages_sender_identity` rejects.
+      expect(pillEntity.senderIdentityId).toBe(profileIdentityOf(INVITEE_ID));
     });
 
     it('reactivates a previously-left row instead of inserting a new one', async () => {
@@ -335,6 +370,40 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       expect(manager.save).not.toHaveBeenCalledWith(
         expect.objectContaining({ userId: INVITEE_ID }),
       );
+    });
+  });
+
+  // F2 (C2): `conversation_participants.identity_id` is NOT NULL, so the
+  // seat a join inserts carries the joiner's own profile identity, the same
+  // one resolved for their `member_joined` pill.
+  describe('F2: a joined seat carries the joiner profile identity', () => {
+    const savedSeat = () =>
+      manager.save.mock.calls
+        .map(([entity]) => entity as { role?: string; identityId?: string })
+        .find((entity) => entity.role === ConversationRole.Member);
+
+    it('accept seats the invitee under their profile identity, resolved once', async () => {
+      await service.accept(INVITE_ID, INVITEE_ID);
+
+      expect(savedSeat()).toEqual(
+        expect.objectContaining({
+          userId: INVITEE_ID,
+          identityId: profileIdentityOf(INVITEE_ID),
+        }),
+      );
+      expect(identities.resolveProfileIdentityId).toHaveBeenCalledTimes(1);
+    });
+
+    it('joinByToken seats the joiner under their profile identity, resolved once', async () => {
+      await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(savedSeat()).toEqual(
+        expect.objectContaining({
+          userId: INVITEE_ID,
+          identityId: profileIdentityOf(INVITEE_ID),
+        }),
+      );
+      expect(identities.resolveProfileIdentityId).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -5,6 +5,7 @@ import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community } from './entities/community.entity';
+import { SubcommunityCascadeService } from './subcommunity-cascade.service';
 
 /**
  * Read-only `forFeature` registration for `CommunityMembershipService`.
@@ -27,7 +28,7 @@ import { Community } from './entities/community.entity';
       CommunityPostReply,
     ]),
   ],
-  providers: [CommunityMembershipService],
-  exports: [CommunityMembershipService],
+  providers: [CommunityMembershipService, SubcommunityCascadeService],
+  exports: [CommunityMembershipService, SubcommunityCascadeService],
 })
 export class CommunityMembershipModule {}

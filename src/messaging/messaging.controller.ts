@@ -28,6 +28,13 @@ import {
 } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { ConversationMediaService } from './conversation-media.service';
+import {
+  ClaimResponse,
+  ConversationListPageWithStaffClaim,
+  ConversationResponseWithStaffClaim,
+  ReleaseClaimResponse,
+  TakeOverClaimResponse,
+} from './conversation-claim';
 import { ConversationsService } from './conversations.service';
 import { AddMembersDto } from './dto/add-members.dto';
 import { ChangeMemberRoleDto } from './dto/change-member-role.dto';
@@ -44,11 +51,11 @@ import { MessageRequestDto } from './dto/message-request.dto';
 import { SearchMessagesQuery } from './dto/search-messages.query';
 import { SendMessageDto } from './dto/send-message.dto';
 import { StarredMessagesQuery } from './dto/starred-messages.query';
+import { TakeOverClaimDto } from './dto/take-over-claim.dto';
 import { TransferGroupOwnershipDto } from './dto/transfer-group-ownership.dto';
 import { UpdateConversationDto } from './dto/update-conversation.dto';
 import { MessageReactionKey } from './entities/message-reaction.entity';
 import {
-  ConversationListPage,
   ConversationResponse,
   GroupInviteSummary,
   GroupJoinPreview,
@@ -115,15 +122,23 @@ export class ConversationsController {
       "ENG-253: one cursor-paginated page of the caller's conversations " +
       "(`ConversationListPage`), trimmed for a list row: a group's " +
       '`members` roster and `draft` body are empty/absent here; read ' +
-      '`GET /conversations/:id` for those.',
+      '`GET /conversations/:id` for those. Task 19: each row carries ' +
+      '`claimReleasedBy`, `claimReleasedAt` and `claimTakenOverFrom`, ' +
+      'set for a staff caller of a business mailbox and null otherwise.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'IDENTITY_NOT_STAFF: `as` names a mailbox the caller does not staff, ' +
+      'or no identity at all.',
   })
   list(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListConversationsQuery,
-  ): Promise<ConversationListPage> {
+  ): Promise<ConversationListPageWithStaffClaim> {
     return this.conversationsService.listConversations(user.userId, {
       cursor: query.cursor,
       limit: query.limit,
+      mailboxIdentityId: query.as,
     });
   }
 
@@ -246,7 +261,10 @@ export class ConversationsController {
   @ApiOkResponse({
     description:
       "The conversation's full detail: the group's member roster with " +
-      "read/delivered watermarks, and the caller's own untruncated draft.",
+      "read/delivered watermarks, and the caller's own untruncated draft. " +
+      'Task 19: a staff caller of a business mailbox also reads ' +
+      '`claimReleasedBy`, `claimReleasedAt` and `claimTakenOverFrom`; ' +
+      'every other caller reads null for each.',
   })
   @ApiNotFoundResponse({
     description:
@@ -255,7 +273,7 @@ export class ConversationsController {
   getOne(
     @Param('id', ParseUUIDPipe) conversationId: string,
     @CurrentUser() user: CurrentUserData,
-  ): Promise<ConversationResponse> {
+  ): Promise<ConversationResponseWithStaffClaim> {
     return this.conversationsService.getConversation(
       conversationId,
       user.userId,
@@ -660,6 +678,8 @@ export class ConversationsController {
         dto.forwarded,
         dto.kind,
         dto.attachment,
+        dto.stickerId,
+        dto.asIdentityId,
       );
     if (!isNew) {
       response.status(200);
@@ -745,6 +765,98 @@ export class ConversationsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.messagingService.unstarMessage(id, messageId, user.userId);
+  }
+
+  /**
+   * Claim a shared business mailbox thread, or learn who already holds it.
+   * Requires a seat in the conversation and standing to act as its mailbox
+   * (the service checks both); two staff members claiming at the same
+   * instant settle on exactly one winner in the database, and the loser
+   * gets an ordinary response naming `isNewlyClaimed: false` and the real
+   * claimant. Task 19: the response names the claimant (`claimedBy`, an
+   * author summary) and carries `claimedAt`, see `ClaimResponse`.
+   */
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Post(':id/claim')
+  @ApiOperation({ summary: 'Claim a shared mailbox thread (staff only)' })
+  @ApiCreatedResponse({
+    description:
+      'The current claim (`ClaimResponse`), status 201: `isNewlyClaimed` is true only when the caller now holds it.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The caller is not a participant, or has no standing to act as this mailbox.',
+  })
+  @ApiBadRequestResponse({
+    description: 'This thread has no business mailbox to claim.',
+  })
+  claim(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<ClaimResponse> {
+    return this.conversationsService.claim(id, user.userId);
+  }
+
+  /**
+   * Task 19: take a claimed mailbox thread over from the colleague the
+   * member saw holding it (`fromUserId`). The take-over only succeeds while
+   * that colleague still holds the claim; otherwise the response is the
+   * current claim with `isNewlyClaimed: false`, like a lost claim. Gated and
+   * throttled exactly like `claim`.
+   */
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Post(':id/claim/take-over')
+  @ApiOperation({
+    summary: 'Take over a claimed mailbox thread from a colleague',
+  })
+  @ApiCreatedResponse({
+    description:
+      'The current claim (`TakeOverClaimResponse`), status 201, plus `previousClaimant` naming whose claim was taken (null when nothing was taken).',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The caller is not a participant, or has no standing to act as this mailbox.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'This thread has no business mailbox, or `fromUserId` is not a UUID.',
+  })
+  takeOverClaim(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: TakeOverClaimDto,
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<TakeOverClaimResponse> {
+    return this.conversationsService.takeOver(id, user.userId, body.fromUserId);
+  }
+
+  /**
+   * Release a shared business mailbox thread's claim, restoring it to
+   * unclaimed. Any staff member of the mailbox may release it, whether or
+   * not they are the current claimant, so an idle or contested claim can
+   * never lock the mailbox. Task 19 fix round 1: answers 200 with the claim
+   * as it stands afterwards (`ReleaseClaimResponse`), so a caller whose
+   * release lost the race to a colleague's take-over sees who holds it now.
+   */
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Delete(':id/claim')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Release a claim on a mailbox thread' })
+  @ApiOkResponse({
+    description:
+      'The claim afterwards: `isReleased` is true when this call released it; otherwise `claimedBy` names who holds it now.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The caller is not a participant, or has no standing to act as this mailbox.',
+  })
+  @ApiBadRequestResponse({
+    description: 'This thread has no business mailbox to release.',
+  })
+  release(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<ReleaseClaimResponse> {
+    return this.conversationsService.release(id, user.userId);
   }
 
   @Post(':id/read')
@@ -1108,6 +1220,11 @@ export class MessageRequestController {
     description:
       "Search hits (snippets + sender + conversation grouping), floored by the caller's clear point; moderator-taken-down messages are excluded.",
   })
+  @ApiForbiddenResponse({
+    description:
+      'IDENTITY_NOT_STAFF: `as` names a mailbox the caller does not staff, ' +
+      'or no identity at all.',
+  })
   search(
     @CurrentUser() user: CurrentUserData,
     @Query() query: SearchMessagesQuery,
@@ -1117,6 +1234,7 @@ export class MessageRequestController {
       query.q,
       query.limit,
       query.conversationId,
+      query.as,
     );
   }
 
@@ -1139,6 +1257,11 @@ export class MessageRequestController {
       "The caller's starred (privately-bookmarked) messages, newest first",
   })
   @ApiOkResponse({ description: "The caller's starred messages." })
+  @ApiForbiddenResponse({
+    description:
+      'IDENTITY_NOT_STAFF: `as` names a mailbox the caller does not staff, ' +
+      'or no identity at all.',
+  })
   starred(
     @CurrentUser() user: CurrentUserData,
     @Query() query: StarredMessagesQuery,
@@ -1148,6 +1271,7 @@ export class MessageRequestController {
       q: query.q,
       type: query.type,
       cursor: query.cursor,
+      mailboxIdentityId: query.as,
     });
   }
 

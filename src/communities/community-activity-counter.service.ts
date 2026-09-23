@@ -28,6 +28,14 @@ const ACTIVITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * the frontend drains every page of the directory to the browser to sort by it,
  * which cannot be paginated and degrades with every community added.
  *
+ * RECOMPUTES SPACES TOO, deliberately: a space's own card (its
+ * `GET /communities/:slug/subcommunities` row) still reads and displays this
+ * column, so a space cannot be left holding a stale or frozen count the way
+ * `topLevelOnly`'s listing exclusions leave other space fields alone. Discover
+ * sort/filter is the one surface this column exists for, and that surface
+ * already keeps spaces out through `topLevelOnly`, so recomputing every
+ * community here costs nothing that listing exclusion doesn't already cover.
+ *
  * The recompute is ONE statement. A grouped subquery unions post authors and
  * reply authors within the window, counts distinct authors per community, and
  * `LEFT JOIN`s that back onto the full communities table so a community with

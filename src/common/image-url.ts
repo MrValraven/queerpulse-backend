@@ -1,5 +1,6 @@
 import { InternalServerErrorException, Logger } from '@nestjs/common';
 import { isStorageKey } from '../storage/storage-key';
+import { isMessageAttachmentReference } from '../storage/message-attachment-reference';
 
 const logger = new Logger('ImageUrl');
 
@@ -12,6 +13,13 @@ const logger = new Logger('ImageUrl');
 // Railway Buckets are private, so a key is not directly fetchable; it becomes a
 // URL to our own `GET /files/*` route, which authorizes and redirects. External
 // URLs are already fetchable and pass through.
+//
+// A message attachment sent as a business, persona or company is rendered by
+// a third kind of value, its opaque reference (`messages/<messageId>/0`, see
+// `storage/message-attachment-reference.ts`). It resolves to the same
+// `GET /files/*` route, which serves it by message after authorizing the
+// requester, so the uploader's user id inside the storage key never leaves
+// the server.
 //
 // Anything that is neither is dropped rather than forwarded. These columns have
 // never validated their input, so a `javascript:` or `data:` URI could have
@@ -38,7 +46,7 @@ export function toImageUrl(value: string | null | undefined): string | null {
   if (!value) {
     return null;
   }
-  if (isStorageKey(value)) {
+  if (isStorageKey(value) || isMessageAttachmentReference(value)) {
     if (!apiBaseUrl) {
       // Reaching this means a mapper ran before bootstrap wired the base URL.
       // Returning a bare key would render as a broken relative image; failing
@@ -86,4 +94,29 @@ export function storageKeyFromImageUrl(value: string): string {
   }
   const key = value.slice(filesPrefix.length);
   return isStorageKey(key) ? key : value;
+}
+
+/**
+ * Final fix F1 (C1): the opaque message attachment reference a WRITE carries,
+ * or `null` when it carries none. A forward of a business, persona or company
+ * attachment arrives as the resolved URL `toImageUrl` produced
+ * (`<apiBaseUrl>/files/messages/<messageId>/0`), or as the bare reference, and
+ * this collapses either back to the reference. Every other value, including a
+ * storage key and its resolved URL, returns `null`.
+ */
+export function messageAttachmentReferenceFromImageUrl(
+  value: string,
+): string | null {
+  if (isMessageAttachmentReference(value)) {
+    return value;
+  }
+  if (!apiBaseUrl) {
+    return null;
+  }
+  const filesPrefix = `${apiBaseUrl}/files/`;
+  if (!value.startsWith(filesPrefix)) {
+    return null;
+  }
+  const reference = value.slice(filesPrefix.length);
+  return isMessageAttachmentReference(reference) ? reference : null;
 }

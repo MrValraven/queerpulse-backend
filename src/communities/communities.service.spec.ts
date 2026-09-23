@@ -11,7 +11,7 @@ import {
 } from '../common/image-url';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { ConnectionsService } from '../connections/connections.service';
@@ -27,6 +27,15 @@ import {
   CreateCommunityInput,
 } from './communities.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
+import { COMMUNITY_MEMBERS_ONLY_CODE } from './community-gate';
+import { COMMUNITY_MEMBER_LEFT } from './community.events';
+import { CommunityMembershipService } from './community-membership.service';
+import { SubcommunityCascadeService } from './subcommunity-cascade.service';
+import {
+  PARENT_MEMBERSHIP_REQUIRED_CODE,
+  resolveEffectiveRole,
+  SUBCOMMUNITY_TIER_TOO_OPEN_CODE,
+} from './subcommunity-rules';
 import { CommunityBanRatificationService } from './community-ban-ratification.service';
 import { COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS } from './community-ban-ratification-window';
 import { CommunityBan } from './entities/community-ban.entity';
@@ -57,6 +66,7 @@ import { CommunityPost } from './entities/community-post.entity';
 import {
   AccessTier,
   Community,
+  CommunityFrozenReason,
   CommunityType,
 } from './entities/community.entity';
 
@@ -91,6 +101,8 @@ const qbStub = () => {
   // stub: `countByFilterClauses` treats a missing row as zero for every tag.
   qb.getRawOne = jest.fn().mockResolvedValue(undefined);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  // `getFeatured`'s single-row read (`GET /communities/featured`).
+  qb.getOne = jest.fn().mockResolvedValue(null);
   return qb;
 };
 
@@ -148,6 +160,8 @@ describe('CommunitiesService', () => {
   let service: CommunitiesService;
   let communities: {
     findOne: jest.Mock;
+    find: jest.Mock;
+    update: jest.Mock;
     exists: jest.Mock;
     count: jest.Mock;
     create: jest.Mock;
@@ -182,7 +196,7 @@ describe('CommunitiesService', () => {
   // VISIBLE (`hidden:false, removed:false`) default keeps every non-moderation
   // test on the normal path. `notifications` is fire-and-forget on join/triage
   // flows, so a no-op stub suffices.
-  let contentModeration: { stateFor: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
   let governanceLog: { log: jest.Mock; logModerationAudit: jest.Mock };
   // `suggestedCommunities`'s social-graph signal and `unfreeze`'s
@@ -210,6 +224,19 @@ describe('CommunitiesService', () => {
   let eventEmitter: { emit: jest.Mock };
   let banRatifications: { proposePermanentBar: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
+  // Effective roles. The stand-in resolves through `members.findOne` (own
+  // row, then the parent row for a space) and `members.find` for the batched
+  // form, so every pre-existing test that stages roster rows on those two
+  // mocks keeps reading the role it always read.
+  let membership: { effectiveRole: jest.Mock; effectiveRolesFor: jest.Mock };
+  let subcommunityCascade: {
+    removeParentMemberFromSpaces: jest.Mock;
+    freezeSpaces: jest.Mock;
+    unfreezeSpaces: jest.Mock;
+    archiveSpaces: jest.Mock;
+    unarchiveSpaces: jest.Mock;
+    raiseSpaceTiers: jest.Mock;
+  };
   // The transaction manager `createWithUniqueRef` runs inside; `query` is the
   // raw `SELECT nextval('communities_ref_seq')` ref allocation.
   let manager: { query: jest.Mock; getRepository: jest.Mock };
@@ -217,6 +244,10 @@ describe('CommunitiesService', () => {
   beforeEach(async () => {
     communities = {
       findOne: jest.fn(),
+      // `removeMember`'s cascade looks up spaces the leaving member owned.
+      // Default: none.
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       exists: jest.fn().mockResolvedValue(false),
       count: jest.fn().mockResolvedValue(0),
       create: jest.fn((v: object) => v),
@@ -273,6 +304,8 @@ describe('CommunitiesService', () => {
     };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      // `buildDetail`'s viewer-aware `subcommunityCount`: no takedowns.
+      statesFor: jest.fn().mockResolvedValue(new Map()),
     };
     notifications = {
       create: jest.fn().mockResolvedValue(undefined),
@@ -323,6 +356,49 @@ describe('CommunitiesService', () => {
     };
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
+    };
+    membership = {
+      effectiveRole: jest.fn(
+        async (
+          community: { id: string; parentId?: string | null },
+          userId: string,
+        ) => {
+          const ownRow = (await members.findOne({
+            where: { communityId: community.id, userId },
+          })) as { role?: RosterRole } | null;
+          const ownRole = ownRow?.role ?? null;
+          if (!community.parentId) return ownRole;
+          const parentRow = (await members.findOne({
+            where: { communityId: community.parentId, userId },
+          })) as { role?: RosterRole } | null;
+          return resolveEffectiveRole({
+            isSpace: true,
+            ownRole,
+            parentRole: parentRow?.role ?? null,
+          });
+        },
+      ),
+      effectiveRolesFor: jest.fn(
+        async (communityList: { id: string }[], userId: string) => {
+          const rows = (await members.find({
+            where: {
+              communityId: In(communityList.map((community) => community.id)),
+              userId,
+            },
+          })) as { communityId: string; role: RosterRole }[];
+          return new Map(rows.map((row) => [row.communityId, row.role]));
+        },
+      ),
+    };
+    subcommunityCascade = {
+      removeParentMemberFromSpaces: jest
+        .fn()
+        .mockResolvedValue({ removedSpaceIds: [], reassignedSpaceIds: [] }),
+      freezeSpaces: jest.fn().mockResolvedValue([]),
+      unfreezeSpaces: jest.fn().mockResolvedValue([]),
+      archiveSpaces: jest.fn().mockResolvedValue([]),
+      unarchiveSpaces: jest.fn().mockResolvedValue([]),
+      raiseSpaceTiers: jest.fn().mockResolvedValue([]),
     };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -400,6 +476,11 @@ describe('CommunitiesService', () => {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
         },
+        { provide: CommunityMembershipService, useValue: membership },
+        {
+          provide: SubcommunityCascadeService,
+          useValue: subcommunityCascade,
+        },
       ],
     }).compile();
     service = module.get(CommunitiesService);
@@ -446,7 +527,16 @@ describe('CommunitiesService', () => {
       expect(manager.query).toHaveBeenCalledWith(
         expect.stringContaining("nextval('communities_ref_seq')"),
       );
-      expect(communities.count).not.toHaveBeenCalled();
+      // `buildDetail` looks up this fresh top-level community's live spaces
+      // for its viewer-aware `subcommunityCount`.
+      expect(communities.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            parentId: 'c1',
+            archivedAt: expect.anything() as unknown,
+          },
+        }),
+      );
     });
 
     // BE-COM-06: `stewards` used to be seeded straight into the roster as
@@ -834,6 +924,116 @@ describe('CommunitiesService', () => {
         NotFoundException,
       );
     });
+
+    // A top-level community (`parentId: null`) has no parent to summarise and
+    // never inherits rules, but it does carry its own space count.
+    it('a top-level community has no parent/inheritedRules and counts only the spaces its viewer can see', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        parentId: null,
+        accessTier: AccessTier.Public,
+        ownerId: 'owner-1',
+        name: 'Open',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        allowsSubcommunities: true,
+      });
+      members.findOne.mockResolvedValue(null);
+      invites.findOne.mockResolvedValue(null);
+      // Two open spaces, one private space the viewer holds no role in, and
+      // one open space under a moderator takedown.
+      communities.find.mockImplementation(
+        (options: { where?: { parentId?: string } }) =>
+          Promise.resolve(
+            options.where?.parentId === 'c1'
+              ? [
+                  {
+                    id: 's1',
+                    slug: 's1',
+                    parentId: 'c1',
+                    accessTier: AccessTier.Public,
+                  },
+                  {
+                    id: 's2',
+                    slug: 's2',
+                    parentId: 'c1',
+                    accessTier: AccessTier.Request,
+                  },
+                  {
+                    id: 's3',
+                    slug: 's3',
+                    parentId: 'c1',
+                    accessTier: AccessTier.Private,
+                  },
+                  {
+                    id: 's4',
+                    slug: 's4',
+                    parentId: 'c1',
+                    accessTier: AccessTier.Public,
+                  },
+                ]
+              : [],
+          ),
+      );
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['s4', { hidden: true, removed: false }]]),
+      );
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(detail.parent).toBeNull();
+      expect(detail.inheritedRules).toBeNull();
+      expect(detail.allowsSubcommunities).toBe(true);
+      expect(detail.subcommunityCount).toBe(2);
+      expect(detail.isRosterMember).toBe(false);
+      expect(communities.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            parentId: 'c1',
+            archivedAt: expect.anything() as unknown,
+          },
+        }),
+      );
+    });
+
+    it('marks the viewer as a roster member only off their own row', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        parentId: null,
+        accessTier: AccessTier.Public,
+        ownerId: 'owner-1',
+        name: 'Open',
+        type: CommunityType.Social,
+        tagline: 't',
+        ref: 'QP-C-0001',
+        purpose: 'purpose',
+        whoFor: 'who',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        allowsSubcommunities: false,
+      });
+      members.findOne.mockResolvedValue({
+        communityId: 'c1',
+        userId: 'u2',
+        role: RosterRole.Member,
+      });
+      invites.findOne.mockResolvedValue(null);
+
+      const detail = await service.getBySlug('p', 'u2');
+
+      expect(detail.isRosterMember).toBe(true);
+    });
   });
 
   // The existence-oracle fix: `GET /communities/:slug/related` used to run
@@ -913,6 +1113,70 @@ describe('CommunitiesService', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0]!.slug).toBe('c');
+    });
+
+    it('excludes spaces (parent_id IS NULL) from the candidate pool', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Public,
+        tags: ['queer-book-club'],
+      });
+      members.findOne.mockResolvedValue(null);
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.relatedCommunities('p', 'stranger');
+
+      expect(qb.andWhere).toHaveBeenCalledWith('c.parent_id IS NULL');
+    });
+  });
+
+  describe('getFeatured', () => {
+    it('excludes spaces (parent_id IS NULL) from the hero candidate', async () => {
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeatured('u1');
+
+      expect(qb.andWhere).toHaveBeenCalledWith('c.parent_id IS NULL');
+    });
+
+    it('returns null when no community is currently featured', async () => {
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await expect(service.getFeatured('u1')).resolves.toBeNull();
+    });
+  });
+
+  describe('searchByText', () => {
+    it('excludes spaces (parent_id IS NULL) from the match set', async () => {
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchByText('u1', 'book club', 10);
+
+      expect(qb.andWhere).toHaveBeenCalledWith('c.parent_id IS NULL');
+    });
+  });
+
+  describe('suggestedCommunities', () => {
+    it('excludes spaces (parent_id IS NULL) from the suggestion pool', async () => {
+      connections.allAcceptedConnectionUserIds.mockResolvedValue(['friend-1']);
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.suggestedCommunities('u1');
+
+      expect(qb.andWhere).toHaveBeenCalledWith('c.parent_id IS NULL');
+    });
+
+    it('returns nothing when the viewer has no accepted connections', async () => {
+      connections.allAcceptedConnectionUserIds.mockResolvedValue([]);
+
+      await expect(service.suggestedCommunities('u1')).resolves.toEqual([]);
+      expect(communities.createQueryBuilder).not.toHaveBeenCalled();
     });
   });
 
@@ -994,6 +1258,31 @@ describe('CommunitiesService', () => {
 
       expect(qb.orderBy).toHaveBeenCalledWith('c.name', 'ASC');
       expect(qb.addOrderBy).toHaveBeenCalledWith('c.id', 'ASC');
+    });
+
+    // A space never surfaces in the top-level grid or its facet counters;
+    // it is reached through its parent's own subcommunities listing.
+    it('excludes spaces (parent_id IS NULL) from the page and both facet queries', async () => {
+      const communitiesQueryBuilder = qbStub();
+      communities.createQueryBuilder.mockReturnValue(communitiesQueryBuilder);
+
+      await service.list('u1', {});
+
+      expect(communitiesQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'c.parent_id IS NULL',
+      );
+      // Three independent `browseBaseQuery` calls back this endpoint (the
+      // page, and each of the two facet aggregates). `qbStub()` types its
+      // return as `Record<string, jest.Mock>`, so with
+      // `noUncheckedIndexedAccess` on, the property read is typed
+      // `jest.Mock | undefined`; asserting the mock type at the access site
+      // is what lets `.mock.calls` chain off it.
+      const andWhereMock = communitiesQueryBuilder.andWhere as jest.Mock;
+      expect(
+        andWhereMock.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'c.parent_id IS NULL',
+        ),
+      ).toHaveLength(3);
     });
   });
 
@@ -2255,6 +2544,7 @@ describe('CommunitiesService', () => {
           role: RosterRole.Mod,
           joinedAt: new Date('2026-02-02T00:00:00.000Z'),
           cardProgramId: 'cp-1',
+          parentId: null,
         },
         {
           slug: 'book-club',
@@ -2262,6 +2552,7 @@ describe('CommunitiesService', () => {
           role: RosterRole.Member,
           joinedAt: new Date('2026-01-01T00:00:00.000Z'),
           cardProgramId: null,
+          parentId: null,
         },
       ]);
       members.createQueryBuilder.mockReturnValue(qb);
@@ -2279,6 +2570,7 @@ describe('CommunitiesService', () => {
           joinedAt: '2026-02-02T00:00:00.000Z',
           // The raw id is never handed out; only whether there is one.
           hasCardProgram: true,
+          parentSlug: null,
         },
         {
           slug: 'book-club',
@@ -2286,6 +2578,7 @@ describe('CommunitiesService', () => {
           role: RosterRole.Member,
           joinedAt: '2026-01-01T00:00:00.000Z',
           hasCardProgram: false,
+          parentSlug: null,
         },
       ]);
       expect(qb.skip).not.toHaveBeenCalled();
@@ -2305,6 +2598,52 @@ describe('CommunitiesService', () => {
       // roster row, so it is excluded structurally rather than by a filter.
       expect(joinRequests.find).not.toHaveBeenCalled();
       expect(joinRequests.findOne).not.toHaveBeenCalled();
+    });
+
+    // Spaces are deliberately KEPT in this listing (unlike the top-level-only
+    // browse/search/related listings): a caller's own space memberships are
+    // as real as their top-level ones.
+    it("resolves a space row's parentSlug through one batched lookup over the distinct parent ids", async () => {
+      const qb = qbStub();
+      qb.getRawMany!.mockResolvedValue([
+        {
+          slug: 'trans-joy-events',
+          name: 'Trans Joy Events',
+          role: RosterRole.Member,
+          joinedAt: new Date('2026-02-02T00:00:00.000Z'),
+          cardProgramId: null,
+          parentId: 'parent-1',
+        },
+        {
+          slug: 'book-club',
+          name: 'Book Club',
+          role: RosterRole.Member,
+          joinedAt: new Date('2026-01-01T00:00:00.000Z'),
+          cardProgramId: null,
+          parentId: null,
+        },
+      ]);
+      members.createQueryBuilder.mockReturnValue(qb);
+      communities.find.mockResolvedValue([
+        { id: 'parent-1', slug: 'trans-joy' },
+      ]);
+
+      const res = await service.myCommunities('me-1');
+
+      expect(res[0]).toEqual(
+        expect.objectContaining({
+          slug: 'trans-joy-events',
+          parentSlug: 'trans-joy',
+        }),
+      );
+      expect(res[1]).toEqual(
+        expect.objectContaining({ slug: 'book-club', parentSlug: null }),
+      );
+      // A single batched lookup covers every distinct parent id.
+      expect(communities.find).toHaveBeenCalledTimes(1);
+      expect(communities.find).toHaveBeenCalledWith({
+        where: { id: In(['parent-1']) },
+      });
     });
   });
 
@@ -3358,6 +3697,597 @@ describe('CommunitiesService', () => {
         service.withdrawMyJoinRequest('x', 'stranger-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(joinRequests.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // Subcommunities ("spaces"). A space is a `Community` row with `parentId`
+  // set; roles inside it are effective roles (parent staff inherit standing),
+  // and a parent's leave, ban, freeze, archive and tier change cascade onto
+  // its spaces through `SubcommunityCascadeService`.
+  describe('spaces', () => {
+    const PARENT_ID = 'parent-1';
+    const SPACE_ID = 'space-1';
+    const sharedFields = {
+      type: CommunityType.Social,
+      tagline: 't',
+      purpose: 'purpose',
+      whoFor: 'who',
+      rosterVisible: true,
+      features: [],
+      rules: [],
+      rulesVersion: 1,
+      requiresSecondVouch: false,
+      isPubliclyListed: false,
+      archivedAt: null as Date | null,
+      frozenAt: null as Date | null,
+      frozenReason: null as CommunityFrozenReason | null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+    const parentRow = (overrides: Record<string, unknown> = {}) => ({
+      ...sharedFields,
+      id: PARENT_ID,
+      slug: 'parent',
+      name: 'Parent',
+      ref: 'QP-C-0001',
+      parentId: null as string | null,
+      ownerId: 'parent-owner' as string | null,
+      accessTier: AccessTier.Public,
+      ...overrides,
+    });
+    const spaceRow = (overrides: Record<string, unknown> = {}) => ({
+      ...sharedFields,
+      id: SPACE_ID,
+      slug: 'space',
+      name: 'Space',
+      ref: 'QP-C-0002',
+      parentId: PARENT_ID as string | null,
+      ownerId: 'space-owner' as string | null,
+      accessTier: AccessTier.Request,
+      ...overrides,
+    });
+
+    // `findOne` answers by id or slug, so the space and its parent resolve
+    // independently whichever order the service asks in.
+    const stageCommunities = (...rows: { id: string; slug: string }[]) => {
+      communities.findOne.mockImplementation(
+        ({ where }: { where: { id?: string; slug?: string } }) =>
+          Promise.resolve(
+            rows.find(
+              (row) =>
+                (where.id !== undefined && row.id === where.id) ||
+                (where.slug !== undefined && row.slug === where.slug),
+            ) ?? null,
+          ),
+      );
+    };
+    // Roster rows keyed by community id, then user id.
+    const stageRoster = (
+      rolesByCommunity: Record<string, Record<string, RosterRole>>,
+    ) => {
+      members.findOne.mockImplementation(
+        ({ where }: { where: { communityId: string; userId: string } }) => {
+          const role = rolesByCommunity[where.communityId]?.[where.userId];
+          return Promise.resolve(
+            role
+              ? {
+                  id: `row-${where.communityId}-${where.userId}`,
+                  communityId: where.communityId,
+                  userId: where.userId,
+                  role,
+                }
+              : null,
+          );
+        },
+      );
+    };
+    const stageMemberSlug = (memberSlug: string, userId: string) => {
+      const lookupQuery = qbStub();
+      lookupQuery.getMany!.mockResolvedValue([{ slug: memberSlug, userId }]);
+      profiles.createQueryBuilder.mockReturnValue(lookupQuery);
+    };
+
+    describe('getBySlug', () => {
+      it('403s a parent member with no row in a request-tier space, with the members-only code', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({ [PARENT_ID]: { 'member-1': RosterRole.Member } });
+
+        const error: unknown = await service
+          .getBySlug('space', 'member-1')
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(ForbiddenException);
+        expect((error as ForbiddenException).getResponse()).toEqual(
+          expect.objectContaining({ code: COMMUNITY_MEMBERS_ONLY_CODE }),
+        );
+      });
+
+      it('serves the detail to a parent mod, who inherits mod in the space', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({ [PARENT_ID]: { 'mod-1': RosterRole.Mod } });
+
+        const detail = await service.getBySlug('space', 'mod-1');
+
+        expect(detail.myRole).toBe(RosterRole.Mod);
+      });
+
+      it('404s a private space for a parent member outside it', async () => {
+        stageCommunities(
+          spaceRow({ accessTier: AccessTier.Private }),
+          parentRow(),
+        );
+        stageRoster({ [PARENT_ID]: { 'member-1': RosterRole.Member } });
+
+        await expect(
+          service.getBySlug('space', 'member-1'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it("a space's detail carries the parent summary and inherits its rules, with isMember true off the viewer's own parent roster row", async () => {
+        stageCommunities(
+          spaceRow({ rules: ['Space-only rule'] }),
+          parentRow({
+            name: 'Parent Name',
+            avatarImageUrl: 'parent-avatar-key',
+            rules: ['Be kind', 'No spam'],
+            rulesVersion: 3,
+          }),
+        );
+        stageRoster({
+          [PARENT_ID]: { 'member-1': RosterRole.Member },
+          [SPACE_ID]: { 'member-1': RosterRole.Member },
+        });
+
+        const detail = await service.getBySlug('space', 'member-1');
+
+        expect(detail.parent).toEqual({
+          slug: 'parent',
+          name: 'Parent Name',
+          avatarImageUrl: 'https://api.test/files/parent-avatar-key',
+          isMember: true,
+        });
+        expect(detail.inheritedRules).toEqual({
+          rules: ['Be kind', 'No spam'],
+          rulesVersion: 3,
+        });
+        // The space's own `rules` are untouched by the parent's.
+        expect(detail.rules).toEqual(['Space-only rule']);
+        expect(detail.subcommunityCount).toBe(0);
+      });
+
+      it('marks parent.isMember false for a viewer with a space roster row but no roster row of their own on the parent', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        // A MOD row on the space itself; nothing on the parent roster.
+        stageRoster({ [SPACE_ID]: { 'space-mod-1': RosterRole.Mod } });
+
+        const detail = await service.getBySlug('space', 'space-mod-1');
+
+        expect(detail.parent?.isMember).toBe(false);
+      });
+    });
+
+    describe('join', () => {
+      it('403s with PARENT_MEMBERSHIP_REQUIRED for a caller outside the parent', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({});
+
+        const error: unknown = await service
+          .join('space', 'stranger', {})
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(ForbiddenException);
+        expect((error as ForbiddenException).getResponse()).toEqual(
+          expect.objectContaining({ code: PARENT_MEMBERSHIP_REQUIRED_CODE }),
+        );
+        expect(joinRequests.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a caller banned in the parent, checked against the parent id', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({});
+        bans.findOne.mockImplementation(
+          ({ where }: { where: { communityId: string } }) =>
+            Promise.resolve(
+              where.communityId === PARENT_ID
+                ? {
+                    id: 'ban-1',
+                    communityId: PARENT_ID,
+                    userId: 'banned-1',
+                    reason: 'Harassment',
+                    expiresAt: null,
+                    ruleText: null,
+                  }
+                : null,
+            ),
+        );
+
+        const error: unknown = await service
+          .join('space', 'banned-1', {})
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(ForbiddenException);
+        expect((error as ForbiddenException).getResponse()).toEqual(
+          expect.objectContaining({ code: 'BANNED_FROM_COMMUNITY' }),
+        );
+        expect(bans.findOne).toHaveBeenCalledWith({
+          where: { communityId: PARENT_ID, userId: 'banned-1' },
+        });
+      });
+
+      it('404s a space under a parent taken down by moderation, like getBySlug', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({});
+        contentModeration.stateFor.mockImplementation(
+          (_subjectType: string, subjectSlug: string) =>
+            Promise.resolve({
+              hidden: subjectSlug === 'parent',
+              removed: false,
+            }),
+        );
+
+        const error: unknown = await service
+          .join('space', 'stranger', {})
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect(error).not.toBeInstanceOf(ForbiddenException);
+      });
+
+      it('404s a space under an archived parent', async () => {
+        stageCommunities(
+          spaceRow(),
+          parentRow({ archivedAt: new Date('2026-01-02T00:00:00.000Z') }),
+        );
+        stageRoster({});
+
+        await expect(
+          service.join('space', 'stranger', {}),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+    });
+
+    describe('removeMember', () => {
+      it('clears the member from every space when they leave the parent', async () => {
+        stageCommunities(parentRow());
+        stageRoster({ [PARENT_ID]: { 'member-1': RosterRole.Member } });
+        stageMemberSlug('member-slug', 'member-1');
+
+        await service.removeMember('parent', 'member-1', 'member-slug');
+
+        expect(
+          subcommunityCascade.removeParentMemberFromSpaces,
+        ).toHaveBeenCalledWith(
+          manager,
+          expect.objectContaining({ id: PARENT_ID }),
+          'member-1',
+        );
+      });
+
+      it('clears the member from every space when a parent mod bans them', async () => {
+        stageCommunities(parentRow());
+        stageRoster({
+          [PARENT_ID]: {
+            'member-1': RosterRole.Member,
+            'mod-1': RosterRole.Mod,
+          },
+        });
+        stageMemberSlug('member-slug', 'member-1');
+        // The read-back `barReturn` does after the insert.
+        bans.findOne.mockResolvedValue({
+          userId: 'member-1',
+          reason: 'Harassment',
+          expiresAt: null,
+          ruleIndex: null,
+          ruleVersion: null,
+          ruleText: null,
+        });
+
+        await service.removeMember('parent', 'mod-1', 'member-slug', {
+          reason: 'Harassment',
+        });
+
+        expect(
+          subcommunityCascade.removeParentMemberFromSpaces,
+        ).toHaveBeenCalledWith(
+          manager,
+          expect.objectContaining({ id: PARENT_ID }),
+          'member-1',
+        );
+        expect(governanceLog.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: PARENT_ID,
+            action: GovernanceLogAction.MemberBanned,
+          }),
+        );
+      });
+
+      it('leaves other spaces alone when a member leaves a space', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: { 'member-1': RosterRole.Member },
+          [PARENT_ID]: { 'member-1': RosterRole.Member },
+        });
+        stageMemberSlug('member-slug', 'member-1');
+
+        await service.removeMember('space', 'member-1', 'member-slug');
+
+        expect(members.delete).toHaveBeenCalledWith({
+          id: `row-${SPACE_ID}-member-1`,
+        });
+        expect(
+          subcommunityCascade.removeParentMemberFromSpaces,
+        ).not.toHaveBeenCalled();
+      });
+
+      // The reassignment itself (owner upsert, ownerless parent) is pinned in
+      // `subcommunity-cascade.service.spec.ts`; here, what the caller does
+      // with the cascade's answer after commit.
+      it("logs the hand-over of a space the leaving member owned to the parent's owner", async () => {
+        stageCommunities(parentRow());
+        stageRoster({ [PARENT_ID]: { 'space-owner': RosterRole.Member } });
+        stageMemberSlug('space-owner-slug', 'space-owner');
+        subcommunityCascade.removeParentMemberFromSpaces.mockResolvedValue({
+          removedSpaceIds: [SPACE_ID],
+          reassignedSpaceIds: [SPACE_ID],
+        });
+
+        await service.removeMember('parent', 'space-owner', 'space-owner-slug');
+
+        expect(governanceLog.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: SPACE_ID,
+            action: GovernanceLogAction.OwnershipTransferred,
+            targetUserId: 'parent-owner',
+            metadata: {
+              reason: 'parent_cascade',
+              previousOwnerId: 'space-owner',
+            },
+          }),
+        );
+      });
+
+      it('emits a member-left event for the parent and every space the cascade cleared', async () => {
+        stageCommunities(parentRow());
+        stageRoster({ [PARENT_ID]: { 'member-1': RosterRole.Member } });
+        stageMemberSlug('member-slug', 'member-1');
+        subcommunityCascade.removeParentMemberFromSpaces.mockResolvedValue({
+          removedSpaceIds: [SPACE_ID],
+          reassignedSpaceIds: [],
+        });
+
+        await service.removeMember('parent', 'member-1', 'member-slug');
+
+        expect(eventEmitter.emit).toHaveBeenCalledWith(COMMUNITY_MEMBER_LEFT, {
+          communityId: PARENT_ID,
+          userId: 'member-1',
+        });
+        expect(eventEmitter.emit).toHaveBeenCalledWith(COMMUNITY_MEMBER_LEFT, {
+          communityId: SPACE_ID,
+          userId: 'member-1',
+        });
+      });
+    });
+
+    describe('update', () => {
+      it('400s a space tier more open than the parent, with SUBCOMMUNITY_TIER_TOO_OPEN', async () => {
+        stageCommunities(
+          spaceRow({ accessTier: AccessTier.Request }),
+          parentRow({ accessTier: AccessTier.Request }),
+        );
+        stageRoster({
+          [SPACE_ID]: { 'space-owner': RosterRole.Owner },
+          [PARENT_ID]: { 'space-owner': RosterRole.Member },
+        });
+
+        const error: unknown = await service
+          .update('space', 'space-owner', { accessTier: AccessTier.Public })
+          .catch((thrown: unknown) => thrown);
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).getResponse()).toEqual(
+          expect.objectContaining({ code: SUBCOMMUNITY_TIER_TOO_OPEN_CODE }),
+        );
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it('400s a request to publicly list a space', async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: { 'space-owner': RosterRole.Owner },
+          [PARENT_ID]: { 'space-owner': RosterRole.Member },
+        });
+
+        await expect(
+          service.update('space', 'space-owner', { isPubliclyListed: true }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+
+      it('raises spaces left more open than a parent that got stricter, one log entry each', async () => {
+        stageCommunities(parentRow({ accessTier: AccessTier.Public }));
+        stageRoster({ [PARENT_ID]: { 'parent-owner': RosterRole.Owner } });
+        subcommunityCascade.raiseSpaceTiers.mockResolvedValue([
+          { id: SPACE_ID, from: AccessTier.Public },
+          { id: 'space-2', from: AccessTier.Request },
+        ]);
+
+        await service.update('parent', 'parent-owner', {
+          accessTier: AccessTier.Invite,
+        });
+
+        expect(subcommunityCascade.raiseSpaceTiers).toHaveBeenCalledWith(
+          manager,
+          PARENT_ID,
+          AccessTier.Invite,
+        );
+        for (const [spaceId, fromTier] of [
+          [SPACE_ID, AccessTier.Public],
+          ['space-2', AccessTier.Request],
+        ]) {
+          expect(governanceLog.log).toHaveBeenCalledWith(
+            expect.objectContaining({
+              communityId: spaceId,
+              action: GovernanceLogAction.SubcommunityTierRaised,
+              metadata: {
+                from: fromTier,
+                to: AccessTier.Invite,
+                parentId: PARENT_ID,
+              },
+            }),
+          );
+        }
+      });
+
+      it('raises nothing when a parent gets more open', async () => {
+        stageCommunities(parentRow({ accessTier: AccessTier.Invite }));
+        stageRoster({ [PARENT_ID]: { 'parent-owner': RosterRole.Owner } });
+
+        await service.update('parent', 'parent-owner', {
+          accessTier: AccessTier.Public,
+        });
+
+        expect(subcommunityCascade.raiseSpaceTiers).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('freeze and unfreeze', () => {
+      it('freezes every space with the parent and logs each one', async () => {
+        stageCommunities(parentRow());
+        stageRoster({ [PARENT_ID]: { 'parent-owner': RosterRole.Owner } });
+        communities.createQueryBuilder.mockReturnValue(updateQbStub());
+        subcommunityCascade.freezeSpaces.mockResolvedValue([SPACE_ID]);
+
+        await service.freeze('parent', 'parent-owner');
+
+        expect(subcommunityCascade.freezeSpaces).toHaveBeenCalledWith(
+          manager,
+          PARENT_ID,
+          'parent-owner',
+        );
+        expect(governanceLog.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: SPACE_ID,
+            action: GovernanceLogAction.Frozen,
+            metadata: { reason: 'parent_frozen' },
+          }),
+        );
+      });
+
+      it("409s the space's own staff lifting a freeze inherited from the parent", async () => {
+        stageCommunities(
+          spaceRow({
+            frozenAt: new Date('2026-01-02T00:00:00.000Z'),
+            frozenReason: CommunityFrozenReason.ParentFrozen,
+          }),
+          parentRow(),
+        );
+        stageRoster({
+          [SPACE_ID]: { 'space-owner': RosterRole.Owner },
+          [PARENT_ID]: { 'space-owner': RosterRole.Member },
+        });
+
+        await expect(
+          service.unfreeze('space', 'space-owner'),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(communities.save).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('transferOwnership', () => {
+      it("lets the parent's owner hand a space on, demoting the space's current owner first", async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: {
+            'space-owner': RosterRole.Owner,
+            'member-1': RosterRole.Member,
+          },
+          [PARENT_ID]: {
+            'parent-owner': RosterRole.Owner,
+            'space-owner': RosterRole.Member,
+            'member-1': RosterRole.Member,
+          },
+        });
+        stageMemberSlug('member-slug', 'member-1');
+
+        const detail = await service.transferOwnership(
+          'space',
+          'parent-owner',
+          'member-slug',
+        );
+
+        expect(communities.save).toHaveBeenCalledWith(
+          expect.objectContaining({ id: SPACE_ID, ownerId: 'member-1' }),
+        );
+        const savedRows = members.save.mock.calls.map(
+          (call: unknown[]) => call[0] as { id: string; role: RosterRole },
+        );
+        const demotionIndex = savedRows.findIndex(
+          (row) =>
+            row.id === `row-${SPACE_ID}-space-owner` &&
+            row.role === RosterRole.Mod,
+        );
+        const promotionIndex = savedRows.findIndex(
+          (row) =>
+            row.id === `row-${SPACE_ID}-member-1` &&
+            row.role === RosterRole.Owner,
+        );
+        // Demoted before the promotion, so the one-owner index holds.
+        expect(demotionIndex).toBeGreaterThanOrEqual(0);
+        expect(promotionIndex).toBeGreaterThan(demotionIndex);
+        expect(governanceLog.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            communityId: SPACE_ID,
+            actorUserId: 'parent-owner',
+            action: GovernanceLogAction.OwnershipTransferred,
+            targetUserId: 'member-1',
+            metadata: { fromOwnerId: 'space-owner' },
+          }),
+        );
+        // The parent's owner keeps the co_owner role they inherit.
+        expect(detail.myRole).toBe(RosterRole.CoOwner);
+      });
+
+      it("refuses the space's own mod", async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({
+          [SPACE_ID]: { 'mod-1': RosterRole.Mod },
+          [PARENT_ID]: { 'mod-1': RosterRole.Member },
+        });
+
+        await expect(
+          service.transferOwnership('space', 'mod-1', 'member-slug'),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+    });
+
+    describe('archive', () => {
+      it('archives every space with the parent', async () => {
+        stageCommunities(parentRow());
+        stageRoster({ [PARENT_ID]: { 'parent-owner': RosterRole.Owner } });
+
+        await service.archive('parent', 'parent-owner');
+
+        expect(subcommunityCascade.archiveSpaces).toHaveBeenCalledWith(
+          manager,
+          PARENT_ID,
+          expect.any(Date),
+        );
+      });
+
+      it("lets the parent's owner archive a space", async () => {
+        stageCommunities(spaceRow(), parentRow());
+        stageRoster({ [PARENT_ID]: { 'parent-owner': RosterRole.Owner } });
+
+        const detail = await service.archive('space', 'parent-owner');
+
+        expect(detail.myRole).toBe(RosterRole.CoOwner);
+        expect(communities.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: SPACE_ID,
+            archivedAt: expect.any(Date) as unknown,
+          }),
+        );
+        expect(subcommunityCascade.archiveSpaces).not.toHaveBeenCalled();
+      });
     });
   });
 });

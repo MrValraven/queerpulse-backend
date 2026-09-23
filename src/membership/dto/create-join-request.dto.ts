@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   Equals,
   IsBoolean,
@@ -72,6 +73,20 @@ export class CreateMembershipJoinRequestDto {
   @IsString()
   @MaxLength(64)
   source?: string;
+
+  /**
+   * Where the applicant says they heard about QueerPulse, in their own words
+   * (a friend, a post, an event). Self-reported free text shown to reviewers
+   * in the mod queue as context. Required, and trimmed before validation so a
+   * whitespace-only answer fails `@MinLength(1)` with a field-level 400.
+   */
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  heardFrom!: string;
 
   /**
    * Optional date of birth (`YYYY-MM-DD`). When supplied it is checked against

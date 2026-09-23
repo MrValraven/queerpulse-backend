@@ -21,6 +21,7 @@ import { GroupInvitesService } from './group-invites.service';
 import { MessageAnnotationsService } from './message-annotations.service';
 import {
   EnquiryContactability,
+  IdentityEnquiryContactability,
   MessageRequestsService,
 } from './message-requests.service';
 import { GetMessagesOptions, MessagesService } from './messages.service';
@@ -184,10 +185,6 @@ export class MessagingService {
     );
   }
 
-  isParticipant(conversationId: string, userId: string): Promise<boolean> {
-    return this.conversationsService.isParticipant(conversationId, userId);
-  }
-
   canJoinConversationLive(
     conversationId: string,
     userId: string,
@@ -238,17 +235,30 @@ export class MessagingService {
     return this.messagesService.getMessages(conversationId, userId, opts);
   }
 
-  searchMessages(
+  /**
+   * Task 24: `mailboxIdentityId` (the route's `?as=`) is authorized here,
+   * once and before any query, through
+   * `ConversationsService.assertMayReadMailbox`.
+   */
+  async searchMessages(
     userId: string,
     rawQuery: string,
     limit?: number,
     conversationId?: string,
+    mailboxIdentityId?: string,
   ): Promise<MessageSearchResponse> {
+    if (mailboxIdentityId !== undefined) {
+      await this.conversationsService.assertMayReadMailbox(
+        userId,
+        mailboxIdentityId,
+      );
+    }
     return this.messagesService.searchMessages(
       userId,
       rawQuery,
       limit,
       conversationId,
+      mailboxIdentityId,
     );
   }
 
@@ -259,8 +269,10 @@ export class MessagingService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image' | 'document',
+    kind?: 'user' | 'gif' | 'image' | 'document' | 'sticker',
     attachment?: AttachmentInput,
+    stickerId?: string,
+    asIdentityId?: string,
   ): Promise<MessageResponse> {
     return this.messagesService.sendMessage(
       conversationId,
@@ -271,6 +283,8 @@ export class MessagingService {
       forwarded,
       kind,
       attachment,
+      stickerId,
+      asIdentityId,
     );
   }
 
@@ -287,8 +301,10 @@ export class MessagingService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif' | 'image' | 'document',
+    kind?: 'user' | 'gif' | 'image' | 'document' | 'sticker',
     attachment?: AttachmentInput,
+    stickerId?: string,
+    asIdentityId?: string,
   ): Promise<{ response: MessageResponse; isNew: boolean }> {
     return this.messagesService.sendMessageWithOutcome(
       conversationId,
@@ -299,6 +315,8 @@ export class MessagingService {
       forwarded,
       kind,
       attachment,
+      stickerId,
+      asIdentityId,
     );
   }
 
@@ -430,10 +448,21 @@ export class MessagingService {
     );
   }
 
-  listStarredMessages(
+  /**
+   * Task 24: `options.mailboxIdentityId` (the route's `?as=`) is authorized
+   * here, once and before any query, through
+   * `ConversationsService.assertMayReadMailbox`.
+   */
+  async listStarredMessages(
     userId: string,
     options?: Parameters<MessageAnnotationsService['listStarredMessages']>[1],
   ): Promise<StarredMessagesResponse> {
+    if (options?.mailboxIdentityId !== undefined) {
+      await this.conversationsService.assertMayReadMailbox(
+        userId,
+        options.mailboxIdentityId,
+      );
+    }
     return this.messageAnnotationsService.listStarredMessages(userId, options);
   }
 
@@ -630,6 +659,34 @@ export class MessagingService {
     return this.messageRequestsService.enquiryContactability(
       fromUserId,
       toUserId,
+    );
+  }
+
+  /** Task 18: `deliverEnquiry` for a listing, persona or company mailbox,
+   *  see `MessageRequestsService.deliverEnquiryToIdentity`. */
+  deliverEnquiryToIdentity(
+    fromUserId: string,
+    toIdentityId: string,
+    body: string,
+    asIdentityId?: string,
+  ): Promise<{ conversationId: string }> {
+    return this.messageRequestsService.deliverEnquiryToIdentity(
+      fromUserId,
+      toIdentityId,
+      body,
+      asIdentityId,
+    );
+  }
+
+  /** Task 18: the read-only twin of `deliverEnquiryToIdentity`, see
+   *  `MessageRequestsService.identityEnquiryContactability`. */
+  identityEnquiryContactability(
+    fromUserId: string,
+    toIdentityId: string,
+  ): Promise<IdentityEnquiryContactability> {
+    return this.messageRequestsService.identityEnquiryContactability(
+      fromUserId,
+      toIdentityId,
     );
   }
 }

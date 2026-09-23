@@ -212,6 +212,17 @@ export class Listing {
   @Column({ type: 'uuid', nullable: true })
   ownerId!: string | null;
 
+  /**
+   * The staff account that authored this listing on a business's behalf.
+   *
+   * `ownerId IS NULL AND createdByStaffId IS NOT NULL` is the precise
+   * definition of a house-authored entry awaiting an owner, which is what
+   * the public directory branches on to describe these honestly.
+   */
+  @Index('IDX_listings_created_by_staff_id')
+  @Column({ type: 'uuid', nullable: true })
+  createdByStaffId!: string | null;
+
   // Filtered on nearly every directory read (`DirectoryService`'s
   // `status = live` gates) and the admin moderation queue
   // (`ListingsService.listQueue`) — mirrors `HousingListing.status`

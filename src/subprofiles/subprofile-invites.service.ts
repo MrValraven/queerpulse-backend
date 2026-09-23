@@ -8,6 +8,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { isUniqueViolation } from '../common/db-errors';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { Profile } from '../users/entities/profile.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Subprofile } from './entities/subprofile.entity';
@@ -51,6 +54,11 @@ export class SubprofileInvitesService {
     private readonly subprofilesService: SubprofilesService,
     private readonly events: EventEmitter2,
     private readonly dataSource: DataSource,
+    // Resolves the persona's mailbox identity and seats a newly-accepted
+    // co-owner into every thread of it, in the same transaction as the
+    // acceptance. See `accept`.
+    private readonly identities: IdentitiesService,
+    private readonly identityMailboxSync: IdentityMailboxSyncService,
   ) {}
 
   // A co-owner invites another member onto the persona. Capped at
@@ -249,8 +257,15 @@ export class SubprofileInvitesService {
     if (invite.status !== SubprofileInviteStatus.Pending) {
       throw new ConflictException('That invite is no longer pending.');
     }
+    // The persona already exists (this invite was sent against it), so this
+    // is safe to resolve outside the lock below: idempotent, and orthogonal
+    // to the membership-cap check the lock actually protects.
+    const identity = await this.identities.ensureIdentityFor(
+      IdentityKind.Subprofile,
+      invite.subprofileId,
+    );
 
-    await this.dataSource.transaction(async (manager) => {
+    const seatChanges = await this.dataSource.transaction(async (manager) => {
       // Lock the persona row FIRST — same lock `invite()` takes, so the two
       // operations never interleave on the same subprofile.
       await manager.findOne(Subprofile, {
@@ -289,7 +304,21 @@ export class SubprofileInvitesService {
       invite.status = SubprofileInviteStatus.Accepted;
       invite.respondedAt = new Date();
       await manager.save(invite);
+      // Seat the new co-owner into every thread of the persona's mailbox, in
+      // this same transaction, so a failed sync rolls the acceptance back
+      // with it. Safe to call even on the idempotent "already a member"
+      // branch above: a member already seated is skipped. The staffing frame
+      // waits for the commit (below).
+      return this.identityMailboxSync.onStaffAdded(
+        identity.id,
+        userId,
+        manager,
+        { shouldDeferEmission: true },
+      );
     });
+    // Task 25: the new co-owner hears their new mailbox only once the
+    // acceptance has committed, so a rollback never announces a seat.
+    this.identityMailboxSync.emitSeatChanges(seatChanges);
 
     // Emitted AFTER the transaction commits.
     this.events.emit(SUBPROFILE_INVITE_ACCEPTED, {

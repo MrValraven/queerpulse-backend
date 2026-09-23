@@ -27,6 +27,10 @@ export enum MessageKind {
    *  'message-document'`), mirroring how `Image` reuses the app's ordinary
    *  upload path rather than inventing a messaging-only one. */
   Document = 'document',
+  /** A sticker from an admin-published pack. The client sends only a
+   *  `stickerId`; the service resolves the row and bakes the attachment, so
+   *  no client ever supplies a storage key for this kind. */
+  Sticker = 'sticker',
 }
 
 /**
@@ -49,6 +53,13 @@ export enum MessageKind {
  *  - `group_dissolved` (actor = the owner, or the last leaver when nobody
  *    remains to end it): "{actor} ended this group".
  *
+ * Business mailboxes (Task 16) add one for direct threads:
+ *  - `moved_to_business_mailbox` (actor = the listing owner whose personal
+ *    thread moved; `value` is the listing identity id): "This conversation
+ *    moved to the business mailbox", naming no actor since the migration
+ *    itself made the move. Written only by
+ *    `1821260000000-MigrateEnquiryThreadsToListingMailboxes.ts`.
+ *
  * Every event whose text mentions the ACTOR or the TARGET needs a
  * viewer-is-that-person variant ("you" instead of a name), computed
  * server-side onto `MessageResponse.systemEvent.actorIsMe`/`targetIsMe`, see
@@ -66,7 +77,8 @@ export type SystemEventType =
   | 'group_photo_changed'
   | 'group_description_changed'
   | 'member_joined'
-  | 'group_dissolved';
+  | 'group_dissolved'
+  | 'moved_to_business_mailbox';
 
 /**
  * Structured payload of a `system` message. Actor/target are user ids; the DTO
@@ -162,16 +174,77 @@ export interface DocumentAttachment {
 }
 
 /**
- * Discriminates the two shapes the `attachment` jsonb column can hold, purely
- * structurally (there is no stored `type` tag): a `DocumentAttachment` is the
- * only one of the two that carries `fileName`. Used wherever a stored
- * attachment must be handled differently per shape (`resolveAttachment`,
+ * A sticker attachment on a `kind:'sticker'` message.
+ *
+ * This is its own interface for one reason that matters at read time:
+ * `provider` is the literal `'sticker'`, which is what `isStickerAttachment`
+ * discriminates on. `GifAttachment.provider` is free-form, so reusing that
+ * interface would make a structural test ambiguous.
+ *
+ * `label` is a distinct field because it serves a different role than the
+ * existing optional `caption`: a caption RENDERS underneath the media, while
+ * a sticker shows nothing beneath it. The label is alt text, the reply-quote
+ * line, the forward preview and the starred snippet.
+ *
+ * Every field is BAKED at send time from the `stickers` row. Archiving the
+ * pack afterwards therefore leaves history intact, and re-rendering a sticker
+ * leaves already-sent messages showing the artwork that was actually sent.
+ */
+export interface StickerAttachment {
+  /** The sticker PNG's storage key, resolved through `toImageUrl` at read
+   *  time exactly like an uploaded image's. */
+  url: string;
+  previewUrl: string;
+  width: number;
+  height: number;
+  provider: 'sticker';
+  stickerId: string;
+  label: string;
+}
+
+/**
+ * Discriminates a sticker from the other two shapes the `attachment` jsonb
+ * column can hold. Checked BEFORE `isDocumentAttachment` everywhere the
+ * column is narrowed: a sticker has no `fileName`, so the order is not
+ * strictly required today, but making the most specific test first keeps a
+ * later shape from silently falling into the document branch.
+ *
+ * Requires BOTH `provider === 'sticker'` AND a `stickerId` field. `provider`
+ * alone is client-forgeable: `SendMessageDto`'s `GifAttachmentDto.provider`
+ * is a free-form `@IsString() @MaxLength(32)`, so an ordinary gif, image, or
+ * document send could claim `provider: 'sticker'` on an ordinary photo.
+ * `stickerId` is never accepted from a client for those three kinds (only a
+ * `kind:'sticker'` send's separate top-level `stickerId` field is, and that
+ * path never lets a client supply its own `attachment` at all, see
+ * `MessagingCoreService.postMessage`'s sticker branch). It is set only when
+ * this service itself bakes a `StickerAttachment` from a resolved `Sticker`
+ * row. Requiring it here closes the forgery, so a photo forged with
+ * `provider: 'sticker'` still reads as a photo everywhere (`buildReplyTo`,
+ * moderation evidence, exports) with its real fields intact.
+ */
+export function isStickerAttachment(
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment,
+): attachment is StickerAttachment {
+  return (
+    'provider' in attachment &&
+    attachment.provider === 'sticker' &&
+    'stickerId' in attachment
+  );
+}
+
+/**
+ * Discriminates the two upload shapes the `attachment` jsonb column can hold,
+ * purely structurally (there is no stored `type` tag): a `DocumentAttachment`
+ * is the only one of the three that carries `fileName`. Used wherever a
+ * stored attachment must be handled differently per shape (`resolveAttachment`,
  * `MessagingCoreService.postMessage`'s write-path validation) instead of
  * trusting the message's `kind` alone, since `kind` and `attachment` are two
- * separate columns a caller could in principle mismatch.
+ * separate columns a caller could in principle mismatch. A caller narrowing a
+ * three-member union checks `isStickerAttachment` first, per that function's
+ * own doc.
  */
 export function isDocumentAttachment(
-  attachment: GifAttachment | DocumentAttachment,
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment,
 ): attachment is DocumentAttachment {
   return 'fileName' in attachment;
 }
@@ -257,6 +330,34 @@ export class Message {
   senderId!: string | null;
 
   /**
+   * Who this message was sent AS. `senderId` above keeps recording the human
+   * who typed it in every case, which is what lets a report resolve to a
+   * person and lets attribution be a display decision. Null only where
+   * `senderId` is null, which is an erased sender, or for a genuinely
+   * personal message that was never sent as any business identity.
+   *
+   * Fix round 2 (Task 11): NOT a foreign key. A listing, persona or company
+   * can be deleted long after it stopped answering messages, and its
+   * `identities` row cascades away with it (see `IdentityMailboxSyncService`'s
+   * own doc for the full cascade chain). This column deliberately survives
+   * that deletion, still naming the identity this message was sent as even
+   * once nothing in `identities` answers to that id, the same reasoning
+   * `erasedSenderRef` below already uses for a `users` row that is gone: a
+   * foreign key here would let the database null this column back out on
+   * deletion, which is exactly the leak that let a stranger's whole message
+   * history re-attribute itself to the staff member who happened to type it,
+   * personal handle included. `toMessageResponses` renders a neutral
+   * former-business placeholder whenever this id is present but no longer
+   * resolves, mirroring `senderAuthorSummary`'s own former-member
+   * placeholder for an erased `senderId` above. A genuinely null value here
+   * (with a non-null `senderId`) still means "personal message", read
+   * through the ordinary profile-author path.
+   */
+  @Index('IDX_messages_sender_identity_id')
+  @Column({ type: 'uuid', nullable: true })
+  senderIdentityId!: string | null;
+
+  /**
    * The erased author's former user id, kept ONLY while the message is held
    * because an open or escalated report is tied to its conversation (ENG-243).
    * Not a foreign key: the `users` row it names is gone. Written by
@@ -292,15 +393,16 @@ export class Message {
   systemEvent!: SystemEvent | null;
 
   /**
-   * The media attachment for a `kind:'gif'`, `kind:'image'`, or
-   * `kind:'document'` message (else NULL). `body` still carries a
-   * "GIF"/"Photo"/"Document" text fallback for push/notification/last-message
-   * previews. `DocumentAttachment` is exactly the "another attachment source"
-   * this column's original `GifAttachment` doc comment predicted — no
-   * migration was needed to add it, only a widened TypeScript union.
+   * The media attachment for a `kind:'gif'`, `kind:'image'`, `kind:'document'`,
+   * or `kind:'sticker'` message (else NULL). `body` still carries a
+   * "GIF"/"Photo"/"Document"/"Sticker" text fallback for push/notification/
+   * last-message previews. `DocumentAttachment` and `StickerAttachment` are
+   * exactly the "another attachment source" this column's original
+   * `GifAttachment` doc comment predicted. No migration was needed to add
+   * either, only a widened TypeScript union.
    */
   @Column({ type: 'jsonb', nullable: true })
-  attachment!: GifAttachment | DocumentAttachment | null;
+  attachment!: GifAttachment | DocumentAttachment | StickerAttachment | null;
 
   @Index('IDX_messages_reply_to_id')
   @Column({ type: 'uuid', nullable: true })

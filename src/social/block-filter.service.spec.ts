@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { SelectQueryBuilder } from 'typeorm';
+import { FindOperator, SelectQueryBuilder } from 'typeorm';
+import { IdentityBlock } from '../identities/entities/identity-block.entity';
 import { BlockFilterService } from './block-filter.service';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
@@ -9,6 +10,10 @@ describe('BlockFilterService', () => {
   let service: BlockFilterService;
   let blocks: { exist: jest.Mock; find: jest.Mock };
   let mutes: { exist: jest.Mock };
+  // Task 14: `identity_blocks` rows, read by a stand-in that evaluates the
+  // `where` it is given, `In(...)` included, over this list.
+  let identityBlockRows: Array<{ blockerUserId: string; identityId: string }>;
+  let identityBlocks: { exist: jest.Mock; find: jest.Mock };
 
   beforeEach(async () => {
     blocks = {
@@ -16,12 +21,35 @@ describe('BlockFilterService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     mutes = { exist: jest.fn().mockResolvedValue(false) };
+    identityBlockRows = [];
+    const matchesValue = (expected: unknown, actual: string) =>
+      expected instanceof FindOperator
+        ? (expected.value as string[]).includes(actual)
+        : expected === actual;
+    const matchingRows = (where: Record<string, unknown>) =>
+      identityBlockRows.filter((row) =>
+        Object.entries(where).every(([column, expected]) =>
+          matchesValue(expected, row[column as keyof typeof row]),
+        ),
+      );
+    identityBlocks = {
+      exist: jest.fn(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(matchingRows(where).length > 0),
+      ),
+      find: jest.fn(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(matchingRows(where)),
+      ),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BlockFilterService,
         { provide: getRepositoryToken(Block), useValue: blocks },
         { provide: getRepositoryToken(Mute), useValue: mutes },
+        {
+          provide: getRepositoryToken(IdentityBlock),
+          useValue: identityBlocks,
+        },
       ],
     }).compile();
     service = module.get(BlockFilterService);
@@ -156,6 +184,88 @@ describe('BlockFilterService', () => {
         service.blockedAgainstAnyOf(['candidate-a'], []),
       ).resolves.toEqual(new Set());
       expect(blocks.find).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Task 14: identity blocks', () => {
+    const OWNER = 'owner-user';
+    const CUSTOMER = 'customer-user';
+    const BUSINESS_IDENTITY = 'business-identity';
+    const OWNER_PROFILE_IDENTITY = 'owner-profile-identity';
+
+    it('is true for a business the member blocked', async () => {
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: BUSINESS_IDENTITY },
+      ];
+
+      await expect(
+        service.isIdentityBlocked(CUSTOMER, BUSINESS_IDENTITY),
+      ).resolves.toBe(true);
+    });
+
+    it("is false for the business owner's own profile identity, which a block of the business leaves alone", async () => {
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: BUSINESS_IDENTITY },
+      ];
+
+      await expect(
+        service.isIdentityBlocked(CUSTOMER, OWNER_PROFILE_IDENTITY),
+      ).resolves.toBe(false);
+    });
+
+    it('is false for the business when the member blocked only its owner as a person', async () => {
+      blocks.exist.mockResolvedValue(true);
+
+      await expect(service.isBlockedEitherWay(CUSTOMER, OWNER)).resolves.toBe(
+        true,
+      );
+      await expect(
+        service.isIdentityBlocked(CUSTOMER, BUSINESS_IDENTITY),
+      ).resolves.toBe(false);
+    });
+
+    it("is directional: the business's block list never answers for its customers", async () => {
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: BUSINESS_IDENTITY },
+      ];
+
+      await expect(
+        service.isIdentityBlocked(OWNER, BUSINESS_IDENTITY),
+      ).resolves.toBe(false);
+    });
+
+    it("lists every identity the member blocked, and no one else's", async () => {
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: BUSINESS_IDENTITY },
+        { blockerUserId: CUSTOMER, identityId: 'persona-identity' },
+        { blockerUserId: OWNER, identityId: 'company-identity' },
+      ];
+
+      await expect(service.blockedIdentityIds(CUSTOMER)).resolves.toEqual([
+        BUSINESS_IDENTITY,
+        'persona-identity',
+      ]);
+    });
+
+    it('reads many blockers and identities in one query, and none for an empty side', async () => {
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: BUSINESS_IDENTITY },
+        { blockerUserId: OWNER, identityId: 'company-identity' },
+      ];
+
+      await expect(
+        service.identityBlocksAmong(
+          [CUSTOMER, CUSTOMER, OWNER],
+          [BUSINESS_IDENTITY],
+        ),
+      ).resolves.toEqual([
+        { blockerUserId: CUSTOMER, identityId: BUSINESS_IDENTITY },
+      ]);
+      expect(identityBlocks.find).toHaveBeenCalledTimes(1);
+      await expect(
+        service.identityBlocksAmong([], [BUSINESS_IDENTITY]),
+      ).resolves.toEqual([]);
+      expect(identityBlocks.find).toHaveBeenCalledTimes(1);
     });
   });
 });

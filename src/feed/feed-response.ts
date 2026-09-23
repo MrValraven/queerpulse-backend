@@ -70,12 +70,17 @@ export type FeedItemReason = 'membership' | 'connection' | 'topic' | 'recent';
  */
 /** A source a member can turn down in their own feed (SOC-18). `name` is
  *  carried so the card's menu and the managed list can say what is being
- *  quieted without a second lookup. Null for an item with no room behind it
- *  (a flat post, a global new-member row). */
+ *  quieted without a second lookup. Null for an item with no community or
+ *  thread behind it (a flat post, a global new-member row). `parentName` is
+ *  the community's own parent when `name` names a space, so the card labels
+ *  it "Parent, Space" (for example "Bristol Queer Collective, Photography");
+ *  null for a top-level community and always null for a `forum_thread`
+ *  source, which names the thread itself. */
 export interface FeedItemSource {
   kind: 'community' | 'forum_thread';
   id: string;
   name: string;
+  parentName: string | null;
 }
 
 export interface FeedItemSignals {

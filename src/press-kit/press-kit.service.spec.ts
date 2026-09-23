@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
@@ -171,6 +171,15 @@ describe('PressKitService', () => {
       expect(safeSpaceNominations.count).toHaveBeenCalledWith({
         where: { status: 'approved' },
       });
+    });
+
+    it('excludes spaces (subcommunities) from the communities count', async () => {
+      await service.getPressKit();
+
+      const [{ where }] = communities.count.mock.calls[0] as [
+        { where: { parentId?: unknown } },
+      ];
+      expect(where.parentId).toEqual(IsNull());
     });
   });
 

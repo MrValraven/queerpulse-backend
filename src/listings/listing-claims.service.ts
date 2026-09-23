@@ -28,12 +28,11 @@ import {
   ListingClaim,
   ListingClaimStatus,
 } from './entities/listing-claim.entity';
-import {
-  ListingModerationAction,
-  ListingModerationEvent,
-} from './entities/listing-moderation-event.entity';
 import { Listing } from './entities/listing.entity';
-import { ListingCoManagersService } from './listing-co-managers.service';
+import {
+  ListingOwnershipService,
+  OwnershipTransferResult,
+} from './listing-ownership.service';
 
 /**
  * "Claim this existing listing" — a member's request to take ownership of a
@@ -67,10 +66,12 @@ export class ListingClaimsService {
     // seam `ListingsService.notifySubmitterBestEffort` already uses to reach a
     // listing's submitter from a moderation action.
     private readonly messaging: MessagingService,
-    // Clears the listing's co-manager seats inside this service's own transfer
-    // transaction (`revokeAllForOwnershipTransfer`). Injected rather than
-    // reached through `ListingsService`, which this file does not depend on.
-    private readonly coManagers: ListingCoManagersService,
+    // The one place a listing changes hands: clears the previous holder's
+    // personal fields, revokes the co-manager seats a displaced owner
+    // appointed, and writes the `ownership_transferred` audit row, all inside
+    // this service's own transaction. Shared with the staff owner-offer path
+    // so the two can never drift.
+    private readonly ownership: ListingOwnershipService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
@@ -320,6 +321,7 @@ export class ListingClaimsService {
 
       const previousOwnerId = listing.ownerId;
       const reassignedAt = new Date();
+      let transfer: OwnershipTransferResult | null = null;
       if (status === ListingClaimStatus.Approved) {
         if (!current.claimantId) {
           throw new BadRequestException(
@@ -332,71 +334,47 @@ export class ListingClaimsService {
         // could still be holding a claim filed while the listing was unowned
         // and approve it long after a real member took it over.
         await this.assertClaimable(listing);
-        listing.ownerId = current.claimantId;
-        // BE-HSG-05: these five columns are the PREVIOUS owner's personal data
-        // rather than the business's. `ListingDTO` hands `contactEmail`,
-        // `ownerName` and `ownerBio` straight to whoever owns the listing, and
-        // `consentOuting`/`consentGuide` are that person's consent decisions,
-        // which cannot transfer to somebody else. Cleared so the new owner
-        // enters their own rather than inheriting them. (`notify` was cleared
-        // here too until it was retired: it is no longer collected or served,
-        // so it is deliberately left alone now.)
-        listing.contactEmail = '';
-        listing.ownerName = '';
-        listing.ownerBio = '';
-        listing.consentOuting = false;
-        listing.consentGuide = false;
-        await listingsRepo.save(listing);
-        // EVERY CO-MANAGER SEAT GOES, in this same transaction as the
-        // reassignment above. A claim is adversarial by definition: it is filed
-        // by somebody arguing the listing should be taken off its current
-        // owner, and every co-manager on it was chosen by that owner. Carrying
-        // them across would hand the contested party a standing team on a page
-        // they just lost. The new owner starts clean and re-invites whoever
-        // they actually want.
-        //
-        // Unanswered invitations go too, on the same reasoning: an invitation
-        // sent by the previous owner is that owner's decision about who should
-        // help run the business, and it has no more claim to survive the
-        // transfer than an accepted seat does.
-        //
-        // Same transaction, and that is the point rather than an
-        // implementation detail. A transfer that committed while the previous
-        // owner's appointees kept write access would be worse than either
-        // outcome on its own, and a losing concurrent reviewer's conditional
-        // UPDATE below rolls this back along with everything else.
-        const revokedCoManagerCount =
-          await this.coManagers.revokeAllForOwnershipTransfer(
-            manager,
-            listing.id,
-            reassignedAt,
-          );
-        // The audit trail for the transfer, written in the SAME transaction as
-        // the reassignment so the two can never disagree. `fromStatus`/
-        // `toStatus` stay null: a transfer changes who owns the listing, never
-        // its moderation state.
-        await manager.save(ListingModerationEvent, {
-          listingId: listing.id,
-          actorId: reviewerId,
-          action: ListingModerationAction.OwnershipTransferred,
-          fromStatus: null,
-          toStatus: null,
-          // The co-manager count rides in the SAME event rather than in a
-          // burst of one `co_manager_removed` row per seat: one act, one row.
-          // It is a count and never a name, so this reason stays as safe to
-          // hold as it was — and it is on nobody's owner-visible allowlist
-          // anyway, because it carries the claimant's own note verbatim.
-          reason: [
-            current.note
-              ? `Ownership transferred on an approved claim. Claimant's note: ${current.note}`
-              : 'Ownership transferred on an approved claim.',
-            revokedCoManagerCount > 0
-              ? `${revokedCoManagerCount} co-manager ${
-                  revokedCoManagerCount === 1 ? 'seat was' : 'seats were'
-                } revoked by the transfer.`
-              : 'The listing had no co-managers to revoke.',
-          ].join(' '),
-        });
+        // The reason's opening sentence is composed HERE because only the
+        // claim path has the claimant's note, which rides in the audit row
+        // verbatim. The count of revoked seats is appended by the shared
+        // transfer, so one act writes exactly one row. It carries a count and
+        // no name, so this reason stays as safe to hold as it was, and it is
+        // on nobody's owner-visible allowlist anyway.
+        const reasonPrefix = current.note
+          ? `Ownership transferred on an approved claim. Claimant's note: ${current.note}`
+          : 'Ownership transferred on an approved claim.';
+        // Stamped HERE, before the shared transfer, and only when the
+        // listing has never carried a real acceptance: `assertClaimable`
+        // above proves this claim is on an unowned entry, but an
+        // admin-authored listing seeds `affirmingBaselineAcceptedAt` as null
+        // by design (`ListingsService`'s admin-create path), and
+        // `CreateListingClaimDto.affirmingBaselineAccepted` is the one place
+        // a real person agrees to it before taking the listing on. This is
+        // the only site that may set this field from a claim: only this path
+        // has the claimant's own `@Equals(true)`-validated acceptance, so
+        // `transferOwnership` itself must never touch it. A listing that
+        // already carries a stamp (from a prior claim or a prior owner
+        // offer) keeps its original timestamp: the promise was already made,
+        // and this claim's acceptance is simply a re-affirmation of it.
+        if (listing.affirmingBaselineAcceptedAt === null) {
+          listing.affirmingBaselineAcceptedAt = reassignedAt;
+        }
+        // The shared transfer does the reassignment, clears the previous
+        // owner's personal fields (BE-HSG-05), revokes every co-manager seat
+        // the previous owner appointed, and writes the audit row. All of it
+        // runs on this transaction's `manager`, and that is load-bearing: a
+        // transfer that committed while the previous owner's appointees kept
+        // write access would be worse than either outcome on its own, and a
+        // losing concurrent reviewer's conditional UPDATE below rolls the
+        // whole thing back with it.
+        transfer = await this.ownership.transferOwnership(
+          manager,
+          listing,
+          current.claimantId,
+          reviewerId,
+          reasonPrefix,
+          reassignedAt,
+        );
       }
 
       const reviewedAt = new Date();
@@ -420,6 +398,7 @@ export class ListingClaimsService {
         listingSlug: listing.slug,
         listingName: listing.name,
         listingRef: listing.ref,
+        transfer,
         // Only set on an approval that actually moved the listing — a decline
         // leaves the previous owner in place, with nothing to tell them.
         displacedOwnerId:
@@ -429,6 +408,13 @@ export class ListingClaimsService {
             : null,
       };
     });
+
+    // The transfer's mailbox changes go out only now that the transaction
+    // has committed, so a losing concurrent reviewer's rolled-back approval
+    // tells nobody anything.
+    if (result.transfer) {
+      this.ownership.emitTransferChanges(result.transfer);
+    }
 
     // Sent AFTER the transaction has committed, never inside it — mirrors
     // `JoinRequestsService.review`'s identical post-commit notify ordering.

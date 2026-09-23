@@ -370,6 +370,41 @@ describe('PushNotificationListener', () => {
     expect(payload.timestamp).toBe(NOTIFICATION_CREATED_AT.getTime());
   });
 
+  it('pushes a ListingOwnerOffer to the account profile Places section, where the accept/decline controls live', async () => {
+    // Whole-branch-review fix: this route used to deep-link to the public
+    // listing page, which carries no accept/decline control at all. The
+    // in-app bell notification for the same event already opens the account
+    // profile's Places section (`notifications.adapters.ts`'s
+    // `listing_owner_offer` branch); this pins the push route to agree with
+    // it, regardless of whether the payload carries a `listingSlug`.
+    const { listener, push, notificationPreferences } = build({
+      actorProfile: ACTOR,
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.ListingOwnerOffer, {
+          listingName: 'Lux Café',
+          listingSlug: 'lux-cafe',
+        }),
+      ),
+    );
+    expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledWith(
+      ['recipient-1'],
+      'listings',
+    );
+    const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(userIds).toEqual(['recipient-1']);
+    expect(payload.data.url).toBe('/account/profile#places');
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:listingOwnerOffer.title',
+      bodyKey: 'push:listingOwnerOffer.body',
+      params: { name: 'Ana Silva', listingName: 'Lux Café' },
+    });
+  });
+
   it('does not push a SafeSpaceVouch when the Vouches category is off', async () => {
     const { listener, push } = build({
       actorProfile: ACTOR,

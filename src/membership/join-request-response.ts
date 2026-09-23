@@ -38,6 +38,8 @@ export interface JoinRequestView {
   message: string;
   mutualMemberEmail: string | null;
   source: string | null;
+  /** Self-reported "where did you hear about QueerPulse". Null on legacy rows. */
+  heardFrom: string | null;
   status: PlatformJoinRequestStatus;
   ageAttestedAt: Date;
   termsVersion: string;
@@ -262,6 +264,7 @@ export function toJoinRequestView(
     message: request.message,
     mutualMemberEmail: request.mutualMemberEmail,
     source: request.source,
+    heardFrom: request.heardFrom,
     status: request.status,
     ageAttestedAt: request.ageAttestedAt,
     termsVersion: request.termsVersion,

@@ -119,7 +119,7 @@ export class OfficialConversationsService {
   }
 
   /**
-   * Batched form for broadcast delivery: three statements for any number of
+   * Batched form for broadcast delivery: four statements for any number of
    * members, never one round trip per member.
    *
    * Race-safe by construction: `ON CONFLICT DO NOTHING` against the partial
@@ -127,8 +127,15 @@ export class OfficialConversationsService {
    * creator never errors and never makes a second row; the SELECT that
    * follows reads whichever row won. The participant insert is equally
    * idempotent (`UQ_conversation_participants`) and runs for existing threads
-   * too, so a thread left without its participant row heals itself. All three
+   * too, so a thread left without its participant row heals itself. All four
    * run in one transaction.
+   *
+   * The member's seat carries their own profile identity, since
+   * `conversation_participants.identity_id` is NOT NULL. A member who joined
+   * after the identities backfill and never messaged anyone has no profile
+   * identity row yet, so the third statement mints the missing ones first,
+   * idempotent against `UQ_identities_user` the same way
+   * `IdentitiesService.ensureIdentityFor` settles its own race.
    */
   async getOrCreateOfficialConversations(
     memberIds: string[],
@@ -153,9 +160,20 @@ export class OfficialConversationsService {
         );
       if (rows.length > 0) {
         await manager.query(
-          `INSERT INTO "conversation_participants" ("conversation_id", "user_id")
-           SELECT pair.conversation_id, pair.user_id
+          `INSERT INTO "identities" ("kind", "user_id")
+           SELECT 'profile', member.user_id
+           FROM unnest($1::uuid[]) AS member(user_id)
+           ON CONFLICT ("user_id") WHERE "user_id" IS NOT NULL
+           DO NOTHING`,
+          [rows.map((row) => row.official_member_id)],
+        );
+        await manager.query(
+          `INSERT INTO "conversation_participants" ("conversation_id", "user_id", "identity_id")
+           SELECT pair.conversation_id, pair.user_id, profile_identity.id
            FROM unnest($1::uuid[], $2::uuid[]) AS pair(conversation_id, user_id)
+           JOIN "identities" profile_identity
+             ON profile_identity.user_id = pair.user_id
+            AND profile_identity.kind = 'profile'
            ON CONFLICT ("conversation_id", "user_id") DO NOTHING`,
           [
             rows.map((row) => row.id),

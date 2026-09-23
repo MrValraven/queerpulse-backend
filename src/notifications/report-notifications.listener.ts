@@ -10,6 +10,8 @@ import {
 import { Community } from '../communities/entities/community.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Event as Gathering } from '../events/entities/event.entity';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
 import { formatReportReference } from '../reports/report-reference';
 import { REPORT_CREATED, ReportCreatedEvent } from '../reports/report.events';
@@ -117,6 +119,11 @@ export class ReportNotificationsListener {
     private readonly dataSource: DataSource,
     private readonly membership: CommunityMembershipService,
     private readonly notifications: NotificationsService,
+    // Who staffs a reported business, so none of them is paged about a report
+    // on it. `IdentitiesService.staffUserIds` is the one definition of that
+    // staff; `IdentitiesModule` imports only `TypeOrmModule.forFeature`, so
+    // importing it closes no cycle.
+    private readonly identities: IdentitiesService,
   ) {}
 
   @OnEvent(REPORT_CREATED)
@@ -234,6 +241,22 @@ export class ReportNotificationsListener {
       photoSubject,
     );
     if (reportedUserId) excludedUserIds.add(reportedUserId);
+    // This lookup gets its OWN try/catch, separate from the one around the
+    // whole of `notifyResponders` in `onReportCreated`: that outer catch
+    // would otherwise let a failure here skip `notifyPlatformStaff` and
+    // `notifyCommunityStaff` entirely, paging nobody about an active report.
+    // Paging a conflicted moderator is the lesser harm.
+    let businessStaffUserIds: string[] = [];
+    try {
+      businessStaffUserIds = await this.resolveReportedBusinessStaffIds(event);
+    } catch (error) {
+      this.logger.warn(
+        `reported business staff lookup failed for report ${event.reportId}: ${String(error)}`,
+      );
+    }
+    for (const staffUserId of businessStaffUserIds) {
+      excludedUserIds.add(staffUserId);
+    }
 
     const sharedPayload = {
       reportId: report.id,
@@ -446,6 +469,93 @@ export class ReportNotificationsListener {
       select: { userId: true },
     });
     return profile?.userId ?? null;
+  }
+
+  /**
+   * Everyone who owns or staffs the business or persona a report is about, so
+   * a platform or community moderator who runs it is never paged about a
+   * report on it. `resolveReportedUserId` names one person, and a business or
+   * persona is answered for by a team.
+   *
+   * - `identity`: the reported mailbox identity's `staffUserIds`.
+   * - `listing` and `business`: both address the same `listings` row by slug
+   *   (`ReportSubjectResolverService` reads them through one arm), and its
+   *   staff are the listing mailbox's `staffUserIds`: the owner plus every
+   *   active co-manager.
+   * - `company`: addressed by slug, exactly as `ReportSubjectResolverService`
+   *   reads it (`COMPANY_SQL`). Its staff are the company mailbox's
+   *   `staffUserIds`: the owner plus the team.
+   * - `subprofile`: addressed by uuid or by slug, exactly as
+   *   `ReportSubjectResolverService` reads it (`SUBPROFILE_BY_ID_SQL` /
+   *   `SUBPROFILE_BY_SLUG_SQL`). Its staff are the persona mailbox's
+   *   `staffUserIds`: the owner plus every co-owner.
+   *
+   * Every arm but `identity` reads the owning entity's mailbox identity
+   * through `ensureIdentityFor`, the public way to reach it, which creates
+   * the row for an entity made before the `identities` table the same way the
+   * mailbox switcher does.
+   *
+   * Every other subject answers an empty list. A non-uuid identity id or an
+   * unknown slug does too, and the fan-out proceeds.
+   */
+  private async resolveReportedBusinessStaffIds(
+    event: ReportCreatedEvent,
+  ): Promise<string[]> {
+    if (event.subjectType === ReportSubjectType.Identity) {
+      if (!UUID_RE.test(event.subjectId)) return [];
+      return this.identities.staffUserIds(event.subjectId);
+    }
+    if (
+      event.subjectType === ReportSubjectType.Listing ||
+      event.subjectType === ReportSubjectType.Business
+    ) {
+      const listingRow = await this.dataSource
+        .createQueryBuilder()
+        .select('listing.id', 'listingId')
+        .from('listings', 'listing')
+        .where('listing.slug = :slug', { slug: event.subjectId })
+        .getRawOne<{ listingId: string }>();
+      if (!listingRow) return [];
+      const listingIdentity = await this.identities.ensureIdentityFor(
+        IdentityKind.Listing,
+        listingRow.listingId,
+      );
+      return this.identities.staffUserIds(listingIdentity.id);
+    }
+    if (event.subjectType === ReportSubjectType.Company) {
+      const companyRow = await this.dataSource
+        .createQueryBuilder()
+        .select('company.id', 'companyId')
+        .from('companies', 'company')
+        .where('company.slug = :slug', { slug: event.subjectId })
+        .getRawOne<{ companyId: string }>();
+      if (!companyRow) return [];
+      const companyIdentity = await this.identities.ensureIdentityFor(
+        IdentityKind.Company,
+        companyRow.companyId,
+      );
+      return this.identities.staffUserIds(companyIdentity.id);
+    }
+    if (event.subjectType === ReportSubjectType.Subprofile) {
+      const subprofileRow = await this.dataSource
+        .createQueryBuilder()
+        .select('subprofile.id', 'subprofileId')
+        .from('subprofiles', 'subprofile')
+        .where(
+          UUID_RE.test(event.subjectId)
+            ? 'subprofile.id = :subjectId OR subprofile.slug = :subjectId'
+            : 'subprofile.slug = :subjectId',
+          { subjectId: event.subjectId },
+        )
+        .getRawOne<{ subprofileId: string }>();
+      if (!subprofileRow) return [];
+      const subprofileIdentity = await this.identities.ensureIdentityFor(
+        IdentityKind.Subprofile,
+        subprofileRow.subprofileId,
+      );
+      return this.identities.staffUserIds(subprofileIdentity.id);
+    }
+    return [];
   }
 
   /**

@@ -10,8 +10,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingService } from '../messaging/messaging.service';
+import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { PreferencesService } from '../preferences/preferences.service';
@@ -59,6 +61,11 @@ describe('ChatGateway delivered receipts', () => {
       providers: [
         ChatGateway,
         PresenceService,
+        // Task 13e: renders a mailbox thread's message frames per viewer.
+        {
+          provide: MessagingCoreService,
+          useValue: { toMessageResponses: jest.fn() },
+        },
         { provide: JwtService, useValue: { verifyAsync: jest.fn() } },
         {
           provide: ConfigService,
@@ -76,6 +83,18 @@ describe('ChatGateway delivered receipts', () => {
           useValue: { findById: jest.fn().mockResolvedValue(null) },
         },
         {
+          provide: IdentitiesService,
+          // Task 13: unused by `delivered` acks (this file's only path under
+          // test): only `handleTyping`/`handlePresenceSnapshot` read it.
+          useValue: {
+            getById: jest.fn(),
+            // Task 13e: the relay test's thread has no seat to resolve.
+            getByIds: jest.fn().mockResolvedValue([]),
+            describeIdentities: jest.fn(),
+            staffUserIds: jest.fn(),
+          },
+        },
+        {
           provide: getRepositoryToken(RefreshToken),
           useValue: { exists: jest.fn().mockResolvedValue(true) },
         },
@@ -85,9 +104,17 @@ describe('ChatGateway delivered receipts', () => {
           // `fanOutConversationMessage` runs (see `chat.gateway.spec.ts`'s own
           // comment); unused by this file's delivered-ack/relay paths, but
           // required for the gateway to construct at all.
+          //
+          // Task 13e: an ordinary direct thread, which the relay needs to
+          // resolve before it broadcasts.
           useValue: {
             find: jest.fn().mockResolvedValue([]),
-            manager: { findOne: jest.fn().mockResolvedValue(null) },
+            manager: {
+              findOne: jest.fn().mockResolvedValue({
+                kind: 'direct',
+                isOfficial: false,
+              }),
+            },
           },
         },
         {
@@ -224,14 +251,14 @@ describe('ChatGateway delivered receipts', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('relays the stored watermark to that conversation room only', () => {
+  it('relays the stored watermark to that conversation room only', async () => {
     const payload = {
       conversationId: 'c1',
       userId: 'recipient',
       deliveredAt: new Date('2026-09-15T09:30:00.000Z'),
     };
 
-    gateway.handleMessageDelivered(payload);
+    await gateway.handleMessageDelivered(payload);
 
     expect(namespaceTo).toHaveBeenCalledTimes(1);
     expect(namespaceTo).toHaveBeenCalledWith('c1');

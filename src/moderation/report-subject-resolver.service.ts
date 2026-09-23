@@ -54,6 +54,13 @@ export interface ReportSubjectResolution {
    * conversation viewer can open anything.
    */
   conversationId?: string | null;
+  /**
+   * Business mailboxes, design section 9: the identity a reported MESSAGE was
+   * sent as (`messages.sender_identity_id`). Present only for a `message`
+   * subject that carries one. `authorUserId` still names the human, and
+   * `ModerationService.buildDetail` shows the moderator both.
+   */
+  senderIdentityId?: string | null;
 }
 
 /**
@@ -74,6 +81,8 @@ interface RawSubjectRow {
   is_author_ambiguous?: boolean | null;
   /** Selected by `MESSAGE_SQL` only (PRD-360); undefined everywhere else. */
   conversation_id?: string | null;
+  /** Selected by `MESSAGE_SQL` only; undefined everywhere else. */
+  sender_identity_id?: string | null;
 }
 
 const UNRESOLVED: ReportSubjectResolution = {
@@ -335,6 +344,15 @@ export class ReportSubjectResolverService {
       // the same "nobody to guess at" answer `Venue` gives above.
       case ReportSubjectType.Conversation:
         return this.queryByUuid(CONVERSATION_SQL, subjectIds);
+
+      // A business-mailbox identity, addressed by the identity's uuid. The
+      // author is the entity's owner, the person a `listing` report on the
+      // same listing already names, and nobody for an ownerless listing. The
+      // excerpt is the business's display name. An identity whose entity was
+      // deleted has cascaded away with it and answers `UNRESOLVED`, like
+      // `Venue`; the filing-time snapshot keeps the facts. See `IDENTITY_SQL`.
+      case ReportSubjectType.Identity:
+        return this.queryByUuid(IDENTITY_SQL, subjectIds);
     }
   }
 
@@ -409,6 +427,9 @@ export class ReportSubjectResolverService {
         // See `RawSubjectRow`.
         isAuthorAmbiguous: row.is_author_ambiguous === true,
         ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
+        ...(row.sender_identity_id
+          ? { senderIdentityId: row.sender_identity_id }
+          : {}),
       });
     }
     return byKey;
@@ -484,7 +505,8 @@ const MESSAGE_SQL = `
          m.sender_id        AS author_user_id,
          m.body             AS excerpt,
          NULL::uuid         AS community_id,
-         m.conversation_id  AS conversation_id
+         m.conversation_id  AS conversation_id,
+         m.sender_identity_id AS sender_identity_id
   FROM messages m
   WHERE m.id = ANY($1::uuid[])
 `;
@@ -945,4 +967,36 @@ const LANDLORD_RECOMMENDATION_SQL = `
                              AS is_author_ambiguous
   FROM landlord_recommendations lrec
   WHERE lrec.id = ANY($1::uuid[])
+`;
+
+/*
+ * A business-mailbox identity (`ReportSubjectType.Identity`), joined to the
+ * one owner entity its `kind` names. `author_user_id` is the owner column of
+ * that entity (`listings.owner_id`, `subprofiles.user_id`,
+ * `companies.owner_id`), which is NULL for an ownerless listing. `excerpt` is
+ * the name the business shows its customers, the same column
+ * `IdentitiesService.describeIdentities` reads for each kind. A `profile`
+ * identity never resolves here (a person is reported through `member`), and
+ * neither does an identity whose entity row is gone.
+ */
+const IDENTITY_SQL = `
+  SELECT i.id::text AS key,
+         CASE i.kind
+           WHEN 'listing'    THEN l.owner_id
+           WHEN 'subprofile' THEN s.user_id
+           WHEN 'company'    THEN co.owner_id
+         END        AS author_user_id,
+         CASE i.kind
+           WHEN 'listing'    THEN l.name
+           WHEN 'subprofile' THEN s.display_name
+           WHEN 'company'    THEN co.name_text
+         END        AS excerpt,
+         NULL::uuid AS community_id
+  FROM identities i
+  LEFT JOIN listings l     ON i.kind = 'listing'    AND l.id  = i.listing_id
+  LEFT JOIN subprofiles s  ON i.kind = 'subprofile' AND s.id  = i.subprofile_id
+  LEFT JOIN companies co   ON i.kind = 'company'    AND co.id = i.company_id
+  WHERE i.id = ANY($1::uuid[])
+    AND i.kind IN ('listing', 'subprofile', 'company')
+    AND (l.id IS NOT NULL OR s.id IS NOT NULL OR co.id IS NOT NULL)
 `;

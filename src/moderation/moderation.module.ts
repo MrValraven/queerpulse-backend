@@ -6,6 +6,7 @@ import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admi
 import { AuthModule } from '../auth/auth.module';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { IdentitiesModule } from '../identities/identities.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ReportsModule } from '../reports/reports.module';
 import { UsersModule } from '../users/users.module';
@@ -79,6 +80,11 @@ import { ReportSubjectResolverService } from './report-subject-resolver.service'
     // `VolunteeringModule` already lean on it for. Closes no cycle.
     CommunityMembershipModule,
     AdminQueueNotificationsModule,
+    // Task 21 review M3: `IdentitiesService.describeIdentities` resolves an
+    // `identity` report's business display name for the queue. Read-only.
+    // `IdentitiesModule` imports only `TypeOrmModule.forFeature`, so nothing
+    // on that side reaches back here and no cycle is created.
+    IdentitiesModule,
   ],
   // `AppealsController` (member-facing `POST /appeals`) shares `ModerationService`
   // with `ModerationController` (the mod/admin queue + review), so submitted

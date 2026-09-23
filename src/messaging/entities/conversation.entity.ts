@@ -20,6 +20,9 @@ export enum ConversationKind {
 }
 
 @Entity('conversations')
+@Index('IDX_conversations_initiator_user_id', ['initiatorUserId'], {
+  where: '"initiator_user_id" IS NOT NULL',
+})
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -148,6 +151,64 @@ export class Conversation {
    */
   @Column({ type: 'timestamptz', nullable: true })
   dissolvedAt!: Date | null;
+
+  /**
+   * The one staff member currently answering a shared business mailbox
+   * thread. Claiming narrows push to that person (Task 12) and tells
+   * colleagues the thread is already handled. NULL means unclaimed, which is
+   * also what a release restores. Taken with a conditional UPDATE guarded on
+   * `claimed_by_user_id IS NULL` (`ConversationsService.claim`), so the
+   * database itself settles two simultaneous claims on exactly one winner.
+   * Meaningless for an ordinary member-to-member DM or group. FK `ON DELETE
+   * SET NULL`: a claimant whose account is later erased leaves the thread
+   * simply unclaimed, with a partial index for that lookup.
+   */
+  @Index('IDX_conversations_claimed_by_user_id', {
+    where: '"claimed_by_user_id" IS NOT NULL',
+  })
+  @Column({ type: 'uuid', nullable: true })
+  claimedByUserId!: string | null;
+
+  /** When the current claim was taken. NULL exactly when `claimedByUserId` is. */
+  @Column({ type: 'timestamptz', nullable: true })
+  claimedAt!: Date | null;
+
+  /**
+   * Task 19: who last released this thread's claim, so an idle claim never
+   * locks the mailbox and colleagues can see who let it go (spec 4.3). NULL
+   * when nobody has released it, after any later claim or take-over (each
+   * clears it), and after a system release of a claimant who left the
+   * business (`claimReleasedAt` set, this NULL).
+   *
+   * The five claim columns hold the LATEST change only. Every claim write
+   * (`ConversationsService.claim`, `takeOver`, `release`) sets all five in
+   * one conditional UPDATE, so the row never holds a mixed state. There is
+   * deliberately no history table: the maintainer's rule is no behaviour
+   * analytics, and the latest change is all specs 4.3 and 6.5 ask for. FK
+   * `ON DELETE SET NULL`, with a partial index for that lookup.
+   */
+  @Index('IDX_conversations_claim_released_by_user_id', {
+    where: '"claim_released_by_user_id" IS NOT NULL',
+  })
+  @Column({ type: 'uuid', nullable: true })
+  claimReleasedByUserId!: string | null;
+
+  /** Task 19: when the claim was last released. NULL while a claim is held
+   *  and before any release. */
+  @Column({ type: 'timestamptz', nullable: true })
+  claimReleasedAt!: Date | null;
+
+  /**
+   * Task 19: whose claim the current claimant took over (spec 6.5, a visible
+   * take-over that names who did it). NULL for an ordinary claim and for an
+   * unclaimed thread. FK `ON DELETE SET NULL`, with a partial index for that
+   * lookup.
+   */
+  @Index('IDX_conversations_claim_taken_over_from_user_id', {
+    where: '"claim_taken_over_from_user_id" IS NOT NULL',
+  })
+  @Column({ type: 'uuid', nullable: true })
+  claimTakenOverFromUserId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

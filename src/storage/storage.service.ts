@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
@@ -22,7 +23,7 @@ import {
   IMAGE_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
-import { isStorageKey } from './storage-key';
+import { isStorageKey, parseStorageKey } from './storage-key';
 import {
   MAGIC_BYTE_PREFIX_LENGTH,
   attachmentContentDispositionForStorageKey,
@@ -196,6 +197,36 @@ export class StorageService {
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
+  }
+
+  /**
+   * Final fix F1 (C1): copies one stored object to a fresh key of the same
+   * kind and extension owned by `ownerUserId`, inside the bucket, and returns
+   * the new key. A member who forwards, as themselves, a photo or document a
+   * business sent them gets their own copy, so the forwarded message's key
+   * names the forwarder alone. The bytes stay inside the bucket.
+   */
+  async copyObjectToOwner(
+    sourceKey: string,
+    ownerUserId: string,
+  ): Promise<string> {
+    const kindSpec = parseStorageKey(sourceKey);
+    if (!kindSpec) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const extension = sourceKey.slice(sourceKey.lastIndexOf('.'));
+    const key = `${kindSpec.prefix}/${ownerUserId}/${randomUUID()}${extension}`;
+    const bucket = this.requireConfig('storage.bucket');
+    // A parsed key holds only lowercase prefixes, hex, dashes and a dot, so
+    // `CopySource` needs no URL encoding.
+    await this.storageClient().send(
+      new CopyObjectCommand({
+        Bucket: bucket,
+        CopySource: `${bucket}/${sourceKey}`,
+        Key: key,
+      }),
+    );
+    return key;
   }
 
   /**

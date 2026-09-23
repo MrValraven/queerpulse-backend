@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { Message } from '../messaging/entities/message.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
 import { messageSnapshotFrom } from '../reports/report-evidence';
 import { Profile } from '../users/entities/profile.entity';
@@ -13,6 +14,7 @@ import {
   ReportConversationContextDTO,
   toConversationContextMessage,
 } from './report-conversation-context-response';
+import { loadSentAsIdentities } from './sent-as-identity';
 
 // `reports.subject_id` is a client-supplied `varchar`; `messages.id` is `uuid`.
 const UUID_RE =
@@ -46,6 +48,7 @@ export class ReportConversationContextService {
     @InjectRepository(Message) private readonly messages: Repository<Message>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly audit: ModAuditService,
+    private readonly identities: IdentitiesService,
   ) {}
 
   async getContext(
@@ -103,7 +106,12 @@ export class ReportConversationContextService {
       ...anchorAndLaterRows.slice(0, CONVERSATION_CONTEXT_WINDOW_SIZE + 1),
     ];
 
-    const profileByUserId = await this.profilesFor(windowMessages);
+    // Business mailboxes, design section 9: each message sent as a business,
+    // persona or company names that identity beside its human sender.
+    const [profileByUserId, sentAsByIdentityId] = await Promise.all([
+      this.profilesFor(windowMessages),
+      loadSentAsIdentities(this.identities, windowMessages),
+    ]);
     const reportedSnapshot = messageSnapshotFrom(report.evidence);
 
     await this.audit.writeAuditLog(
@@ -126,6 +134,7 @@ export class ReportConversationContextService {
           profileByUserId,
           reportedMessage.id,
           reportedSnapshot,
+          sentAsByIdentityId,
         ),
       ),
     };

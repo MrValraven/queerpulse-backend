@@ -40,6 +40,10 @@ import { MentionNotificationService } from '../mentions/mention-notification.ser
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { isGatedTier } from '../communities/community-gate';
 import {
+  ownRosterRowCountsSql,
+  parentStaffOfSpaceSql,
+} from '../communities/subcommunity-rules';
+import {
   ContentModerationService,
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
@@ -2622,6 +2626,14 @@ export class ForumThreadsService {
   // cleanly onto `cursorPaginate`'s keyset ORDER BY, mirroring
   // `FeedService.fetchCandidates`. Shared by `list`/`counts`/`listPinned`/
   // `searchByText` so every browse/search surface hides the same threads.
+  //
+  // `AND "com"."parent_id" IS NULL` on the public-tier arm: a space never
+  // opens this arm on its own tier alone, even a public one. A space's
+  // threads reach a browse list only through the viewer's standing in it:
+  // their own roster row, which counts only while they still hold the parent
+  // row (`ownRosterRowCountsSql`), or staff standing in the parent, which
+  // gives full mod powers in every space with no space roster row
+  // (`parentStaffOfSpaceSql`). Mirrors `FeedService`'s equivalent arm.
   private applyCommunityAccessFilter(
     qb: SelectQueryBuilder<ForumThread>,
     viewerId: string,
@@ -2633,12 +2645,15 @@ export class ForumThreadsService {
           SELECT 1 FROM "communities" "com"
           WHERE "com"."id" = t.community_id
             AND "com"."access_tier" = :publicTier
+            AND "com"."parent_id" IS NULL
         )
         OR EXISTS (
           SELECT 1 FROM "community_members" "mem"
           WHERE "mem"."community_id" = t.community_id
             AND "mem"."user_id" = :viewerId
+            AND ${ownRosterRowCountsSql('t.community_id', 'viewerId')}
         )
+        OR ${parentStaffOfSpaceSql('t.community_id', 'viewerId')}
       )`,
       { publicTier: AccessTier.Public, viewerId },
     );
@@ -2659,6 +2674,14 @@ export class ForumThreadsService {
   // (derived from `isGatedTier`) rather than being spelled out here, so a tier
   // added later hides its content until somebody deliberately opens it.
   //
+  // Inside a space the viewer's standing is their effective role: a space
+  // roster row counts only while the parent row is still held
+  // (`ownRosterRowCountsSql`), and parent owners, co-owners and mods read
+  // every space with no space roster row (`parentStaffOfSpaceSql`). So a
+  // gated space's thread opens to exactly the readers its page and posts
+  // open to. A public space needs neither, since only the gated tiers are
+  // probed here.
+  //
   // Runs against the `communities` entity via the thread repo's shared entity
   // manager, so `ForumModule` needs no extra `Community` repository
   // registration.
@@ -2677,7 +2700,9 @@ export class ForumThreadsService {
           SELECT 1 FROM "community_members" "mem"
           WHERE "mem"."community_id" = com.id
             AND "mem"."user_id" = :viewerId
-        )`,
+            AND ${ownRosterRowCountsSql('com.id', 'viewerId')}
+        )
+        AND NOT ${parentStaffOfSpaceSql('com.id', 'viewerId')}`,
         { viewerId },
       )
       .getExists();

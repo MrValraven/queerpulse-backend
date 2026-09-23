@@ -8,6 +8,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -88,6 +91,12 @@ export class ListingCoManagersService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly notifications: NotificationsService,
     private readonly dataSource: DataSource,
+    // Resolves the listing's mailbox identity and keeps its
+    // `conversation_participants` seats in step with who currently holds
+    // ACCESS here. See `respondToInvite`, where an invitation turns into
+    // access, and `endSeat`, where access ends.
+    private readonly identities: IdentitiesService,
+    private readonly identityMailboxSync: IdentityMailboxSyncService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -126,9 +135,9 @@ export class ListingCoManagersService {
    * Clears every live seat on a listing whose ownership has just been
    * reassigned, and reports how many it cleared.
    *
-   * Called by `ListingClaimsService.review` INSIDE its existing transaction —
-   * hence the `EntityManager` parameter rather than this service's own
-   * repository. The revocation and the `owner_id` reassignment must commit or
+   * Called by `ListingOwnershipService.transferOwnership` INSIDE the caller's
+   * existing transaction, so it takes an `EntityManager` and joins that
+   * transaction. The revocation and the `owner_id` reassignment must commit or
    * roll back together: a transfer that committed while the previous owner's
    * appointees kept write access would be the worst of both outcomes.
    *
@@ -139,6 +148,12 @@ export class ListingCoManagersService {
    * party a standing team on a page they just lost. The new owner starts clean
    * and re-invites whoever they actually want, which costs them a few clicks
    * and costs nobody their safety.
+   *
+   * A seat carrying `isStaffAttached` is the one exception, and the reason it
+   * is a stored flag: `owner_id` being null cannot tell "staff attached this
+   * for the incoming owner" apart from "the owner erased their account", and
+   * `SetNullContentAuthorFksOnUserErasure1794610000000` produces the second.
+   * An erased owner's appointees therefore still lose their seats here.
    *
    * `Repository.update` returns an `UpdateResult` whose `affected` is the row
    * count. This is the QueryBuilder path, so it is NOT the raw `.query()` shape
@@ -154,6 +169,11 @@ export class ListingCoManagersService {
       {
         listingId,
         status: In([...LIVE_LISTING_CO_MANAGER_STATUSES]),
+        // Seats STAFF attached to an unowned listing are spared. They were
+        // put there for the incoming owner and exist so the delegation
+        // survives the handover, which is the opposite provenance from a seat
+        // an owner appointed. See `ListingCoManager.isStaffAttached`.
+        isStaffAttached: false,
       },
       { status: ListingCoManagerStatus.Revoked, endedAt: revokedAt },
     );
@@ -180,31 +200,8 @@ export class ListingCoManagersService {
     ref: string,
     actorUserId: string,
   ): Promise<ListingCoManagerDTO[]> {
-    const listing = await this.loadManageableOr404(ref, actorUserId);
-
-    const seats = await this.coManagers.find({
-      where: {
-        listingId: listing.id,
-        status: In([...LIVE_LISTING_CO_MANAGER_STATUSES]),
-      },
-      order: { status: 'ASC', invitedAt: 'DESC' },
-    });
-    if (!seats.length) return [];
-
-    // ONE batched profile lookup for every member named on the page (seat
-    // holders and inviters together), never one per row.
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      ...seats.map((seat) => seat.userId),
-      ...seats
-        .map((seat) => seat.invitedByUserId)
-        .filter((userId): userId is string => userId !== null),
-    ]);
-    return seats.map((seat) =>
-      toListingCoManagerDTO(
-        seat,
-        refs.get(seat.userId) ?? null,
-        seat.invitedByUserId ? (refs.get(seat.invitedByUserId) ?? null) : null,
-      ),
+    return this.listSeatsForListing(
+      await this.loadManageableOr404(ref, actorUserId),
     );
   }
 
@@ -224,10 +221,15 @@ export class ListingCoManagersService {
    *  2. The slug resolves to an ACTIVE member. `MemberLookup.userIdForSlug`
    *     joins on `users.status = 'active'`, so a suspended or waitlisted
    *     account resolves to nothing and this 404s.
-   *  3. The target is not the owner. An owner already has strictly more access
-   *     than a seat would give them, so a self-invite could only ever be a
-   *     mistake or a way to burn a seat.
-   *  4. Under a row lock on the listing: the seat is free and the cap has room.
+   *  3. Under a row lock on the listing, reading the LOCKED row: the target
+   *     is somebody other than the owner, the seat is free, and the cap has
+   *     room. An owner already has strictly more access than a seat would
+   *     give them, so a self-invite could only ever be a mistake or a way to
+   *     burn a seat, and the ownership it is checked against has to be the
+   *     ownership the lock is holding still.
+   *
+   * Steps 2 and 3 live in `inviteToLoadedListing`, shared with the staff
+   * path.
    *
    * The lock is what makes the cap real. Two invitations racing at four seats
    * would both read four under READ COMMITTED and both write, and no constraint
@@ -243,28 +245,90 @@ export class ListingCoManagersService {
     dto: InviteListingCoManagerDto,
   ): Promise<ListingCoManagerDTO> {
     const listing = await this.loadOwnedOr404(ref, ownerUserId);
+    return this.inviteToLoadedListing(listing, ownerUserId, dto, {
+      isStaffInvite: false,
+    });
+  }
 
+  /**
+   * The whole invitation, on a listing the caller has already been cleared
+   * for. Both the owner-gated `invite` and the staff-gated
+   * `staffInviteCoManager` run through here, so the lock, the cap, the
+   * duplicate-seat conflicts and the terminal-row reuse are one body, with
+   * one set of invariants that both paths inherit.
+   *
+   * `isStaffInvite` is the only option. It names the path, and leaves both
+   * consequences to be decided inside the transaction from the LOCKED
+   * listing row:
+   *
+   *  - `isStaffAttached` on the seat is `isStaffInvite && ownerId === null`.
+   *    The flag records that the listing was UNOWNED at attach time, which is
+   *    what `revokeAllForOwnershipTransfer` reads to spare the seat on a
+   *    handover. A seat staff attach to a listing that already has an owner
+   *    belongs to that owner's arrangement and leaves with them, so it takes
+   *    the `false` every member-invited seat takes. A seat outliving every
+   *    owner is a platform-steward concept this model does not have; if it is
+   *    ever wanted it needs a column of its own.
+   *  - the owner may not also hold a seat. An owner already has strictly more
+   *    access than a seat gives, so seating them could only be a mistake or a
+   *    way to burn one of the five. On the member path the target and the
+   *    owner are the caller, which makes it a self-invite guard; on the staff
+   *    path the check applies whenever the listing has an owner at all.
+   *
+   * BOTH ARE READ FROM THE ROW UNDER THE LOCK. The `listing` argument is a
+   * pre-transaction snapshot, and a concurrent claim approval or offer
+   * accept can reassign `owner_id` between the two reads. Stamping
+   * provenance from that stale copy is precisely the race the
+   * `pessimistic_write` lock is here to close, so the locked row is bound
+   * and its `ownerId` is the one consulted.
+   */
+  private async inviteToLoadedListing(
+    listing: Listing,
+    inviterUserId: string,
+    dto: InviteListingCoManagerDto,
+    options: { isStaffInvite: boolean },
+  ): Promise<ListingCoManagerDTO> {
     const invitedUserId = await new MemberLookup(this.profiles).userIdForSlug(
       dto.memberSlug,
     );
     if (!invitedUserId) {
       throw new NotFoundException('Member not found');
     }
-    if (invitedUserId === listing.ownerId) {
-      throw new BadRequestException(
-        'You already own this listing, so you cannot invite yourself to co-manage it',
-      );
-    }
 
     const invitedAt = new Date();
     const seat = await this.dataSource.transaction(async (manager) => {
       const seatsRepo = manager.getRepository(ListingCoManager);
       // Serialises concurrent invitations on this listing so the cap below is
-      // counted against a stable set of rows. See the method doc comment.
-      await manager.getRepository(Listing).findOne({
+      // counted against a stable set of rows. See `invite`'s doc comment.
+      // The row is BOUND, because the two ownership decisions below have to
+      // read the value the lock is holding still.
+      const lockedListing = await manager.getRepository(Listing).findOne({
         where: { id: listing.id },
         lock: { mode: 'pessimistic_write' },
       });
+      if (!lockedListing) {
+        throw new NotFoundException('Listing not found');
+      }
+      const ownerIdUnderLock = lockedListing.ownerId;
+
+      // On the member path the caller IS the owner, so this reads as the
+      // self-invite guard it has always been. On the staff path it bites
+      // whenever the listing has an owner, and a listing with none has
+      // nobody to compare against.
+      const shouldRejectOwnerAsSeatHolder = options.isStaffInvite
+        ? ownerIdUnderLock !== null
+        : true;
+      if (shouldRejectOwnerAsSeatHolder && invitedUserId === ownerIdUnderLock) {
+        throw new BadRequestException(
+          options.isStaffInvite
+            ? 'That member already owns this listing, so they cannot also hold a co-manager seat on it'
+            : 'You already own this listing, so you cannot invite yourself to co-manage it',
+        );
+      }
+
+      // Unowned AT ATTACH TIME, decided under the lock. See the method doc.
+      const isStaffAttached =
+        options.isStaffInvite && ownerIdUnderLock === null;
 
       const existingSeat = await seatsRepo.findOne({
         where: { listingId: listing.id, userId: invitedUserId },
@@ -300,21 +364,27 @@ export class ListingCoManagersService {
         // invitation is rewritten, so nothing about the seat that ended can be
         // read back as if it belonged to this one.
         existingSeat.status = ListingCoManagerStatus.Invited;
-        existingSeat.invitedByUserId = ownerUserId;
+        existingSeat.invitedByUserId = inviterUserId;
         existingSeat.invitedAt = invitedAt;
         existingSeat.acceptedAt = null;
         existingSeat.endedAt = null;
+        // Written explicitly on the reuse path. A seat an owner appointed and
+        // later revoked, re-attached by staff to a listing that has since
+        // lost its owner, is a STAFF-attached seat now, and the reverse case
+        // has to clear the flag just as plainly.
+        existingSeat.isStaffAttached = isStaffAttached;
         return seatsRepo.save(existingSeat);
       }
       return seatsRepo.save(
         seatsRepo.create({
           listingId: listing.id,
           userId: invitedUserId,
-          invitedByUserId: ownerUserId,
+          invitedByUserId: inviterUserId,
           status: ListingCoManagerStatus.Invited,
           invitedAt,
           acceptedAt: null,
           endedAt: null,
+          isStaffAttached,
         }),
       );
     });
@@ -326,23 +396,23 @@ export class ListingCoManagersService {
       invitedUserId,
       NotificationType.ListingCoManagerInvite,
       {
-        actorId: ownerUserId,
+        actorId: inviterUserId,
         source: 'listing',
         listingSlug: listing.slug,
         listingName: listing.name,
         inviteId: seat.id,
       },
-      ownerUserId,
+      inviterUserId,
     );
 
     const refs = await new MemberLookup(this.profiles).byUserIds([
       invitedUserId,
-      ownerUserId,
+      inviterUserId,
     ]);
     return toListingCoManagerDTO(
       seat,
       refs.get(invitedUserId) ?? null,
-      refs.get(ownerUserId) ?? null,
+      refs.get(inviterUserId) ?? null,
     );
   }
 
@@ -359,13 +429,87 @@ export class ListingCoManagersService {
     memberSlug: string,
   ): Promise<void> {
     const listing = await this.loadOwnedOr404(ref, ownerUserId);
+    await this.revokeSeatOnLoadedListing(listing, ownerUserId, memberSlug);
+  }
+
+  /** The seat removal itself, on a listing the caller has already been cleared
+   * for. Shared by the owner-gated `revoke` and the staff-gated
+   * `staffRevokeCoManager`, so both write the same conditional flip and the
+   * same audit row through `endSeat`. */
+  private async revokeSeatOnLoadedListing(
+    listing: Listing,
+    actorUserId: string,
+    memberSlug: string,
+  ): Promise<void> {
     const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
       memberSlug,
     );
     if (!targetUserId) {
       throw new NotFoundException('Member not found');
     }
-    await this.endSeat(listing, targetUserId, ownerUserId, 'revoked');
+    await this.endSeat(listing, targetUserId, actorUserId, 'revoked');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Staff writes, for a listing the house authored and nobody has accepted yet.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * STAFF: the same roster read the owner gets, for any listing.
+   *
+   * The owner-facing `listSeats` gates on owner-or-co-manager. An admin
+   * arranging the delegation on a house-authored listing is neither, and the
+   * route carries its own admin gate, so the listing is looked up by ref
+   * alone.
+   */
+  async staffListCoManagers(ref: string): Promise<ListingCoManagerDTO[]> {
+    return this.listSeatsForListing(await this.loadForStaffOr404(ref));
+  }
+
+  /**
+   * STAFF: seat somebody on a listing the house wrote, so the business has
+   * people running its page before anybody has accepted ownership of it.
+   *
+   * ON AN UNOWNED LISTING the seat is stamped `isStaffAttached`, which is the
+   * whole point of the flag: `revokeAllForOwnershipTransfer` spares exactly
+   * these seats, so the delegation staff arranged survives the moment an
+   * owner accepts. A staff invite that left the flag at its default would
+   * have its seat revoked by that accept, which is the failure the column was
+   * added to prevent.
+   *
+   * ON AN OWNED LISTING the same call seats somebody alongside an existing
+   * owner, and the flag stays `false`. That seat belongs to the owner's own
+   * arrangement and leaves with them on a transfer, like every seat the owner
+   * appointed. The decision is made inside `inviteToLoadedListing` from the
+   * LOCKED row, so a claim landing mid-flight cannot get the wrong provenance
+   * written.
+   *
+   * Everything else is the member path's body, reached through
+   * `inviteToLoadedListing`: the row lock, the five-seat cap, the two
+   * duplicate-seat conflicts, the owner-may-not-hold-a-seat rule and the
+   * terminal-row reuse all hold identically.
+   */
+  async staffInviteCoManager(
+    ref: string,
+    adminUserId: string,
+    dto: InviteListingCoManagerDto,
+  ): Promise<ListingCoManagerDTO> {
+    const listing = await this.loadForStaffOr404(ref);
+    return this.inviteToLoadedListing(listing, adminUserId, dto, {
+      isStaffInvite: true,
+    });
+  }
+
+  /** STAFF: take back a seat on any listing, accepted or still unanswered.
+   * Writes the same `co_manager_removed` audit row the owner's own revoke
+   * writes, naming the acting admin as the actor. */
+  async staffRevokeCoManager(
+    ref: string,
+    adminUserId: string,
+    memberSlug: string,
+  ): Promise<void> {
+    const listing = await this.loadForStaffOr404(ref);
+    await this.revokeSeatOnLoadedListing(listing, adminUserId, memberSlug);
   }
 
   // ---------------------------------------------------------------------------
@@ -446,7 +590,7 @@ export class ListingCoManagersService {
     // and there is no reason to hold a write transaction open across it.
     const responderName = await this.resolveDisplayName(userId);
 
-    const { seat, listing } = await this.dataSource.transaction(
+    const { seat, listing, mailboxChanges } = await this.dataSource.transaction(
       async (manager) => {
         const seatsRepo = manager.getRepository(ListingCoManager);
         const current = await seatsRepo.findOne({
@@ -500,14 +644,38 @@ export class ListingCoManagersService {
             toStatus: null,
             reason: `${responderName} accepted an invitation to co-manage this listing.`,
           });
-        } else {
-          current.status = ListingCoManagerStatus.Declined;
-          current.acceptedAt = null;
-          current.endedAt = respondedAt;
+          // Acceptance is the moment this seat becomes ACCESS. Seat the new
+          // co-manager into every thread of the listing's mailbox, in this
+          // same transaction, so a failure below rolls the acceptance back
+          // with it. The staffing frame waits for the commit (below).
+          const identity = await this.identities.ensureIdentityFor(
+            IdentityKind.Listing,
+            invitedListing.id,
+          );
+          const acceptedMailboxChanges =
+            await this.identityMailboxSync.onStaffAdded(
+              identity.id,
+              userId,
+              manager,
+              { shouldDeferEmission: true },
+            );
+          return {
+            seat: current,
+            listing: invitedListing,
+            mailboxChanges: acceptedMailboxChanges,
+          };
         }
-        return { seat: current, listing: invitedListing };
+        current.status = ListingCoManagerStatus.Declined;
+        current.acceptedAt = null;
+        current.endedAt = respondedAt;
+        return { seat: current, listing: invitedListing, mailboxChanges: null };
       },
     );
+    // Task 25: the new co-manager hears their new mailbox only once the
+    // acceptance has committed, so a rollback never announces a seat.
+    if (mailboxChanges) {
+      this.identityMailboxSync.emitSeatChanges(mailboxChanges);
+    }
 
     // Post-commit, best-effort, never rethrown. The owner sent this invitation
     // by hand and is the one person waiting on the answer. A NULL `ownerId`
@@ -566,48 +734,106 @@ export class ListingCoManagersService {
     // Resolved before the transaction opens, same reason as in
     // `respondToInvite`: no unrelated read inside a write transaction.
     const targetName = await this.resolveDisplayName(targetUserId);
-    await this.dataSource.transaction(async (manager) => {
-      const seatsRepo = manager.getRepository(ListingCoManager);
-      const seat = await seatsRepo.findOne({
-        where: { listingId: listing.id, userId: targetUserId },
-      });
-      if (!seat || !this.isLiveSeat(seat)) {
-        throw new NotFoundException('Co-manager not found');
-      }
-      const wasActive = seat.status === ListingCoManagerStatus.Active;
-
-      const updated = await seatsRepo.update(
-        {
-          id: seat.id,
-          status: In([...LIVE_LISTING_CO_MANAGER_STATUSES]),
-        },
-        {
-          status:
-            kind === 'left'
-              ? ListingCoManagerStatus.Left
-              : ListingCoManagerStatus.Revoked,
-          endedAt,
-        },
-      );
-      if (updated.affected !== 1) {
-        throw new NotFoundException('Co-manager not found');
-      }
-
-      if (wasActive) {
-        await manager.save(ListingModerationEvent, {
-          listingId: listing.id,
-          actorId: actorUserId,
-          action: ListingModerationAction.CoManagerRemoved,
-          fromStatus: null,
-          toStatus: null,
-          reason: `${targetName} ${
-            kind === 'left'
-              ? 'stepped down as a co-manager of this listing.'
-              : 'was removed as a co-manager of this listing.'
-          }`,
+    const identity = await this.identities.ensureIdentityFor(
+      IdentityKind.Listing,
+      listing.id,
+    );
+    const mailboxChanges = await this.dataSource.transaction(
+      async (manager) => {
+        const seatsRepo = manager.getRepository(ListingCoManager);
+        const seat = await seatsRepo.findOne({
+          where: { listingId: listing.id, userId: targetUserId },
         });
-      }
+        if (!seat || !this.isLiveSeat(seat)) {
+          throw new NotFoundException('Co-manager not found');
+        }
+        const wasActive = seat.status === ListingCoManagerStatus.Active;
+
+        const updated = await seatsRepo.update(
+          {
+            id: seat.id,
+            status: In([...LIVE_LISTING_CO_MANAGER_STATUSES]),
+          },
+          {
+            status:
+              kind === 'left'
+                ? ListingCoManagerStatus.Left
+                : ListingCoManagerStatus.Revoked,
+            endedAt,
+          },
+        );
+        if (updated.affected !== 1) {
+          throw new NotFoundException('Co-manager not found');
+        }
+
+        if (wasActive) {
+          await manager.save(ListingModerationEvent, {
+            listingId: listing.id,
+            actorId: actorUserId,
+            action: ListingModerationAction.CoManagerRemoved,
+            fromStatus: null,
+            toStatus: null,
+            reason: `${targetName} ${
+              kind === 'left'
+                ? 'stepped down as a co-manager of this listing.'
+                : 'was removed as a co-manager of this listing.'
+            }`,
+          });
+          // Only an ACTIVE seat was ever access. Ending it here, in the same
+          // transaction, so a failure rolls the removal back with it. The
+          // live-room eviction event is deferred to after this transaction
+          // resolves (below), mirroring `GroupsService.leaveGroup`'s
+          // post-commit fan-out, so a rollback can never leave a client
+          // believing it lost a room it still has.
+          return this.identityMailboxSync.onStaffRemoved(
+            identity.id,
+            targetUserId,
+            manager,
+            { shouldDeferEmission: true },
+          );
+        }
+        return null;
+      },
+    );
+    // Best-effort live fan-out AFTER commit: see the comment above. Task 25:
+    // this also carries the departing member's claim releases and their
+    // staffing change.
+    if (mailboxChanges) {
+      this.identityMailboxSync.emitSeatChanges(mailboxChanges);
+    }
+  }
+
+  /** The roster itself, once the caller has been cleared for this listing.
+   * Shared by the owner-or-co-manager `listSeats` and the staff
+   * `staffListCoManagers`, so both return the same live seats in the same
+   * order with the same batched profile lookup. */
+  private async listSeatsForListing(
+    listing: Listing,
+  ): Promise<ListingCoManagerDTO[]> {
+    const seats = await this.coManagers.find({
+      where: {
+        listingId: listing.id,
+        status: In([...LIVE_LISTING_CO_MANAGER_STATUSES]),
+      },
+      order: { status: 'ASC', invitedAt: 'DESC' },
     });
+    if (!seats.length) return [];
+
+    // ONE batched profile lookup covering every member named on the page,
+    // seat holders and inviters together. One query at any seat count.
+    const refs = await new MemberLookup(this.profiles).byUserIds([
+      ...seats.map((seat) => seat.userId),
+      ...seats
+        .map((seat) => seat.invitedByUserId)
+        .filter((userId): userId is string => userId !== null),
+    ]);
+    return seats.map((seat) =>
+      toListingCoManagerDTO(
+        seat,
+        refs.get(seat.userId) ?? null,
+        seat.invitedByUserId ? (refs.get(seat.invitedByUserId) ?? null) : null,
+      ),
+    );
   }
 
   private isLiveSeat(seat: ListingCoManager): boolean {
@@ -684,5 +910,20 @@ export class ListingCoManagersService {
       throw new NotFoundException('Listing not found');
     }
     return listing;
+  }
+
+  /**
+   * Load a listing for a staff-driven delegation change.
+   *
+   * The owner-scoped sibling folds ownership into the query so a foreign
+   * listing 404s. Staff routes carry their own admin guard, so this one looks
+   * the listing up by ref alone, which is what the unscoped `loadOr404`
+   * already does. It carries its own name because the name is the
+   * documentation: a reader of `staffInviteCoManager` should see at the call
+   * site that no ownership narrowing happens here and that the gate is on
+   * the route.
+   */
+  private async loadForStaffOr404(ref: string): Promise<Listing> {
+    return this.loadOr404(ref);
   }
 }

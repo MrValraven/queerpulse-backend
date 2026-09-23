@@ -1,6 +1,7 @@
 import { Repository } from 'typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
+import { topLevelOnly } from '../communities/subcommunity-rules';
 import { RoadmapVote, RoadmapVoteTarget } from './entities/roadmap-vote.entity';
 import { AdminVoteBreakdownDTO } from './roadmap-admin-response';
 
@@ -51,17 +52,21 @@ export async function computeVoteBreakdown(
   // One representative community per voter — their earliest membership.
   // Restricted to the voters who actually voted on one of `targetIds`
   // (`memberIds`, not the whole platform), so this stays cheap regardless of
-  // `community_members`' total size.
+  // `community_members`' total size. A space membership is excluded
+  // (`topLevelOnly`): the breakdown names which top-level COMMUNITY is
+  // asking, and a space counts as part of its parent.
   const memberIds = [...new Set(voteRows.map((row) => row.memberId))];
-  const membershipRows = await communityMembers
-    .createQueryBuilder('member')
-    .innerJoin(Community, 'community', 'community.id = member.community_id')
-    .select('member.user_id', 'userId')
-    .addSelect('community.name', 'communityName')
-    .where('member.user_id IN (:...memberIds)', { memberIds })
-    .orderBy('member.user_id', 'ASC')
-    .addOrderBy('member.joined_at', 'ASC')
-    .getRawMany<{ userId: string; communityName: string }>();
+  const membershipRows = await topLevelOnly(
+    communityMembers
+      .createQueryBuilder('member')
+      .innerJoin(Community, 'community', 'community.id = member.community_id')
+      .select('member.user_id', 'userId')
+      .addSelect('community.name', 'communityName')
+      .where('member.user_id IN (:...memberIds)', { memberIds })
+      .orderBy('member.user_id', 'ASC')
+      .addOrderBy('member.joined_at', 'ASC'),
+    'community',
+  ).getRawMany<{ userId: string; communityName: string }>();
 
   // First row per `userId` wins (rows are already ordered earliest-first).
   const communityByMember = new Map<string, string>();

@@ -82,6 +82,16 @@ export interface AdminCommunityListDTO {
   truncated: boolean;
 }
 
+/** One space (subcommunity) listed under a top-level community's admin
+ *  detail. `memberCount` is that space's own roster count, loaded through
+ *  the same grouped-count query the parent's own `memberCount` uses. */
+export interface AdminCommunitySpaceDTO {
+  slug: string;
+  name: string;
+  accessTier: AccessTier;
+  memberCount: number;
+}
+
 export interface AdminCommunityModeratorDTO {
   /** The moderator's user id — the roster identity add/remove act on. */
   userId: string;
@@ -152,6 +162,16 @@ export interface AdminCommunityDetailDTO extends AdminCommunityCardDTO {
    *  aggregates and `scopedQueue` were built from — some of this community's
    *  reports may not be reflected. See `AdminCommunityListDTO.truncated`. */
   truncated: boolean;
+  /** Whether this community accepts spaces under it. Always false on a
+   *  space itself, which cannot host spaces of its own. Set through
+   *  `PATCH /admin/communities/:slug`. */
+  allowsSubcommunities: boolean;
+  /** The space's parent, present only when this detail belongs to a space
+   *  (`Community.parentId` set); null for a top-level community. */
+  parent: { slug: string; name: string } | null;
+  /** Every space open under this community, oldest first. Always empty on a
+   *  space, which cannot host spaces of its own. */
+  subcommunities: AdminCommunitySpaceDTO[];
 }
 
 const SEVERITY_WEIGHT: Record<ReportSeverity, number> = {
@@ -357,6 +377,8 @@ export function toAdminCommunityDetail(
   moderators: AdminCommunityModeratorDTO[],
   scopedQueue: AdminCommunityQueueItemDTO[],
   truncated: boolean,
+  parent: { slug: string; name: string } | null,
+  subcommunities: AdminCommunitySpaceDTO[],
 ): AdminCommunityDetailDTO {
   const communityCard = toAdminCommunityCard(community, aggregates);
   const resolvedPercentage = communityCard.healthBreakdown.reportResolution;
@@ -375,6 +397,9 @@ export function toAdminCommunityDetail(
     moderators,
     scopedQueue,
     truncated,
+    allowsSubcommunities: community.allowsSubcommunities,
+    parent,
+    subcommunities,
   };
 }
 

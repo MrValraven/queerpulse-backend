@@ -11,7 +11,9 @@ import {
   NEW_COMMUNITY_GRACE_PERIOD_DAYS,
   SUPPORT_OPEN_REPORT_THRESHOLD,
   toAdminCommunityCard,
+  toAdminCommunityDetail,
   toneFor,
+  type AdminCommunitySpaceDTO,
   type CommunityAggregates,
 } from './admin-communities-response';
 
@@ -63,6 +65,9 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     frozenReason: null,
     frozenNote: null,
     frozenByUserId: null,
+    parentId: null,
+    allowsSubcommunities: false,
+    archivedWithParent: false,
     rulesVersion: 1,
     welcomeMessage: null,
     avatarImageUrl: null,
@@ -288,5 +293,70 @@ describe('toAdminCommunityCard needsSupport (new-community grace period)', () =>
     // The grace period never covers a real, open incident — age is
     // irrelevant once the open-report threshold is hit.
     expect(card.needsSupport).toBe(true);
+  });
+});
+
+describe('toAdminCommunityDetail (spaces fields)', () => {
+  it('carries allowsSubcommunities straight off the entity', () => {
+    const detail = toAdminCommunityDetail(
+      makeCommunity({ allowsSubcommunities: true }),
+      makeAggregates(),
+      [],
+      [],
+      false,
+      null,
+      [],
+    );
+    expect(detail.allowsSubcommunities).toBe(true);
+  });
+
+  it('carries a null parent for a top-level community', () => {
+    const detail = toAdminCommunityDetail(
+      makeCommunity(),
+      makeAggregates(),
+      [],
+      [],
+      false,
+      null,
+      [],
+    );
+    expect(detail.parent).toBeNull();
+  });
+
+  it('carries the loaded parent summary for a space', () => {
+    const detail = toAdminCommunityDetail(
+      makeCommunity({ parentId: 'community-parent' }),
+      makeAggregates(),
+      [],
+      [],
+      false,
+      { slug: 'circle-of-care', name: 'Circle of Care' },
+      [],
+    );
+    expect(detail.parent).toEqual({
+      slug: 'circle-of-care',
+      name: 'Circle of Care',
+    });
+  });
+
+  it('carries the loaded subcommunity summaries', () => {
+    const spaces: AdminCommunitySpaceDTO[] = [
+      {
+        slug: 'book-club',
+        name: 'Book Club',
+        accessTier: AccessTier.Public,
+        memberCount: 12,
+      },
+    ];
+    const detail = toAdminCommunityDetail(
+      makeCommunity({ allowsSubcommunities: true }),
+      makeAggregates(),
+      [],
+      [],
+      false,
+      null,
+      spaces,
+    );
+    expect(detail.subcommunities).toEqual(spaces);
   });
 });

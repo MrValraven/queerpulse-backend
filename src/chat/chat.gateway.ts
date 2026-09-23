@@ -24,7 +24,7 @@ import {
 import { parseCookie } from 'cookie';
 import * as Sentry from '@sentry/node';
 import { DefaultEventsMap, Namespace, Socket } from 'socket.io';
-import { IsNull, MoreThan, Repository } from 'typeorm';
+import { In, IsNull, MoreThan, Repository } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { socketTicketService } from '../auth/socket-ticket.service';
 import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
@@ -34,6 +34,8 @@ import {
   resolveFrontendOrigins,
 } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
+import { Identity, IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import {
   CONVERSATION_CREATED,
   CONVERSATION_MEMBERSHIP_REVOKED,
@@ -60,8 +62,30 @@ import {
   ConversationKind,
 } from '../messaging/entities/conversation.entity';
 import { MessagingService } from '../messaging/messaging.service';
+import { Message } from '../messaging/entities/message.entity';
+import { MessageReaction } from '../messaging/entities/message-reaction.entity';
+import {
+  businessSeatUserIdsForViewer,
+  collapseBusinessReactions,
+  describeDirectThreadSeats,
+  isDepartedStaffSeat,
+  isEverySeatPersonal,
+  loadReachableMailboxSeats,
+  mailboxThreadPredicate,
+  partitionMailboxThreadSeats,
+} from '../messaging/mailbox-seats';
+import type { MessageResponse } from '../messaging/message-response';
+import {
+  MessageLike,
+  MessagingCoreService,
+} from '../messaging/messaging-core.service';
 import { BlockFilterService } from '../social/block-filter.service';
-import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
+import {
+  IDENTITY_BLOCKED,
+  IdentityBlockedEvent,
+  MEMBER_BLOCKED,
+  MemberBlockedEvent,
+} from '../social/social.events';
 import {
   NOTIFICATION_CREATED,
   NotificationCreatedEvent,
@@ -93,6 +117,12 @@ import {
   SendMessagePayload,
   TypingPayload,
 } from './dto/chat-payloads';
+import {
+  blockedPairUserIdsToEvict,
+  countReactionsPerKey,
+  latestTimestamp,
+} from './mailbox-live-audience';
+import { MailboxTypingAggregator } from './mailbox-typing-aggregator';
 import { PresenceService } from './presence.service';
 import {
   USER_SESSION_REVOKED,
@@ -217,6 +247,40 @@ type ChatSocket = Socket<
   DefaultEventsMap,
   DefaultEventsMap,
   ChatSocketData
+>;
+
+/**
+ * Task 13e: who a thread's live frames may reach. `personal` is a group, an
+ * official thread, or a direct thread whose every seat is a profile
+ * identity, and keeps the one conversation-room emit it always had.
+ * `closed` is a thread that could not be established as personal and could
+ * not be partitioned either (an unresolved or missing conversation, an
+ * unresolved seat identity, or a mailbox thread `partitionMailboxThreadSeats`
+ * could not split): nothing that could carry a staff member's identity is
+ * relayed from it. Task 14: a mailbox thread whose customer blocked the
+ * business is `closed` too, since it reaches nobody. `mailbox` is a
+ * business mailbox thread, whose frames are rendered per viewer.
+ */
+type LiveThreadAudience =
+  | { shape: 'personal' }
+  | { shape: 'closed' }
+  | {
+      shape: 'mailbox';
+      mailboxIdentityId: string;
+      customerUserId: string;
+      /** Live staff seats with no block against the customer, see
+       *  `loadReachableMailboxSeats`. */
+      reachableStaffUserIds: ReadonlySet<string>;
+      /** The seats `businessSeatUserIdsForViewer` gives the customer,
+       *  departed ones included: the seats the customer's REST view reads
+       *  its read and delivered watermarks from, and the reactors it counts
+       *  as the business. */
+      businessSeats: ReadonlyArray<ConversationParticipant>;
+    };
+
+type MailboxLiveThreadAudience = Extract<
+  LiveThreadAudience,
+  { shape: 'mailbox' }
 >;
 
 /**
@@ -441,6 +505,12 @@ export class ChatGateway
     refillPerSecond: 0.1,
   });
   private idleBucketSweepTimer?: NodeJS.Timeout;
+  // Task 13e: the business is typing while any of its staff is, see
+  // `MailboxTypingAggregator`.
+  private readonly mailboxTyping = new MailboxTypingAggregator();
+  // Task 13e: the tail of each conversation's relay queue, see
+  // `enqueueRelay`. An entry is removed once its queue drains.
+  private readonly relayQueueByConversation = new Map<string, Promise<void>>();
 
   constructor(
     private readonly jwt: JwtService,
@@ -477,6 +547,16 @@ export class ChatGateway
     // `handleTyping`'s relay, `handleMessageRead`'s relay, and every presence
     // broadcast/snapshot below.
     private readonly preferences: PreferencesService,
+    // Task 13: `resolveTypingSenderIdentity` resolves the sender's mailbox
+    // identity (kind + display name + full staff roster) off their own seat
+    // in the conversation, so a business/persona/company typing frame names
+    // the identity and excludes every colleague's room, never just the one
+    // human who typed.
+    private readonly identities: IdentitiesService,
+    // Task 13e: renders a business mailbox thread's message frames once per
+    // viewer through `toMessageResponses`, the renderer the REST read uses,
+    // so each live payload is exactly what that viewer's REST read returns.
+    private readonly messagingCore: MessagingCoreService,
   ) {}
 
   /**
@@ -563,6 +643,7 @@ export class ChatGateway
     this.presenceSnapshotLimiter.sweepIdle(now);
     this.handshakeLimiter.sweepIdle(now);
     this.reauthLimiter.sweepIdle(now);
+    this.mailboxTyping.sweep(now);
   }
 
   async handleConnection(client: ChatSocket): Promise<void> {
@@ -775,6 +856,13 @@ export class ChatGateway
         undefined, // forwarded — the WS path never forwards
         data.kind,
         data.attachment,
+        data.stickerId,
+        // Task 13: identity parity with the HTTP send path. Absent, this
+        // resolves server-side to the caller's own profile identity;
+        // present, it passes through the exact same `assertMaySendAs` guard
+        // `MessagingCoreService` already runs for HTTP, so no new
+        // authorization code is needed here.
+        data.asIdentityId,
       );
     } finally {
       this.inFlightSendCount -= 1;
@@ -827,6 +915,24 @@ export class ChatGateway
     if (!senderPrivacy.shareTyping) {
       return;
     }
+    // CW-12: captured up front, ahead of the lookups below. A business seat
+    // now awaits three lookups (`excludedUserRooms`, `resolveTypingSenderIdentity`,
+    // `loadLiveThreadAudience`) before `mailboxTyping.record`'s own call
+    // further down, and every awaited millisecond a later `Date.now()` would
+    // include there narrows the gap `MailboxTypingAggregator`'s TTL measures
+    // a lone typist's refresh against, risking a dropped refresh the
+    // indicator reads as a blink. Stamping it here keeps that gap to the DB
+    // work this one frame itself requires.
+    const typingRecordedAt = Date.now();
+    // CW-09: one shared query serves both lookups below. Each used to issue
+    // its own `conversationParticipants.find({ where: { conversationId } })`
+    // on every typing frame. The select covers what either needs: `userId`
+    // for `excludedUserRooms`, plus `identityId` and `leftAt` for
+    // `resolveTypingSenderIdentity`.
+    const typingSeats = await this.conversationParticipants.find({
+      where: { conversationId: data.conversationId },
+      select: { userId: true, identityId: true, leftAt: true },
+    });
     // `client.to(room)` excludes only the SENDING SOCKET, not the sending user.
     // A member signed in on two devices (phone + laptop) has two sockets in this
     // room, so without `.except` their own "typing" frame echoes to their other
@@ -839,7 +945,109 @@ export class ChatGateway
       data.conversationId,
       userId,
       (privacy) => privacy.shareTyping,
+      typingSeats,
     );
+    // Mailboxes (Task 13): the sender's OWN seat in this thread may speak
+    // for a business/persona/company identity, see
+    // `resolveTypingSenderIdentity`'s own doc. A mailbox seat broadcasts the
+    // IDENTITY, carrying no human id anywhere in the frame, and excludes
+    // the identity's whole staff roster, so no colleague sees the business
+    // typing at itself.
+    const senderIdentity = await this.resolveTypingSenderIdentity(
+      data.conversationId,
+      userId,
+      typingSeats,
+    );
+    if (senderIdentity) {
+      // Task 14a: a staff member who has left the business neither speaks
+      // for it nor hears it. A departed sender's socket may still sit in the
+      // room, so its frame is dropped here, before it can touch the business
+      // typing state below, and every departed colleague's room is excluded
+      // from the frame alongside the current roster.
+      if (senderIdentity.isSenderDeparted) {
+        return;
+      }
+      // A persona that moderation removed speaks no more: every write for it
+      // is refused with IDENTITY_REMOVED, so its staff type to nobody.
+      if (senderIdentity.isIdentityRemoved) {
+        return;
+      }
+      // Task 14: the sender speaks for the business only while their own
+      // seat reaches the thread under every mailbox rule
+      // (`loadReachableMailboxSeats`, which composes
+      // `isSeatExcludedFromMailbox`). A thread whose customer blocked the
+      // business reads `closed`, and a staff member blocked with the
+      // customer is outside the reachable staff, so a socket of either kind
+      // still in the room types to nobody, whether or not the eviction has
+      // landed.
+      const typingAudience = await this.loadLiveThreadAudience(
+        data.conversationId,
+      );
+      if (
+        typingAudience.shape !== 'mailbox' ||
+        !typingAudience.reachableStaffUserIds.has(userId)
+      ) {
+        return;
+      }
+      // Task 13e: one typing state per business, see
+      // `MailboxTypingAggregator`. `null` means the frame would change
+      // nothing the customer sees: a colleague is still typing, or the
+      // business already said it is typing within the refresh interval.
+      const isBusinessTyping = this.mailboxTyping.record(
+        data.conversationId,
+        senderIdentity.identityId,
+        userId,
+        data.isTyping,
+        typingRecordedAt,
+      );
+      if (isBusinessTyping === null) {
+        return;
+      }
+      client
+        .to(data.conversationId)
+        .except([
+          ...senderIdentity.staffUserRooms,
+          ...senderIdentity.departedStaffUserRooms,
+          ...excludedUserRooms,
+        ])
+        .emit('typing', {
+          conversationId: data.conversationId,
+          identityId: senderIdentity.identityId,
+          displayName: senderIdentity.displayName,
+          isTyping: isBusinessTyping,
+        });
+      return;
+    }
+    // Task 13e: a customer typing on a business mailbox thread reaches the
+    // reachable staff alone, so a blocked or departed staff member whose
+    // socket is still in the room sees nothing. A closed thread relays
+    // nothing.
+    const audience = await this.loadLiveThreadAudience(data.conversationId);
+    if (audience.shape === 'closed') {
+      return;
+    }
+    if (audience.shape === 'mailbox') {
+      const excludedRooms = new Set(excludedUserRooms);
+      const frame = {
+        conversationId: data.conversationId,
+        userId,
+        isTyping: data.isTyping,
+      };
+      await this.emitToJoinedSockets(
+        data.conversationId,
+        'typing',
+        new Map(
+          [...audience.reachableStaffUserIds]
+            .filter(
+              (staffUserId) =>
+                staffUserId !== userId &&
+                !excludedRooms.has(`user:${staffUserId}`),
+            )
+            .map((staffUserId) => [staffUserId, frame]),
+        ),
+      );
+      return;
+    }
     client
       .to(data.conversationId)
       .except([`user:${userId}`, ...excludedUserRooms])
@@ -1028,7 +1236,47 @@ export class ChatGateway
   }
 
   @OnEvent(MESSAGE_CREATED)
-  handleMessageCreated(payload: MessageCreatedEvent): void {
+  handleMessageCreated(payload: MessageCreatedEvent): Promise<void> {
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayMessageCreated(payload),
+    );
+  }
+
+  private async relayMessageCreated(
+    payload: MessageCreatedEvent,
+  ): Promise<void> {
+    // Task 13e: `payload.response` is rendered for the SENDER. On a business
+    // mailbox thread one payload cannot be right for both sides (a staff
+    // sender's own view names them to the customer), so the thread's
+    // audience is established first, and only a thread confirmed personal
+    // takes the room emit below. A lookup failure delivers nothing: the
+    // message is committed, and every client reconciles it on its next
+    // fetch.
+    try {
+      const audience = await this.loadLiveThreadAudience(
+        payload.conversationId,
+      );
+      if (audience.shape === 'mailbox') {
+        await this.relayMailboxMessageCreated(payload, audience);
+        return;
+      }
+      if (audience.shape === 'closed') {
+        await this.emitToOwnJoinedSockets(
+          payload.conversationId,
+          payload.message.senderId,
+          'message:new',
+          { conversationId: payload.conversationId, message: payload.response },
+        );
+        return;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to resolve the live audience for message:new: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      return;
+    }
     // Broadcast the frontend-contract `response` (not the internal `MessageView`)
     // so live clients patch it straight into the thread cache and reconcile the
     // sender's optimistic bubble by `clientMessageId` — no refetch.
@@ -1040,10 +1288,11 @@ export class ChatGateway
     // conversation (via `conversation:join`) — a member browsing another page,
     // or with a DIFFERENT thread open, is connected but not in this room, so
     // without the fan-out below they got no badge bump, no inbox row and no
-    // in-app signal until a remount/reload. Fire-and-forget: a query failure
-    // here must not affect the message write, which already committed and
-    // already broadcast above.
-    void this.fanOutConversationMessage(payload);
+    // in-app signal until a remount/reload. Task 13e: awaited inside this
+    // conversation's relay queue (`enqueueRelay`), so a later frame for the
+    // same conversation never overtakes it. It catches its own failures, so
+    // the message write, already committed, is unaffected.
+    await this.fanOutConversationMessage(payload);
   }
 
   /**
@@ -1132,7 +1381,34 @@ export class ChatGateway
   }
 
   @OnEvent(MESSAGE_UPDATED)
-  handleMessageUpdated(payload: MessageUpdatedEvent): void {
+  handleMessageUpdated(payload: MessageUpdatedEvent): Promise<void> {
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayMessageUpdated(payload),
+    );
+  }
+
+  private async relayMessageUpdated(
+    payload: MessageUpdatedEvent,
+  ): Promise<void> {
+    // Task 13e: `payload.message` is rendered for the EDITOR, so a mailbox
+    // thread gets one payload per viewer, exactly as `handleMessageCreated`
+    // does. Only a thread confirmed personal takes the room emit.
+    try {
+      const audience = await this.loadLiveThreadAudience(
+        payload.conversationId,
+      );
+      if (audience.shape !== 'personal') {
+        await this.relayMailboxMessageUpdated(payload, audience);
+        return;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to relay message:updated: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      return;
+    }
     this.namespace?.to(payload.conversationId).emit('message:updated', payload);
   }
 
@@ -1154,7 +1430,13 @@ export class ChatGateway
   }
 
   @OnEvent(MESSAGE_READ)
-  async handleMessageRead(payload: MessageReadEvent): Promise<void> {
+  handleMessageRead(payload: MessageReadEvent): Promise<void> {
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayMessageRead(payload),
+    );
+  }
+
+  private async relayMessageRead(payload: MessageReadEvent): Promise<void> {
     // Async `@OnEvent` doing DB work: the emitter awaits nothing, so an
     // unhandled rejection here would surface as a process-level warning with
     // no context rather than a logged failure. Wrapped exactly like
@@ -1173,6 +1455,25 @@ export class ChatGateway
         payload.userId,
         (privacy) => privacy.shareReadReceipts,
       );
+      // Task 13e: a staff member's read would name them to the customer, and
+      // reads as the customer's own read to every colleague. A mailbox
+      // thread relays per viewer, see `relayMailboxReceipt`.
+      const audience = await this.loadLiveThreadAudience(
+        payload.conversationId,
+      );
+      if (audience.shape === 'closed') {
+        return;
+      }
+      if (audience.shape === 'mailbox') {
+        await this.relayMailboxReceipt(
+          'read',
+          payload,
+          audience,
+          new Set(excludedUserRooms),
+          () => this.latestBusinessReadAt(audience, payload.lastReadAt),
+        );
+        return;
+      }
       this.namespace
         ?.to(payload.conversationId)
         .except(excludedUserRooms)
@@ -1187,7 +1488,49 @@ export class ChatGateway
   }
 
   @OnEvent(MESSAGE_DELIVERED)
-  handleMessageDelivered(payload: MessageDeliveredEvent): void {
+  handleMessageDelivered(payload: MessageDeliveredEvent): Promise<void> {
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayMessageDelivered(payload),
+    );
+  }
+
+  private async relayMessageDelivered(
+    payload: MessageDeliveredEvent,
+  ): Promise<void> {
+    // Task 13e: the same per-viewer relay as `read` on a mailbox thread,
+    // see `relayMailboxReceipt`. Wrapped like `handleMessageRead`: the
+    // watermark is already committed, so a failure costs a stale tick.
+    try {
+      const audience = await this.loadLiveThreadAudience(
+        payload.conversationId,
+      );
+      if (audience.shape === 'closed') {
+        return;
+      }
+      if (audience.shape === 'mailbox') {
+        await this.relayMailboxReceipt(
+          'message:delivered',
+          payload,
+          audience,
+          new Set<string>(),
+          () =>
+            Promise.resolve(
+              latestTimestamp([
+                payload.deliveredAt,
+                ...audience.businessSeats.map((seat) => seat.deliveredAt),
+              ]) ?? payload.deliveredAt,
+            ),
+        );
+        return;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to relay a delivered receipt: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      return;
+    }
     // Relayed to the whole conversation room; the SENDER's client uses the
     // `userId` (the recipient who acked) + `deliveredAt` to advance its
     // one-check → two-check tick. `deliveredAt` is a Date here; socket.io
@@ -1198,21 +1541,189 @@ export class ChatGateway
   }
 
   @OnEvent(MESSAGE_REACTION)
-  handleMessageReaction(payload: MessageReactionEvent): void {
+  handleMessageReaction(payload: MessageReactionEvent): Promise<void> {
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayMessageReaction(payload),
+    );
+  }
+
+  private async relayMessageReaction(
+    payload: MessageReactionEvent,
+  ): Promise<void> {
+    // Task 13e: staff see each colleague's reaction, and the customer sees
+    // the business react once, see `relayMailboxReaction`.
+    try {
+      const audience = await this.loadLiveThreadAudience(
+        payload.conversationId,
+      );
+      if (audience.shape === 'closed') {
+        return;
+      }
+      if (audience.shape === 'mailbox') {
+        // Task 13h: a reaction on a message at or before a co-manager's
+        // mailbox staff floor is part of history they do not have, so it
+        // never reaches them.
+        await this.relayMailboxReaction(
+          payload,
+          audience,
+          await this.messagingCore.loadMailboxStaffFlooredUserIds(
+            payload.conversationId,
+            payload.messageId,
+          ),
+        );
+        return;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to relay a reaction: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      return;
+    }
     this.namespace?.to(payload.conversationId).emit('reaction', payload);
   }
 
   @OnEvent(MESSAGE_DELETED)
-  handleMessageDeleted(payload: MessageDeletedEvent): void {
-    this.namespace?.to(payload.conversationId).emit('message:deleted', payload);
+  handleMessageDeleted(payload: MessageDeletedEvent): Promise<void> {
+    // Task 13e: through the same relay queue and audience as every other
+    // frame, see `relayToThreadAudience`.
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayToThreadAudience(
+        payload.conversationId,
+        'message:deleted',
+        payload,
+        { messageId: payload.messageId, shouldIncludeDeletedMessage: true },
+      ),
+    );
   }
 
   @OnEvent(MESSAGE_PINNED)
-  handleMessagePinned(payload: MessagePinnedEvent): void {
+  handleMessagePinned(payload: MessagePinnedEvent): Promise<void> {
     // Pins are shared: relay to the whole conversation room so BOTH participants
     // refresh the pinned-messages banner (and patch the message's pin state) —
-    // no blanket thread invalidation.
-    this.namespace?.to(payload.conversationId).emit('message:pinned', payload);
+    // no blanket thread invalidation. Task 13e: on a mailbox thread "the
+    // whole room" is the thread's audience, see `relayToThreadAudience`.
+    return this.enqueueRelay(payload.conversationId, () =>
+      this.relayToThreadAudience(
+        payload.conversationId,
+        'message:pinned',
+        payload,
+        { messageId: payload.messageId, shouldIncludeDeletedMessage: false },
+      ),
+    );
+  }
+
+  /**
+   * Task 13e: every conversation-scoped relay goes through here, so each
+   * conversation's frames leave in the order their events arrived. The
+   * handlers above do DB work before they emit, and without one queue a
+   * quick frame (a delete) could overtake a slower one (the `message:new`
+   * for the same message) and a client would re-add a message already
+   * deleted. `EventEmitter2` calls each listener synchronously in emit
+   * order, and every handler enqueues before its first `await`, so the
+   * queue order is the event order. Different conversations never wait on
+   * each other. Each relay catches its own failures; the `catch` here is a
+   * backstop, so one failed relay never stalls the frames behind it.
+   *
+   * CW-13 (accepted residual): this chain carries no `Promise.race` timeout
+   * and no explicit length cap of its own. A cap stays implicit: the chain
+   * only grows as long as there are relays in flight for the one
+   * conversation, and every DB call a relay awaits already carries the
+   * pool's own 10s/30s timeouts, giving a stuck relay a bound on how long it
+   * can hold the queue. This stays a recorded, accepted residual: either
+   * addition (a race timeout, a hard length cap) changes what a client sees
+   * on a relay that is merely slow, and that is a deliberate design decision
+   * for whoever next reviews this queue on purpose, kept separate from this
+   * narrow cleanup-wave pass.
+   *
+   * CW-14 (accepted residual): `handleDelivered` also relays through this
+   * per-conversation queue (Task 13e unified every conversation-scoped
+   * relay through it), so a group's delivered-ack DB lookup can now sit
+   * ahead of the next `message:new` for the same conversation, adding that
+   * lookup's latency to the new-message frame. This stays as it is: keeping
+   * every relay of one conversation in this single ordered queue is exactly
+   * what prevents a delivered ack from racing ahead of the `message:new` it
+   * may reference.
+   */
+  private enqueueRelay(
+    conversationId: string,
+    relay: () => Promise<void>,
+  ): Promise<void> {
+    const previousRelay =
+      this.relayQueueByConversation.get(conversationId) ?? Promise.resolve();
+    const queuedRelay = previousRelay.then(relay).catch((error: unknown) => {
+      this.logger.error(
+        `A live relay failed: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+    });
+    this.relayQueueByConversation.set(conversationId, queuedRelay);
+    void queuedRelay.then(() => {
+      if (this.relayQueueByConversation.get(conversationId) === queuedRelay) {
+        this.relayQueueByConversation.delete(conversationId);
+      }
+    });
+    return queuedRelay;
+  }
+
+  /**
+   * Task 13e: a frame that is the same for every viewer, sent to whoever
+   * may receive the thread's frames. A personal thread keeps its one room
+   * emit. A mailbox thread sends it to the customer and the reachable staff
+   * alone, so a blocked or departed staff member whose socket is still in
+   * the room receives nothing. A closed thread relays nothing.
+   *
+   * Task 13h review M5: a frame about one message (a pin, an unpin, a
+   * delete) names it in `aboutMessage`, and on a mailbox thread it skips
+   * every staff member whose history floor covers that message, as the
+   * edit and reaction relays do. A deleted message is already soft-deleted
+   * when its frame goes out, so the delete relay reads it whatever its
+   * `deleted_at`.
+   */
+  private async relayToThreadAudience(
+    conversationId: string,
+    event: string,
+    frame: unknown,
+    aboutMessage?: { messageId: string; shouldIncludeDeletedMessage: boolean },
+  ): Promise<void> {
+    try {
+      const audience = await this.loadLiveThreadAudience(conversationId);
+      if (audience.shape === 'closed') {
+        return;
+      }
+      if (audience.shape === 'mailbox') {
+        const flooredUserIds = aboutMessage
+          ? await this.messagingCore.loadMailboxStaffFlooredUserIds(
+              conversationId,
+              aboutMessage.messageId,
+              {
+                shouldIncludeDeletedMessage:
+                  aboutMessage.shouldIncludeDeletedMessage,
+              },
+            )
+          : new Set<string>();
+        await this.emitToJoinedSockets(
+          conversationId,
+          event,
+          new Map(
+            [audience.customerUserId, ...audience.reachableStaffUserIds]
+              .filter((userId) => !flooredUserIds.has(userId))
+              .map((userId) => [userId, frame]),
+          ),
+        );
+        return;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to relay ${event}: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      return;
+    }
+    this.namespace?.to(conversationId).emit(event, frame);
   }
 
   /**
@@ -1238,6 +1749,38 @@ export class ChatGateway
   ): void {
     for (const userId of payload.userIds) {
       this.namespace?.in(`user:${userId}`).socketsLeave(payload.conversationId);
+    }
+  }
+
+  /**
+   * Task 14: a member blocked a whole business, persona or company, which
+   * severs every thread between them for both sides. The member's sockets
+   * and every staff socket of that identity, departed seats included, leave
+   * the room of each such thread through
+   * {@link handleConversationMembershipRevoked}, one call per thread, and
+   * nobody else's sockets move. `canJoinConversationLive` already refuses a
+   * fresh join from either side, and lifting the block needs no event, since
+   * a rejoin passes through that same gate.
+   *
+   * Async because the thread ids have to be resolved first; failures are
+   * logged here, since the block has already been written.
+   */
+  @OnEvent(IDENTITY_BLOCKED)
+  async handleIdentityBlocked(payload: IdentityBlockedEvent): Promise<void> {
+    try {
+      const evictions = await this.identityBlockEvictions(
+        payload.blockerUserId,
+        payload.identityId,
+      );
+      for (const eviction of evictions) {
+        this.handleConversationMembershipRevoked(eviction);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to evict a blocked business's threads from their rooms: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
     }
   }
 
@@ -1275,6 +1818,28 @@ export class ChatGateway
     } catch (err) {
       this.logger.error(
         `Failed to evict blocked pair from their DM room: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+    }
+    // Task 13e: `directConversationIdsBetween` leaves business mailbox
+    // threads out, since a block there removes only the blocked staff
+    // member's own access. Those threads are handled here, in their own
+    // `try` so neither eviction can stop the other: only the staff member's
+    // sockets leave the room, and the customer and every colleague stay.
+    // `canJoinConversationLive` already refuses that staff member a new
+    // join.
+    try {
+      const evictions = await this.mailboxEvictionsForBlock(
+        payload.blockerId,
+        payload.blockedId,
+      );
+      for (const { conversationId, userId } of evictions) {
+        this.namespace?.in(`user:${userId}`).socketsLeave(conversationId);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to evict a blocked staff member from a mailbox thread: ${
           err instanceof Error ? err.message : 'unknown error'
         }`,
       );
@@ -1759,21 +2324,31 @@ export class ChatGateway
    * those reciprocal (opting out also means never SEEING the same signal from
    * anyone else). One extra query per relay, same cost class as
    * `fanOutConversationMessage`'s identical per-send participant read.
+   *
+   * CW-09: `handleTyping` also calls `resolveTypingSenderIdentity` for the
+   * same `conversationId` on the same frame, which used to issue its own,
+   * separate seat query. `preloadedSeats` lets a caller that already holds
+   * the conversation's seats (as `handleTyping` now does) pass them in and
+   * skip this method's own query; every other caller omits it and this
+   * method queries as before.
    */
   private async excludedUserRooms(
     conversationId: string,
     callerUserId: string,
     shares: (privacy: MessagingPrivacyDTO) => boolean,
+    preloadedSeats?: ConversationParticipant[],
   ): Promise<string[]> {
-    const participants = await this.conversationParticipants.find({
-      where: { conversationId },
-      // ENG-239, same regression as `fanOutConversationMessage`'s own `select`
-      // above: the default full-row `find` pulled every participant column,
-      // including each member's possibly-5000-char `draft` free text, and this
-      // helper runs on EVERY typing frame and every read relay. Only the id is
-      // ever read here.
-      select: { userId: true },
-    });
+    const participants =
+      preloadedSeats ??
+      (await this.conversationParticipants.find({
+        where: { conversationId },
+        // ENG-239, same regression as `fanOutConversationMessage`'s own `select`
+        // above: the default full-row `find` pulled every participant column,
+        // including each member's possibly-5000-char `draft` free text, and this
+        // helper runs on EVERY typing frame and every read relay. Only the id is
+        // ever read here.
+        select: { userId: true },
+      }));
     const otherUserIds = participants
       .map((participant) => participant.userId)
       .filter((participantUserId) => participantUserId !== callerUserId);
@@ -1790,6 +2365,664 @@ export class ChatGateway
         return privacy ? !shares(privacy) : false;
       })
       .map((otherUserId) => `user:${otherUserId}`);
+  }
+
+  /**
+   * Mailboxes (Task 13): the identity the SENDER speaks as in THIS
+   * conversation, resolved from their OWN seat
+   * (`conversation_participants.identity_id`), the one place that answers
+   * "which identity is this" per `IdentitiesService`'s own doc. Reuses that
+   * one service here instead of a second, hand-rolled lookup.
+   *
+   * Returns null for an ordinary profile-identity seat, so `handleTyping`'s
+   * pre-mailbox behaviour (frame carries `userId`, exclusion is the sender's
+   * own `user:<id>` room) stays exactly as it was for a personal thread.
+   * Also returns null when the caller holds no seat here at all: this is a
+   * defensive fallback for that edge case, since `handleTyping`'s own
+   * room-membership check already guards the common one.
+   *
+   * `staffUserRooms` is EVERY staff member of the identity, owner included,
+   * via `IdentitiesService.staffUserIds`. `handleTyping` excludes the whole
+   * roster, so no colleague sees the business typing at itself.
+   *
+   * Task 14a: `isSenderDeparted` and `departedStaffUserRooms` apply the
+   * departed-staff rule (`isDepartedStaffSeat`) to the sender's own seat and
+   * to every other seat of the same identity. A departed staff member is no
+   * longer on the roster, so without their own room in the exclusion a
+   * socket of theirs still in the room would hear the business typing.
+   *
+   * CW-09: `preloadedSeats`, when given, replaces this method's own seat
+   * query. See `excludedUserRooms`'s identical parameter, added for the
+   * same reason: `handleTyping` needs both helpers' results for the same
+   * conversation on the same frame, and used to pay for two separate,
+   * identically-shaped queries to get them.
+   *
+   * `isIdentityRemoved` is true for a persona that moderation removed
+   * (`IdentitiesService.isRemovedPersona`, the check `assertMayActAs`
+   * refuses writes on), so its staff show nobody that it is typing.
+   */
+  private async resolveTypingSenderIdentity(
+    conversationId: string,
+    userId: string,
+    preloadedSeats?: ConversationParticipant[],
+  ): Promise<{
+    identityId: string;
+    displayName: string | null;
+    staffUserRooms: string[];
+    isSenderDeparted: boolean;
+    isIdentityRemoved: boolean;
+    departedStaffUserRooms: string[];
+  } | null> {
+    const seats =
+      preloadedSeats ??
+      (await this.conversationParticipants.find({
+        where: { conversationId },
+        select: { userId: true, identityId: true, leftAt: true },
+      }));
+    const senderSeat = seats.find((seat) => seat.userId === userId);
+    if (!senderSeat) {
+      return null;
+    }
+    const identity = await this.identities.getById(senderSeat.identityId);
+    if (!identity || identity.kind === IdentityKind.Profile) {
+      return null;
+    }
+    // Every seat of the sender's identity is a staff seat of this mailbox,
+    // so that identity's kind is the one each of those seats needs to be
+    // described from its own side.
+    const mailboxIdentityKindById = new Map([
+      [senderSeat.identityId, identity.kind],
+    ]);
+    const isSeatDeparted = (staffSeat: (typeof seats)[number]): boolean =>
+      isDepartedStaffSeat(
+        staffSeat,
+        describeDirectThreadSeats(
+          staffSeat.identityId,
+          seats.filter((seat) => seat !== staffSeat),
+          mailboxIdentityKindById,
+        ),
+      );
+    if (isSeatDeparted(senderSeat)) {
+      return {
+        identityId: senderSeat.identityId,
+        displayName: null,
+        staffUserRooms: [],
+        isSenderDeparted: true,
+        isIdentityRemoved: false,
+        departedStaffUserRooms: [],
+      };
+    }
+    if (await this.identities.isRemovedPersona(identity)) {
+      return {
+        identityId: senderSeat.identityId,
+        displayName: null,
+        staffUserRooms: [],
+        isSenderDeparted: false,
+        isIdentityRemoved: true,
+        departedStaffUserRooms: [],
+      };
+    }
+    const [descriptions, staffUserIds] = await Promise.all([
+      this.identities.describeIdentities([senderSeat.identityId]),
+      this.identities.staffUserIds(senderSeat.identityId),
+    ]);
+    return {
+      identityId: senderSeat.identityId,
+      displayName: descriptions.get(senderSeat.identityId)?.displayName ?? null,
+      staffUserRooms: staffUserIds.map((staffUserId) => `user:${staffUserId}`),
+      isSenderDeparted: false,
+      isIdentityRemoved: false,
+      departedStaffUserRooms: seats
+        .filter(
+          (seat) =>
+            seat.identityId === senderSeat.identityId && isSeatDeparted(seat),
+        )
+        .map((seat) => `user:${seat.userId}`),
+    };
+  }
+
+  /**
+   * Task 13e: who `conversationId`'s live frames may reach, see
+   * {@link LiveThreadAudience}. A thread is personal only once it is a group
+   * or an official thread, or every seat is confirmed a profile identity. A
+   * business mailbox thread's audience is the customer plus every live staff
+   * seat with no block against the customer
+   * (`loadReachableMailboxSeats`), because a frame addressed to a staff
+   * member's `user:<id>` room reaches them whatever `canJoinConversationLive`
+   * would say.
+   */
+  private async loadLiveThreadAudience(
+    conversationId: string,
+  ): Promise<LiveThreadAudience> {
+    const conversation = await this.conversationParticipants.manager.findOne(
+      Conversation,
+      {
+        where: { id: conversationId },
+        select: { id: true, kind: true, isOfficial: true },
+      },
+    );
+    if (!conversation) {
+      return { shape: 'closed' };
+    }
+    if (
+      conversation.kind === ConversationKind.Group ||
+      conversation.isOfficial
+    ) {
+      return { shape: 'personal' };
+    }
+    const seats = await this.conversationParticipants.find({
+      where: { conversationId },
+      select: {
+        userId: true,
+        identityId: true,
+        leftAt: true,
+        lastReadAt: true,
+        deliveredAt: true,
+      },
+    });
+    const seatIdentities = await this.identities.getByIds(
+      seats.map((seat) => seat.identityId),
+    );
+    const identityKindById = new Map(
+      seatIdentities.map((identity) => [identity.id, identity.kind]),
+    );
+    if (isEverySeatPersonal(seats, identityKindById)) {
+      return { shape: 'personal' };
+    }
+    const partition = partitionMailboxThreadSeats(seats, identityKindById, {
+      shouldIncludeDepartedSeats: false,
+    });
+    if (!partition) {
+      return { shape: 'closed' };
+    }
+    const reachableSeats = await loadReachableMailboxSeats(
+      partition,
+      identityKindById,
+      this.blockFilter,
+    );
+    // Task 14: the customer blocked the business, so the thread reaches
+    // nobody on either side.
+    if (!reachableSeats.customerSeat) {
+      return { shape: 'closed' };
+    }
+    const reachableStaffSeats = reachableSeats.staffSeats;
+    // The business as the customer's own REST reads see it, from the
+    // customer's seat, so the live counts and watermarks agree with them.
+    const customerSeat = partition.customerSeat;
+    const businessUserIds = businessSeatUserIdsForViewer(
+      describeDirectThreadSeats(
+        customerSeat.identityId,
+        seats.filter((seat) => seat.userId !== customerSeat.userId),
+        identityKindById,
+      ),
+    );
+    return {
+      shape: 'mailbox',
+      mailboxIdentityId: partition.mailboxIdentityId,
+      customerUserId: customerSeat.userId,
+      reachableStaffUserIds: new Set(
+        reachableStaffSeats.map((seat) => seat.userId),
+      ),
+      businessSeats: seats.filter((seat) => businessUserIds.has(seat.userId)),
+    };
+  }
+
+  /**
+   * Task 13e: `message:new` and `conversation:message` on a business mailbox
+   * thread, one payload per viewer. The customer and each reachable staff
+   * member get the message exactly as their own REST read renders it
+   * (`renderMessageForViewers`); the sender gets `payload.response`, which
+   * was rendered for them. `message:new` keeps its meaning of "the thread you
+   * have open", so it reaches only a viewer's sockets that joined the
+   * conversation room; `conversation:message` reaches every socket of every
+   * viewer except the sender, as the ordinary fan-out does.
+   */
+  private async relayMailboxMessageCreated(
+    payload: MessageCreatedEvent,
+    audience: MailboxLiveThreadAudience,
+  ): Promise<void> {
+    const senderId = payload.message.senderId;
+    const responseByUserId = await this.renderMessageForViewers(
+      payload.message,
+      [audience.customerUserId, ...audience.reachableStaffUserIds],
+      senderId,
+      payload.response,
+    );
+    const frameByUserId = new Map(
+      [...responseByUserId].map(([userId, message]) => [
+        userId,
+        { conversationId: payload.conversationId, message },
+      ]),
+    );
+    await this.emitToJoinedSockets(
+      payload.conversationId,
+      'message:new',
+      frameByUserId,
+    );
+    for (const [userId, frame] of frameByUserId) {
+      if (userId === senderId) {
+        continue;
+      }
+      this.namespace?.to(`user:${userId}`).emit('conversation:message', frame);
+    }
+  }
+
+  /**
+   * Task 13e: `message:updated` on a thread that is not personal. The edited
+   * row is re-read so each viewer's payload goes through the same renderer
+   * as `message:new`. The editor is the message's author (`editMessage`
+   * allows no one else) and gets `payload.message`, rendered for them. A
+   * closed thread relays the edit to the editor alone.
+   */
+  private async relayMailboxMessageUpdated(
+    payload: MessageUpdatedEvent,
+    audience: Exclude<LiveThreadAudience, { shape: 'personal' }>,
+  ): Promise<void> {
+    const editedMessage = await this.conversationParticipants.manager.findOne(
+      Message,
+      { where: { id: payload.message.id } },
+    );
+    if (!editedMessage) {
+      return;
+    }
+    const editorId = editedMessage.senderId;
+    if (audience.shape === 'closed') {
+      await this.emitToOwnJoinedSockets(
+        payload.conversationId,
+        editorId,
+        'message:updated',
+        payload,
+      );
+      return;
+    }
+    // Task 13h: a co-manager whose mailbox staff floor covers the edited
+    // message does not have it, so the edit skips them. The floor of a moved
+    // business thread sits at its first enquiry, and an edit of an earlier
+    // private message inside the edit window stays with the owner and the
+    // customer.
+    const messageFlooredUserIds =
+      await this.messagingCore.loadMailboxStaffFlooredUserIds(
+        payload.conversationId,
+        editedMessage.id,
+      );
+    const responseByUserId = await this.renderMessageForViewers(
+      editedMessage,
+      [audience.customerUserId, ...audience.reachableStaffUserIds].filter(
+        (userId) => !messageFlooredUserIds.has(userId),
+      ),
+      editorId,
+      payload.message,
+    );
+    await this.emitToJoinedSockets(
+      payload.conversationId,
+      'message:updated',
+      new Map(
+        [...responseByUserId].map(([userId, message]) => [
+          userId,
+          { conversationId: payload.conversationId, message },
+        ]),
+      ),
+    );
+  }
+
+  /**
+   * Task 13e: `read` and `message:delivered` on a business mailbox thread,
+   * matching what each viewer's REST read reports:
+   *  - the customer's own receipt reaches the customer's other devices and
+   *    every reachable staff member, unchanged;
+   *  - a staff member's receipt reaches that staff member's other devices
+   *    unchanged, and the customer as the business's receipt: the mailbox
+   *    identity, with no human id, and `businessWatermark`, the latest
+   *    watermark across the business's seats that the customer's inbox
+   *    reports too;
+   *  - colleagues receive nothing for it, because their REST view reads the
+   *    customer's watermark alone, so a colleague's read never reads as the
+   *    customer's.
+   * `excludedUserRooms` keeps PRD-364's reciprocal read-receipt gate.
+   */
+  private async relayMailboxReceipt(
+    event: 'read' | 'message:delivered',
+    payload: MessageReadEvent | MessageDeliveredEvent,
+    audience: MailboxLiveThreadAudience,
+    excludedUserRooms: ReadonlySet<string>,
+    resolveBusinessWatermark: () => Promise<Date>,
+  ): Promise<void> {
+    const isReceiving = (userId: string) =>
+      !excludedUserRooms.has(`user:${userId}`);
+    const frameByUserId = new Map<string, object>();
+    if (payload.userId === audience.customerUserId) {
+      frameByUserId.set(payload.userId, payload);
+      for (const staffUserId of audience.reachableStaffUserIds) {
+        if (isReceiving(staffUserId)) {
+          frameByUserId.set(staffUserId, payload);
+        }
+      }
+    } else if (audience.reachableStaffUserIds.has(payload.userId)) {
+      frameByUserId.set(payload.userId, payload);
+      if (isReceiving(audience.customerUserId)) {
+        const businessWatermark = await resolveBusinessWatermark();
+        frameByUserId.set(audience.customerUserId, {
+          conversationId: payload.conversationId,
+          identityId: audience.mailboxIdentityId,
+          ...(event === 'read'
+            ? { lastReadAt: businessWatermark }
+            : { deliveredAt: businessWatermark }),
+        });
+      }
+    }
+    await this.emitToJoinedSockets(
+      payload.conversationId,
+      event,
+      frameByUserId,
+    );
+  }
+
+  /**
+   * Task 13e: the business's read watermark as the customer's REST view
+   * reports it (`otherLastReadAt`): the latest across the mailbox identity's
+   * seats whose person shares read receipts (PRD-364), and at least as late
+   * as the read being relayed.
+   */
+  private async latestBusinessReadAt(
+    audience: MailboxLiveThreadAudience,
+    relayedLastReadAt: Date,
+  ): Promise<Date> {
+    const privacyByUser = await this.preferences.getMessagingPrivacyForUsers([
+      ...new Set(audience.businessSeats.map((seat) => seat.userId)),
+    ]);
+    const sharingSeats = audience.businessSeats.filter(
+      (seat) => privacyByUser.get(seat.userId)?.shareReadReceipts ?? true,
+    );
+    return (
+      latestTimestamp([
+        relayedLastReadAt,
+        ...sharingSeats.map((seat) => seat.lastReadAt),
+      ]) ?? relayedLastReadAt
+    );
+  }
+
+  /**
+   * Task 13e: `reaction` on a business mailbox thread. Staff see
+   * individuals, so each reachable staff member gets the frame unchanged.
+   * The customer sees the business react: every staff reaction under one
+   * key counts once (`collapseReactionCountsForCustomer`), and a staff
+   * member's reaction arrives carrying the mailbox identity with no human
+   * id. The customer's own reaction keeps their own `userId`, which is how
+   * their client recognises its own echo.
+   */
+  private async relayMailboxReaction(
+    payload: MessageReactionEvent,
+    audience: MailboxLiveThreadAudience,
+    messageFlooredUserIds: ReadonlySet<string>,
+  ): Promise<void> {
+    const reactionRows = await this.conversationParticipants.manager.find(
+      MessageReaction,
+      {
+        where: { messageId: payload.messageId },
+        select: { userId: true, key: true },
+      },
+    );
+    const frameByUserId = new Map<string, object>();
+    frameByUserId.set(audience.customerUserId, {
+      conversationId: payload.conversationId,
+      messageId: payload.messageId,
+      ...(payload.userId === audience.customerUserId
+        ? { userId: payload.userId }
+        : { identityId: audience.mailboxIdentityId }),
+      reactions: countReactionsPerKey(
+        payload.reactions,
+        collapseBusinessReactions(
+          reactionRows,
+          new Set(audience.businessSeats.map((seat) => seat.userId)),
+        ),
+      ),
+    });
+    for (const staffUserId of audience.reachableStaffUserIds) {
+      frameByUserId.set(staffUserId, payload);
+    }
+    for (const flooredUserId of messageFlooredUserIds) {
+      frameByUserId.delete(flooredUserId);
+    }
+    await this.emitToJoinedSockets(
+      payload.conversationId,
+      'reaction',
+      frameByUserId,
+    );
+  }
+
+  /**
+   * Task 14: every DIRECT, non-official thread between the customer
+   * `blockerUserId` and the mailbox `identityId`, with the users whose
+   * sockets leave its room: the customer, from a seat that speaks for their
+   * own `profile` identity (the customer seat
+   * `identityBlockedCustomerSeatPredicate` reads), and every seat of that
+   * identity.
+   */
+  private async identityBlockEvictions(
+    blockerUserId: string,
+    identityId: string,
+  ): Promise<ConversationMembershipRevokedEvent[]> {
+    const blockedThreads = await this.conversationParticipants
+      .createQueryBuilder('identity_block_customer_seat')
+      .select('identity_block_customer_seat.conversation_id', 'conversationId')
+      .innerJoin(
+        Conversation,
+        'identity_block_conversation',
+        'identity_block_conversation.id = identity_block_customer_seat.conversation_id',
+      )
+      .innerJoin(
+        Identity,
+        'identity_block_customer_identity',
+        'identity_block_customer_identity.id = identity_block_customer_seat.identity_id',
+      )
+      .innerJoin(
+        ConversationParticipant,
+        'identity_block_mailbox_seat',
+        'identity_block_mailbox_seat.conversation_id = identity_block_customer_seat.conversation_id AND identity_block_mailbox_seat.identity_id = :blockedIdentityId',
+        { blockedIdentityId: identityId },
+      )
+      .where('identity_block_customer_seat.user_id = :blockerUserId', {
+        blockerUserId,
+      })
+      .andWhere('identity_block_customer_identity.kind = :profileKind', {
+        profileKind: IdentityKind.Profile,
+      })
+      .andWhere('identity_block_conversation.kind != :groupKind', {
+        groupKind: ConversationKind.Group,
+      })
+      .andWhere('identity_block_conversation.is_official = false')
+      .getRawMany<{ conversationId: string }>();
+    const conversationIds = [
+      ...new Set(blockedThreads.map((row) => row.conversationId)),
+    ];
+    if (conversationIds.length === 0) {
+      return [];
+    }
+    const seats = await this.conversationParticipants.find({
+      where: { conversationId: In(conversationIds) },
+      select: { conversationId: true, userId: true, identityId: true },
+    });
+    return conversationIds.map((conversationId) => ({
+      conversationId,
+      userIds: [
+        ...new Set([
+          blockerUserId,
+          ...seats
+            .filter(
+              (seat) =>
+                seat.conversationId === conversationId &&
+                seat.identityId === identityId,
+            )
+            .map((seat) => seat.userId),
+        ]),
+      ],
+    }));
+  }
+
+  /**
+   * Task 13e: every business mailbox thread the newly blocked pair share,
+   * with the one of them who loses their live place in it
+   * (`blockedPairUserIdsToEvict`). Ordinary DMs are left to
+   * `directConversationIdsBetween`, which already evicts both.
+   */
+  private async mailboxEvictionsForBlock(
+    blockerId: string,
+    blockedId: string,
+  ): Promise<Array<{ conversationId: string; userId: string }>> {
+    // The shared DIRECT, non-official mailbox threads, found in SQL: the
+    // twin of `ConversationsService.directConversationIdsBetween`, which
+    // keeps the ordinary DMs.
+    const sharedMailboxThreads = await this.conversationParticipants
+      .createQueryBuilder('pair_seat')
+      .select('pair_seat.conversation_id', 'conversationId')
+      .innerJoin(
+        Conversation,
+        'pair_conversation',
+        'pair_conversation.id = pair_seat.conversation_id',
+      )
+      .innerJoin(
+        ConversationParticipant,
+        'other_pair_seat',
+        'other_pair_seat.conversation_id = pair_seat.conversation_id AND other_pair_seat.user_id = :blockedId',
+        { blockedId },
+      )
+      .where('pair_seat.user_id = :blockerId', { blockerId })
+      .andWhere('pair_conversation.kind != :group', {
+        group: ConversationKind.Group,
+      })
+      .andWhere('pair_conversation.is_official = false')
+      .andWhere(mailboxThreadPredicate('pair_seat.conversation_id'))
+      .getRawMany<{ conversationId: string }>();
+    const directConversationIds = [
+      ...new Set(sharedMailboxThreads.map((row) => row.conversationId)),
+    ];
+    if (directConversationIds.length === 0) {
+      return [];
+    }
+    const seats = await this.conversationParticipants.find({
+      where: { conversationId: In(directConversationIds) },
+      select: {
+        conversationId: true,
+        userId: true,
+        identityId: true,
+        leftAt: true,
+      },
+    });
+    const seatIdentities = await this.identities.getByIds([
+      ...new Set(seats.map((seat) => seat.identityId)),
+    ]);
+    const identityKindById = new Map(
+      seatIdentities.map((identity) => [identity.id, identity.kind]),
+    );
+    const evictions: Array<{ conversationId: string; userId: string }> = [];
+    for (const conversationId of directConversationIds) {
+      const threadSeats = seats.filter(
+        (seat) => seat.conversationId === conversationId,
+      );
+      if (isEverySeatPersonal(threadSeats, identityKindById)) {
+        continue;
+      }
+      for (const userId of blockedPairUserIdsToEvict(
+        threadSeats,
+        identityKindById,
+        [blockerId, blockedId],
+      )) {
+        evictions.push({ conversationId, userId });
+      }
+    }
+    return evictions;
+  }
+
+  /**
+   * Task 13e: `message` rendered for each viewer through
+   * `MessagingCoreService.toMessageResponses`, the renderer every REST read
+   * of a message uses. The actor (sender or editor) gets `actorResponse`,
+   * already rendered for them. Final review I2: every other viewer is
+   * rendered once per class of viewers that method would render alike
+   * (`renderMessageForViewerClasses`), so the cost stays flat in the staff
+   * count. A viewer whose render fails is left out, so nobody ever receives
+   * a payload rendered for someone else.
+   */
+  private async renderMessageForViewers(
+    message: MessageLike,
+    viewerUserIds: ReadonlyArray<string>,
+    actorUserId: string | null,
+    actorResponse: MessageResponse,
+  ): Promise<Map<string, MessageResponse>> {
+    const uniqueViewerUserIds = [...new Set(viewerUserIds)];
+    const responseByViewerId =
+      await this.messagingCore.renderMessageForViewerClasses(
+        message,
+        uniqueViewerUserIds.filter(
+          (viewerUserId) => viewerUserId !== actorUserId,
+        ),
+        ConversationKind.Direct,
+        (error) =>
+          this.logger.error(
+            `Failed to render a live message for one viewer: ${
+              error instanceof Error ? error.message : 'unknown error'
+            }`,
+          ),
+      );
+    return new Map(
+      uniqueViewerUserIds.flatMap(
+        (viewerUserId): [string, MessageResponse][] => {
+          if (viewerUserId === actorUserId) {
+            return [[viewerUserId, actorResponse]];
+          }
+          const response = responseByViewerId.get(viewerUserId);
+          return response ? [[viewerUserId, response]] : [];
+        },
+      ),
+    );
+  }
+
+  /**
+   * Task 13e: emits `frameByUserId`'s frame to each of that user's sockets
+   * that joined `conversationId`'s room, so a per-viewer frame keeps the
+   * room emit's meaning of "the thread you have open". A socket in the room
+   * whose user has no entry receives nothing, which is what keeps a staff
+   * member outside the audience from receiving a frame even before
+   * `handleMemberBlocked` evicts them. `fetchSockets` reads this instance's
+   * sockets, the single-replica assumption `handleSessionRevoked` states.
+   */
+  private async emitToJoinedSockets(
+    conversationId: string,
+    event: string,
+    frameByUserId: ReadonlyMap<string, unknown>,
+  ): Promise<void> {
+    if (frameByUserId.size === 0 || !this.namespace) {
+      return;
+    }
+    const sockets = await this.namespace.in(conversationId).fetchSockets();
+    for (const socket of sockets) {
+      const socketUserId = (socket.data as ChatSocketData).userId;
+      const frame =
+        socketUserId === undefined
+          ? undefined
+          : frameByUserId.get(socketUserId);
+      if (frame !== undefined) {
+        socket.emit(event, frame);
+      }
+    }
+  }
+
+  /** Task 13e: {@link emitToJoinedSockets} for the actor's own frame alone,
+   *  the one frame a closed thread still relays. */
+  private async emitToOwnJoinedSockets(
+    conversationId: string,
+    actorUserId: string | null,
+    event: string,
+    frame: unknown,
+  ): Promise<void> {
+    if (!actorUserId) {
+      return;
+    }
+    await this.emitToJoinedSockets(
+      conversationId,
+      event,
+      new Map([[actorUserId, frame]]),
+    );
   }
 
   /**

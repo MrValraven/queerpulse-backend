@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { IdentitiesModule } from '../identities/identities.module';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -62,6 +63,11 @@ import { ReportsService } from './reports.service';
     // `forFeature` registrations plus `MediaCropsModule`/`MediaReferencesModule`,
     // so nothing on that side reaches back here and no cycle is created.
     StorageModule,
+    // `IdentitiesService` for the `identity` subject's filing gate and
+    // snapshot in `ReportsService` (which identity, who staffs it, its display
+    // name). `IdentitiesModule` imports only `TypeOrmModule.forFeature`, so
+    // nothing on that side reaches back here and no cycle is created.
+    IdentitiesModule,
   ],
   // PRD-361: `ReportMessageAttachmentController` serves a reported message's
   // held attachment to staff, the same shape as the photo route beside it, and

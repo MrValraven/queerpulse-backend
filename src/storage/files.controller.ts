@@ -30,7 +30,21 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import { parseStorageKey, storageKeyOwnerId } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
+import { parseMessageAttachmentReference } from './message-attachment-reference';
+import {
+  messageAttachmentRouteStorageKey,
+  viewableMessageAttachmentQuery,
+} from './message-attachment-route';
+import {
+  attachmentContentDispositionForStorageKey,
+  contentTypeForStorageKey,
+  inlineContentDispositionForStorageKey,
+} from './served-object';
 import { Message } from '../messaging/entities/message.entity';
+import {
+  mailboxStaffHistoryFloorCoversPredicate,
+  seatExcludedFromMailboxPredicate,
+} from '../messaging/mailbox-seats';
 import {
   ApiNotFoundResponse,
   ApiOperation,
@@ -110,7 +124,8 @@ export class FilesController {
   // path — a document is not merely as protected as an image here, it goes
   // through the IDENTICAL query. A left member keeps a participant row (see
   // `ConversationParticipant.leftAt`) and retains read access to history, so
-  // mere row existence is the correct grant; a soft-deleted message is
+  // mere row existence is the correct grant (Task 14a: except for a departed
+  // staff seat of a business mailbox thread, see below); a soft-deleted message is
   // excluded (its attachment is gone from the timeline). The stored
   // `attachment.url` is the BARE key (the send path normalises it via
   // `storageKeyFromImageUrl`); the `/files/<key>` form is matched too as a
@@ -130,20 +145,45 @@ export class FilesController {
     // `WHERE attachment IS NOT NULL` so it stays tiny on a table where almost
     // no row carries an attachment. Postgres does not infer that implication
     // by itself.
-    return this.messages
-      .createQueryBuilder('message')
-      .innerJoin(
-        'conversation_participants',
-        'participant',
-        'participant.conversation_id = message.conversationId AND participant.user_id = :userId',
-        { userId },
-      )
-      .where("message.attachment ->> 'url' IN (:...attachmentForms)", {
-        attachmentForms,
-      })
-      .andWhere('message.deletedAt IS NULL')
-      .andWhere('message.attachment IS NOT NULL')
-      .getExists();
+    return (
+      this.messages
+        .createQueryBuilder('message')
+        .innerJoin(
+          'conversation_participants',
+          'participant',
+          'participant.conversation_id = message.conversationId AND participant.user_id = :userId',
+          { userId },
+        )
+        .where("message.attachment ->> 'url' IN (:...attachmentForms)", {
+          attachmentForms,
+        })
+        .andWhere('message.deletedAt IS NULL')
+        .andWhere('message.attachment IS NOT NULL')
+        // Tasks 13f, 14a and 14: attachment downloads apply the mailbox seat
+        // rules exactly as every other read of a business mailbox thread
+        // does, through `seatExcludedFromMailboxPredicate`, the tested
+        // single-source SQL twin of `isSeatExcludedFromMailbox`. It holds
+        // when `userId`'s own seat in this DIRECT, non-official conversation
+        // is a staff seat blocked either way with the thread's customer, a
+        // staff seat with `leftAt` set, or any seat of a thread whose
+        // customer blocked the business, the customer's own seat included.
+        // A person block removes only that staff member's own access, and
+        // the customer and every other colleague keep theirs. A group
+        // leaver's seat never matches, since groups are outside the rule.
+        .andWhere(
+          `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}`,
+        )
+        // Task 13h: a message at or before the history floor of the
+        // requester's mailbox staff seat does not exist for them, so neither
+        // do its bytes. The refusal is the same 404 a non-participant gets.
+        // A co-manager's floor in a moved business thread keeps the owner's
+        // and the customer's earlier private photos and documents out of
+        // reach. A personal or group seat's "clear chat" keeps its access.
+        .andWhere(
+          `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
+        )
+        .getExists()
+    );
   }
 
   // Verify the object's real bytes match the content type its key declares
@@ -314,6 +354,120 @@ export class FilesController {
     }
   }
 
+  // Final fix F1 (C1): the bytes of one message's attachment, addressed by
+  // the message (`/files/messages/<messageId>/0`, see
+  // `message-attachment-reference.ts`). Every read renders this URL for an
+  // image or document sent as a business, persona or company, so a customer
+  // never receives the storage key, which names the staff member who uploaded
+  // it. The requester must be able to see that message
+  // (`viewableMessageAttachmentQuery`: a seat in its conversation, the mailbox
+  // seat rules and the staff history floor), and every refusal is the same 404
+  // an unresolvable key gets. No session is a 401, as for every session-gated
+  // kind.
+  //
+  // The bytes are streamed through this service for an image as well as a
+  // document. A 302 to a presigned GET would put the bucket key, owner segment
+  // included, in the redirect's `Location`, which the browser exposes to the
+  // page and its developer tools. The uploader's account status is not
+  // consulted: the business sent the photo, and withholding it for one staff
+  // member's suspension would show the customer which of the business's
+  // photos came from the same person. A moderator takes a message down
+  // through message moderation, which blanks the attachment on every read.
+  private async serveMessageAttachment(
+    messageId: string,
+    user: CurrentUserData | null,
+    response: Response,
+    download: string | undefined,
+  ): Promise<void> {
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+    const message = await viewableMessageAttachmentQuery(
+      this.messages,
+      messageId,
+      user.userId,
+    ).getOne();
+    const storageKey = message
+      ? messageAttachmentRouteStorageKey(message)
+      : null;
+    if (!storageKey) {
+      throw new NotFoundException();
+    }
+    await this.assertServableBytes(storageKey);
+    if (parseStorageKey(storageKey) === UPLOAD_KIND_SPECS['message-document']) {
+      await this.streamMessageDocument(storageKey, response);
+      return;
+    }
+    await this.streamMessageImage(storageKey, response, download === '1');
+  }
+
+  // Streams one message image with the headers a presigned GET would have
+  // signed in (`createPresignedDownload`): the content type forced from the
+  // key's extension, an inline disposition, or an attachment one for the
+  // viewer's Save button, both naming the file `<uuid>.<ext>`. `private,
+  // no-store` because the answer depends on who asks, and `nosniff`. HEAD is
+  // answered from `HeadObject` without opening the body, and a missing object
+  // is a 404, as for a document.
+  private async streamMessageImage(
+    storageKey: string,
+    response: Response,
+    isDownload: boolean,
+  ): Promise<void> {
+    const headers: Record<string, string> = {
+      'Content-Type':
+        contentTypeForStorageKey(storageKey) ?? 'application/octet-stream',
+      'Content-Disposition': isDownload
+        ? attachmentContentDispositionForStorageKey(storageKey)
+        : inlineContentDispositionForStorageKey(storageKey),
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    if (response.req.method === 'HEAD') {
+      let contentLength: number | null;
+      try {
+        ({ contentLength } = await this.storage.headObject(storageKey));
+      } catch (error) {
+        if (FilesController.isMissingObjectError(error)) {
+          throw new NotFoundException();
+        }
+        throw error;
+      }
+      for (const [headerName, headerValue] of Object.entries(headers)) {
+        response.setHeader(headerName, headerValue);
+      }
+      if (contentLength !== null) {
+        response.setHeader('Content-Length', String(contentLength));
+      }
+      response.status(200).end();
+      return;
+    }
+    let body: Readable;
+    try {
+      body = await this.storage.openObjectStream(storageKey);
+    } catch (error) {
+      if (FilesController.isMissingObjectError(error)) {
+        throw new NotFoundException();
+      }
+      throw error;
+    }
+    for (const [headerName, headerValue] of Object.entries(headers)) {
+      response.setHeader(headerName, headerValue);
+    }
+    response.status(200);
+    try {
+      await pipeline(body, response);
+    } catch (error) {
+      const isClientAbort =
+        (error as { code?: unknown } | null)?.code ===
+        'ERR_STREAM_PREMATURE_CLOSE';
+      if (!isClientAbort) {
+        this.logger.warn(
+          `Message image stream failed for ${storageKey}: ${String(error)}`,
+        );
+      }
+    }
+  }
+
   // `@Public()` bypasses the global JwtAuthGuard; OptionalJwtAuthGuard then
   // populates the user when a valid cookie is present without rejecting when it
   // is not. CsrfGuard exempts GET, so no token is needed.
@@ -357,6 +511,18 @@ export class FilesController {
     // anchored UUID regex in `parseStorageKey` still rejects a `%2F`-smuggled
     // segment, so no extra sanitising or re-decoding belongs here.
     const storageKey = Array.isArray(rawKey) ? rawKey.join('/') : rawKey;
+    // Final fix F1 (C1): an opaque message attachment reference is served by
+    // message, see `serveMessageAttachment`.
+    const attachmentReference = parseMessageAttachmentReference(storageKey);
+    if (attachmentReference) {
+      await this.serveMessageAttachment(
+        attachmentReference.messageId,
+        user,
+        response,
+        download,
+      );
+      return;
+    }
     const kindSpec = parseStorageKey(storageKey);
     // A malformed key, an unknown prefix, and a probe all 404 identically —
     // never 401 — so the route never discloses which keys exist.
@@ -428,6 +594,12 @@ export class FilesController {
     if (
       ownerUserId &&
       ownerUserId !== user?.userId &&
+      // A sticker is platform artwork. Its key embeds the admin who published
+      // it purely because every key does, and the bytes depict a pride flag
+      // while saying nothing about who published it. Withholding it because
+      // the publisher was later suspended would blank the sticker in every
+      // conversation that ever used it.
+      kindSpec !== UPLOAD_KIND_SPECS.sticker &&
       !FilesController.isStaffViewer(user)
     ) {
       const owner = await this.users.findOne({

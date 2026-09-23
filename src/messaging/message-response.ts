@@ -2,6 +2,7 @@ import type { CursorPage } from '../common/cursor-pagination';
 import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import type { CropRect } from '../media-crops/crop-rect';
+import { IdentityKind } from '../identities/entities/identity.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
   ConversationMuteMode,
@@ -11,8 +12,10 @@ import {
   DocumentAttachment,
   GifAttachment,
   isDocumentAttachment,
+  isStickerAttachment,
   Message,
   MessageKind,
+  StickerAttachment,
   SystemEvent,
   SystemEventType,
 } from './entities/message.entity';
@@ -26,6 +29,10 @@ export interface MessageView {
   conversationId: string;
   /** NULL once the author erased their account (ENG-243). */
   senderId: string | null;
+  /** Business mailboxes (Task 11): who this message was sent AS. NULL only
+   *  where `senderId` is null, mirroring `Message.senderIdentityId`'s own
+   *  doc. */
+  senderIdentityId: string | null;
   body: string;
   replyToId: string | null;
   createdAt: Date;
@@ -35,7 +42,7 @@ export interface MessageView {
   forwarded: boolean;
   kind: MessageKind;
   systemEvent: SystemEvent | null;
-  attachment: GifAttachment | DocumentAttachment | null;
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null;
 }
 
 /**
@@ -47,10 +54,17 @@ export interface MessageView {
  * `GET /files/<key>` URL, the same way every other image field in this app
  * resolves at read time. For a `DocumentAttachment` (`kind:'document'`) only
  * `url` exists to resolve — there is no `previewUrl`. `null` in → `null` out.
+ *
+ * A `StickerAttachment` (`kind:'sticker'`) needs no branch of its own: its
+ * `url`/`previewUrl` are the sticker's private storage key, laid out exactly
+ * like a `GifAttachment`'s, so it falls into the same branch below and
+ * resolves the same way an uploaded image's does. This function keys off the
+ * value's SHAPE alone, which is why the sticker case needed only the type
+ * signature widened.
  */
 export function resolveAttachment(
-  attachment: GifAttachment | DocumentAttachment | null,
-): GifAttachment | DocumentAttachment | null {
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null,
+): GifAttachment | DocumentAttachment | StickerAttachment | null {
   if (!attachment) {
     return null;
   }
@@ -81,6 +95,7 @@ export function toMessageView(m: Message): MessageView {
     id: m.id,
     conversationId: m.conversationId,
     senderId: m.senderId,
+    senderIdentityId: m.senderIdentityId,
     body: m.body,
     replyToId: m.replyToId,
     createdAt: m.createdAt,
@@ -116,6 +131,31 @@ export interface AuthorSummary {
    *  localized "Former member" with a neutral avatar and no profile link.
    *  Optional so author summaries built outside messaging stay valid. */
   isFormerMember?: boolean;
+  /** Fix round 2 (Task 11): true for the author of a message sent AS a
+   *  business/persona/company identity that has since been deleted:
+   *  `handle` empty, `avatarUrl` null, and the client renders a localized
+   *  neutral placeholder distinct from "Former member" (`isFormerMember`
+   *  above is about a human's own erased account; this is about a mailbox
+   *  that no longer exists, and the human who once sent for it may still
+   *  have an active account). See `FORMER_IDENTITY_AUTHOR`. */
+  isFormerIdentity?: boolean;
+  /** Business mailboxes (Task 11): the identity this author summary was built
+   *  for (`buildAuthorSummary`), so the client can tell a mailbox author from
+   *  an ordinary member without inferring it from `staffFirstName`'s mere
+   *  presence. Optional and absent for the many existing profile-only author
+   *  summaries (`requireAuthorSummary`/`toAuthorSummary`/`senderAuthorSummary`)
+   *  that predate identities and carry no identity of their own. */
+  identityId?: string;
+  /** The kind of {@link identityId} above (`profile`/`subprofile`/`listing`/
+   *  `company`), same optionality and reasoning. */
+  identityKind?: IdentityKind;
+  /** The staff member's own first name, present only when BOTH attribution
+   *  switches (`IdentityAttributionService`) allow this exact reader to see
+   *  it, or when the reader is themself staff of the same mailbox. Absent
+   *  (never a blank string) otherwise, so a caller testing truthiness and one
+   *  testing `=== undefined` agree. Meaningless, and never set, on a profile
+   *  author summary. */
+  staffFirstName?: string;
 }
 
 export interface ReactionSummary {
@@ -216,8 +256,10 @@ export interface MessageResponse {
   canReport: boolean;
   /** The quoted message this one replies to, resolved server-side. Null if not a reply.
    *  `kind` is the parent's own kind and is reported even for a deleted parent;
-   *  `thumbnailUrl` (a gif/image parent's resolved `previewUrl`) and `fileName`
-   *  (a document parent's) are null otherwise, and null whenever `deleted`. */
+   *  `thumbnailUrl` (a gif/image/sticker parent's resolved `previewUrl`) and
+   *  `fileName` (a document parent's) are null otherwise, and null whenever
+   *  `deleted`. A sticker parent's `snippet` carries its `label` instead of
+   *  its (empty) body; see `buildReplyTo`. */
   replyTo: {
     id: string;
     snippet: string;
@@ -227,16 +269,16 @@ export interface MessageResponse {
      *  client renders its own localized "Former member" label. */
     senderIsFormerMember: boolean;
     deleted: boolean;
-    kind: 'user' | 'system' | 'gif' | 'image' | 'document';
+    kind: 'user' | 'system' | 'gif' | 'image' | 'document' | 'sticker';
     thumbnailUrl: string | null;
     fileName: string | null;
   } | null;
   /** `user` (an ordinary bubble), `system` (a rendered event pill), `gif` (a
-   *  picked provider GIF), `image` (a member-uploaded photo), or `document`
-   *  (a member-uploaded PDF/spreadsheet/text file, PRD-226). Present on every
-   *  message; a DM's messages are all `user`, so the client's existing bubble
-   *  path is unchanged. */
-  kind: 'user' | 'system' | 'gif' | 'image' | 'document';
+   *  picked provider GIF), `image` (a member-uploaded photo), `document`
+   *  (a member-uploaded PDF/spreadsheet/text file, PRD-226), or `sticker` (one
+   *  from an admin-published pack). Present on every message; a DM's messages
+   *  are all `user`, so the client's existing bubble path is unchanged. */
+  kind: 'user' | 'system' | 'gif' | 'image' | 'document' | 'sticker';
   /** Resolved system event for a `system` message, else null. Actor/target are
    *  resolved to DISPLAY NAMES server-side (the client only renders bilingual
    *  templates, never user ids); `actorHandle`/`targetHandle` are their public
@@ -274,14 +316,15 @@ export interface MessageResponse {
     targetIsMe?: boolean;
   } | null;
   /** The media attachment for a `kind:'gif'`/`kind:'image'`
-   *  (`url`/`previewUrl`/`width`/`height`/`provider`) or `kind:'document'`
-   *  (`url`/`fileName`/`byteSize`/`contentType`/`provider`) message, else
-   *  null. The client renders a gif/image inline and a document as a
-   *  file-card bubble (name, format, size, a download link); `body` carries a
-   *  "GIF"/"Photo"/"Document" text fallback so previews/notifications keep
-   *  working. Every `url` here is always a resolved, fetchable URL (see
-   *  `resolveAttachment`) — never a bare storage key. */
-  attachment: GifAttachment | DocumentAttachment | null;
+   *  (`url`/`previewUrl`/`width`/`height`/`provider`), `kind:'document'`
+   *  (`url`/`fileName`/`byteSize`/`contentType`/`provider`), or `kind:'sticker'`
+   *  (`url`/`previewUrl`/`width`/`height`/`provider`/`stickerId`/`label`)
+   *  message, else null. The client renders a gif/image/sticker inline and a
+   *  document as a file-card bubble (name, format, size, a download link);
+   *  `body` carries a "GIF"/"Photo"/"Document"/"Sticker" text fallback so
+   *  previews/notifications keep working. Every `url` here is always a
+   *  resolved, fetchable URL (see `resolveAttachment`). */
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null;
 }
 
 /**
@@ -409,6 +452,8 @@ export function messageKindToResponseKind(
       return 'image';
     case MessageKind.Document:
       return 'document';
+    case MessageKind.Sticker:
+      return 'sticker';
     default:
       return 'user';
   }
@@ -460,6 +505,16 @@ export function buildReplyTo(
       : undefined;
   const visibleAttachment =
     parent && !deleted ? resolveAttachment(parent.attachment) : null;
+  // A sticker parent's preview is a small thumbnail of the artwork itself,
+  // laid out exactly like a gif/image parent's (see `StickerAttachment`'s own
+  // doc: `url`/`previewUrl` hold the same resolved value), so it shares the
+  // same `previewUrl` read below with those two kinds. `visibleAttachment` is
+  // only ever set for a `parent && !deleted` row (see above), so a deleted,
+  // missing or moderator-hidden parent always resolves `thumbnailUrl` to null
+  // here, same as every other kind.
+  const isVisibleStickerAttachment = Boolean(
+    visibleAttachment && isStickerAttachment(visibleAttachment),
+  );
   let thumbnailUrl: string | null = null;
   let fileName: string | null = null;
   if (visibleAttachment && isDocumentAttachment(visibleAttachment)) {
@@ -467,13 +522,24 @@ export function buildReplyTo(
       parent?.kind === MessageKind.Document ? visibleAttachment.fileName : null;
   } else if (visibleAttachment) {
     thumbnailUrl =
-      parent?.kind === MessageKind.Gif || parent?.kind === MessageKind.Image
+      parent?.kind === MessageKind.Gif ||
+      parent?.kind === MessageKind.Image ||
+      parent?.kind === MessageKind.Sticker
         ? visibleAttachment.previewUrl
         : null;
   }
+  // A sticker parent stores no body text (see `MessagingCoreService.
+  // postMessage`'s sticker branch), so its quote snippet uses the sticker's
+  // own label.
+  const snippet =
+    parent && !deleted
+      ? isVisibleStickerAttachment && visibleAttachment
+        ? (visibleAttachment as StickerAttachment).label
+        : parent.body.slice(0, 120)
+      : '';
   return {
     id: replyToId,
-    snippet: parent && !deleted ? parent.body.slice(0, 120) : '',
+    snippet,
     senderName: isParentSenderFormerMember
       ? FORMER_MEMBER_DISPLAY_NAME
       : parentSenderProfile
@@ -582,6 +648,30 @@ export interface ConversationResponse {
    *  EVERY `ConversationResponse` (list and single-conversation alike), see
    *  `ConversationMemberPreview`'s own doc. Empty for DMs. */
   memberPreview: ConversationMemberPreview[];
+  /** Business mailboxes (Task 11): the identity THIS thread belongs to,
+   *  i.e. the mailbox `POST/DELETE :id/claim` act on
+   *  (`ConversationsService.resolveMailboxIdentityId`). Present only for a
+   *  DIRECT, non-official thread where one side is a shared business/persona
+   *  mailbox, the identity a staff member's own seat or a customer's
+   *  counterpart carries when it belongs to a business. Absent
+   *  for an ordinary member-to-member DM, a group, and an official thread,
+   *  where claiming has no meaning. Populated wherever a participant row was
+   *  already loaded (like `muted` below), at no extra query cost beyond the
+   *  identities already batch-loaded to render the page.
+   */
+  mailboxIdentityId?: string;
+  /** Business mailboxes (Task 11): who currently has this mailbox thread
+   *  claimed (`Conversation.claimedByUserId`), as an ordinary profile author
+   *  summary of the claimant themself. Always the human who claimed it, with
+   *  the mailbox identity itself carried separately, in `mailboxIdentityId`
+   *  above. Null while unclaimed. Present only where a
+   *  participant row was loaded (like `mailboxIdentityId`); absent (not merely
+   *  null) for a thread this reader's own page never resolved a mailbox for,
+   *  same optionality reasoning as `muted` below. */
+  claimedBy?: AuthorSummary | null;
+  /** When the current claim (`claimedBy`) was taken, else null. Mirrors
+   *  `Conversation.claimedAt` exactly; same optionality as `claimedBy`. */
+  claimedAt?: string | null;
   // Backend extras beyond the frontend contract, which ignores unknown fields.
   // `isOfficial` distinguishes the org/welcome thread `type: 'group'` covers
   // coarsely; `muted` is this caller's per-conversation preference and is only
@@ -834,11 +924,15 @@ export interface MessageSearchHit {
   snippet: string;
   sender: AuthorSummary;
   createdAt: string;
-  /** `user`/`system`/`gif`/`image`/`document`, mirrors `MessageResponse.kind`. */
-  kind: 'user' | 'system' | 'gif' | 'image' | 'document';
+  /** `user`/`system`/`gif`/`image`/`document`/`sticker`, mirrors
+   *  `MessageResponse.kind`. A sticker message carries no body text (see
+   *  `MessagingCoreService.postMessage`'s sticker branch), so it can never
+   *  actually be a body-search hit today; the union still mirrors
+   *  `MessageResponse.kind` exactly, per this interface's own doc above. */
+  kind: 'user' | 'system' | 'gif' | 'image' | 'document' | 'sticker';
   /** The resolved media attachment, mirroring `MessageResponse.attachment`;
    *  null for a plain-text hit. */
-  attachment: GifAttachment | DocumentAttachment | null;
+  attachment: GifAttachment | DocumentAttachment | StickerAttachment | null;
 }
 
 /**
@@ -942,6 +1036,35 @@ export const FORMER_MEMBER_AUTHOR: AuthorSummary = {
   pronouns: null,
   avatarUrl: null,
   isFormerMember: true,
+};
+
+/** English fallback for a message rendered under {@link FORMER_IDENTITY_AUTHOR}.
+ *  The client renders its own localized label off `isFormerIdentity`; this
+ *  string is only what a consumer that ignores the flag (push copy, logs)
+ *  would show. */
+export const FORMER_IDENTITY_DISPLAY_NAME = 'Former business';
+
+/**
+ * Fix round 2 (Task 11): the author of a message sent AS a business, persona
+ * or company identity that has since been deleted: no handle, no pronouns,
+ * no avatar, and the flag a client keys its neutral rendering on. Deliberately
+ * a SEPARATE flag from {@link FORMER_MEMBER_AUTHOR}'s `isFormerMember`: a
+ * former member is a human whose own account is gone, while a message under
+ * this placeholder may have been typed by a staff member whose account is
+ * very much still active, sent AS a mailbox that no longer exists.
+ * `Message.senderIdentityId` deliberately carries no foreign key (see its own
+ * doc comment), so it survives the identity's deletion instead of the
+ * database quietly nulling it back to a personal message; this placeholder
+ * is the render-time half of that guarantee, so a customer's history with a
+ * deleted business never re-attributes itself to the human who once typed
+ * for it.
+ */
+export const FORMER_IDENTITY_AUTHOR: AuthorSummary = {
+  handle: '',
+  displayName: FORMER_IDENTITY_DISPLAY_NAME,
+  pronouns: null,
+  avatarUrl: null,
+  isFormerIdentity: true,
 };
 
 /**

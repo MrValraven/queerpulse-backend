@@ -87,6 +87,11 @@ export enum GovernanceLogAction {
   // community's own history has to be able to answer later.
   SupportOffered = 'support_offered',
   SupportOfferAnswered = 'support_offer_answered',
+  // Written when an owner/mod opens a new space inside their community.
+  SubcommunityCreated = 'subcommunity_created',
+  // Written when a space's access tier is raised to stay at least as strict
+  // as its parent's.
+  SubcommunityTierRaised = 'subcommunity_tier_raised',
 }
 
 /**

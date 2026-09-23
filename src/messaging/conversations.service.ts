@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
@@ -13,6 +14,9 @@ import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { decodeCursor, encodeCursor } from '../common/cursor-pagination';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
+import { Identity, IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -30,10 +34,35 @@ import {
   ConversationRole,
 } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
+import { loadSenderIdentityContext } from './author-summary';
+import { movedNoteMailboxIdentityIds } from './viewer-message-fields';
+import {
+  claimUnclaimedConversation,
+  ClaimResponse,
+  CONVERSATION_CLAIM_CHANGED,
+  ConversationClaimChangedEvent,
+  ConversationListPageWithStaffClaim,
+  ConversationResponseWithStaffClaim,
+  NO_STAFF_CLAIM_FIELDS,
+  ReleaseClaimResponse,
+  returnedTimestamp,
+  staffClaimFields,
+  TakeOverClaimResponse,
+} from './conversation-claim';
+import {
+  DirectThreadSeats,
+  describeDirectThreadSeats,
+  isSeatExcludedFromMailbox,
+  loadMailboxIdentityBlockKeys,
+  mailboxIdentityBlockCandidates,
+  mailboxThreadPredicate,
+  NOT_A_DIRECT_THREAD,
+  renderDirectCounterpart,
+  seatExcludedFromMailboxPredicate,
+} from './mailbox-seats';
 import {
   AuthorSummary,
   computeGroupLeftReason,
-  ConversationListPage,
   ConversationResponse,
   presentSenderIds,
   toAuthorSummary,
@@ -61,6 +90,12 @@ import {
  */
 export const CONVERSATION_REQUIRES_CONNECTION_CODE =
   'CONVERSATION_REQUIRES_CONNECTION';
+
+/**
+ * Task 19: logs a claim-change relay that threw. Module-level so it exists
+ * however the service was constructed.
+ */
+const claimRelayLogger = new Logger('ConversationsService');
 
 /**
  * Conversations concern of the split `MessagingService`: the inbox
@@ -98,6 +133,13 @@ export class ConversationsService {
     // `MESSAGE_READ` emit and the `otherLastReadAt`/group-member read-state
     // fields this service serialises.
     private readonly preferencesService: PreferencesService,
+    // Business mailboxes (Tasks 7-9): `assertMayActAs` gates `claim`/`release`
+    // to a human who actually staffs the mailbox this thread belongs to.
+    private readonly identities: IdentitiesService,
+    // Fix round 1 (Task 11): resolves the staff first name (if any) a
+    // business sender carries in an inbox preview, through
+    // `loadSenderIdentityContext` (Task 13c).
+    private readonly identityAttribution: IdentityAttributionService,
   ) {}
 
   /** Bare array (legacy convenience): every internal caller besides the HTTP
@@ -115,12 +157,12 @@ export class ConversationsService {
    */
   async listConversations(
     userId: string,
-    options: { cursor?: string; limit?: number },
-  ): Promise<ConversationListPage>;
+    options: { cursor?: string; limit?: number; mailboxIdentityId?: string },
+  ): Promise<ConversationListPageWithStaffClaim>;
   async listConversations(
     userId: string,
-    options?: { cursor?: string; limit?: number },
-  ): Promise<ConversationResponse[] | ConversationListPage> {
+    options?: { cursor?: string; limit?: number; mailboxIdentityId?: string },
+  ): Promise<ConversationResponse[] | ConversationListPageWithStaffClaim> {
     // Overload dispatch: the facade's single-argument call keeps returning a
     // bare array; the HTTP list route always passes a (possibly empty)
     // second argument and gets the envelope back. `options` being merely
@@ -137,6 +179,11 @@ export class ConversationsService {
       : DEFAULT_LIST_LIMIT;
     const decodedCursor =
       isPaginatedCall && options?.cursor ? decodeCursor(options.cursor) : null;
+    // Task 24: a mailbox filter is authorized once, before any query.
+    const mailboxIdentityId = options?.mailboxIdentityId;
+    if (mailboxIdentityId !== undefined) {
+      await this.assertMayReadMailbox(userId, mailboxIdentityId);
+    }
 
     // Order by last activity BEFORE the take so the retained subset is
     // DETERMINISTIC: the most-recently-active conversations first, which is
@@ -199,7 +246,9 @@ export class ConversationsService {
       // Blocked counterpart, either direction, on a 1:1 thread. Group and
       // official threads are exempt for the same reason as the loop below: they
       // have no single counterpart, and one block must not erase a whole group
-      // from the member's inbox.
+      // from the member's inbox. Task 13c: a business mailbox thread is exempt
+      // too, for the reason the loop below gives; identity-level blocking of
+      // a business is Task 14's `identity_blocks`, applied just below.
       .andWhere(
         `NOT EXISTS (
           SELECT 1
@@ -209,6 +258,7 @@ export class ConversationsService {
             AND other.user_id <> :userId
             AND convo.kind <> :groupKind
             AND convo.is_official = false
+            AND NOT ${mailboxThreadPredicate('other.conversation_id')}
             AND EXISTS (
               SELECT 1 FROM blocks block
               WHERE (block.blocker_id = :userId AND block.blocked_id = other.user_id)
@@ -216,7 +266,25 @@ export class ConversationsService {
             )
         )`,
         { groupKind: ConversationKind.Group },
+      )
+      // Task 13c fix round 1: a STAFF member blocked either way with the
+      // customer of a mailbox thread is left out of it (see the loop below).
+      // Task 14a: so is a staff member who has left the business. Task 14:
+      // so are the customer and every staff member of a thread whose
+      // customer blocked the business.
+      .andWhere(
+        `NOT ${seatExcludedFromMailboxPredicate('participant.conversation_id', ':userId')}`,
       );
+    if (mailboxIdentityId !== undefined) {
+      // Task 24: only the caller's own seats that speak for this mailbox, on
+      // the same builder the keyset seek and `take(limit + 1)` below run on,
+      // so a filtered page is exact and its cursor walks only this mailbox.
+      // Every predicate above still applies, so a filtered list is always a
+      // subset of the merged one.
+      queryBuilder.andWhere('participant.identity_id = :mailboxIdentityId', {
+        mailboxIdentityId,
+      });
+    }
     if (decodedCursor) {
       // Keyset seek: strictly OLDER activity than the cursor's row, with
       // `participant.id` (unique per caller-conversation pair) as the
@@ -281,6 +349,30 @@ export class ConversationsService {
   }
 
   /**
+   * Task 24: the gate for every `?as=` mailbox filter (the inbox, search and
+   * starred lists). It uses the read test, `isAllowedToActAs`, so a
+   * moderation-removed persona's staff keep reading its threads, the way the
+   * mailbox switcher lists it read-only; the member's own profile identity
+   * passes too, since its staff set is the member. A caller who does not
+   * staff the identity and a caller naming an identity that does not exist
+   * both get the identical refusal, so the routes are no oracle for which
+   * identities exist. It keeps the `IDENTITY_NOT_STAFF` code
+   * `assertMayActAs` uses, which clients key on, with a message that fits a
+   * read.
+   */
+  async assertMayReadMailbox(
+    userId: string,
+    mailboxIdentityId: string,
+  ): Promise<void> {
+    if (!(await this.identities.isAllowedToActAs(userId, mailboxIdentityId))) {
+      throw new ForbiddenException({
+        code: 'IDENTITY_NOT_STAFF',
+        message: 'You cannot read this mailbox',
+      });
+    }
+  }
+
+  /**
    * Single-conversation read path (ENG-253): full detail for ONE conversation
    * the caller already has open. Returns the group's real member roster with
    * each member's read/delivered watermark (for "Seen by N") and the
@@ -298,7 +390,7 @@ export class ConversationsService {
   async getConversation(
     conversationId: string,
     userId: string,
-  ): Promise<ConversationResponse> {
+  ): Promise<ConversationResponseWithStaffClaim> {
     const part = await this.core.requireParticipant(conversationId, userId);
     const [summary] = await this.buildConversationSummaries([part], userId, {
       fullDetail: true,
@@ -329,7 +421,7 @@ export class ConversationsService {
     myParts: ConversationParticipant[],
     userId: string,
     { fullDetail }: { fullDetail: boolean },
-  ): Promise<ConversationResponse[]> {
+  ): Promise<ConversationResponseWithStaffClaim[]> {
     const clearedAtByConversation = new Map<string, Date>();
     for (const part of myParts) {
       if (part.clearedAt) {
@@ -370,6 +462,17 @@ export class ConversationsService {
     // PRD-364: one batched read of every participant's (caller's own included)
     // messaging-privacy row, so the read-state gating below costs the same
     // single query as everything else here rather than one per conversation.
+    //
+    // Business mailboxes (Task 11): every distinct identity a seat on this
+    // page carries (the caller's own and every counterpart's), in ONE query,
+    // so telling a mailbox seat apart from an ordinary profile seat below
+    // never turns into a per-conversation `IdentitiesService.getById` call.
+    const participantIdentityIds = [
+      ...new Set([
+        ...myParts.map((part) => part.identityId),
+        ...others.map((other) => other.identityId),
+      ]),
+    ];
     const [
       lastByConvo,
       unreadByConvo,
@@ -405,17 +508,57 @@ export class ConversationsService {
     // platform's own welcome message read as being from "Member" in the inbox.
     // `presentSenderIds` also drops the NULL sender of an erased author, which
     // `senderAuthorSummary` renders as a former member on its own.
-    const relevantProfiles = await this.profiles.find({
-      where: {
-        userId: In([
-          ...new Set([
-            userId,
-            ...others.map((other) => other.userId),
-            ...presentSenderIds([...lastByConvo.values()]),
+    // Business mailboxes (Task 11): a claimed mailbox thread's `claimedBy` is
+    // an ordinary profile author summary of the claimant, so their profile
+    // rides this same batched query too, one lookup for the whole page.
+    // Task 19: the colleagues a thread's latest claim change names (who
+    // released it, whose claim was taken over) ride the same query.
+    const claimantUserIds = convos
+      .flatMap((convo) => [
+        convo.claimedByUserId,
+        convo.claimReleasedByUserId,
+        convo.claimTakenOverFromUserId,
+      ])
+      .filter(
+        (claimantUserId): claimantUserId is string => claimantUserId !== null,
+      );
+    // Task 13c: ONE identity context for the whole page, covering every
+    // seat's identity (the header and every seat rule below) and every
+    // preview's sender identity (`buildLastMessagePreview`), so the inbox
+    // preview names a business sender exactly the way the thread does. The
+    // preview senders are why this waits for `lastByConvo`: an official
+    // thread's sender is the house account, which holds no seat here.
+    const [relevantProfiles, identityContext] = await Promise.all([
+      this.profiles.find({
+        where: {
+          userId: In([
+            ...new Set([
+              userId,
+              ...others.map((other) => other.userId),
+              ...presentSenderIds([...lastByConvo.values()]),
+              ...claimantUserIds,
+            ]),
           ]),
-        ]),
-      },
-    });
+        },
+      }),
+      loadSenderIdentityContext(
+        {
+          identities: this.identities,
+          identityAttribution: this.identityAttribution,
+        },
+        [
+          ...participantIdentityIds,
+          ...[...lastByConvo.values()].flatMap((message) =>
+            message.senderIdentityId ? [message.senderIdentityId] : [],
+          ),
+          // Task 23 cleanup: the business a moved note names, so its
+          // preview reads the business's current name.
+          ...movedNoteMailboxIdentityIds([...lastByConvo.values()]),
+        ],
+        userId,
+      ),
+    ]);
+    const identityKindById = identityContext.identityKindById;
     const profileByUser = new Map(
       relevantProfiles.map((profile) => [profile.userId, profile]),
     );
@@ -444,17 +587,55 @@ export class ConversationsService {
       others.map((o) => o.userId),
     );
 
+    // Task 13c: which identity every seat of every DIRECT thread on this page
+    // speaks for, computed ONCE per thread by `describeDirectThreadSeats`
+    // (`mailbox-seats.ts`) and read by the batched `connectedSince` lookup
+    // just below and by every field of the per-row build further down, so
+    // they all agree on the same seats. That helper keeps the rule fix round
+    // 1 of Task 13b introduced: a STAFF caller's customer is the one other
+    // seat whose identity differs from the mailbox identity, found
+    // deterministically whatever order the unordered read returned.
+    const myPartByConvoId = new Map(
+      myParts.map((myPart) => [myPart.conversationId, myPart]),
+    );
+    const threadSeatsByConvoId = new Map<string, DirectThreadSeats>();
+    for (const convo of convos) {
+      const myPart = myPartByConvoId.get(convo.id);
+      threadSeatsByConvoId.set(
+        convo.id,
+        convo.kind === ConversationKind.Group || convo.isOfficial || !myPart
+          ? NOT_A_DIRECT_THREAD
+          : describeDirectThreadSeats(
+              myPart.identityId,
+              othersByConvo.get(convo.id) ?? [],
+              identityKindById,
+            ),
+      );
+    }
+    // Task 14: the customer's blocks of a whole business, for every mailbox
+    // thread on this page in one batched query: the caller's own blocks for
+    // a customer, each thread's customer's for a staff caller.
+    const identityBlockKeys = await loadMailboxIdentityBlockKeys(
+      myParts.flatMap((myPart) => {
+        const threadSeats = threadSeatsByConvoId.get(myPart.conversationId);
+        return threadSeats
+          ? mailboxIdentityBlockCandidates(myPart, threadSeats)
+          : [];
+      }),
+      this.blockFilter,
+    );
     // DES-225: `connectedSince` for every DM row in ONE query over all the
     // direct, non-official counterparts, never one lookup per conversation.
+    // A STAFF caller asks for the CUSTOMER's own connection date. A
+    // customer's view of a mailbox thread asks for nothing, since that field
+    // reads null there (see its own comment further down).
     const connectedSinceByCounterpart =
       await this.connectionsService.acceptedSinceByCounterpart(
         userId,
-        convos.flatMap((convo) =>
-          convo.kind !== ConversationKind.Group && !convo.isOfficial
-            ? (othersByConvo.get(convo.id) ?? [])
-                .slice(0, 1)
-                .map((other) => other.userId)
-            : [],
+        [...threadSeatsByConvoId.values()].flatMap((threadSeats) =>
+          threadSeats.mailboxIdentityId && !threadSeats.isCallerMailboxSeat
+            ? []
+            : threadSeats.counterpartSeats.map((seat) => seat.userId),
         ),
       );
 
@@ -475,7 +656,7 @@ export class ConversationsService {
     // extra round trip at most, not N.
     const expiredMuteUpdates: Promise<unknown>[] = [];
 
-    const summaries: ConversationResponse[] = [];
+    const summaries: ConversationResponseWithStaffClaim[] = [];
     for (const part of myParts) {
       const convo = convoById.get(part.conversationId);
       if (!convo) {
@@ -483,24 +664,65 @@ export class ConversationsService {
       }
       const isGroup = convo.kind === ConversationKind.Group;
       const convoOthers = othersByConvo.get(convo.id) ?? [];
+      // Task 13c: see `threadSeatsByConvoId` above. `NOT_A_DIRECT_THREAD`
+      // for a group or official thread.
+      const threadSeats =
+        threadSeatsByConvoId.get(convo.id) ?? NOT_A_DIRECT_THREAD;
+      const { isCallerMailboxSeat, mailboxIdentityId, counterpartSeats } =
+        threadSeats;
+      // A customer's own view of a mailbox thread: every other seat is staff
+      // of the one business, and no field below names any one of them.
+      const isCustomerViewOfMailbox =
+        Boolean(mailboxIdentityId) && !isCallerMailboxSeat;
+      // A person-to-person block severs an ordinary 1:1 DM. Task 13c: on a
+      // mailbox thread the rule is asymmetric. The CUSTOMER's view keeps the
+      // business thread whatever personal blocks they hold, since hiding it
+      // would tell them that person works there. A STAFF member blocked
+      // either way with the customer loses the thread
+      // (`isStaffSeatExcludedFromMailbox`, fix round 1), so a customer who
+      // blocked someone for their safety stays out of that person's sight,
+      // while every colleague without a block keeps the thread and the
+      // business keeps answering. A block between colleagues changes nothing.
+      // Task 14a: a staff member who has left the business loses the thread
+      // by the same call, and gets it back if they are seated again.
+      // Task 14: a customer who blocked the business as a whole
+      // (`identity_blocks`) loses the thread, and so does every staff member
+      // of it, through the same call (`isSeatExcludedFromMailbox`). The SQL
+      // pre-filter in `listConversations` carries the same rules.
       if (
         !isGroup &&
         !convo.isOfficial &&
-        convoOthers.some((o) => blockedCounterparts.has(o.userId))
+        (mailboxIdentityId
+          ? isSeatExcludedFromMailbox(
+              part,
+              threadSeats,
+              blockedCounterparts,
+              identityBlockKeys,
+            )
+          : convoOthers.some((o) => blockedCounterparts.has(o.userId)))
       ) {
         continue;
       }
-      let otherParticipant: AuthorSummary | null = null;
       // 1:1 thread: the single counterpart. Official/welcome AND group threads
-      // have no single "other participant" — the client shows the org identity
-      // or the group title instead — so `first` stays undefined and the
-      // counterpart fields below fall back to null.
+      // have no single "other participant" (the client shows the org identity
+      // or the group title instead), so `first` stays undefined and
+      // `otherParticipant` stays null.
       const first = convo.isOfficial || isGroup ? undefined : convoOthers[0];
-      if (!convo.isOfficial && !isGroup) {
-        otherParticipant = toAuthorSummary(
-          first ? profileByUser.get(first.userId) : undefined,
-        );
-      }
+      // Task 13c: `renderDirectCounterpart` (`mailbox-seats.ts`) renders the
+      // header for every direct thread: the customer's own profile for a
+      // STAFF caller (fix round 2 of Task 13b), the business itself for a
+      // customer, and an ordinary member's profile otherwise. A header
+      // describes the whole business, so it names no staff member; per-message
+      // attribution names the person who actually wrote.
+      const otherParticipant: AuthorSummary | null =
+        convo.isOfficial || isGroup
+          ? null
+          : renderDirectCounterpart(
+              threadSeats,
+              identityKindById,
+              identityContext.identityDescriptionById,
+              profileByUser,
+            );
       // PRD-340: the one-tap-reply state for this DM, from THIS caller's
       // side; see `replyGateFor`. `replyRequiresConnection` mirrors it
       // (`!== "open"`) for existing callers; a blocked counterpart never
@@ -510,7 +732,22 @@ export class ConversationsService {
           ? this.replyGateFor(
               convo,
               userId,
-              acceptedConnectionUserIds.has(first.userId),
+              // Business mailboxes (fix round 1, Task 13b): on a mailbox
+              // thread the connection input is false on both sides of it, even
+              // when the customer really is connected to one staff member as a
+              // person. A connection is between two people, and the thread is
+              // with the business, the same reason `connectedSince` reads null
+              // on the customer's side. A customer who personally knows
+              // someone on staff therefore waits for the BUSINESS to send its
+              // first reply, the same as any other customer, and the thread's
+              // open state stays a property of the thread (who initiated,
+              // whether it already opened) that reads the same on every fetch.
+              // `MessagesService.sendMessageWithOutcome` enforces this same
+              // rule at send time. Task 13c: a thread whose seats cannot be
+              // attributed (`counterpartSeats` empty) also reads false.
+              !mailboxIdentityId &&
+                counterpartSeats.length === 1 &&
+                acceptedConnectionUserIds.has(counterpartSeats[0]!.userId),
             )
           : 'open';
       const replyRequiresConnection =
@@ -570,15 +807,35 @@ export class ConversationsService {
           }),
         );
       }
-      // PRD-364: reciprocal. The caller only sees the counterpart's read
-      // state (watermark AND, since PRD-351, real instant) when BOTH sides
-      // share read receipts. Shared between `otherLastReadAt` and
-      // `otherLastReadInstant` below so the two can never apply the gate
-      // differently.
-      const canSeeOtherReadState =
-        !!first &&
-        viewerSharesReadReceipts &&
-        (privacyByUser.get(first.userId)?.shareReadReceipts ?? true);
+      const latestOf = (values: ReadonlyArray<Date | null>): Date | null =>
+        values.reduce<Date | null>(
+          (latest, value) =>
+            value && (!latest || value > latest) ? value : latest,
+          null,
+        );
+      // Read state, gated and valued from ONE list of seats (fix round 4 of
+      // Task 13b, generalised by Task 13c). The seats that may contribute are
+      // `counterpartSeats` (see its own doc in `mailbox-seats.ts`): the
+      // customer's own seat for a STAFF caller, every staff seat for a
+      // customer (the collapsed read receipt of Task 11: a customer's
+      // message reads as read once ANY staff seat has read it), the single
+      // counterpart of an ordinary DM, and none for a thread whose seats
+      // cannot be attributed.
+      //
+      // PRD-364 is reciprocal: the caller sees read state only while they
+      // share read receipts themselves, and only from seats whose own person
+      // shares them. Task 13c applies that per seat BEFORE collapsing, so a
+      // staff member who turned read receipts off never contributes to what
+      // the customer sees, whatever order the seats arrived in. Both the gate
+      // (`canSeeOtherReadState`) and the two values below read this same
+      // `otherReadStateSeats`, so the gate and the value always describe the
+      // same people.
+      const otherReadStateSeats = viewerSharesReadReceipts
+        ? counterpartSeats.filter(
+            (seat) => privacyByUser.get(seat.userId)?.shareReadReceipts ?? true,
+          )
+        : [];
+      const canSeeOtherReadState = otherReadStateSeats.length > 0;
       summaries.push({
         id: convo.id,
         type: isGroup || convo.isOfficial ? 'group' : 'dm',
@@ -590,6 +847,8 @@ export class ConversationsService {
               profileByUser,
               reactionsByMessage.get(clearedLastMessage.id) ?? [],
               userId,
+              identityContext,
+              part.identityId,
             )
           : null,
         unreadCount: unreadByConvo.get(convo.id) ?? 0,
@@ -599,28 +858,87 @@ export class ConversationsService {
         updatedAt: (
           clearedLastMessage?.createdAt ?? convo.createdAt
         ).toISOString(),
-        // PRD-364: reciprocal — withheld unless BOTH the caller and the
+        // PRD-364: reciprocal, withheld unless BOTH the caller and the
         // counterpart share read receipts. `myLastReadAt` is the caller's own
-        // watermark (never someone else's read state), so it is unaffected.
+        // watermark, so it is unaffected. Task 13c: the latest watermark
+        // across `otherReadStateSeats`, the same seats the gate above read.
+        // For a STAFF caller that is the CUSTOMER's own seat (fix rounds 3
+        // and 4 of Task 13b), so a colleague having read a message never
+        // reads as the customer having read it. For a customer it is every
+        // staff seat that shares read receipts.
         otherLastReadAt: canSeeOtherReadState
-          ? (first?.lastReadAt?.toISOString() ?? null)
+          ? (latestOf(
+              otherReadStateSeats.map((seat) => seat.lastReadAt),
+            )?.toISOString() ?? null)
           : null,
-        // PRD-351: the same gate, applied to the real read INSTANT alongside
-        // the watermark above, see `ConversationParticipant.lastReadInstant`'s
-        // own doc for why the two are distinct columns.
+        // PRD-351: the same gate and the same seats, applied to the real read
+        // INSTANT alongside the watermark above. See
+        // `ConversationParticipant.lastReadInstant`'s own doc for why the two
+        // are distinct columns.
         otherLastReadInstant: canSeeOtherReadState
-          ? (first?.lastReadInstant?.toISOString() ?? null)
+          ? (latestOf(
+              otherReadStateSeats.map((seat) => seat.lastReadInstant),
+            )?.toISOString() ?? null)
           : null,
         myLastReadAt: part.lastReadAt?.toISOString() ?? null,
-        otherDeliveredAt: first?.deliveredAt?.toISOString() ?? null,
-        otherParticipantId: first?.userId ?? null,
+        // The delivered watermark reads the same `counterpartSeats` (Task
+        // 13b, generalised by Task 13c): the customer's own for a STAFF
+        // caller, and for a customer the moment ANY staff seat's device has
+        // the message.
+        otherDeliveredAt:
+          latestOf(
+            counterpartSeats.map((seat) => seat.deliveredAt),
+          )?.toISOString() ?? null,
+        // Presence and the frontend's report/block subject are keyed by this
+        // id. A customer's own view of a mailbox thread gets null (Task 13b):
+        // a business has no human counterpart for the client to correlate,
+        // and one staff member's id would let a customer ask whether that
+        // person is online. A STAFF caller gets the CUSTOMER's id (fix round
+        // 1 of Task 13b), found deterministically among colleague seats. A
+        // thread whose seats cannot be attributed gets null (Task 13c).
+        otherParticipantId: isCustomerViewOfMailbox
+          ? null
+          : (counterpartSeats[0]?.userId ?? null),
+        // Business mailboxes (Task 11): see `mailboxIdentityId`'s own doc on
+        // `ConversationResponse` for exactly when this is set.
+        mailboxIdentityId,
+        // Business mailboxes (Task 13b): who claimed a mailbox thread is
+        // information for the mailbox's own staff, the colleague-facing
+        // purpose the claim feature exists for, so only a STAFF caller of
+        // this mailbox receives the claimant's author summary. Task 13c fix
+        // round 1: `claimedAt` follows the same rule, since its changes
+        // across release and re-claim trace staff handovers.
+        claimedBy:
+          isCallerMailboxSeat && mailboxIdentityId && convo.claimedByUserId
+            ? toAuthorSummary(profileByUser.get(convo.claimedByUserId))
+            : null,
+        claimedAt:
+          isCallerMailboxSeat && mailboxIdentityId
+            ? (convo.claimedAt?.toISOString() ?? null)
+            : null,
+        // Task 19: who last released the claim, when, and whose claim the
+        // current claimant took over, under the same staff-only rule as
+        // `claimedBy`, since each names a person who staffs the business.
+        // The claimant's user id rides the same rule, so a colleague can pass
+        // it to take-over as `fromUserId`.
+        ...(isCallerMailboxSeat && mailboxIdentityId
+          ? staffClaimFields(convo, profileByUser)
+          : NO_STAFF_CLAIM_FIELDS),
         replyRequiresConnection,
         replyGate,
-        // `first` is undefined for official/group threads, so they get null.
-        connectedSince: first
-          ? (connectedSinceByCounterpart.get(first.userId)?.toISOString() ??
-            null)
-          : null,
+        // A connection is a relationship between two people. A customer's own
+        // view of a mailbox thread gets null, since the business holds no
+        // personal connection with the customer (Task 13b). A STAFF caller
+        // reads their own connection with the CUSTOMER, the same seat the
+        // batched `connectedSinceByCounterpart` lookup above asked about.
+        // Group and official threads carry no counterpart seats, so null.
+        connectedSince: isCustomerViewOfMailbox
+          ? null
+          : counterpartSeats[0]
+            ? (connectedSinceByCounterpart
+                .get(counterpartSeats[0].userId)
+                ?.toISOString() ?? null)
+            : null,
         kind: isGroup ? 'group' : 'direct',
         title: isGroup ? convo.title : null,
         avatarUrl: isGroup ? toImageUrl(convo.avatarUrl) : null,
@@ -1156,13 +1474,346 @@ export class ConversationsService {
     return { ok: true };
   }
 
-  isParticipant(conversationId: string, userId: string): Promise<boolean> {
-    return this.participants.exists({ where: { conversationId, userId } });
+  /**
+   * The business/persona/company identity a thread belongs to, i.e. the
+   * mailbox `claim`/`release` act on. A business mailbox seats one
+   * `ConversationParticipant` row per staff member, all sharing that ONE
+   * identity, alongside the customer's own profile-identity row, so the
+   * mailbox identity is the one seat in the thread that is not a plain
+   * member acting as themselves.
+   *
+   * Callers are expected to have already run `MessagingCoreService
+   * .requireParticipant` for this exact `conversationId`, so the empty-seats
+   * case below is a defensive fallback that no real caller reaches.
+   * `BadRequestException` covers a real, ordinary member-to-member
+   * thread, where claiming has no meaning, and is safe to raise here because
+   * the caller already knows this conversation exists (they hold a seat in
+   * it). A conversation somehow carrying more than one distinct non-profile
+   * identity is a data-integrity fault, so that case throws outright and
+   * leaves the choice between those identities unmade.
+   */
+  private async resolveMailboxIdentityId(
+    conversationId: string,
+  ): Promise<string> {
+    const seats = await this.participants.find({
+      where: { conversationId },
+      select: { identityId: true },
+    });
+    if (seats.length === 0) {
+      throw new NotFoundException('Conversation not found');
+    }
+    const identityIds = [...new Set(seats.map((seat) => seat.identityId))];
+    const identities = await Promise.all(
+      identityIds.map((identityId) => this.identities.getById(identityId)),
+    );
+    const mailboxIdentities = identities.filter(
+      (identity): identity is Identity =>
+        identity !== null && identity.kind !== IdentityKind.Profile,
+    );
+    if (mailboxIdentities.length === 0) {
+      throw new BadRequestException({
+        code: 'CONVERSATION_NOT_A_MAILBOX',
+        message: 'Only a shared business mailbox thread can be claimed',
+      });
+    }
+    if (mailboxIdentities.length > 1) {
+      throw new Error(
+        `Conversation ${conversationId} carries more than one business mailbox identity`,
+      );
+    }
+    // Exactly one element at this point: neither `=== 0` nor `> 1` above.
+    return mailboxIdentities[0]!.id;
+  }
+
+  /**
+   * Claim an unclaimed thread, or find out who beat the caller to it. Two
+   * staff members hitting Claim at the same instant must settle on exactly
+   * one winner, so the claim itself is a single conditional UPDATE guarded on
+   * `claimed_by_user_id IS NULL`: only the request whose UPDATE actually
+   * matches a row (`affected === 1`) becomes the claimant. Postgres commits
+   * that guard atomically as part of the write itself, closing the window a
+   * separate read-then-write would leave open for a second caller to slip
+   * through. A caller who loses the race (`affected === 0`) re-reads
+   * the row and is told the real claimant, with `isNewlyClaimed: false`; a
+   * caller re-claiming their own already-claimed thread reads back their own
+   * id with `isNewlyClaimed: true`. Task 19: a loser whose re-read finds the
+   * thread unclaimed (someone released it in between) reads
+   * `claimedByUserId: null`, and every response names the claimant through
+   * `claimedBy`, rendered as the conversation read renders it for staff.
+   *
+   * Task 19: the same UPDATE clears the release columns and
+   * `claimTakenOverFromUserId`, so the row holds the latest change only
+   * (see `Conversation.claimReleasedByUserId`), and a claim that changed the
+   * row emits `CONVERSATION_CLAIM_CHANGED` once it has committed.
+   *
+   * Gated in two steps, in order: `requireParticipant` first, so a caller
+   * with no relationship to this conversation at all gets the same plain
+   * "not a participant" refusal every other read/write in this service
+   * gives them, learning nothing about whether the id even exists; then
+   * `assertMayActAs`, which refuses a participant (a customer, say) who is
+   * not staff for the mailbox this thread belongs to.
+   */
+  async claim(conversationId: string, userId: string): Promise<ClaimResponse> {
+    await this.core.requireParticipant(conversationId, userId);
+    const mailboxIdentityId =
+      await this.resolveMailboxIdentityId(conversationId);
+    await this.identities.assertMayActAs(userId, mailboxIdentityId);
+
+    const claimedAt = await claimUnclaimedConversation(
+      this.conversations,
+      conversationId,
+      userId,
+    );
+
+    if (claimedAt) {
+      this.emitClaimChanged({
+        conversationId,
+        mailboxIdentityId,
+        change: 'claimed',
+        isImplicit: false,
+        actorUserId: userId,
+        claimedByUserId: userId,
+        previousClaimantUserId: null,
+        changedAt: claimedAt,
+      });
+      const summaryByUser = await this.claimAuthorSummaries([userId]);
+      return {
+        claimedByUserId: userId,
+        isNewlyClaimed: true,
+        claimedBy: summaryByUser.get(userId) ?? null,
+        claimedAt: claimedAt.toISOString(),
+      };
+    }
+    const current = await this.currentClaimResponse(conversationId);
+    return {
+      ...current,
+      isNewlyClaimed: current.claimedByUserId === userId,
+    };
+  }
+
+  /**
+   * Task 19: take a claimed thread over from the colleague the caller saw
+   * holding it (spec 6.5, a visible action that names who did it). One
+   * conditional UPDATE guarded on `claimed_by_user_id = :fromUserId`, so a
+   * take-over only ever takes the thread from the person the member was
+   * shown: when a third colleague claimed it in the meantime, or it was
+   * released, no row matches and the caller reads the current state with
+   * `isNewlyClaimed: false`, exactly like a lost claim. The same write
+   * records `fromUserId` in `claimTakenOverFromUserId` and clears the
+   * release columns. `fromUserId` naming the caller changes nothing and
+   * reads the current state.
+   *
+   * Gated exactly like `claim`: `requireParticipant`, then the mailbox
+   * lookup, then `assertMayActAs`.
+   */
+  async takeOver(
+    conversationId: string,
+    userId: string,
+    fromUserId: string,
+  ): Promise<TakeOverClaimResponse> {
+    await this.core.requireParticipant(conversationId, userId);
+    const mailboxIdentityId =
+      await this.resolveMailboxIdentityId(conversationId);
+    await this.identities.assertMayActAs(userId, mailboxIdentityId);
+
+    if (fromUserId !== userId) {
+      const result = await this.conversations
+        .createQueryBuilder()
+        .update()
+        .set({
+          claimedByUserId: userId,
+          claimedAt: () => 'now()',
+          claimReleasedByUserId: null,
+          claimReleasedAt: null,
+          claimTakenOverFromUserId: fromUserId,
+        })
+        .where('id = :conversationId', { conversationId })
+        .andWhere('claimed_by_user_id = :fromUserId', { fromUserId })
+        .returning(['claimedAt'])
+        .execute();
+
+      if (result.affected === 1) {
+        const claimedAt = returnedTimestamp(result.raw, 'claimed_at');
+        this.emitClaimChanged({
+          conversationId,
+          mailboxIdentityId,
+          change: 'taken_over',
+          isImplicit: false,
+          actorUserId: userId,
+          claimedByUserId: userId,
+          previousClaimantUserId: fromUserId,
+          changedAt: claimedAt,
+        });
+        const summaryByUser = await this.claimAuthorSummaries([
+          userId,
+          fromUserId,
+        ]);
+        return {
+          claimedByUserId: userId,
+          isNewlyClaimed: true,
+          claimedBy: summaryByUser.get(userId) ?? null,
+          claimedAt: claimedAt.toISOString(),
+          previousClaimant: summaryByUser.get(fromUserId) ?? null,
+        };
+      }
+    }
+    const current = await this.currentClaimResponse(conversationId);
+    return { ...current, isNewlyClaimed: false, previousClaimant: null };
+  }
+
+  /**
+   * Release a claim so the thread reads unclaimed again and an idle claim
+   * can never lock the mailbox for good. Any staff member of the mailbox may
+   * release it, whether or not they are the current claimant: the same
+   * roster that may take an unclaimed thread may also simply release a
+   * colleague's claim. Gated the same two-step way `claim` is:
+   * `requireParticipant` first, then `assertMayActAs`, so a caller with no
+   * relationship to the conversation and a caller with a seat but no mailbox
+   * standing both learn only "you cannot do this", and nothing about whether
+   * a claim, or the conversation itself, exists. A thread that is already
+   * unclaimed is left exactly as it is.
+   *
+   * Task 19: the release records who did it (spec 4.3). It reads the current
+   * claimant, then runs exactly one UPDATE guarded on that claimant, which
+   * clears the claim, records the caller and the instant in the release
+   * columns, and clears `claimTakenOverFromUserId`. No row matching means
+   * the claim changed under the caller (a colleague took it over, say), so
+   * it re-reads and stops there with no second write: the newer claim
+   * stands, and the caller reads who holds the thread now. A release that
+   * changed the row emits `CONVERSATION_CLAIM_CHANGED`.
+   *
+   * Returns the claim as it stands afterwards: `isReleased` is true only
+   * when this call's write released it, and `claimedByUserId` names whoever
+   * holds the thread when it lost the race. `isNewlyClaimed` is always
+   * false.
+   */
+  async release(
+    conversationId: string,
+    userId: string,
+  ): Promise<ReleaseClaimResponse> {
+    await this.core.requireParticipant(conversationId, userId);
+    const mailboxIdentityId =
+      await this.resolveMailboxIdentityId(conversationId);
+    await this.identities.assertMayActAs(userId, mailboxIdentityId);
+
+    const conversation = await this.conversations.findOne({
+      where: { id: conversationId },
+    });
+    const observedClaimantUserId = conversation?.claimedByUserId ?? null;
+    if (observedClaimantUserId !== null) {
+      const result = await this.conversations
+        .createQueryBuilder()
+        .update()
+        .set({
+          claimedByUserId: null,
+          claimedAt: null,
+          claimReleasedByUserId: userId,
+          claimReleasedAt: () => 'now()',
+          claimTakenOverFromUserId: null,
+        })
+        .where('id = :conversationId', { conversationId })
+        .andWhere('claimed_by_user_id = :observedClaimantUserId', {
+          observedClaimantUserId,
+        })
+        .returning(['claimReleasedAt'])
+        .execute();
+      if (result.affected === 1) {
+        this.emitClaimChanged({
+          conversationId,
+          mailboxIdentityId,
+          change: 'released',
+          isImplicit: false,
+          actorUserId: userId,
+          claimedByUserId: null,
+          previousClaimantUserId: observedClaimantUserId,
+          changedAt: returnedTimestamp(result.raw, 'claim_released_at'),
+        });
+        return {
+          claimedByUserId: null,
+          isNewlyClaimed: false,
+          claimedBy: null,
+          claimedAt: null,
+          isReleased: true,
+        };
+      }
+    }
+    const current = await this.currentClaimResponse(conversationId);
+    return { ...current, isNewlyClaimed: false, isReleased: false };
+  }
+
+  /**
+   * Task 19: the claim as it stands now, read back after a write that
+   * changed nothing (a lost claim, a lost or empty take-over). An unclaimed
+   * thread reads `claimedByUserId: null`. `isNewlyClaimed` is the caller's
+   * to decide.
+   */
+  private async currentClaimResponse(
+    conversationId: string,
+  ): Promise<ClaimResponse> {
+    const current = await this.conversations.findOne({
+      where: { id: conversationId },
+    });
+    if (!current) {
+      throw new NotFoundException('Conversation not found');
+    }
+    const claimedByUserId = current.claimedByUserId ?? null;
+    const summaryByUser = claimedByUserId
+      ? await this.claimAuthorSummaries([claimedByUserId])
+      : new Map<string, AuthorSummary | null>();
+    return {
+      claimedByUserId,
+      isNewlyClaimed: false,
+      claimedBy: claimedByUserId
+        ? (summaryByUser.get(claimedByUserId) ?? null)
+        : null,
+      claimedAt: claimedByUserId
+        ? (current.claimedAt?.toISOString() ?? null)
+        : null,
+    };
+  }
+
+  /**
+   * Task 19: author summaries for the people a claim response names, in one
+   * profile query, rendered with `toAuthorSummary` exactly as the
+   * conversation read renders `claimedBy` for staff.
+   */
+  private async claimAuthorSummaries(
+    userIds: string[],
+  ): Promise<Map<string, AuthorSummary | null>> {
+    const profiles = await this.profiles.find({
+      where: { userId: In([...new Set(userIds)]) },
+    });
+    const profileByUser = new Map(
+      profiles.map((profile) => [profile.userId, profile]),
+    );
+    return new Map(
+      userIds.map((claimUserId) => [
+        claimUserId,
+        toAuthorSummary(profileByUser.get(claimUserId)),
+      ]),
+    );
+  }
+
+  /**
+   * Task 19: `CONVERSATION_CLAIM_CHANGED`, emitted after a claim write that
+   * changed the row has committed. Best-effort: the write already stands,
+   * so a listener that throws is logged and never fails the request.
+   */
+  private emitClaimChanged(event: ConversationClaimChangedEvent): void {
+    try {
+      this.eventEmitter.emit(CONVERSATION_CLAIM_CHANGED, event);
+    } catch (error) {
+      claimRelayLogger.error(
+        `Failed to relay a claim change: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+    }
   }
 
   /**
    * Stricter join gate for a LIVE socket room (`ChatGateway.handleJoin`) than
-   * plain participation (`isParticipant`): also refuses a participant who
+   * plain participation: also refuses a participant who
    * left/was removed from a group (no live room for them — history stays
    * reachable over HTTP, ceilinged at their `leftAt` — see
    * `MessagesService.getMessages`) and a DM whose counterpart is blocked
@@ -1184,14 +1835,41 @@ export class ConversationsService {
       where: { id: conversationId },
     });
     if (convo && convo.kind !== ConversationKind.Group && !convo.isOfficial) {
-      const other = await this.participants.findOne({
-        where: { conversationId, userId: Not(userId) },
-      });
-      if (
-        other &&
-        (await this.blockFilter.isBlockedEitherWay(userId, other.userId))
-      ) {
-        return false;
+      // Task 13c: the same seat rule as the inbox and the send-time gate.
+      // On a business mailbox thread only a STAFF member blocked either way
+      // with the customer is refused (fix round 1); the customer and every
+      // other colleague join as before. Task 13g: that rule is decided by
+      // `isSeatExcludedFromMailbox`, the helper the inbox composes, so any
+      // extension of the shared rule reaches the live room too. Task 14: it
+      // refuses the customer and every staff member once the customer has
+      // blocked the business.
+      const { threadSeats, otherSeats } = await this.core.loadDirectThreadSeats(
+        conversationId,
+        participant,
+      );
+      if (threadSeats.mailboxIdentityId) {
+        const [blockedUserIds, identityBlockKeys] = await Promise.all([
+          this.blockFilter.blockedUserIds(
+            userId,
+            otherSeats.map((seat) => seat.userId),
+          ),
+          loadMailboxIdentityBlockKeys(
+            mailboxIdentityBlockCandidates(participant, threadSeats),
+            this.blockFilter,
+          ),
+        ]);
+        return !isSeatExcludedFromMailbox(
+          participant,
+          threadSeats,
+          blockedUserIds,
+          identityBlockKeys,
+        );
+      }
+      // An ordinary DM checks every other seat (it has exactly one).
+      for (const other of otherSeats) {
+        if (await this.blockFilter.isBlockedEitherWay(userId, other.userId)) {
+          return false;
+        }
       }
     }
     return true;
@@ -1229,6 +1907,12 @@ export class ConversationsService {
       .where('p.user_id = :userId', { userId })
       .andWhere('c.kind != :group', { group: ConversationKind.Group })
       .andWhere('c.is_official = false')
+      // Task 13c: a business mailbox thread is excluded. A block there
+      // removes only the blocked staff member's own access, so evicting both
+      // of the pair, or voiding the thread's `openedAt`, would take the
+      // thread from the customer too. `ChatGateway.handleMemberBlocked`
+      // evicts that staff member alone (Task 13e).
+      .andWhere(`NOT ${mailboxThreadPredicate('p.conversation_id')}`)
       .getRawMany<{ conversationId: string }>();
     return [...new Set(rows.map((row) => row.conversationId))];
   }
@@ -1343,7 +2027,12 @@ export class ConversationsService {
     );
     if (!isConnected) {
       const existing = await this.conversations.findOne({
-        where: { pairKey: this.core.pairKey(userId, recipient.userId) },
+        where: {
+          pairKey: await this.core.resolveProfilePairKey(
+            userId,
+            recipient.userId,
+          ),
+        },
       });
       const gate = existing
         ? this.replyGateFor(existing, userId, isConnected)
@@ -1475,6 +2164,8 @@ export class ConversationsService {
             profileByUser,
             reactionsByMessage.get(clearedLastMessage.id) ?? [],
             userId,
+            undefined,
+            callerParticipantRow?.identityId,
           )
         : null,
       unreadCount: unreadByConvo.get(convo.id) ?? 0,

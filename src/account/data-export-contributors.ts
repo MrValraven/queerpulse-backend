@@ -18,6 +18,7 @@ import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineStorySubmission } from '../magazine/entities/magazine-story-submission.entity';
 import { MyCardsService } from '../membership-cards/my-cards.service';
 import { Notification } from '../notifications/entities/notification.entity';
+import { visibleThroughMailboxSeatRules } from '../notifications/notification-mailbox-block';
 import { ProfileNowHistory } from '../profiles/entities/profile-now-history.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -163,8 +164,13 @@ export class NotificationsExportContributor implements DataExportContribution {
   ) {}
 
   async buildContribution(userId: string): Promise<unknown> {
+    // Task 13g: the raw `payload` goes out verbatim, a mention's excerpt
+    // included, so a row naming a business mailbox thread this member is now
+    // blocked out of is left out, as the bell and the mentions inbox leave
+    // it out (`visibleThroughMailboxSeatRules`). Task 14a: a thread of a
+    // business this member has left is left out the same way.
     const rows = await this.notifications.find({
-      where: { userId },
+      where: { userId, payload: visibleThroughMailboxSeatRules(userId) },
       order: { createdAt: 'ASC' },
     });
     return rows.map((notification) => ({

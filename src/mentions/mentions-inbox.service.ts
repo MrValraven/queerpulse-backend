@@ -5,6 +5,7 @@ import {
   Notification,
   NotificationType,
 } from '../notifications/entities/notification.entity';
+import { visibleThroughMailboxSeatRules } from '../notifications/notification-mailbox-block';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -44,10 +45,16 @@ export class MentionsInboxService {
     opts: { unread?: boolean; page?: number } = {},
   ): Promise<Paginated<MentionResponse>> {
     const page = normalizePage(opts.page);
+    // Task 13g: a mention written inside a business mailbox thread before
+    // this member was blocked out of it carries an excerpt of that thread,
+    // so it stays out of the inbox, and out of `total`, while the block
+    // stands (`visibleThroughMailboxSeatRules`). Task 14a: the same holds
+    // after this member leaves the business, while they stay away.
     const where = {
       userId,
       type: NotificationType.Mention,
       ...(opts.unread ? { read: false } : {}),
+      payload: visibleThroughMailboxSeatRules(userId),
     };
     // Same canonical offset envelope + `(createdAt DESC, id DESC)` deterministic
     // tiebreaker as `NotificationsService.list`, so no same-millisecond row is
@@ -73,11 +80,20 @@ export class MentionsInboxService {
    * Mark every one of the member's mentions read — scoped to
    * `NotificationType.Mention` so the mentions inbox's "mark all read" never
    * silently clears the member's other notification categories (which the
-   * broader `POST /notifications/read-all` would).
+   * broader `POST /notifications/read-all` would). Also composes the same
+   * `visibleThroughMailboxSeatRules` filter `list` reads through: without it,
+   * a mention a mailbox block currently hides still gets `read: true` here,
+   * so lifting the block later resurfaces a row the member never actually
+   * saw, already marked read.
    */
   async markAllRead(userId: string): Promise<{ ok: true }> {
     await this.notifications.update(
-      { userId, type: NotificationType.Mention, read: false },
+      {
+        userId,
+        type: NotificationType.Mention,
+        read: false,
+        payload: visibleThroughMailboxSeatRules(userId),
+      },
       { read: true },
     );
     return { ok: true };

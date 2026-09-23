@@ -1,8 +1,11 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -27,6 +30,9 @@ export enum CommunityFrozenReason {
   Manual = 'manual',
   EmergencyReport = 'emergency_report',
   ReportPileup = 'report_pileup',
+  // Set on every space when its parent freezes; only the parent's unfreeze
+  // lifts it.
+  ParentFrozen = 'parent_frozen',
 }
 
 export enum AccessTier {
@@ -36,6 +42,13 @@ export enum AccessTier {
   Private = 'private',
 }
 
+// One level deep: a space never hosts spaces. Declared here with the exact
+// name `1821400000000-AddSubcommunities` gives it, so schema generation sees
+// the constraint as already present and never proposes dropping it.
+@Check(
+  'CHK_communities_space_has_no_spaces',
+  '"parent_id" IS NULL OR "allows_subcommunities" = false',
+)
 @Entity('communities')
 export class Community {
   @PrimaryGeneratedColumn('uuid')
@@ -319,4 +332,35 @@ export class Community {
   // the two). Paired migration `1793900000000-AddCommunityFrozenNote`.
   @Column({ type: 'uuid', nullable: true })
   frozenByUserId!: string | null;
+
+  // The top-level community this space lives inside, or NULL for a
+  // top-level community. One level deep: a row with a parent never has
+  // `allowsSubcommunities`. FK `ON DELETE RESTRICT`. Paired migration
+  // `1821400000000-AddSubcommunities`.
+  @Index('IDX_communities_parent_id')
+  @Column({ type: 'uuid', nullable: true })
+  parentId!: string | null;
+
+  // The relation behind `parentId`, declared so the entity metadata carries
+  // the migration's FK under its exact name (`FK_communities_parent`,
+  // `ON DELETE RESTRICT`) and schema generation never proposes dropping it.
+  // Never loaded by any query: callers read `parentId` and load the parent
+  // explicitly when they need it.
+  @ManyToOne(() => Community, { nullable: true, onDelete: 'RESTRICT' })
+  @JoinColumn({
+    name: 'parent_id',
+    foreignKeyConstraintName: 'FK_communities_parent',
+  })
+  parent?: Community | null;
+
+  // Staff switch that lets this community's owner and mods open spaces.
+  // Only meaningful on a top-level community.
+  @Column({ type: 'boolean', default: false })
+  allowsSubcommunities!: boolean;
+
+  // Stamped when this space was archived by its parent's archive, so the
+  // parent's unarchive restores exactly those spaces and leaves a space its
+  // own owner archived alone.
+  @Column({ type: 'boolean', default: false })
+  archivedWithParent!: boolean;
 }

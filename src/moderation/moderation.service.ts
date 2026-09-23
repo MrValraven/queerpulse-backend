@@ -22,6 +22,8 @@ import { isUniqueViolation } from '../common/db-errors';
 import { CursorKeyset, cursorPaginate } from '../common/cursor-pagination';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { IdentitiesService } from '../identities/identities.service';
+import { loadSentAsIdentities, SENT_AS_PERSON_ROLE } from './sent-as-identity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -254,6 +256,11 @@ export class ModerationService {
     // ban it was for.
     private readonly banRatification: BanRatificationService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
+    // Task 21 review M3: the queue's business display name for an `identity`
+    // report, in place of the mailbox identity's raw uuid. Read-only.
+    // `IdentitiesModule` imports only `TypeOrmModule.forFeature`, so
+    // importing it closes no cycle.
+    private readonly identities: IdentitiesService,
   ) {}
 
   // The two actions whose whole point is to change the target content's
@@ -2575,6 +2582,7 @@ export class ModerationService {
       moderatorNames,
       reporterCredibility,
       communitySlugs,
+      reportedIdentityDisplayNames,
     ] = await Promise.all([
       this.audit.namesForUserIds(reporterUserIds),
       this.resolveReportedProfiles(reports),
@@ -2582,6 +2590,7 @@ export class ModerationService {
       this.audit.namesForUserIds(moderatorIds),
       this.reporterCredibilityByReporterId(reports),
       this.communitySlugsByReportId(reports),
+      this.reportedIdentityDisplayNames(reports),
     ]);
 
     return reports.map((report) => {
@@ -2594,6 +2603,7 @@ export class ModerationService {
         report,
         reportedProfiles,
         priorReportCounts,
+        reportedIdentityDisplayNames,
       );
       const assignedModeratorName = report.assignedModeratorId
         ? this.audit.resolveActorName(
@@ -2716,6 +2726,7 @@ export class ModerationService {
     report: Report,
     reportedProfiles: Map<string, Profile | null>,
     priorReportCounts: Map<string, number>,
+    reportedIdentityDisplayNames: Map<string, string>,
   ): ModReportedDTO {
     const priorReports = (priorReportCounts.get(report.subjectId) ?? 1) - 1;
     const profile = reportedProfiles.get(report.subjectId);
@@ -2731,7 +2742,50 @@ export class ModerationService {
         priorReports,
       };
     }
+    // Task 21 review M3: an `identity` report's business display name, so the
+    // queue reads "Cafe Lisboa" in place of the mailbox identity's raw uuid.
+    const identityDisplayName = reportedIdentityDisplayNames.get(
+      report.subjectId,
+    );
+    if (identityDisplayName) {
+      return {
+        id: report.subjectId,
+        handle: identityDisplayName,
+        priorReports,
+      };
+    }
     return { id: report.subjectId, handle: report.subjectId, priorReports };
+  }
+
+  /**
+   * Task 21 review M3: every reported `identity` subject's business display
+   * name on the page, keyed by `subjectId`, so the queue shows "Cafe Lisboa"
+   * in place of the mailbox identity's raw uuid. No entry, and the raw
+   * `subjectId` shows through in `buildReported`, for a subject id that fails
+   * the uuid guard or names a deleted identity.
+   */
+  private async reportedIdentityDisplayNames(
+    reports: Report[],
+  ): Promise<Map<string, string>> {
+    const identityIds = [
+      ...new Set(
+        reports
+          .filter(
+            (report) =>
+              report.subjectType === ReportSubjectType.Identity &&
+              UUID_RE.test(report.subjectId),
+          )
+          .map((report) => report.subjectId),
+      ),
+    ];
+    if (!identityIds.length) return new Map();
+
+    const descriptions = await this.identities.describeIdentities(identityIds);
+    const displayNames = new Map<string, string>();
+    for (const [identityId, description] of descriptions) {
+      displayNames.set(identityId, description.displayName);
+    }
+    return displayNames;
   }
 
   /**
@@ -3062,6 +3116,9 @@ export class ModerationService {
           report,
           senders,
           new Map([[report.subjectId, priorReports + 1]]),
+          // Never an `identity` subject on this path (the guard above
+          // restricts it to `message`), so no display-name lookup is needed.
+          new Map(),
         );
       }
     }
@@ -3089,6 +3146,21 @@ export class ModerationService {
     const contentAuthorHandle = subject.authorUserId
       ? await this.handleForUserId(subject.authorUserId)
       : null;
+    // Business mailboxes, design section 9: a message sent as a business,
+    // persona or company names that identity beside the human sender, whom
+    // `contentAuthor` and the `reported` person keep naming.
+    const sentAsIdentity =
+      report.subjectType === ReportSubjectType.Message &&
+      subject.senderIdentityId
+        ? (
+            await loadSentAsIdentities(this.identities, [
+              {
+                senderId: subject.authorUserId,
+                senderIdentityId: subject.senderIdentityId,
+              },
+            ])
+          ).get(subject.senderIdentityId)
+        : undefined;
 
     return {
       contentAuthor: contentAuthorHandle ?? reported.handle,
@@ -3116,7 +3188,22 @@ export class ModerationService {
           handle: reported.handle,
           meta: `${reported.priorReports} prior report(s)`,
         },
+        ...(sentAsIdentity
+          ? [
+              {
+                role: SENT_AS_PERSON_ROLE,
+                name: sentAsIdentity.displayName ?? 'Deleted identity',
+                ...(sentAsIdentity.handle
+                  ? { handle: sentAsIdentity.handle }
+                  : {}),
+                meta: sentAsIdentity.kind
+                  ? `${sentAsIdentity.kind} identity`
+                  : 'identity no longer exists',
+              },
+            ]
+          : []),
       ],
+      ...(sentAsIdentity ? { sentAsIdentity } : {}),
       ...listingEnrichment,
       // Surface the raw evidence array (P0.9) so a moderator sees client-attached
       // evidence AND the server snapshot (message/housing) on the drawer.

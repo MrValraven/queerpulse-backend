@@ -305,6 +305,30 @@ describe('AdminMembersService', () => {
       });
     });
 
+    it('excludes spaces (subcommunities) from each card’s community names', async () => {
+      const profileRow = makeProfile();
+      profiles.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getManyAndCount: [[profileRow], 1] }),
+      );
+      vouches.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getMany: [] }),
+      );
+      reports.createQueryBuilder.mockReturnValue(
+        makeQueryBuilderStub({ getRawMany: [] }),
+      );
+      const membershipQueryBuilder = makeQueryBuilderStub({ getRawMany: [] });
+      communityMembers.createQueryBuilder.mockReturnValue(
+        membershipQueryBuilder,
+      );
+      vouchService.getVouchCounts.mockResolvedValue(new Map());
+
+      await service.list({ page: 1 });
+
+      expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'community.parent_id IS NULL',
+      );
+    });
+
     it('defaults to page 1 and returns an empty envelope with no members', async () => {
       profiles.createQueryBuilder.mockReturnValue(
         makeQueryBuilderStub({ getManyAndCount: [[], 0] }),
@@ -410,10 +434,11 @@ describe('AdminMembersService', () => {
       vouchService.getVouchCount.mockResolvedValue(5);
       vouches.find.mockResolvedValue([]);
       reports.find.mockResolvedValue([]);
+      const membershipQueryBuilder = makeQueryBuilderStub({
+        getRawMany: [{ role: RosterRole.Member, name: 'Circle of Care' }],
+      });
       communityMembers.createQueryBuilder.mockReturnValue(
-        makeQueryBuilderStub({
-          getRawMany: [{ role: RosterRole.Member, name: 'Circle of Care' }],
-        }),
+        membershipQueryBuilder,
       );
 
       const result = await service.getMember('ines-martins');
@@ -433,6 +458,24 @@ describe('AdminMembersService', () => {
           (entry) => entry.action === 'no_reports',
         ),
       ).toBe(true);
+    });
+
+    it('excludes spaces (subcommunities) from the communities list', async () => {
+      const profile = makeProfile();
+      profiles.findOne.mockResolvedValue(profile);
+      vouchService.getVouchCount.mockResolvedValue(0);
+      vouches.find.mockResolvedValue([]);
+      reports.find.mockResolvedValue([]);
+      const membershipQueryBuilder = makeQueryBuilderStub({ getRawMany: [] });
+      communityMembers.createQueryBuilder.mockReturnValue(
+        membershipQueryBuilder,
+      );
+
+      await service.getMember('ines-martins');
+
+      expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'community.parent_id IS NULL',
+      );
     });
   });
 

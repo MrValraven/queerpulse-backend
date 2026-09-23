@@ -16,7 +16,8 @@ export type UploadKind =
   | 'community-avatar'
   | 'message-image'
   | 'message-document'
-  | 'forum-photo';
+  | 'forum-photo'
+  | 'sticker';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -243,6 +244,18 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
     maxBytes: 8 * MB,
     requiresSession: false,
   },
+  // A published sticker's rasterised PNG, minted by the admin Sticker Pack
+  // Builder. `requiresSession: false` is the whole of its public-read story:
+  // `FilesController.serve()` only runs its participant/owner checks for
+  // session-gated kinds, and a sticker is platform ARTWORK that every member
+  // sees in every conversation, carrying nothing about who uploaded it. The
+  // same flag is what gives it the browser cache header the others get.
+  //
+  // 1 MB because the builder exports a 512x512 PNG with a flat palette, which
+  // lands well under 200 KB, so the cap is pure headroom. Presigning
+  // this kind is admin-only, enforced in `UploadsController.presign` (the
+  // spec shape carries no role field, so the check cannot live here).
+  sticker: { prefix: 'stickers', maxBytes: 1 * MB, requiresSession: false },
 };
 
 export const UPLOAD_KINDS: readonly UploadKind[] = Object.keys(

@@ -60,6 +60,7 @@ import {
 } from './entities/deletion-request.entity';
 import { DsarRequest, DsarStatus } from './entities/dsar-request.entity';
 import { ExportDownload, describeExportDownload } from './export-archive';
+import { seatExcludedFromMailboxPredicate } from '../messaging/mailbox-seats';
 
 /** Order-insensitive comparison of two already-de-duplicated category lists. */
 function sameCategorySet(left: string[], right: string[]): boolean {
@@ -69,6 +70,63 @@ function sameCategorySet(left: string[], right: string[]): boolean {
   const seen = new Set(left);
   return right.every((category) => seen.has(category));
 }
+
+const ARCHIVED_CONVERSATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Task 13g: every conversation an export archive carries thread content
+ * from, read from the two sections that copy it: `reportedConversations`
+ * (the thread's messages) and `notifications` (a mention's excerpt). The
+ * member's own messages are theirs to keep, so the `messages` section is
+ * left out. Only well-formed uuids are returned, so the query that reads
+ * them can cast them safely.
+ */
+export function archivedThreadConversationIds(
+  data: Record<string, unknown> | null,
+): string[] {
+  const conversationIds = new Set<string>();
+  const reportedConversations = data?.reportedConversations;
+  if (Array.isArray(reportedConversations)) {
+    for (const entry of reportedConversations as Array<{
+      conversationId?: unknown;
+    }>) {
+      if (typeof entry?.conversationId === 'string') {
+        conversationIds.add(entry.conversationId);
+      }
+    }
+  }
+  const notifications = data?.notifications;
+  if (Array.isArray(notifications)) {
+    for (const entry of notifications as Array<{
+      payload?: { conversationId?: unknown } | null;
+    }>) {
+      const conversationId = entry?.payload?.conversationId;
+      if (typeof conversationId === 'string') {
+        conversationIds.add(conversationId);
+      }
+    }
+  }
+  return [...conversationIds].filter((conversationId) =>
+    ARCHIVED_CONVERSATION_ID_PATTERN.test(conversationId),
+  );
+}
+
+/**
+ * Task 13g: holds when the block rule now takes the exporter's own staff
+ * seat out of any of the conversations `$2` names. `$1` is the exporter.
+ * Task 14a: the departed-staff rule takes it out the same way. Task 14: so
+ * does a customer's block of the business, for either side, all through
+ * `seatExcludedFromMailboxPredicate`.
+ */
+const ARCHIVE_OVERTAKEN_BY_MAILBOX_EXCLUSION_SQL = `
+  SELECT EXISTS (
+    SELECT 1 FROM "conversation_participants" "archived_seat"
+    WHERE "archived_seat"."user_id" = $1
+      AND "archived_seat"."conversation_id" = ANY($2::uuid[])
+      AND ${seatExcludedFromMailboxPredicate('"archived_seat"."conversation_id"', '"archived_seat"."user_id"')}
+  ) AS "isArchiveOvertakenByMailboxExclusion"
+`;
 
 @Injectable()
 export class AccountService {
@@ -439,7 +497,11 @@ export class AccountService {
       },
       order: { generatedAt: 'DESC' },
     });
-    if (reusable && sameCategorySet(reusable.categories, categories)) {
+    if (
+      reusable &&
+      sameCategorySet(reusable.categories, categories) &&
+      !(await this.isArchiveOvertakenByMailboxExclusion(reusable))
+    ) {
       return toExportJobResponse(reusable);
     }
     const job = await this.exportJobs.save({
@@ -507,12 +569,44 @@ export class AccountService {
     // is only ever disclosed to the member whose export it is, and telling them
     // to request a fresh one is more useful than a blank "not found".
     const expiresAt = exportLinkExpiresAt(job);
-    if (expiresAt !== null && expiresAt.getTime() <= Date.now()) {
+    // Task 13g: an archive built before a block still carries the thread
+    // content the block has since taken from this member (a reported
+    // thread's messages, a mention's excerpt). It is refused with the same
+    // expiry copy, which says nothing about the block, and a fresh export
+    // leaves that content out. Task 14a: a departure from the business
+    // takes that content away the same way.
+    if (
+      (expiresAt !== null && expiresAt.getTime() <= Date.now()) ||
+      (await this.isArchiveOvertakenByMailboxExclusion(job))
+    ) {
       throw new NotFoundException(
         'This export download link has expired. Request a new export to download your data again.',
       );
     }
     return describeExportDownload(job);
+  }
+
+  /**
+   * Task 13g: whether the block rule now takes the exporter's own staff seat
+   * out of a conversation this archive copied thread content from. Task 14a:
+   * or the departed-staff rule does. Task 14: or a customer's block of the
+   * business does, for either side. All are read from
+   * `seatExcludedFromMailboxPredicate`. An archive naming no such
+   * conversation costs no query, so most archives never pay for this check.
+   */
+  private async isArchiveOvertakenByMailboxExclusion(
+    job: DataExportJob,
+  ): Promise<boolean> {
+    const conversationIds = archivedThreadConversationIds(job.data);
+    if (conversationIds.length === 0) {
+      return false;
+    }
+    const rows: Array<{ isArchiveOvertakenByMailboxExclusion: boolean }> =
+      await this.dataSource.query(ARCHIVE_OVERTAKEN_BY_MAILBOX_EXCLUSION_SQL, [
+        job.userId,
+        conversationIds,
+      ]);
+    return rows[0]?.isArchiveOvertakenByMailboxExclusion === true;
   }
 
   async getExportJob(
@@ -525,7 +619,24 @@ export class AccountService {
     if (!job) {
       throw new NotFoundException('Export job not found');
     }
-    return toExportJobResponse(job);
+    const response = toExportJobResponse(job);
+    // CW-21: `downloadExport` above already refuses a Ready job's bytes once
+    // `isArchiveOvertakenByMailboxExclusion` holds, so this status poll
+    // reports that same refusal, keeping the envelope honest for a member
+    // who would otherwise be sent toward a download link that 404s the
+    // moment they click it.
+    if (
+      response.status === DataExportStatus.Ready &&
+      (await this.isArchiveOvertakenByMailboxExclusion(job))
+    ) {
+      return {
+        ...response,
+        status: DataExportStatus.Expired,
+        downloadUrl: undefined,
+        expiresAt: undefined,
+      };
+    }
+    return response;
   }
 
   // --- DSAR intake & tracking ------------------------------------------------

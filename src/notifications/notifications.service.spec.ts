@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { FindOperator } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -9,6 +10,7 @@ import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
+import { visibleThroughMailboxSeatRules } from './notification-mailbox-block';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
   NOTIFICATION_BATCH_CREATED,
@@ -458,7 +460,14 @@ describe('NotificationsService', () => {
   it('list filters to unread when requested', async () => {
     await service.list('u1', { unread: true });
     expect(repo.find).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId: 'u1', read: false } }),
+      // Task 13g: plus the mailbox block visibility condition on `payload`.
+      expect.objectContaining({
+        where: {
+          userId: 'u1',
+          read: false,
+          payload: expect.any(FindOperator),
+        },
+      }),
     );
   });
 
@@ -528,7 +537,45 @@ describe('NotificationsService', () => {
     repo.count.mockResolvedValue(4);
     await expect(service.unreadCount('u1')).resolves.toBe(4);
     expect(repo.count).toHaveBeenCalledWith({
-      where: { userId: 'u1', read: false },
+      where: {
+        userId: 'u1',
+        read: false,
+        payload: expect.any(FindOperator),
+      },
+    });
+  });
+
+  describe('markAllRead', () => {
+    it('marks every unread row of the caller read', async () => {
+      const result = await service.markAllRead('u1');
+
+      const [criteria, patch] = repo.update.mock.calls[0] as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ];
+      expect(criteria).toMatchObject({ userId: 'u1', read: false });
+      expect(patch).toEqual({ read: true });
+      expect(result).toEqual({ ok: true });
+    });
+
+    // CW-22: without this filter, a row a mailbox block currently hides from
+    // `list`/`unreadCount` still got marked read here, so lifting the block
+    // later resurfaced a row the member never actually saw, already marked
+    // read.
+    it('composes the same mailbox block visibility filter list and unreadCount use, on the payload column', async () => {
+      await service.markAllRead('u1');
+
+      const [criteria] = repo.update.mock.calls[0] as [
+        { payload: FindOperator<unknown> },
+      ];
+      const expectedCondition = visibleThroughMailboxSeatRules('u1');
+      expect(criteria.payload).toBeInstanceOf(FindOperator);
+      expect(criteria.payload.getSql?.('Notification.payload')).toBe(
+        expectedCondition.getSql?.('Notification.payload'),
+      );
+      expect(criteria.payload.objectLiteralParameters).toEqual(
+        expectedCondition.objectLiteralParameters,
+      );
     });
   });
 

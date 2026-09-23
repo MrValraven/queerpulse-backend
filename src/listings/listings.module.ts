@@ -4,6 +4,7 @@ import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { Event } from '../events/entities/event.entity';
+import { IdentitiesModule } from '../identities/identities.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -19,6 +20,7 @@ import { ListingCoManager } from './entities/listing-co-manager.entity';
 import { ListingEditSuggestion } from './entities/listing-edit-suggestion.entity';
 import { ListingEnquiry } from './entities/listing-enquiry.entity';
 import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
+import { ListingOwnerOffer } from './entities/listing-owner-offer.entity';
 import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
@@ -34,7 +36,9 @@ import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingEnquiriesController } from './listing-enquiries.controller';
 import { ListingEnquiriesService } from './listing-enquiries.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
+import { ListingOwnerOffersService } from './listing-owner-offers.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
+import { ListingOwnershipService } from './listing-ownership.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
@@ -74,6 +78,10 @@ import { ListingsService } from './listings.service';
       // listing day to day. Invited and accepted, never direct-added, and never
       // present in any public response.
       ListingCoManager,
+      // An admin nominating a member as the owner of a listing that has
+      // none. Sits at `offered` until the member answers; an accept then
+      // calls the same ownership-transfer path a claim uses.
+      ListingOwnerOffer,
       // "Message this business" — the link between a listing and the 1:1
       // conversation an enquiry was delivered into. Holds NO message text;
       // messaging still owns message storage (see the entity's docstring).
@@ -86,6 +94,14 @@ import { ListingsService } from './listings.service';
       SafeSpaceMemberVouch,
     ]),
     UsersModule,
+    // `IdentitiesService`/`IdentityMailboxSyncService`, used by
+    // `ListingCoManagersService` and `ListingOwnershipService` to resolve a
+    // listing's mailbox identity and keep its `conversation_participants`
+    // seats in step with the staff list. Plain import, no `forwardRef`:
+    // `IdentitiesModule` registers `Listing`/`ListingCoManager` as entities
+    // only and imports no module of this domain, so this edge is
+    // one-directional.
+    IdentitiesModule,
     // MessagingModule exports MessagingService — delivers a moderator's
     // question to the submitter as a DM (mirrors HousingListingsModule).
     MessagingModule,
@@ -168,11 +184,26 @@ import { ListingsService } from './listings.service';
   providers: [
     ListingsService,
     // The second management gate's data source. Injected by `ListingsService`,
-    // `ListingOwnerPendingService` and `ListingClaimsService`; injects none of
-    // them back, so there is no cycle and no `forwardRef`.
+    // `ListingOwnerPendingService`, `ListingClaimsService` and
+    // `ListingOwnershipService`; injects none of them back, so there is no
+    // cycle and no `forwardRef`. Two controllers of this module take it
+    // directly: `ListingCoManagersController` for the owner and member seat
+    // routes, and `AdminListingsController` for the admin-only `staff*`
+    // delegation ones.
     ListingCoManagersService,
     ListingEditSuggestionsService,
+    // The one place a listing changes hands. `ListingClaimsService` calls it
+    // on an approved claim and the staff owner-offer path calls it on an
+    // accept, so the personal-field clearing, the co-manager revocation and
+    // the `ownership_transferred` audit row stay identical on both routes.
+    // Injects `ListingCoManagersService` above; nothing injects it back, so
+    // there is no cycle and no `forwardRef`.
+    ListingOwnershipService,
     ListingClaimsService,
+    // Task 4: the staff owner-offer lifecycle. Injects `ListingOwnershipService`
+    // above for the one ownership write an accept performs; nothing injects it
+    // back, so there is no cycle and no `forwardRef`.
+    ListingOwnerOffersService,
     ListingEnquiriesService,
     // C8: the owner-facing "what is pending on my listing?" read. Its
     // `Repository<Report>` comes from `ReportsModule`'s re-exported
@@ -185,6 +216,14 @@ import { ListingsService } from './listings.service';
     ListingVenueEventsService,
     DirectoryService,
   ],
-  exports: [DirectoryService],
+  exports: [
+    DirectoryService,
+    // Exported so the staff owner-offer flow can accept an offer through the
+    // same transfer a claim approval uses, from a service outside this module.
+    ListingOwnershipService,
+    // The admin console and the member's own "you have been offered a
+    // listing" surface both live outside this module and call it.
+    ListingOwnerOffersService,
+  ],
 })
 export class ListingsModule {}

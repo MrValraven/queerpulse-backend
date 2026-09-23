@@ -3,9 +3,16 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository } from 'typeorm';
 import { PresenceService } from '../chat/presence.service';
+import { storageKeyFromImageUrl } from '../common/image-url';
 import { MemberLookup } from '../common/member-ref';
 import { extractMentions } from '../common/mentions';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
+import {
+  loadSenderIdentityContext,
+  renderMessageSender,
+} from '../messaging/author-summary';
 import {
   Conversation,
   ConversationKind,
@@ -16,11 +23,17 @@ import {
 } from '../messaging/entities/conversation-participant.entity';
 import { MessageKind } from '../messaging/entities/message.entity';
 import {
+  isEverySeatPersonal,
+  loadReachableMailboxSeats,
+  partitionMailboxThreadSeats,
+} from '../messaging/mailbox-seats';
+import {
   MESSAGE_CREATED,
   MessageCreatedEvent,
 } from '../messaging/messaging.events';
 import {
   requireAuthorSummary,
+  type AuthorSummary,
   type MessageView,
 } from '../messaging/message-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
@@ -62,7 +75,10 @@ function preview(body: string): string {
 }
 
 type AttachmentMessageKind =
-  MessageKind.Image | MessageKind.Gif | MessageKind.Document;
+  | MessageKind.Image
+  | MessageKind.Gif
+  | MessageKind.Document
+  | MessageKind.Sticker;
 
 /**
  * ENG-227 kind-aware copy for an attachment sent without a caption. `word` is
@@ -90,6 +106,13 @@ const ATTACHMENT_PUSH_COPY: Record<
     directBodyKey: 'push:messages.attachment.document',
     groupBodyKey: 'push:messages.group.attachment.document',
   },
+  // A sticker carries no caption to preview (its send path carries only a
+  // `stickerId`), so this copy is the ONLY body a sticker push ever shows.
+  [MessageKind.Sticker]: {
+    word: 'Sticker',
+    directBodyKey: 'push:messages.attachment.sticker',
+    groupBodyKey: 'push:messages.group.attachment.sticker',
+  },
 };
 
 function isAttachmentMessageKind(
@@ -98,8 +121,23 @@ function isAttachmentMessageKind(
   return (
     kind === MessageKind.Image ||
     kind === MessageKind.Gif ||
-    kind === MessageKind.Document
+    kind === MessageKind.Document ||
+    kind === MessageKind.Sticker
   );
+}
+
+/**
+ * A message's typed caption, or '' when it carries none. `GifAttachment`/
+ * `DocumentAttachment` declare `caption` as an optional field; `StickerAttachment`
+ * declares no such field at all (a sticker send carries only a `stickerId`).
+ * This checks for the key's presence before reading it, safely handling the
+ * three-shape union.
+ */
+function attachmentCaptionText(message: MessageView): string {
+  const attachment = message.attachment;
+  return attachment && 'caption' in attachment
+    ? (attachment.caption?.trim() ?? '')
+    : '';
 }
 
 /** The content-bearing half of a message push: who/where, and what was said. */
@@ -140,7 +178,7 @@ function buildMessagePushCopy(
   const isGroup = groupTitle !== '';
   const title = isGroup ? groupTitle : senderName;
 
-  const captionText = message.attachment?.caption?.trim() ?? '';
+  const captionText = attachmentCaptionText(message);
   if (isAttachmentMessageKind(message.kind) && captionText === '') {
     const attachmentCopy = ATTACHMENT_PUSH_COPY[message.kind];
     return isGroup
@@ -171,12 +209,16 @@ function buildMessagePushCopy(
   };
 }
 
-/** The `groupBodyKey` attachment key, reused for the mention-aware variant. */
+/** The `groupBodyKey` attachment key, reused for the mention-aware variant.
+ *  Carries a `Sticker` entry for completeness even though a sticker send's
+ *  `body` is always empty and so can never actually `@`-mention anyone (see
+ *  `groupMentionedParticipantUserIds`, which reads `message.body`). */
 const ATTACHMENT_GROUP_MENTION_BODY_KEY: Record<AttachmentMessageKind, string> =
   {
     [MessageKind.Image]: 'push:messages.group.mention.photo',
     [MessageKind.Gif]: 'push:messages.group.mention.gif',
     [MessageKind.Document]: 'push:messages.group.mention.document',
+    [MessageKind.Sticker]: 'push:messages.group.mention.sticker',
   };
 
 /**
@@ -197,7 +239,7 @@ function buildGroupMentionPushCopy(
   groupTitle: string,
   senderName: string,
 ): MessagePushCopy {
-  const captionText = message.attachment?.caption?.trim() ?? '';
+  const captionText = attachmentCaptionText(message);
   if (isAttachmentMessageKind(message.kind) && captionText === '') {
     const attachmentCopy = ATTACHMENT_PUSH_COPY[message.kind];
     return {
@@ -231,6 +273,40 @@ interface PacedRecipients {
   /** The epoch-ms written into the pacing map for every selected recipient. */
   reservedAt: number;
 }
+
+/**
+ * Task 13d: the business mailbox a DIRECT thread belongs to, as the push
+ * audience reads it. Present only for a thread `partitionMailboxThreadSeats`
+ * partitioned with certainty.
+ */
+interface MailboxPushThread {
+  mailboxIdentityId: string;
+  customerUserId: string;
+}
+
+/** Task 13d: who a message push goes to, and the mailbox it speaks for. */
+interface MessagePushRecipients {
+  recipientUserIds: Set<string>;
+  /** Set exactly when the thread is a partitioned business mailbox thread. */
+  mailbox?: MailboxPushThread;
+}
+
+/**
+ * Task 13d: the seat-level audience of one thread. `personal` covers groups,
+ * official threads and a direct thread whose every seat resolved to a
+ * profile identity. `unpartitionable` is a thread with a mailbox (or an
+ * unresolved) seat that `partitionMailboxThreadSeats` could not split, which
+ * receives no push at all.
+ */
+type MessagePushThreadAudience =
+  | { shape: 'personal' }
+  | { shape: 'unpartitionable' }
+  | {
+      shape: 'mailbox';
+      mailbox: MailboxPushThread;
+      /** The customer seat plus the staff seats this message may reach. */
+      audienceUserIds: ReadonlySet<string>;
+    };
 
 @Injectable()
 export class PushMessageListener {
@@ -266,6 +342,11 @@ export class PushMessageListener {
     private readonly notificationPreferences: NotificationPreferencesService,
     private readonly notificationDelivery: NotificationDeliveryService,
     private readonly connections: ConnectionsService,
+    // Task 13d: a business mailbox thread's seat identities and the
+    // business's own display fields, and whether a reader is owed the staff
+    // first name, through the same services the in-app sender uses.
+    private readonly identities: IdentitiesService,
+    private readonly identityAttribution: IdentityAttributionService,
   ) {}
 
   @OnEvent(MESSAGE_CREATED)
@@ -288,16 +369,39 @@ export class PushMessageListener {
       // category, and quiet hours now all live in one place,
       // `eligibleMessagePushRecipientUserIds`, since PRD-336 needs the exact
       // same question asked a second time (see that method's own doc).
-      const pushable = await this.eligibleMessagePushRecipientUserIds(
-        conversationId,
-        message.senderId,
-      );
+      const { recipientUserIds: pushable, mailbox } =
+        await this.resolveMessagePushRecipients(
+          conversationId,
+          message.senderId,
+          undefined,
+          message.senderIdentityId,
+        );
       if (pushable.size === 0) return;
 
       const senderProfile = await this.profiles.findOne({
         where: { userId: message.senderId },
       });
-      const senderName = requireAuthorSummary(senderProfile).displayName;
+      // Task 13d: a reply the business's staff wrote renders as the business,
+      // exactly as the in-app bubble does, so the title and icon never name
+      // the human behind it. The customer's own messages keep the profile
+      // path below.
+      const mailboxSenderAuthors =
+        mailbox && message.senderId !== mailbox.customerUserId
+          ? await this.renderMailboxSenderAuthors(
+              message.senderId,
+              senderProfile,
+              mailbox,
+            )
+          : undefined;
+      // Task 22: the plain title stays the business name for every
+      // recipient, whoever wrote the reply, so a client with no attribution
+      // catalog entry still renders today's title. The customer's own
+      // payload separately gains a titleKey and params naming the staff
+      // member, built further down near `contentPayload`, and only when
+      // attribution allows it.
+      const senderName = mailboxSenderAuthors
+        ? mailboxSenderAuthors.businessAuthor.displayName
+        : requireAuthorSummary(senderProfile).displayName;
       const messageCopy = buildMessagePushCopy(
         message,
         conversation,
@@ -325,11 +429,23 @@ export class PushMessageListener {
       // Every lookup happens BEFORE the pacing reservation below, so the
       // decide-and-record step runs with no await in between and two messages
       // landing together cannot both be treated as the first.
-      const strangerUserIds = await this.recipientsNotConnectedToSender(
-        conversation,
-        message.senderId,
-        pushableUserIds,
-      );
+      // Task 13d: on a business mailbox thread the copy follows the business
+      // relationship, which is the thread's own open state, the same rule the
+      // send gate enforces (`MessagesService.sendMessageWithOutcome`). The
+      // title and body read identically whichever staff member sent the
+      // reply; Task 22 lets the customer's own payload additionally carry a
+      // staff first name through `l10n`, gated by attribution, without
+      // changing this title or body. An enquiry arrives into a thread that
+      // has not opened, so every enquiry pushes the generic copy to all
+      // staff; once the business replies and the thread opens, every push
+      // carries full copy.
+      const strangerUserIds = mailbox
+        ? new Set<string>(conversation.openedAt ? [] : pushableUserIds)
+        : await this.recipientsNotConnectedToSender(
+            conversation,
+            message.senderId,
+            pushableUserIds,
+          );
 
       // Sender avatar as the notification icon — but ONLY when it is an absolute
       // public https URL a browser can fetch without our session cookie
@@ -337,7 +453,14 @@ export class PushMessageListener {
       // storage-key avatar resolves to our auth-gated `GET /files/*` route, which
       // a push client cannot fetch, so we omit `icon` entirely (conditional
       // spread below) rather than send a URL that would render as a broken image.
-      const rawSenderAvatar = senderProfile?.avatarUrl;
+      // Task 13d: a mailbox sender's avatar is the business's own, already
+      // resolved to a URL by `describeIdentities`; collapsing our own
+      // `/files/*` URL back to its storage key lets the check below drop it.
+      const mailboxAvatarUrl =
+        mailboxSenderAuthors?.businessAuthor.avatarUrl ?? null;
+      const rawSenderAvatar = mailboxSenderAuthors
+        ? mailboxAvatarUrl && storageKeyFromImageUrl(mailboxAvatarUrl)
+        : senderProfile?.avatarUrl;
       const senderAvatar =
         rawSenderAvatar &&
         !isStorageKey(rawSenderAvatar) &&
@@ -351,6 +474,39 @@ export class PushMessageListener {
       // and (SP5) sorts correctly if it's later folded into a coalesced
       // "N new messages" notification.
       const timestamp = message.createdAt.getTime();
+
+      // Task 22: the customer's payload names the staff member who wrote a
+      // business reply, through a titleKey the frontend renders as
+      // "{name} from {business}", only when the mailbox owner's switch and
+      // the sender's own preference both allow it. `staffFirstName` already
+      // carries that exact answer: `renderMailboxSenderAuthors` built it
+      // above through the same `IdentityAttributionService` resolver the
+      // in-app sender uses, resolved for the customer
+      // (`mailbox.customerUserId`), so this reuses that one lookup, resolved
+      // once above. The audience check is defensive: CW-27
+      // already narrows a staff-written reply's push audience to the
+      // customer alone, but a future change to that audience must never hand
+      // the customer's attribution answer to a different reader, so the
+      // attributed variant is built only when every pushable recipient IS
+      // the customer.
+      const staffFirstName =
+        mailboxSenderAuthors?.businessAuthor.staffFirstName;
+      const businessDisplayName =
+        mailboxSenderAuthors?.businessAuthor.displayName;
+      const isPushAudienceCustomerOnly =
+        mailbox != null &&
+        pushableUserIds.every((userId) => userId === mailbox.customerUserId);
+      const staffAttributionParams =
+        staffFirstName && businessDisplayName && isPushAudienceCustomerOnly
+          ? { name: staffFirstName, business: businessDisplayName }
+          : undefined;
+      const contentL10n = staffAttributionParams
+        ? {
+            ...messageCopy.l10n,
+            titleKey: 'push:messages.staffTitle',
+            params: { ...messageCopy.l10n?.params, ...staffAttributionParams },
+          }
+        : messageCopy.l10n;
 
       // ID-13: every batch below is split by
       // `member_preferences.hide_push_previews` rather than calling
@@ -373,7 +529,7 @@ export class PushMessageListener {
         // Omit `icon` (not send `undefined`) when there is no public avatar.
         ...(senderAvatar ? { icon: senderAvatar } : {}),
         actions: [{ action: 'view', title: 'View' }],
-        ...(messageCopy.l10n ? { l10n: messageCopy.l10n } : {}),
+        ...(contentL10n ? { l10n: contentL10n } : {}),
         timestamp,
       };
       // ENG-232: a cold DM from someone the recipient is not connected to
@@ -498,6 +654,16 @@ export class PushMessageListener {
    * `candidateUserIds`, when given, narrows which participants are even
    * loaded (omitted, every participant of the conversation is a candidate).
    *
+   * `senderIdentityId`, when given, excludes every seat speaking for that
+   * same identity, the literal sender included. This is the push-side twin
+   * of the unread rule (`unread-own-identity.spec.ts`): on a shared mailbox
+   * thread every staff seat carries the business identity as its
+   * `identityId`, so a colleague's reply sent as the business is the
+   * business speaking, and it stays out of every OTHER staff seat's push the
+   * same way it already stays out of their unread count. The customer's own
+   * seat always carries their own personal identity, so this check always
+   * leaves the customer in the audience.
+   *
    * PRD-349: a `mentionsOnly`-muted participant is excluded from this set the
    * same way a fully (`muted`) one already was, via `isMutedForPlainMessagePush`
    * rather than the narrower `isParticipantMuted`. That is what makes the
@@ -521,43 +687,132 @@ export class PushMessageListener {
    * is no ordering dependency between the two listeners reacting to the same
    * `sendMessage` call: each asks the same deterministic question of the
    * database and gets the same answer.
+   *
+   * Task 13d: a business mailbox thread builds its audience from the seats
+   * (`resolveMessagePushRecipients`), and a claim narrows only the
+   * business's STAFF seats. Recipients are the customer seat plus the
+   * claimant when the thread is claimed, or every live staff seat when it is
+   * unclaimed, minus the sender, and then the leftAt, online, muted, blocked
+   * and quiet-hours filters below, including the per-identity filter that
+   * drops every seat sharing the sender's own `identityId` (CW-27, Task 15).
+   * A staff member's reply is sent as the one business identity every staff
+   * seat shares, so that filter removes the whole staff audience whatever
+   * the claim state: the claimant's own reply and a colleague's reply both
+   * reach the customer exclusively, excluding every fellow staff seat. The
+   * claim narrowing therefore only shapes who the CUSTOMER's own message
+   * reaches: the claimant alone when the thread is claimed, every live
+   * staff seat when it is unclaimed. An online claimant still gets no push,
+   * exactly like an online member on any other thread.
+   *
+   * A staff member blocked either way with the customer is outside the
+   * audience, whoever sent (`loadReachableMailboxSeats`), and a claim that
+   * staff member held before the block is ignored for push, so the
+   * customer's messages reach the remaining live, unblocked staff. A
+   * claimant with no live seat at all keeps Task 12's defensive answer, no
+   * staff push: `IdentityMailboxSyncService.unseatUser` releases the claim in
+   * the same operation that ends the seat, so the case does not arise in
+   * practice, and falling back to the whole roster would recreate the
+   * double-reply problem claiming exists to solve.
    */
   async eligibleMessagePushRecipientUserIds(
     conversationId: string,
     senderId: string,
     candidateUserIds?: string[],
+    senderIdentityId?: string | null,
   ): Promise<Set<string>> {
-    const participants = await this.participants.find({
-      where: {
-        conversationId,
-        ...(candidateUserIds ? { userId: In(candidateUserIds) } : {}),
-      },
-      select: {
-        userId: true,
-        leftAt: true,
-        muted: true,
-        mutedUntil: true,
-        muteMode: true,
-      },
-    });
+    const { recipientUserIds } = await this.resolveMessagePushRecipients(
+      conversationId,
+      senderId,
+      candidateUserIds,
+      senderIdentityId,
+    );
+    return recipientUserIds;
+  }
+
+  /**
+   * Task 13d: `eligibleMessagePushRecipientUserIds`, together with the
+   * mailbox the thread belongs to, which `handleMessageCreated` needs to
+   * render the push as the business.
+   *
+   * On a mailbox thread the person-level block and mute below are read for
+   * the business's staff recipients only. The customer receives every reply
+   * the business sends, whatever personal block or mute they hold against
+   * one employee, since skipping that employee's replies would tell the
+   * customer which replies were theirs. A block between the customer and a
+   * staff member removes that staff member's own access instead (see the
+   * audience above), which is the rule every REST surface already follows.
+   */
+  private async resolveMessagePushRecipients(
+    conversationId: string,
+    senderId: string,
+    candidateUserIds?: string[],
+    senderIdentityId?: string | null,
+  ): Promise<MessagePushRecipients> {
+    const [participants, conversation] = await Promise.all([
+      this.participants.find({
+        where: {
+          conversationId,
+          ...(candidateUserIds ? { userId: In(candidateUserIds) } : {}),
+        },
+        select: {
+          userId: true,
+          identityId: true,
+          leftAt: true,
+          muted: true,
+          mutedUntil: true,
+          muteMode: true,
+        },
+      }),
+      this.conversations.findOne({
+        where: { id: conversationId },
+        select: {
+          id: true,
+          kind: true,
+          isOfficial: true,
+          claimedByUserId: true,
+        },
+      }),
+    ]);
+    if (!conversation) return { recipientUserIds: new Set() };
+    const threadAudience = await this.loadMessagePushThreadAudience(
+      conversation,
+      candidateUserIds ? undefined : participants,
+    );
+    if (threadAudience.shape === 'unpartitionable') {
+      return { recipientUserIds: new Set() };
+    }
+    const mailboxAudience =
+      threadAudience.shape === 'mailbox' ? threadAudience : undefined;
+    const mailbox = mailboxAudience?.mailbox;
+    const audienceParticipants = mailboxAudience
+      ? participants.filter((participant) =>
+          mailboxAudience.audienceUserIds.has(participant.userId),
+        )
+      : participants;
     const now = new Date();
-    const targets = participants.filter(
+    const targets = audienceParticipants.filter(
       (participant) =>
         participant.userId !== senderId &&
+        participant.identityId !== senderIdentityId &&
         participant.leftAt == null &&
         !this.presence.isOnline(participant.userId) &&
         !isMutedForPlainMessagePush(participant, now),
     );
-    if (targets.length === 0) return new Set();
+    if (targets.length === 0) return { recipientUserIds: new Set(), mailbox };
     const targetUserIds = targets.map((participant) => participant.userId);
+    const personGatedUserIds = mailbox
+      ? targetUserIds.filter((userId) => userId !== mailbox.customerUserId)
+      : targetUserIds;
     const [blockedUserIds, muterUserIds] = await Promise.all([
-      this.blockFilter.blockedUserIds(senderId, targetUserIds),
-      this.blockFilter.mutersOf(senderId, targetUserIds),
+      this.blockFilter.blockedUserIds(senderId, personGatedUserIds),
+      this.blockFilter.mutersOf(senderId, personGatedUserIds),
     ]);
     const deliverableUserIds = targetUserIds.filter(
       (userId) => !blockedUserIds.has(userId) && !muterUserIds.has(userId),
     );
-    if (deliverableUserIds.length === 0) return new Set();
+    if (deliverableUserIds.length === 0) {
+      return { recipientUserIds: new Set(), mailbox };
+    }
     const [pushEnabledUserIds, audibleUserIds] = await Promise.all([
       this.notificationPreferences.recipientsPushEnabled(
         deliverableUserIds,
@@ -567,11 +822,147 @@ export class PushMessageListener {
     ]);
     const pushEnabled = new Set(pushEnabledUserIds);
     const audible = new Set(audibleUserIds);
-    return new Set(
-      deliverableUserIds.filter(
-        (userId) => pushEnabled.has(userId) && audible.has(userId),
+    return {
+      recipientUserIds: new Set(
+        deliverableUserIds.filter(
+          (userId) => pushEnabled.has(userId) && audible.has(userId),
+        ),
       ),
+      mailbox,
+    };
+  }
+
+  /**
+   * Task 13d: whether a thread is personal or a business mailbox, and for a
+   * mailbox thread which seats this message may reach. `loadedSeats` is the
+   * thread's full seat list when the caller already holds it; a caller that
+   * narrowed its own participant query passes `undefined`, and the seats are
+   * read here.
+   *
+   * A thread is personal only once every seat is confirmed a profile
+   * identity. A mailbox or unresolved seat with no certain partition reads
+   * `unpartitionable`, so nothing that could carry a staff member's identity
+   * is pushed from it.
+   *
+   * The partition drops departed seats (`shouldIncludeDepartedSeats: false`):
+   * a push audience is the people who can act now. It is NOT block-aware, so
+   * the live staff seats then go through `loadReachableMailboxSeats`, the
+   * one home of the rule the REST surfaces and the live socket frames apply,
+   * with the blocks between each staff member and the customer read in one
+   * batched query.
+   */
+  private async loadMessagePushThreadAudience(
+    conversation: Pick<
+      Conversation,
+      'id' | 'kind' | 'isOfficial' | 'claimedByUserId'
+    >,
+    loadedSeats: ConversationParticipant[] | undefined,
+  ): Promise<MessagePushThreadAudience> {
+    if (
+      conversation.kind === ConversationKind.Group ||
+      conversation.isOfficial
+    ) {
+      return { shape: 'personal' };
+    }
+    const seats =
+      loadedSeats ??
+      (await this.participants.find({
+        where: { conversationId: conversation.id },
+        select: { userId: true, identityId: true, leftAt: true },
+      }));
+    const identities = await this.identities.getByIds(
+      seats.map((seat) => seat.identityId),
     );
+    const identityKindById = new Map(
+      identities.map((identity) => [identity.id, identity.kind]),
+    );
+    if (isEverySeatPersonal(seats, identityKindById)) {
+      return { shape: 'personal' };
+    }
+    const partition = partitionMailboxThreadSeats(seats, identityKindById, {
+      shouldIncludeDepartedSeats: false,
+    });
+    if (!partition) return { shape: 'unpartitionable' };
+
+    const customerSeat = partition.customerSeat;
+    const reachableSeats = await loadReachableMailboxSeats(
+      partition,
+      identityKindById,
+      this.blockFilter,
+    );
+    // Task 14: the customer blocked the business, so the thread reaches
+    // nobody: the customer's own seat and every staff seat are out.
+    if (!reachableSeats.customerSeat) {
+      return {
+        shape: 'mailbox',
+        mailbox: {
+          mailboxIdentityId: partition.mailboxIdentityId,
+          customerUserId: customerSeat.userId,
+        },
+        audienceUserIds: new Set(),
+      };
+    }
+    const reachableStaffUserIds = new Set(
+      reachableSeats.staffSeats.map((seat) => seat.userId),
+    );
+
+    const claimedByUserId = conversation.claimedByUserId;
+    const hasLiveClaimantSeat = partition.staffSeats.some(
+      (seat) => seat.userId === claimedByUserId,
+    );
+    let staffAudienceUserIds: ReadonlySet<string>;
+    if (!claimedByUserId) {
+      staffAudienceUserIds = reachableStaffUserIds;
+    } else if (reachableStaffUserIds.has(claimedByUserId)) {
+      staffAudienceUserIds = new Set([claimedByUserId]);
+    } else if (hasLiveClaimantSeat) {
+      // The claimant holds a live seat and a block removed it: the claim is
+      // ignored for push, and the business keeps hearing its customer.
+      staffAudienceUserIds = reachableStaffUserIds;
+    } else {
+      staffAudienceUserIds = new Set();
+    }
+    return {
+      shape: 'mailbox',
+      mailbox: {
+        mailboxIdentityId: partition.mailboxIdentityId,
+        customerUserId: customerSeat.userId,
+      },
+      audienceUserIds: new Set([customerSeat.userId, ...staffAudienceUserIds]),
+    };
+  }
+
+  /**
+   * Task 13d: a staff-written mailbox reply's sender, rendered by
+   * `renderMessageSender` exactly as the in-app bubble renders it for the
+   * customer. The sender is rendered as the mailbox identity their seat
+   * speaks for, so a message row carrying no identity still renders the
+   * business. Only the business's own display name and avatar are read from
+   * it (see the title comment in `handleMessageCreated`).
+   */
+  private async renderMailboxSenderAuthors(
+    senderId: string,
+    senderProfile: Profile | null,
+    mailbox: MailboxPushThread,
+  ): Promise<{ businessAuthor: AuthorSummary }> {
+    const senderContext = await loadSenderIdentityContext(
+      {
+        identities: this.identities,
+        identityAttribution: this.identityAttribution,
+      },
+      [mailbox.mailboxIdentityId],
+      mailbox.customerUserId,
+    );
+    const profileByUser = new Map<string, Profile>(
+      senderProfile ? [[senderId, senderProfile]] : [],
+    );
+    return {
+      businessAuthor: renderMessageSender(
+        { senderId, senderIdentityId: mailbox.mailboxIdentityId },
+        profileByUser,
+        senderContext,
+      ),
+    };
   }
 
   /**

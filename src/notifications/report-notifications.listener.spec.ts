@@ -9,6 +9,8 @@ import {
 import { Community } from '../communities/entities/community.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Event as Gathering } from '../events/entities/event.entity';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import {
   Report,
   ReportSeverity,
@@ -101,6 +103,7 @@ describe('ReportNotificationsListener', () => {
   };
   let notifications: { createForRecipients: jest.Mock; create: jest.Mock };
   let photoQueryBuilder: QueryBuilderStub;
+  let identities: { staffUserIds: jest.Mock; ensureIdentityFor: jest.Mock };
 
   /** Every `createForRecipients` call, as its three declared arguments. A
    *  FOURTH argument would be an actor id, which no fan-out here may pass. */
@@ -140,6 +143,10 @@ describe('ReportNotificationsListener', () => {
       authorIdForPost: jest.fn().mockResolvedValue(null),
       authorIdForReply: jest.fn().mockResolvedValue(null),
     };
+    identities = {
+      staffUserIds: jest.fn().mockResolvedValue([]),
+      ensureIdentityFor: jest.fn(),
+    };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue([]),
       // PRD-289. The reporter's own receipt goes through `create`, not the
@@ -163,6 +170,7 @@ describe('ReportNotificationsListener', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: CommunityMembershipService, useValue: membership },
         { provide: NotificationsService, useValue: notifications },
+        { provide: IdentitiesService, useValue: identities },
       ],
     }).compile();
     listener = module.get(ReportNotificationsListener);
@@ -373,6 +381,299 @@ describe('ReportNotificationsListener', () => {
         listener.onReportCreated(PHOTO_REPORT_EVENT),
       ).resolves.toBeUndefined();
       expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+  });
+
+  // A business is answered for by a team, and any of them can hold a platform
+  // role. None of them may be paged about a report on their own business.
+  describe('a report on a business', () => {
+    const IDENTITY_ID = '0c000000-0000-4000-8000-000000000001';
+    const LISTING_ID = '0b000000-0000-4000-8000-000000000001';
+    const LISTING_IDENTITY_ID = '0c000000-0000-4000-8000-000000000009';
+
+    const businessEvent = (
+      subjectType: ReportSubjectType,
+      subjectId: string,
+    ): ReportCreatedEvent => ({
+      reportId: 'report-3',
+      subjectType,
+      subjectId,
+      severity: ReportSeverity.High,
+      reasonCode: 'harassment',
+    });
+
+    const platformRecipients = (): string[] | null => {
+      const call = fanOutCalls().find(
+        ([, notificationType]) =>
+          notificationType === NotificationType.ReportFiled,
+      );
+      return call ? call[0] : null;
+    };
+
+    /** Stubs the listing slug lookup; `undefined` is a slug naming nothing. */
+    const stubListingLookup = (
+      rawRow: { listingId: string } | undefined,
+    ): QueryBuilderStub => {
+      const queryBuilder: QueryBuilderStub = {};
+      for (const chainedMethod of ['select', 'from', 'where']) {
+        queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
+      }
+      queryBuilder.getRawOne = jest.fn().mockResolvedValue(rawRow);
+      dataSource.createQueryBuilder.mockReturnValue(queryBuilder);
+      return queryBuilder;
+    };
+
+    /** Stubs the company/subprofile lookup the same shape the listing lookup
+     *  above uses; `undefined` is a slug or uuid naming nothing. */
+    const stubEntityLookup = (
+      rawRow: Record<string, string> | undefined,
+    ): QueryBuilderStub => {
+      const queryBuilder: QueryBuilderStub = {};
+      for (const chainedMethod of ['select', 'from', 'where']) {
+        queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
+      }
+      queryBuilder.getRawOne = jest.fn().mockResolvedValue(rawRow);
+      dataSource.createQueryBuilder.mockReturnValue(queryBuilder);
+      return queryBuilder;
+    };
+
+    beforeEach(() => {
+      users.find.mockResolvedValue([
+        { id: 'user-business-owner' },
+        { id: 'user-co-manager' },
+        { id: 'user-on-shift' },
+      ]);
+    });
+
+    it('pages no platform moderator who staffs the reported identity', async () => {
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-3',
+        subjectType: ReportSubjectType.Identity,
+        subjectId: IDENTITY_ID,
+      });
+      identities.staffUserIds.mockResolvedValue([
+        'user-business-owner',
+        'user-co-manager',
+      ]);
+
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Identity, IDENTITY_ID),
+      );
+
+      expect(identities.staffUserIds).toHaveBeenCalledWith(IDENTITY_ID);
+      expect(platformRecipients()).toEqual(['user-on-shift']);
+    });
+
+    it.each([ReportSubjectType.Listing, ReportSubjectType.Business])(
+      'pages no platform moderator who owns or co-manages the reported %s',
+      async (subjectType) => {
+        reports.findOne.mockResolvedValue({
+          ...PHOTO_REPORT,
+          id: 'report-3',
+          subjectType,
+          subjectId: 'cafe-lisboa',
+        });
+        const listingLookup = stubListingLookup({ listingId: LISTING_ID });
+        identities.ensureIdentityFor.mockResolvedValue({
+          id: LISTING_IDENTITY_ID,
+        });
+        identities.staffUserIds.mockResolvedValue([
+          'user-business-owner',
+          'user-co-manager',
+        ]);
+
+        await listener.onReportCreated(
+          businessEvent(subjectType, 'cafe-lisboa'),
+        );
+
+        expect(listingLookup.where).toHaveBeenCalledWith(
+          'listing.slug = :slug',
+          { slug: 'cafe-lisboa' },
+        );
+        expect(identities.ensureIdentityFor).toHaveBeenCalledWith(
+          IdentityKind.Listing,
+          LISTING_ID,
+        );
+        expect(identities.staffUserIds).toHaveBeenCalledWith(
+          LISTING_IDENTITY_ID,
+        );
+        expect(platformRecipients()).toEqual(['user-on-shift']);
+      },
+    );
+
+    it('still pages everyone on shift for a listing slug that names nothing', async () => {
+      stubListingLookup(undefined);
+
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Listing, 'no-such-listing'),
+      );
+
+      expect(identities.ensureIdentityFor).not.toHaveBeenCalled();
+      expect(platformRecipients()).toEqual([
+        'user-business-owner',
+        'user-co-manager',
+        'user-on-shift',
+      ]);
+    });
+
+    it('never asks for staff of a non-uuid identity id', async () => {
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Identity, 'cafe-lisboa'),
+      );
+
+      expect(identities.staffUserIds).not.toHaveBeenCalled();
+      expect(platformRecipients()).toHaveLength(3);
+    });
+
+    // Task 21 review M2: the conflict exclusion mirrors the identity and
+    // listing arms for a company and for a persona, so a platform moderator
+    // who owns or staffs either is never paged about a report on it.
+    it('pages no platform moderator who owns or staffs the reported company', async () => {
+      const COMPANY_ID = '0d000000-0000-4000-8000-000000000001';
+      const COMPANY_IDENTITY_ID = '0c000000-0000-4000-8000-000000000010';
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-3',
+        subjectType: ReportSubjectType.Company,
+        subjectId: 'acme-co',
+      });
+      const companyLookup = stubEntityLookup({ companyId: COMPANY_ID });
+      identities.ensureIdentityFor.mockResolvedValue({
+        id: COMPANY_IDENTITY_ID,
+      });
+      identities.staffUserIds.mockResolvedValue([
+        'user-business-owner',
+        'user-co-manager',
+      ]);
+
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Company, 'acme-co'),
+      );
+
+      expect(companyLookup.where).toHaveBeenCalledWith('company.slug = :slug', {
+        slug: 'acme-co',
+      });
+      expect(identities.ensureIdentityFor).toHaveBeenCalledWith(
+        IdentityKind.Company,
+        COMPANY_ID,
+      );
+      expect(identities.staffUserIds).toHaveBeenCalledWith(COMPANY_IDENTITY_ID);
+      expect(platformRecipients()).toEqual(['user-on-shift']);
+    });
+
+    it('pages no platform moderator who owns or co-owns the reported persona, addressed by uuid', async () => {
+      const SUBPROFILE_ID = '0e000000-0000-4000-8000-000000000001';
+      const SUBPROFILE_IDENTITY_ID = '0c000000-0000-4000-8000-000000000011';
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-3',
+        subjectType: ReportSubjectType.Subprofile,
+        subjectId: SUBPROFILE_ID,
+      });
+      const subprofileLookup = stubEntityLookup({
+        subprofileId: SUBPROFILE_ID,
+      });
+      identities.ensureIdentityFor.mockResolvedValue({
+        id: SUBPROFILE_IDENTITY_ID,
+      });
+      identities.staffUserIds.mockResolvedValue([
+        'user-business-owner',
+        'user-co-manager',
+      ]);
+
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Subprofile, SUBPROFILE_ID),
+      );
+
+      expect(subprofileLookup.where).toHaveBeenCalledWith(
+        'subprofile.id = :subjectId OR subprofile.slug = :subjectId',
+        { subjectId: SUBPROFILE_ID },
+      );
+      expect(identities.ensureIdentityFor).toHaveBeenCalledWith(
+        IdentityKind.Subprofile,
+        SUBPROFILE_ID,
+      );
+      expect(identities.staffUserIds).toHaveBeenCalledWith(
+        SUBPROFILE_IDENTITY_ID,
+      );
+      expect(platformRecipients()).toEqual(['user-on-shift']);
+    });
+
+    it('pages no platform moderator who owns or co-owns the reported persona, addressed by slug', async () => {
+      const SUBPROFILE_ID = '0e000000-0000-4000-8000-000000000002';
+      const SUBPROFILE_IDENTITY_ID = '0c000000-0000-4000-8000-000000000012';
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-3',
+        subjectType: ReportSubjectType.Subprofile,
+        subjectId: 'a-persona-slug',
+      });
+      const subprofileLookup = stubEntityLookup({
+        subprofileId: SUBPROFILE_ID,
+      });
+      identities.ensureIdentityFor.mockResolvedValue({
+        id: SUBPROFILE_IDENTITY_ID,
+      });
+      identities.staffUserIds.mockResolvedValue(['user-business-owner']);
+
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Subprofile, 'a-persona-slug'),
+      );
+
+      // A slug is not uuid-shaped, so only the slug branch of the `where`
+      // clause runs, matching `SUBPROFILE_BY_SLUG_SQL`.
+      expect(subprofileLookup.where).toHaveBeenCalledWith(
+        'subprofile.slug = :subjectId',
+        { subjectId: 'a-persona-slug' },
+      );
+      expect(identities.ensureIdentityFor).toHaveBeenCalledWith(
+        IdentityKind.Subprofile,
+        SUBPROFILE_ID,
+      );
+    });
+
+    it('still pages everyone on shift for a company slug that names nothing', async () => {
+      stubEntityLookup(undefined);
+
+      await listener.onReportCreated(
+        businessEvent(ReportSubjectType.Company, 'no-such-company'),
+      );
+
+      expect(identities.ensureIdentityFor).not.toHaveBeenCalled();
+      expect(platformRecipients()).toEqual([
+        'user-business-owner',
+        'user-co-manager',
+        'user-on-shift',
+      ]);
+    });
+
+    // Task 21 review M1: a failure in the staff lookup must never silence the
+    // report. This must not share the try/catch every other resolver in this
+    // fan-out already had, or the outer catch in `onReportCreated` swallows
+    // the whole responder fan-out, paging nobody about an active report.
+    it('still pages every platform moderator when the business staff lookup throws', async () => {
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-3',
+        subjectType: ReportSubjectType.Identity,
+        subjectId: IDENTITY_ID,
+      });
+      identities.staffUserIds.mockRejectedValue(new Error('connection reset'));
+
+      await expect(
+        listener.onReportCreated(
+          businessEvent(ReportSubjectType.Identity, IDENTITY_ID),
+        ),
+      ).resolves.toBeUndefined();
+
+      // Nobody could be excluded on the business-staff axis, so every active
+      // platform moderator is paged.
+      expect(platformRecipients()).toEqual([
+        'user-business-owner',
+        'user-co-manager',
+        'user-on-shift',
+      ]);
     });
   });
 

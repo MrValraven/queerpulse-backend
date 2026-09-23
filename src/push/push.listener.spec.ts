@@ -2,6 +2,7 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { IdentityKind } from '../identities/entities/identity.entity';
 import { ConversationMuteMode } from '../messaging/entities/conversation-participant.entity';
 import { ConversationKind } from '../messaging/entities/conversation.entity';
 import { MessageKind } from '../messaging/entities/message.entity';
@@ -38,6 +39,9 @@ function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
     id: 'm1',
     conversationId: 'conv-1',
     senderId: 'sender-1',
+    // Task 11: unused by this listener, which never reads identity
+    // attribution, present only so `MessageView`'s shape is satisfied.
+    senderIdentityId: 'sender-identity-1',
     body: 'hey there',
     createdAt: new Date(),
     editedAt: null,
@@ -159,7 +163,14 @@ function build(opts: {
                 allowedUserIds.includes(participant.userId),
               )
             : opts.participants;
-          return Promise.resolve(rows);
+          // Task 13d: every seat carries its own profile identity, so each
+          // thread here reads as personal (`identities.getByIds` below).
+          return Promise.resolve(
+            rows.map((participant) => ({
+              identityId: `profile-identity-${participant.userId}`,
+              ...participant,
+            })),
+          );
         },
       ),
   };
@@ -236,6 +247,23 @@ function build(opts: {
         ),
       ),
   };
+  // Task 13d: every identity a seat names resolves as a profile identity, so
+  // no thread in this file is a business mailbox. The mailbox cases live in
+  // `push-listener-mailbox.spec.ts`.
+  const identities = {
+    getByIds: jest.fn((identityIds: string[]) =>
+      Promise.resolve(
+        identityIds.map((identityId) => ({
+          id: identityId,
+          kind: IdentityKind.Profile,
+        })),
+      ),
+    ),
+    describeIdentities: jest.fn().mockResolvedValue(new Map()),
+  };
+  const identityAttribution = {
+    buildStaffNameResolver: jest.fn(),
+  };
   const listener = new PushMessageListener(
     conversationsRepo as never,
     participantsRepo as never,
@@ -246,6 +274,8 @@ function build(opts: {
     notificationPreferences as never,
     notificationDelivery as never,
     connections as never,
+    identities as never,
+    identityAttribution as never,
   );
   return {
     listener,
@@ -582,7 +612,7 @@ describe('group message shape (PRD-333)', () => {
 });
 
 describe('participant column selection (ENG-239)', () => {
-  it('selects only userId, leftAt, muted, mutedUntil and muteMode off the participants query', async () => {
+  it('selects only userId, identityId, leftAt, muted, mutedUntil and muteMode off the participants query', async () => {
     const { listener, participantsRepo } = build({
       participants: DIRECT_PARTICIPANTS,
       online: [],
@@ -592,6 +622,8 @@ describe('participant column selection (ENG-239)', () => {
       where: { conversationId: 'conv-1' },
       select: {
         userId: true,
+        // Task 13d: the seat identity tells a mailbox thread apart.
+        identityId: true,
         leftAt: true,
         muted: true,
         mutedUntil: true,

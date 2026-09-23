@@ -20,6 +20,7 @@ import {
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
 import { SafeSpaceNomination } from '../safe-space-nominations/entities/safe-space-nomination.entity';
+import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { UsersService } from '../users/users.service';
 import { CreatePressContactDto } from './dto/create-press-contact.dto';
 import { CreatePressCoverageDto } from './dto/create-press-coverage.dto';
@@ -101,10 +102,15 @@ export class PressKitService {
     ] = await Promise.all([
       // Active community size (pending/suspended excluded).
       this.usersService.countActiveMembers(),
-      // Public, non-archived communities — the ones a visitor can actually
-      // see (same rule as landing eligibility).
+      // Public, non-archived, top-level communities: the ones a visitor can
+      // actually see (same rule as landing eligibility). This fact counts
+      // top-level communities only; a space counts as part of its parent.
       this.communities.count({
-        where: { accessTier: AccessTier.Public, archivedAt: IsNull() },
+        where: {
+          accessTier: AccessTier.Public,
+          archivedAt: IsNull(),
+          ...TOP_LEVEL_WHERE,
+        },
       }),
       // Published gatherings only — drafts (not yet live) and cancelled ones
       // are not honest "gatherings held/scheduled".

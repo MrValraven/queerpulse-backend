@@ -8,6 +8,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, IsNull, Not } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -99,6 +101,13 @@ describe('ConversationsService preferences (ENG-268)', () => {
         // PRD-364: unused by the setters this file exercises (setMuted etc.) —
         // only `markRead`/`listConversations`/`toConversationResponse` read it.
         { provide: PreferencesService, useValue: {} },
+        // Task 9: unused by the setters this file exercises — only
+        // `claim`/`release` read it.
+        { provide: IdentitiesService, useValue: {} },
+        // Task 11: unused by the setters this file exercises; only
+        // `buildConversationSummaries`'s identity-aware `otherParticipant`
+        // reads it.
+        { provide: IdentityAttributionService, useValue: {} },
       ],
     }).compile();
     service = module.get(ConversationsService);

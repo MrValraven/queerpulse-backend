@@ -2,6 +2,9 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, Repository } from 'typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
+import { Sticker } from '../stickers/entities/sticker.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
 import { Conversation } from './entities/conversation.entity';
@@ -58,6 +61,12 @@ function documentAttachment(key: string): DocumentAttachment {
   };
 }
 
+// Task 7: a fixed profile identity every test's sender resolves to, and a
+// participant seat carrying it, so `postMessage`'s `assertMaySendAs` guard
+// passes trivially, keeping this M8/PRD-226 suite focused on attachment
+// ownership alone.
+const SENDER_IDENTITY_ID = '44444444-4444-4444-4444-444444444444';
+
 function build(accessibleForwardCount: number) {
   const getCount = jest.fn().mockResolvedValue(accessibleForwardCount);
   const queryBuilder = {
@@ -74,10 +83,20 @@ function build(accessibleForwardCount: number) {
       Promise.resolve({ id: 'saved-message-id', ...entity }),
     ),
   };
+  const participants = {
+    find: jest.fn().mockResolvedValue([{ identityId: SENDER_IDENTITY_ID }]),
+    // CW-05: `assertMaySendAs` now asks for the sender's own seat directly
+    // through `exist`, an existence check on the exact pair it needs.
+    exist: jest.fn().mockResolvedValue(true),
+  };
+  const identities = {
+    resolveProfileIdentityId: jest.fn().mockResolvedValue(SENDER_IDENTITY_ID),
+    assertMayActAs: jest.fn().mockResolvedValue(undefined),
+  };
   const empty = {} as Record<string, never>;
   const service = new MessagingCoreService(
     empty as unknown as Repository<Conversation>,
-    empty as unknown as Repository<ConversationParticipant>,
+    participants as unknown as Repository<ConversationParticipant>,
     messages as unknown as Repository<Message>,
     empty as unknown as Repository<MessageReaction>,
     empty as unknown as Repository<ConversationPinnedMessage>,
@@ -85,9 +104,17 @@ function build(accessibleForwardCount: number) {
     empty as unknown as Repository<MessageHide>,
     empty as unknown as Repository<ContentModeration>,
     empty as unknown as Repository<Profile>,
+    empty as unknown as Repository<Sticker>,
     empty as unknown as DataSource,
     empty as unknown as EventEmitter2,
     empty as unknown as UsersService,
+    identities as unknown as IdentitiesService,
+    // Task 11: unused, `buildPostResult` is short-circuited below.
+    {
+      buildStaffNameResolver: jest
+        .fn()
+        .mockResolvedValue({ resolve: () => null }),
+    } as unknown as IdentityAttributionService,
   );
   // Short-circuit the hydration that a genuinely-accepted send would run — this
   // suite only asserts the ownership/forward decision, not the response shape.

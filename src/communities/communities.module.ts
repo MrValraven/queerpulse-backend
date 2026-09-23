@@ -68,6 +68,8 @@ import { CommunityPost } from './entities/community-post.entity';
 import { CommunityTagRequest } from './entities/community-tag-request.entity';
 import { Community } from './entities/community.entity';
 import { MeCommunitiesController } from './me-communities.controller';
+import { SubcommunitiesController } from './subcommunities.controller';
+import { SubcommunitiesService } from './subcommunities.service';
 
 @Module({
   imports: [
@@ -230,6 +232,9 @@ import { MeCommunitiesController } from './me-communities.controller';
     // disagreed about who removed whom the answer sat in the database
     // reachable only by staff.
     CommunityGovernanceHistoryController,
+    // A community's spaces (`:slug/subcommunities`), kept off
+    // `CommunitiesController` like the surfaces above.
+    SubcommunitiesController,
   ],
   providers: [
     CommunitiesService,
@@ -269,6 +274,7 @@ import { MeCommunitiesController } from './me-communities.controller';
     CommunityOwnerReviewService,
     CommunityGovernanceHistoryService,
     CommunitySupportOffersService,
+    SubcommunitiesService,
   ],
   // `CommunityOwnerOrphanService` is exported so `AccountModule` can call
   // `handleOwnerErasure(userId)` from `AccountDeletionProcessorService.eraseAccount`,

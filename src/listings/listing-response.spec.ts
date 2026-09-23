@@ -213,6 +213,49 @@ describe('toDirectoryDetail', () => {
     const withSome = toDirectoryDetail(makeDirectoryListing(), [], [], 7);
     expect(withSome.savedCount).toBe(7);
   });
+
+  describe('isUnclaimed', () => {
+    it('is true for a listing with no owner', () => {
+      const detail = toDirectoryDetail(
+        makeDirectoryListing({ ownerId: null }),
+        [],
+        [],
+        0,
+      );
+      expect(detail.isUnclaimed).toBe(true);
+    });
+
+    it('is false for an owned listing', () => {
+      const detail = toDirectoryDetail(
+        makeDirectoryListing({ ownerId: 'member-1' }),
+        [],
+        [],
+        0,
+      );
+      expect(detail.isUnclaimed).toBe(false);
+    });
+
+    // The whole point of this flag: an owner who chose `anon` visibility
+    // blanks the same name fields an unowned listing blanks, so a flag
+    // derived from those fields could not tell the two apart. Deriving it
+    // from `ownerId` keeps them distinguishable. This stays false here even
+    // though `owner.name` reads empty, exactly like an unclaimed listing's
+    // does. A future edit that reads `isUnclaimed` off the blank name
+    // fields would fail this assertion.
+    it('stays false for an owned anonymous listing, which still blanks the owner name', () => {
+      const detail = toDirectoryDetail(
+        makeDirectoryListing({ ownerId: 'member-1', visibility: 'anon' }),
+        [],
+        [],
+        0,
+      );
+      expect(detail.isUnclaimed).toBe(false);
+      expect(detail.owner.name).toBe('');
+      expect(detail.owner.role).toBe('');
+      expect(detail.owner.bio).toBe('');
+      expect(detail.owner.first).toBe('');
+    });
+  });
 });
 
 describe('safe-space adapters', () => {

@@ -11,6 +11,7 @@ import { toImageUrl } from '../common/image-url';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -87,6 +88,10 @@ export class GroupInvitesService {
     private readonly eventEmitter: EventEmitter2,
     private readonly mediaCropService: MediaCropService,
     private readonly preferencesService: PreferencesService,
+    // Task 8: resolves the joiner's own profile identity so
+    // `insertJoinPill` can stamp `senderIdentityId`, satisfying
+    // `CHK_messages_sender_identity`.
+    private readonly identities: IdentitiesService,
   ) {}
 
   /**
@@ -264,10 +269,13 @@ export class GroupInvitesService {
           code: GROUP_FULL_CODE,
         });
       }
+      const joinerIdentityId =
+        await this.identities.resolveProfileIdentityId(userId);
       await this.seatParticipant(
         manager,
         convo.id,
         userId,
+        joinerIdentityId,
         existingRow ?? null,
       );
       const updateResult = await manager.update(
@@ -283,7 +291,13 @@ export class GroupInvitesService {
           code: INVITE_NOT_FOUND_CODE,
         });
       }
-      return this.insertJoinPill(manager, convo.id, userId, 'invite');
+      return this.insertJoinPill(
+        manager,
+        convo.id,
+        userId,
+        joinerIdentityId,
+        'invite',
+      );
     });
     await this.broadcastPill(systemMessage);
     this.emitBestEffort(CONVERSATION_CREATED, {
@@ -527,10 +541,13 @@ export class GroupInvitesService {
           code: GROUP_FULL_CODE,
         });
       }
+      const joinerIdentityId =
+        await this.identities.resolveProfileIdentityId(userId);
       await this.seatParticipant(
         manager,
         convo.id,
         userId,
+        joinerIdentityId,
         existingRow ?? null,
       );
       // PRD-353: a pending invite for this exact (conversation, invitee)
@@ -545,7 +562,13 @@ export class GroupInvitesService {
         },
         { status: GroupInviteStatus.Accepted, respondedAt: new Date() },
       );
-      return this.insertJoinPill(manager, convo.id, userId, 'link');
+      return this.insertJoinPill(
+        manager,
+        convo.id,
+        userId,
+        joinerIdentityId,
+        'link',
+      );
     });
     await this.broadcastPill(systemMessage);
     this.emitBestEffort(CONVERSATION_CREATED, {
@@ -564,11 +587,16 @@ export class GroupInvitesService {
    * themselves before leaving), `leftAt` clears, role resets to `member`, and
    * `removedBy` clears (a re-seated member reads as freshly added, not still
    * "removed").
+   *
+   * A brand-new row carries `joinerIdentityId`, the joiner's own profile
+   * identity (`conversation_participants.identity_id` is NOT NULL). A
+   * reactivated row keeps the identity it already holds.
    */
   private async seatParticipant(
     manager: EntityManager,
     conversationId: string,
     userId: string,
+    joinerIdentityId: string,
     existing: Pick<
       ConversationParticipant,
       'id' | 'clearedAt' | 'leftAt'
@@ -601,6 +629,7 @@ export class GroupInvitesService {
         manager.create(ConversationParticipant, {
           conversationId,
           userId,
+          identityId: joinerIdentityId,
           role: ConversationRole.Member,
         }),
       );
@@ -609,17 +638,24 @@ export class GroupInvitesService {
 
   /** Inserts the `member_joined` pill (actor = the joiner) inside the
    *  caller's transaction. `body` mirrors `GroupsService`'s own
-   *  `SYSTEM_EVENT_FALLBACK['member_joined']` fallback text exactly. */
+   *  `SYSTEM_EVENT_FALLBACK['member_joined']` fallback text exactly.
+   *
+   *  Task 8: `CHK_messages_sender_identity` requires `senderIdentityId`
+   *  whenever `senderId` is set. The joiner authors this pill as themselves,
+   *  so it stamps their own profile identity, resolved once by the caller
+   *  for both the seat and this pill. */
   private insertJoinPill(
     manager: EntityManager,
     conversationId: string,
     actorId: string,
+    senderIdentityId: string,
     value: 'invite' | 'link',
   ): Promise<Message> {
     return manager.save(
       manager.create(Message, {
         conversationId,
         senderId: actorId,
+        senderIdentityId,
         body: 'joined',
         kind: MessageKind.System,
         systemEvent: { type: 'member_joined', actorId, value },

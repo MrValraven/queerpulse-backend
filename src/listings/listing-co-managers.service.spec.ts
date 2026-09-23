@@ -6,6 +6,9 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -52,6 +55,12 @@ const seat = (overrides: Partial<ListingCoManager> = {}): ListingCoManager =>
     ...overrides,
   }) as ListingCoManager;
 
+const NO_MAILBOX_CHANGES = {
+  endedSeats: [],
+  releasedClaims: [],
+  staffingChanges: [],
+};
+
 describe('ListingCoManagersService', () => {
   let service: ListingCoManagersService;
   let coManagers: {
@@ -65,6 +74,12 @@ describe('ListingCoManagersService', () => {
   let listings: { find: jest.Mock; findOne: jest.Mock };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let notifications: { create: jest.Mock };
+  let identities: { ensureIdentityFor: jest.Mock };
+  let identityMailboxSync: {
+    onStaffAdded: jest.Mock;
+    onStaffRemoved: jest.Mock;
+    emitSeatChanges: jest.Mock;
+  };
   let transactionManager: {
     save: jest.Mock;
     getRepository: jest.Mock;
@@ -108,6 +123,16 @@ describe('ListingCoManagersService', () => {
     };
     slugResolvesToNobody();
     notifications = { create: jest.fn().mockResolvedValue(null) };
+    identities = {
+      ensureIdentityFor: jest
+        .fn()
+        .mockResolvedValue({ id: 'listing-identity-1' }),
+    };
+    identityMailboxSync = {
+      onStaffAdded: jest.fn().mockResolvedValue(NO_MAILBOX_CHANGES),
+      onStaffRemoved: jest.fn().mockResolvedValue(NO_MAILBOX_CHANGES),
+      emitSeatChanges: jest.fn(),
+    };
     transactionManager = {
       save: jest.fn((first: unknown, second?: object) =>
         Promise.resolve(
@@ -126,6 +151,8 @@ describe('ListingCoManagersService', () => {
         { provide: getRepositoryToken(Listing), useValue: listings },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: NotificationsService, useValue: notifications },
+        { provide: IdentitiesService, useValue: identities },
+        { provide: IdentityMailboxSyncService, useValue: identityMailboxSync },
         {
           provide: DataSource,
           useValue: {
@@ -353,6 +380,130 @@ describe('ListingCoManagersService', () => {
         service.respondToInvite('seat-1', INVITEE_ID, 'accept'),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+
+    it('seats the mailbox on accept, in the same transaction', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+
+      await service.respondToInvite('seat-1', INVITEE_ID, 'accept');
+
+      expect(identities.ensureIdentityFor).toHaveBeenCalledWith(
+        IdentityKind.Listing,
+        'listing-1',
+      );
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenCalledWith(
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+    });
+
+    // Task 25: the new co-manager hears `mailbox:staffing` only once the
+    // acceptance has committed.
+    it('tells the new co-manager about their mailbox only after the transaction resolves', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+      const acceptedChanges = {
+        ...NO_MAILBOX_CHANGES,
+        staffingChanges: [
+          {
+            identityId: 'listing-identity-1',
+            userId: INVITEE_ID,
+            isStaff: true,
+          },
+        ],
+      };
+      identityMailboxSync.onStaffAdded.mockImplementation(async () => {
+        expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+        return acceptedChanges;
+      });
+
+      await service.respondToInvite('seat-1', INVITEE_ID, 'accept');
+
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledTimes(1);
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledWith(
+        acceptedChanges,
+      );
+    });
+
+    it('never tells anyone about a mailbox when the acceptance rolls back', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+      identityMailboxSync.onStaffAdded.mockResolvedValue({
+        ...NO_MAILBOX_CHANGES,
+        staffingChanges: [
+          {
+            identityId: 'listing-identity-1',
+            userId: INVITEE_ID,
+            isStaff: true,
+          },
+        ],
+      });
+      // The callback runs to the end, seat included, and the commit fails.
+      const dataSource = (
+        service as unknown as { dataSource: { transaction: jest.Mock } }
+      ).dataSource;
+      dataSource.transaction.mockImplementationOnce(
+        async (work: (manager: EntityManager) => Promise<unknown>) => {
+          await work(transactionManager as unknown as EntityManager);
+          throw new Error('commit failed');
+        },
+      );
+
+      await expect(
+        service.respondToInvite('seat-1', INVITEE_ID, 'accept'),
+      ).rejects.toThrow('commit failed');
+
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenCalled();
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+    });
+
+    it('tells nobody about a mailbox on decline', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+
+      await service.respondToInvite('seat-1', INVITEE_ID, 'decline');
+
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+    });
+
+    it('does not touch the mailbox on decline, since nothing was ever granted', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+
+      await service.respondToInvite('seat-1', INVITEE_ID, 'decline');
+
+      expect(identityMailboxSync.onStaffAdded).not.toHaveBeenCalled();
+    });
+
+    it('seats the mailbox on a returning co-manager who left and was invited again, calling onStaffAdded both times', async () => {
+      // A returning co-manager's `listing_co_managers` row is REUSED
+      // (`inviteToLoadedListing`'s terminal-row reuse), so the same seat id
+      // answers a second invitation. `onStaffAdded` firing twice for the same
+      // identity/user is exactly what its own idempotent reactivation is for
+      // (see `identity-mailbox-sync.service.spec.ts`); this proves the WIRING
+      // itself calls it on both occasions, which is the assumption that test
+      // relies on.
+      coManagers.findOne.mockResolvedValue(seat());
+      await service.respondToInvite('seat-1', INVITEE_ID, 'accept');
+
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Invited }),
+      );
+      await service.respondToInvite('seat-1', INVITEE_ID, 'accept');
+
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenCalledTimes(2);
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenNthCalledWith(
+        1,
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+      expect(identityMailboxSync.onStaffAdded).toHaveBeenNthCalledWith(
+        2,
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+    });
   });
 
   describe('revoke', () => {
@@ -396,6 +547,114 @@ describe('ListingCoManagersService', () => {
       expect(transactionManager.save).not.toHaveBeenCalled();
     });
 
+    it('ends the mailbox seat when an active seat is revoked', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      expect(identityMailboxSync.onStaffRemoved).toHaveBeenCalledWith(
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+    });
+
+    // CW-24: the live-room eviction event must not go out until the
+    // transaction that ends the seat has actually resolved, mirroring
+    // `GroupsService.leaveGroup`'s post-commit fan-out. `onStaffRemoved` is
+    // asked to defer (asserted above), and `emitSeatChanges` (Task 25: the
+    // eviction, the claim releases and the staffing change together) is the
+    // one place that is allowed to fire it, only after `dataSource
+    // .transaction(...)` has returned.
+    it('emits the mailbox eviction only after the transaction resolves', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+      const removedChanges = {
+        endedSeats: [{ conversationId: 'conversation-1', userId: INVITEE_ID }],
+        releasedClaims: [],
+        staffingChanges: [
+          {
+            identityId: 'listing-identity-1',
+            userId: INVITEE_ID,
+            isStaff: false,
+          },
+        ],
+      };
+      identityMailboxSync.onStaffRemoved.mockImplementation(async () => {
+        // Called from inside the transaction callback: the fan-out must not
+        // have happened yet at this point.
+        expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+        return removedChanges;
+      });
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledWith(
+        removedChanges,
+      );
+    });
+
+    it('never emits the mailbox eviction when the transaction rolls back', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+      transactionManager.save.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(
+        service.revoke('QPL-2026-0001', OWNER_ID, 'mika'),
+      ).rejects.toThrow('db down');
+
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+    });
+
+    // Task 25 m3: the stronger rollback shape the accept path uses. The
+    // callback runs to the end, seat ending included, and then the commit
+    // fails, so an emit placed anywhere inside the callback is caught.
+    it('never emits the mailbox changes when the revoke commit fails', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+      identityMailboxSync.onStaffRemoved.mockResolvedValue({
+        endedSeats: [{ conversationId: 'conversation-1', userId: INVITEE_ID }],
+        releasedClaims: [],
+        staffingChanges: [
+          {
+            identityId: 'listing-identity-1',
+            userId: INVITEE_ID,
+            isStaff: false,
+          },
+        ],
+      });
+      const dataSource = (
+        service as unknown as { dataSource: { transaction: jest.Mock } }
+      ).dataSource;
+      dataSource.transaction.mockImplementationOnce(
+        async (work: (manager: EntityManager) => Promise<unknown>) => {
+          await work(transactionManager as unknown as EntityManager);
+          throw new Error('commit failed');
+        },
+      );
+
+      await expect(
+        service.revoke('QPL-2026-0001', OWNER_ID, 'mika'),
+      ).rejects.toThrow('commit failed');
+
+      expect(identityMailboxSync.onStaffRemoved).toHaveBeenCalled();
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
+    });
+
+    it('does not touch the mailbox for an unanswered invitation, since it was never a seat', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      expect(identityMailboxSync.onStaffRemoved).not.toHaveBeenCalled();
+    });
+
     it('404s a seat that has already ended, so a double-click writes one event', async () => {
       coManagers.findOne.mockResolvedValue(
         seat({ status: ListingCoManagerStatus.Revoked }),
@@ -434,6 +693,57 @@ describe('ListingCoManagersService', () => {
       await expect(
         service.leave('QPL-2026-0001', 'nobody'),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('ends the mailbox seat for the member who stepped down', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.leave('QPL-2026-0001', INVITEE_ID);
+
+      expect(identityMailboxSync.onStaffRemoved).toHaveBeenCalledWith(
+        'listing-identity-1',
+        INVITEE_ID,
+        transactionManager,
+        { shouldDeferEmission: true },
+      );
+      expect(identityMailboxSync.emitSeatChanges).toHaveBeenCalledWith(
+        NO_MAILBOX_CHANGES,
+      );
+    });
+
+    it('never emits the mailbox changes when the leave commit fails', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+      identityMailboxSync.onStaffRemoved.mockResolvedValue({
+        endedSeats: [{ conversationId: 'conversation-1', userId: INVITEE_ID }],
+        releasedClaims: [],
+        staffingChanges: [
+          {
+            identityId: 'listing-identity-1',
+            userId: INVITEE_ID,
+            isStaff: false,
+          },
+        ],
+      });
+      const dataSource = (
+        service as unknown as { dataSource: { transaction: jest.Mock } }
+      ).dataSource;
+      dataSource.transaction.mockImplementationOnce(
+        async (work: (manager: EntityManager) => Promise<unknown>) => {
+          await work(transactionManager as unknown as EntityManager);
+          throw new Error('commit failed');
+        },
+      );
+
+      await expect(service.leave('QPL-2026-0001', INVITEE_ID)).rejects.toThrow(
+        'commit failed',
+      );
+
+      expect(identityMailboxSync.onStaffRemoved).toHaveBeenCalled();
+      expect(identityMailboxSync.emitSeatChanges).not.toHaveBeenCalled();
     });
   });
 

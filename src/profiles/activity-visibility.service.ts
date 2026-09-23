@@ -5,6 +5,7 @@ import {
   AccessTier,
   Community,
 } from '../communities/entities/community.entity';
+import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import {
   Event as GatheringEvent,
   EventStatus,
@@ -146,7 +147,10 @@ export class ActivityVisibilityService {
     return new Set(rows.map((row) => row.slug));
   }
 
-  /** Of `slugs`, the communities that are still public-tier and unarchived. */
+  /** Of `slugs`, the communities that are still top-level, public-tier and
+   *  unarchived. A row recorded for a space before this gate existed drops
+   *  out here at read time: "Posted in X" must never re-surface a space's
+   *  name once the read half re-checks it. */
   private async publicCommunitySlugs(slugs: string[]): Promise<Set<string>> {
     if (!slugs.length) {
       return new Set();
@@ -156,6 +160,7 @@ export class ActivityVisibilityService {
         slug: In(slugs),
         accessTier: AccessTier.Public,
         archivedAt: IsNull(),
+        ...TOP_LEVEL_WHERE,
       },
       select: { slug: true },
     });

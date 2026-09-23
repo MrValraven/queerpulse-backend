@@ -1,4 +1,10 @@
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 /**
  * Body for `POST /directory/:slug/enquiries` — a member writing PRIVATELY to
@@ -17,4 +23,13 @@ import { IsString, MaxLength, MinLength } from 'class-validator';
  */
 export class CreateListingEnquiryDto {
   @IsString() @MinLength(8) @MaxLength(2000) body!: string;
+
+  /** Task 18: the identity the member is acting as, when the mailbox
+   *  switcher has one selected, as `SendMessageDto.asIdentityId` carries it.
+   *  Left empty, the member writes as themselves. Only their own profile may
+   *  start a conversation, so a business, persona or company named here is
+   *  refused with `IDENTITY_CANNOT_INITIATE` and nothing is sent. */
+  @IsOptional()
+  @IsUUID()
+  asIdentityId?: string;
 }

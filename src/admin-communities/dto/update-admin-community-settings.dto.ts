@@ -20,4 +20,13 @@ export class UpdateAdminCommunitySettingsDto {
   @IsOptional()
   @IsBoolean()
   isFeatured?: boolean;
+
+  // Staff switch that lets this community's owner and mods open spaces
+  // under it. Only meaningful on a top-level community: setting it `true`
+  // on a space fails with 409 `SUBCOMMUNITIES_NOT_ALLOWED` (see
+  // `AdminCommunitiesService.updateSettings`). Setting it `false` leaves any
+  // spaces already open in place and only blocks new ones.
+  @IsOptional()
+  @IsBoolean()
+  allowsSubcommunities?: boolean;
 }

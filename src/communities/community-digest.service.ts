@@ -122,15 +122,44 @@ export class CommunityDigestService {
     );
 
     // 2. The communities themselves. Archived ones drop out: a community taken
-    // down should not keep filing weekly reports.
+    // down should not keep filing weekly reports. Spaces are INCLUDED (unlike
+    // most other listings in this build): a space's own members still want its
+    // weekly digest, distinct from its parent's.
     const communities = await this.communities.find({
       where: { id: In(communityIds), archivedAt: IsNull() },
-      select: { id: true, slug: true, name: true, avatarImageUrl: true },
+      select: {
+        id: true,
+        slug: true,
+        name: true,
+        parentId: true,
+        avatarImageUrl: true,
+      },
     });
     if (!communities.length) {
       return { since, communities: [] };
     }
     const liveIds = communities.map((community) => community.id);
+
+    // One batched lookup for every space's parent name, so a page of N
+    // digest entries never costs N extra round trips. Most callers belong to
+    // no space at all, in which case this is skipped entirely.
+    const parentIds = [
+      ...new Set(
+        communities
+          .map((community) => community.parentId)
+          .filter((parentId): parentId is string => parentId !== null),
+      ),
+    ];
+    const parentNameById = new Map<string, string>();
+    if (parentIds.length) {
+      const parentRows = await this.communities.find({
+        where: { id: In(parentIds) },
+        select: { id: true, name: true },
+      });
+      for (const parentRow of parentRows) {
+        parentNameById.set(parentRow.id, parentRow.name);
+      }
+    }
 
     const membershipByCommunityId = new Map(
       memberships.map((membership) => [membership.communityId, membership]),
@@ -196,6 +225,9 @@ export class CommunityDigestService {
       entries.push({
         slug: community.slug,
         name: community.name,
+        parentName: community.parentId
+          ? (parentNameById.get(community.parentId) ?? null)
+          : null,
         avatarImageUrl: toImageUrl(community.avatarImageUrl),
         myRole: membership.role,
         notificationLevel: membership.notificationLevel,

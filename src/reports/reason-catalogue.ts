@@ -408,6 +408,22 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'off_topic',
     'other',
   ],
+  // A business-mailbox identity, reported by its customer from their thread
+  // with it. The `Listing`/`Business` set, because the thing reported is the
+  // same business, plus the three codes a conversation adds: a business
+  // replying in a thread can harass a customer, use a slur at them, or keep
+  // writing after being asked to stop. Those three lead, since the thread is
+  // where this report is filed from.
+  [ReportSubjectType.Identity]: [
+    'harassment',
+    'hate_speech',
+    'unwanted_contact',
+    'housing_scam',
+    'spam',
+    'venue_safety',
+    'discrimination',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

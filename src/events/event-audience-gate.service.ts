@@ -451,6 +451,28 @@ export class EventAudienceGateService {
       params.communityVisibility = EventVisibility.Community;
       params.viewerCommunityIds = viewerCommunityIds;
     }
-    return { clause: `(${clauses.join(' OR ')})`, params };
+    // Spaces never appear in Discover. The visibility arms above admit a
+    // space's `public`/`members`/`network` gathering to everyone, so every
+    // gathering hosted by a space is ANDed down to viewers who stand in that
+    // space. `communityIdsForUser` already applies the space rules (a space
+    // row counts only with the parent row, and parent staff reach every
+    // space), so it is the right set to admit by. Mirrors the feed's
+    // gathering arm.
+    const spaceScope =
+      viewerCommunityIds.length > 0
+        ? ' OR e.community_id IN (:...viewerCommunityIds)'
+        : '';
+    const spaceClause = `(
+      e.community_id IS NULL
+      OR NOT EXISTS (
+        SELECT 1 FROM "communities" "evc"
+        WHERE "evc"."id" = e.community_id
+          AND "evc"."parent_id" IS NOT NULL
+      )${spaceScope}
+    )`;
+    return {
+      clause: `((${clauses.join(' OR ')}) AND ${spaceClause})`,
+      params,
+    };
   }
 }

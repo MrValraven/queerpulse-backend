@@ -191,6 +191,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Listings,
   [NotificationType.ListingCoManagerInviteDeclined]:
     NotificationPreferenceCategory.Listings,
+  [NotificationType.ListingOwnerOffer]: NotificationPreferenceCategory.Listings,
 
   // --- Opportunities --------------------------------------------------------
   [NotificationType.JobApplication]:

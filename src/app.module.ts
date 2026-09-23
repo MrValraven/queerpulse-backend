@@ -31,13 +31,17 @@ import { HandlesModule } from './handles/handles.module';
 import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
+import { IdentitiesModule } from './identities/identities.module';
 import { LinkPreviewModule } from './link-preview/link-preview.module';
 import { ChatModule } from './chat/chat.module';
+import { StickersModule } from './stickers/stickers.module';
+import { AdminStickersModule } from './admin-stickers/admin-stickers.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
 import { CompaniesModule } from './companies/companies.module';
+import { IdentityContactModule } from './identity-contact/identity-contact.module';
 import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { RoadmapModule } from './roadmap/roadmap.module';
@@ -252,12 +256,18 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     SafeSpaceVouchesModule,
     ConnectionsModule,
     MessagingModule,
+    IdentitiesModule,
     LinkPreviewModule,
     ChatModule,
+    StickersModule,
+    AdminStickersModule,
     EventsModule,
     CalendarFeedModule,
     CommunitiesModule,
     CompaniesModule,
+    // Task 18: persona and company contact, registered after both domain
+    // modules so their own routes are matched first.
+    IdentityContactModule,
     JobsModule,
     PartnersModule,
     InquiriesModule,

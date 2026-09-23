@@ -2,8 +2,18 @@ import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { Response } from 'express';
 import { PassThrough, Readable } from 'stream';
 import { Repository } from 'typeorm';
+import { IdentityKind } from '../identities/entities/identity.entity';
 import { User } from '../users/entities/user.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Message } from '../messaging/entities/message.entity';
+import {
+  describeDirectThreadSeats,
+  isCoveredByMailboxStaffFloor,
+  isSeatExcludedFromMailbox,
+  mailboxStaffHistoryFloorCoversPredicate,
+  NO_MAILBOX_IDENTITY_BLOCKS,
+  seatExcludedFromMailboxPredicate,
+} from '../messaging/mailbox-seats';
 import { FilesController } from './files.controller';
 import { StorageService } from './storage.service';
 
@@ -21,6 +31,7 @@ const MESSAGE_IMAGE_KEY = `message-images/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
 const MESSAGE_DOCUMENT_KEY = `message-documents/${USER_SEGMENT}/${FILE_SEGMENT}.pdf`;
 
 const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
+const EXPECTED_HISTORY_FLOOR_CLAUSE = `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
 // A logged-in member who did NOT upload the gathering photo (their id differs
 // from the `<ownerUserId>` segment embedded in GATHERING_KEY).
 const OTHER_MEMBER = {
@@ -167,6 +178,432 @@ describe('FilesController', () => {
       messageQueryBuilder.getExists.mockResolvedValue(false);
       await expect(serve(MESSAGE_IMAGE_KEY, LOGGED_IN)).rejects.toThrow(
         NotFoundException,
+      );
+    });
+  });
+
+  // Task 13f: the asymmetric block rule applies to attachment downloads the
+  // same way it applies to every other read of a business mailbox thread. The
+  // fake query builder cannot evaluate real SQL, so it cannot itself tell a
+  // blocked staff seat from an unblocked one. What these tests confirm is
+  // that the participant query now CARRIES the block-aware predicate at all,
+  // which pre-task `isMessageAttachmentParticipant` never did.
+  describe('message images (asymmetric block rule, Task 13f)', () => {
+    it("composes blockedStaffSeatPredicate's EXISTS clause into the participant query", async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(true);
+      await serve(MESSAGE_IMAGE_KEY, OTHER_MEMBER);
+      const andWhereClauses = messageQueryBuilder.andWhere.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
+      );
+      expect(
+        andWhereClauses.some((clause) => clause.includes('blocked_staff_seat')),
+      ).toBe(true);
+    });
+
+    it('negates the predicate, so a blocked staff seat is excluded from the grant', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(true);
+      await serve(MESSAGE_IMAGE_KEY, OTHER_MEMBER);
+      const andWhereClauses = messageQueryBuilder.andWhere.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
+      );
+      const blockClause = andWhereClauses.find((clause) =>
+        clause.includes('blocked_staff_seat'),
+      );
+      expect(blockClause).toMatch(/^NOT /);
+    });
+  });
+
+  // Task 14a: a staff member who has left a business downloads nothing from
+  // its mailbox threads. The participant query runs against a fixture: the
+  // stand-in below understands only the clauses it was told about and throws
+  // on any other, and it answers the exclusion clause through its in-memory
+  // twin (`isSeatExcludedFromMailbox`), limited to direct threads as the
+  // SQL is, so the fixture follows the shared rule.
+  describe('message attachments of a business mailbox thread (departed staff, Task 14a)', () => {
+    const MAILBOX_THREAD = 'mailbox-thread';
+    const GROUP_THREAD = 'group-thread';
+    const CUSTOMER = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const DEPARTED_STAFF = 'aaaaaaaa-0000-4000-8000-000000000002';
+    const COLLEAGUE = 'aaaaaaaa-0000-4000-8000-000000000003';
+    const GROUP_LEAVER = 'aaaaaaaa-0000-4000-8000-000000000004';
+    const MAILBOX_IDENTITY = 'mailbox-identity';
+    const GROUP_IMAGE_KEY = `message-images/${USER_SEGMENT}/bbbbbbbb-0000-4000-8000-000000000000.jpg`;
+    const LEFT_AT = new Date('2026-09-20T12:00:00.000Z');
+    const EXPECTED_EXCLUSION_CLAUSE = `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}`;
+
+    const identityKindById = new Map<string, IdentityKind>([
+      [MAILBOX_IDENTITY, IdentityKind.Listing],
+      [`${CUSTOMER}-identity`, IdentityKind.Profile],
+      [`${GROUP_LEAVER}-identity`, IdentityKind.Profile],
+      [`${COLLEAGUE}-identity`, IdentityKind.Profile],
+    ]);
+    const groupThreadIds = new Set([GROUP_THREAD]);
+    const attachments = [
+      { conversationId: MAILBOX_THREAD, url: MESSAGE_IMAGE_KEY },
+      { conversationId: GROUP_THREAD, url: GROUP_IMAGE_KEY },
+    ];
+    let seats: ConversationParticipant[];
+
+    function fixtureSeat(
+      conversationId: string,
+      userId: string,
+      identityId: string,
+      leftAt: Date | null = null,
+    ): ConversationParticipant {
+      return {
+        conversationId,
+        userId,
+        identityId,
+        leftAt,
+      } as unknown as ConversationParticipant;
+    }
+
+    function isExcluded(ownSeat: ConversationParticipant): boolean {
+      if (groupThreadIds.has(ownSeat.conversationId)) {
+        return false;
+      }
+      return isSeatExcludedFromMailbox(
+        ownSeat,
+        describeDirectThreadSeats(
+          ownSeat.identityId,
+          seats.filter(
+            (seat) =>
+              seat.conversationId === ownSeat.conversationId &&
+              seat !== ownSeat,
+          ),
+          identityKindById,
+        ),
+        new Set<string>(),
+        NO_MAILBOX_IDENTITY_BLOCKS,
+      );
+    }
+
+    beforeEach(() => {
+      seats = [
+        fixtureSeat(MAILBOX_THREAD, CUSTOMER, `${CUSTOMER}-identity`),
+        fixtureSeat(MAILBOX_THREAD, DEPARTED_STAFF, MAILBOX_IDENTITY, LEFT_AT),
+        fixtureSeat(MAILBOX_THREAD, COLLEAGUE, MAILBOX_IDENTITY),
+        fixtureSeat(
+          GROUP_THREAD,
+          GROUP_LEAVER,
+          `${GROUP_LEAVER}-identity`,
+          LEFT_AT,
+        ),
+        fixtureSeat(GROUP_THREAD, COLLEAGUE, `${COLLEAGUE}-identity`),
+      ];
+      const parameters: Record<string, unknown> = {};
+      const clauses: string[] = [];
+      const record = (clause: string, clauseParameters?: object) => {
+        clauses.push(clause);
+        Object.assign(parameters, clauseParameters);
+        return messageQueryBuilder;
+      };
+      messageQueryBuilder.innerJoin.mockImplementation(
+        (
+          _table: string,
+          _alias: string,
+          _condition: string,
+          joinParameters?: object,
+        ) => {
+          Object.assign(parameters, joinParameters);
+          return messageQueryBuilder;
+        },
+      );
+      messageQueryBuilder.where.mockImplementation(record);
+      messageQueryBuilder.andWhere.mockImplementation(record);
+      messageQueryBuilder.getExists.mockImplementation(() => {
+        const userId = parameters.userId as string;
+        const attachmentForms = parameters.attachmentForms as string[];
+        let rows = attachments.flatMap((attachment) =>
+          seats
+            .filter(
+              (seat) =>
+                seat.conversationId === attachment.conversationId &&
+                seat.userId === userId,
+            )
+            .map((seat) => ({ attachment, seat })),
+        );
+        for (const clause of clauses) {
+          if (
+            clause === "message.attachment ->> 'url' IN (:...attachmentForms)"
+          ) {
+            rows = rows.filter(({ attachment }) =>
+              attachmentForms.includes(attachment.url),
+            );
+          } else if (
+            clause === 'message.deletedAt IS NULL' ||
+            clause === 'message.attachment IS NOT NULL'
+          ) {
+            continue;
+          } else if (clause === EXPECTED_EXCLUSION_CLAUSE) {
+            rows = rows.filter(({ seat }) => !isExcluded(seat));
+          } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {
+            // Task 13h: no seat in this fixture holds a history floor.
+            rows = rows.filter(({ seat }) => seat.clearedAt == null);
+          } else {
+            throw new Error(`Unrecognised participant clause: ${clause}`);
+          }
+        }
+        return Promise.resolve(rows.length > 0);
+      });
+    });
+
+    it('refuses the departed staff member', async () => {
+      await expect(
+        serve(MESSAGE_IMAGE_KEY, { userId: DEPARTED_STAFF }),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('serves the live colleague and the customer', async () => {
+      await serve(MESSAGE_IMAGE_KEY, { userId: COLLEAGUE });
+      await serve(MESSAGE_IMAGE_KEY, { userId: CUSTOMER });
+
+      expect(response.redirect).toHaveBeenCalledTimes(2);
+    });
+
+    it('still serves a member who left a group what was posted there (unchanged behaviour)', async () => {
+      await serve(GROUP_IMAGE_KEY, { userId: GROUP_LEAVER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('serves the staff member again once they are seated again', async () => {
+      const departedSeat = seats.find(
+        (seat) =>
+          seat.conversationId === MAILBOX_THREAD &&
+          seat.userId === DEPARTED_STAFF,
+      )!;
+      departedSeat.leftAt = null;
+
+      await serve(MESSAGE_IMAGE_KEY, { userId: DEPARTED_STAFF });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('carries the shared exclusion rule, block and departure together, in the participant query', async () => {
+      await serve(MESSAGE_IMAGE_KEY, { userId: COLLEAGUE });
+
+      expect(
+        messageQueryBuilder.andWhere.mock.calls.map(
+          (call: unknown[]) => call[0] as string,
+        ),
+      ).toContain(EXPECTED_EXCLUSION_CLAUSE);
+    });
+  });
+
+  // Task 13h: a mailbox staff seat's history floor (`cleared_at`) reaches
+  // the bytes. A co-manager seated in a moved business thread holds a floor
+  // at its first enquiry, so the owner's and the customer's earlier private
+  // attachments are refused exactly as a non-participant is, and later ones
+  // are served. Fix round 1: a "clear chat" on a seat that speaks for the
+  // member themself keeps its downloads. The stand-in answers the floor
+  // clause through its in-memory twin (`isCoveredByMailboxStaffFloor`) and
+  // throws on any clause it does not know.
+  describe('message attachments below a history floor (Task 13h)', () => {
+    const MOVED_THREAD = 'moved-thread';
+    const PERSONAL_THREAD = 'personal-thread';
+    const LISTING_IDENTITY = 'listing-identity';
+    const CUSTOMER_IDENTITY = 'customer-identity';
+    const FRIEND_IDENTITY = 'friend-identity';
+    const OWNER = 'cccccccc-0000-4000-8000-000000000001';
+    const CUSTOMER = 'cccccccc-0000-4000-8000-000000000002';
+    const CO_MANAGER = 'cccccccc-0000-4000-8000-000000000003';
+    const FRIEND = 'cccccccc-0000-4000-8000-000000000004';
+    const HISTORY_FLOOR = new Date('2026-09-10T12:00:00.000Z');
+    const PRE_FLOOR_IMAGE_KEY = `message-images/${OWNER}/dddddddd-0000-4000-8000-000000000001.jpg`;
+    const PRE_FLOOR_DOCUMENT_KEY = `message-documents/${CUSTOMER}/dddddddd-0000-4000-8000-000000000002.pdf`;
+    const POST_FLOOR_IMAGE_KEY = `message-images/${CUSTOMER}/dddddddd-0000-4000-8000-000000000003.jpg`;
+    const PERSONAL_CLEARED_IMAGE_KEY = `message-images/${CUSTOMER}/dddddddd-0000-4000-8000-000000000004.jpg`;
+    const identityKindById = new Map<string, IdentityKind>([
+      [LISTING_IDENTITY, IdentityKind.Listing],
+      [CUSTOMER_IDENTITY, IdentityKind.Profile],
+      [FRIEND_IDENTITY, IdentityKind.Profile],
+    ]);
+    const attachments = [
+      {
+        conversationId: MOVED_THREAD,
+        url: PRE_FLOOR_IMAGE_KEY,
+        createdAt: new Date('2026-09-10T11:00:00.000Z'),
+      },
+      {
+        conversationId: MOVED_THREAD,
+        url: PRE_FLOOR_DOCUMENT_KEY,
+        createdAt: new Date('2026-09-10T11:30:00.000Z'),
+      },
+      {
+        conversationId: MOVED_THREAD,
+        url: POST_FLOOR_IMAGE_KEY,
+        createdAt: new Date('2026-09-10T13:00:00.000Z'),
+      },
+      {
+        conversationId: PERSONAL_THREAD,
+        url: PERSONAL_CLEARED_IMAGE_KEY,
+        createdAt: new Date('2026-09-10T11:00:00.000Z'),
+      },
+    ];
+    let seats: Array<{
+      conversationId: string;
+      userId: string;
+      identityId: string;
+      clearedAt: Date | null;
+    }>;
+
+    beforeEach(() => {
+      seats = [
+        {
+          conversationId: MOVED_THREAD,
+          userId: OWNER,
+          identityId: LISTING_IDENTITY,
+          clearedAt: null,
+        },
+        {
+          conversationId: MOVED_THREAD,
+          userId: CUSTOMER,
+          identityId: CUSTOMER_IDENTITY,
+          clearedAt: null,
+        },
+        {
+          conversationId: MOVED_THREAD,
+          userId: CO_MANAGER,
+          identityId: LISTING_IDENTITY,
+          clearedAt: HISTORY_FLOOR,
+        },
+        // A personal thread whose friend cleared the chat at the same
+        // instant: a seat that speaks for the member themself.
+        {
+          conversationId: PERSONAL_THREAD,
+          userId: CUSTOMER,
+          identityId: CUSTOMER_IDENTITY,
+          clearedAt: null,
+        },
+        {
+          conversationId: PERSONAL_THREAD,
+          userId: FRIEND,
+          identityId: FRIEND_IDENTITY,
+          clearedAt: HISTORY_FLOOR,
+        },
+      ];
+      const parameters: Record<string, unknown> = {};
+      const clauses: string[] = [];
+      const record = (clause: string, clauseParameters?: object) => {
+        clauses.push(clause);
+        Object.assign(parameters, clauseParameters);
+        return messageQueryBuilder;
+      };
+      messageQueryBuilder.innerJoin.mockImplementation(
+        (
+          _table: string,
+          _alias: string,
+          _condition: string,
+          joinParameters?: object,
+        ) => {
+          Object.assign(parameters, joinParameters);
+          return messageQueryBuilder;
+        },
+      );
+      messageQueryBuilder.where.mockImplementation(record);
+      messageQueryBuilder.andWhere.mockImplementation(record);
+      messageQueryBuilder.getExists.mockImplementation(() => {
+        const userId = parameters.userId as string;
+        const attachmentForms = parameters.attachmentForms as string[];
+        let rows = attachments.flatMap((attachment) =>
+          seats
+            .filter(
+              (seat) =>
+                seat.conversationId === attachment.conversationId &&
+                seat.userId === userId,
+            )
+            .map((seat) => ({ attachment, seat })),
+        );
+        for (const clause of clauses) {
+          if (
+            clause === "message.attachment ->> 'url' IN (:...attachmentForms)"
+          ) {
+            rows = rows.filter(({ attachment }) =>
+              attachmentForms.includes(attachment.url),
+            );
+          } else if (
+            clause === 'message.deletedAt IS NULL' ||
+            clause === 'message.attachment IS NOT NULL' ||
+            // No block or departure in this fixture.
+            clause ===
+              `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}`
+          ) {
+            continue;
+          } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {
+            rows = rows.filter(
+              ({ attachment, seat }) =>
+                !isCoveredByMailboxStaffFloor(attachment.createdAt, {
+                  clearedAt: seat.clearedAt,
+                  identityKind: identityKindById.get(seat.identityId),
+                  isGroupConversation: false,
+                  isOfficialConversation: false,
+                }),
+            );
+          } else {
+            throw new Error(`Unrecognised participant clause: ${clause}`);
+          }
+        }
+        return Promise.resolve(rows.length > 0);
+      });
+    });
+
+    it("refuses a co-manager the owner's photo from before their floor, as a non-participant is refused", async () => {
+      await expect(
+        serve(PRE_FLOOR_IMAGE_KEY, { userId: CO_MANAGER }),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it("refuses a co-manager the customer's document from before their floor", async () => {
+      await expect(
+        serve(PRE_FLOOR_DOCUMENT_KEY, { userId: CO_MANAGER }),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.openObjectStream).not.toHaveBeenCalled();
+    });
+
+    it('serves the co-manager a photo from after their floor', async () => {
+      await serve(POST_FLOOR_IMAGE_KEY, { userId: CO_MANAGER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('serves the pre-floor photo to the customer, who holds no floor', async () => {
+      await serve(PRE_FLOOR_IMAGE_KEY, { userId: CUSTOMER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('still serves the customer the pre-floor photo after the customer cleared the mailbox thread', async () => {
+      seats.find(
+        (seat) =>
+          seat.conversationId === MOVED_THREAD && seat.userId === CUSTOMER,
+      )!.clearedAt = HISTORY_FLOOR;
+
+      await serve(PRE_FLOOR_IMAGE_KEY, { userId: CUSTOMER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('still serves a personal-thread member the photo they cleared, as before this task', async () => {
+      await serve(PERSONAL_CLEARED_IMAGE_KEY, { userId: FRIEND });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('carries the staff-scoped floor as an inclusive comparison in SQL on the requester seat', async () => {
+      await serve(POST_FLOOR_IMAGE_KEY, { userId: CO_MANAGER });
+
+      const clauses = messageQueryBuilder.andWhere.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
+      );
+      expect(clauses).toContain(EXPECTED_HISTORY_FLOOR_CLAUSE);
+      expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
+        'message.created_at <= participant.cleared_at',
+      );
+      expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
+        `"floor_staff_identity"."kind" <> 'profile'`,
       );
     });
   });

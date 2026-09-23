@@ -63,6 +63,8 @@ function makeCommunity(overrides: Partial<Community>): Community {
     accessTier: AccessTier.Public,
     archivedAt: null,
     frozenAt: null,
+    // Top-level by default; a test that wants a space passes `parentId`.
+    parentId: null,
     // The card renders a category badge, a "since ‹year›" line and the
     // "what you get" chips, so a fixture missing these blows up in the mapper
     // rather than in the assertion.
@@ -286,6 +288,44 @@ describe('LandingService', () => {
 
       expect(result.communities.map((community) => community.slug)).toEqual([
         'public-community',
+      ]);
+    });
+
+    it('drops a featured community that is a space (has a parentId)', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Community) return [];
+          return [
+            makeFeature({
+              id: 'f-top-level',
+              section: LandingSection.Community,
+              targetId: 'c-top-level',
+              position: 0,
+              copy: { blurb: 'a real top-level community' },
+            }),
+            makeFeature({
+              id: 'f-space',
+              section: LandingSection.Community,
+              targetId: 'c-space',
+              position: 1,
+              copy: { blurb: 'a space inside another community' },
+            }),
+          ];
+        },
+      );
+      communities.find.mockResolvedValue([
+        makeCommunity({ id: 'c-top-level', slug: 'top-level-community' }),
+        makeCommunity({
+          id: 'c-space',
+          slug: 'a-space',
+          parentId: 'c-top-level',
+        }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.communities.map((community) => community.slug)).toEqual([
+        'top-level-community',
       ]);
     });
 

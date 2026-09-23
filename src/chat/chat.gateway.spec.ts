@@ -16,12 +16,15 @@ import * as Sentry from '@sentry/node';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { parseCookie } from 'cookie';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import {
   Conversation,
   ConversationKind,
 } from '../messaging/entities/conversation.entity';
 import { MessagingService } from '../messaging/messaging.service';
+import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
@@ -95,6 +98,12 @@ describe('ChatGateway', () => {
     directConversationIdsBetween: jest.Mock;
   };
   let connections: { allAcceptedConnectionUserIds: jest.Mock };
+  let identities: {
+    getById: jest.Mock;
+    getByIds: jest.Mock;
+    describeIdentities: jest.Mock;
+    staffUserIds: jest.Mock;
+  };
   let preferences: {
     getMessagingPrivacy: jest.Mock;
     getMessagingPrivacyForUsers: jest.Mock;
@@ -132,6 +141,27 @@ describe('ChatGateway', () => {
     connections = {
       allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
     };
+    // Task 13: `getById` resolving `null` by default means
+    // `resolveTypingSenderIdentity` never finds a business identity for any
+    // test below unless it sets these up itself. The existing typing tests
+    // never touch `conversationParticipants.find`'s default `[]` seats, so
+    // they fall through to the pre-mailbox path untouched either way.
+    identities = {
+      getById: jest.fn().mockResolvedValue(null),
+      // Task 13e: every seat is a personal profile identity unless a test
+      // says otherwise, so a direct thread reads as personal and keeps its
+      // conversation-room broadcasts.
+      getByIds: jest.fn((identityIds: string[]) =>
+        Promise.resolve(
+          identityIds.map((identityId) => ({
+            id: identityId,
+            kind: IdentityKind.Profile,
+          })),
+        ),
+      ),
+      describeIdentities: jest.fn().mockResolvedValue(new Map()),
+      staffUserIds: jest.fn().mockResolvedValue([]),
+    };
     // PRD-364: every fixture shares everything by default (the platform's
     // pre-PRD-364 behaviour), so the presence/typing/read expectations below —
     // none of which anticipate the new reciprocal gating — keep passing
@@ -162,9 +192,18 @@ describe('ChatGateway', () => {
     // (unresolvable conversation) so it's always treated as non-GROUP,
     // matching the exact pre-PRD-354 fan-out behaviour for every existing
     // test below that doesn't care about the block filter.
+    //
+    // Task 13e: that `null` default is now an ordinary direct thread, which
+    // the fan-out reads as non-GROUP all the same. The relay refuses to
+    // broadcast for a conversation it cannot resolve.
     conversationParticipants = {
       find: jest.fn().mockResolvedValue([]),
-      manager: { findOne: jest.fn().mockResolvedValue(null) },
+      manager: {
+        findOne: jest.fn().mockResolvedValue({
+          kind: ConversationKind.Direct,
+          isOfficial: false,
+        }),
+      },
     };
     // PRD-354: nobody blocked by default.
     blockFilter = { blockedUserIds: jest.fn().mockResolvedValue(new Set()) };
@@ -186,10 +225,16 @@ describe('ChatGateway', () => {
       providers: [
         ChatGateway,
         PresenceService,
+        // Task 13e: renders a mailbox thread's message frames per viewer.
+        {
+          provide: MessagingCoreService,
+          useValue: { toMessageResponses: jest.fn() },
+        },
         { provide: JwtService, useValue: { verifyAsync } },
         { provide: ConfigService, useValue: configService },
         { provide: MessagingService, useValue: messaging },
         { provide: ConnectionsService, useValue: connections },
+        { provide: IdentitiesService, useValue: identities },
         { provide: UsersService, useValue: users },
         { provide: getRepositoryToken(RefreshToken), useValue: refreshTokens },
         {
@@ -1164,9 +1209,9 @@ describe('ChatGateway', () => {
   });
 
   describe('event broadcasts', () => {
-    it('broadcasts the frontend-contract response (not the internal view) as message:new', () => {
+    it('broadcasts the frontend-contract response (not the internal view) as message:new', async () => {
       const response = { id: 'm1', conversationId: 'c1' };
-      gateway.handleMessageCreated({
+      await gateway.handleMessageCreated({
         conversationId: 'c1',
         message: { id: 'm1' } as never,
         response: response as never,
@@ -1201,7 +1246,7 @@ describe('ChatGateway', () => {
         ]);
         const response = { id: 'm1', conversationId: 'c1' };
 
-        gateway.handleMessageCreated({
+        await gateway.handleMessageCreated({
           conversationId: 'c1',
           message: { senderId: 'sender' } as never,
           response: response as never,
@@ -1224,7 +1269,7 @@ describe('ChatGateway', () => {
           { userId: 'sender', leftAt: null },
         ]);
 
-        gateway.handleMessageCreated({
+        await gateway.handleMessageCreated({
           conversationId: 'c1',
           message: { senderId: 'sender' } as never,
           response: { id: 'm1' } as never,
@@ -1243,7 +1288,7 @@ describe('ChatGateway', () => {
           { userId: 'departed', leftAt: new Date() },
         ]);
 
-        gateway.handleMessageCreated({
+        await gateway.handleMessageCreated({
           conversationId: 'c1',
           message: { senderId: 'sender' } as never,
           response: { id: 'm1' } as never,
@@ -1270,7 +1315,7 @@ describe('ChatGateway', () => {
           new Set(['blocked-member']),
         );
 
-        gateway.handleMessageCreated({
+        await gateway.handleMessageCreated({
           conversationId: 'g1',
           message: { senderId: 'sender' } as never,
           response: { id: 'm1' } as never,
@@ -1300,7 +1345,7 @@ describe('ChatGateway', () => {
           kind: ConversationKind.Direct,
         });
 
-        gateway.handleMessageCreated({
+        await gateway.handleMessageCreated({
           conversationId: 'c1',
           message: { senderId: 'sender' } as never,
           response: { id: 'm1' } as never,
@@ -1448,11 +1493,14 @@ describe('ChatGateway', () => {
         body: 'hi',
       });
       // The WS send path forwards the full message signature (reply/clientId/
-      // forwarded/kind/attachment), all undefined for a plain text send here.
+      // forwarded/kind/attachment/stickerId/asIdentityId), all undefined for
+      // a plain text send here.
       expect(messaging.sendMessage).toHaveBeenCalledWith(
         'c1',
         'u1',
         'hi',
+        undefined,
+        undefined,
         undefined,
         undefined,
         undefined,

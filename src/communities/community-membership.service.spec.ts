@@ -1,7 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { IsNull } from 'typeorm';
+import { FindOperator, In, IsNull } from 'typeorm';
 import { CommunityMembershipService } from './community-membership.service';
 import {
   CommunityMember,
@@ -18,8 +18,8 @@ import {
 
 describe('CommunityMembershipService', () => {
   let service: CommunityMembershipService;
-  let communities: { findOne: jest.Mock };
-  let members: { findOne: jest.Mock };
+  let communities: { findOne: jest.Mock; find: jest.Mock };
+  let members: { findOne: jest.Mock; find: jest.Mock };
   let posts: { findOne: jest.Mock };
   let replies: { findOne: jest.Mock };
 
@@ -50,6 +50,9 @@ describe('CommunityMembershipService', () => {
     frozenReason: null,
     frozenNote: null,
     frozenByUserId: null,
+    parentId: null,
+    allowsSubcommunities: false,
+    archivedWithParent: false,
     rulesVersion: 1,
     welcomeMessage: null,
     avatarImageUrl: null,
@@ -93,9 +96,66 @@ describe('CommunityMembershipService', () => {
     welcomeSeenAt: null,
   };
 
+  /**
+   * Matches one `where` value against a row field: a plain value compares
+   * equal, an `In(...)` operator checks membership.
+   */
+  function matchesWhereValue(expected: unknown, actual: unknown): boolean {
+    if (expected === undefined) return true;
+    if (expected instanceof FindOperator) {
+      return (expected.value as unknown[]).includes(actual);
+    }
+    return expected === actual;
+  }
+
+  /**
+   * Seeds the roster the service reads. Every roster read goes through
+   * `members.find` now (the effective-role lookup batches own and parent
+   * rows), so the mock filters the seeded rows by the `where` it is given.
+   */
+  function givenRoster(rows: CommunityMember[]): void {
+    members.find.mockImplementation(
+      ({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          rows.filter(
+            (row) =>
+              matchesWhereValue(where.communityId, row.communityId) &&
+              matchesWhereValue(where.userId, row.userId) &&
+              matchesWhereValue(where.role, row.role),
+          ),
+        ),
+    );
+  }
+
+  /** Seeds the communities `communities.find` resolves by id or parent id. */
+  function givenCommunities(rows: Community[]): void {
+    communities.find.mockImplementation(
+      ({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          rows.filter(
+            (row) =>
+              matchesWhereValue(where.id, row.id) &&
+              matchesWhereValue(where.parentId, row.parentId),
+          ),
+        ),
+    );
+    communities.findOne.mockImplementation(
+      ({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          rows.find(
+            (row) =>
+              matchesWhereValue(where.id, row.id) &&
+              matchesWhereValue(where.slug, row.slug),
+          ) ?? null,
+        ),
+    );
+  }
+
   beforeEach(async () => {
-    communities = { findOne: jest.fn() };
-    members = { findOne: jest.fn() };
+    communities = { findOne: jest.fn(), find: jest.fn() };
+    members = { findOne: jest.fn(), find: jest.fn() };
+    givenRoster([]);
+    givenCommunities([]);
     posts = { findOne: jest.fn() };
     replies = { findOne: jest.fn() };
 
@@ -115,7 +175,7 @@ describe('CommunityMembershipService', () => {
   describe('assertMemberBySlug', () => {
     it('returns the community id when the caller is a roster member', async () => {
       communities.findOne.mockResolvedValue(COMMUNITY);
-      members.findOne.mockResolvedValue(MEMBERSHIP);
+      givenRoster([MEMBERSHIP]);
 
       const communityId = await service.assertMemberBySlug(
         'queer-devs',
@@ -126,8 +186,9 @@ describe('CommunityMembershipService', () => {
       expect(communities.findOne).toHaveBeenCalledWith({
         where: { slug: 'queer-devs', archivedAt: IsNull() },
       });
-      expect(members.findOne).toHaveBeenCalledWith({
-        where: { communityId: 'community-1', userId: 'user-1' },
+      expect(members.find).toHaveBeenCalledWith({
+        where: { communityId: In(['community-1']), userId: 'user-1' },
+        select: { communityId: true, role: true },
       });
     });
 
@@ -141,12 +202,12 @@ describe('CommunityMembershipService', () => {
       await expect(
         service.assertMemberBySlug('unknown-slug', 'user-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(members.findOne).not.toHaveBeenCalled();
+      expect(members.find).not.toHaveBeenCalled();
     });
 
     it('throws ForbiddenException when the caller is not on the roster', async () => {
       communities.findOne.mockResolvedValue(COMMUNITY);
-      members.findOne.mockResolvedValue(null);
+      givenRoster([]);
 
       await expect(
         service.assertMemberBySlug('queer-devs', 'stranger-1'),
@@ -160,7 +221,7 @@ describe('CommunityMembershipService', () => {
     // community pulse come through here, so the fix belongs at this door.
     it('throws NotFoundException for a private-tier caller with no roster row', async () => {
       communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
-      members.findOne.mockResolvedValue(null);
+      givenRoster([]);
 
       await expect(
         service.assertMemberBySlug('queer-devs', 'stranger-1'),
@@ -171,7 +232,7 @@ describe('CommunityMembershipService', () => {
       'still throws ForbiddenException on a %s-tier community',
       async (_tierName: string, accessTier: AccessTier) => {
         communities.findOne.mockResolvedValue({ ...COMMUNITY, accessTier });
-        members.findOne.mockResolvedValue(null);
+        givenRoster([]);
 
         await expect(
           service.assertMemberBySlug('queer-devs', 'stranger-1'),
@@ -182,7 +243,7 @@ describe('CommunityMembershipService', () => {
     it('still resolves normally for a private-tier roster member', async () => {
       // A member's behaviour must not change on any tier.
       communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
-      members.findOne.mockResolvedValue(MEMBERSHIP);
+      givenRoster([MEMBERSHIP]);
 
       await expect(
         service.assertMemberBySlug('queer-devs', 'user-1'),
@@ -195,7 +256,7 @@ describe('CommunityMembershipService', () => {
       'returns the community id when the caller is %s',
       async (role) => {
         communities.findOne.mockResolvedValue(COMMUNITY);
-        members.findOne.mockResolvedValue({ ...MEMBERSHIP, role });
+        givenRoster([{ ...MEMBERSHIP, role }]);
 
         const communityId = await service.assertOwnerOrModBySlug(
           'queer-devs',
@@ -212,12 +273,12 @@ describe('CommunityMembershipService', () => {
       await expect(
         service.assertOwnerOrModBySlug('unknown-slug', 'user-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(members.findOne).not.toHaveBeenCalled();
+      expect(members.find).not.toHaveBeenCalled();
     });
 
     it('throws ForbiddenException when the caller is not on the roster', async () => {
       communities.findOne.mockResolvedValue(COMMUNITY);
-      members.findOne.mockResolvedValue(null);
+      givenRoster([]);
 
       await expect(
         service.assertOwnerOrModBySlug('queer-devs', 'stranger-1'),
@@ -226,7 +287,7 @@ describe('CommunityMembershipService', () => {
 
     it('throws ForbiddenException when the caller is only a plain member', async () => {
       communities.findOne.mockResolvedValue(COMMUNITY);
-      members.findOne.mockResolvedValue(MEMBERSHIP);
+      givenRoster([MEMBERSHIP]);
 
       await expect(
         service.assertOwnerOrModBySlug('queer-devs', 'user-1'),
@@ -235,7 +296,7 @@ describe('CommunityMembershipService', () => {
 
     it('throws NotFoundException for a private-tier caller with no roster row', async () => {
       communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
-      members.findOne.mockResolvedValue(null);
+      givenRoster([]);
 
       await expect(
         service.assertOwnerOrModBySlug('queer-devs', 'stranger-1'),
@@ -248,7 +309,7 @@ describe('CommunityMembershipService', () => {
     // them.
     it('still throws ForbiddenException for a private-tier PLAIN MEMBER', async () => {
       communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
-      members.findOne.mockResolvedValue(MEMBERSHIP);
+      givenRoster([MEMBERSHIP]);
 
       await expect(
         service.assertOwnerOrModBySlug('queer-devs', 'user-1'),
@@ -259,7 +320,7 @@ describe('CommunityMembershipService', () => {
       'still throws ForbiddenException for a non-member on a %s-tier community',
       async (_tierName: string, accessTier: AccessTier) => {
         communities.findOne.mockResolvedValue({ ...COMMUNITY, accessTier });
-        members.findOne.mockResolvedValue(null);
+        givenRoster([]);
 
         await expect(
           service.assertOwnerOrModBySlug('queer-devs', 'stranger-1'),
@@ -271,7 +332,7 @@ describe('CommunityMembershipService', () => {
       'still returns the community id for a private-tier %s',
       async (role) => {
         communities.findOne.mockResolvedValue(PRIVATE_COMMUNITY);
-        members.findOne.mockResolvedValue({ ...MEMBERSHIP, role });
+        givenRoster([{ ...MEMBERSHIP, role }]);
 
         await expect(
           service.assertOwnerOrModBySlug('queer-devs', 'user-1'),
@@ -284,10 +345,14 @@ describe('CommunityMembershipService', () => {
   // (`ModerationService.assertCanActOnReport`): a boolean owner/mod check by
   // community id, no slug resolution, no throw.
   describe('isOwnerOrMod', () => {
+    beforeEach(() => {
+      givenCommunities([COMMUNITY]);
+    });
+
     it.each([RosterRole.Owner, RosterRole.Mod])(
       'returns true when the caller is %s on the roster',
       async (role) => {
-        members.findOne.mockResolvedValue({ ...MEMBERSHIP, role });
+        givenRoster([{ ...MEMBERSHIP, role }]);
 
         await expect(
           service.isOwnerOrMod('community-1', 'user-1'),
@@ -296,7 +361,7 @@ describe('CommunityMembershipService', () => {
     );
 
     it('returns false for a plain member', async () => {
-      members.findOne.mockResolvedValue(MEMBERSHIP);
+      givenRoster([MEMBERSHIP]);
 
       await expect(service.isOwnerOrMod('community-1', 'user-1')).resolves.toBe(
         false,
@@ -304,7 +369,7 @@ describe('CommunityMembershipService', () => {
     });
 
     it('returns false when the caller is not on the roster at all', async () => {
-      members.findOne.mockResolvedValue(null);
+      givenRoster([]);
 
       await expect(
         service.isOwnerOrMod('community-1', 'stranger-1'),
@@ -383,6 +448,130 @@ describe('CommunityMembershipService', () => {
         service.communityIdForReply('33333333-3333-3333-3333-333333333333'),
       ).resolves.toBeNull();
       expect(posts.findOne).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('spaces', () => {
+    const SPACE: Community = {
+      ...COMMUNITY,
+      id: 'space-1',
+      slug: 'space',
+      parentId: COMMUNITY.id,
+    };
+
+    const PARENT_MOD_ROW: CommunityMember = {
+      ...MEMBERSHIP,
+      id: 'membership-parent-mod',
+      communityId: COMMUNITY.id,
+      role: RosterRole.Mod,
+    };
+
+    const SPACE_MEMBER_ROW: CommunityMember = {
+      ...MEMBERSHIP,
+      id: 'membership-space-member',
+      communityId: SPACE.id,
+      role: RosterRole.Member,
+    };
+
+    const SPACE_MOD_ROW: CommunityMember = {
+      ...MEMBERSHIP,
+      id: 'membership-space-mod',
+      communityId: SPACE.id,
+      role: RosterRole.Mod,
+    };
+
+    const PARENT_MEMBER_ROW: CommunityMember = {
+      ...MEMBERSHIP,
+      id: 'membership-parent-member',
+      communityId: COMMUNITY.id,
+      role: RosterRole.Member,
+    };
+
+    beforeEach(() => {
+      givenCommunities([COMMUNITY, SPACE]);
+    });
+
+    it('treats a parent mod with no space row as owner-or-mod of the space', async () => {
+      givenRoster([PARENT_MOD_ROW]);
+
+      await expect(service.isOwnerOrMod(SPACE.id, 'user-1')).resolves.toBe(
+        true,
+      );
+    });
+
+    it('treats a parent mod with no space row as a member of the space', async () => {
+      givenRoster([PARENT_MOD_ROW]);
+
+      await expect(service.isMember(SPACE.id, 'user-1')).resolves.toBe(true);
+    });
+
+    it('refuses a space member whose parent row is gone', async () => {
+      givenRoster([SPACE_MEMBER_ROW]);
+
+      await expect(service.isMember(SPACE.id, 'user-1')).resolves.toBe(false);
+    });
+
+    it('answers 403 on assertMemberBySlug for a space member whose parent row is gone', async () => {
+      givenRoster([SPACE_MEMBER_ROW]);
+
+      await expect(
+        service.assertMemberBySlug('space', 'user-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('resolves assertMemberBySlug for a space member who is also a parent member', async () => {
+      givenRoster([SPACE_MEMBER_ROW, PARENT_MEMBER_ROW]);
+
+      await expect(service.assertMemberBySlug('space', 'user-1')).resolves.toBe(
+        SPACE.id,
+      );
+    });
+
+    it('does not let a space mod act as owner-or-mod of the parent', async () => {
+      givenRoster([SPACE_MOD_ROW, PARENT_MEMBER_ROW]);
+
+      await expect(service.isOwnerOrMod(COMMUNITY.id, 'user-1')).resolves.toBe(
+        false,
+      );
+    });
+
+    it('includes the space id in ownerOrModCommunityIdsForUser for a parent mod', async () => {
+      givenRoster([PARENT_MOD_ROW]);
+
+      const staffIds = await service.ownerOrModCommunityIdsForUser('user-1');
+
+      expect(staffIds).toEqual(
+        expect.arrayContaining([COMMUNITY.id, SPACE.id]),
+      );
+    });
+
+    it('drops a space id from communityIdsForUser when the parent row is gone', async () => {
+      givenRoster([SPACE_MEMBER_ROW]);
+
+      await expect(service.communityIdsForUser('user-1')).resolves.toEqual([]);
+    });
+
+    it('keeps a space id in communityIdsForUser alongside its parent row', async () => {
+      givenRoster([SPACE_MEMBER_ROW, PARENT_MEMBER_ROW]);
+
+      const communityIds = await service.communityIdsForUser('user-1');
+
+      expect(communityIds).toEqual(
+        expect.arrayContaining([COMMUNITY.id, SPACE.id]),
+      );
+    });
+
+    it('batches effectiveRolesFor into one roster query', async () => {
+      givenRoster([PARENT_MOD_ROW, SPACE_MEMBER_ROW]);
+
+      const roles = await service.effectiveRolesFor(
+        [COMMUNITY, SPACE],
+        'user-1',
+      );
+
+      expect(members.find).toHaveBeenCalledTimes(1);
+      expect(roles.get(COMMUNITY.id)).toBe(RosterRole.Mod);
+      expect(roles.get(SPACE.id)).toBe(RosterRole.Mod);
     });
   });
 });

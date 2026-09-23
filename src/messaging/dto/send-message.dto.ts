@@ -96,17 +96,37 @@ export class SendMessageDto {
   forwarded?: boolean;
 
   /** `'gif'` marks this send as a provider GIF, `'image'` a member-uploaded
-   *  photo, `'document'` a member-uploaded PDF/spreadsheet/text file (PRD-226)
-   *  — all three require `attachment`; default/absent is an ordinary text
-   *  bubble. */
+   *  photo, `'document'` a member-uploaded PDF/spreadsheet/text file
+   *  (PRD-226), `'sticker'` one from an admin-published pack. The first three
+   *  require `attachment`; a sticker requires `stickerId` instead and must
+   *  carry no attachment at all. Default/absent is an ordinary text bubble. */
   @IsOptional()
-  @IsIn(['user', 'gif', 'image', 'document'])
-  kind?: 'user' | 'gif' | 'image' | 'document';
+  @IsIn(['user', 'gif', 'image', 'document', 'sticker'])
+  kind?: 'user' | 'gif' | 'image' | 'document' | 'sticker';
 
   /** The media attachment for a `kind:'gif'`, `kind:'image'`, or
-   *  `kind:'document'` send. Ignored for text. */
+   *  `kind:'document'` send. Ignored for text and for a sticker. */
   @IsOptional()
   @ValidateNested()
   @Type(() => GifAttachmentDto)
   attachment?: GifAttachmentDto;
+
+  /** The sticker being sent, for `kind:'sticker'`. The ONLY thing a sticker
+   *  send carries: the service reads the row and builds the stored
+   *  attachment from it, so a client cannot point a message at an arbitrary
+   *  storage key (which is also why the ownership rule that governs
+   *  `kind:'image'` does not apply here). */
+  @IsOptional()
+  @IsUUID()
+  stickerId?: string;
+
+  /** Send this message AS a business identity: a listing, subprofile, or
+   *  company mailbox. Left empty, the send resolves server-side to the
+   *  caller's own profile identity. The caller must currently be staff of
+   *  the identity named here, and that identity must already hold a seat in
+   *  this conversation; both are enforced by
+   *  `MessagingCoreService.assertMaySendAs` before anything is persisted. */
+  @IsOptional()
+  @IsUUID()
+  asIdentityId?: string;
 }

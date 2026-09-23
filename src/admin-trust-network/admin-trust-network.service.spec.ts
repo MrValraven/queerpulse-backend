@@ -287,4 +287,21 @@ describe('AdminTrustNetworkService.getGraph', () => {
 
     expect(graph.truncated).toBe(true);
   });
+
+  it('scopes the membership scene lookup to top-level communities, excluding spaces', async () => {
+    const profileA = makeProfile({ userId: 'user-a', slug: 'a-member' });
+    profiles.count.mockResolvedValue(1);
+    profiles.find.mockResolvedValue([profileA]);
+
+    await service.getGraph();
+
+    // The first `communityMembers.createQueryBuilder` call is the membership
+    // rows read (the second is the community-size tie-break query, which does
+    // not join `communities` at all and so carries no `parent_id` predicate).
+    const membershipQueryBuilder = communityMembers.createQueryBuilder.mock
+      .results[0]?.value as QueryBuilderStub;
+    expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
+      'community.parent_id IS NULL',
+    );
+  });
 });

@@ -40,6 +40,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { resolveRuleSnapshot } from './community-bans-response';
 import { isGatedTier, membersOnlyException } from './community-gate';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { CommunityMembershipService } from './community-membership.service';
 import { toStoredPlainTextOrNull } from './community-plain-text';
 import {
   CommunityReportDTO,
@@ -108,6 +109,13 @@ const LEVELS_WANTING_ANNOUNCEMENTS: readonly CommunityNotificationLevel[] = [
   CommunityNotificationLevel.All,
   CommunityNotificationLevel.Announcements,
 ];
+
+/**
+ * Who is acting and with which effective role. A space's parent staff act
+ * with an inherited role and hold no roster row there, so the gates carry
+ * just this pair.
+ */
+type ActingMember = Pick<CommunityMember, 'userId' | 'role'>;
 
 /** Input for the flat `POST /community-posts` alias (see `createFlatPost`). */
 export interface CreateFlatPostInput {
@@ -179,6 +187,9 @@ export class CommunityPostsService {
     private readonly contentModeration: ContentModerationService,
     private readonly storage: StorageService,
     private readonly eventEmitter: EventEmitter2,
+    // The effective-role resolver (own roster row, plus the role parent staff
+    // inherit inside a space). Every gate in this service reads it.
+    private readonly communityMembership: CommunityMembershipService,
   ) {}
 
   private readonly logger = new Logger(CommunityPostsService.name);
@@ -239,7 +250,7 @@ export class CommunityPostsService {
     searchTerm?: string,
   ): Promise<Paginated<CommunityPostDTO>> {
     const community = await this.loadCommunityOr404(slug);
-    await this.assertViewable(community, viewerId);
+    const viewerRole = await this.assertViewable(community, viewerId);
     const normalizedPage = normalizePage(page);
 
     const qb = this.posts
@@ -265,7 +276,6 @@ export class CommunityPostsService {
     // report a `total` the caller can never page through.
     this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
 
-    const viewerRole = await this.viewerRoleIn(community.id, viewerId);
     // Moderator-hidden posts leave the query for a non-staff viewer, for the
     // same reason the block filter above does. `toPostDTOs` used to drop them
     // in Node AFTER `paginate` had already counted them into `total` and spent
@@ -314,7 +324,7 @@ export class CommunityPostsService {
     viewerId: string,
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
-    await this.assertViewable(community, viewerId);
+    const viewerRole = await this.assertViewable(community, viewerId);
     const post = await this.loadPostOr404(community.id, postId);
     if (post.authorId) {
       const hiddenAuthorIds = await this.blockFilter.hiddenUserIds(viewerId, [
@@ -324,7 +334,6 @@ export class CommunityPostsService {
         throw new NotFoundException('Post not found');
       }
     }
-    const viewerRole = await this.viewerRoleIn(community.id, viewerId);
     const [dto] = await this.toPostDTOs([post], viewerId, viewerRole);
     if (!dto) {
       // `toPostDTOs` withheld it: moderator-hidden, and this viewer is not
@@ -340,7 +349,7 @@ export class CommunityPostsService {
     dto: CreatePostInput,
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
-    const membership = await this.assertMember(community.id, authorId);
+    const membership = await this.assertMember(community, authorId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
     CommunityPostsService.assertKindAllowed(dto.kind, membership.role);
@@ -396,7 +405,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertNotArchived(community);
 
     if (dto.pinned !== undefined) {
@@ -430,11 +439,12 @@ export class CommunityPostsService {
     await this.assertPostCommunityNotArchived(post.communityId);
     // Same announcement gate as the nested route (BE-COM-16). A GLOBAL post
     // (`communityId: null`) has no community to speak for, so there is no
-    // staff voice to impersonate and `viewerRoleIn` is not consulted.
+    // staff voice to impersonate and `viewerRoleInCommunityId` is not
+    // consulted.
     if (dto.kind !== undefined && post.communityId) {
       CommunityPostsService.assertKindAllowed(
         dto.kind,
-        await this.viewerRoleIn(post.communityId, actorId),
+        await this.viewerRoleInCommunityId(post.communityId, actorId),
       );
     }
     const saved = await this.applyPostFieldEdit(post, actorId, dto);
@@ -476,7 +486,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
 
@@ -529,7 +539,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
     this.assertCanRestore(post.deletedById, actorId, membership.role);
@@ -554,7 +564,7 @@ export class CommunityPostsService {
     const post = await this.loadPostByIdOr404(postId);
     await this.assertPostCommunityNotArchived(post.communityId);
     const viewerRole = post.communityId
-      ? await this.viewerRoleIn(post.communityId, actorId)
+      ? await this.viewerRoleInCommunityId(post.communityId, actorId)
       : null;
     if (!CommunityPostsService.isStaffRole(viewerRole)) {
       this.assertAuthorOnly(post.authorId, actorId);
@@ -575,7 +585,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostHistoryResponse> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
 
     return this.postHistoryCore(post.id);
@@ -606,7 +616,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertNotArchived(community);
 
     const saved = await this.applyReplyTextEdit(reply, actorId, text);
@@ -653,7 +663,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
 
@@ -707,7 +717,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertNotArchived(community);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
     this.assertCanRestore(reply.deletedById, actorId, membership.role);
@@ -727,7 +737,7 @@ export class CommunityPostsService {
     await this.assertPostCommunityNotArchived(post.communityId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const viewerRole = post.communityId
-      ? await this.viewerRoleIn(post.communityId, actorId)
+      ? await this.viewerRoleInCommunityId(post.communityId, actorId)
       : null;
     if (!CommunityPostsService.isStaffRole(viewerRole)) {
       this.assertAuthorOnly(reply.authorId, actorId);
@@ -751,7 +761,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
 
     return this.replyHistoryCore(replyId);
@@ -804,7 +814,7 @@ export class CommunityPostsService {
     actorId: string,
   ): Promise<CommunityReportDTO[]> {
     const community = await this.loadCommunityOr404(slug);
-    const membership = await this.assertMember(community.id, actorId);
+    const membership = await this.assertMember(community, actorId);
     if (!CommunityPostsService.isStaffRole(membership.role)) {
       throw new ForbiddenException(
         'Only a community owner/mod can view its reports',
@@ -1023,7 +1033,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
 
@@ -1049,7 +1059,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community, userId);
     // Archived, but NOT frozen. The two gates say different things. A freeze
     // halts new activity while moderators read reports, and taking your own
     // reaction back is not new activity, so this path has never been
@@ -1071,7 +1081,7 @@ export class CommunityPostsService {
   ): Promise<CommunityReplyDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
 
@@ -1120,13 +1130,12 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     // A gated community's replies are refused to a non-member, exactly like
     // `listPosts` above (404 on `private`, 403 on `request`/`invite`).
-    // `viewerRoleIn` below returns null for a non-member rather than throwing,
-    // so without this an ex-member (or any member of another community) who
-    // still holds a post id could read the whole thread. Mirrors the sibling
+    // A public community lets a non-member read with a null role, so the
+    // gate below is what keeps an ex-member (or any member of another
+    // community) holding a post id out of a gated thread. Mirrors the sibling
     // read's gate.
-    await this.assertViewable(community, viewerId);
+    const viewerRole = await this.assertViewable(community, viewerId);
     const post = await this.loadPostOr404(community.id, postId);
-    const viewerRole = await this.viewerRoleIn(community.id, viewerId);
     const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
     const normalizedPage = normalizePage(page);
 
@@ -1200,7 +1209,7 @@ export class CommunityPostsService {
     let communityId: string | null = null;
     if (dto.communitySlug) {
       const community = await this.loadCommunityOr404(dto.communitySlug);
-      const membership = await this.assertMember(community.id, authorId);
+      const membership = await this.assertMember(community, authorId);
       // Same archive/freeze gate as `createPost`'s slug-scoped path — see
       // `assertFlatWriteAllowed` (the community is already resolved here, so
       // the two checks are applied directly rather than re-resolving it).
@@ -1253,7 +1262,7 @@ export class CommunityPostsService {
       // archive half is not optional: an archived community's write side is
       // shut, and `removeReaction` refuses for the same reason.
       const community = await this.loadCommunityByIdOr404(post.communityId);
-      await this.assertMember(community.id, userId);
+      await this.assertMember(community, userId);
       this.assertNotArchived(community);
     }
 
@@ -1583,17 +1592,22 @@ export class CommunityPostsService {
     };
   }
 
+  /**
+   * The caller's standing to act in a community: their effective role (see
+   * `CommunityMembershipService.effectiveRole`). In a space that is the
+   * higher of their own space role and the role inherited from parent staff,
+   * and nothing at all without a parent roster row, so a leftover space row a
+   * cascade missed writes nothing. Parent staff act here with no space row.
+   */
   private async assertMember(
-    communityId: string,
+    community: Pick<Community, 'id' | 'parentId'>,
     userId: string,
-  ): Promise<CommunityMember> {
-    const membership = await this.members.findOne({
-      where: { communityId, userId },
-    });
-    if (!membership) {
+  ): Promise<ActingMember> {
+    const role = await this.viewerRoleIn(community, userId);
+    if (role === null) {
       throw new ForbiddenException('Only roster members can do that');
     }
-    return membership;
+    return { userId, role };
   }
 
   /**
@@ -1611,10 +1625,10 @@ export class CommunityPostsService {
   private async assertFlatWriteAllowed(
     communityId: string | null,
     userId: string,
-  ): Promise<{ community: Community; membership: CommunityMember } | null> {
+  ): Promise<{ community: Community; membership: ActingMember } | null> {
     if (!communityId) return null;
     const community = await this.loadCommunityByIdOr404(communityId);
-    const membership = await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
     return { community, membership };
@@ -1704,7 +1718,7 @@ export class CommunityPostsService {
    */
   private assertNotFrozen(
     community: Community,
-    membership: CommunityMember,
+    membership: ActingMember,
   ): void {
     if (
       community.frozenAt != null &&
@@ -1716,17 +1730,29 @@ export class CommunityPostsService {
     }
   }
 
-  // The viewer's roster role in a community, or null if they aren't a member.
+  // The viewer's effective role in a community, or null if they hold none.
   // Used to compute the DTO's delete/restore/history flags for feed reads,
-  // where the viewer may be a non-member on a non-private tier.
+  // where the viewer may be a non-member on a non-private tier. In a space,
+  // parent staff inherit a role here with no space roster row.
   private async viewerRoleIn(
+    community: Pick<Community, 'id' | 'parentId'>,
+    userId: string,
+  ): Promise<RosterRole | null> {
+    return this.communityMembership.effectiveRole(community, userId);
+  }
+
+  // `viewerRoleIn` for the flat (`/community-posts*`) paths, which hold a
+  // post's `communityId` only. An unknown id resolves to no role.
+  private async viewerRoleInCommunityId(
     communityId: string,
     userId: string,
   ): Promise<RosterRole | null> {
-    const membership = await this.members.findOne({
-      where: { communityId, userId },
+    const community = await this.communities.findOne({
+      where: { id: communityId },
+      select: { id: true, parentId: true },
     });
-    return membership?.role ?? null;
+    if (!community) return null;
+    return this.viewerRoleIn(community, userId);
   }
 
   // Delete / restore / history authz: the author, or the community's owner/mod.
@@ -1738,7 +1764,7 @@ export class CommunityPostsService {
     // to false — an erased-author post/reply is manageable by owner/mod only,
     // never "the author" (there isn't one to match).
     authorId: string | null,
-    membership: CommunityMember,
+    membership: ActingMember,
   ): void {
     const isAuthor = authorId === membership.userId;
     const isOwnerMod = CommunityPostsService.isStaffRole(membership.role);
@@ -2042,15 +2068,18 @@ export class CommunityPostsService {
   // readable by any signed-in viewer. Mutating actions
   // (`createPost`/`addReaction`/`addReply`/pin) still require a roster row on
   // every tier, this tier included, and are gated on their own paths.
+  //
+  // Returns the viewer's effective role (null for a non-member reading a
+  // public board), so the read paths need no second roster lookup. In a
+  // space, parent staff pass through an inherited role, and a leftover space
+  // row without the parent row counts as no row at all.
   private async assertViewable(
     community: Community,
     viewerId: string,
-  ): Promise<void> {
-    if (!isGatedTier(community.accessTier)) return;
-    const membership = await this.members.findOne({
-      where: { communityId: community.id, userId: viewerId },
-    });
-    if (membership) return;
+  ): Promise<RosterRole | null> {
+    const viewerRole = await this.viewerRoleIn(community, viewerId);
+    if (!isGatedTier(community.accessTier)) return viewerRole;
+    if (viewerRole !== null) return viewerRole;
     if (community.accessTier === AccessTier.Private) {
       throw new NotFoundException('Community not found');
     }

@@ -108,6 +108,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   ref: 'QPL-2026-0001',
   slug: 'lux-cafe',
   ownerId: 'owner-1',
+  createdByStaffId: null,
   status: ListingStatus.Review,
   path: 'claim',
   verify: '',

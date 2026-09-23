@@ -48,6 +48,7 @@ import {
   CommunityMember,
   RosterRole,
 } from '../communities/entities/community-member.entity';
+import { topLevelOnly } from '../communities/subcommunity-rules';
 import { ListMembersQuery, MemberSort } from './dto/list-members.query';
 import { SocialLinkDto } from './dto/replace-socials.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
@@ -700,23 +701,29 @@ export class ProfilesService {
    *  - Private-tier communities are excluded, mirroring the picker: a profile
    *    never advertises that its owner is in a private community, even if the
    *    tier changed to private after the pin was made.
+   *  - A space is excluded the same way a left community is: a pin the
+   *    community's own removal of subcommunities would otherwise strand
+   *    simply drops out of the read, with no error.
    *
    * `countLabel` is the community's live roster size (`community_members` count).
    */
   private async loadFeaturedCommunities(
     userId: string,
   ): Promise<FeaturedCommunityRefView[]> {
-    const rows = await this.featuredCommunities
-      .createQueryBuilder('pin')
-      .innerJoin(Community, 'c', 'c.id = pin.community_id')
-      .innerJoin(
-        CommunityMember,
-        'cm',
-        'cm.community_id = c.id AND cm.user_id = :userId',
-        { userId },
-      )
-      .where('pin.user_id = :userId', { userId })
-      .andWhere('c.access_tier != :private', { private: AccessTier.Private })
+    const rows = await topLevelOnly(
+      this.featuredCommunities
+        .createQueryBuilder('pin')
+        .innerJoin(Community, 'c', 'c.id = pin.community_id')
+        .innerJoin(
+          CommunityMember,
+          'cm',
+          'cm.community_id = c.id AND cm.user_id = :userId',
+          { userId },
+        )
+        .where('pin.user_id = :userId', { userId })
+        .andWhere('c.access_tier != :private', { private: AccessTier.Private }),
+      'c',
+    )
       .select('c.id', 'communityId')
       .addSelect('c.slug', 'slug')
       .addSelect('c.name', 'name')
@@ -918,7 +925,9 @@ export class ProfilesService {
    * only a `public`-tier community is ever advertised here, and only one whose
    * roster has been left visible. "Both in X" is a statement about who is on
    * that roster, so `rosterVisible: false` forbids it just as surely as the
-   * tier does.
+   * tier does. A space is excluded outright (`topLevelOnly`): "both in X"
+   * names a community, and a space's name needs its parent beside it to make
+   * sense (profiles never reveal space membership either).
    *
    * The tier gate is `= public` rather than `!= private` because every other
    * tier now closes its roster to non-members outright: `CommunitiesService.
@@ -932,20 +941,23 @@ export class ProfilesService {
     ownerUserId: string,
     otherIds: string[],
   ): Promise<Map<string, string>> {
-    const rows = await this.communityMembers
-      .createQueryBuilder('mine')
-      .innerJoin(
-        CommunityMember,
-        'theirs',
-        'theirs.community_id = mine.community_id AND theirs.user_id IN (:...otherIds)',
-        { otherIds },
-      )
-      .innerJoin(Community, 'c', 'c.id = mine.community_id')
-      .where('mine.user_id = :ownerUserId', { ownerUserId })
-      .andWhere('c.access_tier = :publicTier', {
-        publicTier: AccessTier.Public,
-      })
-      .andWhere('c.roster_visible = true')
+    const rows = await topLevelOnly(
+      this.communityMembers
+        .createQueryBuilder('mine')
+        .innerJoin(
+          CommunityMember,
+          'theirs',
+          'theirs.community_id = mine.community_id AND theirs.user_id IN (:...otherIds)',
+          { otherIds },
+        )
+        .innerJoin(Community, 'c', 'c.id = mine.community_id')
+        .where('mine.user_id = :ownerUserId', { ownerUserId })
+        .andWhere('c.access_tier = :publicTier', {
+          publicTier: AccessTier.Public,
+        })
+        .andWhere('c.roster_visible = true'),
+      'c',
+    )
       .select('theirs.user_id', 'userId')
       .addSelect('c.name', 'name')
       .orderBy('c.name', 'ASC')
@@ -1187,10 +1199,12 @@ export class ProfilesService {
 
   /**
    * Map an ordered list of community slugs to their ids, validating that each
-   * is eligible to feature: a NON-PRIVATE community the member is actually on
-   * the roster of. Rejects duplicates and unknown/ineligible slugs with 400
-   * (mirrors `replaceGroups`), so the client can't pin a community it doesn't
-   * belong to or a private one. Order is preserved — it becomes `position`.
+   * is eligible to feature: a NON-PRIVATE, TOP-LEVEL community the member is
+   * actually on the roster of. Rejects duplicates and unknown/ineligible
+   * slugs with 400 (mirrors `replaceGroups`), so the client can't pin a
+   * community it doesn't belong to, a private one, or a space. A space's slug
+   * is unknown to this picker exactly the way a deleted community's slug is,
+   * with no dedicated error. Order is preserved and becomes `position`.
    */
   private async resolveFeaturedCommunityIds(
     userId: string,
@@ -1206,16 +1220,19 @@ export class ProfilesService {
       }
       seen.add(slug);
     }
-    const rows = await this.communities
-      .createQueryBuilder('c')
-      .innerJoin(
-        CommunityMember,
-        'cm',
-        'cm.community_id = c.id AND cm.user_id = :userId',
-        { userId },
-      )
-      .where('c.slug IN (:...slugs)', { slugs })
-      .andWhere('c.access_tier != :private', { private: AccessTier.Private })
+    const rows = await topLevelOnly(
+      this.communities
+        .createQueryBuilder('c')
+        .innerJoin(
+          CommunityMember,
+          'cm',
+          'cm.community_id = c.id AND cm.user_id = :userId',
+          { userId },
+        )
+        .where('c.slug IN (:...slugs)', { slugs })
+        .andWhere('c.access_tier != :private', { private: AccessTier.Private }),
+      'c',
+    )
       .select('c.id', 'id')
       .addSelect('c.slug', 'slug')
       .getRawMany<{ id: string; slug: string }>();

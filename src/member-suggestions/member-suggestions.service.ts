@@ -14,6 +14,7 @@ import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
+import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { MemberSuggestionDismissal } from './entities/member-suggestion-dismissal.entity';
 import {
   compareSuggestions,
@@ -298,7 +299,9 @@ export class MemberSuggestionsService {
    * an archived community is gone for everyone, and one with
    * `roster_visible = false` deliberately hides who is inside it. Saying "you
    * are both in X" about a hidden roster would leak exactly the fact that
-   * setting exists to keep, so those rooms cannot score and cannot explain.
+   * setting exists to keep, so those communities cannot score and cannot
+   * explain. A space is excluded the same way: this feature names top-level
+   * communities only.
    */
   private async viewerRosterCommunities(
     viewerUserId: string,
@@ -312,7 +315,11 @@ export class MemberSuggestionsService {
       return new Map();
     }
     const communities = await this.communities.find({
-      where: { id: In(communityIds), rosterVisible: true },
+      where: {
+        id: In(communityIds),
+        rosterVisible: true,
+        ...TOP_LEVEL_WHERE,
+      },
       select: { id: true, name: true, archivedAt: true },
     });
     return new Map(

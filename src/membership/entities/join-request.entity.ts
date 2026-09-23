@@ -98,6 +98,16 @@ export class PlatformJoinRequest extends QueueAssignmentColumns {
   @Column({ type: 'varchar', length: 64, nullable: true })
   source!: string | null;
 
+  /**
+   * Where the applicant says they heard about QueerPulse, as free text in
+   * their own words. Self-reported, so the queue shows it as context for a
+   * reviewer and nothing reads it as verified attribution (that is `source`).
+   * Required by `CreateMembershipJoinRequestDto` from now on; nullable only
+   * because rows submitted before this column existed carry no answer.
+   */
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  heardFrom!: string | null;
+
   @Column({
     type: 'enum',
     enum: PlatformJoinRequestStatus,

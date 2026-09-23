@@ -5,6 +5,7 @@ import { ContentModerationModule } from '../content-moderation/content-moderatio
 import { Event } from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
 import { HandlesModule } from '../handles/handles.module';
+import { IdentitiesModule } from '../identities/identities.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
@@ -56,6 +57,14 @@ import { SubprofilesService } from './subprofiles.service';
     // Exports `HandlesService` — publish/unpublish/link-switch/handle-change now
     // claim/release the persona's name in the ONE global namespace (Task C2).
     HandlesModule,
+    // `IdentitiesService`/`IdentityMailboxSyncService`, used by
+    // `SubprofileInvitesService` and `SubprofileMembershipService` to resolve
+    // a persona's mailbox identity and keep its `conversation_participants`
+    // seats in step with the co-owner roster. Plain import, no `forwardRef`:
+    // `IdentitiesModule` registers `Subprofile`/`SubprofileMember` as
+    // entities only and imports no module of this domain, so this edge is
+    // one-directional.
+    IdentitiesModule,
     // Read-only: public persona reads (profile-nested / by-handle / directory /
     // search / sitemap) withhold a moderator-taken-down persona (keyed by slug).
     ContentModerationModule,

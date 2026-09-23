@@ -35,6 +35,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
+import { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentitiesService } from '../identities/identities.service';
 
 // Chainable query-builder stub whose terminal method resolves to a
 // configurable row list (mirrors `partners.service.spec.ts`'s `qbStub`,
@@ -174,6 +176,9 @@ describe('ModerationService', () => {
   // TS-06: the raw `DataSource.query` behind the queue's subject clusters.
   let dataSourceQuery: jest.Mock;
   let adminQueueNotifications: { announce: jest.Mock };
+  // Task 21 review M3: resolves an `identity` report's business display name
+  // for the queue.
+  let identities: { describeIdentities: jest.Mock };
 
   beforeEach(async () => {
     reports = {
@@ -255,6 +260,12 @@ describe('ModerationService', () => {
 
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
+    };
+
+    // Defaults to "no identity resolves", so every pre-existing queue test
+    // (none of them an `identity` subject) is unaffected.
+    identities = {
+      describeIdentities: jest.fn().mockResolvedValue(new Map()),
     };
 
     // Defaults to "nothing resolved", so a `warn` or a `suspend` on a content
@@ -370,6 +381,10 @@ describe('ModerationService', () => {
         {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
+        },
+        {
+          provide: IdentitiesService,
+          useValue: identities,
         },
       ],
     }).compile();
@@ -507,6 +522,60 @@ describe('ModerationService', () => {
       expect(page.pageInfo).toEqual({ nextCursor: null, hasMore: false });
     });
 
+    // Task 21 review M3: the queue shows an `identity` report's business
+    // display name in place of the mailbox identity's raw uuid.
+    it("shows an identity report's business display name in place of its raw uuid", async () => {
+      const IDENTITY_ID = '0c000000-0000-4000-8000-000000000001';
+      const qb = qbStub([
+        baseReport({
+          subjectType: ReportSubjectType.Identity,
+          subjectId: IDENTITY_ID,
+        }),
+      ]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+      identities.describeIdentities.mockResolvedValue(
+        new Map([
+          [
+            IDENTITY_ID,
+            {
+              displayName: 'Cafe Lisboa',
+              handle: 'cafe-lisboa',
+              avatarUrl: null,
+            },
+          ],
+        ]),
+      );
+
+      const page = await service.list({});
+
+      expect(identities.describeIdentities).toHaveBeenCalledWith([IDENTITY_ID]);
+      expect(page.data[0]!.reported).toEqual({
+        id: IDENTITY_ID,
+        handle: 'Cafe Lisboa',
+        priorReports: 0,
+      });
+    });
+
+    it('falls back to the raw subject id when the reported identity cannot be described', async () => {
+      const IDENTITY_ID = '0c000000-0000-4000-8000-000000000002';
+      const qb = qbStub([
+        baseReport({
+          subjectType: ReportSubjectType.Identity,
+          subjectId: IDENTITY_ID,
+        }),
+      ]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+      // Default stub: `describeIdentities` resolves nothing.
+
+      const page = await service.list({});
+
+      expect(page.data[0]!.reported).toEqual({
+        id: IDENTITY_ID,
+        handle: IDENTITY_ID,
+        priorReports: 0,
+      });
+    });
+
     it('resolves a non-anonymous reporter name from their profile', async () => {
       const qb = qbStub([baseReport()]);
       reports.createQueryBuilder.mockReturnValue(qb);
@@ -598,6 +667,117 @@ describe('ModerationService', () => {
         }),
       );
       expect(Array.isArray(res.detail?.people)).toBe(true);
+    });
+  });
+
+  // Business mailboxes, design section 9: the moderator view shows the
+  // identity a message was sent as and the human who sent it, whatever
+  // either attribution switch says.
+  describe('getById on a message sent as a business', () => {
+    const SENT_AS_IDENTITY_ID = '66666666-7777-4888-8999-000000000000';
+
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue(
+        baseReport({
+          subjectType: ReportSubjectType.Message,
+          subjectId: '11111111-2222-4333-8444-555555555555',
+        }),
+      );
+      profiles.findOne.mockResolvedValue({
+        userId: 'staff-user',
+        slug: 'rui-staff',
+      });
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: 'staff-user',
+        excerpt: 'We are closed on Mondays.',
+        communityId: null,
+        isAuthorAmbiguous: false,
+        conversationId: 'conversation-1',
+        senderIdentityId: SENT_AS_IDENTITY_ID,
+      });
+      // The drawer's `reported` person reads the message's sender row.
+      const { dataSource } = service as unknown as {
+        dataSource: Record<string, unknown>;
+      };
+      Object.assign(dataSource, {
+        getRepository: () => ({
+          find: jest.fn().mockResolvedValue([
+            {
+              id: '11111111-2222-4333-8444-555555555555',
+              senderId: 'staff-user',
+            },
+          ]),
+        }),
+      });
+    });
+
+    function givenIdentities(
+      resolved: Array<{ id: string; kind: IdentityKind }>,
+    ) {
+      Object.assign(identities, {
+        getByIds: jest.fn().mockResolvedValue(resolved),
+      });
+      identities.describeIdentities.mockResolvedValue(
+        new Map(
+          resolved.map((identity) => [
+            identity.id,
+            {
+              displayName: 'Cafe Lisboa',
+              handle: 'cafe-lisboa',
+              avatarUrl: null,
+            },
+          ]),
+        ),
+      );
+    }
+
+    it('names both the business and the human sender', async () => {
+      givenIdentities([
+        { id: SENT_AS_IDENTITY_ID, kind: IdentityKind.Listing },
+      ]);
+
+      const res = await service.getById('report-1');
+
+      expect(res.detail?.contentAuthor).toBe('rui-staff');
+      expect(res.detail?.sentAsIdentity).toEqual({
+        identityId: SENT_AS_IDENTITY_ID,
+        kind: IdentityKind.Listing,
+        displayName: 'Cafe Lisboa',
+        handle: 'cafe-lisboa',
+      });
+      expect(res.detail?.people).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'sent as', name: 'Cafe Lisboa' }),
+        ]),
+      );
+    });
+
+    it('still names the identity after the business was deleted', async () => {
+      givenIdentities([]);
+
+      const res = await service.getById('report-1');
+
+      expect(res.detail?.contentAuthor).toBe('rui-staff');
+      expect(res.detail?.sentAsIdentity).toEqual({
+        identityId: SENT_AS_IDENTITY_ID,
+        kind: null,
+        displayName: null,
+        handle: null,
+      });
+    });
+
+    it('adds nothing for a personal message sent as the profile', async () => {
+      givenIdentities([
+        { id: SENT_AS_IDENTITY_ID, kind: IdentityKind.Profile },
+      ]);
+
+      const res = await service.getById('report-1');
+
+      expect(res.detail?.contentAuthor).toBe('rui-staff');
+      expect(res.detail?.sentAsIdentity).toBeUndefined();
+      expect(res.detail?.people.map((person) => person.role)).not.toContain(
+        'sent as',
+      );
     });
   });
 

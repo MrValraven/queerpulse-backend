@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { FindOperator } from 'typeorm';
+import { FindOperator, IsNull } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { Event as GatheringEvent } from '../events/entities/event.entity';
@@ -209,6 +209,25 @@ describe('ActivityVisibilityService.filterVisible', () => {
     await flush();
 
     expect(repos.activities.delete).not.toHaveBeenCalled();
+  });
+
+  it('scopes the community re-check to top-level communities, excluding spaces', async () => {
+    const { service, repos } = await buildService();
+    repos.communities.find.mockResolvedValue([]);
+
+    await service.filterVisible([
+      row({
+        id: 'row-1',
+        subjectKind: ActivitySubjectKind.Community,
+        subjectId: 'a-space',
+      }),
+    ]);
+    await flush();
+
+    const [{ where }] = repos.communities.find.mock.calls[0] as [
+      { where: { parentId?: unknown } },
+    ];
+    expect(where.parentId).toEqual(IsNull());
   });
 
   it('a failed purge never fails the read', async () => {

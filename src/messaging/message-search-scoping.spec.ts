@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { ConnectionsService } from '../connections/connections.service';
+import { IdentityKind } from '../identities/entities/identity.entity';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -127,8 +128,19 @@ describe('MessagesService.searchMessages scoping (ENG-268 / ENG-252 / ENG-251)',
   let participants: { find: jest.Mock };
   let profiles: { find: jest.Mock };
   let blockFilter: { excludeBlocked: jest.Mock };
+  let identities: { getByIds: jest.Mock; describeIdentities: jest.Mock };
+  let identityAttribution: { buildStaffNameResolver: jest.Mock };
 
   beforeEach(async () => {
+    identities = {
+      getByIds: jest.fn().mockResolvedValue([]),
+      describeIdentities: jest.fn().mockResolvedValue(new Map()),
+    };
+    identityAttribution = {
+      buildStaffNameResolver: jest
+        .fn()
+        .mockResolvedValue({ resolve: () => null }),
+    };
     qb = makeSearchQb();
     messages = { createQueryBuilder: jest.fn(() => qb) };
     conversations = { find: jest.fn().mockResolvedValue([]) };
@@ -154,7 +166,18 @@ describe('MessagesService.searchMessages scoping (ENG-268 / ENG-252 / ENG-251)',
         },
         { provide: getRepositoryToken(Message), useValue: messages },
         { provide: getRepositoryToken(Profile), useValue: profiles },
-        { provide: MessagingCoreService, useValue: {} },
+        // Task 13c: search renders its senders and counterparts through the
+        // real `MessagingCoreService.loadMessageListContext`, reading the
+        // same participant and profile stand-ins as this service.
+        {
+          provide: MessagingCoreService,
+          useValue: Object.assign(
+            Object.create(
+              MessagingCoreService.prototype,
+            ) as MessagingCoreService,
+            { participants, profiles, identities, identityAttribution },
+          ),
+        },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
         { provide: ConnectionsService, useValue: {} },
         { provide: BlockFilterService, useValue: blockFilter },
@@ -334,8 +357,15 @@ describe('MessagesService.searchMessages scoping (ENG-268 / ENG-252 / ENG-251)',
           isOfficial: false,
         }),
       ]);
+      // Task 13c: every seat of the thread, the caller's own included, each
+      // with the profile identity it speaks for.
       participants.find.mockResolvedValueOnce([
-        { conversationId: 'c1', userId: 'u3' },
+        { conversationId: 'c1', userId: 'me', identityId: 'identity-me' },
+        { conversationId: 'c1', userId: 'u3', identityId: 'identity-u3' },
+      ]);
+      identities.getByIds.mockResolvedValueOnce([
+        { id: 'identity-me', kind: IdentityKind.Profile },
+        { id: 'identity-u3', kind: IdentityKind.Profile },
       ]);
       profiles.find.mockResolvedValueOnce([
         buildProfile('u2'),

@@ -6,6 +6,9 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, Repository } from 'typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { IdentityAttributionService } from '../identities/identity-attribution.service';
+import { IdentitiesService } from '../identities/identities.service';
+import { Sticker } from '../stickers/entities/sticker.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -77,6 +80,7 @@ describe('MessageAnnotationsService.listMessageReactors (PRD-352)', () => {
   let core: {
     requireParticipant: jest.Mock;
     isMessageWithheldFromViewer: jest.Mock;
+    loadReactorView: jest.Mock;
   };
   let reactorsQuery: ReactorsQueryMock;
 
@@ -132,6 +136,8 @@ describe('MessageAnnotationsService.listMessageReactors (PRD-352)', () => {
         leftAt: null,
       }),
       isMessageWithheldFromViewer: jest.fn().mockResolvedValue(false),
+      // Task 13e: an ordinary thread, where every reactor is named.
+      loadReactorView: jest.fn().mockResolvedValue({ shape: 'individuals' }),
     };
     service = new MessageAnnotationsService(
       {} as Repository<Conversation>,
@@ -345,9 +351,18 @@ describe('MessageAnnotationsService.listMessageReactors takedown visibility', ()
       empty as unknown as Repository<MessageHide>,
       moderationStates as unknown as Repository<ContentModeration>,
       empty as unknown as Repository<Profile>,
+      empty as unknown as Repository<Sticker>,
       empty as unknown as DataSource,
       empty as unknown as EventEmitter2,
       usersService as unknown as UsersService,
+      empty as unknown as IdentitiesService,
+      // Task 11: unused by the reactors route under test here; a safe stand-in
+      // so nothing crashes if a future path under test does reach it.
+      {
+        buildStaffNameResolver: jest
+          .fn()
+          .mockResolvedValue({ resolve: () => null }),
+      } as unknown as IdentityAttributionService,
     );
     jest.spyOn(core, 'requireParticipant').mockResolvedValue({
       conversationId: CONVERSATION_ID,
@@ -355,6 +370,10 @@ describe('MessageAnnotationsService.listMessageReactors takedown visibility', ()
       clearedAt: null,
       leftAt: null,
     } as unknown as ConversationParticipant);
+    // Task 13e: an ordinary thread, where every reactor is named.
+    jest
+      .spyOn(core, 'loadReactorView')
+      .mockResolvedValue({ shape: 'individuals' });
     service = new MessageAnnotationsService(
       {} as Repository<Conversation>,
       {} as Repository<ConversationParticipant>,
@@ -452,6 +471,7 @@ describe('MessageAnnotationsService pins (ENG-240)', () => {
     requireActiveParticipant: jest.Mock;
     requireParticipant: jest.Mock;
     toMessageResponses: jest.Mock;
+    assertMaySendAs: jest.Mock;
   };
 
   /**
@@ -497,16 +517,21 @@ describe('MessageAnnotationsService pins (ENG-240)', () => {
         conversationId: CONVERSATION_ID,
         userId: VIEWER_ID,
         role,
+        identityId: 'identity-viewer',
         leftAt: null,
         clearedAt: null,
       }),
       requireParticipant: jest.fn().mockResolvedValue({
         conversationId: CONVERSATION_ID,
         userId: VIEWER_ID,
+        identityId: 'identity-viewer',
         leftAt: null,
         clearedAt: null,
       }),
       toMessageResponses: jest.fn().mockResolvedValue([]),
+      // Task 7: this suite exercises the pin-role gate, so the identity
+      // guard is stubbed to always allow and stays out of its way.
+      assertMaySendAs: jest.fn().mockResolvedValue(undefined),
     };
     service = new MessageAnnotationsService(
       conversations as unknown as Repository<Conversation>,
@@ -717,7 +742,22 @@ describe('MessageAnnotationsService.listStarredMessages (PRD-374)', () => {
         find: jest.fn().mockResolvedValue([]),
       } as unknown as Repository<MessageHide>,
       profiles as unknown as Repository<Profile>,
-      {} as MessagingCoreService,
+      // Task 13c: the starred list renders its senders and counterparts
+      // through the real `MessagingCoreService.loadMessageListContext`,
+      // reading the same participant and profile stand-ins as this service.
+      Object.assign(Object.create(MessagingCoreService.prototype), {
+        participants,
+        profiles,
+        identities: {
+          getByIds: jest.fn().mockResolvedValue([]),
+          describeIdentities: jest.fn().mockResolvedValue(new Map()),
+        },
+        identityAttribution: {
+          buildStaffNameResolver: jest
+            .fn()
+            .mockResolvedValue({ resolve: () => null }),
+        },
+      }) as MessagingCoreService,
       { emit: jest.fn() } as unknown as EventEmitter2,
     );
   });

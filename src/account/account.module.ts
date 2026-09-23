@@ -20,6 +20,7 @@ import { GovernanceProposal } from '../governance/entities/governance-proposal.e
 import { GovernanceVote } from '../governance/entities/governance-vote.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingReview } from '../housing-reviews/entities/housing-review.entity';
+import { IdentitiesModule } from '../identities/identities.module';
 import { Job } from '../jobs/entities/job.entity';
 import { ListingReview } from '../listings/entities/listing-review.entity';
 import { Listing } from '../listings/entities/listing.entity';
@@ -100,6 +101,11 @@ import { DsarRequest } from './entities/dsar-request.entity';
     // `forwardRef`: `MediaReferencesModule` does not import `AccountModule`,
     // directly or transitively.
     MediaReferencesModule,
+    // `IdentitiesService`: Task 13f's export fix renders a business mailbox
+    // thread's counterpart and sender as the business itself. Plain import,
+    // no `forwardRef`: `IdentitiesModule` registers only its own entities and
+    // imports no other module, so it cannot cycle back to `AccountModule`.
+    IdentitiesModule,
     AdminQueueNotificationsModule,
     TypeOrmModule.forFeature([
       DeletionRequest,

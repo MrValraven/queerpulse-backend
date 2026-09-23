@@ -113,6 +113,27 @@ export enum ReportSubjectType {
   // Backed by `AddGroupConsentInvitesAndDissolve1819000000000` (adds the
   // value to `reports_subject_type_enum`).
   Conversation = 'conversation',
+  // A business-mailbox identity (`identities`, kind `listing`, `subprofile`
+  // or `company`), addressed by the identity's uuid, reported by a customer
+  // from their own direct thread with it ("Report business").
+  //
+  // `Member` is the wrong grain here: it would need the handle of the human
+  // who replied, which the customer never holds and must never learn. The
+  // `listing`, `company` and `subprofile` subjects are addressed by slug or
+  // persona id and carry no thread, so none of them records which
+  // conversation the complaint is about. Per-message reports still name the
+  // human through `sender_id`; this subject is the whole-counterpart grain
+  // beside them, the same reasoning PRD-356 used to add `conversation`.
+  //
+  // Customer-only: `ReportsService.create` accepts it only from a signed-in
+  // member holding (or once holding) the customer seat of a direct thread
+  // with the identity, and refuses the identity's own staff. Resolved by
+  // `ReportSubjectResolverService` to the entity's owner (no one for an
+  // ownerless listing) with the entity's display name as the excerpt.
+  //
+  // Backed by `AddIdentityReportSubject1821281000000` (adds the value to
+  // `reports_subject_type_enum`).
+  Identity = 'identity',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

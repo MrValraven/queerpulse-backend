@@ -23,8 +23,18 @@ export enum CommunityInviteSkipReason {
    * in the triage queue, and an invite would talk past it.
    */
   PendingJoinRequest = 'pending_request',
-  /** Barred from this community (`community_bans`). */
+  /**
+   * Barred from this community (`community_bans`). For a space, a live ban
+   * in its parent counts too.
+   */
   Banned = 'banned',
+  /**
+   * The community is a space and this member holds no roster row in its
+   * parent. Joining a space requires parent membership, so an invitation
+   * could never be accepted, and it would name the space to someone outside
+   * the parent.
+   */
+  NotParentMember = 'not_parent_member',
   /**
    * Already holds a pending invitation to this community
    * (`UQ_community_invites_pending`). The invitation on file is the answer:

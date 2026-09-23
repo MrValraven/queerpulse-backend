@@ -24,7 +24,23 @@ function build() {
   // A `message`-source mention is restricted to the conversation's own
   // participants, so the fan-out reads this repo. Default: nobody is a
   // participant, which is the fail-closed shape the service relies on.
-  const conversationParticipants = { find: jest.fn().mockResolvedValue([]) };
+  //
+  // `dropExcludedMailboxSeats` (Task 13f, renamed by Tasks 14a and 14)
+  // reads the same repo through its own `createQueryBuilder` chain,
+  // composing `seatExcludedFromMailboxPredicate`.
+  // Default: `getRawMany` resolves empty, i.e. nobody is excluded by a
+  // block, the shape every pre-13f test below relies on: each of those
+  // exercises `.find()`'s participant restriction alone.
+  const participantQueryBuilder = {
+    select: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    getRawMany: jest.fn().mockResolvedValue([]),
+  };
+  const conversationParticipants = {
+    find: jest.fn().mockResolvedValue([]),
+    createQueryBuilder: jest.fn(() => participantQueryBuilder),
+  };
   const notifications = {
     // Resolves to the ids it actually notified (the real signature returns
     // `Promise<string[]>`; `notify` reads that array). A stub resolving to
@@ -54,6 +70,7 @@ function build() {
   return {
     service,
     conversationParticipants,
+    participantQueryBuilder,
     communities,
     members,
     listings,
@@ -259,6 +276,93 @@ describe('MentionNotificationService.notify', () => {
         where: expect.objectContaining({ leftAt: IsNull() }),
       }),
     );
+  });
+
+  it('Task 13f: a staff member blocked either way with the customer receives no mention notification, even though their participant row is still live', async () => {
+    const {
+      service,
+      conversationParticipants,
+      participantQueryBuilder,
+      notifications,
+      userIdsForSlugs,
+    } = build();
+    userIdsForSlugs.mockResolvedValue(
+      new Map([['blockedstaff', 'user-blocked-staff']]),
+    );
+    // The staff member left no seat (`leftAt` is still null). A block does
+    // not remove their participant row, only their own access.
+    conversationParticipants.find.mockResolvedValue([
+      { userId: 'user-blocked-staff' },
+    ]);
+    // The block-aware query reports this seat as excluded.
+    participantQueryBuilder.getRawMany.mockResolvedValue([
+      { userId: 'user-blocked-staff' },
+    ]);
+
+    await service.notify('@blockedstaff look at this', 'author-1', {
+      source: 'message',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      excerpt: 'a business mailbox reply',
+    });
+
+    expect(notifications.createForRecipients).not.toHaveBeenCalled();
+  });
+
+  it('Task 13f: an unblocked colleague in the same mailbox thread still receives the mention notification', async () => {
+    const {
+      service,
+      conversationParticipants,
+      participantQueryBuilder,
+      notifications,
+      userIdsForSlugs,
+    } = build();
+    userIdsForSlugs.mockResolvedValue(
+      new Map([['colleague', 'user-colleague']]),
+    );
+    conversationParticipants.find.mockResolvedValue([
+      { userId: 'user-colleague' },
+    ]);
+    // Nobody excluded by a block.
+    participantQueryBuilder.getRawMany.mockResolvedValue([]);
+
+    await service.notify('@colleague look at this', 'author-1', {
+      source: 'message',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      excerpt: 'a business mailbox reply',
+    });
+
+    const notifiedRecipients =
+      notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
+    expect(notifiedRecipients).toEqual(['user-colleague']);
+  });
+
+  it("Task 13f: composes blockedStaffSeatPredicate's EXISTS clause into the block-aware participant query", async () => {
+    const {
+      service,
+      conversationParticipants,
+      participantQueryBuilder,
+      userIdsForSlugs,
+    } = build();
+    userIdsForSlugs.mockResolvedValue(new Map([['someone', 'user-someone']]));
+    conversationParticipants.find.mockResolvedValue([
+      { userId: 'user-someone' },
+    ]);
+
+    await service.notify('@someone look at this', 'author-1', {
+      source: 'message',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      excerpt: 'a business mailbox reply',
+    });
+
+    const andWhereClauses = participantQueryBuilder.andWhere.mock.calls.map(
+      (call: unknown[]) => call[0] as string,
+    );
+    expect(
+      andWhereClauses.some((clause) => clause.includes('blocked_staff_seat')),
+    ).toBe(true);
   });
 
   it('excludeUserIds (PRD-221) drops a mentioned recipient the same as the author, without affecting others', async () => {

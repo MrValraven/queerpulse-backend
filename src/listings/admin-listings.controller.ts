@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   Param,
   Patch,
   Post,
@@ -22,9 +23,12 @@ import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
+import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
 import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
 import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { BulkRemoveDto, BulkStatusDto } from './dto/bulk-listing.dto';
+import { CreateListingOwnerOfferDto } from './dto/create-listing-owner-offer.dto';
+import { InviteListingCoManagerDto } from './dto/invite-listing-co-manager.dto';
 import { ListEditSuggestionsQuery } from './dto/list-edit-suggestions.query';
 import { ListListingClaimsQuery } from './dto/list-listing-claims.query';
 import { ListListingQueueQuery } from './dto/list-listing-queue.query';
@@ -35,8 +39,13 @@ import { UpdateListingStatusDto } from './dto/update-listing-status.dto';
 import { UpdateQueerOwnedVerifiedDto } from './dto/update-queer-owned-verified.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import { ListingClaimsService } from './listing-claims.service';
+import { ListingCoManagerDTO } from './listing-co-manager-response';
+import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
+import { ListingOwnerOfferDTO } from './listing-owner-offer-response';
+import { ListingOwnerOffersService } from './listing-owner-offers.service';
 import { toDirectoryModerationListingDTO } from './listing-owner-personal-fields';
+import { ListingDTO } from './listing-response';
 import { ListingsService } from './listings.service';
 import {
   ApiBadRequestResponse,
@@ -99,11 +108,90 @@ import {
 @Roles(UserRole.Moderator, UserRole.Admin)
 @StaffRoles('directory_moderator')
 export class AdminListingsController {
+  private readonly logger = new Logger(AdminListingsController.name);
+
   constructor(
     private readonly listingsService: ListingsService,
     private readonly editSuggestionsService: ListingEditSuggestionsService,
     private readonly listingClaimsService: ListingClaimsService,
+    // The nomination an admin can make in the same form as the create. Owned
+    // by its own service (`listings.module.ts` provides and exports it), so
+    // this controller only needs the one `offer` call.
+    private readonly listingOwnerOffersService: ListingOwnerOffersService,
+    // The co-manager seats behind the same delegation panel. A provider of
+    // this module already, so no new wiring.
+    private readonly listingCoManagersService: ListingCoManagersService,
   ) {}
+
+  /**
+   * Author a listing on a business's behalf.
+   *
+   * ADMIN ONLY, and the empty `@StaffRoles()` is what makes that true.
+   * `RolesOrStaffGuard` reads both metadata keys with `getAllAndOverride`, so
+   * `@Roles(UserRole.Admin)` on its own would leave the class-level
+   * `@StaffRoles('directory_moderator')` in scope and quietly re-open this
+   * route to every grant holder. The empty decorator overrides the class
+   * grant, leaving `@Roles` as the whole gate. Same idiom as
+   * `admin-resources.controller.ts`'s publish/unpublish pair.
+   *
+   * Writing a public page about a queer business that never asked for one is
+   * a platform-tier decision, which is why it sits above the directory
+   * moderation grant that covers the rest of this class.
+   *
+   * The response is the full `ListingDTO` without passing through
+   * `toDirectoryModerationListingDTO`: an admin-authored listing has no owner
+   * and therefore none of the owner-personal fields that redaction exists to
+   * withhold, and only platform admins reach this handler anyway.
+   */
+  @Post()
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: "Author a listing on a business's behalf" })
+  @ApiCreatedResponse({ description: 'The created listing.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiBadRequestResponse({
+    description: 'The submission is missing a claim-path requirement.',
+  })
+  async create(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: AdminCreateListingDto,
+  ): Promise<ListingDTO> {
+    const listing = await this.listingsService.adminCreate(user.userId, dto);
+    if (dto.ownerOffer) {
+      await this.offerOwnershipBestEffort(
+        listing.ref,
+        user.userId,
+        dto.ownerOffer,
+      );
+    }
+    return listing;
+  }
+
+  /**
+   * Extend the nomination that came with the create, swallowing its failure.
+   *
+   * Best-effort on purpose, matching `enqueueOwnerNotifyIfNeeded` in
+   * `ListingsService.create`. The listing is already committed by the time
+   * this runs, so a member slug that no longer resolves, or an offer that
+   * loses the open-offer slot to a concurrent one, must leave the admin with
+   * their listing and a logged warning. They can re-offer from the delegation
+   * panel, which is the surface that owns offers.
+   */
+  private async offerOwnershipBestEffort(
+    ref: string,
+    adminUserId: string,
+    dto: CreateListingOwnerOfferDto,
+  ): Promise<void> {
+    try {
+      await this.listingOwnerOffersService.offer(ref, adminUserId, dto);
+    } catch (error) {
+      this.logger.warn(
+        `Could not offer freshly authored listing ${ref} to ${dto.memberSlug}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
 
   @Get('safe-space-candidates')
   @ApiOperation({ summary: 'List safe-space candidate listings' })
@@ -345,6 +433,163 @@ export class AdminListingsController {
     return toDirectoryModerationListingDTO(
       await this.listingsService.setQueerOwnedVerified(ref, user.userId, dto),
       isPlatformStaffTier(user.role),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // DELEGATION: who is going to run this page.
+  //
+  // ADMIN ONLY, every one of the six. Each carries the empty `@StaffRoles()`
+  // alongside `@Roles(UserRole.Admin)` for the reason `create`'s doc comment
+  // sets out at length: `RolesOrStaffGuard` resolves both metadata keys with
+  // `getAllAndOverride`, so without the empty decorator the class-level
+  // `@StaffRoles('directory_moderator')` stays in scope and a volunteer grant
+  // holder can reassign a business. Handing a listing to somebody, or seating
+  // them behind a public page about a queer venue, is a platform-tier
+  // decision, and it sits above the directory moderation grant that covers
+  // the rest of this class.
+  //
+  // Declared here, above the bare `@Delete(':ref')`, following this class's
+  // stated ordering rule: a route carrying a literal segment goes before the
+  // parameter route that could absorb it, so no path segment is ever bound
+  // as a `ref` value. `admin-listings-delegation.spec.ts` pins the order.
+  // ---------------------------------------------------------------------------
+
+  // What the delegation panel reads on a cold open. `null` with a 200 is the
+  // ordinary answer, because almost every listing in the directory has no
+  // open offer; the 404 is reserved for a `ref` that does not exist. Without
+  // this the panel could only show an offer extended in the same session,
+  // and an older one stayed invisible until a second offer came back 409.
+  @Get(':ref/owner-offer')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Get the open ownership offer on a listing' })
+  @ApiOkResponse({
+    description: 'The open offer, or null when the listing has none.',
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  getOwnershipOffer(
+    @Param('ref') ref: string,
+  ): Promise<ListingOwnerOfferDTO | null> {
+    return this.listingOwnerOffersService.findOpenForListing(ref);
+  }
+
+  // Nominate a member as the owner of a listing that has none. The member
+  // decides: the row sits at `offered` until they answer, and only their
+  // accept reaches `listings.owner_id`.
+  @Post(':ref/owner-offer')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Offer ownership of a listing to a member' })
+  @ApiCreatedResponse({ description: 'The open offer.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({
+    description: 'No listing with that reference, or no such active member.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The listing already has an owner, or it already has an open offer.',
+  })
+  offerOwnership(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() dto: CreateListingOwnerOfferDto,
+  ): Promise<ListingOwnerOfferDTO> {
+    return this.listingOwnerOffersService.offer(ref, user.userId, dto);
+  }
+
+  // Withdraw the open offer, which is also how staff re-offer a listing to
+  // somebody else: one open offer per listing is a unique index, so the first
+  // has to go before the second can be made.
+  @Delete(':ref/owner-offer')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Withdraw the open ownership offer on a listing' })
+  @ApiOkResponse({ description: 'The withdrawn offer.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({
+    description: 'No listing with that reference, or no open offer on it.',
+  })
+  revokeOwnershipOffer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+  ): Promise<ListingOwnerOfferDTO> {
+    return this.listingOwnerOffersService.revoke(ref, user.userId);
+  }
+
+  // The same roster the owner reads on their own listing, for any listing.
+  // The member-facing `GET /listings/:ref/co-managers` gates on owner or
+  // active co-manager, which an admin arranging a house-authored listing is
+  // neither.
+  @Get(':ref/co-managers')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: "List a listing's co-manager seats" })
+  @ApiOkResponse({
+    description:
+      'The live seats: accepted ones and unanswered invitations. Ended seats are excluded.',
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  listCoManagers(@Param('ref') ref: string): Promise<ListingCoManagerDTO[]> {
+    return this.listingCoManagersService.staffListCoManagers(ref);
+  }
+
+  // Seat somebody on a listing the house wrote, before anybody has accepted
+  // ownership of it. The seat is stamped `isStaffAttached`, so it survives
+  // the handover when an owner does accept; an owner's own appointees leave
+  // with that owner. The invitation still has to be accepted by the member:
+  // staff put nobody behind a public page about a queer venue without asking.
+  @Post(':ref/co-managers')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Seat a member as co-manager of a listing' })
+  @ApiCreatedResponse({ description: 'The pending invitation.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({
+    description: 'No listing with that reference, or no such active member.',
+  })
+  @ApiConflictResponse({
+    description:
+      'That member already holds or has been offered a seat, or the listing is at its co-manager cap.',
+  })
+  inviteCoManager(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() dto: InviteListingCoManagerDto,
+  ): Promise<ListingCoManagerDTO> {
+    return this.listingCoManagersService.staffInviteCoManager(
+      ref,
+      user.userId,
+      dto,
+    );
+  }
+
+  // Take a seat back, accepted or still unanswered. Writes the same
+  // `co_manager_removed` audit row the owner's own revoke writes, naming the
+  // acting admin.
+  @Delete(':ref/co-managers/:memberSlug')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Remove a co-manager seat from a listing' })
+  @ApiNoContentResponse({ description: 'The seat was removed.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({
+    description:
+      'No listing with that reference, or that member holds no live seat on it.',
+  })
+  revokeCoManager(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Param('memberSlug') memberSlug: string,
+  ): Promise<void> {
+    return this.listingCoManagersService.staffRevokeCoManager(
+      ref,
+      user.userId,
+      memberSlug,
     );
   }
 

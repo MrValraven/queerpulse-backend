@@ -93,6 +93,10 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // missing, because the fields were plain `@IsString()` until now.
   'CreateCollectionDto.cover': 'Collection.cover',
   'UpdateCollectionDto.cover': 'Collection.cover',
+  // The admin Sticker Pack Builder's upload, validated the same way every
+  // other required image slot is (see `ForumPostPhotoDto.image`). The source
+  // was wired in an earlier task; this entry is the one this DTO needed.
+  'CreateStickerDto.storageKey': 'Sticker.storageKey',
 };
 
 /** Recursively lists every `.ts` file under a `dto/` directory beneath `root`

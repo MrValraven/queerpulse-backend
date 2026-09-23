@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { CommunityGovernanceLog } from '../communities/entities/community-governance-log.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
@@ -70,6 +71,10 @@ import { AdminCommunityTagRequestsService } from './admin-community-tag-requests
     // `AdminCommunitySupportService.create` tells a community's owner,
     // co-owners and moderators that support has been offered.
     NotificationsModule,
+    // `SubcommunityCascadeService`: the admin freeze/unfreeze/archive/
+    // unarchive/remove-member overrides cascade onto a parent's spaces the
+    // same way the member-facing paths do (see `AdminCommunitiesService`).
+    CommunityMembershipModule,
   ],
   controllers: [
     AdminCommunitiesController,

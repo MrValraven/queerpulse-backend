@@ -30,7 +30,7 @@ function escapeForRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const UUID_SEGMENT =
+export const UUID_SEGMENT =
   '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 
 // Extension matching is case-sensitive (only lowercase accepted) while UUID

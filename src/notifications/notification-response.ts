@@ -87,6 +87,9 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // The invited member, resolved for the owner's bell on their answer.
   [NotificationType.ListingCoManagerInviteAccepted]: 'actorId',
   [NotificationType.ListingCoManagerInviteDeclined]: 'actorId',
+  // The offering admin, resolved for the member's bell so the offer has a
+  // face on it.
+  [NotificationType.ListingOwnerOffer]: 'actorId',
   [NotificationType.SubprofileInvite]: 'invitedByUserId',
   [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
   [NotificationType.MagazinePieceMessage]: 'authorId',
@@ -463,6 +466,10 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.ListingCoManagerInvite]: ['listingName'],
     [NotificationType.ListingCoManagerInviteAccepted]: ['listingName'],
     [NotificationType.ListingCoManagerInviteDeclined]: ['listingName'],
+    // The business's own public name, for copy like "an admin has offered you
+    // ownership of Lux Cafe". `listingSlug` already rides along in
+    // `COMMON_PAYLOAD_KEYS`, which is what the deep link is built from.
+    [NotificationType.ListingOwnerOffer]: ['listingName'],
     [NotificationType.ListingEditSuggestionAccepted]: ['field'],
     // LOC-16, "a gathering has been listed at your venue". The business's own
     // public name and the gathering's own public title, which is exactly what

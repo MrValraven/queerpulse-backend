@@ -23,6 +23,7 @@ import {
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community, CommunityFrozenReason } from './entities/community.entity';
+import { SubcommunityCascadeService } from './subcommunity-cascade.service';
 
 /** Report `subjectId` is a varchar carrying a uuid for post/reply subjects. A
  *  non-uuid value can't match a content id and would 500 a uuid-typed lookup,
@@ -76,6 +77,7 @@ export class CommunityAutoFreezeService {
     private readonly members: Repository<CommunityMember>,
     private readonly governanceLog: CommunityGovernanceLogService,
     private readonly notifications: NotificationsService,
+    private readonly subcommunityCascade: SubcommunityCascadeService,
   ) {}
 
   @OnEvent(REPORT_CREATED)
@@ -122,26 +124,70 @@ export class CommunityAutoFreezeService {
     // owner set themselves: an owner may lift their own manual freeze at will,
     // but an outing/doxxing freeze only once the reports behind it are handled
     // (BE-COM-04).
-    const result = await this.communities
-      .createQueryBuilder()
-      .update(Community)
-      .set({
-        frozenAt: () => 'now()',
-        frozenReason: isEmergency
-          ? CommunityFrozenReason.EmergencyReport
-          : CommunityFrozenReason.ReportPileup,
-      })
-      .where('id = :id AND frozen_at IS NULL AND archived_at IS NULL', {
-        id: community.id,
-      })
-      .execute();
-    if (result.affected) {
+    //
+    // A top-level community's spaces freeze with it, in the same transaction,
+    // so a space is never left open under a parent held for review. Only a
+    // freeze that won the race cascades.
+    const { isFrozenByThisReport, frozenSpaceIds } =
+      await this.communities.manager.transaction(async (manager) => {
+        const freezeResult = await manager
+          .createQueryBuilder()
+          .update(Community)
+          .set({
+            frozenAt: () => 'now()',
+            frozenReason: isEmergency
+              ? CommunityFrozenReason.EmergencyReport
+              : CommunityFrozenReason.ReportPileup,
+          })
+          .where('id = :id AND frozen_at IS NULL AND archived_at IS NULL', {
+            id: community.id,
+          })
+          .execute();
+        const hasFrozen = Boolean(freezeResult.affected);
+        const cascadedSpaceIds =
+          hasFrozen && community.parentId === null
+            ? await this.subcommunityCascade.freezeSpaces(
+                manager,
+                community.id,
+                null,
+              )
+            : [];
+        return {
+          isFrozenByThisReport: hasFrozen,
+          frozenSpaceIds: cascadedSpaceIds,
+        };
+      });
+    if (isFrozenByThisReport) {
       this.logger.log(
         `auto-froze community ${community.slug} (report ${event.reportId}, trigger: ${
           isEmergency ? 'emergency' : 'pile-up'
         })`,
       );
       await this.logAndNotifyFreeze(community, isEmergency);
+      await this.logCascadedSpaceFreezes(frozenSpaceIds);
+    }
+  }
+
+  /**
+   * One `Frozen` entry per space the cascade froze, after commit and best
+   * effort, with the same `parent_frozen` reason the manual freeze writes
+   * (`CommunitiesService.freeze`). Without it a space's own history would
+   * show it frozen with no record of when or why.
+   */
+  private async logCascadedSpaceFreezes(spaceIds: string[]): Promise<void> {
+    for (const spaceId of spaceIds) {
+      try {
+        await this.governanceLog.log({
+          communityId: spaceId,
+          actorUserId: null,
+          action: GovernanceLogAction.Frozen,
+          metadata: { reason: 'parent_frozen' },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to write governance log for the cascaded freeze of space ${spaceId}: ${String(error)}`,
+        );
+      }
     }
   }
 

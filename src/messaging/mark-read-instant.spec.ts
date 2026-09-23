@@ -88,6 +88,10 @@ describe('ConversationsService.markRead (PRD-351 read instant)', () => {
       {} as unknown as MediaCropService,
       {} as unknown as ConnectionsService,
       preferencesService as unknown as PreferencesService,
+      // Task 9: `IdentitiesService`, unused by the read-watermark path under test.
+      {} as never,
+      // Task 11: `IdentityAttributionService`, likewise unused here.
+      {} as never,
     );
   });
 

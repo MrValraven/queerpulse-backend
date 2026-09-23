@@ -143,6 +143,22 @@ export class ListingCoManager {
   @Column({ type: 'timestamptz', nullable: true })
   endedAt!: Date | null;
 
+  /**
+   * Attached by staff to a listing that was UNOWNED AT ATTACH TIME, so that
+   * the seat survives the handover to whoever accepts ownership. An owner's
+   * own appointees leave with that owner; these were put here for the
+   * incoming one.
+   *
+   * "At attach time" is the whole definition, and it is evaluated under the
+   * invitation's row lock on the listing. A seat staff attach to a listing
+   * that ALREADY has an owner belongs to that owner's arrangement and stays
+   * `false`, so it leaves with them like any seat they appointed themselves.
+   * A seat that outlives every owner is a platform-steward idea this model
+   * does not carry; it would need its own column.
+   */
+  @Column({ type: 'boolean', default: false })
+  isStaffAttached!: boolean;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

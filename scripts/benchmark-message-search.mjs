@@ -250,12 +250,17 @@ async function batchInsert(client, tableName, columns, rows, batchSize = 500) {
 }
 
 async function seedUser(client, label) {
-  const id = newUuid();
+  const userId = newUuid();
+  const identityId = newUuid();
   await client.query(
     `INSERT INTO "users" ("id", "google_id", "email") VALUES ($1, $2, $3)`,
-    [id, `bench-${label}-${id}`, `bench-${label}-${id}@benchmark.local`],
+    [userId, `bench-${label}-${userId}`, `bench-${label}-${userId}@benchmark.local`],
   );
-  return id;
+  await client.query(
+    `INSERT INTO "identities" ("id", "kind", "user_id") VALUES ($1, $2, $3)`,
+    [identityId, 'profile', userId],
+  );
+  return { userId, identityId };
 }
 
 async function seedConversation(client) {
@@ -267,12 +272,17 @@ async function seedConversation(client) {
   return id;
 }
 
-async function seedParticipants(client, conversationId, userIds) {
+async function seedParticipants(client, conversationId, participants) {
   await batchInsert(
     client,
     'conversation_participants',
-    ['id', 'conversation_id', 'user_id'],
-    userIds.map((userId) => [newUuid(), conversationId, userId]),
+    ['id', 'conversation_id', 'user_id', 'identity_id'],
+    participants.map((participant) => [
+      newUuid(),
+      conversationId,
+      participant.userId,
+      participant.identityId,
+    ]),
   );
 }
 
@@ -286,7 +296,7 @@ async function seedParticipants(client, conversationId, userIds) {
 function buildMessageRows({
   random,
   conversationId,
-  senderIds,
+  senders,
   count,
   bodyLength,
   endTime,
@@ -302,8 +312,15 @@ function buildMessageRows({
     if (shouldInjectAccentWord && random() < 0.1) extraWords.push(ACCENT_WORD);
     const body = buildBody(random, bodyLength, extraWords);
     const createdAt = new Date(endTime.getTime() - (count - index) * 60_000);
-    const senderId = senderIds[index % senderIds.length];
-    rows.push([newUuid(), conversationId, senderId, body, createdAt]);
+    const sender = senders[index % senders.length];
+    rows.push([
+      newUuid(),
+      conversationId,
+      sender.userId,
+      sender.identityId,
+      body,
+      createdAt,
+    ]);
   }
   return rows;
 }
@@ -312,7 +329,14 @@ async function seedMessages(client, rows) {
   await batchInsert(
     client,
     'messages',
-    ['id', 'conversation_id', 'sender_id', 'body', 'created_at'],
+    [
+      'id',
+      'conversation_id',
+      'sender_id',
+      'sender_identity_id',
+      'body',
+      'created_at',
+    ],
     rows,
   );
 }
@@ -322,15 +346,15 @@ async function seedInbox(client, options) {
   const random = pseudoRandom(20260916);
   const now = new Date();
 
-  const searcherUserId = await seedUser(client, 'searcher');
-  const counterpartUserId = await seedUser(client, 'counterpart');
+  const searcher = await seedUser(client, 'searcher');
+  const counterpart = await seedUser(client, 'counterpart');
   const noiseUserA = await seedUser(client, 'noise-a');
   const noiseUserB = await seedUser(client, 'noise-b');
   const createdUserIds = [
-    searcherUserId,
-    counterpartUserId,
-    noiseUserA,
-    noiseUserB,
+    searcher.userId,
+    counterpart.userId,
+    noiseUserA.userId,
+    noiseUserB.userId,
   ];
   const createdConversationIds = [];
 
@@ -347,10 +371,7 @@ async function seedInbox(client, options) {
   ) {
     const conversationId = await seedConversation(client);
     createdConversationIds.push(conversationId);
-    await seedParticipants(client, conversationId, [
-      searcherUserId,
-      counterpartUserId,
-    ]);
+    await seedParticipants(client, conversationId, [searcher, counterpart]);
     const isRareWordConversation =
       conversationIndex === rareWordConversationIndex;
     const rareWordMessageIndex = isRareWordConversation
@@ -359,7 +380,7 @@ async function seedInbox(client, options) {
     const rows = buildMessageRows({
       random,
       conversationId,
-      senderIds: [searcherUserId, counterpartUserId],
+      senders: [searcher, counterpart],
       count: options.messagesPerConversation,
       bodyLength: options.bodyLength,
       endTime: now,
@@ -390,7 +411,7 @@ async function seedInbox(client, options) {
     const rows = buildMessageRows({
       random,
       conversationId,
-      senderIds: [noiseUserA, noiseUserB],
+      senders: [noiseUserA, noiseUserB],
       count: options.noiseMessagesPerConversation,
       bodyLength: options.bodyLength,
       endTime: now,
@@ -407,7 +428,7 @@ async function seedInbox(client, options) {
   );
 
   return {
-    searcherUserId,
+    searcherUserId: searcher.userId,
     createdUserIds,
     createdConversationIds,
     totalSearcherMessages,

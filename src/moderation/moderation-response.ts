@@ -11,6 +11,7 @@ import {
   BanRatificationStatus,
 } from './entities/ban-ratification.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
+import type { SentAsIdentityDTO } from './sent-as-identity';
 
 // Everything here mirrors
 // `queerpulse/src/features/admin/api/moderation.api.ts` exactly. These are
@@ -127,6 +128,15 @@ export interface ModReportDetail {
    * loading the drawer.
    */
   conversationContextAvailable: boolean;
+  /**
+   * Business mailboxes, design section 9: the business, persona or company a
+   * reported message was sent as. `contentAuthor` and the `reported` person
+   * still name the human sender, and `people` adds a `sent as` row naming the
+   * identity, so the moderator reads both whatever either attribution switch
+   * says. Present only on a `message` report whose message went out as an
+   * identity other than the sender's own profile.
+   */
+  sentAsIdentity?: SentAsIdentityDTO;
   // Listing-report enrichment (item #13), only present on a `listing`-subject
   // report's detail. `disputeReason` is the free-text a disputer/claimer typed
   // (`POST /listings/:ref/dispute`); `listingEvidence` is the ownership/claim

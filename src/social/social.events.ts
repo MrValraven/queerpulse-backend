@@ -39,3 +39,21 @@ export interface MemberUnblockedEvent {
   unblockerId: string;
   unblockedId: string;
 }
+
+/**
+ * Task 14: a member blocked a whole business, persona or company, placed by
+ * `IdentityBlocksService.blockIdentity` (`POST /identity-blocks/:identityId`)
+ * after its write returns, once per new block (a repeat block emits
+ * nothing). The consumer is `ChatGateway`, which evicts the
+ * member's sockets and every staff socket of that identity from the rooms of
+ * every thread between them: a block of a business severs those threads for
+ * both sides, and `ConversationsService.canJoinConversationLive` already
+ * refuses a fresh join from either. Unblocking emits nothing, since a rejoin
+ * passes through that same gate.
+ */
+export const IDENTITY_BLOCKED = 'identity.blocked';
+
+export interface IdentityBlockedEvent {
+  blockerUserId: string;
+  identityId: string;
+}

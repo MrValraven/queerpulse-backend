@@ -81,6 +81,7 @@ describe('VolunteeringService', () => {
   let partnersService: { idBySlug: jest.Mock; refsByIds: jest.Mock };
   let communityMembership: {
     assertOwnerOrModBySlug: jest.Mock;
+    isSubcommunity: jest.Mock;
     refsByIds: jest.Mock;
     ownerOrModCommunityIdsForUser: jest.Mock;
     isOwnerOrMod: jest.Mock;
@@ -157,6 +158,8 @@ describe('VolunteeringService', () => {
     // this — registered only so Nest's DI has something to inject.
     communityMembership = {
       assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
+      // Default: a top-level community. The space case overrides it.
+      isSubcommunity: jest.fn().mockResolvedValue(false),
       refsByIds: jest.fn().mockResolvedValue(new Map()),
       // Default: the viewer holds standing nowhere, so `listMine` stays
       // poster-scoped and the applicant guards fall through to the poster
@@ -283,6 +286,20 @@ describe('VolunteeringService', () => {
       expect(opportunities.save).toHaveBeenCalledWith(
         expect.objectContaining({ communityId: 'community-1' }),
       );
+    });
+
+    it('refuses a communitySlug that names a space (volunteering is out of v1 for spaces)', async () => {
+      communityMembership.isSubcommunity.mockResolvedValue(true);
+
+      await expect(
+        service.create('poster-1', {
+          ...baseDto,
+          communitySlug: 'queer-devs-parents',
+        }),
+      ).rejects.toMatchObject({
+        response: { code: 'SUBCOMMUNITY_FEATURE_UNAVAILABLE' },
+      });
+      expect(opportunities.save).not.toHaveBeenCalled();
     });
 
     it('rejects a communitySlug the poster only has plain membership in', async () => {

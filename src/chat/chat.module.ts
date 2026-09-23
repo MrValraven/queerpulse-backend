@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { ConnectionsModule } from '../connections/connections.module';
+import { IdentitiesModule } from '../identities/identities.module';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingModule } from '../messaging/messaging.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
@@ -14,12 +15,23 @@ import { ChatGateway } from './chat.gateway';
 import { ChatSessionEnforcementService } from './chat-session-enforcement.service';
 import { ChatSingleInstanceGuard } from './chat-single-instance.guard';
 import { ChatGatewayInstanceHeartbeat } from './entities/chat-gateway-instance-heartbeat.entity';
+import { MailboxStaffRelayListener } from './mailbox-staff-relay.listener';
 import { PresenceService } from './presence.service';
 
 @Module({
   imports: [
     MessagingModule,
     ConnectionsModule,
+    // Task 13: `ChatGateway`'s typing relay resolves the sender's SEAT
+    // identity (`conversation_participants.identity_id`) through
+    // `IdentitiesService.getById`/`describeIdentities`/`staffUserIds`, the
+    // same batched service `ConversationsService` and `MessagingCoreService`
+    // already use, so there is exactly one "what is this identity" lookup
+    // in the codebase. `MessagingModule` imports `IdentitiesModule` too but
+    // does not re-export `IdentitiesService`, so this gateway imports it
+    // directly here. No cycle: `IdentitiesModule` registers only its own
+    // entities and imports nothing from `ChatModule`.
+    IdentitiesModule,
     UsersModule,
     PlatformSettingsModule,
     // Exports `PreferencesService` — PRD-364's reciprocal read-receipt/typing/
@@ -77,6 +89,11 @@ import { PresenceService } from './presence.service';
     // horizontal scale-out needs.
     ChatSingleInstanceGuard,
     PresenceService,
+    // Task 19: staff-only business mailbox frames (`conversation:claim`),
+    // emitted through `ChatGateway.namespace`. Reads `Profile` through the
+    // repository `UsersModule` already exports, and `ConversationParticipant`
+    // through the registration above.
+    MailboxStaffRelayListener,
   ],
   exports: [PresenceService],
 })

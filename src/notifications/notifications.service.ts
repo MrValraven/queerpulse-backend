@@ -21,6 +21,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { isForeignKeyViolation } from '../common/db-errors';
 import { Notification, NotificationType } from './entities/notification.entity';
+import { visibleThroughMailboxSeatRules } from './notification-mailbox-block';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
   NOTIFICATION_BUNDLE_WINDOW_MS,
@@ -110,6 +111,16 @@ export class NotificationsService {
    * The trade-off — notifications created *before* a block are not
    * retroactively hidden — is consistent with how blocks behave elsewhere and
    * is why this is enforcement, not history rewriting.
+   *
+   * Task 13g adds one read-time rule on top, for a different reason: a row
+   * that names a business mailbox thread carries a copy of that thread's
+   * content, and the block rule removes a blocked staff member's own access
+   * to the thread. Every read of these rows (`list`, `unreadCount`, the
+   * mentions inbox and the data export) composes
+   * `visibleThroughMailboxSeatRules`, keyed on `payload.conversationId`, so
+   * the list and the badge share one filter and a lifted block shows the row
+   * again. Task 14a: the same filter hides the rows of a business the
+   * member has left, until they are seated there again.
    */
   async create(
     userId: string,
@@ -322,7 +333,14 @@ export class NotificationsService {
     opts: { unread?: boolean; page?: number } = {},
   ): Promise<Paginated<NotificationResponse>> {
     const page = normalizePage(opts.page);
-    const where = { userId, ...(opts.unread ? { read: false } : {}) };
+    // Task 13g: `visibleThroughMailboxSeatRules` leaves out a row naming a
+    // business mailbox thread this member is now blocked out of. Task 14a:
+    // or has left along with the business.
+    const where = {
+      userId,
+      ...(opts.unread ? { read: false } : {}),
+      payload: visibleThroughMailboxSeatRules(userId),
+    };
     // Canonical offset envelope (`{items,total,page,pageSize}`, see
     // `common/pagination.ts`) instead of the old bespoke `{items,page,hasMore}`:
     // `total` is authoritative (the client derives "has a next page" from
@@ -374,7 +392,14 @@ export class NotificationsService {
   }
 
   unreadCount(userId: string): Promise<number> {
-    return this.notifications.count({ where: { userId, read: false } });
+    // Task 13g: the badge counts exactly the rows `list` shows.
+    return this.notifications.count({
+      where: {
+        userId,
+        read: false,
+        payload: visibleThroughMailboxSeatRules(userId),
+      },
+    });
   }
 
   async markRead(id: string, userId: string): Promise<{ ok: true }> {
@@ -388,8 +413,18 @@ export class NotificationsService {
     return { ok: true };
   }
 
+  /**
+   * Marks every unread row of `userId`'s own bell read. Composes the same
+   * `visibleThroughMailboxSeatRules` filter `list`/`unreadCount` read
+   * through: without it, a row a mailbox block currently hides still gets
+   * `read: true` here, so lifting the block later resurfaces a row the
+   * member never actually saw, already marked read.
+   */
   async markAllRead(userId: string): Promise<{ ok: true }> {
-    await this.notifications.update({ userId, read: false }, { read: true });
+    await this.notifications.update(
+      { userId, read: false, payload: visibleThroughMailboxSeatRules(userId) },
+      { read: true },
+    );
     return { ok: true };
   }
 

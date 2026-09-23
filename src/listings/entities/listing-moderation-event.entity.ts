@@ -91,6 +91,8 @@ export enum ListingModerationAction {
    * rows a reader has to reassemble.
    */
   CoManagerRemoved = 'co_manager_removed',
+  /** A listing staff authored on a business's behalf. */
+  StaffCreated = 'staff_created',
 }
 
 /**

@@ -25,6 +25,7 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE } from '../communities/subcommunity-rules';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
@@ -1224,7 +1225,20 @@ export class VolunteeringService {
     userId: string,
   ): Promise<string | null> {
     if (!slug) return null;
-    return this.communityMembership.assertOwnerOrModBySlug(slug, userId);
+    const communityId = await this.communityMembership.assertOwnerOrModBySlug(
+      slug,
+      userId,
+    );
+    // Volunteering is out of v1 for spaces. Parent staff pass the staff
+    // check on a space through their inherited role, and the public board
+    // would then show a possibly private space's name to every viewer.
+    if (await this.communityMembership.isSubcommunity(communityId)) {
+      throw new BadRequestException({
+        message: 'Opportunities cannot be attributed to a space',
+        code: SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE,
+      });
+    }
+    return communityId;
   }
 
   /** Batches `communityId -> {slug,name}` resolution through

@@ -77,6 +77,16 @@ class ConversationIdField {
  * - `conversationId`: HTTP takes it from the URL; the body never carries it.
  *   Supplied here instead via `IntersectionType` with `ConversationIdField`
  *   above.
+ *
+ * `stickerId` rides the same pick list as `kind`/`attachment` so a sticker
+ * sent over the socket validates identically to one sent over HTTP.
+ *
+ * `asIdentityId` (Task 13) rides the same pick list so the socket send path
+ * can express identity exactly like HTTP: left absent, the send resolves
+ * server-side to the caller's own profile identity; present, it is carried
+ * through to `MessagingService.sendMessage` unchanged and passes through the
+ * identical `MessagingCoreService.assertMaySendAs` guard the HTTP path
+ * already runs, so no new authorization code is needed for this transport.
  */
 export class SendMessagePayload extends IntersectionType(
   ConversationIdField,
@@ -86,6 +96,8 @@ export class SendMessagePayload extends IntersectionType(
     'clientMessageId',
     'kind',
     'attachment',
+    'stickerId',
+    'asIdentityId',
   ] as const),
 ) {}
 

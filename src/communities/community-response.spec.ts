@@ -2,10 +2,68 @@ import { CommunityPost, PostKind } from './entities/community-post.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { RosterRole } from './entities/community-member.entity';
 import {
+  AccessTier,
+  Community,
+  CommunityType,
+} from './entities/community.entity';
+import {
+  CommunityStats,
   ReactionAggregate,
+  toCommunityDetail,
   toCommunityPost,
   toCommunityReply,
 } from './community-response';
+
+const EMPTY_STATS: CommunityStats = {
+  memberCount: 0,
+  activeThisWeek: 0,
+  postsThisWeek: 0,
+};
+
+function makeCommunity(overrides: Partial<Community> = {}): Community {
+  return {
+    id: 'community-1',
+    slug: 'community',
+    name: 'Community',
+    purpose: 'purpose',
+    type: CommunityType.Social,
+    whoFor: 'who this is for',
+    tagline: 'tagline',
+    accessTier: AccessTier.Public,
+    rosterVisible: true,
+    requiresSecondVouch: false,
+    autoFreezeOnReports: false,
+    isFeatured: false,
+    features: [],
+    rules: [],
+    tags: [],
+    coverImageUrl: null,
+    ownerId: 'owner-1',
+    ref: 'QP-C-0001',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    archivedAt: null,
+    frozenAt: null,
+    frozenReason: null,
+    needsOwnerReviewAt: null,
+    rulesVersion: 1,
+    welcomeMessage: null,
+    avatarImageUrl: null,
+    city: null,
+    area: null,
+    isOnline: false,
+    languages: [],
+    activeThisWeek: 0,
+    activityCountedAt: null,
+    isPubliclyListed: false,
+    frozenNote: null,
+    frozenByUserId: null,
+    parentId: null,
+    allowsSubcommunities: false,
+    archivedWithParent: false,
+    ...overrides,
+  };
+}
 
 // No reactions / no replies — the shared "empty" input every permission-flag
 // test below passes, since none of them exercise reaction/reply content.
@@ -203,5 +261,117 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
     const byMod = toCommunityReply(makeReply(), null, 'mod-1', RosterRole.Mod);
     expect(byMod.canEdit).toBe(false);
     expect(byMod.canDelete).toBe(true);
+  });
+});
+
+describe('toCommunityDetail subcommunity fields', () => {
+  it('a space carries its parent summary and inherits the parent rules', () => {
+    const parent = makeCommunity({
+      id: 'parent-1',
+      slug: 'parent',
+      name: 'Parent',
+      avatarImageUrl: 'parent-avatar-key',
+      rules: ['Be kind', 'No spam'],
+      rulesVersion: 3,
+      allowsSubcommunities: true,
+    });
+    const space = makeCommunity({
+      id: 'space-1',
+      slug: 'space',
+      name: 'Space',
+      parentId: parent.id,
+      allowsSubcommunities: false,
+    });
+
+    const dto = toCommunityDetail(
+      space,
+      EMPTY_STATS,
+      RosterRole.Member,
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      {
+        parent,
+        isParentMember: true,
+        subcommunityCount: 0,
+        isRosterMember: false,
+      },
+    );
+
+    expect(dto.parent).toEqual({
+      slug: 'parent',
+      name: 'Parent',
+      avatarImageUrl: expect.any(String),
+      isMember: true,
+    });
+    expect(dto.inheritedRules).toEqual({
+      rules: ['Be kind', 'No spam'],
+      rulesVersion: 3,
+    });
+    expect(dto.subcommunityCount).toBe(0);
+  });
+
+  it('isMember reads false for a space viewer with no roster row of their own in the parent', () => {
+    const parent = makeCommunity({ id: 'parent-1', slug: 'parent' });
+    const space = makeCommunity({
+      id: 'space-1',
+      slug: 'space',
+      parentId: parent.id,
+    });
+
+    const dto = toCommunityDetail(
+      space,
+      EMPTY_STATS,
+      RosterRole.Mod, // inherited from a parent mod, no own row in the parent
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      {
+        parent,
+        isParentMember: false,
+        subcommunityCount: 0,
+        isRosterMember: false,
+      },
+    );
+
+    expect(dto.parent?.isMember).toBe(false);
+  });
+
+  it('a top-level community has no parent/inheritedRules and carries its own subcommunity count', () => {
+    const topLevel = makeCommunity({
+      id: 'top-1',
+      slug: 'top',
+      allowsSubcommunities: true,
+    });
+
+    const dto = toCommunityDetail(
+      topLevel,
+      EMPTY_STATS,
+      RosterRole.Owner,
+      null,
+      null,
+      undefined,
+      undefined,
+      null,
+      null,
+      {
+        parent: null,
+        isParentMember: false,
+        subcommunityCount: 4,
+        isRosterMember: true,
+      },
+    );
+
+    expect(dto.isRosterMember).toBe(true);
+    expect(dto.parent).toBeNull();
+    expect(dto.inheritedRules).toBeNull();
+    expect(dto.allowsSubcommunities).toBe(true);
+    expect(dto.subcommunityCount).toBe(4);
   });
 });

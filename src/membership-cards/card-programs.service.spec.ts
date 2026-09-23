@@ -25,6 +25,7 @@ function makeService(overrides: Record<string, unknown> = {}) {
       slug: 'azores-queer',
       name: 'Azores Queer',
       archivedAt: null,
+      parentId: null,
     }),
   };
   const membership = {
@@ -61,6 +62,23 @@ describe('CardProgramsService.upsert', () => {
     const saved = await service.upsert('azores-queer', 'user-1', dto);
     expect(serials.prefixFor).not.toHaveBeenCalled();
     expect(saved.serialPrefix).toBe('OLD');
+  });
+
+  it('refuses a space (membership cards are out of v1 for spaces)', async () => {
+    const { service, communities, programs } = makeService();
+    communities.findOne.mockResolvedValue({
+      id: 'com-1',
+      slug: 'azores-queer-parents',
+      name: 'Parents',
+      archivedAt: null,
+      parentId: 'com-parent',
+    });
+    await expect(
+      service.upsert('azores-queer-parents', 'user-1', dto),
+    ).rejects.toMatchObject({
+      response: { code: 'SUBCOMMUNITY_FEATURE_UNAVAILABLE' },
+    });
+    expect(programs.save).not.toHaveBeenCalled();
   });
 
   it('rejects a caller who is not an owner or mod', async () => {

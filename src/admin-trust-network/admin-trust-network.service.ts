@@ -4,6 +4,7 @@ import { In, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
 import { Community } from '../communities/entities/community.entity';
+import { topLevelOnly } from '../communities/subcommunity-rules';
 import {
   CommunityMember,
   RosterRole,
@@ -246,25 +247,30 @@ export class AdminTrustNetworkService {
     return new Set(rows.map((row) => row.id));
   }
 
+  /** Every top-level community each of `userIds` belongs to, for the trust
+   *  network's scene labels. A space is excluded: those labels name
+   *  top-level communities, and a space counts as part of its parent. */
   private async loadMemberships(
     userIds: string[],
   ): Promise<Map<string, CommunityMembershipInput[]>> {
     const byUserId = new Map<string, CommunityMembershipInput[]>();
     if (!userIds.length) return byUserId;
-    const rows = await this.communityMembers
-      .createQueryBuilder('member')
-      .innerJoin(Community, 'community', 'community.id = member.community_id')
-      .select('member.user_id', 'userId')
-      .addSelect('member.role', 'role')
-      .addSelect('community.id', 'communityId')
-      .addSelect('community.name', 'communityName')
-      .where('member.user_id IN (:...userIds)', { userIds })
-      .getRawMany<{
-        userId: string;
-        role: RosterRole;
-        communityId: string;
-        communityName: string;
-      }>();
+    const rows = await topLevelOnly(
+      this.communityMembers
+        .createQueryBuilder('member')
+        .innerJoin(Community, 'community', 'community.id = member.community_id')
+        .select('member.user_id', 'userId')
+        .addSelect('member.role', 'role')
+        .addSelect('community.id', 'communityId')
+        .addSelect('community.name', 'communityName')
+        .where('member.user_id IN (:...userIds)', { userIds }),
+      'community',
+    ).getRawMany<{
+      userId: string;
+      role: RosterRole;
+      communityId: string;
+      communityName: string;
+    }>();
     // Community sizes for tie-breaking, one grouped query.
     const communityIds = [...new Set(rows.map((r) => r.communityId))];
     const sizeById = new Map<string, number>();

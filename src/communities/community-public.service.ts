@@ -147,13 +147,17 @@ export class CommunityPublicService {
   ) {}
 
   async getPublicTeaser(slug: string): Promise<PublicCommunityResponse> {
-    // One indexed lookup on the unique slug, with all three gates in the
-    // WHERE clause so a community that fails any of them is simply not found.
+    // One indexed lookup on the unique slug, with every gate in the WHERE
+    // clause so a community that fails any of them is simply not found.
+    // `parentId: IsNull()` keeps spaces out: the public teaser is out of v1
+    // for a space, and `isPubliclyListed` staying false on one is a service
+    // invariant this does not lean on alone.
     const community = await this.communities.findOne({
       where: {
         slug,
         isPubliclyListed: true,
         archivedAt: IsNull(),
+        parentId: IsNull(),
       },
     });
     if (!community) {

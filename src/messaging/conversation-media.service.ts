@@ -86,6 +86,10 @@ export class ConversationMediaService {
         'm.id',
         'm.conversationId',
         'm.senderId',
+        // Task 13c: which identity the message was sent AS. Without it
+        // `toMessageResponses` saw no identity and named the staff member who
+        // typed a business's photo.
+        'm.senderIdentityId',
         'm.body',
         'm.replyToId',
         'm.createdAt',
@@ -178,6 +182,12 @@ export class ConversationMediaService {
     );
   }
 
+  // A `kind:'sticker'` message matches none of the three branches below, so it
+  // is excluded from every tab of this gallery, exactly like a `kind:'document'`
+  // message is excluded from `Media`. Deliberate: the shelf is for things a
+  // member actually sent, and a pride flag sent forty times would be pure
+  // noise in it. Surfacing stickers here later means adding a dedicated
+  // branch of their own.
   private static applyKindFilter(
     queryBuilder: SelectQueryBuilder<Message>,
     kind: ConversationMediaKind,

@@ -19,6 +19,7 @@ import {
 } from './message-export';
 import { Connection } from '../connections/entities/connection.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
+import { IdentitiesService } from '../identities/identities.service';
 import { Event } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
@@ -66,6 +67,10 @@ export class AccountExportService {
     @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
     @InjectRepository(Activity)
     private readonly activities: Repository<Activity>,
+    // Task 13f: `IdentitiesService.getByIds`/`describeIdentities`, so a
+    // business mailbox thread's counterpart and sender export as the
+    // business itself, whichever staff member happened to answer.
+    private readonly identities: IdentitiesService,
     // Contributions for domains beyond the six core categories built directly
     // below (subprofiles, listings, housing, saved, notifications, consent).
     // Registered under DATA_EXPORT_CONTRIBUTORS in AccountModule so a new
@@ -91,7 +96,11 @@ export class AccountExportService {
         category: 'messages',
         archiveKey: 'messages',
         buildContribution: (userId) =>
-          buildOwnMessagesExport(this.messages.manager, userId),
+          buildOwnMessagesExport(
+            this.messages.manager,
+            userId,
+            this.identities,
+          ),
       },
       // PRD-370: the same category also carries the threads the member
       // reported, under their own archive key (see `message-export.ts`).
@@ -99,7 +108,11 @@ export class AccountExportService {
         category: 'messages',
         archiveKey: 'reportedConversations',
         buildContribution: (userId) =>
-          buildReportedConversationsExport(this.messages.manager, userId),
+          buildReportedConversationsExport(
+            this.messages.manager,
+            userId,
+            this.identities,
+          ),
       },
       {
         category: 'forumPosts',
