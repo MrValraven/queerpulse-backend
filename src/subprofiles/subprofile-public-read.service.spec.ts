@@ -2,9 +2,16 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In } from 'typeorm';
-import { Community } from '../communities/entities/community.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
-import { Event } from '../events/entities/event.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -22,6 +29,10 @@ import {
 } from './entities/subprofile.entity';
 import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
+import {
+  eligibilityKey,
+  SubprofileAffiliationEligibilityService,
+} from './subprofile-affiliation-eligibility.service';
 import { SubprofileItem } from './entities/subprofile-item.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
@@ -194,13 +205,24 @@ describe('SubprofilePublicReadService', () => {
     loadFollowerCountsFor: jest.Mock;
     viewerFollowingFor: jest.Mock;
   };
-  let blockFilter: { excludeBlocked: jest.Mock; isBlockedEitherWay: jest.Mock };
+  let blockFilter: {
+    excludeBlocked: jest.Mock;
+    isBlockedEitherWay: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
   let handles: {
     previousSubprofileOwnerOf: jest.Mock;
     previousProfileOwnerOf: jest.Mock;
   };
   let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
   let membership: { isMember: jest.Mock };
+  // "Part of" eligibility. Defaults to "no owners, nothing eligible", which
+  // only matters to a test that resolves affiliation rows.
+  let affiliationEligibility: {
+    ownerIdsFor: jest.Mock;
+    eligibleTargetKeys: jest.Mock;
+  };
+  let module: TestingModule;
 
   beforeEach(async () => {
     subprofiles = {
@@ -234,6 +256,7 @@ describe('SubprofilePublicReadService', () => {
     blockFilter = {
       excludeBlocked: jest.fn(),
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     // PRD-204 reclaim lookups. Both answer "nobody" by default, so every
     // pre-existing not-found case here keeps its plain 404.
@@ -246,8 +269,12 @@ describe('SubprofilePublicReadService', () => {
       statesFor: jest.fn().mockResolvedValue(new Map()),
     };
     membership = { isMember: jest.fn().mockResolvedValue(false) };
+    affiliationEligibility = {
+      ownerIdsFor: jest.fn().mockResolvedValue(new Map<string, string[]>()),
+      eligibleTargetKeys: jest.fn().mockResolvedValue(new Set<string>()),
+    };
 
-    const module: TestingModule = await Test.createTestingModule({
+    module = await Test.createTestingModule({
       providers: [
         SubprofilePublicReadService,
         { provide: getRepositoryToken(Subprofile), useValue: subprofiles },
@@ -298,6 +325,10 @@ describe('SubprofilePublicReadService', () => {
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          provide: SubprofileAffiliationEligibilityService,
+          useValue: affiliationEligibility,
         },
       ],
     }).compile();
@@ -936,6 +967,182 @@ describe('SubprofilePublicReadService', () => {
         expect(body.message).toBe('Profile not found');
         expect(body.code).toBeUndefined();
       });
+    });
+  });
+
+  // --- resolveAffiliationsFor: owner eligibility ------------------------------
+
+  describe('resolveAffiliationsFor owner eligibility', () => {
+    beforeEach(() => {
+      module
+        .get<{
+          find: jest.Mock;
+        }>(getRepositoryToken(SubprofileAffiliation))
+        .find.mockResolvedValue([
+          {
+            subprofileId: 'sp-1',
+            targetType: 'community',
+            targetSlug: 'book-club',
+            role: 'member',
+            position: 0,
+          },
+          {
+            subprofileId: 'sp-1',
+            targetType: 'community',
+            targetSlug: 'former-club',
+            role: 'member',
+            position: 1,
+          },
+          {
+            subprofileId: 'sp-1',
+            targetType: 'event',
+            targetSlug: 'pride-picnic',
+            role: 'attending',
+            position: 2,
+          },
+        ]);
+      module
+        .get<{ find: jest.Mock }>(getRepositoryToken(Community))
+        .find.mockResolvedValue([
+          {
+            id: 'community-1',
+            slug: 'book-club',
+            name: 'Queer Book Club',
+            accessTier: AccessTier.Public,
+            ownerId: null,
+          },
+          {
+            id: 'community-2',
+            slug: 'former-club',
+            name: 'Former Club',
+            accessTier: AccessTier.Public,
+            ownerId: null,
+          },
+        ]);
+      module
+        .get<{ find: jest.Mock }>(getRepositoryToken(Event))
+        .find.mockResolvedValue([
+          {
+            id: 'event-1',
+            slug: 'pride-picnic',
+            title: 'Pride Picnic',
+            status: EventStatus.Published,
+            visibility: EventVisibility.Public,
+            hostId: null,
+            coverImageUrl: null,
+          },
+        ]);
+      affiliationEligibility.ownerIdsFor.mockResolvedValue(
+        new Map([['sp-1', ['user-1', 'co-owner-1']]]),
+      );
+    });
+
+    it('keeps a link any owner still qualifies for and drops the one no owner does', async () => {
+      // The co-owner is in the book club, the creator is going to the picnic,
+      // and nobody is in the former club any more.
+      affiliationEligibility.eligibleTargetKeys.mockResolvedValue(
+        new Set([
+          eligibilityKey('community', 'community-1', 'co-owner-1'),
+          eligibilityKey('event', 'event-1', 'user-1'),
+        ]),
+      );
+
+      const result = await service.resolveAffiliationsFor('viewer-1', ['sp-1']);
+
+      expect(result.get('sp-1')).toEqual([
+        {
+          targetType: 'community',
+          targetSlug: 'book-club',
+          role: 'member',
+          name: 'Queer Book Club',
+          imageUrl: null,
+        },
+        {
+          targetType: 'event',
+          targetSlug: 'pride-picnic',
+          role: 'attending',
+          name: 'Pride Picnic',
+          imageUrl: null,
+        },
+      ]);
+      expect(affiliationEligibility.eligibleTargetKeys).toHaveBeenCalledWith(
+        ['user-1', 'co-owner-1'],
+        [expect.objectContaining({ id: 'event-1' })],
+        ['community-1', 'community-2'],
+      );
+    });
+
+    it('drops the link to an archived community even when the owner is still a member', async () => {
+      module
+        .get<{
+          find: jest.Mock;
+        }>(getRepositoryToken(SubprofileAffiliation))
+        .find.mockResolvedValue([
+          {
+            subprofileId: 'sp-1',
+            targetType: 'community',
+            targetSlug: 'book-club',
+            role: 'member',
+            position: 0,
+          },
+          {
+            subprofileId: 'sp-1',
+            targetType: 'community',
+            targetSlug: 'former-club',
+            role: 'member',
+            position: 1,
+          },
+        ]);
+      module
+        .get<{ find: jest.Mock }>(getRepositoryToken(Community))
+        .find.mockResolvedValue([
+          {
+            id: 'community-1',
+            slug: 'book-club',
+            name: 'Queer Book Club',
+            accessTier: AccessTier.Public,
+            ownerId: null,
+            archivedAt: null,
+          },
+          {
+            id: 'community-2',
+            slug: 'former-club',
+            name: 'Former Club',
+            accessTier: AccessTier.Public,
+            ownerId: null,
+            archivedAt: new Date('2026-09-01T00:00:00Z'),
+          },
+        ]);
+      // The creator still belongs to both communities.
+      affiliationEligibility.eligibleTargetKeys.mockResolvedValue(
+        new Set([
+          eligibilityKey('community', 'community-1', 'user-1'),
+          eligibilityKey('community', 'community-2', 'user-1'),
+        ]),
+      );
+
+      const result = await service.resolveAffiliationsFor('viewer-1', ['sp-1']);
+
+      expect(result.get('sp-1')).toEqual([
+        {
+          targetType: 'community',
+          targetSlug: 'book-club',
+          role: 'member',
+          name: 'Queer Book Club',
+          imageUrl: null,
+        },
+      ]);
+      expect(affiliationEligibility.eligibleTargetKeys).toHaveBeenCalledWith(
+        ['user-1', 'co-owner-1'],
+        [],
+        ['community-1'],
+      );
+    });
+
+    it('drops every link when no owner qualifies for any target', async () => {
+      const result = await service.resolveAffiliationsFor('viewer-1', ['sp-1']);
+
+      expect(result.get('sp-1')).toBeUndefined();
     });
   });
 });

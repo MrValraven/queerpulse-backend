@@ -1,7 +1,11 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventLineupEntry } from '../events/entities/event-lineup-entry.entity';
+import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
 import { HandlesModule } from '../handles/handles.module';
@@ -25,6 +29,7 @@ import {
   SubprofilesController,
 } from './subprofiles.controller';
 import { SubprofileItemRevisionsController } from './subprofile-item-revisions.controller';
+import { SubprofileAffiliationEligibilityService } from './subprofile-affiliation-eligibility.service';
 import { SubprofileCreditsService } from './subprofile-credits.service';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
@@ -49,6 +54,13 @@ import { SubprofilesService } from './subprofiles.service';
       SubprofileSocialLink,
       Event,
       Community,
+      // Read-only: "Part of" eligibility (`SubprofileAffiliationEligibilityService`)
+      // checks the persona's owners belong to a linked community or are going
+      // to a linked event.
+      CommunityMember,
+      EventCohost,
+      EventLineupEntry,
+      EventRsvp,
       Handle,
     ]),
     // Exports the `Profile` repository (used to resolve an owner slug → user).
@@ -99,6 +111,9 @@ import { SubprofilesService } from './subprofiles.service';
     // "A persona you follow published something new" (PRD-208): the section
     // diff and the capped follower fan-out.
     SubprofileUpdatesService,
+    // "Part of" links: may the persona's owners link (or keep showing) an
+    // event or community, and which targets can they pick.
+    SubprofileAffiliationEligibilityService,
   ],
   // Exported for the cross-entity SearchModule (standalone-persona search).
   // `SubprofileEndorsementsService` is also exported: `PublicEligibilityModule`

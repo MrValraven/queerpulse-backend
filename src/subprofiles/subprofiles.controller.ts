@@ -393,6 +393,30 @@ export class SubprofilesController {
     );
   }
 
+  // The "Part of" picker's choices. Two segments under `:id`, so it cannot
+  // collide with the single-segment literal GETs above (`mine`, `directory`,
+  // `following`, `public-handles`) or with `invites/mine`.
+  @Get(':id/affiliation-options')
+  @ApiOperation({
+    summary:
+      'List the events and communities a subprofile’s owners can link under "Part of"',
+  })
+  @ApiOkResponse({
+    description:
+      'Communities the owners belong to (alphabetical), then events they are going to (newest start first), at most 100 of each.',
+  })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listAffiliationOptions(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.subprofilesService.listAffiliationOptions(user.userId, id);
+  }
+
   @Post(':id/publish')
   @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Publish a subprofile' })

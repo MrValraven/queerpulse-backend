@@ -32,6 +32,11 @@ import { SubprofileItemInputDTO } from './dto/replace-items.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import {
+  AffiliationOption,
+  hasQualifyingOwner,
+  SubprofileAffiliationEligibilityService,
+} from './subprofile-affiliation-eligibility.service';
+import {
   Subprofile,
   SubprofileLinkVisibility,
   SubprofileStatus,
@@ -286,6 +291,10 @@ export class SubprofilesService {
     private readonly updates: SubprofileUpdatesService,
     // Public/card read surface + shared batched resolvers (extracted).
     private readonly publicRead: SubprofilePublicReadService,
+    // "Part of" eligibility: the persona's owners must belong to a linked
+    // community or be going to a linked event (`replaceAffiliations`,
+    // `listAffiliationOptions`).
+    private readonly affiliationEligibility: SubprofileAffiliationEligibilityService,
     // Batched crop lookup for `avatarUrl`/`coverUrl`/item `imageUrl` — see
     // `MediaCropService.getMany` and `../media-crops/crop-response.ts`.
     private readonly mediaCropService: MediaCropService,
@@ -1305,7 +1314,10 @@ export class SubprofilesService {
   // entity). Though bounded at `MAX_AFFILIATIONS` (12), the resolution is
   // batched — the same shape as the READ side (`resolveAffiliationsFor`): ONE
   // events query, ONE communities query, and ONE block-filter lookup total,
-  // rather than a serial `findOne` + `isBlockedEitherWay` per item.
+  // rather than a serial `findOne` + `isBlockedEitherWay` per item. On top of
+  // those checks, the persona's owners must belong to every target (a member
+  // of the community, or going to the event), checked in one more batch by
+  // `SubprofileAffiliationEligibilityService`.
   async replaceAffiliations(
     userId: string,
     id: string,
@@ -1385,6 +1397,7 @@ export class SubprofilesService {
       // left to block-check against, so it's simply skipped here.
       if (
         community.accessTier !== AccessTier.Private &&
+        community.archivedAt == null &&
         community.ownerId !== null
       ) {
         ownerIdsToBlockCheck.push(community.ownerId);
@@ -1413,14 +1426,76 @@ export class SubprofilesService {
         }
       } else {
         const community = communityBySlug.get(item.targetSlug);
+        // An archived community 404s for everyone off its roster and is
+        // hidden from every listing, so it is treated as not visible here.
         if (
           !community ||
           community.accessTier === AccessTier.Private ||
+          community.archivedAt != null ||
           (community.ownerId !== null && blockedOwnerIds.has(community.ownerId))
         ) {
           throw new BadRequestException(
             `Affiliation target not found or not visible: ${label}`,
           );
+        }
+      }
+    }
+
+    // Every target exists and is visible, so the owners must also belong to
+    // it: a community member of any roster role, or going to the event (see
+    // `SubprofileAffiliationEligibilityService`). Batched over this persona's
+    // owners and every item's target. The message reaches the owner verbatim
+    // in a toast, so it names the target by its real name.
+    if (items.length) {
+      const ownerIds =
+        (await this.affiliationEligibility.ownerIdsFor([id])).get(id) ?? [];
+      const linkedEventRows = items.flatMap((item) => {
+        const event =
+          item.targetType === 'event'
+            ? eventBySlug.get(item.targetSlug)
+            : undefined;
+        return event ? [event] : [];
+      });
+      const linkedCommunityIds = items.flatMap((item) => {
+        const community =
+          item.targetType === 'community'
+            ? communityBySlug.get(item.targetSlug)
+            : undefined;
+        return community ? [community.id] : [];
+      });
+      const eligibleKeys = await this.affiliationEligibility.eligibleTargetKeys(
+        ownerIds,
+        linkedEventRows,
+        linkedCommunityIds,
+      );
+      // Every lookup below hits: the loop above already threw for a missing
+      // target.
+      for (const item of items) {
+        if (item.targetType === 'event') {
+          const event = eventBySlug.get(item.targetSlug);
+          if (
+            event &&
+            !hasQualifyingOwner(eligibleKeys, 'event', event.id, ownerIds)
+          ) {
+            throw new BadRequestException(
+              `You can only link events you're going to. "${event.title}" isn't one of them.`,
+            );
+          }
+        } else {
+          const community = communityBySlug.get(item.targetSlug);
+          if (
+            community &&
+            !hasQualifyingOwner(
+              eligibleKeys,
+              'community',
+              community.id,
+              ownerIds,
+            )
+          ) {
+            throw new BadRequestException(
+              `You can only link communities you're a member of. "${community.name}" isn't one of them.`,
+            );
+          }
         }
       }
     }
@@ -1442,6 +1517,22 @@ export class SubprofilesService {
     });
 
     return this.ownerDTO(sp);
+  }
+
+  // The "Part of" picker's choices: every event and community the REQUESTING
+  // owner belongs to that `replaceAffiliations` would accept. A co-owner's
+  // memberships and RSVPs are theirs to keep private, so they are left out;
+  // links a co-owner already saved still pass the any-owner rule on save and
+  // read, and the editor shows them from the owner DTO. Gated by `getOwned`
+  // (404 for no persona, 403 for a non-owner) like every other owner read.
+  // Blocks are checked against both the persona's `userId` (the party the
+  // save-time check uses) and the requester.
+  async listAffiliationOptions(
+    userId: string,
+    id: string,
+  ): Promise<AffiliationOption[]> {
+    const subprofile = await this.getOwned(userId, id);
+    return this.affiliationEligibility.listOptions(userId, subprofile.userId);
   }
 
   async publish(userId: string, id: string): Promise<SubprofileView> {

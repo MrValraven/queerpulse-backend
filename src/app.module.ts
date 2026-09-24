@@ -55,6 +55,7 @@ import { StatusModule } from './status/status.module';
 import { AdminInvitesModule } from './admin-invites/admin-invites.module';
 import { BanEvasionModule } from './ban-evasion/ban-evasion.module';
 import { ModResponseTemplatesModule } from './mod-response-templates/mod-response-templates.module';
+import { EmailTemplatesModule } from './email-templates/email-templates.module';
 import { LegalRequestsModule } from './legal-requests/legal-requests.module';
 import { TransparencyModule } from './transparency/transparency.module';
 import { AdminTopicsModule } from './admin-topics/admin-topics.module';
@@ -346,6 +347,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     // (TS-16). No template id is ever stored on an action, so editing a
     // template later cannot rewrite what a member was already told.
     ModResponseTemplatesModule,
+    EmailTemplatesModule,
     // The public, aggregate-only transparency report the constitution names
     // but never had (TS-13).
     TransparencyModule,

@@ -14,8 +14,15 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, IsNull } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
-import { Community } from '../communities/entities/community.entity';
-import { Event } from '../events/entities/event.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -40,6 +47,10 @@ import {
 import { SubprofileItemRevision } from './entities/subprofile-item-revision.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
+import {
+  eligibilityKey,
+  SubprofileAffiliationEligibilityService,
+} from './subprofile-affiliation-eligibility.service';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { isSectionAllowed } from './subprofile-kinds';
 import {
@@ -717,6 +728,17 @@ describe('SubprofilesService', () => {
     listPublicHandles: jest.Mock;
   };
   let eventEmitter: { emit: jest.Mock };
+  // Event/community lookups behind `replaceAffiliations`. Empty by default;
+  // the "Part of" describe block below stages its own targets.
+  let eventsRepository: { find: jest.Mock };
+  let communitiesRepository: { find: jest.Mock };
+  // "Part of" eligibility. Defaults to "no owners, nothing eligible", which
+  // no pre-existing test reaches (none of them saves affiliations).
+  let affiliationEligibility: {
+    ownerIdsFor: jest.Mock;
+    eligibleTargetKeys: jest.Mock;
+    listOptions: jest.Mock;
+  };
   // The `HandlesService` stub, read back from the testing module so specs can
   // order its calls against the persona row lock.
   let handlesService: {
@@ -1215,6 +1237,13 @@ describe('SubprofilesService', () => {
     };
 
     eventEmitter = { emit: jest.fn() };
+    eventsRepository = { find: jest.fn().mockResolvedValue([]) };
+    communitiesRepository = { find: jest.fn().mockResolvedValue([]) };
+    affiliationEligibility = {
+      ownerIdsFor: jest.fn().mockResolvedValue(new Map<string, string[]>()),
+      eligibleTargetKeys: jest.fn().mockResolvedValue(new Set<string>()),
+      listOptions: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -1235,13 +1264,10 @@ describe('SubprofilesService', () => {
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         { provide: getRepositoryToken(SubprofileMember), useValue: members },
-        {
-          provide: getRepositoryToken(Event),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
-        },
+        { provide: getRepositoryToken(Event), useValue: eventsRepository },
         {
           provide: getRepositoryToken(Community),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
+          useValue: communitiesRepository,
         },
         { provide: getRepositoryToken(Handle), useValue: handleRegistry },
         { provide: DataSource, useValue: dataSource },
@@ -1275,6 +1301,10 @@ describe('SubprofilesService', () => {
         { provide: SubprofileMembershipService, useValue: membership },
         { provide: SubprofileCreditsService, useValue: credits },
         { provide: SubprofilePublicReadService, useValue: publicRead },
+        {
+          provide: SubprofileAffiliationEligibilityService,
+          useValue: affiliationEligibility,
+        },
         { provide: EventEmitter2, useValue: eventEmitter },
         {
           provide: MediaCropService,
@@ -3608,6 +3638,158 @@ describe('SubprofilesService', () => {
       await expect(
         service.restoreRevision('user-1', 'sp-1', 'missing-item', 'rev-1'),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // "Part of" links: the persona's owners must belong to every target. Uses
+  // the same `subprofiles.findOne` + `members.findOne` pair as the
+  // `getOwned` describe block to pass the owner gate.
+  describe('affiliations owner eligibility', () => {
+    beforeEach(() => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ id: 'sp-1', userId: 'user-1' }),
+      );
+      members.findOne.mockResolvedValue({
+        subprofileId: 'sp-1',
+        userId: 'user-1',
+      });
+      affiliationEligibility.ownerIdsFor.mockResolvedValue(
+        new Map([['sp-1', ['user-1', 'co-owner-1']]]),
+      );
+      communitiesRepository.find.mockResolvedValue([
+        {
+          id: 'community-1',
+          slug: 'book-club',
+          name: 'Queer Book Club',
+          accessTier: AccessTier.Public,
+          ownerId: null,
+        },
+      ]);
+      eventsRepository.find.mockResolvedValue([
+        {
+          id: 'event-1',
+          slug: 'pride-picnic',
+          title: 'Pride Picnic',
+          status: EventStatus.Published,
+          visibility: EventVisibility.Public,
+          hostId: null,
+        },
+      ]);
+    });
+
+    it('rejects a community no owner belongs to, naming it, and writes nothing', async () => {
+      await expect(
+        service.replaceAffiliations('user-1', 'sp-1', [
+          { targetType: 'community', targetSlug: 'book-club', role: 'member' },
+        ]),
+      ).rejects.toThrow(
+        new BadRequestException(
+          `You can only link communities you're a member of. "Queer Book Club" isn't one of them.`,
+        ),
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects an event no owner is going to, naming it', async () => {
+      await expect(
+        service.replaceAffiliations('user-1', 'sp-1', [
+          {
+            targetType: 'event',
+            targetSlug: 'pride-picnic',
+            role: 'attending',
+          },
+        ]),
+      ).rejects.toThrow(
+        new BadRequestException(
+          `You can only link events you're going to. "Pride Picnic" isn't one of them.`,
+        ),
+      );
+    });
+
+    it('rejects an archived community as not visible, even for a member, and writes nothing', async () => {
+      communitiesRepository.find.mockResolvedValue([
+        {
+          id: 'community-1',
+          slug: 'book-club',
+          name: 'Queer Book Club',
+          accessTier: AccessTier.Public,
+          ownerId: null,
+          archivedAt: new Date('2026-09-01T00:00:00Z'),
+        },
+      ]);
+      affiliationEligibility.eligibleTargetKeys.mockResolvedValue(
+        new Set([eligibilityKey('community', 'community-1', 'user-1')]),
+      );
+
+      await expect(
+        service.replaceAffiliations('user-1', 'sp-1', [
+          { targetType: 'community', targetSlug: 'book-club', role: 'member' },
+        ]),
+      ).rejects.toThrow(
+        new BadRequestException(
+          'Affiliation target not found or not visible: community:book-club',
+        ),
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('saves when a co-owner qualifies for every target', async () => {
+      affiliationEligibility.eligibleTargetKeys.mockResolvedValue(
+        new Set([
+          eligibilityKey('community', 'community-1', 'co-owner-1'),
+          eligibilityKey('event', 'event-1', 'co-owner-1'),
+        ]),
+      );
+
+      await service.replaceAffiliations('user-1', 'sp-1', [
+        { targetType: 'community', targetSlug: 'book-club', role: 'member' },
+        { targetType: 'event', targetSlug: 'pride-picnic', role: 'attending' },
+      ]);
+
+      expect(affiliationEligibility.eligibleTargetKeys).toHaveBeenCalledWith(
+        ['user-1', 'co-owner-1'],
+        [expect.objectContaining({ id: 'event-1' })],
+        ['community-1'],
+      );
+      expect(manager.delete).toHaveBeenCalledWith(SubprofileAffiliation, {
+        subprofileId: 'sp-1',
+      });
+    });
+
+    it('lists options for the requesting co-owner only, block-checked against the persona userId too', async () => {
+      members.findOne.mockResolvedValue({
+        subprofileId: 'sp-1',
+        userId: 'co-owner-1',
+      });
+      const options = [
+        {
+          targetType: 'community',
+          targetSlug: 'book-club',
+          name: 'Queer Book Club',
+          imageUrl: null,
+          startsAt: null,
+        },
+      ];
+      affiliationEligibility.listOptions.mockResolvedValue(options);
+
+      await expect(
+        service.listAffiliationOptions('co-owner-1', 'sp-1'),
+      ).resolves.toEqual(options);
+      expect(affiliationEligibility.listOptions).toHaveBeenCalledWith(
+        'co-owner-1',
+        'user-1',
+      );
+      // The other owners' memberships are never read for the picker.
+      expect(affiliationEligibility.ownerIdsFor).not.toHaveBeenCalled();
+    });
+
+    it('403s the options for a non-owner before reading anything', async () => {
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.listAffiliationOptions('stranger-1', 'sp-1'),
+      ).rejects.toThrow(ForbiddenException);
+      expect(affiliationEligibility.listOptions).not.toHaveBeenCalled();
     });
   });
 });

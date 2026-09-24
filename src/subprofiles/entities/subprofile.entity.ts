@@ -146,6 +146,97 @@ export enum SubprofileStatus {
 /** Practice skin (therapist): tri-state for one availability slot. */
 export type PracticeAvailState = 'open' | 'full' | 'off';
 
+/** Therapist layout: whether the therapist is taking new clients. */
+export type TherapistStatus = 'open' | 'wait' | 'closed';
+
+/** Therapist layout: online sessions offered. `''` means the therapist has
+ *  not said either way. */
+export type TherapistOnline = 'yes' | 'no' | '';
+
+/** Therapist layout: the core facts shown in the hero and sidebar. Every
+ *  string is owner-typed display text, stored as written. */
+export interface TherapistFacts {
+  status: TherapistStatus;
+  /** Shown with status "wait", e.g. "About 6 weeks". */
+  waitNote: string;
+  /** e.g. "Clinical psychologist & psychotherapist". */
+  title: string;
+  /** e.g. "OPP 21044", exactly as the therapist states it. */
+  registration: string;
+  /** Hero pull-quote. `*word*` marks the coral italic emphasis. */
+  quote: string;
+  /** Comma-separated, e.g. "Portuguese, English, Spanish". */
+  languages: string;
+  /** e.g. "Arroios, Lisbon · and online". */
+  where: string;
+  online: TherapistOnline;
+  /** Online-only time-zone note. May be "". */
+  timezone: string;
+  /** May be "". */
+  email: string;
+  /** May be "". */
+  website: string;
+  /** Conflict-of-interest / "good to know" note. May be "". */
+  goodToKnow: string;
+}
+
+/** Therapist layout: fees and the small print. Amounts are euro digits as
+ *  typed ("65"); the frontend view model parses them. */
+export interface TherapyFees {
+  standard: string;
+  slidingMin: string;
+  slidingMax: string;
+  /** Total sliding-scale places, e.g. "4". */
+  slidingPlaces: string;
+  /** Sliding-scale places open right now, e.g. "2". */
+  slidingOpen: string;
+  slidingRules: string;
+  /** e.g. "First 20-minute call is free". */
+  firstContact: string;
+  /** A fixed frequency choice ("weekly"), or older owner-typed text. */
+  frequency: string;
+  /** e.g. "Receipts for ADSE, Médis and Multicare reimbursement". */
+  receipts: string;
+  /** A fixed receipt-time choice ("within48h"), or older owner-typed text. */
+  receiptTime: string;
+  /** Fixed payment choices ("mbway", "card"), in the owner's order. Absent
+   *  on older rows; when empty, the `payment` text is shown instead. */
+  paymentMethods?: string[];
+  /** Older owner-typed payment text, e.g. "MB Way, transfer or card". */
+  payment: string;
+  /** A fixed cancellation-notice choice ("24h"). Absent on older rows. */
+  cancellationNotice?: string;
+  /** Free-text note shown after the notice, e.g. "Less than that and the
+   *  session is charged". */
+  cancellation: string;
+}
+
+/** Therapist layout: how soon a first session can happen. */
+export interface TherapistAvailabilitySummary {
+  /** Time to a first session, e.g. "Within 2 weeks". */
+  headline: string;
+  /** People on the waitlist, e.g. "11". "" when there is no waitlist. */
+  waiting: string;
+  /** e.g. "About 2 people a fortnight". */
+  waitMoves: string;
+}
+
+/** Therapist layout: getting to the in-person practice. */
+export interface TherapistTravel {
+  metro: string;
+  bus: string;
+  bike: string;
+  entrance: string;
+}
+
+/** Therapist layout: a person or service the therapist works alongside.
+ *  `kind` is one of psychiatrist | group | community | clinic | therapist. */
+export interface TherapistWorksAlongside {
+  kind: string;
+  name: string;
+  note: string;
+}
+
 // Persona-level skin blocks (Personas redesign Phase 0, design plan "Shared
 // Contract"). Kept in lockstep with the frontend mirror in
 // `subprofiles.api.ts`. Only the keys relevant to the persona's derived skin
@@ -255,6 +346,41 @@ export interface SkinData {
   } | null;
   /** Classroom skin: the "what you leave with" promises list at the foot. */
   promises?: string[] | null;
+  /** Therapist layout: the core facts (status, title, quote, contact). */
+  therapist?: TherapistFacts | null;
+  /** Therapist layout: lived-experience chips, in the therapist's words. */
+  lived?: string[] | null;
+  /** Therapist layout: "also speaks the language of" context chips. */
+  contexts?: string[] | null;
+  /** Therapist layout: approach chips (Person-centred, ACT, EMDR ...). */
+  modalities?: string[] | null;
+  /** Therapist layout: working-style chips as written ("Leans open"). */
+  workingStyle?: string[] | null;
+  /** Therapist layout: the "probably not for you if" list. */
+  notFor?: string[] | null;
+  /** Therapist layout: things the therapist does not do, as chips. */
+  boundaries?: string[] | null;
+  /** Therapist layout: who the practice serves ("Adults 18+", "Couples"). */
+  whoFor?: string[] | null;
+  /** Therapist layout: fees, sliding scale and the small print. */
+  therapyFees?: TherapyFees | null;
+  /** Therapist layout: insurer and euros back per session ("25"). */
+  reimbursement?: { label: string; value: string }[] | null;
+  /** Therapist layout: time to a first session and the waitlist size. */
+  availabilitySummary?: TherapistAvailabilitySummary | null;
+  /** Therapist layout: weekly hours rows ("Weekdays" / "17:00–21:00"). */
+  hours?: { label: string; value: string }[] | null;
+  /** Therapist layout: owner-typed open slots ("Tue 30 Sep · 18:00"). */
+  openSlots?: string[] | null;
+  /** Therapist layout: getting there (metro / bus / bike / entrance). */
+  travel?: TherapistTravel | null;
+  /** Therapist layout: accessibility items NOT offered (shown with an x).
+   *  The offered ones live in the existing `access` key. */
+  accessMissing?: string[] | null;
+  /** Therapist layout: frequently asked questions. */
+  faq?: { question: string; answer: string }[] | null;
+  /** Therapist layout: people and services the therapist works alongside. */
+  worksAlongside?: TherapistWorksAlongside[] | null;
 }
 
 @Entity('subprofiles')

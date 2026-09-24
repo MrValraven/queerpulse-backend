@@ -35,6 +35,10 @@ import {
 import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import {
+  hasQualifyingOwner,
+  SubprofileAffiliationEligibilityService,
+} from './subprofile-affiliation-eligibility.service';
+import {
   Subprofile,
   SubprofileLinkVisibility,
   SubprofileStatus,
@@ -137,6 +141,9 @@ export class SubprofilePublicReadService {
     // Batched crop lookup for `avatarUrl`/`coverUrl`/item `imageUrl` — see
     // `MediaCropService.getMany` and `../media-crops/crop-response.ts`.
     private readonly mediaCropService: MediaCropService,
+    // "Part of" eligibility: `resolveAffiliationsFor` drops a link once none
+    // of the persona's owners belongs to its target any more.
+    private readonly affiliationEligibility: SubprofileAffiliationEligibilityService,
   ) {}
 
   // A persona is reported (and taken down) under the `subprofile` subject code,
@@ -1150,6 +1157,16 @@ export class SubprofilePublicReadService {
   // existence/visibility/block checks `replaceAffiliations` applies at save
   // time, so a target that goes private/gets deleted/becomes blocked after
   // linking silently disappears rather than 500ing or leaking it.
+  //
+  // A target is ALSO dropped once none of the persona's owners belongs to it:
+  // they left or were removed from the community, or are no longer going to
+  // the event (RSVP cancelled or moved off `going`, taken off the lineup or
+  // co-host list). This is the read-side mirror of the membership check
+  // `replaceAffiliations` applies at save time, via the same
+  // `SubprofileAffiliationEligibilityService`, and covers every caller: the
+  // public page, the owner's list and the owner editor. The row itself stays
+  // stored. Because the editor never sees it, the owner's next "Part of" save
+  // (a replace-all) removes it.
   async resolveAffiliationsFor(
     viewerId: string,
     subprofileIds: string[],
@@ -1182,21 +1199,28 @@ export class SubprofilePublicReadService {
     ];
 
     // The two entity queries — ONE for events, ONE for communities,
-    // regardless of how many personas/rows are being resolved.
-    const [eventRows, communityRows] = await Promise.all([
-      eventSlugs.length
-        ? this.events.find({ where: { slug: In(eventSlugs) } })
-        : Promise.resolve([]),
-      communitySlugs.length
-        ? this.communities.find({ where: { slug: In(communitySlugs) } })
-        : Promise.resolve([]),
-    ]);
+    // regardless of how many personas/rows are being resolved. The owners of
+    // every persona involved load alongside them (a fixed two queries).
+    const [eventRows, communityRows, ownerIdsBySubprofileId] =
+      await Promise.all([
+        eventSlugs.length
+          ? this.events.find({ where: { slug: In(eventSlugs) } })
+          : Promise.resolve([]),
+        communitySlugs.length
+          ? this.communities.find({ where: { slug: In(communitySlugs) } })
+          : Promise.resolve([]),
+        this.affiliationEligibility.ownerIdsFor(
+          rows.map((row) => row.subprofileId),
+        ),
+      ]);
 
     // slug -> resolved (name/imageUrl/ownerId), but ONLY for targets that are
     // still publicly visible (mirrors the criteria `EventsService` /
     // `CommunitiesService` use for their own public reads) — an invisible
     // target simply has no map entry below, so it is dropped.
     type ResolvedTarget = {
+      // The event/community id, which is what owner eligibility is keyed by.
+      targetId: string;
       name: string;
       imageUrl: string | null;
       // Null while the community is temporarily ownerless (owner account
@@ -1214,6 +1238,7 @@ export class SubprofilePublicReadService {
         .map((event) => [
           event.slug,
           {
+            targetId: event.id,
             name: event.title,
             imageUrl: toImageUrl(event.coverImageUrl),
             ownerId: event.hostId,
@@ -1233,17 +1258,26 @@ export class SubprofilePublicReadService {
     // the fact an outing risk attaches to. Signed-in members are a different
     // audience: the community is already discoverable to them.
     const isAnonymousViewer = viewerId === ANONYMOUS_VIEWER_ID;
+    // An archived community is hidden from non-members and rejected at save,
+    // so its link drops here too; the owner's next "Part of" save clears it.
     const communityBySlug = new Map<string, ResolvedTarget>(
       communityRows
-        .filter((community) =>
-          isAnonymousViewer
-            ? community.accessTier === AccessTier.Public
-            : community.accessTier !== AccessTier.Private,
+        .filter(
+          (community) =>
+            community.archivedAt == null &&
+            (isAnonymousViewer
+              ? community.accessTier === AccessTier.Public
+              : community.accessTier !== AccessTier.Private),
         )
         .map((community) => [
           community.slug,
           // Communities have no image column — `imageUrl` is always null.
-          { name: community.name, imageUrl: null, ownerId: community.ownerId },
+          {
+            targetId: community.id,
+            name: community.name,
+            imageUrl: null,
+            ownerId: community.ownerId,
+          },
         ]),
     );
 
@@ -1257,10 +1291,23 @@ export class SubprofilePublicReadService {
         ].filter((ownerId): ownerId is string => ownerId !== null),
       ),
     ];
-    const blockedOwnerIds = await this.blockFilter.blockedUserIds(
-      viewerId,
-      ownerIds,
+    // Which personas' owners still belong to which visible targets, batched
+    // over the union of every persona's owners (a fixed four queries; see
+    // `eligibleTargetKeys`). Runs beside the block lookup.
+    const allPersonaOwnerIds = [
+      ...new Set([...ownerIdsBySubprofileId.values()].flat()),
+    ];
+    const visibleEventIds = new Set(
+      [...eventBySlug.values()].map((target) => target.targetId),
     );
+    const [blockedOwnerIds, eligibleKeys] = await Promise.all([
+      this.blockFilter.blockedUserIds(viewerId, ownerIds),
+      this.affiliationEligibility.eligibleTargetKeys(
+        allPersonaOwnerIds,
+        eventRows.filter((event) => visibleEventIds.has(event.id)),
+        [...communityBySlug.values()].map((target) => target.targetId),
+      ),
+    ]);
 
     for (const row of rows) {
       const target =
@@ -1271,7 +1318,13 @@ export class SubprofilePublicReadService {
             : undefined;
       if (
         !target ||
-        (target.ownerId !== null && blockedOwnerIds.has(target.ownerId))
+        (target.ownerId !== null && blockedOwnerIds.has(target.ownerId)) ||
+        !hasQualifyingOwner(
+          eligibleKeys,
+          row.targetType === 'event' ? 'event' : 'community',
+          target.targetId,
+          ownerIdsBySubprofileId.get(row.subprofileId) ?? [],
+        )
       ) {
         continue;
       }
