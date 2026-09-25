@@ -5,12 +5,13 @@ import { ListingDTO } from './listing-response';
  * The columns on a `Listing` that describe the OWNER as a person rather than
  * the business as a business.
  *
- * The first five are not a new judgement. `ListingClaimsService.review` already
- * clears exactly `contactEmail`, `ownerName`, `ownerBio`, `consentOuting` and
- * `consentGuide` when a listing changes hands on an approved claim, on the
- * stated grounds that they belong to the previous owner and cannot transfer to
- * somebody else. That set is treated here as authoritative, and this module is
- * the single place it is written down for both purposes.
+ * The first four are not a new judgement. `ListingOwnershipService` already
+ * clears exactly `ownerName`, `ownerBio`, `consentOuting` and `consentGuide`
+ * when a listing changes hands, on the stated grounds that they belong to the
+ * previous owner and cannot transfer to somebody else. That set is treated here
+ * as authoritative, and this module is the single place it is written down for
+ * both purposes. The transfer also scrubs the retired `contactEmail` column,
+ * which is absent here because no response carries it and no write stores it.
  *
  * Three more are added for the co-manager boundary:
  *
@@ -38,7 +39,6 @@ import { ListingDTO } from './listing-response';
  *    that carries any of them.
  */
 export const OWNER_PERSONAL_LISTING_FIELDS = [
-  'contactEmail',
   'ownerName',
   'ownerBio',
   'consentOuting',
@@ -53,11 +53,11 @@ export type OwnerPersonalListingField =
 
 /**
  * A listing as a CO-MANAGER sees it: every business field, and none of the
- * eight owner-personal ones.
+ * seven owner-personal ones.
  *
  * Modelled as an `Omit` rather than as "the same interface with nulls" on
- * purpose. A co-manager's response does not contain a blanked-out contact
- * email; it contains no `contactEmail` key at all, so a frontend that renders
+ * purpose. A co-manager's response does not contain a blanked-out owner
+ * name; it contains no `ownerName` key at all, so a frontend that renders
  * the field cannot render an empty box that looks like stored data, and a
  * frontend that round-trips the object it just loaded into a PATCH sends a body
  * with the field absent, which is exactly the body the write gate accepts.
@@ -89,7 +89,7 @@ export type ManagedListingDTO =
  *
  * Deletes the keys rather than overwriting them, so the result genuinely has no
  * such property. `structuredClone`-free shallow copy is enough: every one of
- * the eight is a scalar.
+ * the seven is a scalar.
  */
 export function redactOwnerPersonalFields(
   listing: ListingDTO,
@@ -167,19 +167,14 @@ export function assertNoOwnerPersonalListingFields(
  * WHY A SECOND, SMALLER SET than `OWNER_PERSONAL_LISTING_FIELDS` above. That
  * one is the CO-MANAGER boundary and it is wider, because a co-manager is
  * somebody the owner picked to help run the business rather than somebody
- * judging it. A directory moderator is judging it, so five of the eight stay:
+ * judging it. A directory moderator is judging it, so five of the seven stay:
  * `ownerName`, `ownerBio`, `visibility` and `linkToProfile` decide what the
  * public listing page actually shows, and that page is the thing under review;
  * `rel` is a documented input to the queer-owned verification this same
  * controller grants (see the note on `rel` above).
  *
- * The three that leave carry nothing any decision on that controller needs:
+ * The two that leave carry nothing any decision on that controller needs:
  *
- *  - `contactEmail` is the owner's own address. The outreach path the
- *    controller actually offers is `POST /admin/listings/:ref/question`, which
- *    delivers an in-app DM, and QueerPulse sends no email at all. So the
- *    address is not a tool a reviewer uses; it is a personal detail sitting in
- *    a bulk, searchable, paginated queue of every listing on the platform.
  *  - `consentOuting` and `consentGuide` are that person's answers about being
  *    named as a queer business owner and about being featured in editorial.
  *    They are consent decisions about a human being, not facts about a
@@ -190,7 +185,6 @@ export function assertNoOwnerPersonalListingFields(
  * is exactly where the guard put it; only the size of the answer moves.
  */
 export const DELEGATED_DIRECTORY_WITHHELD_FIELDS = [
-  'contactEmail',
   'consentOuting',
   'consentGuide',
 ] as const;

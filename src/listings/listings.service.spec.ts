@@ -450,6 +450,21 @@ describe('ListingsService', () => {
       );
     });
 
+    // `contactEmail` is retired. A stale cached frontend may still send it, so
+    // the DTO accepts it, and the service must drop it on the floor.
+    it('ignores a stale contactEmail: never stored and never returned', async () => {
+      const result = await service.create('owner-1', {
+        name: 'Lux Café',
+        contactEmail: 'ana@example.com',
+      } as CreateListingDto);
+
+      const [savedListing] = listings.save.mock.calls[0] as [
+        Record<string, unknown>,
+      ];
+      expect(savedListing).not.toHaveProperty('contactEmail');
+      expect(result).not.toHaveProperty('contactEmail');
+    });
+
     it('retries the slug on a 23505 unique-violation race', async () => {
       listings.exists
         .mockResolvedValueOnce(true) // first candidate taken
@@ -626,6 +641,31 @@ describe('ListingsService', () => {
       expect(dto.detailsConfirmedAt).toBeNull();
       expect(transactionManager.save).not.toHaveBeenCalled();
       expect(listings.save).toHaveBeenCalled();
+    });
+
+    // `contactEmail` is retired: a stale client may still PATCH it, and the
+    // service leaves the stored value alone, so no `owner_edited` row or
+    // freshness stamp can ever name it.
+    it('ignores a stale contactEmail on a live listing and records no edit for it', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: 'owner-1',
+          status: ListingStatus.Live,
+          contactEmail: 'stored-before-retirement@example.com',
+        }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        contactEmail: 'ana@example.com',
+      });
+
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.contactEmail).toBe(
+        'stored-before-retirement@example.com',
+      );
+      expect(dto).not.toHaveProperty('contactEmail');
+      expect(dto.detailsConfirmedAt).toBeNull();
+      expect(transactionManager.save).not.toHaveBeenCalled();
     });
 
     // Finding M1: `ListingsController.update` keeps the interceptor's

@@ -82,6 +82,8 @@ export class ListingOwnershipService {
     // The personal fields belong to whoever holds the listing, so they leave
     // with the previous holder. `notify` is a retired column and stays as is.
     listing.ownerId = newOwnerId;
+    // Retired column: nothing writes it now, but this scrubs any address
+    // stored before it was retired.
     listing.contactEmail = '';
     listing.ownerName = '';
     listing.ownerBio = '';

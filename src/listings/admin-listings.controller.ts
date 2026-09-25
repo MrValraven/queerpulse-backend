@@ -88,12 +88,11 @@ import {
  * be a platform Moderator/Admin OR a plain member holding the
  * `directory_moderator` grant. Widening the gate did not narrow the bodies,
  * and every handler below that echoes a `ListingDTO` was handing a grant
- * holder the owner's own contact email and their consent decisions on top of
- * the business. Those handlers now pass the response through
- * `toDirectoryModerationListingDTO`, which omits three owner-personal fields
- * for a caller who is not platform staff by ACCOUNT TIER. See
- * `listing-owner-personal-fields.ts` for which three and why the other five
- * stay.
+ * holder the owner's consent decisions on top of the business. Those handlers
+ * now pass the response through `toDirectoryModerationListingDTO`, which omits
+ * two owner-personal fields for a caller who is not platform staff by ACCOUNT
+ * TIER. See `listing-owner-personal-fields.ts` for which two and why the other
+ * five stay.
  */
 @Feature('listings')
 @ApiTags('Admin — Listings')

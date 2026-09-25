@@ -69,8 +69,8 @@ const buildQueryBuilderStub = (): Record<string, jest.Mock> => {
 /**
  * The smallest admin body, carrying the publish choice.
  *
- * Deliberately says nothing about the eight owner-personal fields: the DTO
- * omits them, so there is no shape of this fixture that could set one.
+ * Deliberately says nothing about the owner fields: the DTO omits them, so
+ * there is no shape of this fixture that could set one.
  */
 const adminDto = (publishState: 'review' | 'live'): AdminCreateListingDto =>
   ({ name: 'Lux Café', publishState }) as AdminCreateListingDto;
@@ -233,14 +233,14 @@ describe('ListingsService.adminCreate', () => {
     );
   });
 
-  it('defaults all eight owner-personal columns to empty for a body that omits them', async () => {
+  it('defaults the seven owner columns to empty for a body that omits them', async () => {
     await service.adminCreate(ADMIN_ID, adminDto('live'));
 
     // WHAT THIS PINS, precisely: `normalizeCreate`'s `?? ''` and `?? false`
-    // defaults for the eight columns the admin DTO has no field for, so a
-    // house-authored row asserts nothing about a business it has not spoken
+    // defaults for the seven owner columns the admin DTO has no field for, so
+    // a house-authored row asserts nothing about a business it has not spoken
     // to. It does NOT prove the `OmitType` list is live: rejecting a body
-    // that carries `contactEmail` is the global `forbidNonWhitelisted`
+    // that carries `ownerName` is the global `forbidNonWhitelisted`
     // ValidationPipe's job, which runs above this service and is covered
     // where the pipe is. The names in that list were checked against
     // `CreateListingDto` by hand.
@@ -251,11 +251,13 @@ describe('ListingsService.adminCreate', () => {
         ownerBio: '',
         visibility: '',
         linkToProfile: false,
-        contactEmail: '',
         consentOuting: false,
         consentGuide: false,
       }),
     );
+    // The retired `contactEmail` is never written on any create path; the
+    // column's own DB default fills it.
+    expect(savedRow()).not.toHaveProperty('contactEmail');
   });
 
   it('publishes live when the admin chose live', async () => {

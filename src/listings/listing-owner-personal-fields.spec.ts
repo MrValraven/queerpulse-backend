@@ -12,7 +12,7 @@ import { ListingDTO } from './listing-response';
  * The owner-personal-field boundary, tested on its own before it is tested
  * through the service.
  *
- * These helpers are the whole policy: one list of eight fields used in both
+ * These helpers are the whole policy: one list of seven fields used in both
  * directions. Everything that reads or writes a listing on behalf of a
  * co-manager goes through one of the three functions here, so a regression in
  * any of them is a regression in every route at once.
@@ -26,9 +26,8 @@ const listingDTO = (): ListingDTO =>
     ref: 'QPL-2026-0001',
     slug: 'lux-cafe',
     name: 'Lux Café',
-    // The eight owner-personal fields, each with a value a co-manager must
+    // The seven owner-personal fields, each with a value a co-manager must
     // never receive.
-    contactEmail: 'ana@example.com',
     ownerName: 'Ana Ribeiro',
     ownerBio: 'Runs the place since 2019.',
     consentOuting: true,
@@ -44,7 +43,7 @@ const listingDTO = (): ListingDTO =>
 
 describe('OWNER_PERSONAL_LISTING_FIELDS', () => {
   it('is exactly the claim-transfer set plus the three consent/presentation fields', () => {
-    // Pinned deliberately. `ListingClaimsService.review` clears the first five
+    // Pinned deliberately. `ListingOwnershipService` clears the first four
     // when a listing changes hands, on the stated grounds that they are the
     // previous owner's rather than the business's; this set is that decision
     // reused. If somebody widens or narrows it, they should have to come here
@@ -53,7 +52,6 @@ describe('OWNER_PERSONAL_LISTING_FIELDS', () => {
       [
         'consentGuide',
         'consentOuting',
-        'contactEmail',
         'linkToProfile',
         'ownerBio',
         'ownerName',
@@ -65,6 +63,10 @@ describe('OWNER_PERSONAL_LISTING_FIELDS', () => {
 
   it('does not include ownerRole, which is a job title at the business', () => {
     expect(OWNER_PERSONAL_LISTING_FIELDS).not.toContain('ownerRole');
+  });
+
+  it('does not include the retired contactEmail, which no response carries', () => {
+    expect(OWNER_PERSONAL_LISTING_FIELDS).not.toContain('contactEmail');
   });
 });
 
@@ -98,7 +100,7 @@ describe('redactOwnerPersonalFields', () => {
     const original = listingDTO();
     redactOwnerPersonalFields(original);
 
-    expect(original.contactEmail).toBe('ana@example.com');
+    expect(original.ownerName).toBe('Ana Ribeiro');
   });
 
   it('produces an object a co-manager can round-trip into a PATCH', () => {
@@ -122,7 +124,7 @@ describe('toManagedListingDTO', () => {
     >;
 
     expect(managed.managementRole).toBe(ListingManagementRole.Owner);
-    expect(managed.contactEmail).toBe('ana@example.com');
+    expect(managed.ownerName).toBe('Ana Ribeiro');
   });
 
   it('gives a co-manager the redacted listing and tags the seat', () => {
@@ -132,7 +134,7 @@ describe('toManagedListingDTO', () => {
     >;
 
     expect(managed.managementRole).toBe(ListingManagementRole.CoManager);
-    expect('contactEmail' in managed).toBe(false);
+    expect('ownerName' in managed).toBe(false);
     expect('ownerBio' in managed).toBe(false);
     expect(managed.name).toBe('Lux Café');
   });
@@ -179,7 +181,7 @@ describe('assertNoOwnerPersonalListingFields', () => {
     expect(() =>
       assertNoOwnerPersonalListingFields({
         name: 'Lux Café',
-        contactEmail: undefined,
+        ownerName: undefined,
         ownerBio: undefined,
       }),
     ).not.toThrow();
@@ -188,9 +190,18 @@ describe('assertNoOwnerPersonalListingFields', () => {
   it('names every offending field in the message, not just the first', () => {
     expect(() =>
       assertNoOwnerPersonalListingFields({
-        contactEmail: 'x@example.com',
         ownerName: 'Someone Else',
+        ownerBio: 'Someone else wrote this.',
       }),
-    ).toThrow(/contactEmail, ownerName/);
+    ).toThrow(/ownerName, ownerBio/);
+  });
+
+  it('lets a stale contactEmail through, since the service ignores it anyway', () => {
+    // Retired field: an older cached frontend may still send it. It is no
+    // longer owner-personal data because nothing stores it, so a co-manager's
+    // PATCH carrying it is accepted and the value is dropped.
+    expect(() =>
+      assertNoOwnerPersonalListingFields({ contactEmail: 'x@example.com' }),
+    ).not.toThrow();
   });
 });

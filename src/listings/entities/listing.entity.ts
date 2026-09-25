@@ -491,6 +491,7 @@ export class Listing {
   @Column({ type: 'boolean', default: false })
   linkToProfile!: boolean;
 
+  // RETIRED: no longer written or served; kept to avoid a migration.
   @Column({ type: 'varchar', default: '' })
   contactEmail!: string;
 

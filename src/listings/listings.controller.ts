@@ -197,7 +197,7 @@ export class ListingsController {
   }
 
   // OWNER OR CO-MANAGER (`loadOwnedOrCoManagedOr404`). A co-manager's copy is
-  // redacted of the eight owner-personal fields and tagged
+  // redacted of the seven owner-personal fields and tagged
   // `managementRole: 'co_manager'`.
   @Get(':ref')
   @ApiOperation({
@@ -371,7 +371,7 @@ export class ListingsController {
   // A CO-MANAGER'S PATCH CARRYING AN OWNER-PERSONAL FIELD IS REFUSED WITH 403
   // before anything is merged. Hiding those fields on read while leaving them
   // patchable would be a hole rather than a policy; see
-  // `listing-owner-personal-fields.ts` for the eight fields and the argument
+  // `listing-owner-personal-fields.ts` for the seven fields and the argument
   // for refusing rather than dropping them.
   @Patch(':ref')
   @UseGuards(NotRestrictedGuard)
@@ -429,7 +429,7 @@ export class ListingsController {
   // `DELETE /:ref` below, and why it is not owner-only.
   //
   // NOT to be confused with `listings.visibility`, which is the owner's own
-  // identity-disclosure choice and one of the eight fields a co-manager can
+  // identity-disclosure choice and one of the seven fields a co-manager can
   // neither read nor write.
   //
   // Sits beside `operating-state` and answers a different question. That one

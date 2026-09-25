@@ -338,7 +338,7 @@ describe('listing co-manager permission boundary', () => {
         await expect(
           service.update('QPL-2026-0001', CO_MANAGER_ID, {
             name: 'Lux Café',
-            [field]: field === 'contactEmail' ? 'attacker@example.com' : 'x',
+            [field]: 'x',
           }),
         ).rejects.toBeInstanceOf(ForbiddenException);
       },
@@ -350,11 +350,26 @@ describe('listing co-manager permission boundary', () => {
       // save, not after one.
       await expect(
         service.update('QPL-2026-0001', CO_MANAGER_ID, {
-          contactEmail: 'attacker@example.com',
+          ownerName: 'Attacker',
         }),
       ).rejects.toBeInstanceOf(ForbiddenException);
 
       expect(hasSavedTheListing()).toBe(false);
+    });
+
+    it('accepts a stale contactEmail from a co-manager and stores none of it', async () => {
+      // Retired field: an older cached frontend may still send it. The
+      // service ignores it for every caller, so there is nothing to refuse.
+      // Nothing else moved either, so the edit takes the plain save and writes
+      // no `owner_edited` row.
+      await service.update('QPL-2026-0001', CO_MANAGER_ID, {
+        name: 'Lux Café',
+        contactEmail: 'attacker@example.com',
+      });
+
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.contactEmail).toBe('ana@example.com');
+      expect(transactionManager.save).not.toHaveBeenCalled();
     });
 
     it('rejects consentOuting: false, which is a real consent withdrawal', async () => {
@@ -377,7 +392,7 @@ describe('listing co-manager permission boundary', () => {
 
     it('lets the OWNER write the very fields the co-manager cannot', async () => {
       await service.update('QPL-2026-0001', OWNER_ID, {
-        contactEmail: 'ana@example.com',
+        ownerName: 'Ana R.',
         consentOuting: false,
       });
 
@@ -395,7 +410,7 @@ describe('listing co-manager permission boundary', () => {
       coManagers.isActiveCoManager.mockResolvedValue(true);
     });
 
-    it('omits all eight from GET /listings/:ref', async () => {
+    it('omits all seven from GET /listings/:ref', async () => {
       const result = (await service.getByRef(
         'QPL-2026-0001',
         CO_MANAGER_ID,
@@ -418,18 +433,18 @@ describe('listing co-manager permission boundary', () => {
         { isHiddenByOwner: true },
       )) as unknown as Record<string, unknown>;
 
-      expect('contactEmail' in result).toBe(false);
+      expect('ownerName' in result).toBe(false);
       expect('ownerBio' in result).toBe(false);
     });
 
-    it('gives the owner all eight, and tags the seat as owner', async () => {
+    it('gives the owner all seven, and tags the seat as owner', async () => {
       const result = (await service.getByRef(
         'QPL-2026-0001',
         OWNER_ID,
       )) as unknown as Record<string, unknown>;
 
       expect(result.managementRole).toBe(ListingManagementRole.Owner);
-      expect(result.contactEmail).toBe('ana@example.com');
+      expect(result.ownerName).toBe('Ana Ribeiro');
       expect(result.ownerBio).toBe('Runs the place since 2019.');
     });
   });
@@ -552,11 +567,11 @@ describe('listing co-manager permission boundary', () => {
         unknown
       >[];
       expect(first?.managementRole).toBe(ListingManagementRole.Owner);
-      expect(first?.contactEmail).toBe('ana@example.com');
+      expect(first?.ownerName).toBe('Ana Ribeiro');
       expect(second?.managementRole).toBe(ListingManagementRole.CoManager);
       // Redaction is decided per row, so the co-managed row on the SAME page is
       // still missing every owner-personal field.
-      expect(second && 'contactEmail' in second).toBe(false);
+      expect(second && 'ownerName' in second).toBe(false);
     });
 
     it('asks for the caller’s co-managed ids before building the page', async () => {

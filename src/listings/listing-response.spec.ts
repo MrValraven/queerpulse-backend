@@ -536,7 +536,6 @@ describe('toListingDTO (the owner/managed response)', () => {
       ownerBio: '',
       visibility: 'public',
       linkToProfile: true,
-      contactEmail: '',
       consentOuting: true,
       consentGuide: true,
       queerOwnedVerified: false,
@@ -577,5 +576,15 @@ describe('toListingDTO (the owner/managed response)', () => {
       file: null,
       link: '',
     });
+  });
+
+  it('never serves the retired contactEmail, even when an old row still holds one', () => {
+    const dto = toListingDTO(
+      makeManagedListing({
+        contactEmail: 'stored-before-retirement@example.com',
+      }),
+      null,
+    );
+    expect(dto).not.toHaveProperty('contactEmail');
   });
 });

@@ -246,7 +246,7 @@ function normalizeHoursExceptions(
  *
  * The member wizard sends a `CreateListingDto`. The admin authoring path
  * sends an `AdminCreateListingDto`, which omits the affirming acceptance and
- * the eight owner-personal fields. Every one of those is optional on this
+ * the owner-personal fields. Every one of those is optional on this
  * shape, so an admin body satisfies it and the create machinery below reads
  * a single type. The admin path's missing fields land on their `?? ''` /
  * `?? false` defaults in `normalizeCreate`, which is exactly right: the
@@ -289,9 +289,11 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
   | 'ownerHiddenAt'
   // Retired columns: no longer collected from the wizard and no longer served.
   // The columns stay on the entity so existing rows keep their values, and the
-  // DB default fills them on insert. See `Listing.verify` / `Listing.notify`.
+  // DB default fills them on insert. See `Listing.verify` / `Listing.notify`
+  // / `Listing.contactEmail`.
   | 'verify'
   | 'notify'
+  | 'contactEmail'
   // Partner-space fields are an ops/moderation concern, never part of the
   // member-submission wizard — they default at the DB level on create.
   | 'isPartneredWithQueerpulse'
@@ -377,7 +379,6 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
     ownerBio: dto.ownerBio ?? '',
     visibility: dto.visibility ?? '',
     linkToProfile: dto.linkToProfile ?? false,
-    contactEmail: dto.contactEmail ?? '',
     consentOuting: dto.consentOuting ?? false,
     consentGuide: dto.consentGuide ?? false,
   };
@@ -499,9 +500,6 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.visibility !== undefined ? { visibility: dto.visibility } : {}),
     ...(dto.linkToProfile !== undefined
       ? { linkToProfile: dto.linkToProfile }
-      : {}),
-    ...(dto.contactEmail !== undefined
-      ? { contactEmail: dto.contactEmail }
       : {}),
     ...(dto.consentOuting !== undefined
       ? { consentOuting: dto.consentOuting }
@@ -635,6 +633,8 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   ownerBio: 'the owner bio',
   visibility: 'the owner visibility preference',
   linkToProfile: 'the link to the owner profile',
+  // Retired and never written by `applyUpdate`, so no new edit can change it;
+  // kept because stored history rows from past edits still name this field.
   contactEmail: 'the contact email',
   consentOuting: 'the outing consent',
   consentGuide: 'the guide consent',
@@ -1382,8 +1382,8 @@ export class ListingsService {
    * one listing the caller runs.
    *
    * A co-manager's copy carries `managementRole: 'co_manager'` and none of the
-   * eight owner-personal fields — see `listing-owner-personal-fields.ts` for
-   * what those are and why they leave. That redaction is also what makes the
+   * seven owner-personal fields (see `listing-owner-personal-fields.ts` for
+   * what those are and why they leave). That redaction is also what makes the
    * write side ergonomic: the object a co-manager loads here round-trips into
    * `PATCH /listings/:ref` without tripping the owner-personal-field gate,
    * because the keys it would refuse are simply not in it.
@@ -2710,8 +2710,8 @@ export class ListingsService {
     // `reason` strings it forwards are platform-composed (see
     // `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`): field LABELS on an owner
     // edit or an applied suggestion, member names on a roster change, and
-    // fixed sentences, so an owner's contact email stays out of every change
-    // note.
+    // fixed sentences, so an owner's personal details stay out of every
+    // change note.
     const { listing } = await this.loadOwnedOrCoManagedOr404(ref, userId);
     const currentPage = normalizePage(page);
 
@@ -2991,7 +2991,7 @@ export class ListingsService {
     // what separates it from `remove` two methods up.
     //
     // `listings.visibility` is NOT this. That column is the owner's own
-    // identity-disclosure choice and is one of the eight owner-personal fields
+    // identity-disclosure choice and is one of the seven owner-personal fields
     // a co-manager can neither read nor write. Two unrelated meanings of one
     // word, and this comment is here so the two never get merged.
     const { listing, isOwner } = await this.loadOwnedOrCoManagedOr404(

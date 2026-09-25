@@ -434,7 +434,6 @@ export interface ListingDTO {
   ownerBio: string;
   visibility: string;
   linkToProfile: boolean;
-  contactEmail: string;
   consentOuting: boolean;
   consentGuide: boolean;
   /** Moderator-verified confirmation of the "queer-owned" badge as it
@@ -1548,7 +1547,6 @@ export function toListingDTO(
     ownerBio: listing.ownerBio,
     visibility: listing.visibility,
     linkToProfile: listing.linkToProfile,
-    contactEmail: listing.contactEmail,
     consentOuting: listing.consentOuting,
     consentGuide: listing.consentGuide,
     // The badge as it currently reads: an expired grant stops saying

@@ -8,14 +8,18 @@ import { CreateListingOwnerOfferDto } from './create-listing-owner-offer.dto';
  * What an admin sends when authoring a listing for a business that has not
  * joined yet.
  *
- * The eight owner-personal fields and the affirming baseline are absent by
+ * The owner-personal fields and the affirming baseline are absent by
  * construction. They belong to whoever ends up holding the listing, and an
  * admin cannot truthfully answer any of them on a business's behalf. The
  * owner supplies them after accepting, in the editor they land in.
  *
  * Omission is the enforcement: the global `forbidNonWhitelisted`
  * ValidationPipe rejects a body that carries any of them, so an admin who
- * sends `contactEmail` gets a 400 and a clear message about it.
+ * sends `ownerName` gets a 400 and a clear message about it.
+ *
+ * `contactEmail` is retired (`CreateListingDto` accepts it only so stale
+ * member clients keep working, and ignores it). It stays omitted here because
+ * no admin client ever sent it, so the admin body keeps rejecting it outright.
  */
 export class AdminCreateListingDto extends OmitType(CreateListingDto, [
   'affirmingBaselineAccepted',

@@ -577,13 +577,10 @@ export class CreateListingDto {
   @IsOptional() @IsString() @MaxLength(2000) ownerBio?: string;
   @IsOptional() @IsIn(['public', 'role', 'anon']) visibility?: string;
   @IsOptional() @IsBoolean() linkToProfile?: boolean;
-  // Moderators mail this address when they need to reach the owner, so a
-  // garbage string here is a dead outreach path. Empty string allowed for the
-  // same reason as `ListingSocialDto.email` above.
-  @ValidateIf((dto: CreateListingDto) => (dto.contactEmail ?? '') !== '')
-  @IsEmail()
-  @MaxLength(200)
-  contactEmail?: string;
+  // Retired. Accepted only so an older cached frontend that still sends it
+  // keeps working under `forbidNonWhitelisted`; the service ignores it and
+  // never stores it.
+  @IsOptional() @IsString() @MaxLength(200) contactEmail?: string;
 
   @IsOptional() @IsBoolean() consentOuting?: boolean;
   @IsOptional() @IsBoolean() consentGuide?: boolean;
