@@ -9,7 +9,8 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, IsNull, MoreThan, Not } from 'typeorm';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -223,6 +224,7 @@ describe('ListingsService', () => {
     save: jest.Mock;
     find: jest.Mock;
     findAndCount: jest.Mock;
+    findOne: jest.Mock;
   };
   let questions: {
     findOne: jest.Mock;
@@ -247,7 +249,14 @@ describe('ListingsService', () => {
   // these tests assert on the NOTICE this service composes; the notifier's
   // own guards live in `submissions/`.
   let reviewReplies: { notifyReviewReplied: jest.Mock };
-  let dataSource: { query: jest.Mock; transaction: jest.Mock };
+  let dataSource: {
+    query: jest.Mock;
+    transaction: jest.Mock;
+    getRepository: jest.Mock;
+  };
+  // The `ListingCoManager` repository `getOwnerListingHistory` reaches through
+  // `dataSource.getRepository` for the team's accepted-seat member ids.
+  let coManagerSeats: { find: jest.Mock };
   let coManagers: {
     isActiveCoManager: jest.Mock;
     listingIdsCoManagedBy: jest.Mock;
@@ -299,6 +308,9 @@ describe('ListingsService', () => {
       // Backs `getOwnerListingHistory`'s paginated read (the admin
       // `getListingHistory` still uses the unpaginated `find`).
       findAndCount: jest.fn().mockResolvedValue([[], 0]),
+      // Backs `getOwnerListingHistory`'s latest-transfer read. `null` means
+      // the listing was never transferred.
+      findOne: jest.fn().mockResolvedValue(null),
     };
     questions = {
       findOne: jest.fn(),
@@ -336,7 +348,9 @@ describe('ListingsService', () => {
       announce: jest.fn().mockResolvedValue(undefined),
     };
     transactionManager = buildTransactionManager(listings);
+    coManagerSeats = { find: jest.fn().mockResolvedValue([]) };
     dataSource = {
+      getRepository: jest.fn(() => coManagerSeats),
       query: jest.fn().mockResolvedValue([{ seq: '1' }]),
       // `setStatus`/`removeByModerator`/`bulkSetStatus`/`bulkRemove` all run
       // their writes through `dataSource.transaction(...)` — invoke the
@@ -464,6 +478,31 @@ describe('ListingsService', () => {
         service.create('owner-1', { name: 'Lux Café' } as CreateListingDto),
       ).rejects.toThrow('write failed');
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    describe('curated tags', () => {
+      it('stores vocabulary tags in their canonical spelling', async () => {
+        await service.create('owner-1', {
+          name: 'Lux Café',
+          tags: ['  vegan options ', 'TERRACE', 'terrace'],
+        } as CreateListingDto);
+
+        expect(listings.save).toHaveBeenCalledWith(
+          expect.objectContaining({ tags: ['Vegan options', 'Terrace'] }),
+        );
+      });
+
+      it('400s a tag outside the vocabulary, before drawing a ref or saving', async () => {
+        const attempt = service.create('owner-1', {
+          name: 'Lux Café',
+          tags: ['Terrace', 'Dog-friendly'],
+        } as CreateListingDto);
+
+        await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+        await expect(attempt).rejects.toThrow(/"Dog-friendly"/);
+        expect(dataSource.query).not.toHaveBeenCalled();
+        expect(listings.save).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -594,6 +633,57 @@ describe('ListingsService', () => {
     // so the service is the line that stops a member introducing a NEW photo
     // that is not theirs while still letting a co-editor re-save one a
     // different collaborator uploaded.
+    describe('curated tags', () => {
+      it('400s a tag outside the vocabulary and writes nothing', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', tags: ['Terrace'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            tags: ['Terrace', 'Dog-friendly'],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('keeps a legacy tag the listing already carries, in its stored spelling', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', tags: ['Walk-ins welcome'] }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          tags: ['walk-ins welcome', 'late opening'],
+        });
+
+        expect(result.tags).toEqual(['Walk-ins welcome', 'Late opening']);
+      });
+
+      it('rejects a legacy tag the listing does not already carry', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', tags: [] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            tags: ['Walk-ins welcome'],
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('leaves the tags alone when the patch does not mention them', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', tags: ['Walk-ins welcome'] }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          blurb: 'new blurb',
+        });
+
+        expect(result.tags).toEqual(['Walk-ins welcome']);
+      });
+    });
+
     describe('foreign photo ownership (M1)', () => {
       const OWNER_ID = 'owner-1';
       const OTHER_ID = '22222222-2222-2222-2222-222222222222';
@@ -1420,6 +1510,27 @@ describe('ListingsService', () => {
         skip: 20,
         take: 20,
       });
+      // The team's accepted seats are read on the same listing, with only the
+      // two columns the current-team filter needs.
+      expect(coManagerSeats.find).toHaveBeenCalledWith({
+        where: { listingId: 'listing-1', acceptedAt: Not(IsNull()) },
+        select: { userId: true, endedAt: true },
+      });
+      // The latest transfer is read on the same listing, timestamp only.
+      expect(moderationEvents.findOne).toHaveBeenCalledWith({
+        where: {
+          listingId: 'listing-1',
+          action: ListingModerationAction.OwnershipTransferred,
+        },
+        order: { createdAt: 'DESC' },
+        select: { createdAt: true },
+      });
+      // With no transfer on the listing, the whole Q&A thread comes back.
+      expect(questions.find).toHaveBeenCalledWith({
+        where: { listingId: 'listing-1' },
+        order: { createdAt: 'DESC' },
+        take: DEFAULT_LIST_LIMIT,
+      });
       expect(history.page).toBe(2);
       expect(history.pageSize).toBe(20);
       expect(history.totalEvents).toBe(41);
@@ -1440,7 +1551,7 @@ describe('ListingsService', () => {
       expect(history.events[0]?.hasModeratorNote).toBe(false);
     });
 
-    it("withholds a moderator's internal note and the claimant's transfer note, flagging only that a note exists", async () => {
+    it("withholds a moderator's note and the claimant's transfer note, flagging only the note that was DM'd", async () => {
       listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
       moderationEvents.findAndCount.mockResolvedValue([
         [sentBackEvent, transferEvent],
@@ -1453,15 +1564,17 @@ describe('ListingsService', () => {
       );
 
       expect(history.events[0]?.reason).toBeNull();
+      // The send-back note reached the owner through `setStatus`'s DM.
       expect(history.events[0]?.hasModeratorNote).toBe(true);
       expect(history.events[1]?.reason).toBeNull();
-      expect(history.events[1]?.hasModeratorNote).toBe(true);
+      // The transfer note was never messaged to the owner, so no flag.
+      expect(history.events[1]?.hasModeratorNote).toBe(false);
       // The claimant's self-identifying note must not appear anywhere in the
       // payload, in any field.
       expect(JSON.stringify(history)).not.toContain('Ana');
     });
 
-    it('never carries an actor on any row, and never resolves a profile to build one', async () => {
+    it('reads a staff row as moderation and looks up no profile for it', async () => {
       listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
       moderationEvents.findAndCount.mockResolvedValue([[sentBackEvent], 1]);
       questions.find.mockResolvedValue([
@@ -1481,10 +1594,219 @@ describe('ListingsService', () => {
         'owner-1',
       );
 
-      expect(history.events[0]).not.toHaveProperty('actor');
+      expect(history.events[0]?.actor).toEqual({ kind: 'moderation' });
       expect(history.questions[0]).not.toHaveProperty('askedBy');
       expect(history.questions[0]?.body).toBe('What are your hours?');
       expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('hides who made team edits before the latest transfer and names the current team after it', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-2' }));
+      const olderOwnerEdit = {
+        ...ownerEditedEvent,
+        id: 'event-old-owner-edit',
+        actorId: 'owner-1',
+        createdAt: new Date('2025-12-31T00:00:00.000Z'),
+      };
+      const newerOwnerEdit = {
+        ...ownerEditedEvent,
+        id: 'event-new-owner-edit',
+        actorId: 'owner-2',
+        createdAt: new Date('2026-01-03T00:00:00.000Z'),
+      };
+      moderationEvents.findAndCount.mockResolvedValue([
+        [newerOwnerEdit, transferEvent, olderOwnerEdit],
+        3,
+      ]);
+      moderationEvents.findOne.mockResolvedValue({
+        createdAt: transferEvent.createdAt,
+      });
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'owner-2',
+          slug: 'bea-costa',
+          firstName: 'Bea',
+          lastName: 'Costa',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-2',
+      );
+
+      expect(history.events[0]?.actor).toEqual({
+        kind: 'team',
+        member: {
+          slug: 'bea-costa',
+          firstName: 'Bea',
+          lastName: 'Costa',
+          pronouns: null,
+          avatarUrl: null,
+        },
+      });
+      expect(history.events[1]?.actor).toEqual({ kind: 'moderation' });
+      expect(history.events[2]?.actor).toEqual({ kind: 'previous_team' });
+      // Only the current team's actor is looked up; the previous owner and
+      // the moderator who ran the transfer never reach the profile read.
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+      const [profileQuery] = profiles.find.mock.calls[0] as [
+        { where: { userId: { value: string[] } } },
+      ];
+      expect(profileQuery.where.userId.value).toEqual(['owner-2']);
+    });
+
+    it('reads a pre-transfer row as the previous team on a page that does not hold the transfer', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-2' }));
+      const olderOwnerEdit = {
+        ...ownerEditedEvent,
+        id: 'event-old-owner-edit',
+        actorId: 'owner-1',
+        createdAt: new Date('2025-12-31T00:00:00.000Z'),
+      };
+      moderationEvents.findAndCount.mockResolvedValue([[olderOwnerEdit], 21]);
+      moderationEvents.findOne.mockResolvedValue({
+        createdAt: transferEvent.createdAt,
+      });
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-2',
+        2,
+      );
+
+      expect(history.events[0]?.actor).toEqual({ kind: 'previous_team' });
+      expect(history.events[0]?.reason).toBeNull();
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('keeps an admin who revoked a seat unnamed and names a current co-manager', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      coManagerSeats.find.mockResolvedValue([
+        { userId: 'co-manager-1', endedAt: null },
+      ]);
+      const adminRevokeEvent = {
+        id: 'event-admin-revoke',
+        listingId: 'listing-1',
+        actorId: 'admin-1',
+        action: ListingModerationAction.CoManagerRemoved,
+        fromStatus: null,
+        toStatus: null,
+        reason: 'Rui Alves was removed as a co-manager of this listing.',
+        createdAt: new Date('2026-01-04T00:00:00.000Z'),
+      };
+      const coManagerEdit = {
+        ...ownerEditedEvent,
+        id: 'event-co-manager-edit',
+        actorId: 'co-manager-1',
+      };
+      moderationEvents.findAndCount.mockResolvedValue([
+        [adminRevokeEvent, coManagerEdit],
+        2,
+      ]);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'co-manager-1',
+          slug: 'bea-costa',
+          firstName: 'Bea',
+          lastName: 'Costa',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-1',
+      );
+
+      expect(history.events[0]?.actor).toEqual({ kind: 'moderation' });
+      expect(history.events[1]?.actor).toEqual({
+        kind: 'team',
+        member: {
+          slug: 'bea-costa',
+          firstName: 'Bea',
+          lastName: 'Costa',
+          pronouns: null,
+          avatarUrl: null,
+        },
+      });
+      // The admin's id never reaches the profile read.
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+      const [profileQuery] = profiles.find.mock.calls[0] as [
+        { where: { userId: { value: string[] } } },
+      ];
+      expect(profileQuery.where.userId.value).toEqual(['co-manager-1']);
+    });
+
+    it('reads a member whose seat ended at the transfer as moderation on a later team action', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-2' }));
+      moderationEvents.findOne.mockResolvedValue({
+        createdAt: transferEvent.createdAt,
+      });
+      // Revoked by the transfer itself, so the seat ended at its instant.
+      coManagerSeats.find.mockResolvedValue([
+        { userId: 'former-co-manager', endedAt: transferEvent.createdAt },
+      ]);
+      const laterSeatEvent = {
+        id: 'event-later-seat-change',
+        listingId: 'listing-1',
+        actorId: 'former-co-manager',
+        action: ListingModerationAction.CoManagerRemoved,
+        fromStatus: null,
+        toStatus: null,
+        reason: 'Rui Alves was removed as a co-manager of this listing.',
+        createdAt: new Date('2026-01-05T00:00:00.000Z'),
+      };
+      moderationEvents.findAndCount.mockResolvedValue([[laterSeatEvent], 1]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-2',
+      );
+
+      expect(history.events[0]?.actor).toEqual({ kind: 'moderation' });
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('returns only the questions asked after the latest transfer', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-2' }));
+      moderationEvents.findOne.mockResolvedValue({
+        createdAt: transferEvent.createdAt,
+      });
+      questions.find.mockResolvedValue([
+        {
+          id: 'question-after-transfer',
+          listingId: 'listing-1',
+          askedBy: 'mod-1',
+          body: 'Are the new opening hours final?',
+          answer: null,
+          answeredAt: null,
+          createdAt: new Date('2026-01-06T00:00:00.000Z'),
+        },
+      ]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-2',
+      );
+
+      // The boundary is in the query, so the previous owner's answers never
+      // leave the database.
+      expect(questions.find).toHaveBeenCalledWith({
+        where: {
+          listingId: 'listing-1',
+          createdAt: MoreThan(transferEvent.createdAt),
+        },
+        order: { createdAt: 'DESC' },
+        take: DEFAULT_LIST_LIMIT,
+      });
+      expect(history.questions).toHaveLength(1);
+      expect(history.questions[0]?.id).toBe('question-after-transfer');
     });
   });
 

@@ -261,6 +261,7 @@ describe('listing co-manager permission boundary', () => {
             save: jest.fn((value: object) => Promise.resolve(value)),
             find: jest.fn().mockResolvedValue([]),
             findAndCount: jest.fn().mockResolvedValue([[], 0]),
+            findOne: jest.fn().mockResolvedValue(null),
           },
         },
         { provide: getRepositoryToken(ListingQuestion), useValue: questions },
@@ -281,6 +282,10 @@ describe('listing co-manager permission boundary', () => {
               (work: (manager: EntityManager) => Promise<unknown>) =>
                 work(transactionManager as unknown as EntityManager),
             ),
+            // `getOwnerListingHistory` reads the accepted seats through it.
+            getRepository: jest.fn(() => ({
+              find: jest.fn().mockResolvedValue([]),
+            })),
           },
         },
         { provide: MessagingService, useValue: { deliverEnquiry: jest.fn() } },

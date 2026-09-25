@@ -11,11 +11,15 @@ import { AdminQueueNotificationsService } from '../admin-queue-notifications/adm
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { resolveListingLocation, resolveListingTimezone } from './listing-city';
+import { resolveListingTagsOrThrow } from './listing-tags';
 import { toImageUrl } from '../common/image-url';
 import {
   Brackets,
   DataSource,
   In,
+  IsNull,
+  MoreThan,
+  Not,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
@@ -57,6 +61,7 @@ import {
 } from './dto/listing-question.dto';
 import {
   OwnerListingHistoryDTO,
+  resolveOwnerHistoryActor,
   toOwnerListingHistoryDTO,
   toOwnerListingModerationEventDTO,
   toOwnerListingQuestionDTO,
@@ -91,6 +96,7 @@ import {
   ListingPublicQuestionDTO,
   toListingPublicQuestionDTO,
 } from './dto/listing-public-question.dto';
+import { ListingCoManager } from './entities/listing-co-manager.entity';
 import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
@@ -598,9 +604,9 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   badge: 'the queer-owned or friendly badge',
   evidence: 'the evidence behind the badge',
   price: 'the price range',
-  blurb: 'the description',
+  blurb: 'the one-line blurb',
   tagline: 'the tagline',
-  whatItIs: 'the "what it is" lines',
+  whatItIs: 'the description',
   tags: 'the tags',
   goodFor: 'the "good for" tags',
   accessibilityAnswers: 'the accessibility answers',
@@ -818,9 +824,15 @@ export class ListingsService {
     // `@ValidateIf` to express (item #2): `hours` (≥1 open day) and the hero
     // photo are required on the `claim` path, optional on `suggest`.
     this.assertPathRequirements(dto);
+    // Tags are pick-only from `LISTING_TAG_GROUPS`. Checked before the ref is
+    // drawn, so a rejected submission does not burn a sequence number.
+    const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
 
     const ref = await this.nextRef();
-    const saved = await this.createWithUniqueSlug(ownerId, ref, dto);
+    const saved = await this.createWithUniqueSlug(ownerId, ref, {
+      ...dto,
+      tags,
+    });
     // Tell whoever works the listing-submission queue that a listing landed
     // for review. Awaited, but safe to await: `announce` catches everything
     // internally, so a notification failure can never fail the member's
@@ -860,14 +872,23 @@ export class ListingsService {
     dto: AdminCreateListingDto,
   ): Promise<ListingDTO> {
     this.assertPathRequirements(dto);
+    // Staff authoring picks from the same vocabulary as the member wizard.
+    const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
 
     const ref = await this.nextRef();
-    const saved = await this.createWithUniqueSlug(null, ref, dto, {
-      status:
-        dto.publishState === 'live' ? ListingStatus.Live : ListingStatus.Review,
-      affirmingBaselineAcceptedAt: null,
-      createdByStaffId: adminUserId,
-    });
+    const saved = await this.createWithUniqueSlug(
+      null,
+      ref,
+      { ...dto, tags },
+      {
+        status:
+          dto.publishState === 'live'
+            ? ListingStatus.Live
+            : ListingStatus.Review,
+        affirmingBaselineAcceptedAt: null,
+        createdByStaffId: adminUserId,
+      },
+    );
 
     await this.recordStaffCreated(saved, adminUserId);
 
@@ -1445,7 +1466,17 @@ export class ListingsService {
     // "before" picture (see `changedListingFields`).
     const listingBeforeEdit: Listing = { ...listing };
     const wasLive = listing.status === ListingStatus.Live;
-    applyUpdate(listing, dto);
+    // Tags are pick-only from `LISTING_TAG_GROUPS`. A tag the listing already
+    // carries from before the vocabulary stays savable, so an unrelated edit
+    // never forces the owner to delete it first.
+    const normalizedDto: UpdateListingDto =
+      dto.tags !== undefined
+        ? {
+            ...dto,
+            tags: resolveListingTagsOrThrow(dto.tags, listing.tags ?? []),
+          }
+        : dto;
+    applyUpdate(listing, normalizedDto);
 
     // An owner edit NEVER changes `listing.status`. Once a moderator has
     // approved a listing it stays live through its owner's corrections, and a
@@ -1517,6 +1548,7 @@ export class ListingsService {
                 changedFields,
                 wasQueerOwnedBadgeCleared,
               ),
+              changedFields: [...changedFields],
             });
             return savedListing;
           })
@@ -2622,29 +2654,48 @@ export class ListingsService {
 
   /**
    * C3, the OWNER's own view of the same audit trail `getListingHistory`
-   * serves moderators (`GET /listings/:ref/history`). Owner-gated through
-   * `loadOwnedOr404`, the same gate as `update`/`remove`/`answerQuestion`, so
-   * a ref owned by somebody else 404s exactly like a non-existent one.
-   *
-   * Until now the owner saw none of this table, including the `owner_edited`
-   * row their own edit had just written.
+   * serves moderators (`GET /listings/:ref/history`). Gated through
+   * `loadOwnedOrCoManagedOr404`, the same gate as `get`/`update`, so a ref
+   * the caller neither owns nor co-manages 404s exactly like a non-existent
+   * one.
    *
    * What they see is deliberately narrower than what a moderator sees, and the
    * narrowing lives in `owner-listing-history.dto.ts` rather than here so it
-   * cannot be forgotten by a caller. In short: no actor identity on any row
-   * (the field does not exist on the owner DTO), and no `reason` text unless
-   * the platform composed it rather than a person typing it. Read
-   * `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`'s doc comment for the full rule
-   * and why each excluded action is excluded.
+   * cannot be forgotten by a caller. In short:
    *
-   * Because no actor is ever resolved, this method needs none of the batched
-   * `MemberLookup` work `getListingHistory` does.
+   *  - `actor` names a person only on a team action (`LISTING_TEAM_ACTIONS`)
+   *    taken after the listing's latest `ownership_transferred` event by a
+   *    member of the listing's team: its current owner, or anyone whose
+   *    accepted co-manager seat is still live or ended after that transfer
+   *    (a seat the transfer itself revoked stays with the previous team). A
+   *    staff action reads as `moderation`, and so does a team action by
+   *    anyone outside the team (an admin revoking a seat writes
+   *    `co_manager_removed` in their own name). A team action from before the
+   *    latest transfer reads as `previous_team` and loses its `reason`, so a
+   *    claimant who wins the listing never learns from the event rows who ran
+   *    it before them. `resolveOwnerHistoryActor` holds the rule.
+   *  - only `reason` text the platform composed. Read
+   *    `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`'s doc comment for the full
+   *    rule and why each excluded action is excluded.
+   *  - `hasModeratorNote` only where the note was DM'd to the owner
+   *    (`isModeratorNoteSentToOwner`).
+   *  - only the Q&A questions asked strictly after the latest transfer, since
+   *    a previous owner's answers routinely name them.
+   *
+   * Profiles are resolved in one batched `MemberLookup` call for the actors of
+   * this page's `team` rows only. Staff, outside and previous-team actor ids
+   * are never looked up, so their identity is never loaded into this
+   * response's scope.
    *
    * Pagination: `events` grows without bound (every owner edit adds a row), so
    * it is page-paginated newest-first with `PAGE_SIZE` via a plain
-   * `findAndCount` on one table with no join. The Q&A thread on a single
-   * listing is short, so it comes back whole under `DEFAULT_LIST_LIMIT`,
-   * matching how the admin endpoint returns it.
+   * `findAndCount` on one table with no join. The latest transfer and the
+   * team's member ids are read across the whole listing, so a transfer on
+   * another page still governs the rows on this one. The Q&A thread on a
+   * single listing is short, so it comes back whole under
+   * `DEFAULT_LIST_LIMIT`, matching how the admin endpoint returns it. It is
+   * read in a second step beside the profile lookup, because its transfer
+   * boundary is only known once the first reads land.
    */
   async getOwnerListingHistory(
     ref: string,
@@ -2653,30 +2704,100 @@ export class ListingsService {
   ): Promise<OwnerListingHistoryDTO> {
     // CO-MANAGER-ALLOWED. Someone editing a live listing has to be able to see
     // what has already happened to it, including the `owner_edited` rows their
-    // own edits write. Nothing in this response needs redacting for them: the
-    // DTO has no actor field at all, and the only `reason` strings it forwards
-    // are platform-composed (see `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`) —
-    // field LABELS on an owner edit, never the values, so an owner's contact
-    // email can never surface here as the content of a change note.
+    // own edits write. Nothing in this response needs redacting for them. The
+    // only people it names are members of the current team era, the same
+    // people the roster and the co-manager audit rows already name. The only
+    // `reason` strings it forwards are platform-composed (see
+    // `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`): field LABELS on an owner
+    // edit or an applied suggestion, member names on a roster change, and
+    // fixed sentences, so an owner's contact email stays out of every change
+    // note.
     const { listing } = await this.loadOwnedOrCoManagedOr404(ref, userId);
     const currentPage = normalizePage(page);
 
-    const [[events, totalEvents], questions] = await Promise.all([
-      this.moderationEvents.findAndCount({
-        where: { listingId: listing.id },
-        order: { createdAt: 'DESC' },
-        skip: (currentPage - 1) * PAGE_SIZE,
-        take: PAGE_SIZE,
-      }),
+    const [[events, totalEvents], latestTransfer, acceptedSeats] =
+      await Promise.all([
+        this.moderationEvents.findAndCount({
+          where: { listingId: listing.id },
+          order: { createdAt: 'DESC' },
+          skip: (currentPage - 1) * PAGE_SIZE,
+          take: PAGE_SIZE,
+        }),
+        this.moderationEvents.findOne({
+          where: {
+            listingId: listing.id,
+            action: ListingModerationAction.OwnershipTransferred,
+          },
+          order: { createdAt: 'DESC' },
+          select: { createdAt: true },
+        }),
+        // Everyone who has held an ACCEPTED seat, live or since ended.
+        // `acceptedAt` is set on accept, kept when the seat ends, and cleared
+        // on a decline or a re-invite, so it marks exactly the seats that once
+        // granted access. One row per member per listing, so the read is
+        // bounded by the listing's own roster history.
+        this.dataSource.getRepository(ListingCoManager).find({
+          where: { listingId: listing.id, acceptedAt: Not(IsNull()) },
+          select: { userId: true, endedAt: true },
+        }),
+      ]);
+    const latestTransferAt = latestTransfer?.createdAt ?? null;
+    // A seat counts toward the current team when it is still live, or when it
+    // ended strictly after the latest transfer. A seat that ended at or before
+    // it (the transfer itself revokes the previous owner's appointees) belongs
+    // to the previous team, so a later action by that member names no one.
+    const currentTeamSeats = acceptedSeats.filter(
+      (seat) =>
+        latestTransferAt === null ||
+        seat.endedAt === null ||
+        seat.endedAt.getTime() > latestTransferAt.getTime(),
+    );
+    const teamMemberIds: ReadonlySet<string> = new Set(
+      [listing.ownerId, ...currentTeamSeats.map((seat) => seat.userId)].filter(
+        (memberId): memberId is string => Boolean(memberId),
+      ),
+    );
+
+    // Resolving against an empty map first reuses the one rule to find the
+    // rows that will name someone, so only their actors are looked up.
+    const teamActorIds = events
+      .filter(
+        (event) =>
+          resolveOwnerHistoryActor(
+            event,
+            latestTransferAt,
+            teamMemberIds,
+            new Map(),
+          ).kind === 'team',
+      )
+      .map((event) => event.actorId)
+      .filter((actorId): actorId is string => Boolean(actorId));
+    const [membersByUserId, questions] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds(teamActorIds),
+      // The thread from before the latest transfer stays with the previous
+      // team: its answers are free text that routinely names who wrote them.
       this.questions.find({
-        where: { listingId: listing.id },
+        where:
+          latestTransferAt === null
+            ? { listingId: listing.id }
+            : { listingId: listing.id, createdAt: MoreThan(latestTransferAt) },
         order: { createdAt: 'DESC' },
         take: DEFAULT_LIST_LIMIT,
       }),
     ]);
 
     return toOwnerListingHistoryDTO(
-      events.map(toOwnerListingModerationEventDTO),
+      events.map((event) =>
+        toOwnerListingModerationEventDTO(
+          event,
+          resolveOwnerHistoryActor(
+            event,
+            latestTransferAt,
+            teamMemberIds,
+            membersByUserId,
+          ),
+        ),
+      ),
       questions.map(toOwnerListingQuestionDTO),
       totalEvents,
       currentPage,
@@ -2854,8 +2975,10 @@ export class ListingsService {
    * restores it whole, which is the point: owners were deleting listings to
    * get a pause, and a delete takes the reviews with it.
    *
-   * Nothing here touches `status`: hiding a listing is not a moderation event
-   * and does not send it back for re-review.
+   * Nothing here touches `status`: hiding a listing moves no moderation state
+   * and does not send it back for re-review. The transition does add a
+   * `directory_paused` or `directory_resumed` row to the listing's history,
+   * naming the member who made it.
    */
   async setDirectoryVisibility(
     ref: string,
@@ -2882,7 +3005,25 @@ export class ListingsService {
       // repeated PATCH of the same value, and cleared on the way back so a
       // shown listing carries no stale hidden-since date.
       listing.ownerHiddenAt = dto.isHiddenByOwner ? new Date() : null;
-      await this.listings.save(listing);
+      // The listing save and its history row run in one transaction, the same
+      // shape `update` uses for `owner_edited`. The row records which member
+      // paused or resumed the listing for the owner-facing history; like the
+      // save itself it moves no moderation state, so `fromStatus`/`toStatus`
+      // stay null.
+      await this.dataSource.transaction(async (manager) => {
+        await manager.save(listing);
+        await manager.save(ListingModerationEvent, {
+          listingId: listing.id,
+          actorId: userId,
+          action: dto.isHiddenByOwner
+            ? ListingModerationAction.DirectoryPaused
+            : ListingModerationAction.DirectoryResumed,
+          fromStatus: null,
+          toStatus: null,
+          reason: null,
+          changedFields: null,
+        });
+      });
     }
 
     return this.buildManagedDTO(listing, isOwner);

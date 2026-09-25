@@ -28,6 +28,7 @@ import {
   SafeSpaceVouch,
 } from './entities/listing.entity';
 import { toListingMenuView } from './listing-menu';
+import type { ListingTagGroup } from './listing-tags';
 import {
   ListingAccessibilityAnswerMap,
   normalizeAccessibilityAnswers,
@@ -537,6 +538,22 @@ export function toPartnerSpace(listing: Listing): PartnerSpaceDTO {
     capacity: listing.capacity,
     hostNote: listing.hostNote,
   };
+}
+
+/**
+ * One group of the curated listing tag vocabulary (`GET /directory/tags`).
+ * `id` names the group for the frontend's heading; `tags` are the stored
+ * English values, in display order.
+ */
+export interface ListingTagGroupDTO {
+  id: string;
+  tags: string[];
+}
+
+export function toListingTagGroupDTO(
+  group: ListingTagGroup,
+): ListingTagGroupDTO {
+  return { id: group.id, tags: [...group.tags] };
 }
 
 /** Card avatar tint — a presentation primitive the frontend maps to colours. */

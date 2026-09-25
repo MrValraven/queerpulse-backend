@@ -16,6 +16,7 @@ import pushConfig from './config/push.config';
 import retentionConfig from './config/retention.config';
 import storageConfig from './config/storage.config';
 import { validate } from './config/env.validation';
+import { requestFailureLogProps } from './common/request-failure-log';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { DatabaseModule } from './database/database.module';
@@ -186,8 +187,11 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
           formatters: {
             level: (label: string) => ({ level: label }),
           },
-          // Log only essential fields per request. reqId and responseTime are
-          // emitted at the top level by pino-http and survive automatically.
+          // Log only essential fields per request. `responseTime` is emitted
+          // at the top level by pino-http. The request id is NOT: without
+          // `quietReqLogger` it lives only on `req`, so the serializer below
+          // must copy it, or the id `genReqId` minted never reaches a line and
+          // an app log cannot be tied to its request line.
           //
           // The URL goes through `redactSensitiveQueryParameters` because the
           // header redaction above could never reach it: several credentials
@@ -200,7 +204,8 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
           // readable, so the URL keeps the debugging value it is logged for.
           // The full list and its justification live in `common/redact-url.ts`.
           serializers: {
-            req: (req: IncomingMessage) => ({
+            req: (req: IncomingMessage & { id?: unknown }) => ({
+              id: req.id,
               method: req.method,
               url: redactSensitiveQueryParameters(req.url),
             }),
@@ -211,6 +216,11 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
               stack: err.stack,
             }),
           },
+          // A failed request's line also carries why it failed and, when a
+          // session was resolved, whose it was. Successful lines stay as they
+          // are. See request-failure-log.ts for why the user id is limited
+          // to failures.
+          customProps: requestFailureLogProps,
           // Suppress 304 cache-hits ('silent' skips emission) and map status to
           // level so failures stand out (warn/error) while success stays info.
           customLogLevel: (

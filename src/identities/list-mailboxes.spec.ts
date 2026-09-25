@@ -692,6 +692,35 @@ describe('IdentitiesService.listMailboxesFor', () => {
     });
   });
 
+  it('leaves out a draft persona that has no conversation, since it was never published', async () => {
+    const fixture = makeFixture();
+    fixture.subprofiles.rows.find((row) => row.id === 'drag')!.status = 'draft';
+    // The draft check runs before the unread count: no thread holds "drag".
+    fixture.participants.query.getRawMany!.mockResolvedValueOnce([]);
+
+    const listedIdentityIds = (
+      await fixture.service.listMailboxesFor(MEMBER_ID)
+    ).map((mailbox) => mailbox.identityId);
+
+    expect(listedIdentityIds).not.toContain('drag-identity');
+    expect(listedIdentityIds).toContain('band-identity');
+  });
+
+  it('keeps a draft persona that already has a conversation, so an unpublished persona keeps its threads', async () => {
+    const fixture = makeFixture();
+    fixture.subprofiles.rows.find((row) => row.id === 'drag')!.status = 'draft';
+    fixture.participants.query.getRawMany!.mockResolvedValueOnce([
+      { identityId: 'drag-identity' },
+    ]);
+
+    const listedIdentityIds = (
+      await fixture.service.listMailboxesFor(MEMBER_ID)
+    ).map((mailbox) => mailbox.identityId);
+
+    expect(listedIdentityIds).toContain('drag-identity');
+    expect(fixture.participants.createQueryBuilder).toHaveBeenCalledTimes(2);
+  });
+
   it("fills shouldShowStaffNames from the identity's own column and shouldAllowMyName from one preference query, defaulting true when the caller's row is absent", async () => {
     const fixture = makeFixture({
       identities: [

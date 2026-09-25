@@ -28,6 +28,7 @@ import {
   DIRECTORY_CARD_HOURS_EXCEPTION_DAYS_AHEAD,
   toDirectoryCard,
 } from './listing-response';
+import { LISTING_TAG_GROUPS } from './listing-tags';
 
 /**
  * The public directory reads that changed with the 2026-08-25 "Local" build:
@@ -126,6 +127,7 @@ describe('DirectoryService public reads', () => {
   const makeQueryBuilder = () => {
     const chain: Record<string, jest.Mock> = {};
     for (const method of [
+      'addSelect',
       'where',
       'andWhere',
       'orderBy',
@@ -198,7 +200,10 @@ describe('DirectoryService public reads', () => {
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
         { provide: StorageService, useValue: {} },
-        { provide: DataSource, useValue: { transaction: jest.fn() } },
+        {
+          provide: DataSource,
+          useValue: { transaction: jest.fn() },
+        },
         // The batched open-suspension lookup every public card read now makes.
         // No suspensions in these fixtures, so it answers with an empty Map.
         {
@@ -481,6 +486,43 @@ describe('DirectoryService public reads', () => {
       expect(String(containmentCall()?.[0])).toContain(
         'CAST(:accessRequirement AS jsonb)',
       );
+    });
+  });
+
+  // --- "list your business" wizard: the curated tag vocabulary -------------
+  describe('listTagVocabulary', () => {
+    it('returns every curated group with its tags, in order', () => {
+      expect(service.listTagVocabulary()).toEqual(
+        LISTING_TAG_GROUPS.map((group) => ({
+          id: group.id,
+          tags: [...group.tags],
+        })),
+      );
+    });
+
+    it('starts with the visiting group and ends with the languages group', () => {
+      const groupIds = service.listTagVocabulary().map((group) => group.id);
+
+      expect(groupIds).toEqual([
+        'visiting',
+        'happening',
+        'foodDrink',
+        'pricing',
+        'languages',
+      ]);
+    });
+
+    it('hands out copies, so a caller mutating the response leaves the vocabulary intact', () => {
+      const [firstGroup] = service.listTagVocabulary();
+      firstGroup?.tags.push('Invented tag');
+
+      expect(LISTING_TAG_GROUPS[0]?.tags).not.toContain('Invented tag');
+    });
+
+    it('never reads the database', () => {
+      service.listTagVocabulary();
+
+      expect(listings.createQueryBuilder).not.toHaveBeenCalled();
     });
   });
 });

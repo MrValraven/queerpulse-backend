@@ -17,6 +17,7 @@ import {
   ListingSocial,
   ListingStatus,
 } from './entities/listing.entity';
+import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { Profile } from '../users/entities/profile.entity';
 
@@ -26,7 +27,9 @@ describe('ListingEditSuggestionsService', () => {
     findOne: jest.Mock;
     find: jest.Mock;
     save: jest.Mock<Promise<Partial<Listing>>, [Partial<Listing>]>;
+    manager: { transaction: jest.Mock };
   };
+  let moderationEvents: { save: jest.Mock };
   let suggestions: {
     create: jest.Mock;
     save: jest.Mock;
@@ -42,7 +45,20 @@ describe('ListingEditSuggestionsService', () => {
       findOne: jest.fn(),
       find: jest.fn(),
       save: jest.fn((listing: Partial<Listing>) => Promise.resolve(listing)),
+      // An applied correction saves the listing and its history row in one
+      // transaction. The stub runs the callback with a manager whose
+      // `withRepository` hands back the same mock, so `listings.save` still
+      // observes the write.
+      manager: {
+        transaction: jest.fn(
+          (work: (manager: { withRepository: jest.Mock }) => Promise<void>) =>
+            work({
+              withRepository: jest.fn((repository: unknown) => repository),
+            }),
+        ),
+      },
     };
+    moderationEvents = { save: jest.fn().mockResolvedValue(undefined) };
     suggestions = {
       create: jest.fn((input: Partial<ListingEditSuggestion>) => input),
       save: jest.fn(),
@@ -64,6 +80,10 @@ describe('ListingEditSuggestionsService', () => {
           useValue: suggestions,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        {
+          provide: getRepositoryToken(ListingModerationEvent),
+          useValue: moderationEvents,
+        },
         { provide: NotificationsService, useValue: notifications },
         {
           provide: AdminQueueNotificationsService,

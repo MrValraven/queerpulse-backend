@@ -20,12 +20,49 @@ import {
   ListingEditSuggestionStatus,
 } from './entities/listing-edit-suggestion.entity';
 import { Listing, ListingStatus } from './entities/listing.entity';
+import {
+  ListingModerationAction,
+  ListingModerationEvent,
+} from './entities/listing-moderation-event.entity';
 import { EditSuggestionDTO, toEditSuggestionDTO } from './listing-response';
 import {
+  AcceptedSuggestionTarget,
   collectAcceptedSuggestionValueErrors,
   isAcceptedSuggestionValueValid,
   resolveAcceptedSuggestionTarget,
 } from './accepted-suggestion-value';
+
+/**
+ * The `Listing` property a `suggestion_applied` history row names in
+ * `changedFields`. A phone number or website lives inside `social`, so both
+ * report that column; the other targets are columns of their own.
+ */
+const ACCEPTED_SUGGESTION_CHANGED_FIELD: Record<
+  AcceptedSuggestionTarget,
+  keyof Listing
+> = {
+  address: 'address',
+  phone: 'social',
+  website: 'social',
+  hoursNote: 'hoursNote',
+  tagline: 'tagline',
+};
+
+/**
+ * How the `suggestion_applied` reason names each target in plain language.
+ * The owner reads this reason in their listing history, so it names the field
+ * and leaves the value itself out.
+ */
+const ACCEPTED_SUGGESTION_FIELD_LABEL: Record<
+  AcceptedSuggestionTarget,
+  string
+> = {
+  address: 'the address',
+  phone: 'the phone number',
+  website: 'the website',
+  hoursNote: 'the opening-hours note',
+  tagline: 'the tagline',
+};
 
 export interface ListEditSuggestionsQueryInput {
   status?: ListingEditSuggestionStatus;
@@ -71,6 +108,8 @@ export class ListingEditSuggestionsService {
     @InjectRepository(ListingEditSuggestion)
     private readonly suggestions: Repository<ListingEditSuggestion>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    @InjectRepository(ListingModerationEvent)
+    private readonly moderationEvents: Repository<ListingModerationEvent>,
     private readonly notifications: NotificationsService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
@@ -253,7 +292,11 @@ export class ListingEditSuggestionsService {
     const saved = await this.suggestions.save(suggestion);
 
     if (saved.status === ListingEditSuggestionStatus.Accepted) {
-      await this.applyAcceptedBestEffort(saved, moderatorValue);
+      await this.applyAcceptedBestEffort(
+        saved,
+        moderatorValue,
+        moderatorUserId,
+      );
     }
 
     return { id: saved.id, status: saved.status };
@@ -346,10 +389,16 @@ export class ListingEditSuggestionsService {
    * through `isAcceptedSuggestionValueValid` below: a proposal was validated at
    * submit time, but the rules can be tightened between submit and accept, and
    * the check protecting the column belongs next to the write.
+   *
+   * A value that is actually written also records a `suggestion_applied`
+   * history row with `moderatorUserId` as its actor (see
+   * `saveAppliedCorrection`). The rejected-value branch and a field with no
+   * column write nothing, so the owner's history lists only real changes.
    */
   private async applyAcceptedBestEffort(
     suggestion: ListingEditSuggestion,
     moderatorValue: string | null,
+    moderatorUserId: string,
   ): Promise<void> {
     try {
       const listing = await this.listings.findOne({
@@ -377,14 +426,14 @@ export class ListingEditSuggestionsService {
           );
         } else if (target === 'phone') {
           listing.social = { ...listing.social, phone: valueToWrite };
-          await this.listings.save(listing);
+          await this.saveAppliedCorrection(listing, target, moderatorUserId);
         } else if (target === 'website') {
           listing.social = { ...listing.social, website: valueToWrite };
-          await this.listings.save(listing);
+          await this.saveAppliedCorrection(listing, target, moderatorUserId);
         } else {
           // 'address' | 'hoursNote' | 'tagline' — all plain string columns.
           listing[target] = valueToWrite;
-          await this.listings.save(listing);
+          await this.saveAppliedCorrection(listing, target, moderatorUserId);
         }
       }
 
@@ -406,6 +455,32 @@ export class ListingEditSuggestionsService {
       // committed; a failure here must not surface to the moderator as if
       // the accept itself failed.
     }
+  }
+
+  /**
+   * Saves a listing an accepted suggestion just corrected together with its
+   * `suggestion_applied` history row, in one transaction so the owner's
+   * history can never show a change the listing does not carry (or the
+   * reverse). The actor is the moderator who accepted; `fromStatus`/`toStatus`
+   * stay null because a correction moves no moderation state.
+   */
+  private async saveAppliedCorrection(
+    listing: Listing,
+    target: AcceptedSuggestionTarget,
+    moderatorUserId: string,
+  ): Promise<void> {
+    await this.listings.manager.transaction(async (manager) => {
+      await manager.withRepository(this.listings).save(listing);
+      await manager.withRepository(this.moderationEvents).save({
+        listingId: listing.id,
+        actorId: moderatorUserId,
+        action: ListingModerationAction.SuggestionApplied,
+        fromStatus: null,
+        toStatus: null,
+        reason: `A moderator applied a suggested correction to ${ACCEPTED_SUGGESTION_FIELD_LABEL[target]}.`,
+        changedFields: [ACCEPTED_SUGGESTION_CHANGED_FIELD[target]],
+      });
+    });
   }
 
   /** Mirrors `DirectoryService.loadLiveOr404` exactly (slug + `Live` status +

@@ -1,9 +1,36 @@
+import { MemberRef } from '../../common/member-ref';
 import {
   ListingModerationAction,
   ListingModerationEvent,
 } from '../entities/listing-moderation-event.entity';
 import { ListingQuestion } from '../entities/listing-question.entity';
 import { ListingStatus } from '../entities/listing.entity';
+
+/**
+ * Who an owner is told acted on a history row. A discriminated union so the
+ * three cases are exhaustive in the type, and so a staff row structurally has
+ * no place to carry a person:
+ *
+ *  - `team`: the listing's current team acted, and `member` names them. The
+ *    team is the current owner plus every member whose ACCEPTED co-manager
+ *    seat on the listing is still live or ended after the latest ownership
+ *    transfer (any accepted seat, when there was no transfer). `member` is
+ *    `null` when the account was erased (`actorId` is `ON DELETE SET NULL`)
+ *    or has no profile to show.
+ *  - `previous_team`: a team action from before the latest ownership
+ *    transfer. Who it was stays unsaid, and so does the row's `reason`.
+ *  - `moderation`: the platform or its staff acted. That includes a team
+ *    action whose actor is outside the team, such as an admin revoking a seat
+ *    through `ListingCoManagersService.staffRevokeCoManager`, which writes a
+ *    `co_manager_removed` row with the admin as `actorId`. Staff identity is
+ *    internal.
+ *
+ * Decided in one place, `resolveOwnerHistoryActor`.
+ */
+export type OwnerHistoryActorDTO =
+  | { kind: 'team'; member: MemberRef | null }
+  | { kind: 'previous_team' }
+  | { kind: 'moderation' };
 
 /**
  * The OWNER-facing twin of `ListingModerationEventDTO` (C3), returned by
@@ -14,20 +41,30 @@ import { ListingStatus } from '../entities/listing.entity';
  *
  * The differences, all of them deliberate:
  *
- *  - There is NO `actor` field at all. The admin row carries a `MemberRef` for
- *    the moderator who acted; this one omits the key rather than always
- *    sending `null`, so no future mapper edit can accidentally start
- *    populating it. The platform's other moderation surfaces already treat
- *    staff identity as internal, and this endpoint follows that.
- *  - `reason` is withheld unless the text was written BY the platform rather
- *    than typed by a person. See `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`.
+ *  - `actor` is an `OwnerHistoryActorDTO`, which names a person only for a
+ *    team action taken after the latest ownership transfer by someone on the
+ *    listing's team. The admin row carries a `MemberRef` for whoever acted;
+ *    this one reduces a staff action to `moderation`, because the platform's
+ *    other moderation surfaces already treat staff identity as internal. A
+ *    team action from before the latest transfer becomes `previous_team`: a
+ *    claimant who wins a listing inherits its history, and learning who ran
+ *    the business before them would hand them the displaced owner's identity,
+ *    the same disclosure `notifyDisplacedOwnerBestEffort` refuses to make in
+ *    the other direction.
+ *  - `reason` is shown only when the platform composed the text (see
+ *    `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`), and it is dropped on a
+ *    `previous_team` row too, because the co-manager reasons spell out a
+ *    member's name and would undo the anonymised actor beside them.
  *  - `hasModeratorNote` replaces the withheld text with the one bit an owner
- *    can act on: a human wrote something about this event, and the wording
- *    reached them through the send-back/removal DM the moderation flow already
- *    sends.
+ *    can act on: a moderator wrote something about this event, and the
+ *    wording reached the owner through the send-back/removal DM the
+ *    moderation flow already sends. See `isModeratorNoteSentToOwner`.
+ *  - `changedFields` is the one field the owner row carries and the admin
+ *    row does not: the `Listing` properties an owner edit or an applied
+ *    suggestion changed, so the owner's timeline can say what moved.
  *
- * Everything else (`id`, `action`, `fromStatus`, `toStatus`, `createdAt`)
- * matches the admin row field for field, so a frontend can render both
+ * The shared fields (`id`, `action`, `fromStatus`, `toStatus`, `createdAt`)
+ * match the admin row field for field, so a frontend can render both
  * timelines from one component.
  */
 export interface OwnerListingModerationEventDTO {
@@ -36,20 +73,50 @@ export interface OwnerListingModerationEventDTO {
   fromStatus: ListingStatus | null;
   toStatus: ListingStatus | null;
   /**
-   * The event's reason text, or `null` when the owner may not see it. Only
-   * ever non-null for an action listed in
-   * `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`.
+   * The event's reason text, or `null` when the owner may not see it.
+   * Non-null only for an action listed in
+   * `OWNER_VISIBLE_MODERATION_REASON_ACTIONS` on a row whose actor is not
+   * `previous_team`.
    */
   reason: string | null;
   /**
-   * `true` when this event carries a reason the owner is not shown. Lets the
+   * `true` when a moderator wrote a note on this event AND that note was
+   * DM'd to the listing's owner (`isModeratorNoteSentToOwner`). Lets the
    * frontend say "a moderator left a note about this" and point at the
-   * member's messages, without putting the note itself on screen.
+   * member's messages, without putting the note itself on screen. `false` on
+   * every row whose reason stayed internal or was composed by the platform.
    */
   hasModeratorNote: boolean;
+  /** Who acted, as far as the owner may know. See `OwnerHistoryActorDTO`. */
+  actor: OwnerHistoryActorDTO;
+  /**
+   * The `Listing` property names this event changed, on `owner_edited` and
+   * `suggestion_applied` rows. `null` on every other action and on rows
+   * written before the column existed.
+   */
+  changedFields: string[] | null;
   /** ISO 8601 timestamp. */
   createdAt: string;
 }
+
+/**
+ * The actions a listing's own team takes: the owner or a co-manager editing
+ * the page, changing who co-manages it, or pausing and resuming it in the
+ * directory. Only these rows can name a person to the owner, and only when
+ * the actor belongs to the listing's team (`resolveOwnerHistoryActor`), since
+ * staff can write one of these actions too.
+ *
+ * An allowlist, on purpose: a new `ListingModerationAction` added later reads
+ * as `moderation` until someone decides its actor is a team member and adds
+ * it here.
+ */
+export const LISTING_TEAM_ACTIONS: readonly ListingModerationAction[] = [
+  ListingModerationAction.OwnerEdited,
+  ListingModerationAction.CoManagerAdded,
+  ListingModerationAction.CoManagerRemoved,
+  ListingModerationAction.DirectoryPaused,
+  ListingModerationAction.DirectoryResumed,
+];
 
 /**
  * The ONLY actions whose `reason` string an owner is allowed to read.
@@ -64,6 +131,10 @@ export interface OwnerListingModerationEventDTO {
  * `ListingsService.update` out of `OWNER_EDITABLE_FIELD_LABELS`: plain
  * language naming the fields the owner themself just changed. There is no
  * human-typed text in it, and it is a description of the owner's own action.
+ *
+ * `staff_created` qualifies for the same reason: `recordStaffCreated` writes
+ * one of two fixed platform sentences (published straight away, or sent to
+ * the moderation queue) and nothing a person typed.
  *
  * Every other action's reason is free text somebody typed for a moderator's
  * eyes, and two of them are actively unsafe to forward:
@@ -99,9 +170,48 @@ export const OWNER_VISIBLE_MODERATION_REASON_ACTIONS: readonly ListingModeration
     // already gives them: who else can edit the page is operational fact for
     // anyone who can edit the page. It is not the owner's personal data (see
     // `listing-owner-personal-fields.ts` for what is), and it is not public.
+    //
+    // On a `previous_team` row `toOwnerListingModerationEventDTO` drops these
+    // reasons again, so a member who won the listing by transfer reads no
+    // names from the team that ran it before them.
     ListingModerationAction.CoManagerAdded,
     ListingModerationAction.CoManagerRemoved,
+    // Composed by the platform when a moderator applies a member's edit
+    // suggestion: a fixed sentence naming the field's LABEL. It never quotes
+    // the suggested value or the suggester, so it tells the owner which part
+    // of their page changed and nothing about who proposed it.
+    ListingModerationAction.SuggestionApplied,
+    // One of two fixed sentences from `ListingsService.recordStaffCreated`.
+    ListingModerationAction.StaffCreated,
   ];
+
+/**
+ * Whether this event's moderator note was actually DM'd to the listing's
+ * owner, which is the only case `hasModeratorNote` may be `true`: the owner
+ * UI tells them the note is in their messages.
+ *
+ * Mirrors the DM paths in `ListingsService` exactly:
+ *
+ *  - `status_changed` (`setStatus`) and `bulk_status` (`bulkSetStatus`) DM
+ *    the owner `statusChangeMessage`, reason included, on every transition
+ *    to a status other than `live`. A transition into `live` sends the
+ *    `ListingApproved` notification instead, which carries no note.
+ *  - `removed` (`removeByModerator` / `bulkRemove`) DMs the owner the
+ *    removal, reason included.
+ *
+ * Every other action's reason stays internal or was composed by the
+ * platform, so it never reached the owner as a moderator's note.
+ */
+export function isModeratorNoteSentToOwner(
+  event: Pick<ListingModerationEvent, 'action' | 'toStatus' | 'reason'>,
+): boolean {
+  if (event.reason === null) return false;
+  if (event.action === ListingModerationAction.Removed) return true;
+  const isStatusAction =
+    event.action === ListingModerationAction.StatusChanged ||
+    event.action === ListingModerationAction.BulkStatus;
+  return isStatusAction && event.toStatus !== ListingStatus.Live;
+}
 
 /**
  * The owner-facing twin of `ListingQuestionDTO`. Same fields minus `askedBy`:
@@ -130,6 +240,11 @@ export interface OwnerListingQuestionDTO {
  * is a short thread on a single listing, so it is returned whole under a cap
  * rather than paginated on its own axis, matching how the admin endpoint
  * returns it.
+ *
+ * `questions` holds only the questions asked strictly after the latest
+ * ownership transfer (all of them when there was none). An answer is free
+ * text the owner of the day typed, and it routinely names them, so the
+ * previous owner's thread stays with the previous team.
  */
 export interface OwnerListingHistoryDTO {
   events: OwnerListingModerationEventDTO[];
@@ -140,9 +255,66 @@ export interface OwnerListingHistoryDTO {
   pageSize: number;
 }
 
+/**
+ * THE one place the owner-facing actor is decided. Pure, so the whole rule is
+ * testable without a Nest module:
+ *
+ *  - an action outside `LISTING_TEAM_ACTIONS` is `moderation`;
+ *  - a team action at or before `latestTransferAt` (the newest
+ *    `ownership_transferred` row) is `previous_team`, so a new owner never
+ *    learns who ran the listing before them;
+ *  - a team action by an erased actor (`actorId` null) is `team` with
+ *    `member: null`. It runs before the team-membership check, so an erased
+ *    admin's seat revocation also reads as an unnamed team member: once
+ *    `actorId` is null the two rows are identical, and an unnamed member
+ *    discloses no one. Accepted on purpose; any future change here must stay
+ *    free of identity lookups for a null actor;
+ *  - a team action whose actor is outside `teamMemberIds` is `moderation`.
+ *    Staff write `co_manager_removed` when an admin revokes a seat, and the
+ *    admin must stay unnamed;
+ *  - every other team action is `team`, named from `membersByUserId`, or with
+ *    `member: null` when the actor has no profile.
+ *
+ * `teamMemberIds` is the listing's current owner plus every member whose
+ * accepted co-manager seat is still live or ended after the latest transfer
+ * (the caller builds it). `membersByUserId` only needs the actors of `team`
+ * rows; the caller resolves no other ids.
+ */
+export function resolveOwnerHistoryActor(
+  event: Pick<ListingModerationEvent, 'action' | 'actorId' | 'createdAt'>,
+  latestTransferAt: Date | null,
+  teamMemberIds: ReadonlySet<string>,
+  membersByUserId: Map<string, MemberRef>,
+): OwnerHistoryActorDTO {
+  if (!LISTING_TEAM_ACTIONS.includes(event.action)) {
+    return { kind: 'moderation' };
+  }
+  if (
+    latestTransferAt !== null &&
+    event.createdAt.getTime() <= latestTransferAt.getTime()
+  ) {
+    return { kind: 'previous_team' };
+  }
+  if (event.actorId === null) {
+    return { kind: 'team', member: null };
+  }
+  if (!teamMemberIds.has(event.actorId)) {
+    return { kind: 'moderation' };
+  }
+  return {
+    kind: 'team',
+    member: membersByUserId.get(event.actorId) ?? null,
+  };
+}
+
 export function toOwnerListingModerationEventDTO(
   event: ListingModerationEvent,
+  actor: OwnerHistoryActorDTO,
 ): OwnerListingModerationEventDTO {
+  // A `previous_team` row loses its reason as well: the co-manager reasons
+  // name a member, which would undo the anonymised actor. Nothing a moderator
+  // wrote is hidden by this, so it raises no moderator-note flag either.
+  const isPreviousTeam = actor.kind === 'previous_team';
   const isReasonOwnerVisible = OWNER_VISIBLE_MODERATION_REASON_ACTIONS.includes(
     event.action,
   );
@@ -151,8 +323,10 @@ export function toOwnerListingModerationEventDTO(
     action: event.action,
     fromStatus: event.fromStatus,
     toStatus: event.toStatus,
-    reason: isReasonOwnerVisible ? event.reason : null,
-    hasModeratorNote: !isReasonOwnerVisible && event.reason !== null,
+    reason: isReasonOwnerVisible && !isPreviousTeam ? event.reason : null,
+    hasModeratorNote: !isPreviousTeam && isModeratorNoteSentToOwner(event),
+    actor,
+    changedFields: event.changedFields ?? null,
     createdAt: event.createdAt.toISOString(),
   };
 }

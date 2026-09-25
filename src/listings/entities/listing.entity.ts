@@ -82,7 +82,8 @@ export interface SafeSpaceRemoval {
   whatNow: string;
 }
 
-/** A single "what it actually is" bullet — mirrors the frontend's `WitLine`. */
+/** One paragraph of the listing's markdown-lite description. Mirrors the
+ *  frontend's `WitLine`. */
 export interface ListingWitLine {
   id: string;
   text: string;

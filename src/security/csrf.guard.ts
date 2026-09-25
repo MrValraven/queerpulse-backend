@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   ForbiddenException,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
@@ -85,6 +86,7 @@ function parentDomainOf(hostname: string): string | null {
 
 @Injectable()
 export class CsrfGuard implements CanActivate {
+  private readonly logger = new Logger(CsrfGuard.name);
   // Resolved once: the allowlist comes from FRONTEND_URL, which cannot change
   // without a restart.
   private cachedOrigins: Set<string> | null = null;
@@ -131,7 +133,7 @@ export class CsrfGuard implements CanActivate {
     // controls. Browsers always attach `Origin` to a state-changing request.
     const origin = req.headers.origin;
     if (typeof origin === 'string' && !this.allowedOrigins().has(origin)) {
-      throw new ForbiddenException('Origin not allowed');
+      throw this.reject(req, 'origin-not-allowed', 'Origin not allowed');
     }
 
     // `Sec-Fetch-Site` is the companion signal, and whether this guard may act
@@ -162,7 +164,7 @@ export class CsrfGuard implements CanActivate {
       req.headers['sec-fetch-site'] === CROSS_SITE_FETCH_LABEL &&
       this.isSameSiteDeployment()
     ) {
-      throw new ForbiddenException('Cross-site request rejected');
+      throw this.reject(req, 'cross-site', 'Cross-site request rejected');
     }
 
     // Read ONLY the environment's active cookie name — in production the
@@ -180,9 +182,43 @@ export class CsrfGuard implements CanActivate {
       typeof headerToken !== 'string' ||
       !this.safeEqual(cookieToken, headerToken)
     ) {
-      throw new ForbiddenException('Invalid or missing CSRF token');
+      // The client sees one message for all three token failures; the log
+      // splits them, since each points at a different cause.
+      const reason =
+        typeof cookieToken !== 'string'
+          ? 'cookie-missing'
+          : typeof headerToken !== 'string'
+            ? 'header-missing'
+            : 'token-mismatch';
+      throw this.reject(req, reason, 'Invalid or missing CSRF token');
     }
     return true;
+  }
+
+  /**
+   * Log why a mutation was refused, then hand back the 403 to throw. The
+   * request line already carries the 403's message (see
+   * request-failure-log.ts); this line adds what that message cannot say:
+   * which token check failed, and the Origin, Sec-Fetch-Site and token
+   * presence the browser sent. It records only whether each token was sent,
+   * and uses `req.path` so a credential in the query string stays out of it.
+   */
+  private reject(
+    req: Request,
+    reason: string,
+    message: string,
+  ): ForbiddenException {
+    const cookieName = csrfCookieName(this.config.get<string>('app.nodeEnv'));
+    const hasCookie = typeof req.cookies?.[cookieName] === 'string';
+    const hasHeader = typeof req.headers['x-csrf-token'] === 'string';
+    this.logger.warn(
+      `csrf-rejected reason=${reason} method=${req.method} path=${req.path} ` +
+        `origin=${JSON.stringify(req.headers.origin ?? null)} ` +
+        `secFetchSite=${JSON.stringify(req.headers['sec-fetch-site'] ?? null)} ` +
+        `cookie=${hasCookie ? 'present' : 'missing'} ` +
+        `header=${hasHeader ? 'present' : 'missing'}`,
+    );
+    return new ForbiddenException(message);
   }
 
   /**

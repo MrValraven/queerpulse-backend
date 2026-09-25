@@ -224,9 +224,18 @@ export class ListingsController {
   // what has already happened to it, including the `owner_edited` rows their
   // own edits write. The moderator's view of the same table is
   // `GET /admin/listings/:ref/history`; the two envelopes agree field for
-  // field except where this one deliberately withholds (no actor identity, no
-  // human-typed reason text). See `owner-listing-history.dto.ts` for the rule
-  // and `ListingsService.getOwnerListingHistory` for why.
+  // field except where this one deliberately differs. The actor is named only
+  // for the current team's own actions after the latest ownership transfer,
+  // and only when the actor is the owner or holds an accepted co-manager seat
+  // that is live or ended after that transfer. Earlier team actions read as
+  // the previous team, with their reason withheld; staff actions, and team
+  // actions by anyone outside the team, read as moderation. Human-typed
+  // reason text is withheld, and `hasModeratorNote` is set only where that
+  // note was DM'd to the owner. The Q&A thread starts at the latest transfer.
+  // The one wider field is `changedFields`, which lists the properties an
+  // owner edit or an applied suggestion changed. See
+  // `owner-listing-history.dto.ts` for the rule and
+  // `ListingsService.getOwnerListingHistory` for why.
   @Get(':ref/history')
   @ApiOperation({
     summary: "Get the moderation history of one of the member's own listings",

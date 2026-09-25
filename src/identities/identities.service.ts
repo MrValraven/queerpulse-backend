@@ -11,7 +11,10 @@ import {
 } from '../listings/entities/listing-co-manager.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
-import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileStatus,
+} from '../subprofiles/entities/subprofile.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { countUnreadConversationsByIdentity } from '../messaging/unread-conversations-query';
 import { Profile } from '../users/entities/profile.entity';
@@ -127,7 +130,8 @@ export class IdentitiesService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     // Only `listMailboxesFor` reads this, for the member's own seats in each
-    // mailbox (`countUnreadConversationsByIdentity`).
+    // mailbox (`countUnreadConversationsByIdentity`) and for whether a draft
+    // persona has any thread (`withoutNeverPublishedPersonas`).
     @InjectRepository(ConversationParticipant)
     private readonly participants: Repository<ConversationParticipant>,
     // Task 20: only `listMailboxesFor` reads this, for the caller's own
@@ -528,8 +532,8 @@ export class IdentitiesService {
   /**
    * Task 15 fix round 1: which of `subprofileIds` moderation removed
    * (`subprofiles.removed_at` set), in one query. The single answer to "may
-   * this persona still speak", read by `assertMayActAs` and by
-   * `listMailboxesFor` for `isReadOnly`.
+   * this persona still speak", read by `assertMayActAs`. `listMailboxesFor`
+   * reads the same column in its own persona read, for `isReadOnly`.
    */
   private async removedSubprofileIds(
     subprofileIds: ReadonlyArray<string>,
@@ -566,43 +570,61 @@ export class IdentitiesService {
    * its `identities` row: a business made before that table, which nothing
    * has touched since, gets its row here, in one batched insert (see
    * `ensureMailboxIdentities`).
+   *
+   * A persona that was never published is left out: it is a draft with no
+   * conversation (`withoutNeverPublishedPersonas`).
    */
   async listMailboxesFor(userId: string): Promise<MailboxSummaryDto[]> {
     const staffedMailboxes = await this.staffedMailboxesFor(userId);
     const identityByMailbox =
       await this.ensureMailboxIdentities(staffedMailboxes);
-    const resolvedMailboxes = staffedMailboxes.flatMap((mailbox) => {
+    const staffedWithIdentities = staffedMailboxes.flatMap((mailbox) => {
       const identity = identityByMailbox.get(mailboxKey(mailbox));
       return identity
         ? [{ ...mailbox, identityId: identity.id, identity }]
         : [];
     });
+    // ONE read of every listed persona, for both `isReadOnly` (moderation
+    // removed it) and the never-published filter.
+    const personaIds = staffedWithIdentities
+      .filter((mailbox) => mailbox.kind === IdentityKind.Subprofile)
+      .map((mailbox) => mailbox.ownerEntityId);
+    const personaStates = personaIds.length
+      ? await this.subprofiles.find({
+          where: { id: In(personaIds) },
+          select: { id: true, removedAt: true, status: true },
+        })
+      : [];
+    const removedSubprofileIds = new Set(
+      personaStates
+        .filter((subprofile) => subprofile.removedAt != null)
+        .map((subprofile) => subprofile.id),
+    );
+    const resolvedMailboxes = await this.withoutNeverPublishedPersonas(
+      staffedWithIdentities,
+      new Set(
+        personaStates
+          .filter((subprofile) => subprofile.status === SubprofileStatus.Draft)
+          .map((subprofile) => subprofile.id),
+      ),
+    );
     const identityIds = resolvedMailboxes.map((mailbox) => mailbox.identityId);
-    const [
-      descriptionById,
-      unreadCountById,
-      removedSubprofileIds,
-      ownPreferenceRows,
-    ] = await Promise.all([
-      this.describeIdentities(identityIds),
-      countUnreadConversationsByIdentity(
-        this.participants,
-        userId,
-        identityIds,
-      ),
-      this.removedSubprofileIds(
-        resolvedMailboxes
-          .filter((mailbox) => mailbox.kind === IdentityKind.Subprofile)
-          .map((mailbox) => mailbox.ownerEntityId),
-      ),
-      // Task 20: ONE query for the caller's own preference rows across every
-      // listed mailbox, never one per mailbox.
-      identityIds.length
-        ? this.preferences.find({
-            where: { identityId: In(identityIds), userId },
-          })
-        : Promise.resolve([]),
-    ]);
+    const [descriptionById, unreadCountById, ownPreferenceRows] =
+      await Promise.all([
+        this.describeIdentities(identityIds),
+        countUnreadConversationsByIdentity(
+          this.participants,
+          userId,
+          identityIds,
+        ),
+        // Task 20: ONE query for the caller's own preference rows across every
+        // listed mailbox, never one per mailbox.
+        identityIds.length
+          ? this.preferences.find({
+              where: { identityId: In(identityIds), userId },
+            })
+          : Promise.resolve([]),
+      ]);
     const shouldAllowMyNameByIdentityId = new Map(
       ownPreferenceRows.map((row) => [row.identityId, row.shouldAllowNaming]),
     );
@@ -635,6 +657,43 @@ export class IdentitiesService {
           MAILBOX_KIND_ORDER.indexOf(second.kind) ||
         (first.displayName ?? '').localeCompare(second.displayName ?? '') ||
         first.identityId.localeCompare(second.identityId),
+    );
+  }
+
+  /**
+   * `mailboxes` minus every draft persona (`draftSubprofileIds`) that holds
+   * no conversation: one never published, so nobody could reach it and it
+   * has nothing to read. A persona unpublished after it had threads keeps
+   * its mailbox, so its staff can still answer them. Costs one query, and
+   * only when some listed persona is a draft.
+   */
+  private async withoutNeverPublishedPersonas<
+    Mailbox extends StaffedMailbox & { identityId: string },
+  >(
+    mailboxes: Mailbox[],
+    draftSubprofileIds: ReadonlySet<string>,
+  ): Promise<Mailbox[]> {
+    const isDraftPersona = (mailbox: Mailbox) =>
+      mailbox.kind === IdentityKind.Subprofile &&
+      draftSubprofileIds.has(mailbox.ownerEntityId);
+    const draftIdentityIds = mailboxes
+      .filter(isDraftPersona)
+      .map((mailbox) => mailbox.identityId);
+    if (draftIdentityIds.length === 0) {
+      return mailboxes;
+    }
+    const rowsWithThreads = await this.participants
+      .createQueryBuilder('p')
+      .select('DISTINCT p.identity_id', 'identityId')
+      .where('p.identity_id IN (:...draftIdentityIds)', { draftIdentityIds })
+      .getRawMany<{ identityId: string }>();
+    const identityIdsWithThreads = new Set(
+      rowsWithThreads.map((row) => row.identityId),
+    );
+    return mailboxes.filter(
+      (mailbox) =>
+        !isDraftPersona(mailbox) ||
+        identityIdsWithThreads.has(mailbox.identityId),
     );
   }
 

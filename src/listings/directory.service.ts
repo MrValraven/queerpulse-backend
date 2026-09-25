@@ -52,6 +52,7 @@ import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.d
 import { CreateListingReviewDto } from './dto/create-review.dto';
 import { ListListingDirectoryQuery } from './dto/list-directory.query';
 import { ListingAccessibilityAnswer } from './listing-accessibility';
+import { LISTING_TAG_GROUPS } from './listing-tags';
 import {
   ListingPublicQuestionDTO,
   ListingQuestionAsker,
@@ -73,6 +74,7 @@ import {
   DIRECTORY_DETAIL_QUESTION_LIMIT,
   DirectoryCardDTO,
   DirectoryDetailDTO,
+  ListingTagGroupDTO,
   MovedToListingView,
   PartnerSpaceDTO,
   RemovedSpaceCardDTO,
@@ -84,6 +86,7 @@ import {
   listingPhotoKeys,
   toDirectoryCard,
   toDirectoryDetail,
+  toListingTagGroupDTO,
   toPartnerSpace,
   toRemovedSpaceCard,
   toRemovedSpaceDetail,
@@ -408,6 +411,17 @@ export class DirectoryService {
   }
 
   /**
+   * The curated tag vocabulary (`LISTING_TAG_GROUPS`), for the "list your
+   * business" wizard's tag picker (`GET /directory/tags`). The write paths in
+   * `ListingsService` validate against the same list, so the picker can only
+   * offer tags a save will accept. Copied per call so a caller cannot mutate
+   * the shared constant.
+   */
+  listTagVocabulary(): ListingTagGroupDTO[] {
+    return LISTING_TAG_GROUPS.map(toListingTagGroupDTO);
+  }
+
+  /**
    * Builds the shared `WHERE`/`ORDER BY` for the public directory grid — cat/
    * q/safe filters, the moderation takedown exclusion, and the
    * verified-safe-space-first ordering — factored out so both the bare
@@ -581,6 +595,16 @@ export class DirectoryService {
    * grid (never the owner-scoped `ListingDTO`, which carries contact/consent
    * PII). An unknown or inactive slug simply yields an empty array (200): a
    * member may run no listings, so this is not a 404 case.
+   *
+   * Only listings whose owner is publicly named appear here, by the same rule
+   * as `isOwnerPubliclyNamed` in listing-response: `linkToProfile` is on AND
+   * the chosen visibility is neither `anon` nor `role` (an unset or legacy
+   * value counts as public, as it does there). The strip sits on the member's
+   * own profile, so listing a business here IS the tie between that person
+   * and the business. An owner who picked "anonymous" or "role only", or who
+   * kept the listing off their profile, asked for exactly that tie to stay
+   * unpublished, and the card's own redaction cannot undo it once the card is
+   * rendered under their name.
    */
   async listByMemberSlug(memberSlug: string): Promise<DirectoryCardDTO[]> {
     const ownerUserId = await new MemberLookup(this.profiles).userIdForSlug(
@@ -596,6 +620,10 @@ export class DirectoryService {
         // they run now, so a business they closed for good leaves the strip,
         // and so does one whose listing they have paused.
         ...DirectoryService.PUBLICLY_LISTED,
+        // `isOwnerPubliclyNamed`, applied in the query so `take` stays honest.
+        // `visibility` is a NOT NULL column, so `NOT IN` keeps the unset ''.
+        linkToProfile: true,
+        visibility: Not(In(['anon', 'role'])),
       },
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,

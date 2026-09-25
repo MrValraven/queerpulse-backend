@@ -3,6 +3,7 @@ import { BaseExceptionFilter } from '@nestjs/core';
 import * as Sentry from '@sentry/node';
 import { STATUS_CODES } from 'node:http';
 import type { Response } from 'express';
+import { recordRequestFailure } from './request-failure-log';
 
 /**
  * Global catch-all filter with two jobs:
@@ -47,6 +48,12 @@ export class AllExceptionsFilter extends BaseExceptionFilter {
     const isHttp = exception instanceof HttpException;
     const status = isHttp ? exception.getStatus() : 500;
     const responseBody = isHttp ? exception.getResponse() : undefined;
+    if (isHttp) {
+      recordRequestFailure(
+        host.switchToHttp().getResponse<Response>(),
+        exception,
+      );
+    }
 
     // A platform lockdown rejection (503, code PLATFORM_LOCKED) is a
     // deliberate operator action, not an incident: while the switch is on,

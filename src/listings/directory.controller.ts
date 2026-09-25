@@ -92,8 +92,9 @@ export const SAFE_SPACE_READ_CDN_CACHE = 'public, s-maxage=60';
  * unconditionally requires an active member), so public reads cannot live under
  * it. Every route here is `@Public()` and there is no class guard.
  *
- * `spaces` is a static segment declared before the `:slug` detail route (added
- * in a later sub-project) so route matching resolves it literally.
+ * `spaces` and `tags` are static segments declared before the `:slug` detail
+ * route (added in a later sub-project) so route matching resolves them
+ * literally.
  *
  * Every read here carries a positive cache header (AUDIT-2026-07-30.md §I
  * "No CDN cache headers on public GETs"), so Vercel's CDN can answer repeat
@@ -137,6 +138,25 @@ export class DirectoryController {
   @ApiOkResponse({ description: 'The partner spaces.' })
   listPartnerSpaces() {
     return this.directoryService.listPartnerSpaces();
+  }
+
+  // The curated listing tag vocabulary, grouped, for the "list your business"
+  // wizard and the listing editor's tag picker. Static data, so it caches like
+  // every other public read here. A static segment, so it sits above the
+  // `:slug` detail route.
+  @Public()
+  @Get('tags')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
+  @ApiOperation({
+    summary: 'List the curated listing tag vocabulary, grouped',
+  })
+  @ApiOkResponse({
+    description:
+      'Every `{ id, tags }` group a listing may pick tags from, in display order. Tags are the stored English values; create and update reject anything else.',
+  })
+  listTagVocabulary() {
+    return this.directoryService.listTagVocabulary();
   }
 
   // Public directory grid — every live listing, optionally filtered. Bare

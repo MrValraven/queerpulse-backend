@@ -1,4 +1,7 @@
-import { EMAIL_LIMITS } from './email-template-content';
+import {
+  EMAIL_FEATURE_ITEMS_MAX,
+  EMAIL_LIMITS,
+} from './email-template-content';
 import { placeholdersIn } from './email-template-purposes';
 import { validateEmailTemplateLocales } from './email-template-validation';
 
@@ -230,5 +233,247 @@ describe('validateEmailTemplateLocales', () => {
         'invite_approved',
       ),
     ).toContain('en.blocks[0].type: unknown block type');
+  });
+});
+
+describe('validateEmailTemplateLocales: designed blocks', () => {
+  function errorsForBlock(block: Record<string, unknown>) {
+    return errorsOf(
+      { en: validLocale({ blocks: [block] }) },
+      'invite_approved',
+    );
+  }
+
+  function acceptedBlock(block: Record<string, unknown>) {
+    const result = validateEmailTemplateLocales(
+      { en: validLocale({ blocks: [block] }) },
+      'invite_approved',
+    );
+    expect(result.isValid).toBe(true);
+    return result.isValid ? result.locales.en.blocks[0] : undefined;
+  }
+
+  const hero = {
+    id: 'hero-1',
+    type: 'hero',
+    eyebrow: "You're in",
+    headline: 'Welcome in, *{name}*.',
+    text: 'We would love to have you here.',
+  };
+  const ticket = {
+    id: 'ticket-1',
+    type: 'ticket',
+    label: 'Your invite',
+    title: 'Valid until {expiresOn}',
+    text: 'This link is yours alone.',
+    buttonLabel: 'Join QueerPulse',
+    href: '{inviteLink}',
+  };
+  const featureItem = {
+    icon: 'communities',
+    title: 'Communities',
+    text: 'Find your people.',
+  };
+  const featureList = {
+    id: 'features-1',
+    type: 'featureList',
+    items: [featureItem],
+  };
+  const signature = {
+    id: 'signature-1',
+    type: 'signature',
+    name: 'The QueerPulse team',
+    role: '',
+    note: 'See you inside.',
+    photoUrl: '',
+  };
+
+  it('accepts a hero, trims it and stores empty optional fields as empty text', () => {
+    expect(
+      acceptedBlock({
+        ...hero,
+        eyebrow: '  ',
+        text: undefined,
+        headline: '  Hi  ',
+        extra: 'dropped',
+      }),
+    ).toEqual({
+      id: 'hero-1',
+      type: 'hero',
+      eyebrow: '',
+      headline: 'Hi',
+      text: '',
+    });
+  });
+
+  it('requires a hero headline', () => {
+    expect(errorsForBlock({ ...hero, headline: ' ' })).toContain(
+      'en.blocks[0].headline: is required',
+    );
+  });
+
+  it('accepts a ticket with an empty text', () => {
+    expect(acceptedBlock({ ...ticket, text: '' })).toEqual({
+      ...ticket,
+      text: '',
+    });
+  });
+
+  it('requires the ticket label, title, button label and link', () => {
+    const errors = errorsForBlock({
+      id: 'ticket-1',
+      type: 'ticket',
+      text: 'Hello',
+    });
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        'en.blocks[0].label: must be text',
+        'en.blocks[0].title: must be text',
+        'en.blocks[0].buttonLabel: must be text',
+        'en.blocks[0].href: must be text',
+      ]),
+    );
+  });
+
+  it('holds a ticket link to the same rule as a button', () => {
+    expect(errorsForBlock({ ...ticket, href: 'http://example.com' })).toContain(
+      'en.blocks[0].href: must be an https:// address or a single placeholder',
+    );
+  });
+
+  it('accepts a feature list and drops unknown item fields', () => {
+    expect(
+      acceptedBlock({
+        ...featureList,
+        items: [{ ...featureItem, colour: 'red' }],
+      }),
+    ).toEqual(featureList);
+  });
+
+  it('rejects a feature icon outside the list', () => {
+    const errors = errorsForBlock({
+      ...featureList,
+      items: [featureItem, { ...featureItem, icon: 'rocket' }],
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(
+      /^en\.blocks\[0\]\.items\[1\]\.icon: must be one of/,
+    );
+  });
+
+  it('names a missing feature title by its item', () => {
+    expect(
+      errorsForBlock({
+        ...featureList,
+        items: [featureItem, { ...featureItem, title: '' }],
+      }),
+    ).toContain('en.blocks[0].items[1].title: is required');
+  });
+
+  it('holds a feature list to one to four items', () => {
+    expect(errorsForBlock({ ...featureList, items: [] })).toContain(
+      'en.blocks[0].items: add at least one item',
+    );
+    expect(
+      errorsForBlock({
+        ...featureList,
+        items: Array.from(
+          { length: EMAIL_FEATURE_ITEMS_MAX + 1 },
+          () => featureItem,
+        ),
+      }),
+    ).toContain(`en.blocks[0].items: at most ${EMAIL_FEATURE_ITEMS_MAX} items`);
+  });
+
+  it('accepts a signature with or without an https photo', () => {
+    expect(acceptedBlock(signature)).toEqual(signature);
+    const withPhoto = { ...signature, photoUrl: 'https://x.test/kai.png' };
+    expect(acceptedBlock(withPhoto)).toEqual(withPhoto);
+  });
+
+  it('requires a signature name', () => {
+    expect(errorsForBlock({ ...signature, name: '' })).toContain(
+      'en.blocks[0].name: is required',
+    );
+  });
+
+  it('rejects a signature photo that is not an https address', () => {
+    for (const photoUrl of ['http://x.test/kai.png', '{inviteLink}']) {
+      expect(errorsForBlock({ ...signature, photoUrl })).toContain(
+        'en.blocks[0].photoUrl: must be an https:// address',
+      );
+    }
+  });
+
+  it('scans every designed block for placeholders', () => {
+    const errors = errorsOf(
+      {
+        en: validLocale({
+          blocks: [
+            { ...hero, headline: 'Hi', eyebrow: '{firstName}' },
+            { ...featureList, items: [{ ...featureItem, text: '{city}' }] },
+          ],
+        }),
+      },
+      'invite_approved',
+    );
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('{firstName} is not a placeholder'),
+        expect.stringContaining('{city} is not a placeholder'),
+      ]),
+    );
+  });
+});
+
+describe('validateEmailTemplateLocales: preheader', () => {
+  it('stores a trimmed preheader', () => {
+    const result = validateEmailTemplateLocales(
+      { en: validLocale({ preheader: '  Your invite is inside.  ' }) },
+      'invite_approved',
+    );
+    expect(result.isValid && result.locales.en.preheader).toBe(
+      'Your invite is inside.',
+    );
+  });
+
+  it('leaves an empty preheader off the stored content', () => {
+    const result = validateEmailTemplateLocales(
+      { en: validLocale({ preheader: '   ' }) },
+      'invite_approved',
+    );
+    expect(result.isValid).toBe(true);
+    if (!result.isValid) return;
+    expect(result.locales.en).not.toHaveProperty('preheader');
+  });
+
+  it('caps the preheader length', () => {
+    expect(
+      errorsOf(
+        {
+          en: validLocale({
+            preheader: 'a'.repeat(EMAIL_LIMITS.preheader + 1),
+          }),
+        },
+        'invite_approved',
+      ),
+    ).toContain(
+      `en.preheader: must be at most ${EMAIL_LIMITS.preheader} characters`,
+    );
+  });
+
+  it('rejects a placeholder in the preheader the purpose does not allow', () => {
+    const errors = errorsOf(
+      {
+        en: validLocale({
+          blocks: [{ id: 'divider-1', type: 'divider' }],
+          preheader: 'Hello {name}',
+        }),
+      },
+      'general',
+    );
+    expect(errors).toEqual([
+      'en: {name} is not a placeholder for general. Allowed: none',
+    ]);
   });
 });

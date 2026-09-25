@@ -3,7 +3,7 @@ import { HttpStatus, NotFoundException } from '@nestjs/common';
 import { HttpException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, FindOperator } from 'typeorm';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
@@ -22,13 +22,19 @@ import { DirectoryService } from './directory.service';
 import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
-import { Listing, ListingStatus } from './entities/listing.entity';
+import {
+  Listing,
+  ListingOperatingState,
+  ListingStatus,
+  SafeSpaceStatus,
+} from './entities/listing.entity';
 
 /**
  * Covers the three member-facing write paths added to the directory: editing
  * your own review, helpful votes, and the public question box. The read paths
  * this service has always had are exercised through the listings specs and are
- * deliberately not re-covered here.
+ * deliberately not re-covered here. The one read covered below is the privacy
+ * filter on `listByMemberSlug`, which decides whose name a profile publishes.
  */
 describe('DirectoryService', () => {
   let service: DirectoryService;
@@ -536,6 +542,166 @@ describe('DirectoryService', () => {
       ).resolves.toEqual(
         expect.objectContaining({ body: 'Is the entrance step-free?' }),
       );
+    });
+  });
+
+  /**
+   * `GET /directory/by-member/:slug` backs the "Places <first name> runs"
+   * strip on a PUBLIC profile, so every card it returns publishes the tie
+   * between that member and the business. Only an owner who is publicly
+   * named (`isOwnerPubliclyNamed`: linked AND visibility outside anon/role)
+   * may appear there.
+   */
+  describe('listByMemberSlug owner naming', () => {
+    const OWNER_SLUG = 'ana-silva';
+    const OWNER_USER_ID = 'owner-1';
+
+    let storedListings: Listing[];
+
+    /** A live listing of the owner, complete enough for `toDirectoryCard`. */
+    const ownedListing = (overrides: Partial<Listing>): Listing =>
+      ({
+        id: 'listing-public',
+        slug: 'lux-cafe',
+        name: 'Lux Cafe',
+        ownerId: OWNER_USER_ID,
+        status: ListingStatus.Live,
+        operatingState: ListingOperatingState.Open,
+        isHiddenByOwner: false,
+        cats: ['food'],
+        hood: 'Anjos',
+        blurb: 'Coffee and zines.',
+        badge: 'owned',
+        ownerName: 'Ana Silva',
+        ownerRole: 'Founder',
+        ownerBio: '',
+        visibility: 'public',
+        linkToProfile: true,
+        photoGallery: [],
+        hours: {},
+        hoursExceptions: [],
+        timezone: 'Europe/Lisbon',
+        accessibilityAnswers: null,
+        online: false,
+        latitude: null,
+        longitude: null,
+        safeSpaceStatus: SafeSpaceStatus.None,
+        safeSpaceTier: null,
+        safeSpaceReVerifiedAt: null,
+        createdAt: new Date('2026-03-01T10:00:00.000Z'),
+        ...overrides,
+      }) as unknown as Listing;
+
+    // Evaluates one TypeORM `find` condition against an in-memory value. It
+    // covers the operators this read uses (`Not`, `In`) plus plain equality,
+    // so the spec asserts which rows the query admits and stays independent
+    // of how the `where` object happens to be spelled.
+    const matchesCondition = (actual: unknown, condition: unknown): boolean => {
+      if (condition instanceof FindOperator) {
+        if (condition.type === 'not') {
+          return !matchesCondition(
+            actual,
+            (condition.child as unknown) ?? condition.value,
+          );
+        }
+        if (condition.type === 'in') {
+          return (condition.value as unknown[]).includes(actual);
+        }
+        throw new Error(`Spec matcher lacks operator "${condition.type}"`);
+      }
+      return actual === condition;
+    };
+
+    beforeEach(() => {
+      storedListings = [];
+      // `MemberLookup.userIdForSlug` resolves the slug through a query
+      // builder joined to active users.
+      const slugQuery: Record<string, jest.Mock> = {};
+      slugQuery.innerJoin = jest.fn().mockReturnValue(slugQuery);
+      slugQuery.where = jest.fn().mockReturnValue(slugQuery);
+      slugQuery.getMany = jest
+        .fn()
+        .mockResolvedValue([{ slug: OWNER_SLUG, userId: OWNER_USER_ID }]);
+      Object.assign(profiles, {
+        createQueryBuilder: jest.fn().mockReturnValue(slugQuery),
+      });
+      Object.assign(listings, {
+        find: jest.fn(({ where }: { where: Record<string, unknown> }) =>
+          Promise.resolve(
+            storedListings.filter((listing) =>
+              Object.entries(where).every(([field, condition]) =>
+                matchesCondition(
+                  (listing as unknown as Record<string, unknown>)[field],
+                  condition,
+                ),
+              ),
+            ),
+          ),
+        ),
+      });
+    });
+
+    it('lists a live listing whose owner is public and linked to the profile', async () => {
+      storedListings = [ownedListing({})];
+
+      const cards = await service.listByMemberSlug(OWNER_SLUG);
+
+      expect(cards.map((card) => card.slug)).toEqual(['lux-cafe']);
+    });
+
+    it('leaves out a listing whose owner chose to stay anonymous', async () => {
+      storedListings = [ownedListing({ slug: 'anon-bar', visibility: 'anon' })];
+
+      await expect(service.listByMemberSlug(OWNER_SLUG)).resolves.toEqual([]);
+    });
+
+    it('leaves out a listing whose owner shows only their role', async () => {
+      storedListings = [
+        ownedListing({ slug: 'role-studio', visibility: 'role' }),
+      ];
+
+      await expect(service.listByMemberSlug(OWNER_SLUG)).resolves.toEqual([]);
+    });
+
+    it('leaves out a public listing the owner kept off their profile', async () => {
+      storedListings = [
+        ownedListing({ slug: 'unlinked-shop', linkToProfile: false }),
+      ];
+
+      await expect(service.listByMemberSlug(OWNER_SLUG)).resolves.toEqual([]);
+    });
+
+    it('keeps only the publicly named listing out of a mixed set', async () => {
+      storedListings = [
+        ownedListing({
+          id: 'listing-anon',
+          slug: 'anon-bar',
+          visibility: 'anon',
+        }),
+        ownedListing({
+          id: 'listing-role',
+          slug: 'role-studio',
+          visibility: 'role',
+        }),
+        ownedListing({
+          id: 'listing-unlinked',
+          slug: 'unlinked-shop',
+          linkToProfile: false,
+        }),
+        ownedListing({}),
+      ];
+
+      const cards = await service.listByMemberSlug(OWNER_SLUG);
+
+      expect(cards.map((card) => card.slug)).toEqual(['lux-cafe']);
+    });
+
+    it('treats an unset legacy visibility as public, like isOwnerPubliclyNamed', async () => {
+      storedListings = [ownedListing({ slug: 'legacy-cafe', visibility: '' })];
+
+      const cards = await service.listByMemberSlug(OWNER_SLUG);
+
+      expect(cards.map((card) => card.slug)).toEqual(['legacy-cafe']);
     });
   });
 });

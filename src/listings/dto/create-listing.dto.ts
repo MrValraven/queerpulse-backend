@@ -44,7 +44,7 @@ import {
 
 export class ListingWitLineDto {
   @IsString() @MinLength(1) @MaxLength(60) id!: string;
-  @IsOptional() @IsString() @MaxLength(300) text?: string;
+  @IsOptional() @IsString() @MaxLength(2000) text?: string;
 }
 
 export class ListingSocialDto {
@@ -376,11 +376,12 @@ function requiredOnClaim(field: keyof CreateListingDto) {
  * `@IsObject()` check.
  *
  * Required-field gating is path-branched (item #2): name, cats, hood, address,
- * coordinates, blurb, and ≥1 `whatItIs` line are required for BOTH paths; the
- * owner identity (ownerName/ownerRole/rel), price, and tagline are required
- * only on the `claim` path (via `requiredOnClaim`). Claim-required `hours` and
- * `photos` are nested shapes, so their presence is enforced in
- * `ListingsService` rather than here (see `assertPathRequirements`).
+ * coordinates, blurb, and ≥1 `whatItIs` paragraph of the description are
+ * required for BOTH paths; the owner identity (ownerName/ownerRole/rel),
+ * price, and tagline are required only on the `claim` path (via
+ * `requiredOnClaim`). Claim-required `hours` and `photos` are nested shapes,
+ * so their presence is enforced in `ListingsService` rather than here (see
+ * `assertPathRequirements`).
  */
 export class CreateListingDto {
   @IsOptional() @IsIn(['claim', 'suggest', '']) path?: string;
@@ -428,10 +429,12 @@ export class CreateListingDto {
   @MaxLength(200)
   tagline?: string;
 
-  // Required for both paths: at least one "what it actually is" line.
+  // Required for both paths: the listing's description, written in
+  // markdown-lite and stored as one entry per paragraph. At least one
+  // paragraph is required.
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(4)
+  @ArrayMaxSize(20)
   @ValidateNested({ each: true })
   @Type(() => ListingWitLineDto)
   whatItIs!: ListingWitLineDto[];
