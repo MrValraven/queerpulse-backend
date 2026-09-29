@@ -19,9 +19,10 @@ export enum RsvpStatus {
   Cancelled = 'cancelled',
 }
 
-// The closed set `RsvpDetailsModal` (queerpulse FE) offers for "who can see
-// this" — mirrors `MemberEventReminderPreferences.EventVisibility`'s "plain
-// varchar + DTO `@IsIn`" shape so a future option needs no type migration.
+// The closed set `RsvpDetailsModal` (queerpulse FE) offers for "Who can see
+// you're going?" (PRD-414). Mirrors
+// `MemberEventReminderPreferences.EventVisibility`'s "plain varchar + DTO
+// `@IsIn`" shape so a future option needs no type migration.
 export const RSVP_DETAILS_VISIBILITY_OPTIONS = [
   'everyone',
   'connections',
@@ -80,13 +81,23 @@ export class EventRsvp {
   @Column({ type: 'text', nullable: true })
   dietaryNeeds!: string | null;
 
+  // PRD-414: who can see that this member is going. ONE setting, applied to
+  // every roster a non-organiser reads (the attendee list and the going
+  // preview) by `restrictToAttendeesVisibleTo`:
+  //  - `everyone`, or NULL for a row that never chose: every viewer who can
+  //    read the roster;
+  //  - `connections`: only the attendee's accepted connections;
+  //  - `justMe`: only the gathering's organisers (host and co-hosts).
+  // The attendee always sees their own row. Organisers always see every
+  // attendee and all the notes above and below, whatever this says. Counts
+  // (`goingCount`, `seatsTaken`, the preview total) include every row.
   @Column({ type: 'varchar', length: 20, nullable: true })
   visibility!: RsvpDetailsVisibility | null;
 
   // The attendee's answers to the gathering's optional RSVP questions
   // (`Event.rsvpQuestions`, `Event.customRsvpQuestion`). Same self-service,
-  // own-row-only rules as the needs above, and the same `visibility`
-  // withholding when an organiser reads them.
+  // own-row-only rules as the needs above, and like them always shown to the
+  // organisers.
   @Column({ type: 'varchar', length: MAX_RSVP_PRONOUNS_LENGTH, nullable: true })
   pronouns!: string | null;
 

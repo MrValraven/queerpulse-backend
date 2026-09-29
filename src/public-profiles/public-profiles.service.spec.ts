@@ -84,6 +84,15 @@ class FakeQueryBuilder {
     );
   }
 
+  /**
+   * True when the service asked for the self-hide predicate over
+   * `hidden_until` (ENG-440: "Hide me for 24 hours" must gate the open-web
+   * page the same way it already gates the in-app one).
+   */
+  get gatesOnHiddenUntil(): boolean {
+    return this.wheres.some((w) => /hidden_until/.test(w.condition));
+  }
+
   private get requestedSlug(): unknown {
     return this.wheres.find((w) => /p\.slug\s*=\s*:slug/.test(w.condition))
       ?.params.slug;
@@ -116,6 +125,13 @@ class FakeQueryBuilder {
       if (
         this.gatesOnOpenVisibility &&
         row.profile.visibility !== ProfileVisibility.Open
+      ) {
+        return false;
+      }
+      if (
+        this.gatesOnHiddenUntil &&
+        row.profile.hiddenUntil &&
+        row.profile.hiddenUntil > new Date()
       ) {
         return false;
       }
@@ -161,6 +177,10 @@ describe('PublicProfilesService', () => {
       tags: ['design'],
       verified: true,
       now: 'Shipping a thing',
+      // Not self-hidden by default, stated explicitly for the same reason
+      // `photoVisible` is above: an omitted column must not read as either
+      // state by accident.
+      hiddenUntil: null,
       joinedAt: new Date('2026-01-01T00:00:00.000Z'),
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
       updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -409,12 +429,34 @@ describe('PublicProfilesService', () => {
       await expectNotFound('ada');
     });
 
-    it('applies all three gates in the query itself', async () => {
+    // ENG-440. During "Hide me for 24 hours" the in-app profile already 404s
+    // for every non-owner viewer; the open-web page must give the same
+    // answer and stop keeping the name, face, bio and links indexable.
+    it('404s while a self-hide (hidden_until) is live, even with the flag on', async () => {
+      fixtures = [
+        published({ hiddenUntil: new Date(Date.now() + 60 * 60 * 1000) }),
+      ];
+
+      await expectNotFound('ada');
+    });
+
+    it('still publishes once a past self-hide has lapsed', async () => {
+      fixtures = [
+        published({ hiddenUntil: new Date(Date.now() - 60 * 60 * 1000) }),
+      ];
+
+      const result = await service.getBySlug('ada');
+
+      expect(result.displayName).toBe('Ada Lovelace');
+    });
+
+    it('applies all four gates in the query itself', async () => {
       await service.getBySlug('ada');
 
       expect(builder.gatesOnActiveStatus).toBe(true);
       expect(builder.gatesOnPublicFlag).toBe(true);
       expect(builder.gatesOnOpenVisibility).toBe(true);
+      expect(builder.gatesOnHiddenUntil).toBe(true);
     });
   });
 
@@ -443,6 +485,11 @@ describe('PublicProfilesService', () => {
       await capture('ada');
 
       fixtures = [published({ visibility: ProfileVisibility.Private })];
+      await capture('ada');
+
+      fixtures = [
+        published({ hiddenUntil: new Date(Date.now() + 60 * 60 * 1000) }),
+      ];
       await capture('ada');
 
       expect(new Set(bodies.map((b) => JSON.stringify(b))).size).toBe(1);
@@ -536,6 +583,26 @@ describe('PublicProfilesService', () => {
       fixtures = [published({ slug: 'ada-l' })];
 
       expect(await bodyOf('ada')).toEqual(await bodyOf('no-such-slug'));
+    });
+
+    // ENG-440, the forwarding half: the previous owner's current page runs
+    // through the same `publishedProfileQuery`, so a self-hide on THEIR
+    // current profile must block the forward exactly as an un-publish does
+    // above.
+    it('gives the plain 404 when the former owner has self-hidden their current page', async () => {
+      fixtures = [
+        published({
+          slug: 'ada-l',
+          hiddenUntil: new Date(Date.now() + 60 * 60 * 1000),
+        }),
+      ];
+      reservedFor('u1');
+
+      const hidden = await bodyOf('ada');
+
+      internals().handles.previousProfileOwnerOf.mockResolvedValue(null);
+      fixtures = [];
+      expect(hidden).toEqual(await bodyOf('no-such-slug'));
     });
   });
 });

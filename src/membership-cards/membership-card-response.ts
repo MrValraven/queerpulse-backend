@@ -76,11 +76,14 @@ export interface MyCardDTO {
   communityName: string;
   communitySlug: string;
   role: string;
-  holderName: string;
+  /** The holder's display name, or null when their profile carries none. The
+   *  client prints its own localized fallback for null. */
+  holderName: string | null;
   /**
    * The face on the card, or null. Resolved server-side from the holder's own
    * profile avatar, and ONLY when the programme allows photos, the member has
-   * not hidden theirs, and they actually have one. A client never receives an
+   * not hidden theirs on the card, their profile photo is visible, and they
+   * actually have one. A client never receives an
    * avatar it is not supposed to draw, so it cannot leak one by rendering the
    * wrong branch.
    */
@@ -128,7 +131,9 @@ export interface IssuerCardDTO {
   /** Issuer-only. Deliberately absent from every other DTO in this file. */
   revokedReason: string | null;
   holderSlug: string;
-  holderName: string;
+  /** The holder's display name, or null when their profile carries none. The
+   *  client prints its own localized fallback for null. */
+  holderName: string | null;
   /**
    * The holder's PROFILE picture, for the roster row. A mod already sees this
    * everywhere else in the community, so it is not gated here.
@@ -194,7 +199,12 @@ export interface CardVerificationCountsDTO {
 export interface CardVerificationDTO {
   status: EffectiveCardStatus;
   issuerName: string;
-  holderName: string;
+  /**
+   * The holder's display name, or null when their profile carries none. Sent
+   * as null so the verifier's page prints the fallback in the verifier's own
+   * language.
+   */
+  holderName: string | null;
   role: string;
   serial: string;
   memberSince: string;
@@ -217,7 +227,7 @@ export interface CardVerificationDTO {
    * Sent so the door compares the person in front of it against the copy the
    * ISSUER holds rather than against the picture on the object being shown —
    * a printed card or a phone screen can be doctored, this cannot. Gated by
-   * the same three switches as `hasPhoto` AND by status: only a card that is
+   * the same switches as `hasPhoto` AND by status: only a card that is
    * currently good hands a stranger a face, because there is no door decision
    * a revoked card's photo could inform.
    */
@@ -260,8 +270,12 @@ export function toMyCard(
     communityName: string;
     communitySlug: string;
     role: string;
-    holderName: string;
-    /** The holder's profile avatar, before either switch is applied. */
+    holderName: string | null;
+    /**
+     * The holder's avatar, already resolved to a fetchable URL and already
+     * passed through `toVisibleAvatarUrl`, before the programme switch and the
+     * card veto below are applied.
+     */
     holderAvatarUrl?: string | null;
     /** The holder's profile pronouns, before either switch is applied. */
     holderPronouns?: string | null;
@@ -288,9 +302,7 @@ export function toMyCard(
     communitySlug: context.communitySlug,
     role: context.role,
     holderName: context.holderName,
-    holderAvatarUrl: canShowPhoto
-      ? toImageUrl(context.holderAvatarUrl ?? null)
-      : null,
+    holderAvatarUrl: canShowPhoto ? (context.holderAvatarUrl ?? null) : null,
     isPhotoHidden: card.isPhotoHidden,
     holderPronouns: canShowPronouns
       ? context.holderPronouns?.trim() || null
@@ -313,7 +325,7 @@ export function toIssuerCard(
   status: EffectiveCardStatus,
   holder: {
     holderSlug: string;
-    holderName: string;
+    holderName: string | null;
     /** Already resolved to a fetchable URL by the caller. */
     avatarUrl: string | null;
     /** The holder's profile pronouns, before either switch is applied. */
@@ -363,12 +375,17 @@ export function toCardVerification(
   status: EffectiveCardStatus,
   context: {
     issuerName: string;
-    holderName: string;
+    holderName: string | null;
     role: string;
     hasPhoto: boolean;
     /** Already gated by the caller, the same way `hasPhoto` is. */
     holderPronouns: string | null;
-    /** The holder's avatar, before the photo gate or the status gate below. */
+    /**
+     * The holder's avatar, already resolved to a fetchable URL and already
+     * passed through `toVisibleAvatarUrl`, so a face its owner hid everywhere
+     * is null here. The card's photo gate and the status gate below still
+     * apply on top of it.
+     */
     holderAvatarUrl: string | null;
     photoStyle: CardPhotoStyle;
   },
@@ -384,13 +401,12 @@ export function toCardVerification(
     holderPronouns: context.holderPronouns,
     // Both gates in one place, the same way `toMyCard` gates the avatar at the
     // single boundary it can leave through. `hasPhoto` already carries the
-    // programme switch, the member's veto and whether they have a face at all;
+    // programme switch, the member's card veto, their profile-wide photo
+    // switch and whether they have a face at all;
     // the status check is this DTO's own, because this is the only card
     // payload handed to someone who is not the holder or the issuer.
     holderPhotoUrl:
-      context.hasPhoto && status === 'active'
-        ? toImageUrl(context.holderAvatarUrl)
-        : null,
+      context.hasPhoto && status === 'active' ? context.holderAvatarUrl : null,
     photoStyle: context.photoStyle,
   };
 }

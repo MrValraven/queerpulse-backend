@@ -39,6 +39,7 @@ import { MagazinePiece, PieceCare } from './entities/magazine-piece.entity';
 import { MagazinePitch } from './entities/magazine-pitch.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazinePieceService } from './magazine-piece.service';
+import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
 import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -256,6 +257,7 @@ describe('MagazinePieceService', () => {
   let transactionManager: { getRepository: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let notifications: { create: jest.Mock };
+  let issueAnnouncer: { announceIssueIfDue: jest.Mock };
 
   beforeEach(async () => {
     pieces = makeRepositoryMock();
@@ -290,6 +292,7 @@ describe('MagazinePieceService', () => {
         if (entity === MagazineArticle) return articles;
         if (entity === MagazineDeck) return decks;
         if (entity === MagazineIssue) return issues;
+        if (entity === MagazinePayment) return payments;
         return sections;
       }),
     };
@@ -305,6 +308,7 @@ describe('MagazinePieceService', () => {
         ),
     };
     notifications = { create: jest.fn().mockResolvedValue(null) };
+    issueAnnouncer = { announceIssueIfDue: jest.fn().mockResolvedValue(false) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -347,6 +351,7 @@ describe('MagazinePieceService', () => {
         },
         { provide: DataSource, useValue: dataSource },
         { provide: NotificationsService, useValue: notifications },
+        { provide: MagazineIssueAnnouncerService, useValue: issueAnnouncer },
       ],
     }).compile();
 
@@ -441,6 +446,95 @@ describe('MagazinePieceService', () => {
         }),
       );
     });
+
+    // PRD-439: the commission modal's angle and fee used to be dropped.
+    it('opens the brief with the typed angle and saves the fee amount as a payment row', async () => {
+      let saved: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-3';
+        saved = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: CreatePieceDto = {
+        format: 'article',
+        title: 'A feature',
+        section: 'Features',
+        editorId: 'editor-1',
+        writerId: 'writer-1',
+        angle: '  The last queer bookshop in town  ',
+        fee: '150,50',
+      };
+      await service.createPiece(dto, 'editor-1');
+
+      expect(saved?.brief?.angle).toBe('The last queer bookshop in town');
+      expect(saved?.brief?.commissionedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(payments.save).toHaveBeenCalledWith({
+        pieceId: 'piece-3',
+        currency: 'EUR',
+        feeAmount: '150.50',
+        feeText: null,
+      });
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-3',
+          actorId: 'editor-1',
+          action: 'payment_updated',
+        }),
+      );
+    });
+
+    it('keeps a fee that is not an amount as the payment text', async () => {
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-3';
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      await service.createPiece(
+        {
+          format: 'article',
+          title: 'A feature',
+          section: 'Features',
+          editorId: 'editor-1',
+          fee: 'TBD',
+        },
+        'editor-1',
+      );
+
+      expect(payments.save).toHaveBeenCalledWith({
+        pieceId: 'piece-3',
+        currency: 'EUR',
+        feeAmount: null,
+        feeText: 'TBD',
+      });
+    });
+
+    it('writes no brief and no payment row when the angle and fee are blank', async () => {
+      let saved: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-3';
+        saved = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      await service.createPiece(
+        {
+          format: 'article',
+          title: 'A feature',
+          section: 'Features',
+          editorId: 'editor-1',
+          angle: '  ',
+          fee: '',
+        },
+        'editor-1',
+      );
+
+      expect(saved?.brief ?? null).toBeNull();
+      expect(payments.save).not.toHaveBeenCalled();
+    });
   });
 
   describe('updatePiece', () => {
@@ -502,6 +596,134 @@ describe('MagazinePieceService', () => {
       expect(pieces.save).toHaveBeenCalledWith(piece);
       expect(result.title).toBe('On chosen family, revisited');
     });
+
+    // ENG-460: a piece whose content carries a publish date (scheduled, or
+    // live while not yet settled at `published`) is in front of readers on
+    // the strength of its gate, so the desk may not move its stage or reopen
+    // its care gate until it is unpublished.
+    describe('on a piece with a publish date', () => {
+      const SCHEDULED_PIECE: MagazinePiece = {
+        ...PIECE,
+        stage: 'ready',
+        articleId: 'article-1',
+        care: PAST_GATE_CARE,
+      };
+
+      beforeEach(() => {
+        articles.findOne.mockResolvedValue({
+          ...ARTICLE,
+          publishedAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        });
+        pieceEvents.find.mockResolvedValue([]);
+      });
+
+      async function scheduledRefusal(dto: UpdatePieceDto): Promise<unknown> {
+        return service.updatePiece('piece-1', dto, 'editor-1').then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+      }
+
+      it('refuses a stage move on a scheduled piece with magazine_piece_scheduled and saves nothing', async () => {
+        pieces.findOne.mockResolvedValue({ ...SCHEDULED_PIECE });
+
+        const error = await scheduledRefusal({ stage: 'edit' });
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual({
+          message:
+            'This piece has a publish date. Unpublish it from the piece record to change its stage.',
+          code: 'magazine_piece_scheduled',
+        });
+        expect(pieces.save).not.toHaveBeenCalled();
+        expect(pieceEvents.create).not.toHaveBeenCalled();
+      });
+
+      it('refuses a care patch that reopens the gate on a scheduled piece', async () => {
+        pieces.findOne.mockResolvedValue({ ...SCHEDULED_PIECE });
+
+        const error = await scheduledRefusal({
+          care: { ...PAST_GATE_CARE, contentNotes: [] },
+        });
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual({
+          message:
+            'This piece has a publish date. Unpublish it from the piece record before reopening its care record.',
+          code: 'magazine_piece_scheduled',
+        });
+        expect(pieces.save).not.toHaveBeenCalled();
+      });
+
+      it('accepts a care patch that keeps the gate clear', async () => {
+        const piece = { ...SCHEDULED_PIECE };
+        pieces.findOne.mockResolvedValue(piece);
+        const clearCare: PieceCare = {
+          ...PAST_GATE_CARE,
+          contentNotes: ['All good.', 'Mentions a hospital stay.'],
+        };
+
+        await service.updatePiece('piece-1', { care: clearCare }, 'editor-1');
+
+        expect(piece.care).toEqual(clearCare);
+        expect(pieces.save).toHaveBeenCalledWith(piece);
+      });
+
+      // No scheduled job settles a Ready piece whose date passed, so its
+      // content is live while the desk still reads it as Ready.
+      describe('whose content is already live', () => {
+        beforeEach(() => {
+          articles.findOne.mockResolvedValue({
+            ...ARTICLE,
+            publishedAt: new Date('2026-08-01T09:00:00.000Z'),
+          });
+        });
+
+        it('refuses a stage move on a live Ready piece', async () => {
+          pieces.findOne.mockResolvedValue({ ...SCHEDULED_PIECE });
+
+          const error = await scheduledRefusal({ stage: 'layout' });
+
+          expect(error).toBeInstanceOf(ConflictException);
+          expect((error as ConflictException).getResponse()).toEqual(
+            expect.objectContaining({ code: 'magazine_piece_scheduled' }),
+          );
+          expect(pieces.save).not.toHaveBeenCalled();
+        });
+
+        it('refuses a gate-opening care patch on a live Ready piece', async () => {
+          pieces.findOne.mockResolvedValue({ ...SCHEDULED_PIECE });
+
+          const error = await scheduledRefusal({ care: null });
+
+          expect(error).toBeInstanceOf(ConflictException);
+          expect((error as ConflictException).getResponse()).toEqual(
+            expect.objectContaining({ code: 'magazine_piece_scheduled' }),
+          );
+          expect(pieces.save).not.toHaveBeenCalled();
+        });
+
+        it('keeps the care record of a piece settled at published editable', async () => {
+          const piece = { ...SCHEDULED_PIECE, stage: 'published' as const };
+          pieces.findOne.mockResolvedValue(piece);
+
+          await service.updatePiece('piece-1', { care: null }, 'editor-1');
+
+          expect(piece.care).toBeNull();
+          expect(pieces.save).toHaveBeenCalledWith(piece);
+        });
+      });
+
+      it('moves the stage of a piece with no publish date', async () => {
+        articles.findOne.mockResolvedValue({ ...ARTICLE, publishedAt: null });
+        const piece = { ...SCHEDULED_PIECE };
+        pieces.findOne.mockResolvedValue(piece);
+
+        await service.updatePiece('piece-1', { stage: 'layout' }, 'editor-1');
+
+        expect(piece.stage).toBe('layout');
+      });
+    });
   });
 
   describe('getPieceById', () => {
@@ -515,8 +737,14 @@ describe('MagazinePieceService', () => {
 
   describe('triagePitch', () => {
     it("sets status 'passed' and stores the pass template/note on a pass verdict", async () => {
-      const pitch = { ...PITCH };
-      pitches.findOne.mockResolvedValue(pitch);
+      pitches.findOne
+        .mockResolvedValueOnce({ ...PITCH })
+        .mockResolvedValueOnce({
+          ...PITCH,
+          status: 'passed' as const,
+          passTemplate: 'not-a-fit',
+          passNote: 'Doesn’t fit an upcoming issue.',
+        });
 
       const dto: TriagePitchDto = {
         verdict: 'pass',
@@ -525,9 +753,102 @@ describe('MagazinePieceService', () => {
       };
       const result = await service.triagePitch('pitch-1', dto, 'editor-1');
 
-      expect(pitch.status).toBe('passed');
-      expect(pitch.passTemplate).toBe('not-a-fit');
-      expect(pitches.save).toHaveBeenCalledWith(pitch);
+      // ENG-462: a conditional update that only an open pitch satisfies.
+      expect(pitches.update).toHaveBeenCalledWith(
+        { id: 'pitch-1', status: In(['waiting', 'maybe']) },
+        {
+          status: 'passed',
+          passTemplate: 'not-a-fit',
+          passNote: 'Doesn’t fit an upcoming issue.',
+        },
+      );
+      expect(pitches.save).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ status: 'passed' });
+    });
+
+    it('answers 409 when a pass lands on a pitch another editor already commissioned', async () => {
+      pitches.findOne.mockResolvedValue({
+        ...PITCH,
+        status: 'commissioned' as const,
+      });
+      pitches.update.mockResolvedValueOnce({ affected: 0 });
+
+      const error: unknown = await service
+        .triagePitch('pitch-1', { verdict: 'pass' }, 'editor-1')
+        .then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'magazine_pitch_already_triaged' }),
+      );
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('answers 409 when a maybe lands on a pitch already commissioned', async () => {
+      pitches.findOne.mockResolvedValue({
+        ...PITCH,
+        status: 'commissioned' as const,
+      });
+      pitches.update.mockResolvedValueOnce({ affected: 0 });
+
+      await expect(
+        service.triagePitch('pitch-1', { verdict: 'maybe' }, 'editor-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('rings the submitter of a workspace pitch when it is passed on, with no actor', async () => {
+      const workspacePitch = { ...PITCH, from: '', submitterId: 'writer-9' };
+      pitches.findOne
+        .mockResolvedValueOnce(workspacePitch)
+        .mockResolvedValueOnce({
+          ...workspacePitch,
+          status: 'passed' as const,
+        });
+
+      await service.triagePitch('pitch-1', { verdict: 'pass' }, 'editor-1');
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'writer-9',
+        NotificationType.MagazinePitchPassed,
+        { source: 'magazine', pitchId: 'pitch-1', title: PITCH.title },
+      );
+    });
+
+    it('sends no pass bell for a pitch that came from a story submission', async () => {
+      const storyPitch = {
+        ...PITCH,
+        from: '',
+        submitterId: 'writer-9',
+        storySubmissionId: 'submission-1',
+      };
+      pitches.findOne
+        .mockResolvedValueOnce(storyPitch)
+        .mockResolvedValueOnce({ ...storyPitch, status: 'passed' as const });
+
+      await service.triagePitch('pitch-1', { verdict: 'pass' }, 'editor-1');
+
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('keeps the pass when the submitter bell fails', async () => {
+      const workspacePitch = { ...PITCH, from: '', submitterId: 'writer-9' };
+      pitches.findOne
+        .mockResolvedValueOnce(workspacePitch)
+        .mockResolvedValueOnce({
+          ...workspacePitch,
+          status: 'passed' as const,
+        });
+      notifications.create.mockRejectedValueOnce(new Error('bell down'));
+
+      const result = await service.triagePitch(
+        'pitch-1',
+        { verdict: 'pass' },
+        'editor-1',
+      );
+
       expect(result).toMatchObject({ status: 'passed' });
     });
 
@@ -669,6 +990,240 @@ describe('MagazinePieceService', () => {
       expect(savedPiece?.writerId).toBeNull();
       expect(savedPiece?.byline).toBe(PITCH.from);
       expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    // PRD-439: the commission modal's writer picker reaches an external pitch.
+    it('makes the picked writer the writer of an external pitch and rings them', async () => {
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: TriagePitchDto = {
+        verdict: 'commission',
+        editorId: 'editor-1',
+        section: 'Features',
+        writerId: 'writer-5',
+      };
+      await service.triagePitch('pitch-1', dto, 'editor-1');
+
+      expect(savedPiece?.writerId).toBe('writer-5');
+      expect(savedPiece?.byline).toBe(PITCH.from);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'writer-5',
+        NotificationType.MagazinePieceCommissioned,
+        expect.objectContaining({ pieceId: 'piece-2' }),
+        'editor-1',
+      );
+    });
+
+    // The editor picked a writer in the Commission modal for a pitch with no
+    // account behind it. The byline should read as that writer's resolved
+    // name, replacing the free text the editor typed into `from`.
+    it("gives an external pitch commissioned to a picked writer that writer's name as the byline", async () => {
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'writer-5',
+          firstName: 'Marta',
+          lastName: 'Reis',
+        }),
+      ]);
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: TriagePitchDto = {
+        verdict: 'commission',
+        editorId: 'editor-1',
+        section: 'Features',
+        writerId: 'writer-5',
+      };
+      await service.triagePitch('pitch-1', dto, 'editor-1');
+
+      expect(savedPiece?.writerId).toBe('writer-5');
+      expect(savedPiece?.byline).toBe('Marta Reis');
+    });
+
+    it('keeps the submitter of an internal pitch as its writer over a picked writer', async () => {
+      pitches.findOne.mockResolvedValue({
+        ...PITCH,
+        from: '',
+        submitterId: 'writer-9',
+      });
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      await service.triagePitch(
+        'pitch-1',
+        {
+          verdict: 'commission',
+          editorId: 'editor-1',
+          section: 'Features',
+          writerId: 'writer-5',
+        },
+        'editor-1',
+      );
+
+      expect(savedPiece?.writerId).toBe('writer-9');
+    });
+
+    it('opens the brief with the angle and saves a payment row with the fee amount', async () => {
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      await service.triagePitch(
+        'pitch-1',
+        {
+          verdict: 'commission',
+          editorId: 'editor-1',
+          section: 'Features',
+          angle: '  Who keeps the nightlife safe  ',
+          fee: '€400',
+        },
+        'editor-1',
+      );
+
+      expect(savedPiece?.brief?.angle).toBe('Who keeps the nightlife safe');
+      expect(savedPiece?.brief?.commissionedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(transactionManager.getRepository).toHaveBeenCalledWith(
+        MagazinePayment,
+      );
+      expect(payments.save).toHaveBeenCalledWith({
+        pieceId: 'piece-2',
+        currency: 'EUR',
+        feeAmount: '400',
+        feeText: null,
+      });
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-2',
+          action: 'payment_updated',
+        }),
+      );
+    });
+
+    it('keeps a fee that is not an amount as the payment text', async () => {
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      await service.triagePitch(
+        'pitch-1',
+        {
+          verdict: 'commission',
+          editorId: 'editor-1',
+          section: 'Features',
+          fee: 'Half on filing, half on publication',
+        },
+        'editor-1',
+      );
+
+      expect(payments.save).toHaveBeenCalledWith({
+        pieceId: 'piece-2',
+        currency: 'EUR',
+        feeAmount: null,
+        feeText: 'Half on filing, half on publication',
+      });
+    });
+
+    it('writes no brief and no payment row when the angle and fee are blank', async () => {
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      let savedPiece: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        savedPiece = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      await service.triagePitch(
+        'pitch-1',
+        {
+          verdict: 'commission',
+          editorId: 'editor-1',
+          section: 'Features',
+          angle: '   ',
+          fee: '  ',
+        },
+        'editor-1',
+      );
+
+      expect(savedPiece?.brief).toBeNull();
+      expect(payments.save).not.toHaveBeenCalled();
+    });
+
+    it('answers 409 and creates no piece when a pass claims the pitch mid-commission', async () => {
+      // Both reads see an open pitch; the conditional claim finds it gone.
+      pitches.findOne.mockResolvedValue({ ...PITCH });
+      pitches.update.mockResolvedValueOnce({ affected: 0 });
+
+      const error: unknown = await service
+        .triagePitch(
+          'pitch-1',
+          { verdict: 'commission', editorId: 'editor-1', section: 'Features' },
+          'editor-1',
+        )
+        .then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(pitches.update).toHaveBeenCalledWith(
+        { id: 'pitch-1', status: In(['waiting', 'maybe']) },
+        { status: 'commissioned' },
+      );
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'magazine_pitch_already_triaged' }),
+      );
+      expect(pieces.save).not.toHaveBeenCalled();
+      expect(payments.save).not.toHaveBeenCalled();
+    });
+
+    it('answers the already-triaged 409 with its code on a second commission', async () => {
+      pitches.findOne.mockResolvedValue({
+        ...PITCH,
+        status: 'passed' as const,
+      });
+
+      const error: unknown = await service
+        .triagePitch(
+          'pitch-1',
+          { verdict: 'commission', editorId: 'editor-1', section: 'Features' },
+          'editor-1',
+        )
+        .then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'magazine_pitch_already_triaged' }),
+      );
     });
   });
 
@@ -1569,6 +2124,305 @@ describe('MagazinePieceService', () => {
         expect.objectContaining({ pieceId: 'piece-blocked' }),
       );
     });
+
+    // PRD-438: the announcer decides whether the issue is due (live ship,
+    // visible issue page) and keeps it to one announcement per issue.
+    it('hands the shipped issue to the issue announcer after the ship commits', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, publishedOn: '2026-08-01' });
+      pieces.find.mockResolvedValue([]);
+
+      await service.shipIssue('05', 'editor-1');
+
+      expect(issueAnnouncer.announceIssueIfDue).toHaveBeenCalledTimes(1);
+      expect(issueAnnouncer.announceIssueIfDue).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'issue-1', number: '05' }),
+      );
+    });
+  });
+
+  // ENG-460 and PRD-437: the publish rails around a scheduled piece.
+  describe('publishing a scheduled piece', () => {
+    const FUTURE_INSTANT = (): Date =>
+      new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const PAST_INSTANT = new Date('2026-08-01T09:00:00.000Z');
+    const READY_ARTICLE_PIECE: MagazinePiece = {
+      ...PIECE,
+      stage: 'ready',
+      articleId: 'article-1',
+      care: PAST_GATE_CARE,
+    };
+
+    it('re-runs the care gate when a scheduled article is moved to now', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...READY_ARTICLE_PIECE,
+        care: null,
+      });
+      const article = {
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: FUTURE_INSTANT(),
+      };
+      articles.findOne.mockResolvedValue(article);
+      const scheduledInstant = article.publishedAt;
+
+      const error: unknown = await service
+        .publishArticle('piece-1', {}, 'editor-1')
+        .then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'magazine_care_gate_open' }),
+      );
+      expect(article.publishedAt).toBe(scheduledInstant);
+      expect(articles.save).not.toHaveBeenCalled();
+    });
+
+    it('re-runs the care gate when a scheduled article is moved to another instant', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...READY_ARTICLE_PIECE,
+        care: null,
+      });
+      articles.findOne.mockResolvedValue({
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: FUTURE_INSTANT(),
+      });
+
+      await expect(
+        service.publishArticle(
+          'piece-1',
+          {
+            publishedAt: new Date(
+              Date.now() + 2 * 24 * 60 * 60 * 1000,
+            ).toISOString(),
+          },
+          'editor-1',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(articles.save).not.toHaveBeenCalled();
+    });
+
+    it('keeps the live date when the article rail publishes with no instant', async () => {
+      const piece = { ...READY_ARTICLE_PIECE };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = {
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: PAST_INSTANT,
+      };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.publishArticle('piece-1', {}, 'editor-1');
+
+      expect(article.publishedAt).toBe(PAST_INSTANT);
+      expect(piece.stage).toBe('published');
+      expect(notifications.create).toHaveBeenCalledWith(
+        'writer-1',
+        NotificationType.MagazinePiecePublished,
+        expect.objectContaining({ pieceId: 'piece-1' }),
+        'editor-1',
+      );
+    });
+
+    it('re-saves an article that is already live without re-running the gate', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...READY_ARTICLE_PIECE,
+        stage: 'published',
+        care: null,
+      });
+      const article = { ...ARTICLE, publishedAt: PAST_INSTANT };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.publishArticle(
+        'piece-1',
+        { publishedAt: PAST_INSTANT.toISOString() },
+        'editor-1',
+      );
+
+      expect(articles.save).toHaveBeenCalledWith(article);
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    // There is no scheduled job: an editor settles a piece whose scheduled
+    // instant has passed by pressing Publish on the record.
+    it('settles a piece whose scheduled instant passed: keeps the date, advances the stage, rings the writer', async () => {
+      const piece = { ...READY_ARTICLE_PIECE };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = {
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: PAST_INSTANT,
+      };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.publishPiece('piece-1', {}, 'editor-1');
+
+      expect(article.publishedAt).toBe(PAST_INSTANT);
+      expect(piece.stage).toBe('published');
+      expect(pieces.save).toHaveBeenCalledWith(piece);
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-1',
+          action: 'article_published',
+        }),
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'writer-1',
+        NotificationType.MagazinePiecePublished,
+        expect.objectContaining({ pieceId: 'piece-1' }),
+        'editor-1',
+      );
+    });
+
+    it('still runs the care gate when settling a piece whose instant passed', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...READY_ARTICLE_PIECE,
+        care: null,
+      });
+      articles.findOne.mockResolvedValue({
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: PAST_INSTANT,
+      });
+
+      await expect(
+        service.publishPiece('piece-1', {}, 'editor-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(articles.save).not.toHaveBeenCalled();
+    });
+
+    it('does not ring the writer again when a published piece is re-published', async () => {
+      const piece = { ...READY_ARTICLE_PIECE, stage: 'published' as const };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = {
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: PAST_INSTANT,
+      };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.publishPiece('piece-1', {}, 'editor-1');
+
+      expect(article.publishedAt).toBe(PAST_INSTANT);
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('publishes a scheduled piece now when no instant is given', async () => {
+      const piece = { ...READY_ARTICLE_PIECE };
+      pieces.findOne.mockResolvedValue(piece);
+      const scheduledInstant = FUTURE_INSTANT();
+      const article = {
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: scheduledInstant,
+      };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.publishPiece('piece-1', {}, 'editor-1');
+
+      expect(article.publishedAt?.getTime()).toBeLessThanOrEqual(Date.now());
+      expect(piece.stage).toBe('published');
+    });
+
+    // The go-live lock holds a dated piece still, so a schedule set from the
+    // article rail at an earlier stage has to land the piece at `ready`, where
+    // Publish and Unpublish both live.
+    it('moves a piece scheduled from layout to ready without ringing the writer', async () => {
+      const piece = { ...READY_ARTICLE_PIECE, stage: 'layout' as const };
+      pieces.findOne.mockResolvedValue(piece);
+      const scheduledInstant = FUTURE_INSTANT();
+      const article: MagazineArticle = {
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: null,
+      };
+      articles.findOne.mockResolvedValue(article);
+
+      await service.publishArticle(
+        'piece-1',
+        { publishedAt: scheduledInstant.toISOString() },
+        'editor-1',
+      );
+
+      expect(article.publishedAt?.getTime()).toBe(scheduledInstant.getTime());
+      expect(piece.stage).toBe('ready');
+      expect(pieces.save).toHaveBeenCalledWith(piece);
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-1',
+          action: 'article_scheduled',
+        }),
+      );
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('leaves the stage alone when a ready piece is scheduled', async () => {
+      const piece = { ...READY_ARTICLE_PIECE };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({
+        ...ARTICLE,
+        standfirst: 'A standfirst.',
+        publishedAt: null,
+      });
+
+      await service.publishArticle(
+        'piece-1',
+        { publishedAt: FUTURE_INSTANT().toISOString() },
+        'editor-1',
+      );
+
+      expect(piece.stage).toBe('ready');
+      expect(pieces.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses to publish a deck piece whose deck is below the go-live bar', async () => {
+      pieces.findOne.mockResolvedValue({
+        ...READY_ARTICLE_PIECE,
+        format: 'deck',
+        articleId: null,
+        deckId: 'deck-1',
+      });
+      decks.findOne.mockResolvedValue({
+        id: 'deck-1',
+        slug: 'nightlife-map',
+        title: 'Nightlife, mapped',
+        kicker: '',
+        section: 'Culture',
+        byline: 'Sofia Andrade',
+        role: null,
+        authorBio: '',
+        cover: '',
+        coverDesc: '',
+        readTime: '',
+        tags: [],
+        related: [],
+        slides: [],
+        publishedAt: null,
+        createdAt: new Date('2026-08-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-08-01T00:00:00.000Z'),
+      });
+
+      const error: unknown = await service
+        .publishPiece('piece-1', {}, 'editor-1')
+        .then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).getResponse()).toEqual(
+        expect.objectContaining({
+          code: 'magazine_publish_not_ready',
+          openGateItems: ['The deck has no slides yet.'],
+        }),
+      );
+      expect(decks.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
   });
 
   /** A payment row for the batched writer lists (ENG-114). Only the columns the
@@ -2245,6 +3099,61 @@ describe('MagazinePieceService', () => {
 
       expect(pieceEvents.createQueryBuilder).not.toHaveBeenCalled();
       expect(payments.find).not.toHaveBeenCalled();
+    });
+
+    // PRD-437: the board tells a scheduled piece from one merely ready, so
+    // each row carries its linked article's or deck's `publishedAt`.
+    it('carries each row its linked content publishedAt, batched per format', async () => {
+      const scheduledInstant = new Date('2026-10-05T08:00:00.000Z');
+      pieces.createQueryBuilder.mockReturnValue(
+        makeListQueryBuilder(
+          [
+            { ...PIECE, id: 'piece-article', articleId: 'article-1' },
+            {
+              ...PIECE,
+              id: 'piece-deck',
+              format: 'deck' as const,
+              deckId: 'deck-1',
+            },
+            { ...PIECE, id: 'piece-empty' },
+          ],
+          3,
+        ),
+      );
+      articles.find.mockResolvedValue([
+        { id: 'article-1', publishedAt: scheduledInstant },
+      ]);
+      decks.find.mockResolvedValue([{ id: 'deck-1', publishedAt: null }]);
+
+      const result = await service.listPieces({});
+
+      expect(articles.find).toHaveBeenCalledWith({
+        where: { id: In(['article-1']) },
+        select: { id: true, publishedAt: true },
+      });
+      expect(decks.find).toHaveBeenCalledWith({
+        where: { id: In(['deck-1']) },
+        select: { id: true, publishedAt: true },
+      });
+      expect(result.items).toEqual([
+        expect.objectContaining({
+          id: 'piece-article',
+          publishedAt: '2026-10-05T08:00:00.000Z',
+        }),
+        expect.objectContaining({ id: 'piece-deck', publishedAt: null }),
+        expect.objectContaining({ id: 'piece-empty', publishedAt: null }),
+      ]);
+    });
+
+    it('runs no content query when no row links an article or deck', async () => {
+      pieces.createQueryBuilder.mockReturnValue(
+        makeListQueryBuilder([{ ...PIECE, id: 'piece-empty' }], 1),
+      );
+
+      await service.listPieces({});
+
+      expect(articles.find).not.toHaveBeenCalled();
+      expect(decks.find).not.toHaveBeenCalled();
     });
   });
 

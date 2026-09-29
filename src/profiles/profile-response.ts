@@ -21,14 +21,20 @@ import { matchNeighbourhood } from './neighbourhoods';
 import { withoutUnlistedWork } from './professions';
 
 /**
- * Options for `toProfileCard`. Only `shouldIncludeUnlistedWork` exists today
- * (a narrower object than a boolean parameter, matching the style the other
- * mappers in this file use for a card's identity-gating flag), and it
- * defaults to `false` so a caller that forgets it gets the safe, stripped
- * card rather than accidentally leaking `adultWork`.
+ * Options for `toProfileCard` (a narrower object than boolean parameters,
+ * matching the style the other mappers in this file use for a card's
+ * identity-gating flags). Both default to `false` so a caller that forgets
+ * one gets the safe card: `adultWork` stripped, and the member's own privacy
+ * settings left off.
  */
 export interface ProfileCardOptions {
   shouldIncludeUnlistedWork?: boolean;
+  /**
+   * Whether this card's subject IS the viewer. Only then does the card carry
+   * the member's own privacy settings (`visibility` and the three toggles).
+   * See `ProfileCard.photoVisible`.
+   */
+  isOwner?: boolean;
 }
 
 export interface ProfileCard {
@@ -52,16 +58,21 @@ export interface ProfileCard {
   profession: string[];
   languages: string[];
   vouchCount: number;
-  visibility: string;
-  // Member-controlled visibility toggles. These are ALWAYS the true stored
-  // value, for every viewer — they say whether the corresponding CONTENT
-  // (avatarUrl/location/vouchers list) is gated, they are never themselves
-  // gated. The owner reads them to render the real settings-sheet toggle
-  // state; a non-owner viewer can use them to know whether e.g. calling the
-  // vouchers-list endpoint is worth it. See toFullProfile's isOwner gating.
-  photoVisible: boolean;
-  hoodVisible: boolean;
-  vouchersVisible: boolean;
+  // Owner-only (ENG-444): the member's profile tier and their three
+  // member-controlled visibility toggles. A card reaches every member, and a
+  // directory page of cards carrying `photoVisible: false` or
+  // `visibility: 'private'` is a list of exactly the members who chose to
+  // hide, the same leak the Ambassador toggle below was closed for. The keys
+  // are ABSENT (no `undefined` value, no default) for every viewer but the
+  // member themselves (`ProfileCardOptions.isOwner`); the owner reads them
+  // to render the real settings-sheet state. The CONTENT they govern is gated
+  // separately, per viewer: see gateAvatarUrl/gateLocation and
+  // `VouchService.listVouchers`. The single-profile responses put
+  // `visibility` back for every viewer: see FullProfileResponse.visibility.
+  visibility?: string;
+  photoVisible?: boolean;
+  hoodVisible?: boolean;
+  vouchersVisible?: boolean;
   // The Ambassador tag toggle is deliberately absent here: a card reaches
   // every member, and a `false` would single out exactly the ambassadors who
   // chose to hide. It travels owner-only on FullProfileResponse instead.
@@ -227,15 +238,26 @@ export interface ProfileRelations {
  *    connections and a count of one, the viewer has narrowed "who vouched for
  *    them" to three people, and often to one. A member who hid their roster
  *    hid it from this read too. `null` is honest where `0` would be a lie
- *    ("nobody you know did") about a set the viewer is not allowed to see, and
- *    it leaks nothing new: `vouchersVisible` is already on the wire for every
- *    viewer (see ProfileCard).
+ *    ("nobody you know did") about a set the viewer is not allowed to see. On
+ *    this single-profile read it discloses no more than the vouchers endpoint
+ *    beside it, which answers a hidden roster with the true count and no
+ *    names. The toggle itself stays off every card (see ProfileCard), so no
+ *    list response can enumerate who hid their roster; the frontend reads a
+ *    non-owner's hidden roster off this `null`.
  *
  * `0` therefore always means the real answer is zero.
  */
 export type MutualVoucherCount = number | null;
 
 export interface FullProfileResponse extends ProfileCard {
+  // The profile tier, for EVERY viewer of this one profile, unlike the list
+  // cards (see ProfileCard.visibility). The profile page prints it as the
+  // hero's eyebrow and the limited note picks its words by it (a `network`
+  // stranger is told a connection opens the rest, a `private` one is not).
+  // A single read already says `limited`, so the tier adds only
+  // network-versus-private for one member the viewer opened; the enumerable
+  // surfaces (`GET /members`, suggestions, related) never carry it.
+  visibility: string;
   verified: boolean;
   joinedAt: string;
   // See MutualVoucherCount. Gated in ProfilesService, never here.
@@ -263,10 +285,14 @@ export interface FullProfileResponse extends ProfileCard {
   openTo: OpenToEntry[];
   // Private Interests preferences — populated only when the requester is the
   // profile owner; `[]` for everyone else (see toFullProfile's `isOwner`).
+  // `lookingFor` is the one exception: other viewers get it when the member
+  // turned `lookingForPublic` on.
   identities: string[];
   lookingFor: string[];
   // Member's own choice of whether the above is visible to other viewers.
-  lookingForPublic: boolean;
+  // Owner-only (see toFullProfile's `isOwner`); omitted for every other
+  // viewer so the DTO never lists who keeps their list private.
+  lookingForPublic?: boolean;
   // Private preference — populated only for the profile owner (see
   // toFullProfile's `isOwner`); omitted entirely for every other viewer so it
   // never leaks on another member's public/network profile.
@@ -306,6 +332,8 @@ export interface FullProfileResponse extends ProfileCard {
 }
 
 export interface LimitedProfileResponse extends ProfileCard {
+  // For every viewer, same reason as FullProfileResponse.visibility.
+  visibility: string;
   verified: boolean;
   joinedAt: string;
   // Carried on the limited card on purpose, unlike location/openTo/activity.
@@ -378,10 +406,17 @@ export function sortShapings(rows: Shaping[]): Shaping[] {
 // `shouldIncludeUnlistedWork`. Every caller of this mapper gets the strip for
 // free instead of repeating it by hand, so a future card built on
 // `toProfileCard` can't forget it. See professions.ts#withoutUnlistedWork.
+//
+// Safe by default for the privacy settings too: `visibility` and the three
+// toggles ride the card only with `isOwner`, so a new card surface built on
+// this mapper cannot start listing who hid what. See ProfileCard.photoVisible.
 export function toProfileCard(
   profile: Profile,
   vouchCount: number,
-  { shouldIncludeUnlistedWork = false }: ProfileCardOptions = {},
+  {
+    shouldIncludeUnlistedWork = false,
+    isOwner = false,
+  }: ProfileCardOptions = {},
 ): ProfileCard {
   const rawWork = {
     discipline: profile.discipline ?? [],
@@ -403,6 +438,25 @@ export function toProfileCard(
     profession: work.profession,
     languages: profile.languages ?? [],
     vouchCount,
+    ...(isOwner ? ownPrivacySettings(profile) : {}),
+  };
+}
+
+/**
+ * The member's own privacy settings, spread onto a card only when its subject
+ * is the viewer (`ProfileCardOptions.isOwner`). Same conditional-spread shape
+ * as the owner-only fields in `toFullProfile`, so the keys are absent for
+ * everyone else.
+ */
+function ownPrivacySettings(
+  profile: Profile,
+): Required<
+  Pick<
+    ProfileCard,
+    'visibility' | 'photoVisible' | 'hoodVisible' | 'vouchersVisible'
+  >
+> {
+  return {
     visibility: profile.visibility,
     photoVisible: profile.photoVisible,
     hoodVisible: profile.hoodVisible,
@@ -467,16 +521,24 @@ export function toMemberCard(
   // filtering. The owner keeps seeing it on their own card.
   // `toProfileCard` strips by default; `shouldIncludeUnlistedWork: isOwner`
   // opts back in only for the owner's own row. See
-  // professions.ts#UNLISTED_DISCIPLINE_IDS.
+  // professions.ts#UNLISTED_DISCIPLINE_IDS. `isOwner` likewise puts the
+  // member's own privacy settings on their own row only (ENG-444).
   const card = toProfileCard(p, vouchCount, {
     shouldIncludeUnlistedWork: isOwner,
+    isOwner,
   });
   return {
     ...card,
     // The card DTO deliberately omits `bio`, so a browser can't do this itself —
     // the fallback has to happen here, where the bio is in scope. See
     // ./directory-blurb.ts; this is the list path only.
-    tagline: directoryBlurb(p.tagline, p.bio),
+    //
+    // The bio is borrowed only from an `open` profile (ENG-438): a
+    // `network`/`private` member's bio sits behind the limited card, so its
+    // opening must not print on a card every member scrolls past. The owner's
+    // own row follows the same rule so it matches what strangers see, which
+    // is what the profile editor's card preview promises.
+    tagline: directoryBlurb(p.tagline, open ? p.bio : null),
     avatarUrl: gateAvatarUrl(p, isOwner),
     location: locationVisible ? p.location : null,
     openTo: open ? p.openTo : [],
@@ -563,7 +625,9 @@ export function toFullProfile(
   ownAmbassador: Ambassador | null = null,
 ): FullProfileResponse {
   return {
-    ...toProfileCard(p, vouchCount, { shouldIncludeUnlistedWork }),
+    ...toProfileCard(p, vouchCount, { shouldIncludeUnlistedWork, isOwner }),
+    // For every viewer of this one profile. See FullProfileResponse.visibility.
+    visibility: p.visibility,
     verified: p.verified,
     joinedAt: p.joinedAt.toISOString(),
     mutualVoucherCount,
@@ -586,7 +650,10 @@ export function toFullProfile(
     // Owner always sees their own list; others see it only when the member has
     // opted in via lookingForPublic.
     lookingFor: isOwner || p.lookingForPublic ? (p.lookingFor ?? []) : [],
-    lookingForPublic: p.lookingForPublic ?? false,
+    // Owner-only privacy toggle, same shape as photoVisible/hoodVisible/
+    // vouchersVisible (ENG-444): a visitor reads the list above, which is
+    // already empty when the member keeps it private.
+    ...(isOwner ? { lookingForPublic: p.lookingForPublic ?? false } : {}),
     // Owner-only: never included in the object for a non-owner viewer, so it
     // cannot leak on another member's full profile response.
     ...(isOwner ? { privateNetwork: p.privateNetwork ?? false } : {}),
@@ -656,9 +723,13 @@ export function toLimitedProfile(
   // professions.ts#UNLISTED_DISCIPLINE_IDS.
   const card = toProfileCard(p, vouchCount, {
     shouldIncludeUnlistedWork: isOwner,
+    isOwner,
   });
   return {
     ...card,
+    // For every viewer: the limited note picks its words by it. See
+    // FullProfileResponse.visibility.
+    visibility: p.visibility,
     // Overrides the ungated `avatarUrl`/`location`-adjacent fields the spread
     // above copied from toProfileCard — same gating as toFullProfile/
     // toMemberCard, so a `photoVisible: false` limited profile can't ship a

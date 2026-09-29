@@ -18,6 +18,11 @@ import { MessagingCoreService } from './messaging-core.service';
  * carried only by that member's own sends, which `m.sender_id != :userId`
  * already leaves out.
  *
+ * ENG-402 ruling, a deliberate update of this literal: a group message from
+ * someone blocked either way with the caller never counts, because the thread
+ * hides it (PRD-354) and reading could never clear it. The fragment is pinned
+ * here verbatim so a change to `notFromBlockedGroupMemberPredicate` shows up.
+ *
  * The mailbox predicates are owned by `mailbox-seats.ts` and pinned by its own
  * specs, so they are composed here from the same functions.
  */
@@ -79,7 +84,18 @@ const UNREAD_THREAD_FRAGMENT = normaliseSql(`( p.marked_unread_at IS NOT NULL
           AND "cm"."subject_id" = m.id::text
           AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL) )
       AND NOT EXISTS ( SELECT 1 FROM "message_hides" "mh"
-        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hiddenForUserId ) ) )`);
+        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hiddenForUserId )
+      AND ( m.kind = 'system'
+        OR m.sender_id IS NULL
+        OR m.sender_id <> ALL (ARRAY(
+          SELECT "blocked_by_viewer"."blocked_id" FROM "blocks" "blocked_by_viewer"
+            WHERE "blocked_by_viewer"."blocker_id" = :userId
+          UNION ALL
+          SELECT "blocker_of_viewer"."blocker_id" FROM "blocks" "blocker_of_viewer"
+            WHERE "blocker_of_viewer"."blocked_id" = :userId ))
+        OR NOT EXISTS ( SELECT 1 FROM "conversations" "group_block_conversation"
+          WHERE "group_block_conversation"."id" = m.conversation_id
+            AND "group_block_conversation"."kind" = 'group' ) ) ) )`);
 
 const PERSON_BLOCK_FRAGMENT = normaliseSql(`NOT EXISTS (
   SELECT 1 FROM "conversation_participants" "__unread_other"

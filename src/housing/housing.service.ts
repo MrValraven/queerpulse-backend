@@ -15,6 +15,7 @@ import {
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { HousingCoop } from './entities/housing-coop.entity';
@@ -56,6 +57,9 @@ export class HousingService {
     // application, in-app plus push (PRD-242). QueerPulse sends no email.
     private readonly notifications: NotificationsService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
+    // ENG-490: a co-op delete and a join-request triage each leave a
+    // `mod_audit_logs` row naming the admin who acted.
+    private readonly modAudit: ModAuditService,
   ) {}
 
   async listPublished(): Promise<HousingCoopDTO[]> {
@@ -145,9 +149,18 @@ export class HousingService {
     }
   }
 
-  async deleteCoop(id: string): Promise<void> {
+  async deleteCoop(id: string, actorId: string): Promise<void> {
+    // Read first so the audit note can still name the co-op once its row is
+    // gone: an id alone points at nothing after the delete.
+    const coop = await this.coops.findOne({ where: { id } });
+    if (!coop) throw new NotFoundException('Co-op not found');
     const result = await this.coops.delete({ id });
     if (!result.affected) throw new NotFoundException('Co-op not found');
+    await this.auditStaffAction(
+      actorId,
+      'housing_coop_delete',
+      `Housing co-op ${id} "${coop.name}" (${coop.slug})`,
+    );
   }
 
   /**
@@ -242,6 +255,7 @@ export class HousingService {
   async triageJoinRequest(
     id: string,
     action: 'accepted' | 'declined',
+    actorId: string,
   ): Promise<AdminJoinRequestDTO> {
     const request = await this.joinRequests.findOne({ where: { id } });
     if (!request) throw new NotFoundException('Join request not found');
@@ -250,12 +264,43 @@ export class HousingService {
         ? JoinRequestStatus.Accepted
         : JoinRequestStatus.Declined;
     await this.joinRequests.save(request);
+    await this.auditStaffAction(
+      actorId,
+      'housing_coop_join_request_triage',
+      `Co-op join request ${id} (co-op ${request.coopId}): ${action}`,
+    );
     const updated = await this.joinRequests.findOne({
       where: { id },
       relations: { coop: true },
     });
     await this.notifyJoinDecided(updated!);
     return toAdminJoinRequestDTO(updated!);
+  }
+
+  /**
+   * Appends one `mod_audit_logs` row for an irreversible co-op staff write
+   * (ENG-490): a co-op delete or a join-request triage. No report and no
+   * target member, so the target id and the decision travel in `note`.
+   *
+   * Best-effort, the posture `ForumThreadsService.auditThreadAction` takes:
+   * the write this documents has already committed, so a failed audit insert
+   * is logged and swallowed. A 500 here would invite the admin to retry an
+   * action that already happened.
+   */
+  private async auditStaffAction(
+    actorId: string,
+    action: string,
+    note: string,
+  ): Promise<void> {
+    try {
+      await this.modAudit.writeAuditLog(null, actorId, action, undefined, note);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to write the ${action} audit row: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**

@@ -38,3 +38,19 @@ export const DESK_BODY_MAX = 10000;
 
 /** A block id anchor on an article note — a slug/uuid, never prose. */
 export const DESK_BLOCK_ID_MAX = 100;
+
+/**
+ * Commission-time angle prose, written into `PieceBrief.angle` via
+ * `briefWithCommission`. Matches `MAX_JSONB_TEXT_LENGTH` in
+ * `piece-jsonb.validation.ts`, the cap already enforced on that same jsonb
+ * field everywhere else it's written, so the commission form and the brief
+ * editor agree on what "too long" means.
+ */
+export const DESK_ANGLE_MAX = 5000;
+
+/**
+ * Commission-time fee prose, split into a fee amount/text pair by
+ * `splitCommissionFee`. Matches `UpdatePaymentDto.feeText`, the cap already
+ * enforced on the same free-text field once the payment row exists.
+ */
+export const DESK_FEE_TEXT_MAX = 200;

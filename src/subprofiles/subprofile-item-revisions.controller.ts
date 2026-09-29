@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Param,
@@ -7,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
@@ -21,6 +23,8 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
+import { RestoreItemRevisionDTO } from './dto/restore-item-revision.dto';
 import { SubprofilesService } from './subprofiles.service';
 
 // Protect Your Work (revision history), Task 8: list/view/restore an item's
@@ -84,10 +88,18 @@ export class SubprofileItemRevisionsController {
   }
 
   @Post(':subprofileId/items/:itemId/revisions/:revisionId/restore')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Restore a saved revision onto a portfolio item (non-destructive)',
   })
-  @ApiCreatedResponse({ description: '`{ ok: true }` once restored.' })
+  @ApiCreatedResponse({
+    description:
+      '`{ ok: true, editVersion }` once restored. `editVersion` is the persona edit version the restore raised to.',
+  })
+  @ApiConflictResponse({
+    description:
+      '`{ code: "PERSONA_EDIT_CONFLICT", currentEditVersion }`: `expectedEditVersion` differs from the stored edit version, so nothing was restored.',
+  })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({
     description:
@@ -101,13 +113,16 @@ export class SubprofileItemRevisionsController {
     @Param('subprofileId', ParseUUIDPipe) subprofileId: string,
     @Param('itemId', ParseUUIDPipe) itemId: string,
     @Param('revisionId', ParseUUIDPipe) revisionId: string,
-  ): Promise<{ ok: true }> {
-    await this.subprofilesService.restoreRevision(
+    // Optional: an empty or absent body restores with no precondition.
+    @Body() dto?: RestoreItemRevisionDTO,
+  ): Promise<{ ok: true; editVersion: number }> {
+    const editVersion = await this.subprofilesService.restoreRevision(
       user.userId,
       subprofileId,
       itemId,
       revisionId,
+      dto?.expectedEditVersion,
     );
-    return { ok: true };
+    return { ok: true, editVersion };
   }
 }

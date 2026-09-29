@@ -38,6 +38,11 @@ import { UpdateStickerPackDto } from './dto/update-sticker-pack.dto';
  */
 const MAX_TEMPLATE_PARAMS_LENGTH = 4096;
 
+/** The `code` on the 400 `removeSticker` answers when the sticker is the
+ *  last one in a published pack. The builder matches on it. */
+export const LAST_STICKER_IN_PUBLISHED_PACK_CODE =
+  'LAST_STICKER_IN_PUBLISHED_PACK';
+
 /** A sticker as an admin sees it: the member-facing fields plus what the
  *  builder needs to rebuild or replace its artwork. */
 export interface AdminStickerResponse extends StickerResponse {
@@ -125,6 +130,7 @@ export class AdminStickersService {
       this.packs.create({
         slug: dto.slug,
         name: dto.name,
+        namePt: dto.namePt ?? null,
         description: dto.description ?? null,
         status: StickerPackStatus.Draft,
         createdById,
@@ -160,6 +166,9 @@ export class AdminStickersService {
       pack.coverStickerId = dto.coverStickerId;
     }
     if (dto.name !== undefined) pack.name = dto.name;
+    // `undefined` leaves the Portuguese name alone; an explicit `null` clears
+    // it, so Portuguese readers fall back to `name`.
+    if (dto.namePt !== undefined) pack.namePt = dto.namePt;
     if (dto.description !== undefined) pack.description = dto.description;
     if (dto.status !== undefined) pack.status = dto.status;
     if (dto.sortOrder !== undefined) pack.sortOrder = dto.sortOrder;
@@ -234,6 +243,7 @@ export class AdminStickersService {
         packId,
         slug: dto.slug,
         label: dto.label,
+        labelPt: dto.labelPt ?? null,
         storageKey: dto.storageKey,
         width: dto.width,
         height: dto.height,
@@ -270,10 +280,17 @@ export class AdminStickersService {
     // `@IsOptional()` lets `null` through DTO validation the same as a
     // missing field, and `label`/`keywords` are NOT NULL columns, so a
     // `null` here must be treated exactly like the field was never sent,
-    // both in this gate and in the assignments below.
-    if (!dto.label && !dto.keywords && !dto.artwork) {
+    // both in this gate and in the assignments below. `labelPt` is the one
+    // nullable field: an explicit `null` there clears it, so it counts as
+    // sent whenever it is present at all.
+    if (
+      !dto.label &&
+      !dto.keywords &&
+      !dto.artwork &&
+      dto.labelPt === undefined
+    ) {
       throw new BadRequestException(
-        'Send at least one of label, keywords or artwork to update',
+        'Send at least one of label, labelPt, keywords or artwork to update',
       );
     }
     const sticker = await this.stickers.findOne({
@@ -298,6 +315,7 @@ export class AdminStickersService {
       sticker.templateParams = dto.artwork.templateParams;
     }
     if (dto.label) sticker.label = dto.label;
+    if (dto.labelPt !== undefined) sticker.labelPt = dto.labelPt;
     if (dto.keywords) sticker.keywords = dto.keywords;
     // `slug`, `id`, `sortOrder` and the pack's cover are never touched here:
     // an update replaces a sticker's content in place, keeping its identity
@@ -312,7 +330,38 @@ export class AdminStickersService {
     return stickerResponse;
   }
 
+  /**
+   * Refuses to take the last sticker out of a published pack, for the same
+   * reason `updatePack` refuses to publish an empty one: members would get a
+   * pack with nothing in it. The admin archives or unpublishes the pack
+   * first, or adds another sticker. The error carries
+   * `LAST_STICKER_IN_PUBLISHED_PACK_CODE` so the builder can explain it in
+   * the admin's own language.
+   */
   async removeSticker(packId: string, stickerId: string): Promise<void> {
+    // Only the status is needed here, so the pack is read without its
+    // stickers (each of which carries its full `svgSource`).
+    const pack = await this.packs.findOne({
+      where: { id: packId },
+      select: { id: true, status: true },
+    });
+    if (!pack) throw new NotFoundException('Sticker pack not found');
+    if (
+      pack.status === StickerPackStatus.Published &&
+      (await this.stickers.count({ where: { packId } })) <= 1
+    ) {
+      // A sticker from another pack answers 404 here as it would below.
+      const isInPack =
+        (await this.stickers.count({ where: { id: stickerId, packId } })) > 0;
+      if (!isInPack) throw new NotFoundException('Sticker not found');
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'Bad Request',
+        code: LAST_STICKER_IN_PUBLISHED_PACK_CODE,
+        message:
+          'A published pack needs at least one sticker. Unpublish or archive the pack first, or add another sticker',
+      });
+    }
     const result = await this.stickers.delete({ id: stickerId, packId });
     if (!result.affected) throw new NotFoundException('Sticker not found');
     // A pack whose cover was the removed sticker falls back to "no cover"

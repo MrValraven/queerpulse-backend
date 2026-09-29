@@ -12,7 +12,7 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
-import { Handle } from '../handles/entities/handle.entity';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -67,6 +67,8 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     position: 0,
     skinData: null,
     removedAt: null,
+    // Task 6's edit counter on the entity (a required column).
+    editVersion: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -544,6 +546,11 @@ describe('SubprofilePublicReadService', () => {
       expect(moderatedCall![0]).toEqual(
         expect.stringContaining('content_moderation'),
       );
+      // Keyed on the persona uuid, which the report pipeline stores.
+      expect(moderatedCall![0]).toEqual(
+        expect.stringContaining('"cm"."subject_id" = "sp"."id"::text'),
+      );
+      expect(moderatedCall![0]).not.toContain('sp.slug');
       expect(moderatedCall![1]).toEqual({
         subprofileSubjectType: 'subprofile',
       });
@@ -880,6 +887,297 @@ describe('SubprofilePublicReadService', () => {
         expect(body.code).toBeUndefined();
         expect(body.handle).toBeUndefined();
       });
+    });
+
+    // ENG-454: the handle namespace is case-folded, so the route param is too.
+    it('resolves a handle typed with capital letters', async () => {
+      personaRows.push(
+        makeSubprofile({ id: 'sp-unlinked', handle: 'nightform' }),
+      );
+
+      const view = await service.getByHandle('NightForm', activeViewer);
+
+      expect(view.id).toBe('sp-unlinked');
+      expect(subprofiles.findOne).toHaveBeenNthCalledWith(1, {
+        where: { handle: 'nightform', status: SubprofileStatus.Published },
+      });
+    });
+
+    it('folds the handle before the PERSONA_MOVED lookup too', async () => {
+      personaRows.push(linkedPersona({ handle: 'ana-beats' }));
+      handles.previousSubprofileOwnerOf.mockImplementation((handle: string) =>
+        Promise.resolve(handle === 'ana-dj-set' ? 'sp-linked' : null),
+      );
+
+      const error = await rejectionOf(
+        service.getByHandle('Ana-DJ-Set', activeViewer),
+      );
+
+      expect(handles.previousSubprofileOwnerOf).toHaveBeenCalledWith(
+        'ana-dj-set',
+      );
+      expect((error as NotFoundException).getResponse()).toEqual({
+        code: 'PERSONA_MOVED',
+        message: 'That handle has moved',
+        handle: 'ana-beats',
+      });
+    });
+
+    // ENG-446: a persona takedown is keyed on the persona uuid.
+    describe('moderator takedowns', () => {
+      beforeEach(() => {
+        personaRows.push(
+          makeSubprofile({
+            id: 'sp-unlinked',
+            userId: 'creator-1',
+            slug: 'nightform',
+            handle: 'nightform',
+          }),
+        );
+      });
+
+      it('hides a persona whose uuid carries a takedown', async () => {
+        contentModeration.stateFor.mockImplementation(
+          (subjectType: string, subjectId: string) =>
+            Promise.resolve({
+              hidden:
+                subjectType === 'subprofile' && subjectId === 'sp-unlinked',
+              removed: false,
+            }),
+        );
+
+        const error = await rejectionOf(
+          service.getByHandle('nightform', activeViewer),
+        );
+
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect(contentModeration.stateFor).toHaveBeenCalledWith(
+          'subprofile',
+          'sp-unlinked',
+        );
+      });
+
+      it("serves a persona when only a slug-keyed row shares its slug, which may name another member's persona", async () => {
+        contentModeration.stateFor.mockImplementation(
+          (subjectType: string, subjectId: string) =>
+            Promise.resolve({
+              hidden: subjectType === 'subprofile' && subjectId === 'nightform',
+              removed:
+                subjectType === 'subprofile' && subjectId === 'nightform',
+            }),
+        );
+
+        const view = await service.getByHandle('nightform', activeViewer);
+
+        expect(view.id).toBe('sp-unlinked');
+        expect(contentModeration.stateFor).not.toHaveBeenCalledWith(
+          'subprofile',
+          'nightform',
+        );
+      });
+    });
+  });
+
+  // --- listForProfile applies the single-read visibility rule ---------------
+
+  describe('listForProfile visibility', () => {
+    let members: { find: jest.Mock };
+
+    beforeEach(() => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'creator-1',
+        slug: 'ana',
+        firstName: 'Ana',
+        lastName: 'Reis',
+      });
+      const linked = (id: string, visibility: SubprofileVisibility) =>
+        makeSubprofile({
+          id,
+          userId: 'creator-1',
+          slug: id,
+          handle: id,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          visibility,
+        });
+      subprofiles.find.mockResolvedValue([
+        linked('sp-open', SubprofileVisibility.Open),
+        linked('sp-network', SubprofileVisibility.Network),
+        linked('sp-private', SubprofileVisibility.Private),
+      ]);
+      members = module.get<{ find: jest.Mock }>(
+        getRepositoryToken(SubprofileMember),
+      );
+    });
+
+    // The profile owner's roster lists all three; `co-owner-1` also holds a
+    // seat on the private persona, and nobody else holds any.
+    function rosterFor(viewerOwnsPrivate: boolean) {
+      members.find.mockImplementation(
+        ({ where }: { where: { userId: string; subprofileId?: unknown } }) => {
+          if (where.subprofileId === undefined) {
+            return Promise.resolve(
+              ['sp-open', 'sp-network', 'sp-private'].map(
+                (subprofileId, position) => ({ subprofileId, position }),
+              ),
+            );
+          }
+          return Promise.resolve(
+            viewerOwnsPrivate && where.userId === 'co-owner-1'
+              ? [{ subprofileId: 'sp-private' }]
+              : [],
+          );
+        },
+      );
+    }
+
+    it('withholds a private persona from an active member who does not own it', async () => {
+      rosterFor(false);
+
+      const views = await service.listForProfile('ana', 'viewer-1');
+
+      expect(views.map((view) => view.id)).toEqual(['sp-open', 'sp-network']);
+      expect(views.map((view) => view.visibility)).toEqual([
+        SubprofileVisibility.Open,
+        SubprofileVisibility.Network,
+      ]);
+    });
+
+    it('lists the private persona for its co-owner', async () => {
+      rosterFor(true);
+
+      const views = await service.listForProfile('ana', 'co-owner-1');
+
+      expect(views.map((view) => view.id)).toEqual([
+        'sp-open',
+        'sp-network',
+        'sp-private',
+      ]);
+    });
+  });
+
+  // --- sitemap handles keyed on the persona uuid ------------------------------
+
+  describe('listPublicHandles takedown filter', () => {
+    it('drops a persona by the uuid its takedown is keyed on', async () => {
+      const updatedAt = new Date('2026-09-01T10:00:00.000Z');
+      subprofiles.find.mockResolvedValue([
+        { id: 'sp-live', handle: 'live-one', updatedAt },
+        { id: 'sp-down', handle: 'taken-down', updatedAt },
+      ]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['sp-down', { hidden: true, removed: false }]]),
+      );
+
+      const result = await service.listPublicHandles();
+
+      expect(contentModeration.statesFor).toHaveBeenCalledWith('subprofile', [
+        'sp-live',
+        'sp-down',
+      ]);
+      expect(result.items).toEqual([
+        { handle: 'live-one', updatedAt: updatedAt.toISOString() },
+      ]);
+    });
+  });
+
+  // --- resolveHandles: a collaboration credit honours the persona uuid's
+  // takedown state too (Task 1 N3) ------------------------------------------
+
+  describe('resolveHandles takedown filter', () => {
+    let handleRegistry: { find: jest.Mock };
+
+    beforeEach(() => {
+      handleRegistry = module.get<{ find: jest.Mock }>(
+        getRepositoryToken(Handle),
+      );
+    });
+
+    // A persona that would otherwise be creditable: published, unlinked and
+    // not private, so a takedown is the only thing withholding it below.
+    function creditablePersona(
+      overrides: Partial<Subprofile> = {},
+    ): Subprofile {
+      return makeSubprofile({
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+        visibility: SubprofileVisibility.Open,
+        status: SubprofileStatus.Published,
+        ...overrides,
+      });
+    }
+
+    it('drops a persona credit whose uuid carries a takedown and keeps one that does not', async () => {
+      handleRegistry.find.mockResolvedValue([
+        {
+          name: 'taken-down',
+          ownerKind: HandleOwnerKind.Subprofile,
+          userId: null,
+          subprofileId: 'sp-down',
+        },
+        {
+          name: 'live-one',
+          ownerKind: HandleOwnerKind.Subprofile,
+          userId: null,
+          subprofileId: 'sp-live',
+        },
+      ]);
+      subprofiles.find.mockResolvedValue([
+        creditablePersona({
+          id: 'sp-down',
+          handle: 'taken-down',
+          displayName: 'Taken Down',
+        }),
+        creditablePersona({
+          id: 'sp-live',
+          handle: 'live-one',
+          displayName: 'Live One',
+        }),
+      ]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['sp-down', { hidden: true, removed: false }]]),
+      );
+
+      const result = await service.resolveHandles(
+        ['taken-down', 'live-one'],
+        'viewer-1',
+      );
+
+      expect(contentModeration.statesFor).toHaveBeenCalledWith('subprofile', [
+        'sp-down',
+        'sp-live',
+      ]);
+      expect(result.has('taken-down')).toBe(false);
+      expect(result.get('live-one')).toEqual({
+        handle: 'live-one',
+        type: 'persona',
+        name: 'Live One',
+        avatarUrl: null,
+        slug: null,
+      });
+    });
+
+    it('also drops a persona credit whose uuid carries a removed takedown', async () => {
+      handleRegistry.find.mockResolvedValue([
+        {
+          name: 'removed-one',
+          ownerKind: HandleOwnerKind.Subprofile,
+          userId: null,
+          subprofileId: 'sp-removed',
+        },
+      ]);
+      subprofiles.find.mockResolvedValue([
+        creditablePersona({
+          id: 'sp-removed',
+          handle: 'removed-one',
+          displayName: 'Removed One',
+        }),
+      ]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['sp-removed', { hidden: false, removed: true }]]),
+      );
+
+      const result = await service.resolveHandles(['removed-one'], 'viewer-1');
+
+      expect(result.has('removed-one')).toBe(false);
     });
   });
 

@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import {
   toStoredPlainText,
   toStoredPlainTextOrNull,
@@ -15,12 +15,21 @@ import { Profile } from '../users/entities/profile.entity';
 import {
   AdminLegalRequestDTO,
   AdminLegalRequestPageDTO,
+  LegalRequestAmendmentDTO,
   toAdminLegalRequestDTO,
+  toLegalRequestAmendmentDTO,
 } from './legal-request-response';
 import { CreateLegalRequestDto } from './dto/create-legal-request.dto';
 import { ListLegalRequestsQuery } from './dto/list-legal-requests.query';
 import { UpdateLegalRequestDto } from './dto/update-legal-request.dto';
 import { VoidLegalRequestDto } from './dto/void-legal-request.dto';
+import {
+  LEGAL_REQUEST_AMENDABLE_FIELDS,
+  LegalRequestAmendableField,
+  LegalRequestAmendment,
+  LegalRequestAmendmentChanges,
+  LegalRequestFieldValue,
+} from './entities/legal-request-amendment.entity';
 import { LegalRequest } from './entities/legal-request.entity';
 import {
   DISCLOSING_LEGAL_REQUEST_OUTCOMES,
@@ -76,8 +85,11 @@ export class LegalRequestsService {
   constructor(
     @InjectRepository(LegalRequest)
     private readonly legalRequests: Repository<LegalRequest>,
+    @InjectRepository(LegalRequestAmendment)
+    private readonly amendments: Repository<LegalRequestAmendment>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -194,15 +206,23 @@ export class LegalRequestsService {
    * record is the register's one irreversible move, and a struck row that
    * could still be rewritten would let the reason it was struck disagree with
    * what it now says.
+   *
+   * Every amendment that moves a stored value is attributed (ENG-487): the
+   * record and one `legal_request_amendments` row, naming the acting admin and
+   * holding `{ from, to }` for each field that changed, are written in the
+   * same transaction, so the register never shows an edit its history lacks.
+   * A PATCH that changes nothing writes no history row.
    */
   async update(
     id: string,
+    actorUserId: string,
     dto: UpdateLegalRequestDto,
   ): Promise<AdminLegalRequestDTO> {
     const record = await this.requireRecord(id);
     if (record.voidedAt !== null) {
       throw new ConflictException('A voided legal request cannot be amended');
     }
+    const valuesBefore = amendableValuesOf(record);
 
     if (dto.requestingBody !== undefined) {
       record.requestingBody = toStoredPlainText(dto.requestingBody);
@@ -238,7 +258,48 @@ export class LegalRequestsService {
     }
 
     assertInvariants(record);
-    return toAdminLegalRequestDTO(await this.legalRequests.save(record));
+
+    const changes = diffAmendableValues(
+      valuesBefore,
+      amendableValuesOf(record),
+    );
+    const hasChanges = Object.keys(changes).length > 0;
+    // Looked up before the transaction opens, so the transaction holds only
+    // the two writes.
+    const actorName = hasChanges
+      ? await this.recorderLabelFor(actorUserId)
+      : null;
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const savedRecord = await manager.save(LegalRequest, record);
+      if (hasChanges) {
+        await manager.insert(LegalRequestAmendment, {
+          legalRequestId: record.id,
+          actorUserId,
+          actorName,
+          changes,
+        });
+      }
+      return savedRecord;
+    });
+    return toAdminLegalRequestDTO(saved);
+  }
+
+  /**
+   * A record's amendment history, newest first. 404 for an unknown record, so
+   * an empty list always means a record that has never been amended. A voided
+   * record's history stays readable: it shows what the row said before it was
+   * struck.
+   */
+  async listAmendments(id: string): Promise<LegalRequestAmendmentDTO[]> {
+    await this.requireRecord(id);
+    const rows = await this.amendments.find({
+      where: { legalRequestId: id },
+      // Matches `IDX_legal_request_amendments_request_created`; `id` keeps the
+      // order stable for two amendments stamped in the same instant.
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+    return rows.map(toLegalRequestAmendmentDTO);
   }
 
   /**
@@ -329,4 +390,56 @@ function assertInvariants(view: LegalRequestInvariantView): void {
         'affected account was notified',
     );
   }
+}
+
+/** The amendable fields' stored values, captured before and after a PATCH. */
+type LegalRequestAmendableValues = Record<
+  LegalRequestAmendableField,
+  LegalRequestFieldValue
+>;
+
+function amendableValuesOf(record: LegalRequest): LegalRequestAmendableValues {
+  return {
+    requestingBody: record.requestingBody,
+    jurisdiction: record.jurisdiction,
+    requestType: record.requestType,
+    receivedOn: record.receivedOn,
+    accountsAffected: record.accountsAffected,
+    outcome: record.outcome,
+    // Copied, so the "before" snapshot cannot follow a later in-place change
+    // to the record's array.
+    dataDisclosed: [...(record.dataDisclosed ?? [])],
+    memberNotifiedOn: record.memberNotifiedOn ?? null,
+    accountsNotified: record.accountsNotified,
+    notificationWithheldReason: record.notificationWithheldReason ?? null,
+    isUnderGagOrder: record.isUnderGagOrder,
+    internalNote: record.internalNote ?? null,
+  };
+}
+
+/**
+ * The fields whose stored value moved, as `{ from, to }`. Arrays compare as a
+ * set (sorted and joined), since re-sending the same categories in another
+ * order changes nothing that is published; everything else compares by its
+ * string form, which is also how the `date` columns read back.
+ */
+function diffAmendableValues(
+  valuesBefore: LegalRequestAmendableValues,
+  valuesAfter: LegalRequestAmendableValues,
+): LegalRequestAmendmentChanges {
+  const changes: LegalRequestAmendmentChanges = {};
+  for (const field of LEGAL_REQUEST_AMENDABLE_FIELDS) {
+    const valueBefore = valuesBefore[field];
+    const valueAfter = valuesAfter[field];
+    if (comparisonKeyOf(valueBefore) !== comparisonKeyOf(valueAfter)) {
+      changes[field] = { from: valueBefore, to: valueAfter };
+    }
+  }
+  return changes;
+}
+
+function comparisonKeyOf(value: LegalRequestFieldValue): string | null {
+  if (value === null) return null;
+  if (Array.isArray(value)) return [...value].sort().join(',');
+  return String(value);
 }

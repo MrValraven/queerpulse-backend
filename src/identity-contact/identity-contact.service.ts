@@ -233,11 +233,11 @@ export class IdentityContactService {
           SubprofileVisibility.Network,
         ]),
       },
-      select: { id: true, slug: true, userId: true },
+      select: { id: true, userId: true },
     });
     if (
       !persona ||
-      (await isSubprofileUnderTakedown(this.contentModeration, persona.slug)) ||
+      (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) ||
       (await this.blockFilter.isBlockedEitherWay(viewerUserId, persona.userId))
     ) {
       throw new NotFoundException('Subprofile not found');

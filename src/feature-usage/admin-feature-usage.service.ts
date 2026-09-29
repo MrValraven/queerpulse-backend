@@ -16,7 +16,7 @@ import { HousingViewing } from '../housing-viewings/entities/housing-viewing.ent
 import { runWithConcurrency } from '../common/run-with-concurrency';
 import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { FeatureKey, launchedFeatures } from '../launchedFeatures';
-import { FEATURE_DEPTH } from './feature-depth';
+import { FEATURE_DEPTH, TrackedFeatureKey } from './feature-depth';
 import { FeatureUsageDaily } from './entities/feature-usage-daily.entity';
 import {
   AdminFeatureUsageDTO,
@@ -138,7 +138,8 @@ export class AdminFeatureUsageService {
       this.sumRequestsByFeature(previousRangeStart, rangeStart),
     ]);
 
-    const featureKeys = Object.keys(FEATURE_DEPTH) as FeatureKey[];
+    // Untracked keys (Go together) have no depth entry, so they get no row.
+    const featureKeys = Object.keys(FEATURE_DEPTH) as TrackedFeatureKey[];
 
     const depthCountTasks: DepthCountTask[] = [];
     const depthCountThunks: Array<() => Promise<number>> = [];

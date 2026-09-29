@@ -20,6 +20,8 @@ import {
 } from './subprofile-takedown';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
+import { SubprofileMembershipService } from './subprofile-membership.service';
+import { lockEngageablePersonaWithin } from './subprofile-engagement-lock';
 import {
   Subprofile,
   SubprofileLinkVisibility,
@@ -61,6 +63,10 @@ export class SubprofileFollowersService {
     // applies. `ContentModerationModule` is already imported by
     // `SubprofilesModule` for `SubprofilePublicReadService`.
     private readonly contentModeration: ContentModerationService,
+    // Read-only: the self-follow guard in `follow` asks whether the follower
+    // co-owns the persona, through the same `isMember` predicate every owner
+    // gate uses.
+    private readonly membership: SubprofileMembershipService,
   ) {}
 
   async follow(
@@ -68,7 +74,14 @@ export class SubprofileFollowersService {
     id: string,
   ): Promise<{ followerCount: number; viewerFollowing: boolean }> {
     const persona = await this.resolveFollowablePersona(followerId, id);
-    if (persona.userId === followerId) {
+    // Every owner is refused: the creator (`persona.userId`) and each co-owner
+    // holding a `subprofile_members` row. A co-owner following their own
+    // persona would inflate its count from inside and send the creator a
+    // follow bell from a fellow owner.
+    if (
+      persona.userId === followerId ||
+      (await this.membership.isMember(followerId, persona.id))
+    ) {
       throw new BadRequestException('You cannot follow your own persona');
     }
 
@@ -76,11 +89,20 @@ export class SubprofileFollowersService {
     // the entity): a genuine insert emits the notification event once;
     // re-tapping an already-followed persona (or losing a race to a
     // concurrent follow for the same pair) is idempotent success, no event.
+    //
+    // The insert runs in a transaction that first re-reads the persona under a
+    // share lock (`lockEngageablePersonaWithin`), so it cannot land after a
+    // concurrent linked-to-unlinked switch has deleted every follower. A
+    // unique violation aborts that transaction and is caught out here, after
+    // the rollback.
     let justFollowed = false;
     try {
-      await this.followers.insert({
-        subprofileId: id,
-        followerId,
+      await this.followers.manager.transaction(async (manager) => {
+        await lockEngageablePersonaWithin(manager, persona);
+        await manager.insert(SubprofileFollower, {
+          subprofileId: id,
+          followerId,
+        });
       });
       justFollowed = true;
     } catch (err) {
@@ -236,7 +258,7 @@ export class SubprofileFollowersService {
         `NOT EXISTS (
           SELECT 1 FROM "content_moderation" "cm"
           WHERE "cm"."subject_type" = :subprofileSubjectType
-            AND "cm"."subject_id" = sp.slug
+            AND "cm"."subject_id" = "sp"."id"::text
             AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
         )`,
         { subprofileSubjectType: SUBPROFILE_MODERATION_SUBJECT_TYPE },
@@ -401,7 +423,7 @@ export class SubprofileFollowersService {
     // A moderator takedown withholds the persona from every public read path
     // (`dropModeratedSubprofiles` / `excludeModeratedSubprofiles`), so it has
     // to close the write path too. Same predicate, one shared spelling.
-    if (await isSubprofileUnderTakedown(this.contentModeration, persona.slug)) {
+    if (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) {
       throw new NotFoundException('Subprofile not found');
     }
     if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {

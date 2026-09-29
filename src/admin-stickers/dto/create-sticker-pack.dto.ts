@@ -16,7 +16,12 @@ export class CreateStickerPackDto {
   })
   slug!: string;
 
+  /** The English pack name. */
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
+
+  /** The Portuguese pack name. Optional: readers in Portuguese fall back to
+   *  `name` while it is absent. */
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(80) namePt?: string;
 
   @IsOptional() @IsString() @MaxLength(500) description?: string;
 }

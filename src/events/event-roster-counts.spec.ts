@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -107,6 +108,7 @@ describe('EventsService.rosterCounts', () => {
       {} as unknown as EventAudienceGateService,
       {} as unknown as MediaCropService,
       {} as unknown as ListingLookupService,
+      {} as unknown as EventEmitter2,
     );
   });
 

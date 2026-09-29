@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
+import { CommunityBan } from '../communities/entities/community-ban.entity';
 import { CommunityGovernanceLog } from '../communities/entities/community-governance-log.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
@@ -56,6 +57,11 @@ import { SpaceRequestApprovalsService } from './space-request-approvals.service'
       CommunityPost,
       CommunityPostReply,
       CommunityGovernanceLog,
+      // `AdminCommunitiesService.removeMember` writes the permanent bar when
+      // the admin asks for one (`barReturn=true`, PRD-413). Same overlapping
+      // `forFeature` precedent; `CommunitiesModule` registers it for the
+      // member-facing ban surface.
+      CommunityBan,
       // The "suggest a tag" feedback inbox
       // (`AdminCommunityTagRequestsService`) — own `forFeature` registration
       // here, same precedent as the entities above; `CommunitiesModule`
@@ -82,6 +88,8 @@ import { SpaceRequestApprovalsService } from './space-request-approvals.service'
     // co-owners and moderators that support has been offered, and
     // `SpaceRequestApprovalsService`/`AdminCommunitySpaceRequestsService.decline`
     // notify a space request's requester once it is approved or declined.
+    // `AdminCommunitiesService.removeMember` tells the removed member, and
+    // says when the removal also barred their return.
     NotificationsModule,
     // `SubcommunityCascadeService`: the admin freeze/unfreeze/archive/
     // unarchive/remove-member overrides cascade onto a parent's spaces the

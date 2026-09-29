@@ -80,6 +80,15 @@ export class AmbassadorCircleService {
     }
   }
 
+  /**
+   * The circle when it has been founded, or null. A pure read that creates
+   * nothing, for the reads (the admin summary, a staff seat release) that must
+   * never found the circle as a side effect.
+   */
+  findCircle(): Promise<Community | null> {
+    return this.findPinned();
+  }
+
   private async findPinned(): Promise<Community | null> {
     const pin = await this.circlePin.findOne({ where: { id: CIRCLE_PIN_ID } });
     if (!pin) return null;

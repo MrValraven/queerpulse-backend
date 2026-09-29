@@ -40,15 +40,18 @@ export interface NotificationResponse {
 /**
  * Per-type payload key holding the acting member's user id. This is the same
  * per-type key `NotificationsListener` writes and `NotificationsService.create`
- * filters blocks on — reused here for display only.
+ * filters blocks on, reused here to resolve the actor for display.
  *
  * A missing entry (system types, or any future type) simply yields
  * `actor: null`, never an error, so the enrichment degrades gracefully. The
  * actor id in `payload` stays the source of truth: name/slug/avatar are
  * resolved fresh on every read, so a renamed member or a new avatar is never
  * stale and a changed slug never links to a dead profile.
+ *
+ * Exported for PRD-403: `visibleThroughActorBlocks` reads the same key per
+ * type to hide a row whose actor is blocked either way at read time.
  */
-const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
+export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.ConnectionRequest]: 'fromUserId',
   [NotificationType.ConnectionAccepted]: 'byUserId',
   [NotificationType.VouchReceived]: 'voucherId',
@@ -248,7 +251,11 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.ForumReply]: ['threadTitle'],
     [NotificationType.ForumThreadReply]: ['threadTitle'],
     [NotificationType.TopicNewPost]: ['topicSlug', 'topicLabel', 'threadTitle'],
-    [NotificationType.ModerationOutcome]: ['action', 'note'],
+    // `actionId` (ENG-480) is the `mod_audit_logs` row id of the decision, so
+    // the bell can open the appeal form on that exact decision. It is the
+    // recipient's own sanction, which `POST /appeals` already accepts by id
+    // only when the row names them, so it discloses nothing new.
+    [NotificationType.ModerationOutcome]: ['action', 'note', 'actionId'],
     [NotificationType.ConcernUpdate]: ['status', 'category'],
     // The outcome of a non-concern intake form, read back to the member. Only
     // `status` (the terminal outcome the copy branches on) and `kind` (the
@@ -298,6 +305,20 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     ],
     [NotificationType.EventUpdated]: ['changes', 'title'],
     [NotificationType.EventCohostInvite]: ['title'],
+    // LOC-06, a host's announcement to the people coming. `title` is the
+    // GATHERING's own title (announcements have none of their own), and every
+    // recipient holds a live RSVP or a standing invite to it, so they already
+    // read that title on the event page the row opens. `source` + `eventSlug`
+    // ride in COMMON_PAYLOAD_KEYS and build the deep link. The announcement
+    // `body` appears in no entry, like every content-bearing key.
+    [NotificationType.EventAnnouncement]: ['title'],
+    // PRD-404. The reminder names the gathering it is about: `eventTitle` is
+    // the gathering's own public title for the copy, and `source` +
+    // `eventSlug` build the deep link. The two routing keys also ride in
+    // COMMON_PAYLOAD_KEYS; they are listed here so the reminder's full
+    // contract with the client reads in one place. `eventId` and `startAt`
+    // stay server-side: the copy formats no time, and the link needs no id.
+    [NotificationType.EventReminder]: ['source', 'eventSlug', 'eventTitle'],
     [NotificationType.XpLevelUp]: ['level', 'name'],
     // `badgeKey` is the badge's stable catalogue id, the same one persisted in
     // `recognition_awards.badge_key`. The writer has always put it in the
@@ -356,6 +377,12 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'newCreatorName',
       'isYou',
     ],
+    // A new endorsement or follower on a persona. The recipient is the
+    // persona's creator, so `subprofileName` is their own persona's name. The
+    // endorser and the follower are in no payload and have no
+    // `ACTOR_PAYLOAD_KEY` entry, so the row names the persona only.
+    [NotificationType.PersonaEndorsed]: ['subprofileName'],
+    [NotificationType.PersonaFollowed]: ['subprofileName'],
     [NotificationType.SafeSpaceVouch]: ['spaceName', 'spaceSlug'],
     [NotificationType.HousingListingMatch]: ['title', 'area', 'slug'],
     // The moderator's decision on the member's OWN housing listing, plus the
@@ -465,6 +492,12 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // fallback. The message BODY stays absent on purpose: it is author-written
     // prose, and this allowlist is the guarantee it can never reach a bell.
     [NotificationType.MagazinePieceMessage]: ['pieceId'],
+    // ENG-462, the pitch verdict. `pitchId` is the deep link (the writer's
+    // tracker card), `title` is the pitch's own working title. The pass note
+    // is staff-authored prose and stays on the tracker card the member reads
+    // under their own authentication, the same boundary `StorySubmissionDecided`
+    // draws around its own decision note.
+    [NotificationType.MagazinePitchPassed]: ['pitchId', 'title'],
     // The business's own public name, for copy like "someone asked a question
     // about Lux Cafe". The question BODY and the ANSWER text are deliberately
     // absent: they are member- and owner-authored prose, this allowlist is the
@@ -486,6 +519,12 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // ownership of Lux Cafe". `listingSlug` already rides along in
     // `COMMON_PAYLOAD_KEYS`, which is what the deep link is built from.
     [NotificationType.ListingOwnerOffer]: ['listingName'],
+    // The answer to the member's OWN ownership claim. `listingName` is the
+    // business's public name, so the row says which claim was answered. The
+    // decline carries no reviewer reason: `ListingClaimsService.review` takes
+    // none. The claimant's own note stays in the claim row.
+    [NotificationType.ListingClaimApproved]: ['listingName'],
+    [NotificationType.ListingClaimDeclined]: ['listingName'],
     [NotificationType.ListingEditSuggestionAccepted]: ['field'],
     // LOC-16, "a gathering has been listed at your venue". The business's own
     // public name and the gathering's own public title, which is exactly what
@@ -509,7 +548,13 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.AmbassadorRevoked]: [],
     [NotificationType.CommunityRoleChanged]: ['communityName', 'role'],
     [NotificationType.CommunityMemberRemoved]: ['communityName'],
-    [NotificationType.CommunityOwnershipTransferred]: ['communityName'],
+    // `youAreNowOwner` is a boolean the copy branches on, telling the incoming
+    // owner apart from the outgoing one. Each recipient only learns their own
+    // side of a transfer they are party to.
+    [NotificationType.CommunityOwnershipTransferred]: [
+      'communityName',
+      'youAreNowOwner',
+    ],
     [NotificationType.CommunityArchived]: ['communityName'],
     [NotificationType.CommunityFrozen]: ['communityName'],
     [NotificationType.CommunityUnfrozen]: ['communityName'],
@@ -750,6 +795,19 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'communityName',
     ],
 
+    // --- Member motions (GOV-01) --------------------------------------------
+    //
+    // `title` is the motion's own title. On the two decisions it is read back
+    // to the member who filed it; on ready-for-review the recipients are
+    // platform `Moderator`/`Admin` accounts screening it as their duty. On the
+    // rejection, `note` is the admin's required reason written TO the proposer
+    // (`RejectGovernanceMotionDto`), the same class of value `CommunityBanned`'s
+    // `reason` forwards, and it is the substance of the answer. `source` rides
+    // in COMMON_PAYLOAD_KEYS and builds the deep link.
+    [NotificationType.GovernanceMotionApproved]: ['title'],
+    [NotificationType.GovernanceMotionRejected]: ['title', 'note'],
+    [NotificationType.GovernanceMotionReadyForReview]: ['title'],
+
     // --- The shared submission-decision row (PRD-48) ------------------------
     //
     // `kind` and `outcome` are the two discriminators the client branches its
@@ -812,10 +870,14 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'groupId',
       'conversationId',
     ],
+    // `reason` is a fixed code with no member-authored text: its one writer
+    // (`GoTogetherHostService.notifySwitchedOff`) sends only
+    // `'hostSwitchedOff'`, and the bell reads only that value.
     [NotificationType.GoTogetherUnmatched]: [
       'eventId',
       'eventTitle',
       'isFinal',
+      'reason',
     ],
     [NotificationType.GoTogetherMemberLeft]: [
       'eventId',
@@ -829,6 +891,30 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'groupId',
     ],
     [NotificationType.GoTogetherMutual]: ['eventId', 'eventTitle', 'groupId'],
+    // PRD-433. A member's suggested listing, told to them in their own
+    // language. `listingName` is the business's public name and the copy's
+    // only token; `listingSlug` (in `COMMON_PAYLOAD_KEYS`) opens the live
+    // listing, and `listingRef` builds the prefilled correction link on the
+    // three rows with no public page. `reason` is moderator-authored prose
+    // written TO this recipient, the same class of value
+    // `HousingListingDecision.reason` forwards, and the DM these replace
+    // already carried it. Nothing else about the listing rides along.
+    [NotificationType.ListingSuggestionLive]: ['listingName'],
+    [NotificationType.ListingSuggestionNeedsInfo]: [
+      'listingName',
+      'listingRef',
+      'reason',
+    ],
+    [NotificationType.ListingSuggestionSentBack]: [
+      'listingName',
+      'listingRef',
+      'reason',
+    ],
+    [NotificationType.ListingSuggestionRemoved]: [
+      'listingName',
+      'listingRef',
+      'reason',
+    ],
   };
 
 /**
@@ -860,6 +946,13 @@ export function toNotificationResponse(
   notification: Notification,
   actorProfile: Profile | undefined,
 ): NotificationResponse {
+  // PRD-423: a mention written inside a Go together chat names the mentioner
+  // the way the chat does, by first name alone, and with an empty `slug` the
+  // bell links to no profile. `MessagesService` writes the server-side
+  // `isGoTogetherChat` payload key, which the client allowlist leaves out.
+  const isGoTogetherChatMention =
+    notification.type === NotificationType.Mention &&
+    notification.payload?.isGoTogetherChat === true;
   return {
     id: notification.id,
     userId: notification.userId,
@@ -870,10 +963,18 @@ export function toNotificationResponse(
     otherActorCount: notification.otherActorCount ?? 0,
     actor: actorProfile
       ? {
-          slug: actorProfile.slug,
-          firstName: actorProfile.firstName,
-          lastName: actorProfile.lastName,
-          avatarUrl: toImageUrl(actorProfile.avatarUrl),
+          slug: isGoTogetherChatMention ? '' : actorProfile.slug,
+          firstName: isGoTogetherChatMention
+            ? actorProfile.firstName.trim()
+            : actorProfile.firstName,
+          lastName: isGoTogetherChatMention ? '' : actorProfile.lastName,
+          // ENG-412: an actor who hid their photo shows no avatar on the bell,
+          // the same `photoVisible` gate every profile surface applies
+          // (`ListingsService`'s asker summary is the house pattern). Name
+          // and profile link stay.
+          avatarUrl: actorProfile.photoVisible
+            ? toImageUrl(actorProfile.avatarUrl)
+            : null,
         }
       : null,
   };

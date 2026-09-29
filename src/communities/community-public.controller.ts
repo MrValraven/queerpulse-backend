@@ -66,6 +66,10 @@ import {
  * the same reasons as the second route. All three routes in this controller
  * answer the same question, "what may somebody outside a community's roster
  * be shown of it", at three different distances.
+ *
+ * FOURTH ROUTE: `GET /communities/:slug/rules`, the house rules for the gate
+ * card's audience, who must accept them at the door. Method-level
+ * `ActiveMemberGuard` and uncached, like the gate route.
  */
 @Feature('communities')
 @ApiTags('Communities')
@@ -117,7 +121,7 @@ export class CommunityPublicController {
   })
   @ApiOkResponse({
     description:
-      'Name, tagline, purpose, type, tier, tags, place, languages, member count, images, and the next public gathering. Never the roster, any post, the owner, or the rules.',
+      "Name, tagline, purpose, type, tier, tags, place, languages, member count, images, the next public gathering, and the caller's own join-request status. Never the roster, any post, the owner, or the rules.",
   })
   @ApiNotFoundResponse({
     description:
@@ -128,6 +132,38 @@ export class CommunityPublicController {
     @Param('slug') slug: string,
   ) {
     return this.communityPublicService.getGateCard(slug, user.userId);
+  }
+
+  /**
+   * The house rules the join wizard asks a caller to accept, for anybody who
+   * may see the community's gate card, plus roster members of an archived
+   * community. See `CommunityPublicService.getRules` for why an outsider may
+   * read them.
+   *
+   * NO `Cache-Control`, for the same reason the gate route above carries
+   * none: the answer depends on the caller (an invited viewer is served a
+   * private community's rules where an uninvited one gets a 404, and
+   * `rulesAcceptedVersion` is the caller's own), so a shared cache must never
+   * hold it.
+   */
+  @UseGuards(ActiveMemberGuard)
+  @Get(':slug/rules')
+  @ApiCookieAuth()
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiOperation({
+    summary:
+      "A community's house rules and the caller's accepted version, for the join wizard.",
+  })
+  @ApiOkResponse({
+    description:
+      'Rules, current version, and the version the caller last agreed to (null off the roster).',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Unknown slug, a private community the caller holds no live invitation to, a takedown, or an archive the caller is off the roster of.',
+  })
+  getRules(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.communityPublicService.getRules(slug, user.userId);
   }
 
   /**

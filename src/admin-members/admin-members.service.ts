@@ -7,6 +7,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
+import {
+  AmbassadorsService,
+  CIRCLE_STAFF_ROLE,
+} from '../ambassadors/ambassadors.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
@@ -148,6 +152,7 @@ export class AdminMembersService {
     private readonly vouchService: VouchService,
     private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
+    private readonly ambassadors: AmbassadorsService,
   ) {}
 
   async list(query: ListAdminMembersQuery): Promise<AdminMemberListDTO> {
@@ -460,10 +465,14 @@ export class AdminMembersService {
       memberLookup.byUserIds(vouchersReceived.map((vouch) => vouch.voucherId)),
       memberLookup.byUserIds(vouchesGiven.map((vouch) => vouch.voucheeId)),
     ]);
-    // A row can only ever match one of the two queries above (report-scoped
-    // rows carry no `targetUserId`; target-scoped rows carry no `reportId`),
-    // but de-dupe by id anyway rather than relying on that invariant holding
-    // forever.
+    // Both queries above can match the SAME row, so the id de-dupe below is
+    // load-bearing. Since ENG-480 a sanction decided on a report also carries
+    // the member in `targetUserId` (queue actions, ratified bans, direct
+    // drawer restrictions), so a `member`-report sanction comes back from
+    // both lookups, and a sanction on a content report (a post, a review)
+    // reaches this timeline through the target lookup alone. Rows written
+    // before ENG-480 carry no target and only surface through a `member`
+    // report, as before.
     const auditLogEntriesById = new Map<string, ModAuditLog>();
     for (const auditLogEntry of [
       ...reportScopedAuditLogEntries,
@@ -720,6 +729,14 @@ export class AdminMembersService {
       return targetRole;
     });
 
+    // ENG-457: the admin tier opens the ambassadors admin routes, so an admin
+    // may hold a staff seat in the ambassadors circle. Any non-admin outcome
+    // releases a seat the member no longer qualifies for. A no-op for anyone
+    // with no seat or who still holds the `partnerships` grant.
+    if (appliedRole !== UserRole.Admin) {
+      await this.ambassadors.releaseStaffSeat(targetUserId);
+    }
+
     return toAdminMemberRole({
       userId: targetUserId,
       slug: profile.slug,
@@ -920,6 +937,15 @@ export class AdminMembersService {
       });
       return holdings.map((holding) => holding.role);
     });
+
+    // ENG-457: the `partnerships` grant earns a staff seat in the ambassadors
+    // circle, so losing it gives the seat up (an admin keeps it). Runs after
+    // the revoke commits and lets a failure surface: the grant is already
+    // gone, and a retry of this revoke, a no-op on the grant, runs the
+    // release again. So it runs even when this call deleted nothing.
+    if (role === CIRCLE_STAFF_ROLE) {
+      await this.ambassadors.releaseStaffSeat(targetUserId);
+    }
 
     return {
       userId: targetUserId,

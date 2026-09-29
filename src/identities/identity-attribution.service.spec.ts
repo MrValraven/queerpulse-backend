@@ -299,3 +299,170 @@ describe('IdentityAttributionService.buildStaffNameResolver', () => {
     expect(resolver.resolve(IDENTITY, 'staff-user', '   ')).toBeNull();
   });
 });
+
+/**
+ * ENG-456: a persona that keeps who runs it private never names its staff
+ * to a customer, whatever both switches say. Its own staff still see who
+ * replied. `linkedSubprofileIds` stands in for
+ * `IdentitiesService.linkedPersonaSubprofileIds`, the one read of
+ * `subprofiles.link_visibility`.
+ */
+function makePersonaFixture(options: {
+  personas: Record<string, { subprofileId: string | null }>;
+  linkedSubprofileIds: string[];
+  staffByIdentityId: Record<string, string[]>;
+}) {
+  const identities = {
+    getById: jest.fn(async (identityId: string) => {
+      const persona = options.personas[identityId];
+      if (!persona) {
+        return null;
+      }
+      return {
+        id: identityId,
+        kind: IdentityKind.Subprofile,
+        subprofileId: persona.subprofileId,
+        shouldShowStaffNames: true,
+      } as Identity;
+    }),
+    staffUserIds: jest.fn(
+      async (identityId: string) => options.staffByIdentityId[identityId] ?? [],
+    ),
+    linkedPersonaSubprofileIds: jest.fn(
+      async (subprofileIds: ReadonlyArray<string>) =>
+        new Set(
+          subprofileIds.filter((subprofileId) =>
+            options.linkedSubprofileIds.includes(subprofileId),
+          ),
+        ),
+    ),
+    isUnlinkedPersona: jest.fn(
+      async (identity: Identity) =>
+        !identity.subprofileId ||
+        !options.linkedSubprofileIds.includes(identity.subprofileId),
+    ),
+  };
+  const preferences = {
+    find: jest.fn().mockResolvedValue([]),
+    findOne: jest.fn().mockResolvedValue(null),
+  };
+  const service = new IdentityAttributionService(
+    preferences as never,
+    identities as never,
+  );
+  return { service, identities };
+}
+
+describe('IdentityAttributionService, unlinked personas (ENG-456)', () => {
+  const LINKED = 'identity-linked-persona';
+  const UNLINKED = 'identity-unlinked-persona';
+  const ORPHANED = 'identity-orphaned-persona';
+
+  function makeFixture() {
+    return makePersonaFixture({
+      personas: {
+        [LINKED]: { subprofileId: 'persona-linked' },
+        [UNLINKED]: { subprofileId: 'persona-unlinked' },
+        [ORPHANED]: { subprofileId: null },
+      },
+      linkedSubprofileIds: ['persona-linked'],
+      staffByIdentityId: {
+        [LINKED]: ['staff-user'],
+        [UNLINKED]: ['staff-user', 'colleague'],
+        [ORPHANED]: ['staff-user'],
+      },
+    });
+  }
+
+  it('hides the staff name of an unlinked persona from a customer, with both switches on', async () => {
+    const { service } = makeFixture();
+
+    const resolver = await service.buildStaffNameResolver(
+      [LINKED, UNLINKED, ORPHANED],
+      'customer',
+    );
+
+    expect(resolver.resolve(LINKED, 'staff-user', 'Ana')).toBe('Ana');
+    expect(resolver.resolve(UNLINKED, 'staff-user', 'Ana')).toBeNull();
+    // A persona identity with no persona row behind it fails closed.
+    expect(resolver.resolve(ORPHANED, 'staff-user', 'Ana')).toBeNull();
+  });
+
+  it('still names the sender to a colleague inside the unlinked persona', async () => {
+    const { service } = makeFixture();
+
+    const resolver = await service.buildStaffNameResolver(
+      [UNLINKED],
+      'colleague',
+    );
+
+    expect(resolver.resolve(UNLINKED, 'staff-user', 'Ana')).toBe('Ana');
+  });
+
+  it('reads every persona link visibility in one query when the resolver is built, and none after', async () => {
+    const { service, identities } = makeFixture();
+
+    const resolver = await service.buildStaffNameResolver(
+      [LINKED, UNLINKED, ORPHANED],
+      'customer',
+    );
+    for (let index = 0; index < 20; index++) {
+      resolver.resolve(UNLINKED, 'staff-user', 'Ana');
+    }
+
+    expect(identities.linkedPersonaSubprofileIds).toHaveBeenCalledTimes(1);
+    expect(identities.linkedPersonaSubprofileIds).toHaveBeenCalledWith([
+      'persona-linked',
+      'persona-unlinked',
+    ]);
+  });
+
+  it('never reads link visibility for a set without a persona', async () => {
+    // The listing fixture's `IdentitiesService` stub has no
+    // `linkedPersonaSubprofileIds`, so building would throw if it were read.
+    const { service } = makeResolverFixture({
+      identities: { 'identity-listing': { shouldShowStaffNames: true } },
+      staffByIdentityId: { 'identity-listing': ['staff-user'] },
+      preferenceRows: [],
+    });
+
+    const resolver = await service.buildStaffNameResolver(
+      ['identity-listing'],
+      'customer',
+    );
+
+    expect(resolver.resolve('identity-listing', 'staff-user', 'Ana')).toBe(
+      'Ana',
+    );
+  });
+
+  it('gives the same answer through resolveStaffFirstName', async () => {
+    const { service } = makeFixture();
+
+    for (const identityId of [LINKED, UNLINKED, ORPHANED]) {
+      const resolver = await service.buildStaffNameResolver(
+        [identityId],
+        'customer',
+      );
+      const identity = {
+        id: identityId,
+        kind: IdentityKind.Subprofile,
+        subprofileId:
+          identityId === LINKED
+            ? 'persona-linked'
+            : identityId === UNLINKED
+              ? 'persona-unlinked'
+              : null,
+        shouldShowStaffNames: true,
+      } as Identity;
+      await expect(
+        service.resolveStaffFirstName({
+          identity,
+          senderUserId: 'staff-user',
+          senderFirstName: 'Ana',
+          readerUserId: 'customer',
+        }),
+      ).resolves.toBe(resolver.resolve(identityId, 'staff-user', 'Ana'));
+    }
+  });
+});

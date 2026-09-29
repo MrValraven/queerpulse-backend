@@ -138,6 +138,15 @@ export interface SubprofileView {
   // `subprofile_members` row from the moment the persona is created (see
   // `SubprofilesService.create`), so this is never less than 1.
   memberCount: number;
+  /**
+   * ENG-451: the persona's edit counter (`subprofiles.edit_version`). Each
+   * successful PATCH, section PUT, social-links PUT, affiliations PUT or item
+   * revision restore raises it by 1 and answers with the new value (the
+   * restore answers `{ ok, editVersion }`, with no owner view). The editor
+   * sends the value it loaded back as `expectedEditVersion`, and a save built
+   * on an older value gets a 409 `PERSONA_EDIT_CONFLICT`. Owner view only.
+   */
+  editVersion: number;
 }
 
 // Personas redesign Phase 1b (design plan Task 1 Shared Contract): the signal
@@ -179,6 +188,13 @@ export interface SubprofilePublicView {
   ctaLabel: string | null;
   ctaUrl: string | null;
   linkVisibility: SubprofileLinkVisibility;
+  // Who may open the persona: `open`, `network` (signed-in members only) or
+  // `private`. A non-owner only ever reaches `open` or `network` here: the
+  // single-persona reads answer `private` with a 403, and `listForProfile`
+  // lists a private persona for its own owners alone. Follow and endorse accept an `open`
+  // persona only, so the frontend reads this to hide both buttons and skip
+  // the endorser list on a `network` persona (PRD-428).
+  visibility: SubprofileVisibility;
   // Personas redesign Phase 1b: present so an owner/co-owner viewing their own
   // unpublished persona through the public read can tell it's a draft (drives
   // the frontend's `SubprofileDraftBanner`). For every non-owner viewer this
@@ -426,6 +442,9 @@ export function toSubprofileDTO(
     affiliations,
     skinData: subprofile.skinData ?? null,
     memberCount,
+    // A row built in memory before its insert returns carries no value yet;
+    // the column default is 0.
+    editVersion: subprofile.editVersion ?? 0,
   };
 }
 
@@ -464,6 +483,7 @@ export function toPublicDTO(
     ctaLabel: subprofile.ctaLabel,
     ctaUrl: subprofile.ctaUrl,
     linkVisibility: subprofile.linkVisibility,
+    visibility: subprofile.visibility,
     status: subprofile.status,
     items: sortItems(items).map((item) =>
       toItemView(item, collaboratorsByHandle, crops),

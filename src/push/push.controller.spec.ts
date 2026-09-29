@@ -21,7 +21,7 @@ describe('PushController', () => {
       'user-1',
       expect.objectContaining({
         title: 'Test notification',
-        body: 'This is a test — your notifications are working.',
+        body: 'This is a test. Your notifications are working.',
         tag: 'push-test',
         data: { url: '/account/settings' },
       }),

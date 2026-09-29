@@ -5,6 +5,7 @@ import {
   CommunityType,
 } from '../communities/entities/community.entity';
 import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import {
   LandingFeature,
@@ -20,13 +21,13 @@ export interface LandingMemberFeatureDTO {
   tagline: string | null;
   avatarUrl: string | null;
   quote: string;
-  /** The member's own public profile tags — the same set shown on their card
+  /** The member's own public profile tags: the same set shown on their card
    *  and in directory search, surfaced here so the homepage spotlight can
    *  mirror the richer profile-preview layout without any extra curation. */
   tags: string[];
 }
 
-/** A single roster face on a featured-community card — the community's owner
+/** A single roster face on a featured-community card: the community's owner
  *  ("kept by") or one of its members. Name (for the avatar's initials fallback)
  *  + a resolved avatar URL, nothing more: the public homepage needs no slug or
  *  contact detail, and omitting them keeps the payload from leaking a member
@@ -50,16 +51,19 @@ export interface LandingCommunityFeatureDTO {
   /** Access level, shown as an "open / request / private" chip. */
   accessTier: AccessTier;
   /** Year the community was created (`createdAt`), shown as "since ‹year›".
-   *  This is the record-creation year, not a user-entered founding date. */
+   *  This year comes entirely from the record's own creation timestamp; the
+   *  community entity carries no separate, user-entered founding-date field. */
   foundedYear: number;
   /** The community's `features` list → the card's "what you get" chips. */
   features: string[];
-  /** The owner, rendered as "kept by ‹name›". Null if the owner profile is
-   *  somehow unresolved (shouldn't happen for a live community). */
+  /** The owner, rendered as "kept by ‹name›". Null when the owner profile is
+   *  unresolved, or when it fails `isPublicFace` (private, hidden or the
+   *  owner's account suspended): the card then omits the "kept by" line
+   *  entirely, so a name that should no longer be public never renders. */
   owner: LandingCommunityFaceDTO | null;
   /** A capped set of member avatars for the roster strip. Empty when the
-   *  community hides its roster (`rosterVisible === false`) — the card then
-   *  leans on `memberCount` alone rather than leaking who's inside. */
+   *  community hides its roster (`rosterVisible === false`): the card then
+   *  leans on `memberCount` alone and keeps the roster private. */
   faces: LandingCommunityFaceDTO[];
 }
 
@@ -81,7 +85,7 @@ export interface LandingFeaturesResponseDTO {
 // ---- Admin shapes (include inactive rows + eligibility state) -------------
 
 /** Why a feature is currently withheld from the public response, computed at
- *  read time against the canonical eligibility rules — never stored. */
+ *  read time against the canonical eligibility rules. It is never stored. */
 export type LandingHiddenReason =
   | 'consent_revoked'
   | 'went_private'
@@ -117,10 +121,10 @@ export interface AdminEligibleEntityDTO {
 
 // ---- Mappers ----------------------------------------------------------------
 
-/** `feature.id` (not the target's id) is the public list-key here — the same
- *  convention `AdminLandingFeatureDTO` uses to keep `id` (the row) distinct
- *  from `targetId`. `slug` is what routes a card to the featured entity's own
- *  page. */
+/** `feature.id` (the feature row's own id, distinct from the target's id) is
+ *  the public list-key here, the same convention `AdminLandingFeatureDTO`
+ *  uses to keep `id` (the row) distinct from `targetId`. `slug` is what
+ *  routes a card to the featured entity's own page. */
 export function toLandingMemberFeatureDTO(
   feature: LandingFeature,
   profile: Profile,
@@ -132,10 +136,11 @@ export function toLandingMemberFeatureDTO(
     name: `${profile.firstName} ${profile.lastName}`,
     tagline: profile.tagline,
     // Resolve the stored avatar (a private storage key for uploaded photos, an
-    // absolute URL for Google avatars) into a fetchable `/files/*` URL — same as
-    // every other avatar-bearing response. Returning the raw key renders as a
-    // broken relative image on the public homepage.
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    // absolute URL for Google avatars) into a fetchable `/files/*` URL, the
+    // same as every other avatar-bearing response. `toVisibleAvatarUrl` also
+    // honours the member's own `photoVisible` toggle, so a spotlighted member
+    // who has turned their photo off still ships with a null avatar here.
+    avatarUrl: toVisibleAvatarUrl(profile),
     quote: copy.quote,
     tags: profile.tags,
   };
@@ -147,7 +152,7 @@ export function toLandingCommunityFace(
 ): LandingCommunityFaceDTO {
   return {
     name: `${profile.firstName} ${profile.lastName}`,
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    avatarUrl: toVisibleAvatarUrl(profile),
   };
 }
 

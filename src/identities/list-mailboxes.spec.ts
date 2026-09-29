@@ -788,4 +788,42 @@ describe('IdentitiesService.listMailboxesFor', () => {
     });
     expect(fixture.preferences.find).toHaveBeenCalledTimes(1);
   });
+
+  it('marks an unlinked persona as never naming its staff, and leaves every other mailbox unlocked', async () => {
+    const fixture = makeFixture();
+    fixture.subprofiles.rows.find((row) => row.id === 'drag')!.linkVisibility =
+      'linked';
+    fixture.subprofiles.rows.find((row) => row.id === 'band')!.linkVisibility =
+      'unlinked';
+
+    const lockedReasonById = Object.fromEntries(
+      (await fixture.service.listMailboxesFor(MEMBER_ID)).map((mailbox) => [
+        mailbox.identityId,
+        mailbox.staffNamesLockedReason,
+      ]),
+    );
+
+    expect(lockedReasonById).toEqual({
+      'profile-identity': null,
+      'zebra-identity': null,
+      'cafe-identity': null,
+      'bookshop-identity': null,
+      'drag-identity': null,
+      'band-identity': 'unlinkedPersona',
+      'acme-identity': null,
+      'globex-identity': null,
+    });
+  });
+
+  it('treats a persona whose link visibility did not load as unlinked, so it fails closed', async () => {
+    const fixture = makeFixture();
+    fixture.subprofiles.rows.find((row) => row.id === 'drag')!.linkVisibility =
+      'linked';
+
+    const band = (await fixture.service.listMailboxesFor(MEMBER_ID)).find(
+      (mailbox) => mailbox.identityId === 'band-identity',
+    );
+
+    expect(band?.staffNamesLockedReason).toBe('unlinkedPersona');
+  });
 });

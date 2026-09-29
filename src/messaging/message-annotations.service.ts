@@ -9,6 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
+import { CAPTIONED_MESSAGE_KINDS } from '../common/mentions';
+import { truncateCharacters } from '../common/text-characters';
 import {
   foldedHaystack,
   foldedSearchTerm,
@@ -33,6 +35,7 @@ import {
   Message,
   MessageKind,
 } from './entities/message.entity';
+import { readableMessageBody } from './legacy-message-body';
 import {
   decodeMessageHistoryCursor,
   encodeMessageHistoryCursor,
@@ -57,6 +60,7 @@ import {
   MAX_PINNED_MESSAGES,
   MAX_SEARCH_LIMIT,
 } from './messaging.constants';
+import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
 import {
   MESSAGE_PINNED,
   MESSAGE_REACTION,
@@ -147,18 +151,23 @@ export class MessageAnnotationsService {
   }
 
   /**
-   * Task 13h: a reaction, pin or star WRITE on a message at or before the
-   * history floor of the caller's mailbox staff seat is refused with the
-   * same 404 as a message outside the conversation. A co-manager seated
-   * when a personal thread moved into a business mailbox holds a floor at
-   * its first enquiry, and an unavailable quote still carries its parent's
-   * id, so without this they could react to, pin or star the owner's and
-   * the customer's earlier private messages by id. The rule is read through
-   * `mailboxStaffHistoryFloorCoversPredicate`, which reads the seat's
-   * `historyFloorAt`, so a "clear chat" on any seat, a staff seat included,
-   * keeps every write it had. A seat with no history floor costs no query.
+   * Task 13h and PRD-400: a reaction, pin or star WRITE on a message at or
+   * before the history floor of the caller's seat is refused with the same
+   * 404 as a message outside the conversation. Two seats carry that floor:
+   *  - a mailbox staff seat: a co-manager seated when a personal thread
+   *    moved into a business mailbox holds a floor at its first enquiry
+   *    (`mailboxStaffHistoryFloorCoversPredicate`);
+   *  - a group seat taken after the group began: a new member holds a floor
+   *    at the moment they joined (`groupJoinHistoryFloorCoversPredicate`).
+   * An unavailable quote still carries its parent's id, so without this
+   * either of them could react to, pin or star a message from before their
+   * floor by id. Both predicates are OR'd exactly as the reply-quote floor
+   * in `MessagingCoreService` composes them. Both read the seat's
+   * `historyFloorAt`, which a personal "clear chat" leaves alone, so a
+   * cleared chat on any seat keeps every write it had. A seat with no
+   * history floor costs no query.
    */
-  private async assertAboveMailboxStaffFloor(
+  private async assertAboveSeatHistoryFloor(
     callerSeat: ConversationParticipant,
     messageId: string,
   ): Promise<void> {
@@ -173,7 +182,13 @@ export class MessageAnnotationsService {
       })
       .where('message.id = :messageId', { messageId })
       .andWhere(
-        mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'seat'),
+        `(${mailboxStaffHistoryFloorCoversPredicate(
+          'message.created_at',
+          'seat',
+        )} OR ${groupJoinHistoryFloorCoversPredicate(
+          'message.created_at',
+          'seat',
+        )})`,
       )
       .getExists();
     if (isBelowFloor) {
@@ -204,7 +219,7 @@ export class MessageAnnotationsService {
       participant.identityId,
     );
     await this.requireMessageInConversation(conversationId, messageId);
-    await this.assertAboveMailboxStaffFloor(participant, messageId);
+    await this.assertAboveSeatHistoryFloor(participant, messageId);
 
     // Idempotent per (message,user,key): `ON CONFLICT DO NOTHING` absorbs a
     // re-react (or a race between two concurrent ones) without a pre-check +
@@ -245,7 +260,7 @@ export class MessageAnnotationsService {
       participant.identityId,
     );
     await this.requireMessageInConversation(conversationId, messageId);
-    await this.assertAboveMailboxStaffFloor(participant, messageId);
+    await this.assertAboveSeatHistoryFloor(participant, messageId);
 
     await this.reactions.delete({ messageId, userId, key });
 
@@ -375,7 +390,13 @@ export class MessageAnnotationsService {
           reactorView.shape === 'customerOfMailbox' &&
           businessUserIds.has(row.userId)
             ? reactorView.business
-            : requireAuthorSummary(row.profile),
+            : requireAuthorSummary(
+                row.profile,
+                // PRD-423: first names only in a matched Go together chat.
+                reactorView.shape === 'individuals'
+                  ? reactorView.nameOptions
+                  : undefined,
+              ),
         isMine: row.userId === userId,
         reactedAt: null,
       }),
@@ -459,7 +480,7 @@ export class MessageAnnotationsService {
     );
     await this.assertCanManageGroupPins(conversationId, participant);
     await this.requireMessageInConversation(conversationId, messageId);
-    await this.assertAboveMailboxStaffFloor(participant, messageId);
+    await this.assertAboveSeatHistoryFloor(participant, messageId);
 
     const alreadyPinned = await this.pins.exist({
       where: { conversationId, messageId },
@@ -519,7 +540,7 @@ export class MessageAnnotationsService {
       participant.identityId,
     );
     await this.assertCanManageGroupPins(conversationId, participant);
-    await this.assertAboveMailboxStaffFloor(participant, messageId);
+    await this.assertAboveSeatHistoryFloor(participant, messageId);
     const result = await this.pins.delete({ conversationId, messageId });
     if (result.affected) {
       this.eventEmitter.emit(MESSAGE_PINNED, {
@@ -631,7 +652,7 @@ export class MessageAnnotationsService {
       userId,
     );
     await this.requireMessageInConversation(conversationId, messageId);
-    await this.assertAboveMailboxStaffFloor(participant, messageId);
+    await this.assertAboveSeatHistoryFloor(participant, messageId);
     await this.stars
       .createQueryBuilder()
       .insert()
@@ -835,9 +856,18 @@ export class MessageAnnotationsService {
       // (identical to the implicit Postgres default here, kept for
       // consistency with `ConnectionsService`/`ListingsService`'s own folded
       // `LIKE` comparisons).
+      // ENG-405: a kind whose Edit rewrites the caption
+      // (`CAPTIONED_MESSAGE_KINDS`) stores a send-time fallback label
+      // (such as "Photo" or "Document") as its `body`, so it is matched on its
+      // caption and file name alone, exactly as
+      // `MessagesService.searchMessages` matches it. A search for "photo"
+      // then finds the starred photos whose caption says so. A sticker's
+      // body is skipped the same way (`CAPTIONED_MESSAGE_KINDS` includes it):
+      // one edited before ENG-405 still holds the edit's text there.
       starredQuery.andWhere(
         `(
-          ${foldedHaystack('m', ['body'])} LIKE ${foldedTerm} ESCAPE '\\'
+          (m.kind NOT IN (:...captionOnlySearchKinds)
+            AND ${foldedHaystack('m', ['body'])} LIKE ${foldedTerm} ESCAPE '\\')
           OR ${foldedTextExpression("coalesce(m.attachment ->> 'caption', '')")} LIKE ${foldedTerm} ESCAPE '\\'
           OR ${foldedTextExpression("coalesce(m.attachment ->> 'fileName', '')")} LIKE ${foldedTerm} ESCAPE '\\'
           OR EXISTS (
@@ -863,7 +893,10 @@ export class MessageAnnotationsService {
             )
           )
         )`,
-        { qPattern: pattern },
+        {
+          qPattern: pattern,
+          captionOnlySearchKinds: [...CAPTIONED_MESSAGE_KINDS],
+        },
       );
     }
 
@@ -979,11 +1012,12 @@ export class MessageAnnotationsService {
       const attachment = resolveAttachment(m.attachment);
       // A starred sticker stores no body text (see `MessagingCoreService.
       // postMessage`'s sticker branch), so its snippet uses the sticker's own
-      // label.
+      // label. A legacy raw-key attachment body reads as its English label
+      // (`legacy-message-body.ts`).
       const snippet =
         attachment && isStickerAttachment(attachment)
           ? attachment.label
-          : m.body.slice(0, 160);
+          : truncateCharacters(readableMessageBody(m.kind, m.body), 160);
       return {
         id: m.id,
         conversationId: m.conversationId,

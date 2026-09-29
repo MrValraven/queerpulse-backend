@@ -9,7 +9,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  PAGE_SIZE,
+  type Paginated,
+} from '../common/pagination';
 import { CommunitySystemMembershipService } from '../communities/community-system-membership.service';
 import {
   CommunityMember,
@@ -18,7 +22,9 @@ import {
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import type { StaffRoleId } from '../users/staff-roles.registry';
 import { AmbassadorCircleService } from './ambassador-circle.service';
 import type { AmbassadorFocusArea } from './ambassador-focus-areas';
 import {
@@ -35,6 +41,10 @@ export const AMBASSADOR_NOT_FOUND_CODE = 'ambassador_not_found';
 export const AMBASSADOR_MEMBER_NOT_FOUND_CODE = 'ambassador_member_not_found';
 export const AMBASSADOR_SELF_GRANT_CODE = 'ambassador_self_grant';
 export const AMBASSADOR_INELIGIBLE_MEMBER_CODE = 'ambassador_ineligible_member';
+
+/** The staff grant that, beside the admin tier, opens the ambassadors admin
+ *  routes and so earns a staff seat in the circle. */
+export const CIRCLE_STAFF_ROLE: StaffRoleId = 'partnerships';
 
 export interface GrantAmbassadorInput {
   memberSlug: string;
@@ -60,6 +70,8 @@ export class AmbassadorsService {
     private readonly users: Repository<User>,
     @InjectRepository(CommunityMember)
     private readonly communityMembers: Repository<CommunityMember>,
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
     private readonly circle: AmbassadorCircleService,
     private readonly systemMembership: CommunitySystemMembershipService,
     private readonly notifications: NotificationsService,
@@ -207,31 +219,74 @@ export class AmbassadorsService {
     return this.loadAdminAmbassador(id);
   }
 
-  /** Active grants newest first, or past ones most recently revoked first. */
+  /**
+   * One page of active grants newest first, or past ones most recently
+   * revoked first, in the `{ items, total, page, pageSize }` envelope the
+   * other admin lists use (ENG-458). `id` breaks ties so a page boundary
+   * never repeats or skips a row granted in the same instant.
+   */
   async list(
     status: AmbassadorListStatus = 'active',
-  ): Promise<AdminAmbassadorDTO[]> {
+    page = 1,
+  ): Promise<Paginated<AdminAmbassadorDTO>> {
     const isPast = status === 'past';
-    const rows = await this.ambassadors.find({
+    const [rows, total] = await this.ambassadors.findAndCount({
       where: { revokedAt: isPast ? Not(IsNull()) : IsNull() },
       relations: { user: { profile: true } },
-      order: isPast ? { revokedAt: 'DESC' } : { grantedAt: 'DESC' },
+      order: isPast
+        ? { revokedAt: 'DESC', id: 'ASC' }
+        : { grantedAt: 'DESC', id: 'ASC' },
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+    });
+    return {
+      items: await this.toAdminRows(rows),
+      total,
+      page,
+      pageSize: PAGE_SIZE,
+    };
+  }
+
+  /**
+   * Every grant one member has held, active and revoked, newest first: the
+   * record behind the admin page's History drawer (ENG-458). A member holds a
+   * handful of grants at most, so the list cap is a safety bound only.
+   */
+  async historyFor(userId: string): Promise<AdminAmbassadorDTO[]> {
+    const rows = await this.ambassadors.find({
+      where: { userId },
+      relations: { user: { profile: true } },
+      order: { grantedAt: 'DESC', id: 'ASC' },
       take: DEFAULT_LIST_LIMIT,
     });
     return this.toAdminRows(rows);
   }
 
+  /**
+   * The circle as the admin page summarises it. A pure read (ENG-459): before
+   * the first grant or staff seat founds the circle it answers the
+   * not-founded state and creates nothing, so opening the page never founds a
+   * community as a side effect.
+   */
   async getCircleSummary(
     viewerId: string,
   ): Promise<AmbassadorCircleSummaryDTO> {
-    const circle = await this.circle.resolveCircle();
+    const circle = await this.circle.findCircle();
+    if (!circle) {
+      return {
+        isFounded: false,
+        slug: null,
+        memberCount: 0,
+        isViewerMember: false,
+      };
+    }
     const [memberCount, isViewerMember] = await Promise.all([
       this.communityMembers.count({ where: { communityId: circle.id } }),
       this.communityMembers.exists({
         where: { communityId: circle.id, userId: viewerId },
       }),
     ]);
-    return { slug: circle.slug, memberCount, isViewerMember };
+    return { isFounded: true, slug: circle.slug, memberCount, isViewerMember };
   }
 
   /**
@@ -243,6 +298,47 @@ export class AmbassadorsService {
     const circle = await this.circle.resolveCircle();
     await this.systemMembership.addMember(circle.id, viewerId, RosterRole.Mod);
     return { slug: circle.slug };
+  }
+
+  /**
+   * Gives up the staff seat of a member who no longer qualifies for one
+   * (ENG-457): called after their `partnerships` grant is revoked or their
+   * admin tier is removed. Someone who still qualifies (an admin, or a holder
+   * of the grant) keeps the seat. Otherwise an active ambassador drops from
+   * `mod` to a plain `member` seat, keeping their card, and anyone else leaves
+   * the circle, which revokes their card through the roster listener.
+   *
+   * Only a `mod` row is touched, the seat `takeStaffSeat` writes, so a plain
+   * member seat stays put. Idempotent, and a pure read before the circle
+   * exists: nothing to release, so it founds nothing.
+   */
+  async releaseStaffSeat(userId: string): Promise<void> {
+    const circle = await this.circle.findCircle();
+    if (!circle) return;
+    const [user, holdsStaffGrant] = await Promise.all([
+      this.users.findOne({
+        where: { id: userId },
+        select: { id: true, role: true },
+      }),
+      this.staffRoles.exists({ where: { userId, role: CIRCLE_STAFF_ROLE } }),
+    ]);
+    if (user?.role === UserRole.Admin || holdsStaffGrant) return;
+
+    const hasActiveGrant = await this.ambassadors.exists({
+      where: { userId, revokedAt: IsNull() },
+    });
+    if (hasActiveGrant) {
+      await this.communityMembers.update(
+        { communityId: circle.id, userId, role: RosterRole.Mod },
+        { role: RosterRole.Member },
+      );
+      return;
+    }
+    await this.systemMembership.removeMemberIfRole(
+      circle.id,
+      userId,
+      RosterRole.Mod,
+    );
   }
 
   private async loadAdminAmbassador(id: string): Promise<AdminAmbassadorDTO> {

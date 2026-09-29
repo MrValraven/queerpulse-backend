@@ -1,16 +1,19 @@
 import {
   ConflictException,
   ForbiddenException,
+  GoneException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
 import { IdentitiesService } from '../identities/identities.service';
 import { PreferencesService } from '../preferences/preferences.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -27,9 +30,11 @@ import {
   ConversationResponse,
   GroupInviteSummary,
   GroupJoinPreview,
+  memberNameOptionsFor,
   MessageResponse,
   requireAuthorSummary,
 } from './message-response';
+import { readGroupJoinHistoryFloor } from './group-join-history-floor';
 import { MAX_GROUP_MEMBERS } from './messaging.constants';
 import {
   CONVERSATION_CREATED,
@@ -55,6 +60,10 @@ const GROUP_ADD_REFUSED_CODE = 'GROUP_ADD_REFUSED';
 const MATCHED_GROUP_LOCKED_CODE = 'MATCHED_GROUP_LOCKED';
 export const INVITE_NOT_FOUND_CODE = 'INVITE_NOT_FOUND';
 export const INVITE_LINK_INVALID_CODE = 'INVITE_LINK_INVALID';
+/** PRD-400: the link's token matched a live group but its
+ *  `inviteTokenExpiresAt` has passed. 410 Gone, so the join page can tell the
+ *  person to ask the group for a fresh link. */
+export const INVITE_LINK_EXPIRED_CODE = 'INVITE_LINK_EXPIRED';
 export const REMOVED_FROM_GROUP_CODE = 'REMOVED_FROM_GROUP';
 
 /**
@@ -77,6 +86,8 @@ export const REMOVED_FROM_GROUP_CODE = 'REMOVED_FROM_GROUP';
  */
 @Injectable()
 export class GroupInvitesService {
+  private readonly logger = new Logger(GroupInvitesService.name);
+
   constructor(
     @InjectRepository(GroupInvite)
     private readonly invites: Repository<GroupInvite>,
@@ -111,27 +122,32 @@ export class GroupInvitesService {
       return [];
     }
     const conversationIds = [...new Set(rows.map((row) => row.conversationId))];
-    const [convos, inviterProfiles, activeCounts, myActiveConversationIds] =
-      await Promise.all([
-        this.conversations.find({ where: { id: In(conversationIds) } }),
-        this.profiles.find({
-          where: {
-            userId: In(
-              [...new Set(rows.map((row) => row.inviterId))].filter(
-                (id): id is string => id != null,
-              ),
-            ),
-          },
-        }),
-        this.activeMemberCountsByConversation(conversationIds),
-        // A pending row normally gets marked `accepted` the moment the caller
-        // is seated by any path (`accept`, `joinByToken`, or a re-add), but a
-        // pending invite could in principle still outlive that (a row created
-        // just after the seating write read its own snapshot). Belt-and-
-        // braces: never show, on the Requests tab, an invite to a group the
-        // caller is already an active member of.
-        this.myActiveConversationIds(userId, conversationIds),
-      ]);
+    const inviterIds = [...new Set(rows.map((row) => row.inviterId))].filter(
+      (id): id is string => id != null,
+    );
+    const [
+      convos,
+      inviterProfiles,
+      activeCounts,
+      myActiveConversationIds,
+      blockedInviterIds,
+    ] = await Promise.all([
+      this.conversations.find({ where: { id: In(conversationIds) } }),
+      this.profiles.find({ where: { userId: In(inviterIds) } }),
+      this.activeMemberCountsByConversation(conversationIds),
+      // A pending row normally gets marked `accepted` the moment the caller
+      // is seated by any path (`accept`, `joinByToken`, or a re-add), but a
+      // pending invite could in principle still outlive that (a row created
+      // just after the seating write read its own snapshot). Belt-and-
+      // braces: never show, on the Requests tab, an invite to a group the
+      // caller is already an active member of.
+      this.myActiveConversationIds(userId, conversationIds),
+      // ENG-408: an inviter blocked either way with the caller never shows
+      // on the Requests tab by name and avatar. Blocking also revokes the
+      // pair's pending invites (`handleMemberBlocked` below); this read
+      // gate covers a row that outlived that best-effort revocation.
+      this.blockFilter.blockedUserIds(userId, inviterIds),
+    ]);
     const convoById = new Map(convos.map((c) => [c.id, c]));
     const inviterProfileByUser = new Map(
       inviterProfiles.map((p) => [p.userId, p]),
@@ -140,7 +156,8 @@ export class GroupInvitesService {
       .filter(
         (row) =>
           convoById.has(row.conversationId) &&
-          !myActiveConversationIds.has(row.conversationId),
+          !myActiveConversationIds.has(row.conversationId) &&
+          !(row.inviterId && blockedInviterIds.has(row.inviterId)),
       )
       .map((row) => {
         const convo = convoById.get(row.conversationId)!;
@@ -156,6 +173,51 @@ export class GroupInvitesService {
           createdAt: row.createdAt.toISOString(),
         };
       });
+  }
+
+  /**
+   * ENG-408: a block revokes every still-pending group invite between the
+   * pair, in both directions, the same way `GroupsService`'s dissolve path
+   * revokes a dead group's invites (`status: revoked`, `respondedAt` set).
+   * Listens to `MEMBER_BLOCKED`, which both block entry points
+   * (`SocialService.blockMember`, `ConnectionsService.respond('block')`)
+   * emit post-commit, so messaging gains no module edge toward `social`
+   * beyond the `BlockFilterService` it already imports. Unblocking restores
+   * nothing: a revoked invite stays answered, and the inviter can send a
+   * fresh one.
+   *
+   * Best-effort: a failure is logged and swallowed so the committed block
+   * is never affected. `listMyInvites` hides any row that outlives it.
+   */
+  @OnEvent(MEMBER_BLOCKED)
+  async handleMemberBlocked(payload: MemberBlockedEvent): Promise<void> {
+    const { blockerId, blockedId } = payload;
+    if (!blockerId || !blockedId || blockerId === blockedId) return;
+    const respondedAt = new Date();
+    try {
+      await Promise.all([
+        this.invites.update(
+          {
+            inviterId: blockerId,
+            inviteeId: blockedId,
+            status: GroupInviteStatus.Pending,
+          },
+          { status: GroupInviteStatus.Revoked, respondedAt },
+        ),
+        this.invites.update(
+          {
+            inviterId: blockedId,
+            inviteeId: blockerId,
+            status: GroupInviteStatus.Pending,
+          },
+          { status: GroupInviteStatus.Revoked, respondedAt },
+        ),
+      ]);
+    } catch (error) {
+      this.logger.error(
+        `Revoking pending group invites after a block failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -445,13 +507,20 @@ export class GroupInvitesService {
         code: INVITE_LINK_INVALID_CODE,
       });
     }
+    const isMember = callerRow != null && callerRow.leftAt == null;
+    // PRD-400: an expired link shows nothing about the group to a newcomer.
+    // A current member still gets the preview, which carries them into the
+    // group they already belong to.
+    if (!isMember) {
+      this.assertInviteLinkNotExpired(convo);
+    }
     return {
       conversationId: convo.id,
       title: convo.title,
       avatarUrl: toImageUrl(convo.avatarUrl),
       description: convo.description,
       memberCount: activeMemberUserIds.length,
-      isMember: callerRow != null && callerRow.leftAt == null,
+      isMember,
     };
   }
 
@@ -499,6 +568,10 @@ export class GroupInvitesService {
       );
       return this.buildGroupConversationResponse(convo, userId);
     }
+    // PRD-400: past its 7-day window the link seats nobody new. Checked
+    // after the already-active branch above, so a member who taps an old
+    // link still lands in their group.
+    this.assertInviteLinkNotExpired(convo);
     // Reads `removedAt`, NOT `removedBy`: `removedBy` carries an `ON DELETE
     // SET NULL` foreign key to the remover's own account, so it goes quietly
     // NULL once that account is deleted, and this gate would otherwise let a
@@ -589,6 +662,24 @@ export class GroupInvitesService {
   }
 
   /**
+   * PRD-400: refuse a join-by-link token whose `inviteTokenExpiresAt` has
+   * passed with a coded 410 `INVITE_LINK_EXPIRED`. A live token with no
+   * expiry is treated as expired too: every issue and rotation writes one,
+   * and the migration gave every token live at deploy time its own, so a
+   * missing value can only be a row nothing vouches for.
+   */
+  private assertInviteLinkNotExpired(convo: Conversation): void {
+    const expiresAt = convo.inviteTokenExpiresAt;
+    if (expiresAt == null || expiresAt.getTime() <= Date.now()) {
+      throw new GoneException({
+        statusCode: 410,
+        message: 'This invite link has expired',
+        code: INVITE_LINK_EXPIRED_CODE,
+      });
+    }
+  }
+
+  /**
    * Go together: refuse any invite or link path into a matched group
    * (`Conversation.eventMatchGroupId` set) with the same coded 403
    * `GroupsService.requireGroupRole` uses for its member routes.
@@ -614,8 +705,10 @@ export class GroupInvitesService {
    * "removed").
    *
    * A brand-new row carries `joinerIdentityId`, the joiner's own profile
-   * identity (`conversation_participants.identity_id` is NOT NULL). A
-   * reactivated row keeps the identity it already holds.
+   * identity (`conversation_participants.identity_id` is NOT NULL), and
+   * PRD-400's join floor in `clearedAt` and `historyFloorAt`, the same one
+   * `GroupsService.seatMembersInTransaction` writes. A reactivated row keeps
+   * the identity it already holds.
    */
   private async seatParticipant(
     manager: EntityManager,
@@ -650,12 +743,18 @@ export class GroupInvitesService {
         },
       );
     } else {
+      // PRD-400: a brand-new seat reads the group from its join onward,
+      // floored just before this transaction's `member_joined` pill (see
+      // `readGroupJoinHistoryFloor`).
+      const joinHistoryFloor = await readGroupJoinHistoryFloor(manager);
       await manager.save(
         manager.create(ConversationParticipant, {
           conversationId,
           userId,
           identityId: joinerIdentityId,
           role: ConversationRole.Member,
+          clearedAt: joinHistoryFloor,
+          historyFloorAt: joinHistoryFloor,
         }),
       );
     }
@@ -821,6 +920,9 @@ export class GroupInvitesService {
     const activeMemberCount = participantRows.filter(
       (row) => row.leftAt == null,
     ).length;
+    // PRD-423: spelled like every other response for this conversation, so
+    // a matched Go together chat would name its members by first name only.
+    const nameOptions = memberNameOptionsFor(convo);
     const members = hasCallerLeft
       ? []
       : this.core.buildMemberSummaries(
@@ -828,6 +930,7 @@ export class GroupInvitesService {
           profileByUser,
           userId,
           privacyByUser,
+          nameOptions,
         );
     const lastMessage = lastByConvo.get(convo.id) ?? null;
     const clearedAt = callerRow?.clearedAt ?? null;
@@ -861,6 +964,9 @@ export class GroupInvitesService {
             profileByUser,
             reactionsByMessage.get(clearedLastMessage.id) ?? [],
             userId,
+            undefined,
+            undefined,
+            nameOptions,
           )
         : null,
       unreadCount: unreadByConvo.get(convo.id) ?? 0,
@@ -893,6 +999,7 @@ export class GroupInvitesService {
       memberPreview: this.core.buildMemberPreview(
         participantRows,
         profileByUser,
+        nameOptions,
       ),
       isOfficial: false,
       muted: callerRow?.muted ?? false,
@@ -905,6 +1012,8 @@ export class GroupInvitesService {
       description: convo.description,
       dissolvedAt: convo.dissolvedAt?.toISOString() ?? null,
       eventMatchGroupId: convo.eventMatchGroupId,
+      // PRD-423: the durable Go together marker, outlives eventMatchGroupId.
+      isGoTogetherChat: convo.isGoTogetherChat,
       leftReason: computeGroupLeftReason({
         leftAt: callerRow?.leftAt,
         removedAt: callerRow?.removedAt,
@@ -913,6 +1022,13 @@ export class GroupInvitesService {
       inviteToken:
         !callerRow?.leftAt && !convo.dissolvedAt && isOwnerOrAdmin
           ? convo.inviteToken
+          : null,
+      inviteTokenExpiresAt:
+        !callerRow?.leftAt &&
+        !convo.dissolvedAt &&
+        isOwnerOrAdmin &&
+        convo.inviteToken
+          ? (convo.inviteTokenExpiresAt?.toISOString() ?? null)
           : null,
       canManageInviteLink:
         !hasCallerLeft && !convo.dissolvedAt && isOwnerOrAdmin,

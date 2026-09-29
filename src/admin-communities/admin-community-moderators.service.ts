@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
@@ -17,6 +18,7 @@ import {
 import { Community } from '../communities/entities/community.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { Profile } from '../users/entities/profile.entity';
 import {
   AdminCommunityModeratorDTO,
@@ -30,6 +32,17 @@ import {
 /** Roster roles that count as moderation staff — the owner (founder) plus any
  *  promoted moderators. Mirrors `AdminCommunitiesService`'s own constant. */
 const MODERATOR_ROLES = [RosterRole.Owner, RosterRole.Mod];
+
+/** Most candidates the add-moderator picker receives in one answer (ENG-492).
+ *  The frontend reads a full page as "search to narrow". */
+export const MODERATOR_CANDIDATE_LIMIT = 25;
+
+/** What the picker's `q` matches: names and handle, folded like member search. */
+const MODERATOR_CANDIDATE_SEARCH_HAYSTACK = foldedHaystack('profile', [
+  'first_name',
+  'last_name',
+  'slug',
+]);
 
 /**
  * Write model behind the admin communities panel's moderator controls
@@ -72,17 +85,51 @@ export class AdminCommunityModeratorsService {
   }
 
   /**
-   * The plain members eligible to be promoted — everyone on the roster who is
-   * not already the owner or a moderator. Backs the add-moderator picker.
+   * The plain members eligible to be promoted: everyone on the roster who is
+   * still a plain member (the owner and moderators are already staff). Backs
+   * the add-moderator picker.
+   *
+   * Capped at `MODERATOR_CANDIDATE_LIMIT` in SQL and ordered by name (ENG-492):
+   * a large community used to answer with its whole roster plus one huge
+   * `IN (...)` profile lookup. `searchTerm` narrows by name or handle through
+   * the shared folded haystack, so "Joao" finds "João"; the admin searches to
+   * reach anyone past the first page.
    */
-  async listCandidates(slug: string): Promise<AdminModeratorCandidateDTO[]> {
+  async listCandidates(
+    slug: string,
+    searchTerm?: string,
+  ): Promise<AdminModeratorCandidateDTO[]> {
     const community = await this.loadOr404(slug);
-    const candidateMembers = await this.communityMembers.find({
-      where: { communityId: community.id, role: RosterRole.Member },
-      order: { joinedAt: 'ASC' },
-    });
+    // The inner join also drops a roster row with no profile, a data-integrity
+    // anomaly that could never be offered as a nameable candidate anyway.
+    const candidateQuery = this.communityMembers
+      .createQueryBuilder('member')
+      .innerJoin(Profile, 'profile', '"profile"."user_id" = "member"."user_id"')
+      .where('"member"."community_id" = :communityId', {
+        communityId: community.id,
+      })
+      .andWhere('"member"."role" = :memberRole', {
+        memberRole: RosterRole.Member,
+      });
+
+    const trimmedSearchTerm = searchTerm?.trim();
+    if (trimmedSearchTerm) {
+      candidateQuery.andWhere(
+        `${MODERATOR_CANDIDATE_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('searchTerm')} ESCAPE '\\'`,
+        { searchTerm: `%${escapeLikeTerm(trimmedSearchTerm)}%` },
+      );
+    }
+
+    const candidateMembers = await candidateQuery
+      .orderBy('"profile"."first_name"', 'ASC')
+      .addOrderBy('"profile"."last_name"', 'ASC')
+      // Two members can share a name; the user id keeps the order stable.
+      .addOrderBy('"member"."user_id"', 'ASC')
+      .limit(MODERATOR_CANDIDATE_LIMIT)
+      .getMany();
     if (!candidateMembers.length) return [];
 
+    // Bounded by the LIMIT above, so this lookup never exceeds the cap.
     const memberRefsByUserId = await new MemberLookup(this.profiles).byUserIds(
       candidateMembers.map((candidateMember) => candidateMember.userId),
     );
@@ -90,8 +137,6 @@ export class AdminCommunityModeratorsService {
     const candidates: AdminModeratorCandidateDTO[] = [];
     for (const candidateMember of candidateMembers) {
       const memberRef = memberRefsByUserId.get(candidateMember.userId);
-      // A roster row with no profile is a data-integrity anomaly, not a
-      // legitimate candidate — drop it rather than offer an unnameable member.
       if (!memberRef) continue;
       candidates.push(toModeratorCandidate(candidateMember.userId, memberRef));
     }
@@ -248,6 +293,10 @@ export class AdminCommunityModeratorsService {
           actorId: actorUserId,
           source: 'community',
           communitySlug: community.slug,
+          // `role` and `communityName` are what the bell's copy reads (the
+          // allowlist forwards both); `fromRole`/`toRole` stay for the record.
+          communityName: community.name,
+          role: toRole,
           fromRole,
           toRole,
         },

@@ -3,6 +3,15 @@ import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumPostsService } from './forum-posts.service';
+import { forumThreadVisibleSql } from './forum-threads.service';
+
+const GRINNING_FACE = '\u{1F600}';
+
+/** A high surrogate with no low surrogate after it, or the reverse: what a code-unit slice through a pair leaves behind. */
+const hasLoneSurrogate = (text: string): boolean =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+    text,
+  );
 
 // Minimal fake repositories; only the paths exercised below are stubbed.
 function build() {
@@ -647,6 +656,16 @@ describe('ForumPostsService.searchByText visibility', () => {
       expect(sql).toContain('"t"."community_id" IS NULL');
     });
 
+    // PRD-407: a cross-posted thread is readable by the whole forum, so its
+    // replies are searchable by everyone too, whatever the community's tier.
+    it('post search admits replies in a cross-posted thread', async () => {
+      const { sql } = await communityGate();
+
+      expect(sql).toMatch(
+        /"t"\."community_id" IS NULL\s*OR "t"\."cross_posted" = true\s*OR EXISTS/,
+      );
+    });
+
     it("never opens the public-tier arm for a space's reply to a non-member", async () => {
       // A space's own public tier alone must not admit its reply here. Only
       // the roster branch (tested above) or the space's PARENT being public
@@ -666,6 +685,24 @@ describe('ForumPostsService.searchByText visibility', () => {
     await service.searchByText('viewer-1', 'gp', 6);
 
     expect(predicates()).toContain('p.deletedAt IS NULL');
+  });
+
+  // I1: a thread's opening post exists from the moment the thread is created,
+  // so the thread's own read gate is what keeps a scheduled, pending-review or
+  // rejected thread's title and body out of the header search box.
+  it('post search drops the text of a scheduled, pending or rejected thread', async () => {
+    const { service, andWhereCalls } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 6);
+
+    const gateSql = andWhereCalls()
+      .map((call) => String(call[0]))
+      .find((sql) => sql.includes('published_at'));
+    expect(gateSql).toBe(forumThreadVisibleSql('"t"'));
+    expect(gateSql).toContain('"t".published_at <= now()');
+    expect(gateSql).toContain(
+      `("t".review_state IS NULL OR "t".review_state = 'approved')`,
+    );
   });
 
   it('drops both hidden AND removed moderation subjects, under either taxonomy code', async () => {
@@ -750,6 +787,51 @@ describe('ForumPostsService.searchByText visibility', () => {
 
     expect(rows[0]?.excerpt).toContain('São Bento');
   });
+
+  it('keeps an emoji at the head-fallback excerpt boundary whole', async () => {
+    const { service, queryBuilder } = buildSearch();
+    // No literal or folded match for `term` exists, so `matchIndex < 0` and
+    // `buildSearchExcerpt` takes its head-of-body fallback branch. The emoji
+    // sits exactly on the 160-character cut.
+    const body = 'a'.repeat(159) + GRINNING_FACE + ' unrelated tail text';
+    (queryBuilder.getRawMany as jest.Mock).mockResolvedValue([
+      {
+        threadSlug: 'general',
+        threadTitle: 'General chat',
+        threadCategory: 'general',
+        postBody: body,
+      },
+    ]);
+
+    const rows = await service.searchByText('viewer-1', 'zzz-no-match', 6);
+
+    expect(rows[0]?.excerpt).toBe(`${'a'.repeat(159)}${GRINNING_FACE}…`);
+  });
+
+  it('keeps an emoji at the match-centred window edge whole', async () => {
+    const { service, queryBuilder } = buildSearch();
+    const term = 'findme';
+    // The match sits at code-unit index 200, so the window's raw end
+    // (`start + SEARCH_EXCERPT_LENGTH`, before any surrogate widening) lands
+    // at index 307. The emoji's high surrogate is placed at index 306, its
+    // low surrogate at 307, exactly straddling that raw cut.
+    const beforeEmoji = `${'x'.repeat(200)}${term}${'x'.repeat(100)}`;
+    const body = `${beforeEmoji}${GRINNING_FACE}${'y'.repeat(200)}`;
+    (queryBuilder.getRawMany as jest.Mock).mockResolvedValue([
+      {
+        threadSlug: 'general',
+        threadTitle: 'General chat',
+        threadCategory: 'general',
+        postBody: body,
+      },
+    ]);
+
+    const rows = await service.searchByText('viewer-1', term, 6);
+
+    const excerpt = rows[0]?.excerpt ?? '';
+    expect(excerpt).toContain(GRINNING_FACE);
+    expect(hasLoneSurrogate(excerpt)).toBe(false);
+  });
 });
 
 // --- C5 / ENG-130 + C6 / PRD-162: what a page of posts actually contains -----
@@ -767,6 +849,8 @@ function buildListPosts(options: {
   descendantRows?: Array<Record<string, unknown>>;
   acceptedPostId?: string | null;
   role?: string;
+  // ENG-494: null is a thread whose author erased their account.
+  threadAuthorId?: string | null;
 }) {
   const makeRow = (row: Record<string, unknown>): Record<string, unknown> => ({
     id: 'post-1',
@@ -840,6 +924,9 @@ function buildListPosts(options: {
     id: 't1',
     slug: 'hello',
     acceptedPostId: options.acceptedPostId ?? null,
+    ...('threadAuthorId' in options
+      ? { authorId: options.threadAuthorId }
+      : {}),
   });
   jest.spyOn(MemberLookup.prototype, 'byUserIds').mockResolvedValue(new Map());
 
@@ -938,6 +1025,26 @@ describe('ForumPostsService.listPosts opening post', () => {
     expect(page.opAvailable).toBe(false);
   });
 
+  it('a thread whose author was erased still lists and serves its replies', async () => {
+    // ENG-494: the author's erasure NULLs `forum_thread.author_id` and
+    // cascades their own opening post away, so the thread arrives with no
+    // author and no OP. The replies other members wrote are still served.
+    const { service, viewer } = buildListPosts({
+      threadAuthorId: null,
+      opPost: null,
+      rootRows: [
+        { id: 'r1', authorId: 'replier-1' },
+        { id: 'r2', authorId: 'replier-2' },
+      ],
+    });
+
+    const page = await service.listPosts('hello', viewer, undefined, 20);
+
+    expect(page.opAvailable).toBe(false);
+    expect(page.data.map((post) => post.id)).toEqual(['r1', 'r2']);
+    expect(page.data.every((post) => !post.isOp)).toBe(true);
+  });
+
   it('does not hoist the OP onto a later page, but still reports availability', async () => {
     const { service, viewer } = buildListPosts({ rootRows: [{ id: 'r1' }] });
 
@@ -1006,5 +1113,166 @@ describe('ForumPostsService.listPosts reply tree', () => {
     expect(page.data.filter((post) => post.id === 'c1')).toHaveLength(1);
     // Hoisted: the accepted answer leads the replies, right behind the OP.
     expect(page.data.map((post) => post.id)).toEqual(['op-1', 'c1', 'r1']);
+  });
+});
+
+// --- ENG-494: replying under a thread whose author was erased ----------------
+// `forum_thread.author_id` is `ON DELETE SET NULL`, so a thread outlives its
+// author. A reply there has no thread author to notify or to count as already
+// notified.
+function buildReply(threadAuthorId: string | null) {
+  const manager = {
+    create: jest
+      .fn()
+      .mockImplementation((_entity: unknown, row: Record<string, unknown>) => ({
+        ...row,
+      })),
+    save: jest.fn().mockImplementation((row: Record<string, unknown>) =>
+      Promise.resolve({
+        id: 'reply-1',
+        createdAt: new Date('2026-07-23T10:00:00.000Z'),
+        editedAt: null,
+        deletedAt: null,
+        deletedById: null,
+        ...row,
+      }),
+    ),
+  };
+  const posts = {
+    manager: {
+      transaction: jest.fn(
+        async (callback: (transactionManager: typeof manager) => unknown) =>
+          callback(manager),
+      ),
+    },
+  };
+  const threadsService = {
+    loadOr404: jest.fn().mockResolvedValue({
+      id: 't1',
+      slug: 'hello',
+      authorId: threadAuthorId,
+      isLocked: false,
+      closesAt: null,
+      acceptedPostId: null,
+    }),
+    assertCanReplyInThread: jest.fn().mockResolvedValue(undefined),
+    markActivity: jest.fn().mockResolvedValue(undefined),
+  };
+  const mentions = {
+    notify: jest.fn().mockResolvedValue(new Set<string>()),
+    notifyThreadReply: jest.fn().mockResolvedValue(undefined),
+    notifyParentReply: jest.fn().mockResolvedValue(undefined),
+    // The thread's current audience: every candidate, unless a test narrows it.
+    forumThreadAudience: jest.fn((_threadSlug: string, userIds: string[]) =>
+      Promise.resolve(new Set(userIds)),
+    ),
+  };
+  const subscriptions = {
+    subscribe: jest.fn().mockResolvedValue(undefined),
+    subscriberIdsToNotify: jest.fn().mockResolvedValue(['follower-1']),
+  };
+  jest.spyOn(MemberLookup.prototype, 'byUserIds').mockResolvedValue(new Map());
+
+  const service = new ForumPostsService(
+    posts as never,
+    {} as never,
+    {} as never,
+    threadsService as never,
+    {} as never,
+    {} as never,
+    mentions as never,
+    {} as never,
+    subscriptions as never,
+  );
+  const replier = {
+    userId: 'replier-1',
+    email: '',
+    status: 'active',
+    role: 'member',
+  };
+  return { service, mentions, subscriptions, replier };
+}
+
+describe('ForumPostsService.reply under an erased thread author', () => {
+  it('replying to a thread with no author sends no thread-author notification', async () => {
+    const { service, mentions, replier } = buildReply(null);
+
+    const response = await service.reply('hello', replier, 'still here');
+
+    expect(response.id).toBe('reply-1');
+    // Only the open subscription fan-out reaches anybody: the follower.
+    const recipients = (
+      mentions.notifyThreadReply.mock.calls as Array<[unknown, ...unknown[]]>
+    ).map((call) => call[0]);
+    expect(recipients).toEqual(['follower-1']);
+    expect(recipients).not.toContain(null);
+  });
+
+  it('still notifies a thread author who has an account', async () => {
+    const { service, mentions, replier } = buildReply('author-1');
+
+    await service.reply('hello', replier, 'still here');
+
+    const recipients = (
+      mentions.notifyThreadReply.mock.calls as Array<[unknown, ...unknown[]]>
+    ).map((call) => call[0]);
+    expect(recipients).toEqual(['author-1', 'follower-1']);
+  });
+});
+
+describe('ForumPostsService.reply follower fan-out holds to the thread audience', () => {
+  it('notifies only the followers the audience read returns, from one batched read', async () => {
+    const { service, mentions, subscriptions, replier } = buildReply(null);
+    subscriptions.subscriberIdsToNotify.mockResolvedValue([
+      'follower-1',
+      'follower-who-left',
+      'follower-blocked',
+    ]);
+    mentions.forumThreadAudience.mockResolvedValue(new Set(['follower-1']));
+
+    await service.reply('hello', replier, 'still here');
+
+    expect(mentions.forumThreadAudience).toHaveBeenCalledTimes(1);
+    expect(mentions.forumThreadAudience).toHaveBeenCalledWith('hello', [
+      'follower-1',
+      'follower-who-left',
+      'follower-blocked',
+    ]);
+    const recipients = (
+      mentions.notifyThreadReply.mock.calls as Array<[unknown, ...unknown[]]>
+    ).map((call) => call[0]);
+    expect(recipients).toEqual(['follower-1']);
+    // The audience is already checked, so the per-recipient read is skipped.
+    expect(mentions.notifyThreadReply).toHaveBeenCalledWith(
+      'follower-1',
+      'replier-1',
+      expect.objectContaining({ source: 'forum', threadSlug: 'hello' }),
+      { isAudienceChecked: true },
+    );
+  });
+
+  it('leaves the thread author out of the audience read once the targeted notify covered them', async () => {
+    const { service, mentions, subscriptions, replier } =
+      buildReply('author-1');
+    subscriptions.subscriberIdsToNotify.mockResolvedValue([
+      'author-1',
+      'follower-1',
+    ]);
+
+    await service.reply('hello', replier, 'still here');
+
+    expect(mentions.forumThreadAudience).toHaveBeenCalledWith('hello', [
+      'follower-1',
+    ]);
+  });
+
+  it('skips the audience read when no follower is left to notify', async () => {
+    const { service, mentions, subscriptions, replier } = buildReply(null);
+    subscriptions.subscriberIdsToNotify.mockResolvedValue([]);
+
+    await service.reply('hello', replier, 'still here');
+
+    expect(mentions.forumThreadAudience).not.toHaveBeenCalled();
+    expect(mentions.notifyThreadReply).not.toHaveBeenCalled();
   });
 });

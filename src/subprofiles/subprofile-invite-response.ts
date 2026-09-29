@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import {
   Subprofile,
@@ -25,7 +26,10 @@ export function toMemberView(
     userId: member.userId,
     name: `${profile.firstName} ${profile.lastName}`.trim(),
     slug: profile.slug,
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    // ENG-452: honours the co-owner's own `photoVisible` toggle, using the
+    // one spelling of the gate in `common/member-ref.ts`. Keeps a member who
+    // hid their photo from having it appear on their own persona's roster.
+    avatarUrl: toVisibleAvatarUrl(profile),
     joinedAt: member.joinedAt.toISOString(),
     isCreator: member.userId === creatorUserId,
   };
@@ -58,7 +62,9 @@ export function toInviteView(
     invitedName:
       `${invitedProfile.firstName} ${invitedProfile.lastName}`.trim(),
     invitedSlug: invitedProfile.slug,
-    invitedAvatarUrl: toImageUrl(invitedProfile.avatarUrl),
+    // ENG-452: same `photoVisible` gate as `toMemberView` above, applied to
+    // the invitee's own toggle here.
+    invitedAvatarUrl: toVisibleAvatarUrl(invitedProfile),
   };
 }
 

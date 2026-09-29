@@ -38,6 +38,10 @@ import {
 } from './subcommunity-rules';
 import { CommunityBanRatificationService } from './community-ban-ratification.service';
 import { COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS } from './community-ban-ratification-window';
+import { CommunityBanEvasionService } from '../ban-evasion/community-ban-evasion.service';
+import { BlockFilterService } from '../social/block-filter.service';
+import { findLivePendingInvite } from './community-invite-liveness';
+import { assertCommunityInteriorReadable } from './community-read-gate';
 import { CommunityBan } from './entities/community-ban.entity';
 import {
   CommunityInvite,
@@ -69,6 +73,34 @@ import {
   CommunityFrozenReason,
   CommunityType,
 } from './entities/community.entity';
+
+// Whether an invitation is still spendable (pending, unexpired, from somebody
+// still on staff, no block between the two people) is the shared liveness
+// helper's call, and whether a community's interior is readable is the shared
+// read gate's. This file checks that the service asks them and acts on the
+// answer. Defaults, set in `beforeEach`: nobody holds a live invitation, and
+// every interior is readable.
+jest.mock('./community-invite-liveness');
+jest.mock('./community-read-gate');
+const findLivePendingInviteMock = findLivePendingInvite as jest.MockedFunction<
+  typeof findLivePendingInvite
+>;
+const assertCommunityInteriorReadableMock =
+  assertCommunityInteriorReadable as jest.MockedFunction<
+    typeof assertCommunityInteriorReadable
+  >;
+
+// A live invitation row as `findLivePendingInvite` hands it back.
+const liveInvite = (overrides: Partial<CommunityInvite> = {}) =>
+  ({
+    id: 'inv-1',
+    communityId: 'c1',
+    invitedUserId: 'u1',
+    status: CommunityInviteStatus.Pending,
+    createdAt: new Date('2026-02-02T00:00:00.000Z'),
+    expiresAt: new Date('2026-03-04T00:00:00.000Z'),
+    ...overrides,
+  }) as CommunityInvite;
 
 // A chainable query-builder stub whose terminal methods resolve to empty
 // results by default (mirrors `profiles.service.spec.ts`'s `qbStub`).
@@ -224,6 +256,13 @@ describe('CommunitiesService', () => {
   let eventEmitter: { emit: jest.Mock };
   let banRatifications: { proposePermanentBar: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
+  // ENG-428. Default: the joiner correlates with nobody this community
+  // banned, the ordinary case and the one every pre-existing join test assumes.
+  let communityBanEvasion: { isMatchingCommunityBan: jest.Mock };
+  // Decision 8. `roster` hands its query to `excludeBlocked` for a viewer
+  // below staff. Default: the builder passes through untouched, so a roster
+  // test that stages no blocks reads every row it staged.
+  let blockFilter: { excludeBlocked: jest.Mock };
   // Effective roles. The stand-in resolves through `members.findOne` (own
   // row, then the parent row for a space) and `members.find` for the batched
   // form, so every pre-existing test that stages roster rows on those two
@@ -354,9 +393,21 @@ describe('CommunitiesService', () => {
         expiresAt: new Date('2026-01-04T00:00:00.000Z'),
       }),
     };
+    blockFilter = {
+      excludeBlocked: jest.fn(
+        (queryBuilder: Record<string, jest.Mock>) => queryBuilder,
+      ),
+    };
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
+    communityBanEvasion = {
+      isMatchingCommunityBan: jest.fn().mockResolvedValue(false),
+    };
+    findLivePendingInviteMock.mockReset();
+    findLivePendingInviteMock.mockResolvedValue(null);
+    assertCommunityInteriorReadableMock.mockReset();
+    assertCommunityInteriorReadableMock.mockResolvedValue(undefined);
     membership = {
       effectiveRole: jest.fn(
         async (
@@ -481,6 +532,11 @@ describe('CommunitiesService', () => {
           provide: SubcommunityCascadeService,
           useValue: subcommunityCascade,
         },
+        {
+          provide: CommunityBanEvasionService,
+          useValue: communityBanEvasion,
+        },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(CommunitiesService);
@@ -793,7 +849,7 @@ describe('CommunitiesService', () => {
         accessTier: AccessTier.Request,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
 
       // `HttpException`'s status and body are read through their getters, not
       // off instance properties, so the error is captured and inspected rather
@@ -816,7 +872,7 @@ describe('CommunitiesService', () => {
         accessTier: AccessTier.Invite,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
 
       await expect(service.getBySlug('p', 'u2')).rejects.toBeInstanceOf(
         ForbiddenException,
@@ -835,16 +891,39 @@ describe('CommunitiesService', () => {
         accessTier: AccessTier.Private,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue({
-        id: 'inv-1',
-        communityId: 'c1',
-        invitedUserId: 'u2',
-        status: CommunityInviteStatus.Pending,
-        createdAt: new Date('2026-02-02T00:00:00.000Z'),
-      });
+      findLivePendingInviteMock.mockResolvedValue(
+        liveInvite({ invitedUserId: 'u2' }),
+      );
 
       await expect(service.getBySlug('p', 'u2')).rejects.toBeInstanceOf(
         ForbiddenException,
+      );
+      expect(findLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'c1',
+        'u2',
+      );
+    });
+
+    // ENG-429. An invitation from somebody who has since left the mod team is
+    // dead, so the liveness helper answers null and the private community is
+    // as invisible to its holder as it is to any stranger.
+    it('getBySlug 404s a private community whose invitation came from a demoted inviter', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'p',
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
+
+      await expect(service.getBySlug('p', 'u2')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(findLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'c1',
+        'u2',
       );
     });
 
@@ -866,7 +945,7 @@ describe('CommunitiesService', () => {
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
 
       const detail = await service.getBySlug('p', 'u2');
 
@@ -947,7 +1026,7 @@ describe('CommunitiesService', () => {
         allowsSubcommunities: true,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
       // Two open spaces, one private space the viewer holds no role in, and
       // one open space under a moderator takedown.
       communities.find.mockImplementation(
@@ -1028,7 +1107,7 @@ describe('CommunitiesService', () => {
         userId: 'u2',
         role: RosterRole.Member,
       });
-      invites.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
 
       const detail = await service.getBySlug('p', 'u2');
 
@@ -1710,7 +1789,7 @@ describe('CommunitiesService', () => {
     // PRD-140. A pending invitation admits its holder straight to the roster
     // and is spent doing it: without this a `private` community could never
     // gain a second member, because every other door into it 404s.
-    it('admits a private-tier invitee at once and marks the invitation accepted', async () => {
+    it('join spends a live invitation on the private tier', async () => {
       communities.findOne.mockResolvedValue({
         id: 'c1',
         slug: 'x',
@@ -1720,13 +1799,7 @@ describe('CommunitiesService', () => {
         rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue({
-        id: 'inv-1',
-        communityId: 'c1',
-        invitedUserId: 'u1',
-        status: CommunityInviteStatus.Pending,
-        createdAt: new Date('2026-02-02T00:00:00.000Z'),
-      });
+      findLivePendingInviteMock.mockResolvedValue(liveInvite());
       const claimQb = inviteQbStub();
       invites.createQueryBuilder.mockReturnValue(claimQb);
       const insertQb = insertQbStub();
@@ -1739,10 +1812,15 @@ describe('CommunitiesService', () => {
         role: RosterRole.Member,
         request: null,
       });
-      // The flip is a GUARDED update: a revoke landing between the read and
-      // this write must win, never be overwritten.
+      expect(findLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'c1',
+        'u1',
+      );
+      // The flip is a GUARDED update: a revoke, or the expiry passing,
+      // between the read and this write must win and leave the row unspent.
       expect(claimQb.where).toHaveBeenCalledWith(
-        'id = :id AND status = :pending',
+        'id = :id AND status = :pending AND expires_at > now()',
         { id: 'inv-1', pending: CommunityInviteStatus.Pending },
       );
       expect(insertQb.values).toHaveBeenCalledWith({
@@ -1750,6 +1828,31 @@ describe('CommunitiesService', () => {
         userId: 'u1',
         role: RosterRole.Member,
       });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    // ENG-429. The row still says `pending`, but its 30 days are up, so the
+    // liveness helper answers null. The holder is answered exactly as an
+    // uninvited stranger is, and nothing is spent.
+    it('join treats an expired invitation as absent on the private tier', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Private,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(invites.createQueryBuilder).not.toHaveBeenCalled();
+      expect(insertQb.execute).not.toHaveBeenCalled();
       expect(joinRequests.save).not.toHaveBeenCalled();
     });
 
@@ -1766,12 +1869,7 @@ describe('CommunitiesService', () => {
         rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue({
-        id: 'inv-1',
-        communityId: 'c1',
-        invitedUserId: 'u1',
-        status: CommunityInviteStatus.Pending,
-      });
+      findLivePendingInviteMock.mockResolvedValue(liveInvite());
       const claimQb = inviteQbStub();
       claimQb.execute!.mockResolvedValue({ affected: 0, raw: [] });
       invites.createQueryBuilder.mockReturnValue(claimQb);
@@ -1799,7 +1897,7 @@ describe('CommunitiesService', () => {
         rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(null);
 
       const res = await service.join('x', 'u1', {});
 
@@ -1822,18 +1920,139 @@ describe('CommunitiesService', () => {
         rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue({
-        id: 'inv-2',
-        communityId: 'c1',
-        invitedUserId: 'u1',
-        status: CommunityInviteStatus.Pending,
-      });
+      findLivePendingInviteMock.mockResolvedValue(liveInvite({ id: 'inv-2' }));
       members.createQueryBuilder.mockReturnValue(insertQbStub());
 
       const res = await service.join('x', 'u1', {});
 
       expect(res.outcome).toBe('joined');
       expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    // I-3. The gate offers an invitee Accept on every tier but `public`. On
+    // `request` the join used to file a request and leave the invitation
+    // live, so the gate kept offering Accept and a second press hit the
+    // pending-request 409. The invitation now admits its holder here too.
+    it('an invited caller to a request-tier community is admitted and the invitation is spent', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Request,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      findLivePendingInviteMock.mockResolvedValue(liveInvite());
+      const claimQb = inviteQbStub();
+      invites.createQueryBuilder.mockReturnValue(claimQb);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(res).toEqual({
+        outcome: 'joined',
+        role: RosterRole.Member,
+        request: null,
+      });
+      expect(findLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'c1',
+        'u1',
+      );
+      expect(claimQb.set).toHaveBeenCalledWith(
+        expect.objectContaining({ status: CommunityInviteStatus.Accepted }),
+      );
+      expect(claimQb.where).toHaveBeenCalledWith(
+        'id = :id AND status = :pending AND expires_at > now()',
+        { id: 'inv-1', pending: CommunityInviteStatus.Pending },
+      );
+      expect(insertQb.values).toHaveBeenCalledWith({
+        communityId: 'c1',
+        userId: 'u1',
+        role: RosterRole.Member,
+      });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    it('a request-tier caller without a live invitation still files a request', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Request,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'u1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+      findLivePendingInviteMock.mockResolvedValue(null);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(findLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'c1',
+        'u1',
+      );
+      expect(res.outcome).toBe('requested');
+      expect(res.role).toBeNull();
+      expect(res.request).toMatchObject({ status: JoinRequestStatus.Pending });
+      expect(invites.createQueryBuilder).not.toHaveBeenCalled();
+      expect(insertQb.execute).not.toHaveBeenCalled();
+      expect(joinRequests.save).toHaveBeenCalled();
+    });
+
+    // The invitation was live at the read and gone by the spend (revoked, or
+    // expired in between), so the claim matches nothing. The `request` tier
+    // answers an uninvited caller with an ordinary join request, so that is
+    // exactly what this caller gets. The private-only 404 stays with the
+    // private tier.
+    it('files an ordinary request for a request-tier caller whose invitation lapsed mid-join', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Request,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'u1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+      findLivePendingInviteMock.mockResolvedValue(liveInvite());
+      const claimQb = inviteQbStub();
+      claimQb.execute!.mockResolvedValue({ affected: 0, raw: [] });
+      invites.createQueryBuilder.mockReturnValue(claimQb);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(claimQb.execute).toHaveBeenCalled();
+      expect(res.outcome).toBe('requested');
+      expect(res.role).toBeNull();
+      expect(res.request).toMatchObject({ status: JoinRequestStatus.Pending });
+      expect(insertQb.execute).not.toHaveBeenCalled();
+      expect(joinRequests.save).toHaveBeenCalled();
     });
 
     // An invitation opens a door. It is not a way past a ban, a takedown, a
@@ -1849,17 +2068,165 @@ describe('CommunitiesService', () => {
         rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
-      invites.findOne.mockResolvedValue({
-        id: 'inv-2',
-        communityId: 'c1',
-        invitedUserId: 'u1',
-        status: CommunityInviteStatus.Pending,
-      });
+      findLivePendingInviteMock.mockResolvedValue(liveInvite({ id: 'inv-2' }));
 
       await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
         ForbiddenException,
       );
       expect(invites.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    // DES-407. The refusal is coded and carries the reason, so the join panel
+    // can explain the pause in the member's own language.
+    it('join refuses a frozen community with COMMUNITY_FROZEN and the manual reason', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Public,
+        archivedAt: null,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+        frozenReason: CommunityFrozenReason.Manual,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const error: unknown = await service
+        .join('x', 'u1', {})
+        .catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(ForbiddenException);
+      expect((error as ForbiddenException).getResponse()).toMatchObject({
+        code: 'COMMUNITY_FROZEN',
+        frozenReason: CommunityFrozenReason.Manual,
+      });
+      expect(members.createQueryBuilder).not.toHaveBeenCalled();
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    it('join refuses a report-frozen community with the report_pileup reason', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Request,
+        archivedAt: null,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+        frozenReason: CommunityFrozenReason.ReportPileup,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const error: unknown = await service
+        .join('x', 'u1', {})
+        .catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(ForbiddenException);
+      expect((error as ForbiddenException).getResponse()).toMatchObject({
+        code: 'COMMUNITY_FROZEN',
+        frozenReason: 'report_pileup',
+      });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    // PRD-411. The partial-unique pending index is the backstop; its 23505
+    // now reaches the client as a coded 409 the join panel can name.
+    it('join answers COMMUNITY_JOIN_REQUEST_PENDING when the pending index rejects a second request', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Request,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      joinRequests.save.mockRejectedValueOnce({ code: '23505' });
+
+      const error: unknown = await service
+        .join('x', 'u1', {})
+        .catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getStatus()).toBe(409);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        code: 'COMMUNITY_JOIN_REQUEST_PENDING',
+      });
+    });
+
+    // ENG-428. An open door used to readmit a returning banned member in one
+    // tap. A joiner who correlates with one of THIS community's bans lands in
+    // the same reviewable queue the second-vouch gate uses, and staff are rung.
+    it('join holds a public-tier joiner who matches a ban here for review', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Public,
+        archivedAt: null,
+        ownerId: 'owner-1',
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'u1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+      communityBanEvasion.isMatchingCommunityBan.mockResolvedValue(true);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(communityBanEvasion.isMatchingCommunityBan).toHaveBeenCalledWith(
+        'c1',
+        'u1',
+      );
+      expect(res.outcome).toBe('requested');
+      expect(res.role).toBeNull();
+      expect(res.request).toMatchObject({ status: JoinRequestStatus.Pending });
+      expect(insertQb.execute).not.toHaveBeenCalled();
+      expect(joinRequests.save).toHaveBeenCalled();
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        expect.arrayContaining(['owner-1']),
+        NotificationType.JoinRequestReceived,
+        expect.anything(),
+        'u1',
+      );
+    });
+
+    it('join admits a public-tier joiner with no ban match', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Public,
+        archivedAt: null,
+        rules: [],
+        rulesVersion: 1,
+      });
+      members.findOne.mockResolvedValue(null);
+      communityBanEvasion.isMatchingCommunityBan.mockResolvedValue(false);
+      const insertQb = insertQbStub();
+      members.createQueryBuilder.mockReturnValue(insertQb);
+
+      const res = await service.join('x', 'u1', {});
+
+      expect(communityBanEvasion.isMatchingCommunityBan).toHaveBeenCalledWith(
+        'c1',
+        'u1',
+      );
+      expect(res).toEqual({
+        outcome: 'joined',
+        role: RosterRole.Member,
+        request: null,
+      });
+      expect(insertQb.execute).toHaveBeenCalled();
+      expect(joinRequests.save).not.toHaveBeenCalled();
     });
 
     it('is idempotent for an already-existing member: resolves joined, never throws', async () => {
@@ -1944,6 +2311,187 @@ describe('CommunitiesService', () => {
       await expect(service.roster('x', 'stranger')).rejects.toBeInstanceOf(
         NotFoundException,
       );
+      // The private 404 answers first, so the interior gate is never asked.
+      expect(assertCommunityInteriorReadableMock).not.toHaveBeenCalled();
+    });
+
+    // ENG-426. Posts and replies already closed on a takedown; the roster
+    // now follows the same interior rule, asked with the viewer's role.
+    it('roster 404s a taken-down community to a non-staff viewer', async () => {
+      const community = {
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+      };
+      communities.findOne.mockResolvedValue(community);
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      assertCommunityInteriorReadableMock.mockRejectedValue(
+        new NotFoundException('Community not found'),
+      );
+
+      await expect(service.roster('x', 'u2')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(assertCommunityInteriorReadableMock).toHaveBeenCalledWith({
+        community,
+        viewerRole: RosterRole.Member,
+        communities,
+        contentModeration,
+      });
+      expect(members.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    // Decision 8: rosters honour blocks for everyone below staff. Four people
+    // share one public roster: the viewer, someone the viewer blocked,
+    // someone who blocked the viewer, and a bystander with no block either
+    // way.
+    describe('block severance', () => {
+      const blockRows = [
+        { blockerId: 'viewer', blockedId: 'blocked-by-viewer' },
+        { blockerId: 'blocker-of-viewer', blockedId: 'viewer' },
+      ];
+      const rosterRow = (userId: string, role: RosterRole) => ({
+        communityId: 'c1',
+        userId,
+        role,
+        joinedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      // Answers the roster query the way Postgres answers it: once
+      // `excludeBlocked` has been applied for a viewer, every row blocked
+      // either way with that viewer leaves the page and the count together.
+      const stageBlockedRoster = (viewerRole: RosterRole) => {
+        communities.findOne.mockResolvedValue({
+          id: 'c1',
+          slug: 'x',
+          parentId: null,
+          accessTier: AccessTier.Public,
+          rosterVisible: true,
+        });
+        members.findOne.mockResolvedValue({ role: viewerRole });
+        const rosterRows = [
+          rosterRow('viewer', viewerRole),
+          rosterRow('blocked-by-viewer', RosterRole.Member),
+          rosterRow('blocker-of-viewer', RosterRole.Member),
+          rosterRow('bystander', RosterRole.Member),
+        ];
+        profiles.find.mockResolvedValue(
+          rosterRows.map((row) => ({
+            userId: row.userId,
+            slug: row.userId,
+            firstName: row.userId,
+            lastName: 'L',
+            avatarUrl: null,
+          })),
+        );
+        let filteredForViewerId: string | null = null;
+        blockFilter.excludeBlocked.mockImplementation(
+          (queryBuilder: Record<string, jest.Mock>, actorId: string) => {
+            filteredForViewerId = actorId;
+            return queryBuilder;
+          },
+        );
+        const rosterQb = qbStub();
+        rosterQb.getManyAndCount!.mockImplementation(() => {
+          const visibleRows = rosterRows.filter(
+            (row) =>
+              filteredForViewerId === null ||
+              !blockRows.some(
+                (block) =>
+                  (block.blockerId === filteredForViewerId &&
+                    block.blockedId === row.userId) ||
+                  (block.blockedId === filteredForViewerId &&
+                    block.blockerId === row.userId),
+              ),
+          );
+          return Promise.resolve([visibleRows, visibleRows.length]);
+        });
+        members.createQueryBuilder.mockReturnValue(rosterQb);
+        return rosterQb;
+      };
+
+      const visibleSlugs = (rosterPage: {
+        items: { member: { slug: string } }[];
+      }) => rosterPage.items.map((entry) => entry.member.slug);
+
+      it('hides someone a plain member blocked from their roster', async () => {
+        const rosterQb = stageBlockedRoster(RosterRole.Member);
+
+        const rosterPage = await service.roster('x', 'viewer');
+
+        expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+          rosterQb,
+          'viewer',
+          '"m"."user_id"',
+        );
+        expect(visibleSlugs(rosterPage)).not.toContain('blocked-by-viewer');
+        expect(visibleSlugs(rosterPage)).toContain('bystander');
+      });
+
+      it('hides someone who blocked a plain member from their roster', async () => {
+        stageBlockedRoster(RosterRole.Member);
+
+        const rosterPage = await service.roster('x', 'viewer');
+
+        expect(visibleSlugs(rosterPage)).not.toContain('blocker-of-viewer');
+        expect(visibleSlugs(rosterPage)).toContain('bystander');
+      });
+
+      it('shows a moderator the full roster, blocks in both directions included', async () => {
+        stageBlockedRoster(RosterRole.Mod);
+
+        const rosterPage = await service.roster('x', 'viewer');
+
+        expect(blockFilter.excludeBlocked).not.toHaveBeenCalled();
+        expect(visibleSlugs(rosterPage)).toEqual([
+          'viewer',
+          'blocked-by-viewer',
+          'blocker-of-viewer',
+          'bystander',
+        ]);
+        expect(rosterPage.total).toBe(4);
+      });
+
+      // Staff standing is the EFFECTIVE role: a plain member of a space who
+      // moderates its parent inherits moderator standing in the space, and
+      // reads the space's full roster with it.
+      it('shows a parent moderator the full roster of a space', async () => {
+        stageBlockedRoster(RosterRole.Member);
+        communities.findOne.mockResolvedValue({
+          id: 'c1',
+          slug: 'x',
+          parentId: 'parent-1',
+          accessTier: AccessTier.Public,
+          rosterVisible: true,
+        });
+        members.findOne.mockImplementation(
+          ({ where }: { where: { communityId: string } }) =>
+            Promise.resolve({
+              role:
+                where.communityId === 'parent-1'
+                  ? RosterRole.Mod
+                  : RosterRole.Member,
+            }),
+        );
+
+        const rosterPage = await service.roster('x', 'viewer');
+
+        expect(blockFilter.excludeBlocked).not.toHaveBeenCalled();
+        expect(visibleSlugs(rosterPage)).toContain('blocked-by-viewer');
+        expect(visibleSlugs(rosterPage)).toContain('blocker-of-viewer');
+        expect(rosterPage.total).toBe(4);
+      });
+
+      // A count that ran ahead of the list would point at the person hidden.
+      it('counts only the members a plain member can see', async () => {
+        stageBlockedRoster(RosterRole.Member);
+
+        const rosterPage = await service.roster('x', 'viewer');
+
+        expect(visibleSlugs(rosterPage)).toEqual(['viewer', 'bystander']);
+        expect(rosterPage.total).toBe(rosterPage.items.length);
+      });
     });
   });
 
@@ -2265,6 +2813,45 @@ describe('CommunitiesService', () => {
         // A removal serves no term: the member may come back at once.
         duration: null,
       });
+    });
+
+    // PRD-413. The bell names the community so the member can read which one
+    // let them go, and leaves the moderator who acted unnamed. The actor still
+    // travels as the block/mute argument.
+    it('staff removal bell carries the community name', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        name: 'Queer Hikers',
+        ownerId: 'owner-1',
+      });
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([
+        { slug: 'member-slug', userId: 'member-1' },
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      members.findOne
+        .mockResolvedValueOnce({
+          id: 'm6',
+          role: RosterRole.Member,
+          userId: 'member-1',
+        })
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' });
+
+      await service.removeMember('x', 'mod-1', 'member-slug', {
+        allowReturn: true,
+      });
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-1',
+        NotificationType.CommunityMemberRemoved,
+        {
+          source: 'community',
+          communitySlug: 'x',
+          communityName: 'Queer Hikers',
+        },
+        'mod-1',
+      );
     });
 
     // The guard that matters most. A member leaving takes the same code path,

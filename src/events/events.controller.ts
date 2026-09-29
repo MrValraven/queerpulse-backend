@@ -53,6 +53,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -203,6 +204,10 @@ export class EventsController {
   @ApiConflictResponse({
     description:
       'People still have a stake in it. Cancel it before deleting it.',
+  })
+  @ApiServiceUnavailableResponse({
+    description:
+      'One of its Go together group chats could not be closed, so the gathering was kept. A later retry of the same delete can succeed.',
   })
   remove(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.remove(slug, user.userId);

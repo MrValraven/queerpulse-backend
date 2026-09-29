@@ -79,22 +79,11 @@ export class VouchController {
     return this.vouchService.withdrawVouch(user.userId, slug);
   }
 
-  @Get(':slug/vouchers')
-  @ApiOperation({
-    summary: 'List members who vouched for a member (paginated)',
-  })
-  @ApiOkResponse({ description: 'A page of vouchers.' })
-  @ApiNotFoundResponse({ description: 'No member with that slug.' })
-  @ApiUnauthorizedResponse({
-    description: 'Not an authenticated active member.',
-  })
-  vouchers(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-    @Query() page: PaginationQuery,
-  ) {
-    return this.vouchService.listVouchers(slug, page, user.userId);
-  }
+  // `GET members/:slug/vouchers` lives on `MembersController`
+  // (profiles.controller.ts), beside `GET profiles/:slug/mutuals`: the roster
+  // must resolve its target through `ProfilesService.findBySlugOrThrow`, and
+  // `ProfilesModule` imports this module, so only that side can reach both
+  // services without a module cycle (ENG-436).
 }
 
 @ApiTags('Vouches')

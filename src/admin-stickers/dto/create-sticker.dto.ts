@@ -37,7 +37,12 @@ export class CreateStickerDto {
   })
   slug!: string;
 
+  /** The English name. */
   @IsString() @MinLength(1) @MaxLength(80) label!: string;
+
+  /** The Portuguese name. Optional: readers in Portuguese fall back to
+   *  `label` while it is absent. */
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(80) labelPt?: string;
 
   /** The bare storage key the builder's presigned PUT landed on. Validated as
    *  an uploaded image reference by `@IsImageReference` (the same decorator

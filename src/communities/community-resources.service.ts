@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -18,7 +19,7 @@ import {
   toCommunityResourceDTO,
 } from './community-resources-response';
 import {
-  resolveMemberCommunity,
+  resolveMemberCommunityInterior,
   resolveStaffCommunity,
 } from './community-staff-access';
 import {
@@ -72,6 +73,7 @@ export class CommunityResourcesService {
     private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /**
@@ -79,14 +81,21 @@ export class CommunityResourcesService {
    * `position` ascending with `createdAt` as the tie-break, so two rows that
    * were never explicitly ordered still come back in a stable order rather
    * than whatever Postgres happens to return.
+   *
+   * Resolved through `resolveMemberCommunityInterior` (ENG-426 follow-up), so
+   * a plain member of a community a moderator has hidden or removed gets the
+   * same 404 the community's own page, posts and roster already answer with.
+   * Staff keep reading it. A member of a merely archived community keeps its
+   * shelf, unchanged.
    */
   async listBySlug(
     slug: string,
     userId: string,
   ): Promise<CommunityResourceShelfDTO> {
-    const { community } = await resolveMemberCommunity(
+    const { community } = await resolveMemberCommunityInterior(
       this.communities,
       this.members,
+      this.contentModeration,
       slug,
       userId,
     );

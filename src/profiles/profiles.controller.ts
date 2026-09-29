@@ -14,7 +14,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { PaginationQuery } from '../common/pagination.query';
 import { ConnectionsService } from '../connections/connections.service';
+import { VouchService } from '../vouch/vouch.service';
 import { CloseBoardItemDto } from './dto/close-board-item.dto';
 import { UpdateActivityVisibilityDto } from './dto/update-activity-visibility.dto';
 import { ListMembersQuery } from './dto/list-members.query';
@@ -348,7 +350,10 @@ export class ProfilesController {
 @ApiCookieAuth('access_token')
 @Controller('members')
 export class MembersController {
-  constructor(private readonly profilesService: ProfilesService) {}
+  constructor(
+    private readonly profilesService: ProfilesService,
+    private readonly vouchService: VouchService,
+  ) {}
 
   @ApiOperation({ summary: 'Search and page the member directory' })
   @ApiOkResponse({
@@ -363,5 +368,45 @@ export class MembersController {
   @UseGuards(ActiveMemberGuard)
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListMembersQuery) {
     return this.profilesService.searchMembers(query, user.userId);
+  }
+
+  // ENG-436: moved here from `VouchController`. The roster resolves its
+  // target through `findBySlugOrThrow`, the same gate as the profile and
+  // `GET profiles/:slug/mutuals`, so a member who blocked the viewer, hid from
+  // them, is inside "Hide me for 24 hours", was taken down, or has
+  // deactivated or been suspended 404s here too. `ProfilesModule` already
+  // imports `VouchModule`; the reverse import would be a module cycle.
+  @ApiTags('Vouches')
+  @ApiOperation({
+    summary: 'List members who vouched for a member (paginated)',
+  })
+  @ApiOkResponse({ description: 'A page of vouchers.' })
+  @ApiNotFoundResponse({
+    description:
+      'No member with that slug, or one the caller may not see. A renamed slug inside its reclaim cooldown carries code PROFILE_MOVED and the current slug.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  @Get(':slug/vouchers')
+  @UseGuards(ActiveMemberGuard)
+  async vouchers(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() page: PaginationQuery,
+  ) {
+    const target = await this.profilesService.findBySlugOrThrow(
+      slug,
+      user.userId,
+      user.role,
+    );
+    // Each named voucher holds the same member-set boundary as `/members`
+    // for this viewer (status, block, hidden-from, 24h hide, takedown).
+    return this.vouchService.listVouchers(
+      target,
+      user.userId,
+      (userIds) => this.profilesService.visibleMemberIds(user.userId, userIds),
+      page,
+    );
   }
 }

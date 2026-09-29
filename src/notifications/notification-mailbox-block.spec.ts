@@ -1,10 +1,12 @@
-import { FindOperator, Repository } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { DataSource, FindOperator, Repository } from 'typeorm';
 import { NotificationsExportContributor } from '../account/data-export-contributors';
 import { Community } from '../communities/entities/community.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { MentionsInboxService } from '../mentions/mentions-inbox.service';
 import type { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { Message } from '../messaging/entities/message.entity';
 import {
   describeDirectThreadSeats,
   isSeatExcludedFromMailbox,
@@ -18,6 +20,11 @@ import {
   visibleThroughMailboxSeatRules,
 } from './notification-mailbox-block';
 import { NotificationsService } from './notifications.service';
+import {
+  ACTOR_BLOCK_READER_PARAMETER,
+  visibleThroughActorBlocks,
+} from './notification-actor-block';
+import { actorIdOf } from './notification-response';
 
 /**
  * Task 13g, audit gaps G2, G3 and G4: a mention written inside a business
@@ -42,6 +49,7 @@ const DEPARTED_AT = new Date('2026-09-21T10:00:00.000Z');
 const CUSTOMER_IDENTITY = 'customer-identity';
 const MAILBOX_IDENTITY = 'mailbox-identity';
 const MAILBOX_THREAD = '0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a';
+const MAILBOX_MESSAGE = '0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b';
 
 const identityKindById = new Map<string, IdentityKind>([
   [CUSTOMER_IDENTITY, IdentityKind.Profile],
@@ -121,7 +129,7 @@ function mentionInThread(id: string, userId: string): Notification {
     payload: {
       source: 'message',
       conversationId: MAILBOX_THREAD,
-      messageId: 'message-1',
+      messageId: MAILBOX_MESSAGE,
       actorId: CUSTOMER,
       excerpt: 'can you check my booking for the 14th',
     },
@@ -201,11 +209,39 @@ function buildNotificationFixture(rows: Notification[]) {
     );
   }
 
+  // PRD-403: the in-memory twin of `visibleThroughActorBlocks`, read only
+  // when the `id` condition is exactly that shared predicate. It reads the
+  // same `blockPairs`, so a block placed or lifted between two reads moves
+  // both rules together, as the one `blocks` table does in Postgres.
+  function isActorVisible(
+    row: Notification,
+    idCondition: FindOperator<unknown>,
+  ): boolean {
+    const readerUserId = idCondition.objectLiteralParameters?.[
+      ACTOR_BLOCK_READER_PARAMETER
+    ] as string;
+    const expectedSql =
+      visibleThroughActorBlocks(readerUserId).getSql?.('Notification.id');
+    if (idCondition.getSql?.('Notification.id') !== expectedSql) {
+      throw new Error('Unrecognised id condition');
+    }
+    const actorId = actorIdOf(row);
+    if (!actorId) return true;
+    return !state.blockPairs.some(
+      ([blockerId, blockedId]) =>
+        (blockerId === readerUserId && blockedId === actorId) ||
+        (blockedId === readerUserId && blockerId === actorId),
+    );
+  }
+
   function matching(where: Record<string, unknown>): Notification[] {
     return rows.filter((row) =>
       Object.entries(where).every(([key, expected]) => {
         if (key === 'payload') {
           return isRowVisible(row, expected as FindOperator<unknown>);
+        }
+        if (key === 'id' && expected instanceof FindOperator) {
+          return isActorVisible(row, expected as FindOperator<unknown>);
         }
         return (row as unknown as Record<string, unknown>)[key] === expected;
       }),
@@ -232,12 +268,36 @@ function buildNotificationsService(repository: unknown): NotificationsService {
   }) as NotificationsService;
 }
 
+/**
+ * ENG-411: the data export blanks a mention's excerpt once its source is gone
+ * or edited. The mailbox message behind `mentionInThread` is still there and
+ * unedited, so its excerpt legitimately travels whenever no block hides the
+ * row, and only the mailbox rule decides what the export shows.
+ */
+const liveMailboxMessageSource = {
+  getRepository: (entity: unknown) =>
+    entity === Message
+      ? {
+          find: jest
+            .fn()
+            .mockResolvedValue([
+              { id: MAILBOX_MESSAGE, deletedAt: null, editedAt: null },
+            ]),
+        }
+      : emptyFind,
+} as unknown as DataSource;
+
 function buildMentionsInbox(repository: unknown): MentionsInboxService {
   return new MentionsInboxService(
     repository as Repository<Notification>,
     emptyFind as unknown as Repository<Profile>,
     emptyFind as unknown as Repository<ForumThread>,
     emptyFind as unknown as Repository<Community>,
+    // ENG-411: the excerpt freshness check reaches its source repositories
+    // through the DataSource. None of the fixture rows names a resolvable
+    // source, so every lookup it could make answers empty.
+    { getRepository: () => emptyFind } as unknown as DataSource,
+    { emit: jest.fn() } as unknown as EventEmitter2,
   );
 }
 
@@ -372,6 +432,7 @@ describe('G4: the notifications section of the data export', () => {
     ]);
     const contributor = new NotificationsExportContributor(
       repository as unknown as Repository<Notification>,
+      liveMailboxMessageSource,
     );
 
     state.blockPairs = [[CUSTOMER, BLOCKED_STAFF]];
@@ -438,6 +499,7 @@ describe('Task 14a: a staff member who left the business', () => {
     ]);
     const contributor = new NotificationsExportContributor(
       repository as unknown as Repository<Notification>,
+      liveMailboxMessageSource,
     );
     state.departedUserIds = new Set([DEPARTING_STAFF]);
 

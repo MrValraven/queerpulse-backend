@@ -185,9 +185,8 @@ describe('CommunityAutoFreezeService', () => {
       expect(updateQueryBuilder.execute).not.toHaveBeenCalled();
     });
 
-    // `reports.subject_id` is a varchar that carries slugs and the
-    // `"unspecified"` sentinel too, so a non-uuid value must never reach a
-    // uuid-typed lookup.
+    // `reports.subject_id` is a varchar that carries slugs and `unlinked:<uuid>`
+    // ids too, so a non-uuid value must never reach a uuid-typed lookup.
     it('never lets a non-uuid subject id reach the photo lookup', async () => {
       await service.onReportCreated({
         ...PHOTO_REPORT,

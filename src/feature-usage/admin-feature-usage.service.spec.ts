@@ -57,6 +57,16 @@ describe('AdminFeatureUsageService', () => {
     service = module.get(AdminFeatureUsageService);
   });
 
+  describe('getUsage: feature rows', () => {
+    it('lists no row for Go together, which is never measured', async () => {
+      const usage = await service.getUsage(7);
+
+      const featureKeys = usage.features.map((feature) => feature.featureKey);
+      expect(featureKeys).toContain('events');
+      expect(featureKeys).not.toContain('goTogether');
+    });
+  });
+
   describe('getUsage: communities drill-down', () => {
     it('excludes spaces (subcommunities) from the "still posting this week" count', async () => {
       await service.getUsage(7);

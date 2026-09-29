@@ -1061,7 +1061,7 @@ describe('ListingsService', () => {
       expect(notifications.create).not.toHaveBeenCalled();
     });
 
-    it('tells the suggester by DM when a suggestion the platform holds goes live', async () => {
+    it('tells the suggester with a bell notification when a suggestion the platform holds goes live', async () => {
       listings.findOne.mockResolvedValue(
         baseListing({
           status: ListingStatus.Review,
@@ -1074,17 +1074,45 @@ describe('ListingsService', () => {
 
       await service.setStatus('QPL-2026-0001', ListingStatus.Live, 'mod-1');
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
-        'mod-1',
+      // PRD-433. No actor: the bell never names the moderator. The slug opens
+      // the public directory page.
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+      expect(notifications.create).toHaveBeenCalledWith(
         'suggester-1',
-        expect.stringContaining('is now live in the directory'),
+        NotificationType.ListingSuggestionLive,
+        { source: 'listing', listingSlug: 'lux-cafe', listingName: 'Lux Café' },
       );
       // The `ListingApproved` notification says "your listing", which a
-      // suggester does not hold, so the DM above replaces it.
-      expect(notifications.create).not.toHaveBeenCalled();
+      // suggester does not hold, and the moderator no longer DMs them.
+      expect(notifications.create).not.toHaveBeenCalledWith(
+        expect.anything(),
+        NotificationType.ListingApproved,
+        expect.anything(),
+      );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
-    it('asks the suggester for more information in suggestion wording', async () => {
+    it('keeps the moderator change when the suggester notification fails to write', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          status: ListingStatus.Review,
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+        }),
+      );
+      notifications.create.mockRejectedValue(new Error('db down'));
+
+      const dto = await service.setStatus(
+        'QPL-2026-0001',
+        ListingStatus.Live,
+        'mod-1',
+      );
+
+      expect(dto.status).toBe(ListingStatus.Live);
+    });
+
+    it('notifies the suggester that their suggestion needs more information', async () => {
       listings.findOne.mockResolvedValue(
         baseListing({
           status: ListingStatus.Review,
@@ -1102,14 +1130,20 @@ describe('ListingsService', () => {
         'need opening hours',
       );
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
-        'mod-1',
+      expect(notifications.create).toHaveBeenCalledWith(
         'suggester-1',
-        'The place you suggested, "Lux Café", needs more information before it can go live. Reason: need opening hours',
+        NotificationType.ListingSuggestionNeedsInfo,
+        {
+          source: 'listing',
+          listingRef: 'QPL-2026-0001',
+          listingName: 'Lux Café',
+          reason: 'need opening hours',
+        },
       );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
-    it('tells the suggester their suggestion was sent back to review in suggestion wording', async () => {
+    it('notifies the suggester that their suggestion was sent back to review', async () => {
       listings.findOne.mockResolvedValue(
         baseListing({
           status: ListingStatus.Live,
@@ -1122,11 +1156,17 @@ describe('ListingsService', () => {
 
       await service.setStatus('QPL-2026-0001', ListingStatus.Review, 'mod-1');
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
-        'mod-1',
+      // No reason given, so the payload carries none.
+      expect(notifications.create).toHaveBeenCalledWith(
         'suggester-1',
-        'The place you suggested, "Lux Café", was sent back to review.',
+        NotificationType.ListingSuggestionSentBack,
+        {
+          source: 'listing',
+          listingRef: 'QPL-2026-0001',
+          listingName: 'Lux Café',
+        },
       );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
     it('keeps the owner wording for an owned listing sent to question', async () => {
@@ -1173,7 +1213,7 @@ describe('ListingsService', () => {
   });
 
   describe('removeByModerator', () => {
-    it('tells the suggester their suggestion was removed in suggestion wording', async () => {
+    it('notifies the suggester that their suggestion was removed', async () => {
       listings.findOne.mockResolvedValue(
         baseListing({
           path: 'suggest',
@@ -1189,11 +1229,17 @@ describe('ListingsService', () => {
         'policy violation',
       );
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
-        'mod-1',
+      expect(notifications.create).toHaveBeenCalledWith(
         'suggester-1',
-        'The place you suggested, "Lux Café", was removed from the directory. Reason: policy violation',
+        NotificationType.ListingSuggestionRemoved,
+        {
+          source: 'listing',
+          listingRef: 'QPL-2026-0001',
+          listingName: 'Lux Café',
+          reason: 'policy violation',
+        },
       );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
     it('keeps the owner wording when the listing has an owner', async () => {
@@ -1212,13 +1258,81 @@ describe('ListingsService', () => {
   });
 
   describe('askQuestion', () => {
-    it('asks the suggester when the platform holds the suggestion', async () => {
+    it('asks the suggester with a needs-info notification carrying the question, and no DM', async () => {
       listings.findOne.mockResolvedValue(
         baseListing({
           path: 'suggest',
           ownerId: null,
           suggestedByUserId: 'suggester-id',
+          status: ListingStatus.Review,
+          name: 'Lux Café',
         }),
+      );
+
+      const dto = await service.askQuestion(
+        'QPL-2026-0001',
+        'mod-1',
+        'Which street is it on?',
+      );
+
+      // PRD-433. The question is the notification's reason; no moderator is
+      // named and the moderator's personal account sends nothing.
+      expect(dto.status).toBe(ListingStatus.Question);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'suggester-id',
+        NotificationType.ListingSuggestionNeedsInfo,
+        {
+          source: 'listing',
+          listingRef: 'QPL-2026-0001',
+          listingName: 'Lux Café',
+          reason: 'Which street is it on?',
+        },
+      );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+      // The Q&A thread row and the audit event are kept.
+      expect(questions.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          listingId: 'listing-1',
+          askedBy: 'mod-1',
+          body: 'Which street is it on?',
+        }),
+      );
+      expect(moderationEvents.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: ListingModerationAction.QuestionAsked,
+          fromStatus: ListingStatus.Review,
+          toStatus: ListingStatus.Question,
+        }),
+      );
+    });
+
+    it('reverts the status and throws when the suggester notification fails to write', async () => {
+      const listing = baseListing({
+        path: 'suggest',
+        ownerId: null,
+        suggestedByUserId: 'suggester-id',
+        status: ListingStatus.Review,
+      });
+      listings.findOne.mockResolvedValue(listing);
+      notifications.create.mockRejectedValue(new Error('bell is down'));
+
+      await expect(
+        service.askQuestion('QPL-2026-0001', 'mod-1', 'Which street is it on?'),
+      ).rejects.toThrow('bell is down');
+
+      // Saved once into Question, then once more back to Review.
+      expect(listings.save).toHaveBeenCalledTimes(2);
+      expect(listings.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: ListingStatus.Review }),
+      );
+      expect(questions.save).not.toHaveBeenCalled();
+      expect(moderationEvents.save).not.toHaveBeenCalled();
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('keeps the DM for an owner and writes no notification', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({ ownerId: 'owner-1', status: ListingStatus.Review }),
       );
 
       await service.askQuestion(
@@ -1229,9 +1343,10 @@ describe('ListingsService', () => {
 
       expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
         'mod-1',
-        'suggester-id',
+        'owner-1',
         'Which street is it on?',
       );
+      expect(notifications.create).not.toHaveBeenCalled();
     });
 
     it('400s a house-authored listing with nobody to ask', async () => {
@@ -1635,6 +1750,46 @@ describe('ListingsService', () => {
       // Owners and suggesters resolve in one profile read.
       expect(profiles.find).toHaveBeenCalledTimes(1);
     });
+
+    it('credits the staff author on a listing an admin added', async () => {
+      const searchQb = qbStub();
+      searchQb.getManyAndCount.mockResolvedValue([
+        [
+          baseListing({
+            path: 'admin-added',
+            ownerId: null,
+            suggestedByUserId: null,
+            createdByStaffId: 'staff-1',
+          }),
+        ],
+        1,
+      ]);
+      listings.createQueryBuilder
+        .mockReturnValueOnce(searchQb)
+        .mockReturnValueOnce(qbStub());
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'staff-1',
+          slug: 'rui-staff',
+          firstName: 'Rui',
+          lastName: 'Staff',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+
+      const result = await service.listQueue({});
+
+      const [row] = result.items;
+      expect(row?.submittedBy).toBeNull();
+      expect(row?.suggestedBy).toBeNull();
+      expect(row?.addedByStaff).toEqual(
+        expect.objectContaining({ slug: 'rui-staff', firstName: 'Rui' }),
+      );
+      // The staff author joins the same batched profile read.
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('bulkSetStatus', () => {
@@ -1715,7 +1870,7 @@ describe('ListingsService', () => {
       expect(notifications.create).not.toHaveBeenCalled();
     });
 
-    it('tells a suggester in suggestion wording when a bulk transition sends their suggestion back', async () => {
+    it('notifies a suggester when a bulk transition sends their suggestion back', async () => {
       listings.find.mockResolvedValue([
         baseListing({
           ref: 'QPL-2026-0001',
@@ -1734,11 +1889,44 @@ describe('ListingsService', () => {
         'needs another look',
       );
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
-        'mod-1',
+      expect(notifications.create).toHaveBeenCalledWith(
         'suggester-1',
-        'The place you suggested, "Lux Café", was sent back to review. Reason: needs another look',
+        NotificationType.ListingSuggestionSentBack,
+        {
+          source: 'listing',
+          listingRef: 'QPL-2026-0001',
+          listingName: 'Lux Café',
+          reason: 'needs another look',
+        },
       );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('tells a suggester with a bell notification when a bulk approval puts their suggestion live', async () => {
+      listings.find.mockResolvedValue([
+        baseListing({
+          ref: 'QPL-2026-0001',
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+          status: ListingStatus.Review,
+        }),
+      ]);
+
+      await service.bulkSetStatus(
+        ['QPL-2026-0001'],
+        ListingStatus.Live,
+        'mod-1',
+      );
+
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'suggester-1',
+        NotificationType.ListingSuggestionLive,
+        { source: 'listing', listingSlug: 'lux-cafe', listingName: 'Lux Café' },
+      );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
     it('counts an already-at-target-status ref as updated but writes no event, DM, or notification', async () => {
@@ -1802,7 +1990,7 @@ describe('ListingsService', () => {
       );
     });
 
-    it('tells a suggester in suggestion wording when their suggestion is bulk-removed', async () => {
+    it('notifies a suggester when their suggestion is bulk-removed', async () => {
       listings.find.mockResolvedValue([
         baseListing({
           ref: 'QPL-2026-0001',
@@ -1815,11 +2003,17 @@ describe('ListingsService', () => {
 
       await service.bulkRemove(['QPL-2026-0001'], 'mod-1', 'policy violation');
 
-      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
-        'mod-1',
+      expect(notifications.create).toHaveBeenCalledWith(
         'suggester-1',
-        'The place you suggested, "Lux Café", was removed from the directory. Reason: policy violation',
+        NotificationType.ListingSuggestionRemoved,
+        {
+          source: 'listing',
+          listingRef: 'QPL-2026-0001',
+          listingName: 'Lux Café',
+          reason: 'policy violation',
+        },
       );
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
   });
 

@@ -1,6 +1,7 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { NotificationType } from './entities/notification.entity';
 import { NotificationsListener } from './notifications.listener';
@@ -9,12 +10,20 @@ import { NotificationsService } from './notifications.service';
 describe('NotificationsListener', () => {
   let listener: NotificationsListener;
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
-  let subprofileMembers: { find: jest.Mock };
+  let subprofileMembers: { find: jest.Mock; manager: { findOne: jest.Mock } };
   let profiles: { findOne: jest.Mock };
 
   beforeEach(async () => {
     notifications = { create: jest.fn(), createForRecipients: jest.fn() };
-    subprofileMembers = { find: jest.fn() };
+    subprofileMembers = {
+      find: jest.fn(),
+      manager: {
+        findOne: jest.fn().mockResolvedValue({
+          id: 'sp1',
+          displayName: 'Persona One',
+        }),
+      },
+    };
     profiles = { findOne: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -129,11 +138,78 @@ describe('NotificationsListener', () => {
       NotificationType.SubprofileInvite,
       {
         subprofileId: 'sp1',
-        displayName: 'Persona One',
+        subprofileName: 'Persona One',
         invitedByUserId: 'owner',
       },
       'owner',
     );
+  });
+
+  describe('persona endorsed and followed', () => {
+    it('names the endorsed persona and keeps the endorser out of the payload', async () => {
+      await listener.onSubprofileEndorsed({
+        subprofileId: 'sp1',
+        endorserId: 'fan-1',
+        ownerId: 'owner',
+      });
+      expect(subprofileMembers.manager.findOne).toHaveBeenCalledWith(
+        Subprofile,
+        {
+          where: { id: 'sp1' },
+          select: { id: true, displayName: true },
+        },
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner',
+        NotificationType.PersonaEndorsed,
+        { subprofileId: 'sp1', subprofileName: 'Persona One' },
+        'fan-1',
+      );
+    });
+
+    it('names the followed persona and keeps the follower out of the payload', async () => {
+      await listener.onSubprofileFollowed({
+        subprofileId: 'sp1',
+        followerId: 'fan-2',
+        ownerId: 'owner',
+      });
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner',
+        NotificationType.PersonaFollowed,
+        { subprofileId: 'sp1', subprofileName: 'Persona One' },
+        'fan-2',
+      );
+    });
+
+    it('still delivers the row without a name when the persona is gone', async () => {
+      subprofileMembers.manager.findOne.mockResolvedValue(null);
+      await listener.onSubprofileFollowed({
+        subprofileId: 'sp1',
+        followerId: 'fan-2',
+        ownerId: 'owner',
+      });
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner',
+        NotificationType.PersonaFollowed,
+        { subprofileId: 'sp1' },
+        'fan-2',
+      );
+    });
+
+    it('still delivers the row without a name when the name lookup fails', async () => {
+      subprofileMembers.manager.findOne.mockRejectedValue(new Error('db down'));
+      await listener.onSubprofileEndorsed({
+        subprofileId: 'sp1',
+        endorserId: 'fan-1',
+        ownerId: 'owner',
+      });
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner',
+        NotificationType.PersonaEndorsed,
+        { subprofileId: 'sp1' },
+        'fan-1',
+      );
+    });
   });
 
   it('notifies the other current co-owners when an invite is accepted, excluding the joiner', async () => {
@@ -154,9 +230,15 @@ describe('NotificationsListener', () => {
     expect(notifications.createForRecipients).toHaveBeenCalledWith(
       ['owner', 'u2'],
       NotificationType.SubprofileCoOwnerJoined,
-      { subprofileId: 'sp1', joinedUserId: 'newJoiner' },
+      {
+        subprofileId: 'sp1',
+        joinedUserId: 'newJoiner',
+        subprofileName: 'Persona One',
+      },
       'newJoiner',
     );
+    // One name lookup for the whole fan-out.
+    expect(subprofileMembers.manager.findOne).toHaveBeenCalledTimes(1);
   });
 
   it('skips the fan-out when the joiner was the only co-owner found', async () => {
@@ -167,6 +249,7 @@ describe('NotificationsListener', () => {
       invitedByUserId: 'owner',
     });
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    expect(subprofileMembers.manager.findOne).not.toHaveBeenCalled();
   });
 
   it('notifies the invitee with a cohost_invite-sourced deep-link payload', async () => {

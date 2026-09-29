@@ -17,7 +17,8 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { sanitizeMessageBody } from './dto/trim-message-body';
-import { MessageView } from './message-response';
+import { MessageResponse } from './message-response';
+import { MessagesService } from './messages.service';
 import {
   IdentityContactRefusal,
   identityContactRefusalException,
@@ -165,15 +166,29 @@ export class MessageRequestsService {
     // Read-only: whose account can receive an enquiry right now
     // (`loadReceivingStaffUserIds`). `UsersModule` exports the repository.
     @InjectRepository(User) private readonly users: Repository<User>,
+    // ENG-407: the connected branch of `messageRequest` posts through the
+    // ordinary member send path. No cycle: `MessagesService` depends on
+    // `MessagingCoreService` only.
+    private readonly messagesService: MessagesService,
   ) {}
 
+  /**
+   * "Say hello" to a member by handle. Connected pair: the body lands in
+   * their DM through `MessagesService.sendMessageWithOutcome`, the same send
+   * the thread composer uses (ENG-407), so it gets that path's account,
+   * restriction and gate checks, the `@`-mention fan-out, and the
+   * `(conversationId, clientMessageId)` dedup: a retried request with the
+   * same `clientMessageId` returns the stored message and posts nothing new.
+   * Unconnected pair: the body seeds a connection request (§7).
+   */
   async messageRequest(
     userId: string,
     toSlug: string,
     body: string,
+    clientMessageId?: string,
   ): Promise<{
     conversationId: string | null;
-    message: MessageView | null;
+    message: MessageResponse | null;
     connectionRequestId: string | null;
   }> {
     const recipient = await this.profiles.findOne({ where: { slug: toSlug } });
@@ -192,14 +207,16 @@ export class MessageRequestsService {
         userId,
         recipient.userId,
       );
-      const { view } = await this.core.postMessage(
+      const { response } = await this.messagesService.sendMessageWithOutcome(
         conversation.id,
         userId,
         body,
+        undefined,
+        clientMessageId,
       );
       return {
         conversationId: conversation.id,
-        message: view,
+        message: response,
         connectionRequestId: null,
       };
     }

@@ -13,6 +13,7 @@ import {
   levelName,
   levelStartXp,
 } from './recognition.catalog';
+import { resolveMonthlyInviteLimit } from '../membership/monthly-invite-limit';
 import {
   BADGE_REQUIREMENTS,
   badgeBonusFor,
@@ -397,27 +398,51 @@ function xpAwayAmount(unlockLevel: number, totalXp: number): number {
 }
 
 /**
- * The perk card's copy, with the invite-quota numbers filled in from the ONE
- * place that decides them (`INVITE_QUOTA_BONUS_BY_LEVEL`) plus the base quota
- * this deployment actually enforces. A perk with no `{base}`/`{total}` in its
- * text is returned untouched.
+ * The member's monthly invite limit for a given recognition level bonus.
+ * `RecognitionService` builds it from `resolveMonthlyInviteLimit`, the rule
+ * `InvitesService` enforces, fed with the member's own override, ambassador
+ * bonus and the configured base (PRD-436).
+ */
+export type InviteLimitResolver = (levelBonus: number) => number;
+
+/**
+ * For a caller with no member to read: the same rule for a member with no
+ * override and no ambassador grant, on the default base.
+ */
+export function defaultInviteLimit(levelBonus: number): number {
+  return resolveMonthlyInviteLimit({
+    inviteQuotaOverride: null,
+    base: DEFAULT_INVITE_MONTHLY_QUOTA,
+    levelBonus,
+    ambassadorBonus: 0,
+  });
+}
+
+/**
+ * The invite-quota perk's numbers: `base` is the member's limit with no level
+ * bonus, `total` the limit once this perk's bonus
+ * (`INVITE_QUOTA_BONUS_BY_LEVEL`) applies. Both come from `resolveInviteLimit`,
+ * so an ambassador's bonus and a staff override show here exactly as the
+ * invite page enforces them.
  */
 export function perkInviteQuota(
   def: PerkCatalogEntry,
-  baseInviteQuota: number,
+  resolveInviteLimit: InviteLimitResolver = defaultInviteLimit,
 ): PerkInviteQuotaDTO | undefined {
   if (def.isInviteQuotaPerk !== true) return undefined;
   return {
-    base: baseInviteQuota,
-    total: baseInviteQuota + inviteQuotaBonusForLevel(def.unlockLevel),
+    base: resolveInviteLimit(0),
+    total: resolveInviteLimit(inviteQuotaBonusForLevel(def.unlockLevel)),
   };
 }
 
+/** The perk card's copy with `{base}`/`{total}` filled in. A perk with neither
+ *  in its text is returned untouched. */
 export function perkDescription(
   def: PerkCatalogEntry,
-  baseInviteQuota: number,
+  resolveInviteLimit: InviteLimitResolver = defaultInviteLimit,
 ): string {
-  const quota = perkInviteQuota(def, baseInviteQuota);
+  const quota = perkInviteQuota(def, resolveInviteLimit);
   if (!quota) return def.desc;
   return def.desc
     .replace('{base}', String(quota.base))
@@ -425,17 +450,16 @@ export function perkDescription(
 }
 
 /**
- * `baseInviteQuota` is the deployment's configured `app.inviteMonthlyQuota`,
- * passed in by `RecognitionService` so the invite-quota perk copy names the
- * number `InvitesService` will really enforce. It defaults to the same
- * constant `app.config.ts` defaults to, so a caller without a `ConfigService`
- * still cannot print a number the backend would not honour.
+ * `resolveInviteLimit` is built by `RecognitionService` from the member's own
+ * quota inputs, so the invite-quota perk copy names the number
+ * `InvitesService` will really enforce (PRD-436). It defaults to
+ * `defaultInviteLimit` for a caller with no member to read.
  */
 export function buildPerks(
   currentLevel: number,
   totalXp: number,
   claimed: ClaimedPerkRow[],
-  baseInviteQuota: number = DEFAULT_INVITE_MONTHLY_QUOTA,
+  resolveInviteLimit: InviteLimitResolver = defaultInviteLimit,
 ): PerksDTO {
   const claimedByKey = new Map(claimed.map((row) => [row.perkKey, row]));
   const available: PerkDTO[] = [];
@@ -443,8 +467,8 @@ export function buildPerks(
   const lockedByLevel = new Map<number, PerkDTO[]>();
 
   for (const def of PERK_CATALOG) {
-    const desc = perkDescription(def, baseInviteQuota);
-    const inviteQuota = perkInviteQuota(def, baseInviteQuota);
+    const desc = perkDescription(def, resolveInviteLimit);
+    const inviteQuota = perkInviteQuota(def, resolveInviteLimit);
     const claim = claimedByKey.get(def.key);
     if (claim) {
       claimedPerks.push({
@@ -578,8 +602,8 @@ export function buildXpBreakdown(
 }
 
 /**
- * `options.baseInviteQuota` is the deployment's configured monthly invite
- * allowance (see `buildPerks`). `options.isOwnerView` decides whether a badge
+ * `options.resolveInviteLimit` is the member's invite limit rule (see
+ * `buildPerks`). `options.isOwnerView` decides whether a badge
  * the member has hidden is returned at all; it defaults to `signals !== null`,
  * which is exactly how the owner/non-owner split is already expressed
  * everywhere else in this file (`xpBreakdown`, `xpLedger`, perks).
@@ -590,7 +614,10 @@ export function buildRecognition(
   claimed: ClaimedPerkRow[],
   signals: RecognitionSignals | null = null,
   ledgerRows: LedgerEntryRow[] = [],
-  options: { baseInviteQuota?: number; isOwnerView?: boolean } = {},
+  options: {
+    resolveInviteLimit?: InviteLimitResolver;
+    isOwnerView?: boolean;
+  } = {},
 ): RecognitionDTO {
   const level = computeLevel(totalXp);
   const isOwnerView = options.isOwnerView ?? signals !== null;
@@ -598,7 +625,12 @@ export function buildRecognition(
     level,
     levelLadder: buildLevelLadder(level.level),
     badges: buildBadges(earned, signals, isOwnerView),
-    perks: buildPerks(level.level, totalXp, claimed, options.baseInviteQuota),
+    perks: buildPerks(
+      level.level,
+      totalXp,
+      claimed,
+      options.resolveInviteLimit,
+    ),
     xpBreakdown: buildXpBreakdown(
       signals,
       earned.map((a) => a.badgeKey),

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
 import { CalendarFeedController } from './calendar-feed.controller';
@@ -18,9 +19,17 @@ import { CalendarFeedToken } from './entities/calendar-feed-token.entity';
  * Owns `calendar_feed_tokens` (`AddCalendarFeedTokens1793510000000`): the feed
  * credential is now a stored, per-member, revocable random token rather than an
  * HMAC of the member's user id — see `CalendarFeedTokenService`.
+ *
+ * ENG-482: also imports `ContentModerationModule`, so the feed can drop a
+ * taken-down gathering the same way the public browse/search surfaces do
+ * (`EventsService.excludeModeratedEvents`). A leaf module itself, exporting
+ * only the service, so importing it here closes no cycle.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Event, EventRsvp, CalendarFeedToken])],
+  imports: [
+    TypeOrmModule.forFeature([Event, EventRsvp, CalendarFeedToken]),
+    ContentModerationModule,
+  ],
   controllers: [CalendarFeedController],
   providers: [CalendarFeedService, CalendarFeedTokenService],
 })

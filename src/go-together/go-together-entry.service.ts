@@ -15,9 +15,20 @@ import { EventsService } from '../events/events.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { OptInDto, PairAnswersDto } from './dto/opt-in.dto';
+import {
+  OptInDto,
+  PairAnswersDto,
+  UpdateHostAnswersDto,
+} from './dto/opt-in.dto';
+import { EventMatchConfig } from './entities/event-match-config.entity';
 import { EventMatchEntry } from './entities/event-match-entry.entity';
-import { parseHostAnswers } from './go-together-answers';
+import {
+  changedHostQuestionIds,
+  mergeHostAnswers,
+  omitHostAnswers,
+  parseHostAnswers,
+  unansweredHostQuestionIds,
+} from './go-together-answers';
 import { computeCardState } from './go-together-card';
 import {
   GoTogetherEligibilityService,
@@ -25,9 +36,16 @@ import {
   optInClosesAt,
 } from './go-together-eligibility.service';
 import { feedbackWindow } from './go-together-group.service';
-import { GoTogetherHostService } from './go-together-host.service';
+import {
+  CLOSED_ENTRY_FIELDS,
+  GoTogetherHostService,
+} from './go-together-host.service';
 import { GoTogetherProfileService } from './go-together-profile.service';
-import type { HostAnswers, Lens } from './go-together-questionnaire.catalog';
+import type {
+  HostAnswers,
+  HostQuestion,
+  Lens,
+} from './go-together-questionnaire.catalog';
 import type { GoTogetherCardResponse } from './go-together-response';
 
 /** The fields an opt-in writes onto the caller's entry. */
@@ -49,6 +67,23 @@ type AnswerFields = Pick<
   'hostAnswers' | 'lens' | 'lensConsentedAt'
 >;
 
+function unavailableError(reason: string): ConflictException {
+  return new ConflictException({
+    statusCode: 409,
+    message: 'Go together is not open for this gathering',
+    code: 'GO_TOGETHER_UNAVAILABLE',
+    reason,
+  });
+}
+
+function notWaitingError(): ConflictException {
+  return new ConflictException({
+    statusCode: 409,
+    message: 'You are not waiting for a group for this gathering',
+    code: 'GO_TOGETHER_NOT_WAITING',
+  });
+}
+
 function partnerUnavailableError(): ConflictException {
   return new ConflictException({
     statusCode: 409,
@@ -59,6 +94,8 @@ function partnerUnavailableError(): ConflictException {
 
 interface JoinCheck {
   hostAnswers: HostAnswers;
+  /** The host questions the answers were checked against. */
+  answeredQuestions: HostQuestion[];
   lens: Lens | null;
   existing: EventMatchEntry | null;
 }
@@ -96,11 +133,8 @@ export class GoTogetherEntryService {
     dto: OptInDto,
   ): Promise<GoTogetherCardResponse> {
     const event = await this.loadViewable(slug, userId);
-    const { hostAnswers, lens, existing } = await this.assertMayJoin(
-      event,
-      userId,
-      dto,
-    );
+    const { hostAnswers, answeredQuestions, lens, existing } =
+      await this.assertMayJoin(event, userId, dto);
     await this.host.ensureConfigRow(event);
     const answerFields: AnswerFields = {
       hostAnswers,
@@ -132,6 +166,7 @@ export class GoTogetherEntryService {
           partnerEntry,
           existing,
           answerFields,
+          answeredQuestions,
         );
       } else {
         const isRepeatInvite =
@@ -153,7 +188,12 @@ export class GoTogetherEntryService {
           mergeOfferGroupId: null,
           ...answerFields,
         });
-        if (!isRepeatInvite) {
+        const isStillOpen = await this.settleAgainstConfig(
+          event.id,
+          userId,
+          answeredQuestions,
+        );
+        if (isStillOpen && !isRepeatInvite) {
           await this.notifications.create(
             partnerId,
             NotificationType.GoTogetherPairInvite,
@@ -176,6 +216,7 @@ export class GoTogetherEntryService {
         mergeOfferGroupId: null,
         ...answerFields,
       });
+      await this.settleAgainstConfig(event.id, userId, answeredQuestions);
       if (previousAcceptedPartnerId) {
         await this.resetPartnerToSolo(
           event.id,
@@ -197,20 +238,105 @@ export class GoTogetherEntryService {
     const event = await this.loadViewable(slug, userId);
     const inviter = await this.findIncomingInvite(event.id, userId);
     if (!inviter) throw new NotFoundException('That invite is no longer open');
-    const { hostAnswers, lens, existing } = await this.assertMayJoin(
-      event,
-      userId,
-      dto,
-    );
+    const { hostAnswers, answeredQuestions, lens, existing } =
+      await this.assertMayJoin(event, userId, dto);
     this.assertSameLens(lens, inviter.lens);
     await this.host.ensureConfigRow(event);
-    await this.completeAcceptance(event.id, userId, inviter, existing, {
-      hostAnswers,
-      lens,
-      lensConsentedAt: lens ? new Date() : null,
-    });
+    await this.completeAcceptance(
+      event.id,
+      userId,
+      inviter,
+      existing,
+      { hostAnswers, lens, lensConsentedAt: lens ? new Date() : null },
+      answeredQuestions,
+    );
     await this.profileService.touchUsed(userId);
     return this.buildCard(event, userId);
+  }
+
+  /**
+   * A waiting member answers the host questions again after the host changed
+   * them. Only the host answers change: pairing, lens and consent stay as
+   * they are.
+   */
+  async updateHostAnswers(
+    slug: string,
+    userId: string,
+    dto: UpdateHostAnswersDto,
+  ): Promise<GoTogetherCardResponse> {
+    const event = await this.loadViewable(slug, userId);
+    const config = await this.openConfig(event);
+    await this.assertMemberEligible(event.id, userId);
+    const entry = await this.entries.findOne({
+      where: { eventId: event.id, userId },
+    });
+    if (entry?.status !== 'waiting') throw notWaitingError();
+    const merged = mergeHostAnswers(
+      config.hostQuestions,
+      entry.hostAnswers,
+      dto.hostAnswers,
+    );
+    if (!merged.ok) {
+      throw new BadRequestException({
+        statusCode: 400,
+        message: "Answer the host's questions",
+        code: 'GO_TOGETHER_INVALID_ANSWERS',
+        errors: merged.errors,
+      });
+    }
+    // Guarded on `waiting` so a cutoff run that grouped the member meanwhile
+    // keeps the answers it scored.
+    const result = await this.entries.update(
+      { id: entry.id, status: 'waiting' },
+      { hostAnswers: merged.value },
+    );
+    if (!result.affected) throw notWaitingError();
+    await this.settleAgainstConfig(event.id, userId, config.hostQuestions);
+    return this.buildCard(event, userId);
+  }
+
+  /**
+   * Closes the window between reading the config and writing the entry. The
+   * config row is read `FOR SHARE` after the caller's entry committed, so a
+   * host save either finished first (and is seen here) or starts after this
+   * and its own sweep sees the entry. A config switched off meanwhile
+   * withdraws the caller's waiting entry; a question edited meanwhile drops
+   * the answer to it, and the card asks for it again. Returns whether the
+   * entry is still open.
+   */
+  private async settleAgainstConfig(
+    eventId: string,
+    userId: string,
+    answeredQuestions: HostQuestion[],
+  ): Promise<boolean> {
+    return this.dataSource.transaction(async (manager) => {
+      const lockedConfig = await manager
+        .getRepository(EventMatchConfig)
+        .findOne({ where: { eventId }, lock: { mode: 'pessimistic_read' } });
+      const entryRepository = manager.getRepository(EventMatchEntry);
+      if (!lockedConfig?.enabled) {
+        await entryRepository.update(
+          { eventId, userId, status: 'waiting' },
+          { ...CLOSED_ENTRY_FIELDS },
+        );
+        return false;
+      }
+      const staleQuestionIds = changedHostQuestionIds(
+        answeredQuestions,
+        lockedConfig.hostQuestions,
+      );
+      if (staleQuestionIds.length === 0) return true;
+      const entry = await entryRepository.findOne({
+        where: { eventId, userId },
+      });
+      if (entry) {
+        await entryRepository.update(
+          { id: entry.id },
+          { hostAnswers: omitHostAnswers(entry.hostAnswers, staleQuestionIds) },
+        );
+      }
+      return true;
+    });
   }
 
   async declinePair(
@@ -299,6 +425,7 @@ export class GoTogetherEntryService {
       entry: activeEntry,
       hasIncomingPairInvite: incoming !== null,
       isFeedbackOpen,
+      isFinalPassDone: config?.lateGroupAt != null,
     });
 
     return {
@@ -310,6 +437,13 @@ export class GoTogetherEntryService {
         : null,
       optInClosesAt: optInClosesAt(event).toISOString(),
       hostQuestions: config?.hostQuestions ?? [],
+      unansweredHostQuestionIds:
+        state === 'waiting' && activeEntry && config
+          ? unansweredHostQuestionIds(
+              config.hostQuestions,
+              activeEntry.hostAnswers,
+            )
+          : [],
       pair: await this.buildPair(activeEntry, incoming),
       lens: activeEntry?.lens ?? null,
       groupId: activeEntry?.groupId ?? null,
@@ -363,27 +497,8 @@ export class GoTogetherEntryService {
     userId: string,
     dto: PairAnswersDto,
   ): Promise<JoinCheck> {
-    const config = await this.host.effectiveConfig(event);
-    const eventBlocker = this.eligibility.eventBlocker(event, config);
-    if (eventBlocker || !config) {
-      throw new ConflictException({
-        statusCode: 409,
-        message: 'Go together is not open for this gathering',
-        code: 'GO_TOGETHER_UNAVAILABLE',
-        reason: eventBlocker ?? 'notEnabled',
-      });
-    }
-    const memberBlocker = (
-      await this.eligibility.memberBlockers(event.id, [userId])
-    ).get(userId);
-    if (memberBlocker) {
-      throw new ForbiddenException({
-        statusCode: 403,
-        message: 'You cannot join Go together for this gathering',
-        code: 'GO_TOGETHER_INELIGIBLE',
-        reason: memberBlocker,
-      });
-    }
+    const config = await this.openConfig(event);
+    await this.assertMemberEligible(event.id, userId);
     if (!(await this.profileService.findUsable(userId))) {
       throw new ConflictException({
         statusCode: 409,
@@ -421,7 +536,40 @@ export class GoTogetherEntryService {
         code: 'GO_TOGETHER_ALREADY_GROUPED',
       });
     }
-    return { hostAnswers: parsedAnswers.value, lens, existing };
+    return {
+      hostAnswers: parsedAnswers.value,
+      answeredQuestions: config.hostQuestions,
+      lens,
+      existing,
+    };
+  }
+
+  /** The config when Go together is open for this gathering, else a 409. */
+  private async openConfig(event: Event): Promise<EventMatchConfig> {
+    const config = await this.host.effectiveConfig(event);
+    const eventBlocker = this.eligibility.eventBlocker(event, config);
+    if (eventBlocker || !config) {
+      throw unavailableError(eventBlocker ?? 'notEnabled');
+    }
+    return config;
+  }
+
+  /** The same member checks for joining and for answering again. */
+  private async assertMemberEligible(
+    eventId: string,
+    userId: string,
+  ): Promise<void> {
+    const memberBlocker = (
+      await this.eligibility.memberBlockers(eventId, [userId])
+    ).get(userId);
+    if (memberBlocker) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        message: 'You cannot join Go together for this gathering',
+        code: 'GO_TOGETHER_INELIGIBLE',
+        reason: memberBlocker,
+      });
+    }
   }
 
   /** An accepted pair always shares one lens (`isPairFeasible` compares it). */
@@ -447,6 +595,7 @@ export class GoTogetherEntryService {
     inviter: EventMatchEntry,
     existing: EventMatchEntry | null,
     answerFields: AnswerFields,
+    answeredQuestions: HostQuestion[],
   ): Promise<void> {
     const previousAcceptedPartnerId =
       existing?.pairStatus === 'accepted' &&
@@ -454,6 +603,17 @@ export class GoTogetherEntryService {
         ? existing.pairPartnerId
         : null;
     await this.dataSource.transaction(async (manager) => {
+      // The config first, in the order a host save locks: a switch-off that
+      // committed meanwhile refuses the acceptance, and one that starts later
+      // waits and then sweeps both entries.
+      const lockedConfig = await manager
+        .getRepository(EventMatchConfig)
+        .findOne({ where: { eventId }, lock: { mode: 'pessimistic_read' } });
+      if (!lockedConfig?.enabled) throw unavailableError('notEnabled');
+      const staleQuestionIds = changedHostQuestionIds(
+        answeredQuestions,
+        lockedConfig.hostQuestions,
+      );
       const entryRepository = manager.getRepository(EventMatchEntry);
       // Guarded so an inviter who re-invited someone else in the meantime is
       // left alone.
@@ -475,6 +635,10 @@ export class GoTogetherEntryService {
         groupId: null,
         mergeOfferGroupId: null,
         ...answerFields,
+        hostAnswers: omitHostAnswers(
+          answerFields.hostAnswers,
+          staleQuestionIds,
+        ),
       });
       await entryRepository.update(
         {

@@ -517,3 +517,95 @@ describe('buildReportedConversationsExport (Task 13f, fix round 1)', () => {
     }
   });
 });
+
+describe('buildReportedConversationsExport, matched Go together chats (PRD-423)', () => {
+  function groupMessageRow(
+    id: string,
+    senderId: string,
+    createdAt: string,
+  ): Record<string, unknown> {
+    return {
+      id,
+      conversationId: 'conversation-group',
+      senderId,
+      senderIdentityId: null,
+      body: 'see you there',
+      kind: MessageKind.User,
+      attachment: null,
+      replyToId: null,
+      forwarded: false,
+      createdAt: new Date(createdAt),
+      editedAt: null,
+      exactCreatedAt: createdAt.replace('.000Z', '.000000Z'),
+    };
+  }
+
+  async function exportGroup(
+    eventMatchGroupId: string | null,
+    isGoTogetherChat = eventMatchGroupId !== null,
+  ) {
+    const manager = buildFakeManager({
+      reportedConversationIdRows: [{ conversationId: 'conversation-group' }],
+      conversations: [
+        {
+          id: 'conversation-group',
+          isOfficial: false,
+          kind: 'group' as never,
+          title: 'Trans Joy Picnic',
+          eventMatchGroupId,
+          isGoTogetherChat,
+        },
+      ],
+      ownParticipants: [
+        {
+          id: 'own-participant',
+          conversationId: 'conversation-group',
+          clearedAt: null,
+          leftAt: null,
+        },
+      ],
+      profiles: [
+        profile({ userId: 'member-1', firstName: 'Jamie', slug: 'jamie-last' }),
+        profile({
+          userId: 'ana-1',
+          firstName: 'Ana',
+          lastName: 'Sousa',
+          slug: 'ana-sousa',
+        }),
+      ],
+      // Newest first, as `readNewestMessages` reads a page.
+      messageRowBatches: [
+        [
+          groupMessageRow('message-2', 'member-1', '2026-01-01T00:01:00.000Z'),
+          groupMessageRow('message-1', 'ana-1', '2026-01-01T00:00:00.000Z'),
+        ],
+      ],
+    });
+    const exported = await buildReportedConversationsExport(
+      manager,
+      'member-1',
+      buildFakeIdentities([], new Map()),
+    );
+    const [anaMessage, ownMessage] = exported[0]!.messages;
+    return { anaMessage: anaMessage!, ownMessage: ownMessage! };
+  }
+
+  it("exports another matched chat member under their first name and the member's own name whole", async () => {
+    const { anaMessage, ownMessage } = await exportGroup('match-group-1');
+
+    expect(anaMessage.senderDisplayName).toBe('Ana');
+    expect(ownMessage.senderDisplayName).toBe('Jamie Last');
+  });
+
+  it('keeps first names once the matched group row is gone', async () => {
+    const { anaMessage } = await exportGroup(null, true);
+
+    expect(anaMessage.senderDisplayName).toBe('Ana');
+  });
+
+  it('keeps full names in a normal group', async () => {
+    const { anaMessage } = await exportGroup(null);
+
+    expect(anaMessage.senderDisplayName).toBe('Ana Sousa');
+  });
+});

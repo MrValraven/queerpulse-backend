@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -16,16 +15,17 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { Profile } from '../users/entities/profile.entity';
 import { UpdateAuthorDto } from './dto/update-author.dto';
-import {
-  isDeckPublishReady,
-  validateDeckSlides,
-} from './deck-slides.validation';
+import { validateDeckSlides } from './deck-slides.validation';
 import { CreateDeckDto } from './dto/create-deck.dto';
 import { UpdateDeckDto } from './dto/update-deck.dto';
 import {
   DEFAULT_ARTICLE_LOCALE,
   MagazineArticle,
 } from './entities/magazine-article.entity';
+import {
+  magazineIssueVisibleThroughDate,
+  magazineTodayIsoDate,
+} from './magazine-clock';
 import { toArticleLocale } from './magazine-locale';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineCorrection } from './entities/magazine-correction.entity';
@@ -63,6 +63,15 @@ import {
  * through the piece's publish/unpublish endpoints instead.
  */
 export const DECK_PUBLISH_VIA_PIECE_CODE = 'magazine_deck_publish_via_piece';
+
+/**
+ * The 409 `code` `updateDeck` answers when a publish-state change targets a
+ * deck with no desk piece to publish from. The adoption migration
+ * (`AdoptStandaloneDecksAsPieces`) gave every deck a piece precisely so decks
+ * publish from their desk piece; a standalone deck can still come back down
+ * (`publishedAt: null`) but has no piece to publish through.
+ */
+export const DECK_PUBLISH_UNLINKED_CODE = 'magazine_deck_publish_unlinked';
 
 /** Two nullable publish instants name the same moment (or are both null). */
 function isSameInstant(left: Date | null, right: Date | null): boolean {
@@ -157,21 +166,16 @@ export class MagazineService {
   }
 
   /**
-   * Today as `YYYY-MM-DD`, the ceiling both public issue reads compare
-   * `magazine_issue.published_on` against (CON-18). The column is a Postgres
-   * `date`, so a plain ISO day string is the right operand — the article
-   * reads use a timestamp against `published_at` for the same reason.
-   */
-  private todayIsoDate(): string {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  /**
    * CON-18 — the public archive is PUBLISHED issues only. `published_on`
    * is NULL while an issue is merely opened at the desk and a future date
    * while it is scheduled, and either way its number, title, dek and cover
    * are embargoed: an unshipped cover and theme are exactly what an
    * editorial team holds back until launch.
+   *
+   * The ceiling is `magazineIssueVisibleThroughDate()`: an issue goes
+   * visible at 09:00 Lisbon on its ship date, the same instant
+   * `resolveIssuePublishInstant` computes for the ship itself, so a cover
+   * embargoed for this morning stays embargoed until that hour arrives.
    *
    * NULL rows drop out on their own because `NULL <= :today` is unknown
    * rather than true, the same way `listArticles` gates on `published_at`.
@@ -185,7 +189,9 @@ export class MagazineService {
     // the `runOrder`/`digest`/`coverlines` jsonb (issue-production data),
     // none of which this public read ever maps.
     const rows = await this.issues.find({
-      where: { publishedOn: LessThanOrEqual(this.todayIsoDate()) },
+      where: {
+        publishedOn: LessThanOrEqual(magazineIssueVisibleThroughDate()),
+      },
       select: {
         number: true,
         title: true,
@@ -204,14 +210,18 @@ export class MagazineService {
   }
 
   /**
-   * Same embargo gate as `listIssues` (CON-18): an unshipped or scheduled
-   * issue 404s here rather than handing a member the cover and dek by
-   * guessing the next number. The desk reads the production record through
-   * `GET /magazine/admin/issues/:number` instead.
+   * Same embargo gate as `listIssues` (CON-18, `magazineIssueVisibleThroughDate()`
+   * ceiling, visible from 09:00 Lisbon on the ship date): an unshipped or
+   * scheduled issue 404s here, keeping its cover and dek hidden from a
+   * member who guesses the next number. The desk reads the production
+   * record through `GET /magazine/admin/issues/:number`.
    */
   async getIssueByNumber(number: string): Promise<IssueResponse> {
     const issue = await this.issues.findOne({
-      where: { number, publishedOn: LessThanOrEqual(this.todayIsoDate()) },
+      where: {
+        number,
+        publishedOn: LessThanOrEqual(magazineIssueVisibleThroughDate()),
+      },
     });
     if (!issue) {
       throw new NotFoundException('Issue not found');
@@ -248,7 +258,7 @@ export class MagazineService {
         'issue.submissionDeadline',
       ])
       .where('(issue.published_on IS NULL OR issue.published_on > :today)', {
-        today: this.todayIsoDate(),
+        today: magazineIssueVisibleThroughDate(),
       })
       .orderBy('issue.published_on', 'ASC', 'NULLS LAST')
       .addOrderBy('issue.number', 'ASC')
@@ -645,7 +655,8 @@ export class MagazineService {
       .innerJoin(MagazinePiece, 'piece', 'piece.id = correction.piece_id')
       .where('piece.article_id = :articleId', { articleId })
       .andWhere(
-        '(correction.published_on IS NULL OR correction.published_on <= CURRENT_DATE)',
+        '(correction.published_on IS NULL OR correction.published_on <= :magazineToday)',
+        { magazineToday: magazineTodayIsoDate() },
       )
       .orderBy('correction.published_on', 'DESC', 'NULLS LAST')
       .addOrderBy('correction.created_at', 'DESC')
@@ -1104,10 +1115,21 @@ export class MagazineService {
     // piece: `MagazinePieceService.publishPiece` runs the care gate (consent,
     // sensitivity read), moves the piece's stage, records the audit event and
     // rings the writer's bell, and this endpoint does none of that. Any change
-    // to the publish instant is refused here, before anything is written, so
-    // the deck editor has to take the piece path. The piece id rides along so
-    // a client can reroute the same click. Plain saves (no publish control,
-    // or the instant already stored) are untouched.
+    // to the publish instant on a linked deck is refused here, before
+    // anything is written, so the deck editor has to take the piece path. The
+    // piece id rides along so a client can reroute the same click.
+    //
+    // A deck with no desk piece at all cannot publish through this endpoint
+    // either. The `AdoptStandaloneDecksAsPieces` migration's whole intent was
+    // that decks publish from their desk piece, so an unlinked deck (created
+    // via `POST /magazine/admin/decks`, or left behind when a piece drops
+    // its deck link) has no piece to publish through and is refused the
+    // same way, with its own code so the editor sees a distinct
+    // explanation. A take-down (`publishedAt: null`) stays allowed on an
+    // unlinked deck: it only pulls something offline, and an editor still
+    // needs a way to do that for a deck with no piece to unpublish it from.
+    // Plain saves (no publish control, or the instant already stored) are
+    // untouched on both paths.
     if (!isSameInstant(nextPublishedAt, deck.publishedAt)) {
       const linkedPiece = await this.pieces.findOne({
         where: { deckId: id },
@@ -1121,21 +1143,15 @@ export class MagazineService {
           pieceId: linkedPiece.id,
         });
       }
+      if (nextPublishedAt !== null) {
+        throw new ConflictException({
+          message:
+            'This deck has no desk piece. Decks publish from their desk piece.',
+          code: DECK_PUBLISH_UNLINKED_CODE,
+        });
+      }
     }
 
-    // The readiness bar, re-checked server-side (PRD-131). It mirrors the
-    // REQUIRED items of the editor's own checklist (see `isDeckPublishReady`),
-    // so a direct request cannot do what the UI refuses to: publish an empty
-    // deck, or one with an image slide missing its alt text. Checked against
-    // the slides this request will STORE, so a payload that both fills the
-    // gap and publishes in one PATCH passes. Only a draft -> live/scheduled
-    // transition is gated; pulling a live deck back down never is.
-    const isGoingLive = nextPublishedAt !== null && deck.publishedAt === null;
-    if (isGoingLive && !isDeckPublishReady(deck.slides)) {
-      throw new BadRequestException(
-        'Deck is not ready to publish: at least one slide and alt text on every image slide are required.',
-      );
-    }
     deck.publishedAt = nextPublishedAt;
 
     const deckTitleBeforeUpdate = deck.title;

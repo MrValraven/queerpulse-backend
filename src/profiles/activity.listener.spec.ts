@@ -101,6 +101,27 @@ describe('ActivityListener write gate: events', () => {
   });
 });
 
+describe('ActivityListener write gate: forum threads', () => {
+  it('listener records forum_thread subject references', async () => {
+    const { listener, record } = await buildListener();
+    await listener.onForumThreadCreated({
+      authorId: 'member-1',
+      threadSlug: 'finding-a-gp',
+      title: 'Finding a GP',
+    });
+
+    // The thread is the subject the read gate re-checks, so a thread that is
+    // later withdrawn or moves behind a private community takes the row too.
+    expect(recorded(record)).toMatchObject({
+      userId: 'member-1',
+      kind: ActivityKind.Post,
+      toLink: '/thread/finding-a-gp',
+      subjectKind: ActivitySubjectKind.ForumThread,
+      subjectId: 'finding-a-gp',
+    });
+  });
+});
+
 describe('ActivityListener write gate: communities', () => {
   const post = (accessTier: AccessTier) => ({
     authorId: 'member-1',
@@ -117,7 +138,7 @@ describe('ActivityListener write gate: communities', () => {
 
     expect(recorded(record)).toMatchObject({
       toLink: '/community/trans-joy/post/post-9',
-      // The COMMUNITY is what gets re-checked, not the post: a post's
+      // The COMMUNITY is what gets re-checked: a post's
       // readability is entirely a function of its community's access tier.
       subjectKind: ActivitySubjectKind.Community,
       subjectId: 'trans-joy',

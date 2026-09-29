@@ -4,8 +4,14 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import {
+  ACCOUNT_REINSTATED,
+  AccountReinstatedEvent,
+} from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -78,6 +84,11 @@ export class CommunityBansService {
     // call. It now proposes the same hold the removal path does. Lifting a bar
     // withdraws any hold still open on it.
     private readonly banRatifications: CommunityBanRatificationService,
+    // ENG-486. `liftBan` emits `ACCOUNT_REINSTATED` so `BanEvasionListener`
+    // retires the signal row the original ban wrote. `EventEmitterModule` is
+    // registered `@Global()` in `AppModule` (see `CommunitiesService`, which
+    // already injects it the same way), so no module change is needed here.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -356,6 +367,21 @@ export class CommunityBansService {
     // somebody a colleague had deliberately let back in.
     await this.banRatifications.withdrawPendingHold(community.id, ban.userId);
     await this.logBanLifted(community.id, actorUserId, ban);
+
+    // ENG-486. The bar is gone; retire the ban-evasion signal it left behind
+    // so a future applicant who is actually this member back again reads
+    // clean against a ban that no longer exists. Emitted after the lift has
+    // committed, best effort: a listener failure leaves one stale signal row
+    // for a reviewer to judge on its merits, while a failure that rolled back
+    // the lift would re-bar somebody this moderator just let back in.
+    const reinstated: AccountReinstatedEvent = {
+      userId: ban.userId,
+      removalKind: RemovalKind.CommunityBan,
+      communityId: community.id,
+      reinstatedAt: new Date(),
+    };
+    this.eventEmitter.emit(ACCOUNT_REINSTATED, reinstated);
+
     return { ok: true };
   }
 

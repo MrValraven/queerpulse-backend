@@ -27,6 +27,36 @@ export interface AccountRemovedEvent {
 }
 
 /**
+ * A removal has been undone: a suspension was lifted, a `ban` appeal was
+ * overturned, or a community ban was lifted (ENG-486).
+ *
+ * Emitted by whoever actually reopens the door, on the same (userId,
+ * removalKind, communityId) key `ACCOUNT_REMOVED` was emitted on when the
+ * door closed. `BanEvasionListener` deletes the matching
+ * `removed_account_signals` row(s): the table only ever means "this account
+ * is removed", so once the removal is undone the row is simply false and the
+ * listener deletes it outright.
+ *
+ * Emit AFTER the lift/overturn has committed, best effort, for the same
+ * reason as `ACCOUNT_REMOVED`: a listener failure here leaves one stale
+ * signal row for a reviewer to see and judge on its merits, while a failure
+ * that rolled back the lift itself would leave someone barred who was just
+ * cleared.
+ */
+export const ACCOUNT_REINSTATED = 'ban_evasion.account_reinstated';
+
+export interface AccountReinstatedEvent {
+  /** The account whose removal was undone. */
+  userId: string;
+  /** Which kind of removal this undoes: platform ban or community ban. */
+  removalKind: RemovalKind;
+  /** The community for a lifted community ban; null for a platform ban. */
+  communityId: string | null;
+  /** When the lift or overturn landed. */
+  reinstatedAt: Date;
+}
+
+/**
  * A community's owner, co-owner or moderator has handed platform staff a
  * ban-evasion question about one join-request applicant (PRD-31).
  *

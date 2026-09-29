@@ -12,6 +12,7 @@ import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import {
   computePublishGate,
+  deckPublishBlockers,
   deriveLate,
   derivePaymentStatus,
   deriveStageEnteredAt,
@@ -187,6 +188,15 @@ describe('deriveLate', () => {
     const piece = makePiece({ dueOn: '2026-08-10', stage: 'drafting' });
     expect(deriveLate(piece, FIXED_NOW)).toBe(false);
   });
+
+  // Lisbon runs on summer time (UTC+1) in August, so 23:30 UTC is already
+  // past midnight in Lisbon. A piece due that same UTC calendar day reads as
+  // due YESTERDAY once the clock is read in Lisbon, so it must already be
+  // late even though a plain UTC date compare would still call it due today.
+  it('is true at 23:30 UTC in summer once Lisbon has already rolled to the next day', () => {
+    const piece = makePiece({ dueOn: '2026-08-09', stage: 'drafting' });
+    expect(deriveLate(piece, new Date('2026-08-09T23:30:00Z'))).toBe(true);
+  });
 });
 
 describe('deriveWaitingOn', () => {
@@ -260,6 +270,7 @@ describe('toPieceListItem', () => {
       contentsBlurb: '',
       stageEnteredAt: '2026-08-01T10:00:00.000Z',
       paymentStatus: 'none',
+      publishedAt: null,
     });
   });
 
@@ -285,6 +296,26 @@ describe('toPieceListItem', () => {
     expect(toPieceListItem(piece).contentsBlurb).toBe(
       'A quiet, devastating read.',
     );
+  });
+
+  it('leaves publishedAt null when the context carries no linked content', () => {
+    expect(toPieceListItem(makePiece()).publishedAt).toBeNull();
+  });
+
+  it('reads publishedAt from a past contentPublishedAt', () => {
+    const listItem = toPieceListItem(makePiece(), {
+      contentPublishedAt: new Date('2026-07-01T09:00:00Z'),
+    });
+
+    expect(listItem.publishedAt).toBe('2026-07-01T09:00:00.000Z');
+  });
+
+  it('reads publishedAt from a future contentPublishedAt (a scheduled piece)', () => {
+    const listItem = toPieceListItem(makePiece(), {
+      contentPublishedAt: new Date('2026-12-25T09:00:00Z'),
+    });
+
+    expect(listItem.publishedAt).toBe('2026-12-25T09:00:00.000Z');
   });
 
   it('never leaks internal columns (brief, care, orderIndex, pages, laidOut, pitchId)', () => {
@@ -1164,5 +1195,103 @@ describe('toArchiveEntryFromDeck', () => {
       by: 'Sofia Andrade',
       tags: ['nightlife'],
     });
+  });
+});
+
+describe('deckPublishBlockers', () => {
+  const TEXT_SLIDE = { layout: 'text' as const, heading: 'After hours' };
+  const IMAGE_SLIDE = {
+    layout: 'image' as const,
+    src: 'https://cdn.example/dancefloor.jpg',
+    alt: 'A crowded dancefloor under violet light',
+    tint: 'violet',
+  };
+  const BEFORE_AFTER_SLIDE = {
+    layout: 'interactive' as const,
+    kind: 'before-after' as const,
+    before: {
+      src: 'https://cdn.example/before.jpg',
+      alt: 'The bar front in 2019',
+      label: '2019',
+    },
+    after: {
+      src: 'https://cdn.example/after.jpg',
+      alt: 'The same bar front today',
+      label: 'Today',
+    },
+  };
+
+  it('blocks an empty deck', () => {
+    expect(deckPublishBlockers(makeDeck({ slides: [] }))).toEqual([
+      'The deck has no slides yet.',
+    ]);
+  });
+
+  it('blocks an image slide with blank alt text', () => {
+    const deck = makeDeck({
+      slides: [TEXT_SLIDE, { ...IMAGE_SLIDE, alt: '   ' }],
+    });
+
+    expect(deckPublishBlockers(deck)).toEqual([
+      'Every image slide needs alt text.',
+    ]);
+  });
+
+  it('blocks a before/after slide whose before image has no alt text', () => {
+    const deck = makeDeck({
+      slides: [
+        {
+          ...BEFORE_AFTER_SLIDE,
+          before: { ...BEFORE_AFTER_SLIDE.before, alt: '' },
+        },
+      ],
+    });
+
+    expect(deckPublishBlockers(deck)).toEqual([
+      'Every image slide needs alt text.',
+    ]);
+  });
+
+  it('blocks a before/after slide whose after image has no alt text', () => {
+    const deck = makeDeck({
+      slides: [
+        {
+          ...BEFORE_AFTER_SLIDE,
+          after: { ...BEFORE_AFTER_SLIDE.after, alt: '' },
+        },
+      ],
+    });
+
+    expect(deckPublishBlockers(deck)).toEqual([
+      'Every image slide needs alt text.',
+    ]);
+  });
+
+  it('blocks a set cover that has no description', () => {
+    const deck = makeDeck({
+      slides: [TEXT_SLIDE],
+      cover: 'https://cdn.example/cover.jpg',
+      coverDesc: ' ',
+    });
+
+    expect(deckPublishBlockers(deck)).toEqual([
+      'The cover image needs a description.',
+    ]);
+  });
+
+  it('lets a deck with no cover through without a cover description', () => {
+    const deck = makeDeck({ slides: [TEXT_SLIDE], cover: '', coverDesc: '' });
+
+    expect(deckPublishBlockers(deck)).toEqual([]);
+  });
+
+  it('returns an empty list when every image is described', () => {
+    const deck = makeDeck({
+      slides: [TEXT_SLIDE, IMAGE_SLIDE, BEFORE_AFTER_SLIDE],
+      cover: 'https://cdn.example/cover.jpg',
+      coverDesc: 'Neon sign reading OPEN over a wet street',
+    });
+
+    expect(deckPublishBlockers(deck)).toEqual([]);
   });
 });

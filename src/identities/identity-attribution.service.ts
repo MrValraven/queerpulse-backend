@@ -38,6 +38,12 @@ export interface StaffNameResolverInputs {
   identityById: ReadonlyMap<string, Identity | null>;
   staffByIdentityId: ReadonlyMap<string, string[]>;
   preferenceByKey: ReadonlyMap<string, IdentityStaffPreference>;
+  /**
+   * ENG-456: every persona identity in the set that keeps who runs it
+   * private (`IdentitiesService.linkedPersonaSubprofileIds` did not answer
+   * it as linked). Its staff are named to its own staff alone.
+   */
+  unlinkedPersonaIdentityIds: ReadonlySet<string>;
 }
 
 /**
@@ -46,6 +52,13 @@ export interface StaffNameResolverInputs {
  * and the staff member's own. Colleagues inside the same mailbox always see
  * who replied, because a shared inbox that hides its own authors cannot be
  * worked in.
+ *
+ * ENG-456: a persona that keeps who runs it private (an unlinked persona)
+ * names its staff to nobody outside its own staff, whatever both switches
+ * say. Reaching such a persona must never expose who owns it, and a first
+ * name beside its replies would. Every consumer (thread history, the socket
+ * emit, the push title, the inbox preview) reads its answer from here, so
+ * each one inherits the rule.
  */
 @Injectable()
 export class IdentityAttributionService {
@@ -70,6 +83,12 @@ export class IdentityAttributionService {
     if (!identity.shouldShowStaffNames) {
       return null;
     }
+    if (
+      identity.kind === IdentityKind.Subprofile &&
+      (await this.identities.isUnlinkedPersona(identity))
+    ) {
+      return null;
+    }
     const preference = await this.preferences.findOne({
       where: { identityId: identity.id, userId: senderUserId },
     });
@@ -91,12 +110,15 @@ export class IdentityAttributionService {
    *
    * The returned `resolve` gives the SAME answer `resolveStaffFirstName`
    * would for identical inputs, including the reader-is-staff override, the
-   * mailbox switch, and the absent-preference-row default, with one addition:
+   * mailbox switch, the unlinked-persona rule (ENG-456) and the
+   * absent-preference-row default, with one addition:
    * a blank or whitespace-only `senderFirstName` resolves to `null` here,
    * closing a minor ambiguity between a caller that tests truthiness and one
-   * that tests `=== null`. `resolveStaffFirstName` itself is unchanged, for
-   * the genuinely single-message paths (e.g. emitting one new message over
-   * the socket) this pairs with.
+   * that tests `=== null`. `resolveStaffFirstName` keeps its own reads per
+   * call and applies the same rules, the unlinked-persona one through
+   * `IdentitiesService.isUnlinkedPersona`, for a genuinely single-message
+   * path. Today only its specs call it: every production path, the socket
+   * emit and the push title included, builds a resolver.
    *
    * Every missing or unexpected input fails closed: an identity this resolver
    * never loaded, or one it could not resolve, answers `null` for every
@@ -109,7 +131,12 @@ export class IdentityAttributionService {
     // `loadStaffNameResolverInputs`, so several readers share one roster.
     preloadedInputs?: StaffNameResolverInputs,
   ): Promise<StaffNameResolver> {
-    const { identityById, staffByIdentityId, preferenceByKey } =
+    const {
+      identityById,
+      staffByIdentityId,
+      preferenceByKey,
+      unlinkedPersonaIdentityIds,
+    } =
       preloadedInputs ?? (await this.loadStaffNameResolverInputs(identityIds));
     return {
       resolve(
@@ -129,6 +156,9 @@ export class IdentityAttributionService {
           return senderFirstName;
         }
         if (!identity.shouldShowStaffNames) {
+          return null;
+        }
+        if (unlinkedPersonaIdentityIds.has(senderIdentityId)) {
           return null;
         }
         const preference = preferenceByKey.get(
@@ -183,6 +213,19 @@ export class IdentityAttributionService {
       return identity != null && identity.kind !== IdentityKind.Profile;
     });
 
+    // ENG-456: persona identities, whose link visibility decides whether a
+    // customer may ever see a staff name. A persona identity carrying no
+    // subprofile id is judged unlinked below without a read.
+    const personaIdentities = mailboxIdentityIds
+      .map((identityId) => identityById.get(identityId))
+      .filter(
+        (identity): identity is Identity =>
+          identity != null && identity.kind === IdentityKind.Subprofile,
+      );
+    const personaSubprofileIds = personaIdentities.flatMap((identity) =>
+      identity.subprofileId ? [identity.subprofileId] : [],
+    );
+
     const staffByIdentityId = new Map<string, string[]>();
     await Promise.all(
       mailboxIdentityIds.map(async (identityId) => {
@@ -195,17 +238,38 @@ export class IdentityAttributionService {
       }),
     );
 
-    // ONE query for every mailbox identity's preference rows, never one per
-    // identity: the query this whole method exists to stop repeating.
-    const preferenceRows = mailboxIdentityIds.length
-      ? await this.preferences.find({
-          where: { identityId: In(mailboxIdentityIds) },
-        })
-      : [];
+    const [preferenceRows, linkedSubprofileIds] = await Promise.all([
+      // ONE query for the preference rows of every mailbox identity at once:
+      // the query this whole method exists to stop repeating.
+      mailboxIdentityIds.length
+        ? this.preferences.find({
+            where: { identityId: In(mailboxIdentityIds) },
+          })
+        : Promise.resolve<IdentityStaffPreference[]>([]),
+      // ENG-456: ONE query for every persona's link visibility, and none when
+      // the set holds no persona.
+      personaSubprofileIds.length
+        ? this.identities.linkedPersonaSubprofileIds(personaSubprofileIds)
+        : Promise.resolve(new Set<string>()),
+    ]);
     const preferenceByKey = new Map<string, IdentityStaffPreference>(
       preferenceRows.map((row) => [`${row.identityId}:${row.userId}`, row]),
     );
+    const unlinkedPersonaIdentityIds = new Set(
+      personaIdentities
+        .filter(
+          (identity) =>
+            !identity.subprofileId ||
+            !linkedSubprofileIds.has(identity.subprofileId),
+        )
+        .map((identity) => identity.id),
+    );
 
-    return { identityById, staffByIdentityId, preferenceByKey };
+    return {
+      identityById,
+      staffByIdentityId,
+      preferenceByKey,
+      unlinkedPersonaIdentityIds,
+    };
   }
 }

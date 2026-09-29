@@ -12,7 +12,9 @@ import {
 
 import { ArtState, PieceFormat } from '../entities/magazine-piece.entity';
 import {
+  DESK_ANGLE_MAX,
   DESK_BLURB_MAX,
+  DESK_FEE_TEXT_MAX,
   DESK_SHORT_TEXT_MAX,
   DESK_TITLE_MAX,
 } from './desk-text-limits';
@@ -71,4 +73,20 @@ export class CreatePieceDto {
    * commission time.
    */
   @IsOptional() @IsString() @MaxLength(DESK_BLURB_MAX) contentsBlurb?: string;
+
+  /**
+   * Commission-time only: the pitch angle the desk is commissioning against.
+   * The service writes it onto `brief.angle` (via `briefWithCommission`),
+   * keeping it off any `MagazinePiece` column, so a later `UpdatePieceDto`
+   * cannot resend it (see `OmitType` there).
+   */
+  @IsOptional() @IsString() @MaxLength(DESK_ANGLE_MAX) angle?: string;
+
+  /**
+   * Commission-time only: the fee as the desk typed it ("$400", "TBD"). The
+   * service splits it into the payment row's `feeAmount`/`feeText` (via
+   * `splitCommissionFee`), keeping it off any `MagazinePiece` column, so a
+   * later `UpdatePieceDto` cannot resend it (see `OmitType` there).
+   */
+  @IsOptional() @IsString() @MaxLength(DESK_FEE_TEXT_MAX) fee?: string;
 }

@@ -2,8 +2,10 @@ import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
@@ -21,6 +23,8 @@ describe('RecognitionService', () => {
   let profilesRepo: { findOne: jest.Mock };
   let profilesService: { findBySlugOrThrow: jest.Mock };
   let awardingService: { gatherSignalsForUser: jest.Mock };
+  let usersRepo: { findOne: jest.Mock };
+  let ambassadorStatus: { getInviteBonus: jest.Mock };
 
   beforeEach(async () => {
     statsRepo = { findOne: jest.fn().mockResolvedValue(null) };
@@ -29,6 +33,12 @@ describe('RecognitionService', () => {
     ledgerRepo = { find: jest.fn().mockResolvedValue([]) };
     profilesRepo = { findOne: jest.fn() };
     profilesService = { findBySlugOrThrow: jest.fn() };
+    usersRepo = {
+      findOne: jest
+        .fn()
+        .mockResolvedValue({ id: 'u1', inviteMonthlyQuota: null }),
+    };
+    ambassadorStatus = { getInviteBonus: jest.fn().mockResolvedValue(0) };
     // Non-null signals so buildRecognition's owner-gated fields (xpBreakdown,
     // xpLedger) populate — mirrors a real `includePerks: true` call.
     awardingService = {
@@ -67,6 +77,8 @@ describe('RecognitionService', () => {
           useValue: ledgerRepo,
         },
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
+        { provide: getRepositoryToken(User), useValue: usersRepo },
+        { provide: AmbassadorStatusService, useValue: ambassadorStatus },
         { provide: RecognitionAwardingService, useValue: awardingService },
         { provide: ProfilesService, useValue: profilesService },
         // SUS-04: the perk copy names the deployment's real invite quota, so
@@ -181,6 +193,65 @@ describe('RecognitionService', () => {
         where: { userId: 'u2' },
         take: DEFAULT_LIST_LIMIT,
       });
+    });
+  });
+
+  describe('invite-quota perk numbers (PRD-436)', () => {
+    function levelFourInviteQuota(dto: {
+      perks: {
+        groups: {
+          perks: { key: string; inviteQuota?: unknown; desc: string }[];
+        }[];
+      };
+    }) {
+      return dto.perks.groups
+        .flatMap((group) => group.perks)
+        .find((perk) => perk.key === 'invite-quota-level-4');
+    }
+
+    it("adds an active ambassador's bonus, the same total the invite page enforces", async () => {
+      statsRepo.findOne.mockResolvedValue({ userId: 'u1', xp: 1000 });
+      ambassadorStatus.getInviteBonus.mockResolvedValue(10);
+
+      const dto = await service.getForUser('u1');
+
+      expect(ambassadorStatus.getInviteBonus).toHaveBeenCalledWith('u1');
+      const perk = levelFourInviteQuota(dto);
+      expect(perk?.inviteQuota).toEqual({ base: 15, total: 17 });
+      expect(perk?.desc).toContain('from 15 to 17');
+    });
+
+    it('lets a staff override win outright, as the invite page does', async () => {
+      statsRepo.findOne.mockResolvedValue({ userId: 'u1', xp: 1000 });
+      usersRepo.findOne.mockResolvedValue({ id: 'u1', inviteMonthlyQuota: 25 });
+      ambassadorStatus.getInviteBonus.mockResolvedValue(10);
+
+      const dto = await service.getForUser('u1');
+
+      expect(levelFourInviteQuota(dto)?.inviteQuota).toEqual({
+        base: 25,
+        total: 25,
+      });
+    });
+
+    it('keeps the plain base plus level bonus for a member with neither', async () => {
+      statsRepo.findOne.mockResolvedValue({ userId: 'u1', xp: 1000 });
+
+      const dto = await service.getForUser('u1');
+
+      expect(levelFourInviteQuota(dto)?.inviteQuota).toEqual({
+        base: 5,
+        total: 7,
+      });
+    });
+
+    it("skips the quota reads for another member's view", async () => {
+      statsRepo.findOne.mockResolvedValue({ userId: 'u1', xp: 1000 });
+
+      await service.getForUser('u1', false);
+
+      expect(usersRepo.findOne).not.toHaveBeenCalled();
+      expect(ambassadorStatus.getInviteBonus).not.toHaveBeenCalled();
     });
   });
 

@@ -2,6 +2,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { FindOperator, In, IsNull } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { CommunityMembershipService } from './community-membership.service';
 import {
   CommunityMember,
@@ -22,6 +23,7 @@ describe('CommunityMembershipService', () => {
   let members: { findOne: jest.Mock; find: jest.Mock };
   let posts: { findOne: jest.Mock };
   let replies: { findOne: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock };
 
   const COMMUNITY: Community = {
     id: 'community-1',
@@ -159,6 +161,9 @@ describe('CommunityMembershipService', () => {
     givenCommunities([]);
     posts = { findOne: jest.fn() };
     replies = { findOne: jest.fn() };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -167,6 +172,7 @@ describe('CommunityMembershipService', () => {
         { provide: getRepositoryToken(CommunityMember), useValue: members },
         { provide: getRepositoryToken(CommunityPost), useValue: posts },
         { provide: getRepositoryToken(CommunityPostReply), useValue: replies },
+        { provide: ContentModerationService, useValue: contentModeration },
       ],
     }).compile();
 
@@ -248,6 +254,94 @@ describe('CommunityMembershipService', () => {
 
       await expect(
         service.assertMemberBySlug('queer-devs', 'user-1'),
+      ).resolves.toBe('community-1');
+    });
+  });
+
+  describe('assertMemberForReadBySlug', () => {
+    // PRD-412: the read tier this backs (community pulse, ...) must keep
+    // serving a member of a community that has since been archived, so the
+    // lookup here carries no `archivedAt: IsNull()` filter at all.
+    it('returns the id of an archived community to its member', async () => {
+      const archivedCommunity = {
+        ...COMMUNITY,
+        archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+      };
+      communities.findOne.mockResolvedValue(archivedCommunity);
+      givenRoster([MEMBERSHIP]);
+
+      const communityId = await service.assertMemberForReadBySlug(
+        'queer-devs',
+        'user-1',
+      );
+
+      expect(communityId).toBe('community-1');
+      expect(communities.findOne).toHaveBeenCalledWith({
+        where: { slug: 'queer-devs' },
+      });
+    });
+
+    it('throws NotFoundException for an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.assertMemberForReadBySlug('unknown-slug', 'user-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(members.find).not.toHaveBeenCalled();
+    });
+
+    it('throws ForbiddenException when the caller is not on the roster', async () => {
+      communities.findOne.mockResolvedValue(COMMUNITY);
+      givenRoster([]);
+
+      await expect(
+        service.assertMemberForReadBySlug('queer-devs', 'stranger-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    // ENG-426 follow-up: the Library shelf and community pulse used to serve
+    // a plain member of a community a moderator had hidden or removed, even
+    // though `getBySlug`, posts, replies and the roster already 404 it. This
+    // pins the same closure here.
+    it('throws NotFoundException for a plain member of a taken-down community', async () => {
+      communities.findOne.mockResolvedValue(COMMUNITY);
+      givenRoster([MEMBERSHIP]);
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(
+        service.assertMemberForReadBySlug('queer-devs', 'user-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it.each([RosterRole.Owner, RosterRole.CoOwner, RosterRole.Mod])(
+      'still reads a taken-down community for its %s',
+      async (role) => {
+        communities.findOne.mockResolvedValue(COMMUNITY);
+        givenRoster([{ ...MEMBERSHIP, role }]);
+        contentModeration.stateFor.mockResolvedValue({
+          hidden: true,
+          removed: false,
+        });
+
+        await expect(
+          service.assertMemberForReadBySlug('queer-devs', 'user-1'),
+        ).resolves.toBe('community-1');
+      },
+    );
+
+    it('still reads a taken-down-but-removed community for staff', async () => {
+      communities.findOne.mockResolvedValue(COMMUNITY);
+      givenRoster([{ ...MEMBERSHIP, role: RosterRole.Owner }]);
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: true,
+      });
+
+      await expect(
+        service.assertMemberForReadBySlug('queer-devs', 'user-1'),
       ).resolves.toBe('community-1');
     });
   });

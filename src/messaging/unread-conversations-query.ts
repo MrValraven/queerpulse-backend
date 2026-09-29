@@ -7,7 +7,9 @@ import {
 } from './mailbox-seats';
 import {
   MESSAGE_SUBJECT_TYPE,
+  notFromBlockedGroupMemberPredicate,
   notModeratedMessagePredicate,
+  withinLeftAtCeilingPredicate,
 } from './message-visibility-predicates';
 
 /**
@@ -55,8 +57,11 @@ export const NOT_SENT_AS_SEAT_IDENTITY_PREDICATE =
  * never one sent as the seat's own identity
  * (`NOT_SENT_AS_SEAT_IDENTITY_PREDICATE`), past their
  * `last_read_at`/`cleared_at`/`left_at` watermarks, never a moderated,
- * self-hidden or deleted row) OR the caller explicitly
- * `markedUnreadAt` it (PRD-225) with nothing new to actually read.
+ * self-hidden or deleted row, and never a group message from someone blocked
+ * either way with the caller (ENG-402, `notFromBlockedGroupMemberPredicate`),
+ * which the thread hides and reading could therefore never clear) OR the
+ * caller explicitly `markedUnreadAt` it (PRD-225) with nothing new to
+ * actually read.
  *
  * A blocked DM does not appear in the inbox (`listConversations` drops it),
  * so it counts nowhere either: otherwise the number permanently outruns the
@@ -93,9 +98,10 @@ export function applyUnreadConversationScope(
               AND ${NOT_SENT_AS_SEAT_IDENTITY_PREDICATE}
               AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at)
               AND (p.cleared_at IS NULL OR m.created_at > p.cleared_at)
-              AND (p.left_at IS NULL OR m.created_at <= p.left_at)
+              AND ${withinLeftAtCeilingPredicate('m.created_at', 'p')}
               AND ${notModeratedMessagePredicate('m')}
               AND ${notHiddenForViewerMessagePredicate()}
+              AND ${notFromBlockedGroupMemberPredicate('m', ':userId')}
           )
         )`,
     )

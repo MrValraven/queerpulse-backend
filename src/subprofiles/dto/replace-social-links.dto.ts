@@ -1,9 +1,13 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
   IsIn,
+  IsInt,
+  IsOptional,
   IsString,
+  Min,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -34,4 +38,17 @@ export class ReplaceSocialLinksDTO {
   @ValidateNested({ each: true })
   @Type(() => SocialLinkInputDTO)
   items!: SocialLinkInputDTO[];
+
+  // ENG-451 save precondition. When it differs from the stored `edit_version`
+  // the PUT answers 409 `PERSONA_EDIT_CONFLICT` and changes nothing.
+  @ApiPropertyOptional({
+    type: Number,
+    minimum: 0,
+    description:
+      'The editVersion this save was built on. A stored editVersion that differs answers 409 { code: "PERSONA_EDIT_CONFLICT", currentEditVersion }. When omitted the save is unconditional.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  expectedEditVersion?: number;
 }

@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import {
+  briefWithCommission,
   briefWithFiledWords,
   validatePieceBrief,
   validatePieceCare,
@@ -201,5 +202,29 @@ describe('briefWithFiledWords (PRD-127)', () => {
     expect(() =>
       validatePieceBrief(briefWithFiledWords(null, 0)),
     ).not.toThrow();
+  });
+});
+
+describe('briefWithCommission', () => {
+  const commission = {
+    angle: 'Who kept the club open through the lockdowns.',
+    commissionedOn: '2026-09-29',
+  };
+
+  it('sets angle and commissionedOn while keeping every other brief field', () => {
+    expect(briefWithCommission(VALID_BRIEF, commission)).toEqual({
+      ...VALID_BRIEF,
+      ...commission,
+    });
+  });
+
+  it('starts a piece with no brief from the empty brief', () => {
+    const result = briefWithCommission(null, commission);
+
+    expect(result.angle).toBe(commission.angle);
+    expect(result.commissionedOn).toBe('2026-09-29');
+    expect(result.wants).toEqual([]);
+    expect(result.filedWords).toBeNull();
+    expect(() => validatePieceBrief(result)).not.toThrow();
   });
 });

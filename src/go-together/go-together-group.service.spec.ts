@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   HttpException,
   NotFoundException,
@@ -7,6 +8,9 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { FindOperator } from 'typeorm';
 import { Event } from '../events/entities/event.entity';
+import { ReportSubjectType } from '../reports/entities/report.entity';
+import { ReportsService } from '../reports/reports.service';
+import { SocialService } from '../social/social.service';
 import { Profile } from '../users/entities/profile.entity';
 import { EventMatchConfig } from './entities/event-match-config.entity';
 import { EventMatchEntry } from './entities/event-match-entry.entity';
@@ -116,11 +120,19 @@ describe('GoTogetherGroupService', () => {
   let groups: { findOne: jest.Mock };
   let configs: { findOne: jest.Mock };
   let events: { findOne: jest.Mock };
-  let profiles: { find: jest.Mock };
+  let profiles: { find: jest.Mock; findOne: jest.Mock };
   let feedback: { exists: jest.Mock };
   let groupFeedback: { exists: jest.Mock };
   let blockFilter: { blockedUserIds: jest.Mock };
-  let formation: { removeMember: jest.Mock; acceptMerge: jest.Mock };
+  let formation: {
+    removeMember: jest.Mock;
+    leaveGroup: jest.Mock;
+    acceptMerge: jest.Mock;
+    hasLeftChat: jest.Mock;
+    moveAfterBlock: jest.Mock;
+  };
+  let social: { blockMember: jest.Mock };
+  let reports: { create: jest.Mock };
 
   beforeEach(async () => {
     entryRows = [
@@ -196,6 +208,11 @@ describe('GoTogetherGroupService', () => {
       find: jest.fn(({ where }: { where: Record<string, unknown> }) =>
         Promise.resolve(profileRows.filter((row) => matchesWhere(row, where))),
       ),
+      findOne: jest.fn(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          profileRows.find((row) => matchesWhere(row, where)) ?? null,
+        ),
+      ),
     };
     feedback = { exists: jest.fn().mockResolvedValue(false) };
     groupFeedback = { exists: jest.fn().mockResolvedValue(false) };
@@ -204,7 +221,24 @@ describe('GoTogetherGroupService', () => {
     };
     formation = {
       removeMember: jest.fn().mockResolvedValue(undefined),
+      leaveGroup: jest.fn().mockResolvedValue('group'),
       acceptMerge: jest.fn().mockResolvedValue(undefined),
+      hasLeftChat: jest.fn().mockResolvedValue(false),
+      moveAfterBlock: jest.fn().mockResolvedValue(true),
+    };
+    social = { blockMember: jest.fn().mockResolvedValue({ id: 'block-1' }) };
+    reports = {
+      create: jest.fn().mockResolvedValue({
+        id: 'report-1',
+        subjectType: 'member',
+        subjectId: 'user-3',
+        reasonCode: 'harassment',
+        severity: 'high',
+        status: 'open',
+        createdAt: '2026-10-09T12:00:00.000Z',
+        slaDueAt: '2026-10-10T12:00:00.000Z',
+        acknowledgement: 'Thanks for telling us.',
+      }),
     };
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -221,6 +255,8 @@ describe('GoTogetherGroupService', () => {
         },
         { provide: GoTogetherFormationService, useValue: formation },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: SocialService, useValue: social },
+        { provide: ReportsService, useValue: reports },
       ],
     }).compile();
     service = moduleRef.get(GoTogetherGroupService);
@@ -248,7 +284,7 @@ describe('GoTogetherGroupService', () => {
 
       expect(card.members).toEqual([
         {
-          slug: 'ana',
+          memberRef: 'entry-1',
           firstName: 'Ana',
           pronouns: 'she/her',
           avatarUrl: 'https://images.example.com/face.jpg',
@@ -258,7 +294,7 @@ describe('GoTogetherGroupService', () => {
           hasLeftEvent: false,
         },
         {
-          slug: 'bea',
+          memberRef: 'entry-2',
           firstName: 'Bea',
           pronouns: null,
           avatarUrl: 'https://images.example.com/face.jpg',
@@ -268,7 +304,7 @@ describe('GoTogetherGroupService', () => {
           hasLeftEvent: false,
         },
         {
-          slug: 'cris',
+          memberRef: 'entry-3',
           firstName: 'Cris',
           pronouns: 'they/them',
           avatarUrl: null,
@@ -279,6 +315,9 @@ describe('GoTogetherGroupService', () => {
         },
       ]);
       expect(JSON.stringify(card)).not.toContain('Surname');
+      for (const handle of ['"ana"', '"bea"', '"cris"', 'user-']) {
+        expect(JSON.stringify(card)).not.toContain(handle);
+      }
       expect(JSON.stringify(card)).not.toContain('Private bio');
       expect(card).toMatchObject({
         id: 'group-1',
@@ -293,6 +332,8 @@ describe('GoTogetherGroupService', () => {
         meetingPointNote: 'By the fountain',
         conversationId: 'conversation-1',
         isDissolved: false,
+        isLeaveChatOnly: false,
+        hasLeftChat: false,
         mergeOffer: null,
         checkIn: { isOpen: false, isHere: false, hasLeftEvent: false },
         feedback: { isOpen: false, closesAt: null, hasAnswered: false },
@@ -353,7 +394,10 @@ describe('GoTogetherGroupService', () => {
         'user-2',
         'user-3',
       ]);
-      expect(card.members.map((member) => member.slug)).toEqual(['ana', 'bea']);
+      expect(card.members.map((member) => member.memberRef)).toEqual([
+        'entry-1',
+        'entry-2',
+      ]);
     });
   });
 
@@ -433,11 +477,14 @@ describe('GoTogetherGroupService', () => {
   });
 
   describe('leave', () => {
-    it("hands the caller's grouped entry to formation.removeMember", async () => {
-      await service.leave('group-1', 'user-3');
+    it("hands the caller's grouped entry to the shared leave rule", async () => {
+      const leftAt = new Date('2026-10-10T21:00:00Z');
 
-      expect(formation.removeMember).toHaveBeenCalledTimes(1);
-      expect(formation.removeMember).toHaveBeenCalledWith(entryRows[2]);
+      await service.leave('group-1', 'user-3', leftAt);
+
+      expect(formation.leaveGroup).toHaveBeenCalledTimes(1);
+      expect(formation.leaveGroup).toHaveBeenCalledWith(entryRows[2], leftAt);
+      expect(formation.removeMember).not.toHaveBeenCalled();
     });
 
     it('returns 404 and removes nobody when the caller is not grouped there', async () => {
@@ -445,7 +492,155 @@ describe('GoTogetherGroupService', () => {
         service.leave('group-1', 'user-5'),
         NotFoundException,
       );
-      expect(formation.removeMember).not.toHaveBeenCalled();
+      expect(formation.leaveGroup).not.toHaveBeenCalled();
+    });
+
+    it('tells the card that Leave ends only the chat from the start onward', async () => {
+      const beforeStart = await service.getGroup(
+        'group-1',
+        'user-1',
+        new Date(startAt.getTime() - 1),
+      );
+      const atStart = await service.getGroup('group-1', 'user-1', startAt);
+
+      expect(beforeStart.isLeaveChatOnly).toBe(false);
+      expect(atStart.isLeaveChatOnly).toBe(true);
+    });
+
+    it("reports the caller's own chat seat as left once formation says so", async () => {
+      formation.hasLeftChat.mockResolvedValue(true);
+
+      const card = await service.getGroup('group-1', 'user-1', startAt);
+
+      expect(formation.hasLeftChat).toHaveBeenCalledWith(
+        'conversation-1',
+        'user-1',
+      );
+      expect(card.hasLeftChat).toBe(true);
+    });
+  });
+
+  describe('blockMember (PRD-421)', () => {
+    it('resolves the ref to the member and runs the ordinary block, returning nothing', async () => {
+      const options = { alsoReport: true, reasonCode: 'harassment' as const };
+
+      const result = await service.blockMember(
+        'group-1',
+        'user-1',
+        'entry-3',
+        options,
+      );
+
+      expect(result).toBeUndefined();
+      expect(social.blockMember).toHaveBeenCalledWith(
+        'user-1',
+        'cris',
+        options,
+      );
+    });
+
+    it('awaits the move out of the group after the block, before answering', async () => {
+      const order: string[] = [];
+      social.blockMember.mockImplementation(() => {
+        order.push('block');
+        return Promise.resolve({ id: 'block-1' });
+      });
+      formation.moveAfterBlock.mockImplementation(async () => {
+        await Promise.resolve();
+        order.push('move');
+        return true;
+      });
+
+      await service.blockMember('group-1', 'user-1', 'entry-3');
+      order.push('answered');
+
+      expect(formation.moveAfterBlock).toHaveBeenCalledWith(
+        'event-1',
+        'user-1',
+        'user-3',
+      );
+      expect(order).toEqual(['block', 'move', 'answered']);
+    });
+
+    it('keeps the block and answers when the move fails, logging the failure', async () => {
+      formation.moveAfterBlock.mockRejectedValue(new Error('database is down'));
+      const loggerError = jest
+        .spyOn(
+          (
+            service as unknown as {
+              logger: { error: (text: string) => void };
+            }
+          ).logger,
+          'error',
+        )
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.blockMember('group-1', 'user-1', 'entry-3'),
+      ).resolves.toBeUndefined();
+
+      expect(social.blockMember).toHaveBeenCalledTimes(1);
+      expect(loggerError).toHaveBeenCalledWith(
+        expect.stringContaining('database is down'),
+      );
+    });
+
+    it('returns 404 to a caller who is not grouped there, and blocks nobody', async () => {
+      await expectRejection(
+        service.blockMember('group-1', 'user-5', 'entry-3'),
+        NotFoundException,
+      );
+      expect(social.blockMember).not.toHaveBeenCalled();
+      expect(formation.moveAfterBlock).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 for a ref that is not seated in that group', async () => {
+      await expectRejection(
+        service.blockMember('group-1', 'user-1', 'entry-5'),
+        NotFoundException,
+      );
+      expect(social.blockMember).not.toHaveBeenCalled();
+    });
+
+    it("refuses the caller's own ref with 400", async () => {
+      await expectRejection(
+        service.blockMember('group-1', 'user-1', 'entry-1'),
+        BadRequestException,
+      );
+      expect(social.blockMember).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reportMember (PRD-421)', () => {
+    it('files a member report by user id and answers without the subject', async () => {
+      const response = await service.reportMember(
+        'group-1',
+        'user-1',
+        'entry-3',
+        { reasonCode: 'harassment', detail: 'Pushy in the chat' },
+      );
+
+      expect(reports.create).toHaveBeenCalledWith('user-1', {
+        reasonCode: 'harassment',
+        detail: 'Pushy in the chat',
+        anonymous: undefined,
+        evidence: undefined,
+        subjectType: ReportSubjectType.Member,
+        subjectId: 'user-3',
+      });
+      expect(response).not.toHaveProperty('subjectId');
+      expect(JSON.stringify(response)).not.toContain('user-3');
+      expect(response).toMatchObject({ id: 'report-1', status: 'open' });
+    });
+
+    it('returns 404 for a ref that is not seated in that group, and files nothing', async () => {
+      await expectRejection(
+        service.reportMember('group-1', 'user-1', 'entry-5', {
+          reasonCode: 'harassment',
+        }),
+        NotFoundException,
+      );
+      expect(reports.create).not.toHaveBeenCalled();
     });
   });
 
@@ -465,7 +660,7 @@ describe('GoTogetherGroupService', () => {
       expect(card.id).toBe('group-2');
       expect(card.conversationId).toBe('conversation-2');
       expect(card.members).toEqual([
-        expect.objectContaining({ slug: 'cris', isYou: true }),
+        expect.objectContaining({ memberRef: 'entry-3', isYou: true }),
       ]);
     });
 

@@ -62,7 +62,11 @@ export class MentionsController {
     @CurrentUser() user: CurrentUserData,
     @Query() query: ResolveMentionNamesQuery,
   ) {
-    return this.mentionNames.resolve(user.userId, query.refs);
+    return this.mentionNames.resolve(
+      user.userId,
+      query.refs,
+      query.conversationId,
+    );
   }
 
   @Get()

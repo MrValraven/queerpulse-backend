@@ -1,4 +1,8 @@
 import type { Paginated } from '../common/pagination';
+import type {
+  LegalRequestAmendment,
+  LegalRequestAmendmentChanges,
+} from './entities/legal-request-amendment.entity';
 import type { LegalRequest } from './entities/legal-request.entity';
 import type {
   LegalRequestDataCategory,
@@ -89,5 +93,33 @@ export function toAdminLegalRequestDTO(
     voidReason: record.voidReason ?? null,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * One entry in a record's amendment history
+ * (`GET /admin/legal-requests/:id/amendments`), admin-only like the record
+ * itself.
+ *
+ * `actorUserId` stays server-side for the same reason the record DTO omits
+ * its actor ids: the pane reads `actorName`, the write-time snapshot.
+ */
+export interface LegalRequestAmendmentDTO {
+  id: string;
+  /** Null on an entry whose author has since erased their account. */
+  actorName: string | null;
+  /** `{ [field]: { from, to } }` for the fields that moved. */
+  changes: LegalRequestAmendmentChanges;
+  createdAt: string;
+}
+
+export function toLegalRequestAmendmentDTO(
+  amendment: LegalRequestAmendment,
+): LegalRequestAmendmentDTO {
+  return {
+    id: amendment.id,
+    actorName: amendment.actorName ?? null,
+    changes: amendment.changes,
+    createdAt: amendment.createdAt.toISOString(),
   };
 }

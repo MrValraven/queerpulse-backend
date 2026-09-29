@@ -21,6 +21,7 @@ import { CreateThreadDto } from './dto/create-thread.dto';
 import { LockThreadDto } from './dto/lock-thread.dto';
 import { ListPostsQuery } from './dto/list-posts.query';
 import { ListThreadsQuery } from './dto/list-threads.query';
+import { MarkThreadReadDto } from './dto/mark-thread-read.dto';
 import { ReplyThreadDto } from './dto/reply-thread.dto';
 import { SetAcceptedPostDto } from './dto/set-accepted-post.dto';
 import { UpdateForumPostDto } from './dto/update-post.dto';
@@ -459,18 +460,46 @@ export class ForumController {
   // it stands (C7/PRD-170). Opening a thread must never sign anybody up for a
   // notification per reply, so the two stay separate routes writing separate
   // fields of the same row.
+  //
+  // The body is optional (PRD-409): `upTo` names the newest reply the member
+  // had on screen, and an empty body keeps the old "read up to now" meaning.
+  // `dto?.upTo` guards a request that arrives with no body at all.
   @Post('threads/:slug/read')
   @ApiOperation({
     summary:
-      'Mark this thread read up to now (does NOT follow it; clears the unread badge)',
+      'Mark this thread read up to a timestamp, or up to now (does NOT follow it; clears the unread badge)',
   })
   @ApiCreatedResponse({ description: 'Acknowledgement.' })
+  @ApiBadRequestResponse({ description: 'upTo is not an ISO-8601 timestamp.' })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   markThreadRead(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
+    @Body() dto?: MarkThreadReadDto,
   ) {
-    return this.threadsService.markRead(slug, user);
+    return this.threadsService.markRead(slug, user, dto?.upTo);
+  }
+
+  // Either half of the byline can take the co-author credit off (PRD-408): the
+  // credited member withdrawing a credit they never agreed to, or the author
+  // retracting it. Anyone else gets the same 404 as a missing thread. No
+  // `NotRestrictedGuard`: removing your own name from somebody else's post is
+  // a way of saying less, which a restricted member may always do.
+  @Delete('threads/:slug/co-author')
+  @ApiOperation({
+    summary:
+      "Remove the co-author credit from a thread (the co-author or the thread's author)",
+  })
+  @ApiOkResponse({ description: 'The updated thread.' })
+  @ApiNotFoundResponse({
+    description:
+      'Thread not found, or the caller is neither its author nor its co-author.',
+  })
+  removeCoAuthor(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.removeCoAuthor(slug, user);
   }
 
   @Post('threads/:slug/lock')

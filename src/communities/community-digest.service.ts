@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { toImageUrl } from '../common/image-url';
+import { truncateCharacters } from '../common/text-characters';
 import {
   Report,
   ReportStatus,
@@ -481,7 +482,7 @@ export class CommunityDigestService {
       excerpts.push({
         postId: row.id,
         kind: row.kind,
-        excerpt: row.body.slice(0, DIGEST_EXCERPT_LENGTH),
+        excerpt: truncateCharacters(row.body, DIGEST_EXCERPT_LENGTH),
         createdAt: row.created_at,
       });
       grouped.set(row.community_id, excerpts);

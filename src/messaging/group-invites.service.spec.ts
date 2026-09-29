@@ -11,6 +11,7 @@ import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { GroupInvite, GroupInviteStatus } from './entities/group-invite.entity';
 import {
   GroupInvitesService,
+  INVITE_LINK_EXPIRED_CODE,
   INVITE_LINK_INVALID_CODE,
   INVITE_NOT_FOUND_CODE,
   REMOVED_FROM_GROUP_CODE,
@@ -50,13 +51,17 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
     groupCapabilities: jest.Mock;
     hasUnreadMentionByConversation: jest.Mock;
   };
-  let blockFilter: { blockedAgainstAnyOf: jest.Mock };
+  let blockFilter: {
+    blockedAgainstAnyOf: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
   let manager: {
     create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
     findOne: jest.Mock;
     count: jest.Mock;
+    query: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
@@ -78,6 +83,8 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       avatarUrl: null,
       description: null,
       inviteToken: 'tok123',
+      // PRD-400: a live link, one day from its 7-day expiry.
+      inviteTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       dissolvedAt: null,
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
     }) as unknown as Conversation;
@@ -147,6 +154,7 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
     };
     blockFilter = {
       blockedAgainstAnyOf: jest.fn().mockResolvedValue(new Set<string>()),
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     manager = {
       create: jest.fn((_entity: unknown, data: unknown) => ({
@@ -166,6 +174,12 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       // individual tests override `count` to exercise the race.
       findOne: jest.fn().mockResolvedValue({ id: CONVERSATION_ID }),
       count: jest.fn().mockResolvedValue(0),
+      // PRD-400: `readGroupJoinHistoryFloor`'s clock reading for a new seat.
+      query: jest
+        .fn()
+        .mockResolvedValue([
+          { floorInstant: new Date('2026-01-31T23:59:59.999Z') },
+        ]),
     };
     dataSource = {
       transaction: jest.fn(
@@ -620,6 +634,141 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
     });
   });
 
+  // PRD-400 (owner decision 2026-09-29): history from join, links for 7 days.
+  describe('PRD-400: join history floor and invite link expiry', () => {
+    const JOIN_FLOOR = new Date('2026-01-31T23:59:59.999Z');
+
+    const savedSeat = () =>
+      manager.save.mock.calls
+        .map(
+          ([entity]) =>
+            entity as {
+              role?: string;
+              userId?: string;
+              clearedAt?: Date | null;
+              historyFloorAt?: Date | null;
+            },
+        )
+        .find((entity) => entity.role === ConversationRole.Member);
+
+    const expiredGroup = () => ({
+      ...activeGroup(),
+      inviteTokenExpiresAt: new Date(Date.now() - 1000),
+    });
+
+    it('accept floors a brand-new seat at its join in clearedAt and historyFloorAt', async () => {
+      await service.accept(INVITE_ID, INVITEE_ID);
+
+      expect(savedSeat()).toEqual(
+        expect.objectContaining({
+          userId: INVITEE_ID,
+          clearedAt: JOIN_FLOOR,
+          historyFloorAt: JOIN_FLOOR,
+        }),
+      );
+    });
+
+    it('joinByToken floors a brand-new seat at its join in clearedAt and historyFloorAt', async () => {
+      await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(savedSeat()).toEqual(
+        expect.objectContaining({
+          userId: INVITEE_ID,
+          clearedAt: JOIN_FLOOR,
+          historyFloorAt: JOIN_FLOOR,
+        }),
+      );
+    });
+
+    it('joinByToken reads the floor before writing the member_joined pill', async () => {
+      await service.joinByToken('tok123', INVITEE_ID);
+
+      const pillSaveIndex = manager.save.mock.calls.findIndex(
+        ([entity]) =>
+          (entity as { systemEvent?: { type?: string } }).systemEvent?.type ===
+          'member_joined',
+      );
+      expect(pillSaveIndex).toBeGreaterThanOrEqual(0);
+      expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+        manager.save.mock.invocationCallOrder[pillSaveIndex]!,
+      );
+    });
+
+    it('a returning member keeps the resume floor and gets no join floor', async () => {
+      const leftAt = new Date('2026-01-20T00:00:00.000Z');
+      participants.findOne.mockResolvedValue({
+        id: 'seat-1',
+        clearedAt: null,
+        leftAt,
+        removedAt: null,
+      });
+
+      await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.update).toHaveBeenCalledWith(
+        ConversationParticipant,
+        { id: 'seat-1' },
+        expect.objectContaining({ clearedAt: leftAt, leftAt: null }),
+      );
+    });
+
+    it('410s INVITE_LINK_EXPIRED previewing an expired link as a newcomer', async () => {
+      conversations.findOne.mockResolvedValue(expiredGroup());
+
+      await expect(
+        service.previewByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 410,
+        response: expect.objectContaining({ code: INVITE_LINK_EXPIRED_CODE }),
+      });
+    });
+
+    it('410s INVITE_LINK_EXPIRED joining by an expired link, seating nobody', async () => {
+      conversations.findOne.mockResolvedValue(expiredGroup());
+
+      await expect(
+        service.joinByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 410,
+        response: expect.objectContaining({ code: INVITE_LINK_EXPIRED_CODE }),
+      });
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('treats a live token with no expiry as expired', async () => {
+      conversations.findOne.mockResolvedValue({
+        ...activeGroup(),
+        inviteTokenExpiresAt: null,
+      });
+
+      await expect(
+        service.joinByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: INVITE_LINK_EXPIRED_CODE }),
+      });
+    });
+
+    it('still previews an expired link for a current member', async () => {
+      conversations.findOne.mockResolvedValue(expiredGroup());
+      participants.findOne.mockResolvedValue({ leftAt: null, removedAt: null });
+
+      const result = await service.previewByToken('tok123', INVITEE_ID);
+
+      expect(result).toMatchObject({ isMember: true });
+    });
+
+    it('still answers a current member who taps an expired link', async () => {
+      conversations.findOne.mockResolvedValue(expiredGroup());
+      participants.findOne.mockResolvedValue({ leftAt: null });
+
+      const result = await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(result).toBeDefined();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   describe('listMyInvites', () => {
     it('returns a bare array (never a wrapper object)', async () => {
       invites.find.mockResolvedValue([pendingInvite()]);
@@ -649,6 +798,94 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       const result = await service.listMyInvites(INVITEE_ID);
 
       expect(result).toEqual([]);
+    });
+
+    // ENG-408: a blocked inviter disappears from the Requests tab.
+    it('drops a pending invite whose inviter is blocked either way with the caller', async () => {
+      const OTHER_INVITER_ID = '20000000-0000-4000-8000-000000000003';
+      invites.find.mockResolvedValue([
+        pendingInvite(),
+        pendingInvite({ id: 'inv2', inviterId: OTHER_INVITER_ID }),
+      ]);
+      conversations.find.mockResolvedValue([activeGroup()]);
+      participants.find.mockResolvedValue([]);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set([INVITER_ID]));
+
+      const result = await service.listMyInvites(INVITEE_ID);
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(
+        INVITEE_ID,
+        expect.arrayContaining([INVITER_ID, OTHER_INVITER_ID]),
+      );
+      expect(result.map((invite) => invite.id)).toEqual(['inv2']);
+    });
+
+    it('keeps a pending invite whose inviter account is gone (null inviter)', async () => {
+      invites.find.mockResolvedValue([pendingInvite({ inviterId: null })]);
+      conversations.find.mockResolvedValue([activeGroup()]);
+      participants.find.mockResolvedValue([]);
+
+      const result = await service.listMyInvites(INVITEE_ID);
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(INVITEE_ID, []);
+      expect(result).toHaveLength(1);
+    });
+  });
+
+  // ENG-408: blocking revokes the pair's pending invites, both directions.
+  describe('handleMemberBlocked', () => {
+    const BLOCKER_ID = INVITEE_ID;
+    const BLOCKED_ID = INVITER_ID;
+
+    it('revokes pending invites between the pair in both directions', async () => {
+      await service.handleMemberBlocked({
+        blockerId: BLOCKER_ID,
+        blockedId: BLOCKED_ID,
+      });
+
+      expect(invites.update).toHaveBeenCalledTimes(2);
+      expect(invites.update).toHaveBeenCalledWith(
+        {
+          inviterId: BLOCKER_ID,
+          inviteeId: BLOCKED_ID,
+          status: GroupInviteStatus.Pending,
+        },
+        {
+          status: GroupInviteStatus.Revoked,
+          respondedAt: expect.any(Date),
+        },
+      );
+      expect(invites.update).toHaveBeenCalledWith(
+        {
+          inviterId: BLOCKED_ID,
+          inviteeId: BLOCKER_ID,
+          status: GroupInviteStatus.Pending,
+        },
+        {
+          status: GroupInviteStatus.Revoked,
+          respondedAt: expect.any(Date),
+        },
+      );
+    });
+
+    it('does nothing for a self-pair payload', async () => {
+      await service.handleMemberBlocked({
+        blockerId: BLOCKER_ID,
+        blockedId: BLOCKER_ID,
+      });
+
+      expect(invites.update).not.toHaveBeenCalled();
+    });
+
+    it('swallows a write failure so the committed block stays unaffected', async () => {
+      invites.update.mockRejectedValue(new Error('db down'));
+
+      await expect(
+        service.handleMemberBlocked({
+          blockerId: BLOCKER_ID,
+          blockedId: BLOCKED_ID,
+        }),
+      ).resolves.toBeUndefined();
     });
   });
 });

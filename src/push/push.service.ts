@@ -53,7 +53,10 @@ export interface PushPayload {
   // Field names MUST match the frontend `DirectMessagePush` validator exactly.
   icon?: string;
   image?: string;
-  actions?: { action: string; title: string }[];
+  // `title` is the English fallback label. `titleKey` is an optional `push:`
+  // catalog key the service worker localizes the label from (ENG-414), the
+  // same fallback rule as `l10n.bodyKey` below.
+  actions?: { action: string; title: string; titleKey?: string }[];
   renotify?: boolean;
   vibrate?: number[];
   requireInteraction?: boolean;

@@ -182,6 +182,24 @@ describe('SavedAvailabilityService', () => {
         foldedPredicates().some((sql) => sql.includes('"deleted_at" IS NULL')),
       ).toBe(true);
     });
+
+    // PRD-407: `loadOr404` serves a cross-posted thread to a non-member of
+    // its community, so a bookmark of one must stay available too.
+    it('saved list keeps a cross-posted thread', async () => {
+      await build({ thread: ['a-thread'] });
+
+      await service.availableRefs(
+        [ref(SavedKind.Post, 'a-thread')],
+        'viewer-1',
+      );
+
+      const communityGate = foldedPredicates().find((sql) =>
+        sql.includes('"saved_com"'),
+      );
+      expect(communityGate).toMatch(
+        /"thread"\."community_id" IS NULL\s*OR "thread"\."cross_posted" = true\s*OR NOT EXISTS/,
+      );
+    });
   });
 
   it('deduplicates a subject id repeated on the page', async () => {

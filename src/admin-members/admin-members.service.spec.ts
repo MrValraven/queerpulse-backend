@@ -2,6 +2,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityTarget, ObjectLiteral } from 'typeorm';
+import { AmbassadorsService } from '../ambassadors/ambassadors.service';
 import {
   CommunityMember,
   RosterRole,
@@ -14,7 +15,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { UsersService } from '../users/users.service';
@@ -144,6 +145,9 @@ describe('AdminMembersService', () => {
   // role change is never the last-admin case.
   let usersService: { countAdmins: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+  // ENG-457: losing the `partnerships` grant or the admin tier releases the
+  // member's staff seat in the ambassadors circle.
+  let ambassadorsService: { releaseStaffSeat: jest.Mock };
 
   // The repos as seen through `manager.getRepository(...)` inside
   // `dataSource.transaction` — separate mocks from the top-level injected
@@ -198,6 +202,9 @@ describe('AdminMembersService', () => {
       getVouchCount: jest.fn().mockResolvedValue(0),
     };
     usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
+    ambassadorsService = {
+      releaseStaffSeat: jest.fn().mockResolvedValue(undefined),
+    };
 
     transactionUsers = {
       findOne: jest.fn().mockResolvedValue(null),
@@ -259,6 +266,7 @@ describe('AdminMembersService', () => {
         { provide: VouchService, useValue: vouchService },
         { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: dataSource },
+        { provide: AmbassadorsService, useValue: ambassadorsService },
       ],
     }).compile();
 
@@ -663,6 +671,96 @@ describe('AdminMembersService', () => {
 
       expect(transactionAuditLogs.save).not.toHaveBeenCalled();
       expect(result.staffRoles).toEqual([]);
+    });
+
+    it('releases the ambassadors circle staff seat when the partnerships grant goes (ENG-457)', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+
+      await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'partnerships',
+        'Moved to the events desk',
+      );
+
+      expect(ambassadorsService.releaseStaffSeat).toHaveBeenCalledWith(
+        'user-ines',
+      );
+    });
+
+    it('runs the seat release again on a retried partnerships revoke, so a failed release heals', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 0 });
+
+      await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'partnerships',
+      );
+
+      expect(ambassadorsService.releaseStaffSeat).toHaveBeenCalledWith(
+        'user-ines',
+      );
+    });
+
+    it('leaves the circle alone when another staff role is revoked', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+
+      await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_editor',
+      );
+
+      expect(ambassadorsService.releaseStaffSeat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateRole', () => {
+    it('releases the ambassadors circle staff seat when an admin is demoted (ENG-457)', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Admin,
+        isSystem: false,
+      });
+
+      await service.updateRole('user-admin', 'ines-martins', UserRole.Member);
+
+      expect(transactionUsers.update).toHaveBeenCalledWith(
+        { id: 'user-ines' },
+        { role: UserRole.Member },
+      );
+      expect(ambassadorsService.releaseStaffSeat).toHaveBeenCalledWith(
+        'user-ines',
+      );
+    });
+
+    it('keeps the seat of a member promoted to admin', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Member,
+        isSystem: false,
+      });
+
+      await service.updateRole('user-admin', 'ines-martins', UserRole.Admin);
+
+      expect(ambassadorsService.releaseStaffSeat).not.toHaveBeenCalled();
     });
   });
 });

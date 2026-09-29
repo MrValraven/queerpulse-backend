@@ -29,6 +29,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
+import type { Paginated } from '../common/pagination';
 import { UserRole } from '../users/entities/user.entity';
 import {
   AdminAmbassadorDTO,
@@ -36,6 +37,7 @@ import {
   AmbassadorStaffSeatDTO,
 } from './ambassador-response';
 import { AmbassadorsService } from './ambassadors.service';
+import { AmbassadorHistoryQuery } from './dto/ambassador-history.query';
 import { GrantAmbassadorDto } from './dto/grant-ambassador.dto';
 import { ListAmbassadorsQuery } from './dto/list-ambassadors.query';
 import { RevokeAmbassadorDto } from './dto/revoke-ambassador.dto';
@@ -58,11 +60,34 @@ export class AdminAmbassadorsController {
 
   @Get()
   @ApiOperation({ summary: 'List active or past ambassador grants' })
-  @ApiOkResponse({ description: 'Grants, newest first.' })
+  @ApiOkResponse({
+    description:
+      'One page of grants, newest first, as `{ items, total, page, pageSize }`.',
+  })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: FORBIDDEN_DESCRIPTION })
-  list(@Query() query: ListAmbassadorsQuery): Promise<AdminAmbassadorDTO[]> {
-    return this.ambassadorsService.list(query.status ?? 'active');
+  list(
+    @Query() query: ListAmbassadorsQuery,
+  ): Promise<Paginated<AdminAmbassadorDTO>> {
+    return this.ambassadorsService.list(
+      query.status ?? 'active',
+      query.page ?? 1,
+    );
+  }
+
+  @Get('history')
+  @ApiOperation({ summary: "One member's ambassador grants, active and past" })
+  @ApiOkResponse({
+    description:
+      'Every grant the member has held, newest first. Empty when they never held one.',
+  })
+  @ApiBadRequestResponse({ description: '`userId` is not a UUID.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: FORBIDDEN_DESCRIPTION })
+  history(
+    @Query() query: AmbassadorHistoryQuery,
+  ): Promise<AdminAmbassadorDTO[]> {
+    return this.ambassadorsService.historyFor(query.userId);
   }
 
   // Declared before the `:id` routes, so Nest matches the literal `circle`
@@ -72,7 +97,8 @@ export class AdminAmbassadorsController {
     summary: 'The ambassadors circle, as the admin page sees it',
   })
   @ApiOkResponse({
-    description: 'The circle slug, its head count and whether you hold a seat.',
+    description:
+      'The circle slug, its head count and whether you hold a seat. Before the first grant founds the circle, `isFounded` is false and nothing is created.',
   })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: FORBIDDEN_DESCRIPTION })

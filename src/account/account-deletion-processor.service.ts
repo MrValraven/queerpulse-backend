@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
   EntityManager,
+  In,
   IsNull,
   LessThanOrEqual,
   Repository,
@@ -24,7 +25,11 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { releaseHandleWithin } from '../handles/handles.service';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
+import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { User } from '../users/entities/user.entity';
 import {
   EmailSuppression,
@@ -384,6 +389,23 @@ export class AccountDeletionProcessorService {
       //     statement live in `erased-sender-messages.ts`.
       await this.settleErasedMemberMessages(manager, userId);
 
+      // 2c. Note the forum threads this member had withdrawn, while
+      //     `forum_thread.author_id` still names them. Step 3 blanks that
+      //     column, and step 3b needs the list to tell this member's
+      //     withdrawn threads apart from a surviving thread a moderator took
+      //     down later.
+      const withdrawnForumThreadIds = await this.withdrawnForumThreadIdsOf(
+        manager,
+        userId,
+      );
+
+      // 2d. Release the registry handles of the personas this member still
+      //     creates (step 0c handed the shared ones over, so these are the
+      //     ones that cascade away with the user row in step 3). ENG-449:
+      //     released with no forwarding BEFORE the cascade, the way a persona
+      //     delete does, so each name stays reserved for the reclaim cooldown.
+      await this.releaseErasedPersonaHandles(manager, userId);
+
       // 3. Hard-delete the user. Every other member-owned table carries an
       //    `ON DELETE CASCADE` FK to `users("id")` and goes with it — 70+ FKs
       //    across the schema, verified against `src/migrations`.
@@ -404,6 +426,18 @@ export class AccountDeletionProcessorService {
       //    nominations) is `ON DELETE SET NULL` and survives this delete with
       //    a NULL byline. Step 0b above is what makes that survival sensible
       //    rather than merely non-destructive.
+      //
+      //    `forum_thread.author_id` joined them as `ON DELETE SET NULL` in
+      //    `SetNullForumThreadAuthorOnUserErasure1823800300000` (ENG-494): a
+      //    live thread the member started survives with a NULL author when
+      //    other members replied in it or it credits a co-author, so those
+      //    replies and that shared work stay readable. Step 0b
+      //    (`ContentOwnerErasureService.eraseFor`) has already deleted the
+      //    member's other threads, corrected reply counts and scrubbed their
+      //    name from `topic_post`, and step 3b below repeats the thread
+      //    deletion for anything step 0b could not finish. The member's own
+      //    posts, their opening post included, still go with them
+      //    (`forum_post.author_id` stays CASCADE).
       //
       //    `deletion_request` itself is the one table that must NOT cascade —
       //    its FK was dropped in the same migration so this erasure ledger
@@ -433,6 +467,14 @@ export class AccountDeletionProcessorService {
       //    The count is therefore no longer worth quoting from memory. Derive
       //    it when you need it rather than trusting the number above.
       await manager.delete(User, { id: userId });
+
+      // 3b. Fail-closed backstop for step 0b's forum thread deletion, which
+      //     runs isolated and only logs a failure. See
+      //     `sweepErasedMemberForumThreads`.
+      await this.sweepErasedMemberForumThreads(
+        manager,
+        withdrawnForumThreadIds,
+      );
     });
 
     // 4. Erase the member's uploaded objects from bucket storage (audit §B P1),
@@ -500,6 +542,122 @@ export class AccountDeletionProcessorService {
         `Storage object erasure failed for account ${userId} (DB erasure already committed): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Step 2d of `eraseAccount` (ENG-449): frees every `handles` registry row
+   * held by a persona the member still creates, through the same release
+   * `HandlesService.release` runs (`releaseHandleWithin`), with no
+   * forwarding. Each release writes a `handle_history` reservation, and that
+   * row survives the persona's cascade (`previous_owner_subprofile_id` is
+   * `ON DELETE SET NULL`), so a stranger cannot claim the name, and every
+   * printed QR or shared `/p/` link keeps opening nothing, until the cooldown
+   * lapses. Runs inside the erasure transaction, so a rollback keeps the
+   * handles.
+   */
+  private async releaseErasedPersonaHandles(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    // N5: locked BEFORE the handle read below, so this step takes the
+    // persona row(s) first and the handle rows second, the same order every
+    // other persona writer uses (see `subprofile-membership.service.ts`).
+    const createdPersonas = await manager.find(Subprofile, {
+      where: { userId },
+      select: { id: true },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!createdPersonas.length) {
+      return;
+    }
+    const heldHandles = await manager.find(Handle, {
+      where: {
+        ownerKind: HandleOwnerKind.Subprofile,
+        subprofileId: In(createdPersonas.map((persona) => persona.id)),
+      },
+      select: { name: true, subprofileId: true },
+    });
+    for (const heldHandle of heldHandles) {
+      if (!heldHandle.subprofileId) {
+        continue;
+      }
+      await releaseHandleWithin(
+        manager,
+        heldHandle.name,
+        { kind: 'subprofile', subprofileId: heldHandle.subprofileId },
+        { isForwarding: false },
+      );
+    }
+  }
+
+  /**
+   * Step 2c of `eraseAccount`: the ids of the forum threads the member had
+   * withdrawn (`deleted_at` stamped), read inside the erasure transaction
+   * while `author_id` still names them. Step 3b deletes these once the user
+   * row is gone.
+   */
+  private async withdrawnForumThreadIdsOf(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<string[]> {
+    const rows: unknown = await manager.query(
+      `SELECT "t"."id" FROM "forum_thread" "t"
+        WHERE "t"."author_id" = $1
+          AND "t"."deleted_at" IS NOT NULL`,
+      [userId],
+    );
+    if (!Array.isArray(rows)) return [];
+    return (rows as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /**
+   * Step 3b of `eraseAccount` (ENG-494): deletes the authorless forum threads
+   * that must not outlive an erasure, inside the erasure transaction and right
+   * after the user row is deleted.
+   *
+   * WHY. `ContentOwnerErasureService.eraseForumThreads` (step 0b) deletes the
+   * member's scheduled, pending, rejected and withdrawn threads, but it runs
+   * under `runIsolated`, which logs a failure and carries on. Had it failed,
+   * step 3 would still blank `author_id` on those threads, and a scheduled
+   * one would then publish on its date (the schedule is only a read gate), or
+   * a pending one could be approved from the review queue, under the
+   * placeholder byline after the member asked to be erased. Running here, a
+   * failure rolls the whole erasure back and parks the request in
+   * `processing` for a human to retry (`eraseDueAccounts` never retries it
+   * on its own).
+   *
+   * WHAT, in two arms, each scoped so it can never reach another member's
+   * thread:
+   *  - not yet visible (the negation of `forumThreadVisibleSql`) with a NULL
+   *    author. `author_id` is NULL only after its author's erasure, and a
+   *    thread that was visible at that moment stays visible: `published_at`
+   *    is fixed at creation and a review decision is only ever made on a
+   *    pending thread. So this arm matches only threads an erasure should
+   *    have deleted, this member's and any an earlier failed run left behind;
+   *  - withdrawn (`deleted_at` stamped) with a NULL author AND among the ids
+   *    step 2c read for this member. A surviving authorless thread that a
+   *    moderator took down after an earlier erasure is kept for staff, as
+   *    every takedown is, since its replies belong to other members.
+   *
+   * The delete cascades exactly as step 0b's does. Idempotent: a retry finds
+   * nothing left to match.
+   */
+  private async sweepErasedMemberForumThreads(
+    manager: EntityManager,
+    withdrawnForumThreadIds: string[],
+  ): Promise<void> {
+    await manager.query(
+      `DELETE FROM "forum_thread" AS "t"
+        WHERE "t"."author_id" IS NULL
+          AND (
+            NOT (${forumThreadVisibleSql('"t"')})
+            OR (
+              "t"."deleted_at" IS NOT NULL
+              AND "t"."id" = ANY($1::uuid[])
+            )
+          )`,
+      [withdrawnForumThreadIds],
+    );
   }
 
   /**

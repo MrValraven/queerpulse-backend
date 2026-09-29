@@ -13,6 +13,7 @@ import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry
 import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -167,6 +168,11 @@ export class HousingGroupsService {
     // push (LOC-19). QueerPulse sends no email.
     private readonly notifications: NotificationsService,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
+    // ENG-490: the irreversible staff writes here (group delete, listing
+    // hide/unhide, join-request triage) each leave a `mod_audit_logs` row
+    // naming who acted. Reachable through a `housing_moderator` grant, so the
+    // trail is the only record of which grant holder did it.
+    private readonly modAudit: ModAuditService,
   ) {}
 
   async listPublished(): Promise<HousingGroupDTO[]> {
@@ -282,9 +288,18 @@ export class HousingGroupsService {
     }
   }
 
-  async deleteGroup(id: string): Promise<void> {
+  async deleteGroup(id: string, actorId: string): Promise<void> {
+    // Read first so the audit note can still name the group once its row is
+    // gone: an id alone points at nothing after the delete.
+    const group = await this.groups.findOne({ where: { id } });
+    if (!group) throw new NotFoundException('Group not found');
     const result = await this.groups.delete({ id });
     if (!result.affected) throw new NotFoundException('Group not found');
+    await this.auditStaffAction(
+      actorId,
+      'housing_group_delete',
+      `Housing group ${id} "${group.name}" (${group.slug})`,
+    );
   }
 
   async createJoinRequest(
@@ -334,6 +349,14 @@ export class HousingGroupsService {
         userId,
         status: GroupJoinRequestStatus.Pending,
       }),
+    );
+    // PRD-462: tell whoever works the group join-request queue that an
+    // application landed. Awaited, but safe to await: `announce` catches
+    // everything internally, so a notification failure can never fail the
+    // applicant's submission.
+    await this.adminQueueNotifications.announce(
+      AdminQueueKey.HousingGroupJoinRequests,
+      saved.id,
     );
     return { id: saved.id };
   }
@@ -515,6 +538,7 @@ export class HousingGroupsService {
   async triageJoinRequest(
     id: string,
     action: 'approved' | 'declined',
+    actorId: string,
   ): Promise<AdminGroupJoinRequestDTO> {
     const request = await this.joinRequests.findOne({ where: { id } });
     if (!request) throw new NotFoundException('Join request not found');
@@ -523,6 +547,11 @@ export class HousingGroupsService {
         ? GroupJoinRequestStatus.Approved
         : GroupJoinRequestStatus.Declined;
     await this.joinRequests.save(request);
+    await this.auditStaffAction(
+      actorId,
+      'housing_group_join_request_triage',
+      `Group join request ${id} (group ${request.groupId}): ${action}`,
+    );
     // The roster IS the set of approved join requests — `computeMutualConnections`
     // above already reads membership that way. Recount after every decision so
     // the published "N members" figure follows the roster instead of being an
@@ -1154,7 +1183,9 @@ export class HousingGroupsService {
    */
   private async notifyListingDecided(
     listing: GroupListing,
-    status: GroupListingStatus,
+    // `hidden` is the post-publication takedown (`setListingHidden`, PRD-463),
+    // which lives on its own column beside `status`.
+    status: GroupListingStatus | 'hidden',
     reason: string | null,
   ): Promise<void> {
     if (!listing.postedByUserId) return;
@@ -1187,19 +1218,91 @@ export class HousingGroupsService {
     return trimmed ? trimmed : null;
   }
 
+  /**
+   * Moderator/admin: take a group listing down for a norm violation, or put it
+   * back (PRD-463, ENG-490).
+   *
+   * Hiding REQUIRES a reason (`HideGroupListingDto` enforces it; the check
+   * here backs it up for any caller that skips the pipe). The reason is stored
+   * on the row, and the poster is told in-app plus push through the same
+   * `GroupListingDecided` bell a review decision uses: `decision: 'hidden'`
+   * with the moderator's reason, or `decision: 'live'` when the listing comes
+   * back. Every call leaves an audit row naming the acting staff member.
+   */
   async setListingHidden(
     id: string,
     dto: HideGroupListingDto,
+    actorId: string,
   ): Promise<AdminGroupListingDTO> {
+    const reason = dto.hidden
+      ? HousingGroupsService.trimToNull(dto.reason)
+      : null;
+    if (dto.hidden && !reason) {
+      throw new BadRequestException(
+        'A hidden listing needs a reason the poster can read.',
+      );
+    }
     const listing = await this.listings.findOne({ where: { id } });
     if (!listing) throw new NotFoundException('Listing not found');
+    // The poster hears about a change on the board, once. Both directions
+    // speak only for a `live` listing: one still in review, question or
+    // declined was never on the board, so taking it down or putting it back
+    // changes nothing its poster can see. A repeated hide with the same reason
+    // (a double click, two moderators on one queue) tells them nothing new.
+    const isLive = listing.status === GroupListingStatus.Live;
+    const shouldNotifyPoster = dto.hidden
+      ? isLive && (!listing.hidden || listing.hiddenReason !== reason)
+      : isLive && listing.hidden;
     listing.hidden = dto.hidden;
-    listing.hiddenReason = dto.hidden ? (dto.reason ?? null) : null;
+    listing.hiddenReason = reason;
     await this.listings.save(listing);
+    await this.auditStaffAction(
+      actorId,
+      dto.hidden
+        ? 'housing_group_listing_hide'
+        : 'housing_group_listing_unhide',
+      reason
+        ? `Group listing ${id} "${listing.title}": ${reason}`
+        : `Group listing ${id} "${listing.title}"`,
+    );
     const updated = await this.listings.findOne({
       where: { id },
       relations: { group: true },
     });
+    if (shouldNotifyPoster) {
+      await this.notifyListingDecided(
+        updated!,
+        dto.hidden ? 'hidden' : GroupListingStatus.Live,
+        reason,
+      );
+    }
     return this.toAdminListingDTO(updated!);
+  }
+
+  /**
+   * Appends one `mod_audit_logs` row for an irreversible housing-group staff
+   * write (ENG-490). No report and no target member, so the target id and
+   * what was decided travel in `note`, the column the audit feed shows and its
+   * free-text filter searches.
+   *
+   * Best-effort, the posture `ForumThreadsService.auditThreadAction` takes:
+   * the write this documents has already committed, so a failed audit insert
+   * is logged and swallowed. A 500 here would invite the reviewer to retry an
+   * action that already happened.
+   */
+  private async auditStaffAction(
+    actorId: string,
+    action: string,
+    note: string,
+  ): Promise<void> {
+    try {
+      await this.modAudit.writeAuditLog(null, actorId, action, undefined, note);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to write the ${action} audit row: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }

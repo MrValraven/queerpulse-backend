@@ -23,9 +23,10 @@ import { HandleOwnerKind } from './handle.entity';
  * window anyone may claim it, and claiming clears the row. See `HandlesService`.
  *
  * `name` is the PK, so an upsert keeps only the LATEST release per name; the row
- * mirrors the `handles` owner shape (exactly one of `previous_owner_user_id` /
- * `previous_owner_subprofile_id` set, matching `previous_owner_kind`), enforced
- * by the same CHECK-constraint style in the migration. It reuses the existing
+ * mirrors the `handles` owner shape (a profile row sets `previous_owner_user_id`
+ * alone; a subprofile row sets `previous_owner_subprofile_id` alone, or neither
+ * once that persona has been deleted), enforced by a CHECK constraint in the
+ * migrations. It reuses the existing
  * `handles_owner_kind_enum` type rather than minting a new one.
  */
 @Entity('handle_history')
@@ -53,13 +54,17 @@ export class HandleHistory {
   @JoinColumn({ name: 'previous_owner_user_id' })
   previousOwnerUser!: User | null;
 
-  // Set when previousOwnerKind === 'subprofile'; null otherwise. Cascades so a
-  // deleted subprofile drops the reservation.
+  // Set when previousOwnerKind === 'subprofile' and the persona still exists.
+  // A persona delete releases its handle first (ENG-449), then this FK sets
+  // the column to null, so the reservation survives the delete and the name
+  // stays reserved for its full cooldown. A null here matches no owner, so the
+  // name reads as taken to everyone and never forwards. Always null for a
+  // profile reservation (migration CHECK constraint).
   @Index('IDX_handle_history_previous_owner_subprofile_id')
   @Column({ type: 'uuid', nullable: true })
   previousOwnerSubprofileId!: string | null;
 
-  @ManyToOne(() => Subprofile, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Subprofile, { onDelete: 'SET NULL' })
   @JoinColumn({ name: 'previous_owner_subprofile_id' })
   previousOwnerSubprofile!: Subprofile | null;
 

@@ -5,9 +5,27 @@ import { IsNull } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Event } from '../events/entities/event.entity';
 import { CommunityPublicService } from './community-public.service';
+import { hasLivePendingInvite } from './community-invite-liveness';
 import { CommunityInvite } from './entities/community-invite.entity';
-import { CommunityMember } from './entities/community-member.entity';
+import {
+  CommunityJoinRequest,
+  JoinRequestStatus,
+} from './entities/community-join-request.entity';
+import {
+  CommunityMember,
+  RosterRole,
+} from './entities/community-member.entity';
 import { AccessTier, Community } from './entities/community.entity';
+
+// Whether an invitation is still spendable (pending, unexpired, from somebody
+// still on staff, no block between the two people) is the shared liveness
+// helper's call. This file only checks that the private-tier gate asks it.
+jest.mock('./community-invite-liveness', () => ({
+  hasLivePendingInvite: jest.fn(),
+}));
+const hasLivePendingInviteMock = hasLivePendingInvite as jest.MockedFunction<
+  typeof hasLivePendingInvite
+>;
 
 interface RecordedWhereCall {
   clause: string;
@@ -56,7 +74,8 @@ describe('CommunityPublicService', () => {
   let members: { findOne: jest.Mock; count: jest.Mock };
   let events: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
-  let invites: { exists: jest.Mock };
+  let invites: Record<string, never>;
+  let joinRequests: { findOne: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -75,11 +94,14 @@ describe('CommunityPublicService', () => {
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
-    // No standing invitation is the default caller here, same as `members`
-    // defaulting to no roster row: a prospective member off the street.
-    // `exists` and not `findOne`, matching the query the service runs: the
-    // answer is a boolean, so no row need be materialized.
-    invites = { exists: jest.fn().mockResolvedValue(false) };
+    // No live invitation is the default caller here, same as `members`
+    // defaulting to no roster row: a prospective member off the street. The
+    // repository itself is only handed through to the mocked liveness helper.
+    invites = {};
+    hasLivePendingInviteMock.mockReset();
+    hasLivePendingInviteMock.mockResolvedValue(false);
+    // No join request on file is the default: somebody who never applied.
+    joinRequests = { findOne: jest.fn().mockResolvedValue(null) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -89,6 +111,10 @@ describe('CommunityPublicService', () => {
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: getRepositoryToken(CommunityInvite), useValue: invites },
+        {
+          provide: getRepositoryToken(CommunityJoinRequest),
+          useValue: joinRequests,
+        },
       ],
     }).compile();
     service = module.get(CommunityPublicService);
@@ -333,7 +359,7 @@ describe('CommunityPublicService', () => {
         accessTier: AccessTier.Private,
       });
       members.findOne.mockResolvedValue(null);
-      invites.exists.mockResolvedValue(true);
+      hasLivePendingInviteMock.mockResolvedValue(true);
 
       const card = await service.getGateCard('queer-devs', 'invitee');
 
@@ -346,7 +372,7 @@ describe('CommunityPublicService', () => {
         accessTier: AccessTier.Private,
       });
       members.findOne.mockResolvedValue(null);
-      invites.exists.mockResolvedValue(false);
+      hasLivePendingInviteMock.mockResolvedValue(false);
 
       await expect(
         service.getGateCard('queer-devs', 'stranger'),
@@ -428,6 +454,9 @@ describe('CommunityPublicService', () => {
           'isOnline',
           'languages',
           'memberCount',
+          // The one addition over the teaser: the CALLER'S own applicant
+          // state, a fact about them alone.
+          'myJoinRequestStatus',
           'name',
           'nextGathering',
           'purpose',
@@ -437,6 +466,182 @@ describe('CommunityPublicService', () => {
           'type',
         ].sort(),
       );
+    });
+
+    it("getGateCard carries the caller's pending join request status", async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue(null);
+      joinRequests.findOne.mockResolvedValue({
+        id: 'request-1',
+        status: JoinRequestStatus.Pending,
+      });
+
+      const card = await service.getGateCard('queer-devs', 'applicant');
+
+      expect(card.myJoinRequestStatus).toBe(JoinRequestStatus.Pending);
+      // The caller's OWN newest request, and only theirs.
+      expect(joinRequests.findOne).toHaveBeenCalledWith({
+        where: { communityId: 'community-1', userId: 'applicant' },
+        order: { createdAt: 'DESC' },
+        select: { id: true, status: true },
+      });
+    });
+
+    it('getGateCard answers null status for a caller who never applied', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue(null);
+      joinRequests.findOne.mockResolvedValue(null);
+
+      const card = await service.getGateCard('queer-devs', 'stranger');
+
+      expect(card.myJoinRequestStatus).toBeNull();
+    });
+
+    // A pending row that has expired, or whose sender left the mod team, or
+    // that sits across a block, no longer opens the private door. The
+    // liveness helper answers false for all of those.
+    it('getGateCard 404s a private community whose only invitation is no longer live', async () => {
+      communities.findOne.mockResolvedValue({
+        ...GATED_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      hasLivePendingInviteMock.mockResolvedValue(false);
+
+      await expect(
+        service.getGateCard('queer-devs', 'former-invitee'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(hasLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'community-1',
+        'former-invitee',
+      );
+    });
+  });
+
+  describe('getRules', () => {
+    const RULED_COMMUNITY = {
+      id: 'community-1',
+      slug: 'queer-devs',
+      rules: ['rules.preset.respect', 'Bring your own mug'],
+      rulesVersion: 3,
+      archivedAt: null,
+    };
+
+    it('getRules serves a request-tier outsider the rules and a null accepted version', async () => {
+      communities.findOne.mockResolvedValue({
+        ...RULED_COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const rulesResponse = await service.getRules('queer-devs', 'stranger');
+
+      expect(rulesResponse).toEqual({
+        rules: ['rules.preset.respect', 'Bring your own mug'],
+        rulesVersion: 3,
+        rulesAcceptedVersion: null,
+      });
+    });
+
+    it('getRules serves an invited private-tier outsider', async () => {
+      communities.findOne.mockResolvedValue({
+        ...RULED_COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      hasLivePendingInviteMock.mockResolvedValue(true);
+
+      const rulesResponse = await service.getRules('queer-devs', 'invitee');
+
+      expect(rulesResponse.rulesVersion).toBe(3);
+      expect(rulesResponse.rulesAcceptedVersion).toBeNull();
+      expect(hasLivePendingInviteMock).toHaveBeenCalledWith(
+        invites,
+        'community-1',
+        'invitee',
+      );
+    });
+
+    // PRD-143 parity: members keep reading an archived community, so a plain
+    // member (no staff role) still reaches its rules.
+    it('getRules serves the roster of an archived community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...RULED_COMMUNITY,
+        accessTier: AccessTier.Request,
+        archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Member,
+        rulesVersionAccepted: 2,
+      });
+
+      const rulesResponse = await service.getRules('queer-devs', 'member-1');
+
+      expect(rulesResponse.rules).toEqual([
+        'rules.preset.respect',
+        'Bring your own mug',
+      ]);
+      expect(rulesResponse.rulesAcceptedVersion).toBe(2);
+    });
+
+    it('getRules 404s an archived community to a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...RULED_COMMUNITY,
+        accessTier: AccessTier.Request,
+        archivedAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getRules('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // The archive widening reaches the roster; a takedown still stays with
+    // the community's staff.
+    it('getRules 404s a taken-down community to a plain member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...RULED_COMMUNITY,
+        accessTier: AccessTier.Request,
+      });
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Member,
+        rulesVersionAccepted: 3,
+      });
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: true,
+      });
+
+      await expect(
+        service.getRules('queer-devs', 'member-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it("getRules reports the member's accepted version", async () => {
+      communities.findOne.mockResolvedValue({
+        ...RULED_COMMUNITY,
+        accessTier: AccessTier.Invite,
+      });
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Member,
+        rulesVersionAccepted: 2,
+      });
+
+      const rulesResponse = await service.getRules('queer-devs', 'member-1');
+
+      expect(rulesResponse).toEqual({
+        rules: ['rules.preset.respect', 'Bring your own mug'],
+        rulesVersion: 3,
+        rulesAcceptedVersion: 2,
+      });
     });
   });
 

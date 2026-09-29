@@ -5,7 +5,8 @@ import { In, IsNull, Repository } from 'typeorm';
 import { PresenceService } from '../chat/presence.service';
 import { storageKeyFromImageUrl } from '../common/image-url';
 import { MemberLookup } from '../common/member-ref';
-import { extractMentions } from '../common/mentions';
+import { extractMentions, messageMentionText } from '../common/mentions';
+import { countCharacters, truncateCharacters } from '../common/text-characters';
 import { ConnectionsService } from '../connections/connections.service';
 import { IdentityAttributionService } from '../identities/identity-attribution.service';
 import { IdentitiesService } from '../identities/identities.service';
@@ -32,6 +33,7 @@ import {
   MessageCreatedEvent,
 } from '../messaging/messaging.events';
 import {
+  memberNameOptionsFor,
   requireAuthorSummary,
   type AuthorSummary,
   type MessageView,
@@ -69,8 +71,10 @@ const FRESH_PUSH_VIBRATE_PATTERN = [80, 40, 80];
 
 function preview(body: string): string {
   const trimmed = body.trim();
-  return trimmed.length > PREVIEW_MAX
-    ? `${trimmed.slice(0, PREVIEW_MAX - 1)}…`
+  // Cut by character so an emoji at the bound never reaches the
+  // notification as half a surrogate pair.
+  return countCharacters(trimmed) > PREVIEW_MAX
+    ? `${truncateCharacters(trimmed, PREVIEW_MAX - 1)}…`
     : trimmed;
 }
 
@@ -210,9 +214,9 @@ function buildMessagePushCopy(
 }
 
 /** The `groupBodyKey` attachment key, reused for the mention-aware variant.
- *  Carries a `Sticker` entry for completeness even though a sticker send's
- *  `body` is always empty and so can never actually `@`-mention anyone (see
- *  `groupMentionedParticipantUserIds`, which reads `message.body`). */
+ *  Carries a `Sticker` entry for completeness, though a sticker has no caption
+ *  and so can never `@`-mention anyone (`groupMentionedParticipantUserIds`
+ *  scans `messageMentionText`, which is '' for a sticker). */
 const ATTACHMENT_GROUP_MENTION_BODY_KEY: Record<AttachmentMessageKind, string> =
   {
     [MessageKind.Image]: 'push:messages.group.mention.photo',
@@ -401,7 +405,11 @@ export class PushMessageListener {
       // attribution allows it.
       const senderName = mailboxSenderAuthors
         ? mailboxSenderAuthors.businessAuthor.displayName
-        : requireAuthorSummary(senderProfile).displayName;
+        : // PRD-423: a matched Go together chat names its sender by first name.
+          requireAuthorSummary(
+            senderProfile,
+            memberNameOptionsFor(conversation),
+          ).displayName;
       const messageCopy = buildMessagePushCopy(
         message,
         conversation,
@@ -458,9 +466,13 @@ export class PushMessageListener {
       // `/files/*` URL back to its storage key lets the check below drop it.
       const mailboxAvatarUrl =
         mailboxSenderAuthors?.businessAuthor.avatarUrl ?? null;
+      // ENG-412: a sender who hid their photo sends no icon, the same
+      // `photoVisible` gate the bell and the mentions inbox apply.
       const rawSenderAvatar = mailboxSenderAuthors
         ? mailboxAvatarUrl && storageKeyFromImageUrl(mailboxAvatarUrl)
-        : senderProfile?.avatarUrl;
+        : senderProfile?.photoVisible
+          ? senderProfile.avatarUrl
+          : undefined;
       const senderAvatar =
         rawSenderAvatar &&
         !isStorageKey(rawSenderAvatar) &&
@@ -478,7 +490,8 @@ export class PushMessageListener {
       // Task 22: the customer's payload names the staff member who wrote a
       // business reply, through a titleKey the frontend renders as
       // "{name} from {business}", only when the mailbox owner's switch and
-      // the sender's own preference both allow it. `staffFirstName` already
+      // the sender's own preference both allow it, and never from an
+      // unlinked persona (ENG-456). `staffFirstName` already
       // carries that exact answer: `renderMailboxSenderAuthors` built it
       // above through the same `IdentityAttributionService` resolver the
       // in-app sender uses, resolved for the customer
@@ -968,18 +981,19 @@ export class PushMessageListener {
   /**
    * The subset of `conversation`'s CURRENT participants (mirrors
    * `MentionNotificationService.recipientsAllowedForSource`'s own
-   * message-source restriction: excludes anyone who left) that `message`'s
-   * body `@`-mentions, excluding the sender. Reads `message.body`: for an
-   * attachment message that is always the sender's placeholder text, never a
-   * typed caption (see `buildMessagePushCopy`'s own doc), so this correctly
-   * finds nothing for one today, exactly like `MentionNotificationService`
-   * does when it fans the same body out to notification rows.
+   * message-source restriction: excludes anyone who left) that `message`
+   * `@`-mentions, excluding the sender. Scans `messageMentionText`, the same
+   * text `MessagesService` hands `MentionNotificationService` for the bell
+   * row: a plain message's body, or an attachment message's typed caption
+   * (its `body` is only the sender's placeholder, see `buildMessagePushCopy`).
+   * A caption `@`-mention in a group therefore folds into this push exactly
+   * like a body mention does.
    */
   private async groupMentionedParticipantUserIds(
     conversation: Conversation,
     message: MessageView,
   ): Promise<Set<string>> {
-    const slugs = extractMentions(message.body).members;
+    const slugs = extractMentions(messageMentionText(message)).members;
     if (slugs.length === 0) return new Set();
     const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(slugs);
     const candidateUserIds = Array.from(new Set(bySlug.values())).filter(

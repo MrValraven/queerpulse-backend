@@ -1,8 +1,9 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { MoreThan } from 'typeorm';
+import { In, MoreThan } from 'typeorm';
 import { Connection } from '../connections/entities/connection.entity';
 import { Block } from '../social/entities/block.entity';
+import { EventMatchConfig } from './entities/event-match-config.entity';
 import { EventMatchEntry } from './entities/event-match-entry.entity';
 import { EventMatchGroup } from './entities/event-match-group.entity';
 import { FriendMatchProfile } from './entities/friend-match-profile.entity';
@@ -12,7 +13,10 @@ import {
   MeetAgainVerdict,
 } from './entities/match-feedback.entity';
 import { MatchGroupFeedback } from './entities/match-group-feedback.entity';
-import { FriendMatchAnswers } from './go-together-questionnaire.catalog';
+import {
+  FriendMatchAnswers,
+  HostQuestion,
+} from './go-together-questionnaire.catalog';
 import {
   groupUnitLists,
   personIndexesOf,
@@ -21,6 +25,8 @@ import {
 } from './go-together-formation.helpers';
 import {
   GoTogetherPoolService,
+  INTEREST_FREQUENCY_SQL,
+  INTEREST_IDF_TTL_MS,
   MatchPool,
   NEUTRAL_SCORE,
 } from './go-together-pool.service';
@@ -96,8 +102,26 @@ function profile(
   };
 }
 
+/** Frequency rows as the aggregate returns them, for the given profiles. */
+function interestFrequencyRows(profiles: FriendMatchProfile[]) {
+  const documentFrequency = new Map<string, number>();
+  for (const row of profiles) {
+    for (const tagId of new Set(row.answers.interests)) {
+      documentFrequency.set(tagId, (documentFrequency.get(tagId) ?? 0) + 1);
+    }
+  }
+  return [...documentFrequency].map(([tagId, frequency]) => ({
+    tag_id: tagId,
+    document_frequency: frequency,
+    profile_total: profiles.length,
+  }));
+}
+
 interface PoolFixtures {
   profiles: FriendMatchProfile[];
+  /** Every questionnaire on the platform; defaults to the pool's own. */
+  platformProfiles?: FriendMatchProfile[];
+  configs?: Pick<EventMatchConfig, 'eventId' | 'hostQuestions'>[];
   blocks?: Pick<Block, 'blockerId' | 'blockedId'>[];
   avoidances?: Pick<MatchAvoidance, 'userId' | 'avoidedUserId'>[];
   connections?: Pick<Connection, 'userLow' | 'userHigh'>[];
@@ -112,14 +136,27 @@ interface PoolFixtures {
 describe('GoTogetherPoolService', () => {
   let groupsRepository: { find: jest.Mock };
   let groupFeedbackRepository: { find: jest.Mock };
+  let profilesRepository: {
+    find: jest.Mock;
+    query: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let configsRepository: { find: jest.Mock };
 
   async function build(fixtures: PoolFixtures): Promise<GoTogetherPoolService> {
-    const interestRows = fixtures.profiles.map((row) => ({
-      interests: row.answers.interests,
-    }));
-    const queryBuilder = {
-      select: jest.fn().mockReturnThis(),
-      getRawMany: jest.fn().mockResolvedValue(interestRows),
+    // `createQueryBuilder` is here only to prove the pool never calls it: a
+    // read of every questionnaire's interests would go through it.
+    profilesRepository = {
+      find: jest.fn().mockResolvedValue(fixtures.profiles),
+      query: jest
+        .fn()
+        .mockResolvedValue(
+          interestFrequencyRows(fixtures.platformProfiles ?? fixtures.profiles),
+        ),
+      createQueryBuilder: jest.fn(),
+    };
+    configsRepository = {
+      find: jest.fn().mockResolvedValue(fixtures.configs ?? []),
     };
     groupsRepository = {
       find: jest.fn().mockResolvedValue(fixtures.pastGroups ?? []),
@@ -132,10 +169,11 @@ describe('GoTogetherPoolService', () => {
         GoTogetherPoolService,
         {
           provide: getRepositoryToken(FriendMatchProfile),
-          useValue: {
-            find: jest.fn().mockResolvedValue(fixtures.profiles),
-            createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
-          },
+          useValue: profilesRepository,
+        },
+        {
+          provide: getRepositoryToken(EventMatchConfig),
+          useValue: configsRepository,
         },
         {
           provide: getRepositoryToken(Block),
@@ -255,6 +293,176 @@ describe('GoTogetherPoolService', () => {
     ]);
     expect(pool.indexByUserId.has('user-b')).toBe(false);
     expect(pool.graph.size).toBe(2);
+  });
+
+  it('keeps a listed pending entry without a questionnaire answerless, so its accepted pair stays one unit', async () => {
+    const service = await build({
+      profiles: [profile('mover'), profile('c')],
+      blocks: [{ blockerId: 'user-partner', blockedId: 'user-c' }],
+    });
+    const { pool, skippedEntryIds } = await service.buildPool(
+      [
+        entry('mover', {
+          status: 'unmatched',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-partner',
+        }),
+        entry('partner', {
+          status: 'unmatched',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-mover',
+        }),
+        entry('c'),
+        entry('gone'),
+      ],
+      {
+        includeAnchors: false,
+        keepAnswerlessEntryIds: new Set(['entry-partner']),
+      },
+    );
+    const mover = indexOf(pool, 'mover');
+    const partner = indexOf(pool, 'partner');
+    expect(skippedEntryIds).toEqual(['entry-gone']);
+    expect(pool.members[partner]!.candidate).toBeNull();
+    expect(pool.graph.score(mover, partner)).toBe(NEUTRAL_SCORE);
+    expect(pool.graph.feasible(partner, indexOf(pool, 'c'))).toBe(false);
+    expect(pool.units).toContainEqual({
+      id: 'entry-mover',
+      members: [mover, partner],
+    });
+  });
+
+  describe('scoped reads', () => {
+    it('reads questionnaires only for the pool members and takes the platform-wide IDF from the aggregate counts', async () => {
+      const service = await build({
+        profiles: [
+          profile('a', { interests: ['boardGames', 'hiking'] }),
+          profile('b', { interests: ['boardGames'] }),
+        ],
+      });
+      // Platform: 99 questionnaires, boardGames in 49, hiking in 4.
+      profilesRepository.query.mockResolvedValue([
+        { tag_id: 'boardGames', document_frequency: 49, profile_total: 99 },
+        { tag_id: 'hiking', document_frequency: 4, profile_total: 99 },
+      ]);
+
+      const { pool } = await service.buildPool([entry('a'), entry('b')], {
+        includeAnchors: false,
+      });
+
+      expect(profilesRepository.find).toHaveBeenCalledTimes(1);
+      expect(profilesRepository.find).toHaveBeenCalledWith({
+        where: { userId: In(['user-a', 'user-b']) },
+      });
+      expect(profilesRepository.createQueryBuilder).not.toHaveBeenCalled();
+      expect(profilesRepository.query).toHaveBeenCalledWith(
+        INTEREST_FREQUENCY_SQL,
+      );
+      const idfOf = (tagId: string) => pool.context.interestIdf.get(tagId);
+      expect(idfOf('boardGames')).toBeCloseTo(Math.log(100 / 50) + 1);
+      expect(idfOf('hiking')).toBeCloseTo(Math.log(100 / 5) + 1);
+      expect(idfOf('queerHistory')).toBeUndefined();
+    });
+
+    it('aggregates counts in SQL with snake_case aliases and loads no interest list', () => {
+      expect(INTEREST_FREQUENCY_SQL).toContain('GROUP BY "interest"."tag_id"');
+      expect(INTEREST_FREQUENCY_SQL).toContain('COUNT(DISTINCT');
+      for (const alias of INTEREST_FREQUENCY_SQL.matchAll(/AS "([^"]+)"/g)) {
+        expect(alias[1]).toMatch(/^[a-z_]+$/);
+      }
+    });
+
+    it('runs the aggregate once per tick window, shared by every pool build in it', async () => {
+      const service = await build({ profiles: [profile('a'), profile('b')] });
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(NOW.getTime());
+      const entries = [entry('a'), entry('b')];
+
+      await service.buildPool(entries, { includeAnchors: false });
+      await service.buildPool(entries, { includeAnchors: false });
+      clock.mockReturnValue(NOW.getTime() + INTEREST_IDF_TTL_MS - 1);
+      await service.buildPool(entries, { includeAnchors: false });
+      expect(profilesRepository.query).toHaveBeenCalledTimes(1);
+
+      clock.mockReturnValue(NOW.getTime() + INTEREST_IDF_TTL_MS);
+      await service.buildPool(entries, { includeAnchors: false });
+      expect(profilesRepository.query).toHaveBeenCalledTimes(2);
+      clock.mockRestore();
+    });
+
+    it('asks again on the next build after a failed aggregate', async () => {
+      const service = await build({ profiles: [profile('a'), profile('b')] });
+      const entries = [entry('a'), entry('b')];
+      profilesRepository.query.mockRejectedValueOnce(new Error('timeout'));
+
+      await expect(
+        service.buildPool(entries, { includeAnchors: false }),
+      ).rejects.toThrow('timeout');
+      await service.buildPool(entries, { includeAnchors: false });
+
+      expect(profilesRepository.query).toHaveBeenCalledTimes(2);
+    });
+
+    it("reads the host questions of the pool's gathering only", async () => {
+      const service = await build({ profiles: [profile('a'), profile('b')] });
+
+      await service.buildPool([entry('a'), entry('b')], {
+        includeAnchors: false,
+      });
+
+      expect(configsRepository.find).toHaveBeenCalledWith({
+        where: { eventId: In(['event-1']) },
+        select: { eventId: true, hostQuestions: true },
+      });
+    });
+  });
+
+  describe('host answers', () => {
+    const currentQuestion: HostQuestion = {
+      id: 'q-plan',
+      prompt: 'Before or after?',
+      options: [
+        { id: 'before', label: 'Before' },
+        { id: 'after', label: 'After' },
+      ],
+    };
+
+    it('scores only answers to the questions the host asks now', async () => {
+      const service = await build({
+        profiles: [profile('a'), profile('b')],
+        configs: [{ eventId: 'event-1', hostQuestions: [currentQuestion] }],
+      });
+
+      const { pool } = await service.buildPool(
+        [
+          entry('a', {
+            hostAnswers: { 'q-plan': 'before', 'q-removed': 'yes' },
+          }),
+          entry('b', {
+            hostAnswers: { 'q-plan': 'gone-option', 'q-removed': 'yes' },
+          }),
+        ],
+        { includeAnchors: false },
+      );
+
+      expect(
+        pool.members.map((member) => member.candidate?.hostAnswers),
+      ).toEqual([{ 'q-plan': 'before' }, {}]);
+      // The removed question both answered alike earns no host bonus.
+      expect(
+        pool.componentsFor(indexOf(pool, 'a'), indexOf(pool, 'b')).hostBonus,
+      ).toBe(0);
+    });
+
+    it('drops every host answer when the gathering has no config', async () => {
+      const service = await build({ profiles: [profile('a')] });
+
+      const { pool } = await service.buildPool(
+        [entry('a', { hostAnswers: { 'q-plan': 'before' } })],
+        { includeAnchors: false },
+      );
+
+      expect(pool.members[0]?.candidate?.hostAnswers).toEqual({});
+    });
   });
 
   describe('regroup anchors', () => {

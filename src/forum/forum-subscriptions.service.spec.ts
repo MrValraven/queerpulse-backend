@@ -5,9 +5,9 @@ import { ForumSubscriptionsService } from './forum-subscriptions.service';
 
 /**
  * SOC-13 thread following and the C7/PRD-170 read watermark. Both write paths
- * are `ON CONFLICT DO UPDATE` query-builder chains (idempotent by
- * construction), so they are asserted through a chainable stub rather than a
- * live repository.
+ * are `ON CONFLICT DO UPDATE` statements (idempotent by construction): the
+ * follow is a query-builder chain asserted through a chainable stub, and the
+ * watermark is raw SQL asserted through the repository's `query` stub.
  */
 describe('ForumSubscriptionsService', () => {
   let service: ForumSubscriptionsService;
@@ -16,6 +16,7 @@ describe('ForumSubscriptionsService', () => {
     find: jest.Mock;
     delete: jest.Mock;
     update: jest.Mock;
+    query: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   // Typed with named properties rather than an index signature, so
@@ -49,6 +50,7 @@ describe('ForumSubscriptionsService', () => {
       find: jest.fn().mockResolvedValue([]),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      query: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn().mockReturnValue(insertChain),
     };
 
@@ -91,22 +93,38 @@ describe('ForumSubscriptionsService', () => {
   });
 
   it('stamps a read watermark WITHOUT subscribing the reader', async () => {
-    await service.markRead('thread-1', 'user-1');
+    const readAt = new Date('2026-09-01T10:00:00.000Z');
+    await service.markRead('thread-1', 'user-1', readAt);
 
+    const [sql, params] = subscriptions.query.mock.calls[0] as [
+      string,
+      unknown[],
+    ];
     // The whole point of C7: opening a thread must not sign anybody up for a
-    // notification per reply.
-    expect(insertChain.values).toHaveBeenCalledWith({
-      threadId: 'thread-1',
-      userId: 'user-1',
-      isFollowing: false,
-      lastReadAt: expect.any(Date) as unknown,
-    });
-    // ...and a member who already follows the thread keeps following it: only
-    // the watermark is overwritten on conflict.
-    expect(insertChain.orUpdate).toHaveBeenCalledWith(
-      ['last_read_at'],
-      ['thread_id', 'user_id'],
+    // notification per reply. The insert writes `is_following = false`...
+    expect(sql).toMatch(/VALUES \(\$1, \$2, false, \$3\)/);
+    expect(params).toEqual(['thread-1', 'user-1', readAt]);
+    // ...and a member who already follows the thread keeps following it: the
+    // conflict arm sets the watermark alone.
+    const conflictArm = sql.slice(sql.indexOf('DO UPDATE'));
+    expect(conflictArm).toContain('"last_read_at" = GREATEST(');
+    expect(conflictArm).not.toContain('is_following');
+  });
+
+  it('markRead never moves the watermark backward', async () => {
+    await service.markRead(
+      'thread-1',
+      'user-1',
+      new Date('2026-08-01T10:00:00.000Z'),
     );
+
+    const [sql] = subscriptions.query.mock.calls[0] as [string];
+    // PRD-409: a late request carrying an older stamp keeps the stored value,
+    // because the conflict arm takes the later of the two.
+    expect(sql.replace(/\s+/g, ' ')).toContain(
+      'GREATEST( COALESCE( "forum_thread_subscription"."last_read_at", EXCLUDED."last_read_at" ), EXCLUDED."last_read_at" )',
+    );
+    expect(sql).toContain('ON CONFLICT ("thread_id", "user_id") DO UPDATE');
   });
 
   it('unfollows by clearing the flag, never by deleting the watermark row', async () => {

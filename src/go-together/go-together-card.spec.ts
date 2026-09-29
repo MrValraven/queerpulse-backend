@@ -7,6 +7,7 @@ const base: CardInput = {
   entry: null,
   hasIncomingPairInvite: false,
   isFeedbackOpen: false,
+  isFinalPassDone: false,
 };
 
 describe('computeCardState', () => {
@@ -62,6 +63,67 @@ describe('computeCardState', () => {
       'questionnaireNeeded',
     );
     expect(computeCardState(base).state).toBe('notOptedIn');
+  });
+
+  it('keeps the group card for a grouped member when the switch reads off', () => {
+    expect(
+      computeCardState({
+        ...base,
+        eventBlocker: 'notEnabled',
+        entry: { status: 'grouped' },
+      }).state,
+    ).toBe('grouped');
+    expect(
+      computeCardState({
+        ...base,
+        eventBlocker: 'notEnabled',
+        entry: { status: 'grouped' },
+        isFeedbackOpen: true,
+      }).state,
+    ).toBe('feedbackDue');
+  });
+
+  it('still hides the group card of a gathering that is no longer published', () => {
+    expect(
+      computeCardState({
+        ...base,
+        eventBlocker: 'eventNotPublished',
+        entry: { status: 'grouped' },
+      }).state,
+    ).toBe('unavailable');
+  });
+
+  it('shows closed to an unmatched member once the final late-group pass has run', () => {
+    expect(
+      computeCardState({
+        ...base,
+        eventBlocker: 'closed',
+        entry: { status: 'unmatched' },
+        isFinalPassDone: true,
+      }),
+    ).toEqual({ state: 'closed', reason: null });
+  });
+
+  it('keeps an unmatched member on unmatched while the final pass is still to run', () => {
+    expect(
+      computeCardState({
+        ...base,
+        eventBlocker: 'closed',
+        entry: { status: 'unmatched' },
+      }).state,
+    ).toBe('unmatched');
+  });
+
+  it('keeps closed after the final pass when the gathering moved later', () => {
+    // A later start reopens opt-in (no `closed` blocker), but the final pass
+    // stays done and no more matching runs.
+    expect(
+      computeCardState({
+        ...base,
+        entry: { status: 'unmatched' },
+        isFinalPassDone: true,
+      }).state,
+    ).toBe('closed');
   });
 
   it('shows closed to a member who never opted in once opt-in closed', () => {

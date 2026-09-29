@@ -75,10 +75,12 @@ interface EventPhotoSubject {
  *     This is the SLA-bearing channel and it fires for every report, whatever
  *     the subject.
  *  2. COMMUNITY STAFF: the owner, co-owners and mods of the community a
- *     reported post, reply or gathering photograph belongs to (or of a
- *     reported community itself). Anyone already reached by the platform
- *     fan-out is dropped from this one, so a moderator who also runs a
- *     community is told once, on the channel that carries the SLA.
+ *     reported post, reply or gathering photograph belongs to. Anyone
+ *     already reached by the platform fan-out is dropped from this one, so a
+ *     moderator who also runs a community is told once, on the channel that
+ *     carries the SLA. A report on the community itself never reaches this
+ *     fan-out (ENG-481): that community's own staff are the reported party,
+ *     and the report stays on the platform channel only.
  *
  * Three people are never reached by EITHER responder fan-out, whatever role
  * they hold: the member who filed the report (nobody needs paging about their
@@ -309,10 +311,16 @@ export class ReportNotificationsListener {
   }
 
   /**
-   * The community's own responders, when the report is attributable to one.
-   * They see the same report from the mod-tools side, where the actions
-   * available to them live, so the payload carries the community's slug and
-   * name for the deep link and the copy.
+   * The community's own responders, when the report is attributable to one of
+   * the three subject types `resolveCommunity` answers for: a post, a reply,
+   * or a gathering photograph. They see the same report from the mod-tools
+   * side, where the actions available to them live, so the payload carries
+   * the community's slug and name for the deep link and the copy.
+   *
+   * A report on the community itself never reaches this fan-out (ENG-481).
+   * The community's own staff are the reported party for that report, so
+   * paging them about it would tell the people being reported on that a
+   * report was filed. That report stays on the platform fan-out only.
    */
   private async notifyCommunityStaff(
     event: ReportCreatedEvent,
@@ -353,17 +361,25 @@ export class ReportNotificationsListener {
 
   /**
    * The community a report belongs to, or `null` when it is not
-   * community-scoped (a member, message or venue subject, or a flat forum post
-   * that belongs to no community). Post and reply subjects resolve through
-   * `CommunityMembershipService`, which already owns that mapping and its own
-   * uuid guard.
+   * community-scoped (a member, message or venue subject, a report on the
+   * community itself, or a flat forum post that belongs to no community).
+   * Post and reply subjects resolve through `CommunityMembershipService`,
+   * which already owns that mapping and its own uuid guard.
    *
-   * The four arms here are the four `CommunityAutoFreezeService
-   * .resolveCommunity` and `ModerationService.communityIdForReportSubject`
-   * answer for, and they have to keep agreeing: those decide which community
-   * may ACT on a report and which community a report can freeze, and telling a
-   * room about a report it cannot act on (or worse, staying silent about one
-   * it can) is the same drift read from either end.
+   * The three arms here are exactly the three `ModerationService
+   * .communityIdForReportSubject` answers for, and they have to keep
+   * agreeing: that resolver decides which community may ACT on a report, and
+   * telling a room about a report it cannot act on is the same drift read
+   * from either end.
+   *
+   * A `community`-subject report resolves to `null` here on purpose
+   * (ENG-481): the community's own owner, co-owners and mods are the reported
+   * party for that report, and notifying them would tell the people the
+   * report is about that it exists. That report reaches platform staff only,
+   * on the same SLA-bearing channel every report uses.
+   * `CommunityAutoFreezeService.resolveCommunity` keeps its own `Community`
+   * arm: freezing a reported community is a platform safety action that does
+   * not depend on who currently staffs the room.
    *
    * TS-13: an `event_photo` resolves through the gathering whose album it is
    * in, so the community is the GATHERING's own (`events.community_id`) and is
@@ -375,9 +391,6 @@ export class ReportNotificationsListener {
     event: ReportCreatedEvent,
     photoSubject: EventPhotoSubject | null,
   ): Promise<Community | null> {
-    if (event.subjectType === ReportSubjectType.Community) {
-      return this.communities.findOne({ where: { slug: event.subjectId } });
-    }
     if (event.subjectType === ReportSubjectType.EventPhoto) {
       if (!photoSubject?.communityId) return null;
       return this.communities.findOne({

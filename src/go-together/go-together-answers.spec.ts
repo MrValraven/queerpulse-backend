@@ -1,7 +1,11 @@
 import {
+  changedHostQuestionIds,
+  currentHostAnswers,
+  mergeHostAnswers,
   parseFriendMatchAnswers,
   parseHostAnswers,
   parseHostQuestions,
+  unansweredHostQuestionIds,
 } from './go-together-answers';
 
 const valid = {
@@ -143,5 +147,91 @@ describe('parseHostAnswers', () => {
 
   it('accepts an empty body when the gathering has no questions', () => {
     expect(parseHostAnswers([], undefined)).toEqual({ ok: true, value: {} });
+  });
+});
+
+describe('host question edits', () => {
+  const coffee = {
+    id: 'q1',
+    prompt: 'Coffee or tea?',
+    options: [
+      { id: 'o1', label: 'Coffee' },
+      { id: 'o2', label: 'Tea' },
+    ],
+  };
+  const walk = {
+    id: 'q2',
+    prompt: 'Walk there together?',
+    options: [
+      { id: 'o1', label: 'Yes' },
+      { id: 'o2', label: 'No' },
+    ],
+  };
+
+  it('finds no change when the same questions are saved again', () => {
+    expect(
+      changedHostQuestionIds([coffee, walk], [{ ...coffee }, { ...walk }]),
+    ).toEqual([]);
+  });
+
+  it('flags a question whose prompt, labels or option order changed', () => {
+    expect(
+      changedHostQuestionIds(
+        [coffee],
+        [{ ...coffee, prompt: 'Tea or coffee?' }],
+      ),
+    ).toEqual(['q1']);
+    expect(
+      changedHostQuestionIds(
+        [coffee],
+        [
+          {
+            ...coffee,
+            options: [
+              { id: 'o1', label: 'Tea' },
+              { id: 'o2', label: 'Coffee' },
+            ],
+          },
+        ],
+      ),
+    ).toEqual(['q1']);
+    expect(
+      changedHostQuestionIds(
+        [coffee],
+        [
+          {
+            ...coffee,
+            options: [...coffee.options, { id: 'o3', label: 'Water' }],
+          },
+        ],
+      ),
+    ).toEqual(['q1']);
+  });
+
+  it('flags a removed question and ignores an added one', () => {
+    expect(changedHostQuestionIds([coffee, walk], [coffee])).toEqual(['q2']);
+    expect(changedHostQuestionIds([coffee], [coffee, walk])).toEqual([]);
+  });
+
+  it('keeps only answers that point at a current option', () => {
+    expect(
+      currentHostAnswers([coffee, walk], { q1: 'o3', q2: 'o1', q9: 'o1' }),
+    ).toEqual({ q2: 'o1' });
+    expect(unansweredHostQuestionIds([coffee, walk], { q2: 'o1' })).toEqual([
+      'q1',
+    ]);
+  });
+
+  it('merges a partial answer over the saved ones and requires every question', () => {
+    expect(
+      mergeHostAnswers([coffee, walk], { q1: 'o2' }, { q2: 'o1' }),
+    ).toEqual({ ok: true, value: { q1: 'o2', q2: 'o1' } });
+    expect(mergeHostAnswers([coffee, walk], { q1: 'o2' }, {}).ok).toBe(false);
+    expect(
+      mergeHostAnswers([coffee, walk], { q1: 'o2' }, { q2: 'o7' }).ok,
+    ).toBe(false);
+    expect(
+      mergeHostAnswers([coffee, walk], { q1: 'o2' }, { q5: 'o1' }).ok,
+    ).toBe(false);
   });
 });

@@ -27,6 +27,7 @@ import { MagazineDeck } from './entities/magazine-deck.entity';
 import { toReadableBlocks } from './magazine-response';
 import { Profile } from '../users/entities/profile.entity';
 import { toImageUrl } from '../common/image-url';
+import { magazineTodayIsoDate } from './magazine-clock';
 
 /**
  * Response shapes below are hand-mapped (mirror `magazine-response.ts`) so
@@ -75,6 +76,11 @@ export interface PieceListItem {
   stageEnteredAt: string;
   /** See `PiecePaymentStatus`; derived by `derivePaymentStatus`. */
   paymentStatus: PiecePaymentStatus;
+  /**
+   * ISO instant the linked article or deck goes (or went) live, or `null`
+   * while a draft. A future value means scheduled.
+   */
+  publishedAt: string | null;
 }
 
 export interface PitchResponse {
@@ -193,10 +199,16 @@ export function toPiecePublicHref(format: PieceFormat, slug: string): string {
 }
 
 /**
- * True when `piece.dueOn` is a valid, past calendar date (UTC date compare,
- * ignoring time-of-day) and the piece hasn't reached `ready`. A ready piece
- * is never "late" — the desk only chases pieces still in flight. `now` is
- * injectable for deterministic tests; defaults to the real clock.
+ * True when `piece.dueOn` is a valid `YYYY-MM-DD` calendar date, strictly
+ * before today in `MAGAZINE_TIMEZONE` (Europe/Lisbon), and the piece hasn't
+ * reached `ready`. The desk only chases pieces still in flight, so this
+ * always reads false once a piece is ready. `now` is injectable for
+ * deterministic tests; defaults to the real clock.
+ *
+ * The date compare runs in Lisbon: `dueOn` is the calendar date the desk sees
+ * on screen, so the piece must flip late at Lisbon midnight, the same moment
+ * the desk's own "today" rolls over (see `magazineTodayIsoDate` in
+ * `./magazine-clock`).
  */
 export function deriveLate(
   piece: Pick<MagazinePiece, 'dueOn' | 'stage'>,
@@ -212,23 +224,11 @@ export function deriveLate(
     return false;
   }
 
-  const dueDate = new Date(piece.dueOn);
-  if (Number.isNaN(dueDate.getTime())) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(piece.dueOn)) {
     return false;
   }
 
-  const todayUtc = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-  );
-  const dueUtc = Date.UTC(
-    dueDate.getUTCFullYear(),
-    dueDate.getUTCMonth(),
-    dueDate.getUTCDate(),
-  );
-
-  return dueUtc < todayUtc;
+  return piece.dueOn < magazineTodayIsoDate(now);
 }
 
 /**
@@ -356,6 +356,11 @@ export interface PieceListItemContext {
   latestStageEntryAt?: Date | null;
   /** The piece's payment row (only `status` is read); omitted means none. */
   payment?: Pick<MagazinePayment, 'status'> | null;
+  /**
+   * The linked article/deck's `publishedAt` column; omitted or `null` means
+   * no linked content, or linked content that is still a draft.
+   */
+  contentPublishedAt?: Date | null;
 }
 
 export function toPieceListItem(
@@ -388,6 +393,9 @@ export function toPieceListItem(
       context.latestStageEntryAt ?? null,
     ),
     paymentStatus: derivePaymentStatus(context.payment ?? null),
+    publishedAt: context.contentPublishedAt
+      ? context.contentPublishedAt.toISOString()
+      : null,
   };
 }
 
@@ -496,6 +504,7 @@ export function toPieceRecordSummary(
     ...toPieceListItem(piece, {
       latestStageEntryAt: latestStageEntryAt(events, piece.stage),
       payment,
+      contentPublishedAt: publishedAt,
     }),
     brief: piece.brief,
     care: piece.care,

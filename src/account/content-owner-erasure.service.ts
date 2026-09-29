@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, MoreThan, Not, Repository } from 'typeorm';
+import { DataSource, In, IsNull, MoreThan, Not, Repository } from 'typeorm';
+import { ERASED_AUTHOR_TOPIC_BYLINE } from '../content/topic-post-link.service';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import {
   EventInvite,
@@ -9,6 +10,7 @@ import {
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Job, JobStatus } from '../jobs/entities/job.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -49,6 +51,15 @@ import {
  * sit live with nobody reading them: open jobs and volunteering are closed,
  * and live housing listings are taken off the market with the same `filledAt`
  * stamp the owner's own "mark filled" and the expiry sweeper use.
+ *
+ * And for the forum (ENG-494), where `forum_thread.author_id` is `SET NULL`
+ * since `SetNullForumThreadAuthorOnUserErasure1823800300000`: a live thread
+ * survives when other members' replies live in it or when it credits a
+ * co-author, whose shared work it also is. The member's other threads are
+ * deleted here, the surviving threads' reply counts are
+ * corrected for the member's own replies about to cascade away, and the
+ * member's name is scrubbed from the `topic_post` bylines that copied it.
+ * See `eraseForumThreads`, `recountForumReplies` and `scrubTopicPostBylines`.
  *
  * Deliberately NOT handled here:
  *  - business directory listings (`listings.owner_id`) stay live and simply
@@ -111,6 +122,9 @@ export class ContentOwnerErasureService {
     @InjectRepository(HousingListing)
     private readonly housingListings: Repository<HousingListing>,
     private readonly notifications: NotificationsService,
+    // The forum and topic steps are set-based raw SQL, so they run on the
+    // root connection and `AccountModule` registers no extra repositories.
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -135,6 +149,18 @@ export class ContentOwnerErasureService {
     );
     await this.runIsolated('live housing listings', () =>
       this.withdrawHousingListings(userId),
+    );
+    // Forum order matters: the deletions go first, so the recount and the
+    // byline scrub touch only rows that survive.
+    await this.runIsolated(
+      'forum threads with nothing of anyone else in them',
+      () => this.eraseForumThreads(userId),
+    );
+    await this.runIsolated('forum reply counts', () =>
+      this.recountForumReplies(userId),
+    );
+    await this.runIsolated('topic post bylines', () =>
+      this.scrubTopicPostBylines(userId),
     );
   }
 
@@ -508,5 +534,125 @@ export class ContentOwnerErasureService {
           `for erased account ${userId}`,
       );
     }
+  }
+
+  // --- the forum (ENG-494) ------------------------------------------------------
+
+  /**
+   * Deletes the erased member's threads that hold nothing of anyone else's.
+   * A thread survives the erasure (author NULL, `UNKNOWN_AUTHOR` byline) only
+   * when it is live and either other members replied in it or it credits a
+   * co-author, whose shared work it also is; everything else would outlive
+   * its author as an empty shell or, worse, go public later:
+   *
+   *  - scheduled (`published_at` still ahead) or held for review (pending or
+   *    rejected): the negation of `forumThreadVisibleSql`. Left standing, the
+   *    first read after the date, or a moderator's approval, would publish a
+   *    title, tags and poll the member never made public, after they asked to
+   *    be erased;
+   *  - withdrawn (`deleted_at` stamped): kept only for staff, and staff have
+   *    nothing to act on once the author is gone;
+   *  - no live reply from another member and no co-author: the opening post
+   *    cascades with the account, so the thread would be a title under
+   *    "Member" and nothing else. A `co_author_id` that is still set means the
+   *    co-author still has an account (that FK is `SET NULL`), so the thread
+   *    stays as theirs. The first two arms above apply to a co-authored
+   *    thread all the same.
+   *
+   * The row delete cascades exactly as every thread did before the FK became
+   * `SET NULL` (posts, votes, polls, photos, subscriptions, topic links).
+   * Idempotent: a retry finds only the rows still attributed to `userId`.
+   *
+   * This step runs under `runIsolated`, so a failure here is logged and the
+   * erasure carries on. The first two arms are therefore repeated as a
+   * fail-closed backstop inside the erasure transaction, right after the user
+   * row is deleted (`AccountDeletionProcessorService
+   * .sweepErasedMemberForumThreads`), so a scheduled or pending thread can
+   * never publish later under the placeholder byline.
+   */
+  private async eraseForumThreads(userId: string): Promise<void> {
+    const deletedRows: unknown = await this.dataSource.query(
+      `DELETE FROM "forum_thread" AS "t"
+        WHERE "t"."author_id" = $1
+          AND (
+            NOT (${forumThreadVisibleSql('"t"')})
+            OR "t"."deleted_at" IS NOT NULL
+            OR (
+              "t"."co_author_id" IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM "forum_post" "p"
+                 WHERE "p"."thread_id" = "t"."id"
+                   AND "p"."author_id" <> $1
+                   AND "p"."deleted_at" IS NULL
+              )
+            )
+          )
+        RETURNING "t"."id"`,
+      [userId],
+    );
+    const deletedCount = Array.isArray(deletedRows)
+      ? (deletedRows[0] as unknown[] | undefined)?.length
+      : undefined;
+    if (deletedCount) {
+      this.logger.log(
+        `Deleted ${deletedCount} forum thread(s) with no other member's ` +
+          `replies for erased account ${userId}`,
+      );
+    }
+  }
+
+  /**
+   * The member's own replies go with their account (`forum_post.author_id`
+   * stays CASCADE), and nothing moves the denormalized `reply_count` when a
+   * cascade removes a row. So every thread the member has a live reply in is
+   * recounted here, in one set-based statement, to the value it will hold once
+   * their replies are gone. The definition is `adjustReplyCount`'s and
+   * `BackfillForumThreadReplyCount1804020000000`'s: posts that are neither the
+   * opening post nor tombstoned.
+   */
+  private async recountForumReplies(userId: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE "forum_thread" "t"
+          SET "reply_count" = (
+            SELECT COUNT(*)::int FROM "forum_post" "p"
+             WHERE "p"."thread_id" = "t"."id"
+               AND "p"."is_op" = false
+               AND "p"."deleted_at" IS NULL
+               AND "p"."author_id" <> $1
+          )
+        WHERE "t"."id" IN (
+          SELECT "own"."thread_id" FROM "forum_post" "own"
+           WHERE "own"."author_id" = $1
+             AND "own"."is_op" = false
+             AND "own"."deleted_at" IS NULL
+        )`,
+      [userId],
+    );
+  }
+
+  /**
+   * `topic_post` stores a copy of the writer's byline (name, initials, tone)
+   * for every topic a thread's tags linked it to. Its `author_id` is `SET
+   * NULL`, and the thread now survives the erasure, so without this the
+   * member's full name would stay on every topic page that lists the thread.
+   * The generic `ERASED_AUTHOR_TOPIC_BYLINE` goes over it before the user row
+   * is deleted, while `author_id` still says whose rows these are.
+   * `TopicsService.listPosts` applies the same byline on read for any row this
+   * missed.
+   */
+  private async scrubTopicPostBylines(userId: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE "topic_post"
+          SET "author_name" = $2,
+              "author_initials" = $3,
+              "author_tone" = $4
+        WHERE "author_id" = $1`,
+      [
+        userId,
+        ERASED_AUTHOR_TOPIC_BYLINE.authorName,
+        ERASED_AUTHOR_TOPIC_BYLINE.authorInitials,
+        ERASED_AUTHOR_TOPIC_BYLINE.authorTone,
+      ],
+    );
   }
 }

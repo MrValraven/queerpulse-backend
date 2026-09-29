@@ -13,6 +13,7 @@ import { Listing } from '../listings/entities/listing.entity';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import {
   Subprofile,
+  SubprofileLinkVisibility,
   SubprofileStatus,
 } from '../subprofiles/entities/subprofile.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
@@ -420,10 +421,10 @@ export class IdentitiesService {
    * listing co-manager, a persona co-owner and a company team member are
    * staff and never the owner, matching `MailboxSummaryDto.isOwner`'s own
    * doc. An ownerless listing (its owner column erased, co-managers remain)
-   * has no owner, so this reads null until the listing gains one again; the
-   * owner's mailbox switch stays locked for that whole gap
-   * (`IdentityAttributionSettingsService.updateOwnerSwitch`), a deliberate
-   * product choice: the toggle stays the owner's own call alone. A
+   * has no owner, so this reads null until the listing gains one again. For
+   * that whole gap any staff member of the mailbox may change the owner's
+   * switch (PRD-432, `IdentityAttributionSettingsService.updateOwnerSwitch`),
+   * since the platform holds the listing and nobody else could. A
    * `Profile` identity carries no separate owner concept for this question:
    * it reads null, since the profile mailbox switch has no meaning either.
    */
@@ -530,6 +531,54 @@ export class IdentitiesService {
   }
 
   /**
+   * ENG-456: which of `subprofileIds` are linked personas
+   * (`subprofiles.link_visibility = 'linked'`), in one query. A persona
+   * missing from the answer keeps who runs it private, so a customer is
+   * never told which staff member replied as it
+   * (`IdentityAttributionService`). A persona row that vanished is missing
+   * too, so an unknown persona fails closed.
+   */
+  async linkedPersonaSubprofileIds(
+    subprofileIds: ReadonlyArray<string>,
+  ): Promise<Set<string>> {
+    const uniqueSubprofileIds = [...new Set(subprofileIds)];
+    if (uniqueSubprofileIds.length === 0) {
+      return new Set();
+    }
+    const subprofiles = await this.subprofiles.find({
+      where: { id: In(uniqueSubprofileIds) },
+      select: { id: true, linkVisibility: true },
+    });
+    return new Set(
+      subprofiles
+        .filter(
+          (subprofile) =>
+            subprofile.linkVisibility === SubprofileLinkVisibility.Linked,
+        )
+        .map((subprofile) => subprofile.id),
+    );
+  }
+
+  /**
+   * ENG-456: true when `identity` is a persona that keeps who runs it
+   * private, read through `linkedPersonaSubprofileIds`. Its staff are never
+   * named to a customer, whatever either attribution switch says. False for
+   * every listing, company and profile identity.
+   */
+  async isUnlinkedPersona(identity: Identity): Promise<boolean> {
+    if (identity.kind !== IdentityKind.Subprofile) {
+      return false;
+    }
+    if (!identity.subprofileId) {
+      return true;
+    }
+    const linkedSubprofileIds = await this.linkedPersonaSubprofileIds([
+      identity.subprofileId,
+    ]);
+    return !linkedSubprofileIds.has(identity.subprofileId);
+  }
+
+  /**
    * Task 15 fix round 1: which of `subprofileIds` moderation removed
    * (`subprofiles.removed_at` set), in one query. The single answer to "may
    * this persona still speak", read by `assertMayActAs`. `listMailboxesFor`
@@ -584,20 +633,34 @@ export class IdentitiesService {
         ? [{ ...mailbox, identityId: identity.id, identity }]
         : [];
     });
-    // ONE read of every listed persona, for both `isReadOnly` (moderation
-    // removed it) and the never-published filter.
+    // ONE read of every listed persona, for `isReadOnly` (moderation
+    // removed it), the never-published filter and, ENG-456, whether it keeps
+    // who runs it private (`staffNamesLockedReason`).
     const personaIds = staffedWithIdentities
       .filter((mailbox) => mailbox.kind === IdentityKind.Subprofile)
       .map((mailbox) => mailbox.ownerEntityId);
     const personaStates = personaIds.length
       ? await this.subprofiles.find({
           where: { id: In(personaIds) },
-          select: { id: true, removedAt: true, status: true },
+          select: {
+            id: true,
+            removedAt: true,
+            status: true,
+            linkVisibility: true,
+          },
         })
       : [];
     const removedSubprofileIds = new Set(
       personaStates
         .filter((subprofile) => subprofile.removedAt != null)
+        .map((subprofile) => subprofile.id),
+    );
+    const linkedSubprofileIds = new Set(
+      personaStates
+        .filter(
+          (subprofile) =>
+            subprofile.linkVisibility === SubprofileLinkVisibility.Linked,
+        )
         .map((subprofile) => subprofile.id),
     );
     const resolvedMailboxes = await this.withoutNeverPublishedPersonas(
@@ -647,6 +710,13 @@ export class IdentitiesService {
         shouldAllowMyName: isProfile
           ? null
           : (shouldAllowMyNameByIdentityId.get(mailbox.identityId) ?? true),
+        // Fails closed like `linkedPersonaSubprofileIds`: a persona this
+        // read did not find linked is treated as unlinked.
+        staffNamesLockedReason:
+          mailbox.kind === IdentityKind.Subprofile &&
+          !linkedSubprofileIds.has(mailbox.ownerEntityId)
+            ? 'unlinkedPersona'
+            : null,
       });
     });
     // The identity id breaks a tie between equal names, so the switcher keeps

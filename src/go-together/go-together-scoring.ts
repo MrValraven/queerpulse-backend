@@ -249,9 +249,24 @@ export function scorePair(
   return { score: clamp01(weighted + components.hostBonus), components };
 }
 
-/** Smoothed IDF over every current questionnaire profile's interest list:
- *  ln((N + 1) / (df + 1)) + 1. The pool service reads only the interests
- *  column, so this takes plain lists. */
+/** Smoothed IDF over every current questionnaire profile on the platform:
+ *  ln((N + 1) / (df + 1)) + 1, where N counts the profiles and df the
+ *  profiles holding the tag. The pool service gets both from one aggregate
+ *  query (a count per tag plus the profile total) and never loads anyone's
+ *  interest list, so this takes the counts. */
+export function interestIdfFromFrequencies(
+  documentFrequency: ReadonlyMap<string, number>,
+  profileTotal: number,
+): Map<string, number> {
+  const idf = new Map<string, number>();
+  for (const [tagId, frequency] of documentFrequency) {
+    idf.set(tagId, Math.log((profileTotal + 1) / (frequency + 1)) + 1);
+  }
+  return idf;
+}
+
+/** The same IDF from plain interest lists, one per profile. Kept for tests
+ *  and tools that already hold the lists. */
 export function computeInterestIdf(
   interestLists: readonly (readonly string[])[],
 ): Map<string, number> {
@@ -261,10 +276,5 @@ export function computeInterestIdf(
       documentFrequency.set(tagId, (documentFrequency.get(tagId) ?? 0) + 1);
     }
   }
-  const total = interestLists.length;
-  const idf = new Map<string, number>();
-  for (const [tagId, frequency] of documentFrequency) {
-    idf.set(tagId, Math.log((total + 1) / (frequency + 1)) + 1);
-  }
-  return idf;
+  return interestIdfFromFrequencies(documentFrequency, interestLists.length);
 }

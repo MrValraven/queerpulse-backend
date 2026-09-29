@@ -157,6 +157,24 @@ export function briefWithFiledWords(
   return { ...(brief ?? EMPTY_PIECE_BRIEF), filedWords };
 }
 
+/**
+ * Returns `brief` with the commission's `angle` and `commissionedOn` set,
+ * spreading every other field for the same reason as `briefWithFiledWords`:
+ * the brief is one jsonb blob, and the wants, rate and kill fee already on it
+ * survive the commission. A piece with no brief starts from
+ * `EMPTY_PIECE_BRIEF`.
+ */
+export function briefWithCommission(
+  brief: PieceBrief | null,
+  commission: { angle: string; commissionedOn: string },
+): PieceBrief {
+  return {
+    ...(brief ?? EMPTY_PIECE_BRIEF),
+    angle: commission.angle,
+    commissionedOn: commission.commissionedOn,
+  };
+}
+
 function assertCareSubject(
   value: unknown,
   index: number,

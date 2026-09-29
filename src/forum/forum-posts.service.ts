@@ -10,6 +10,10 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
 import {
+  truncateCharacters,
+  widenToCodePointBoundaries,
+} from '../common/text-characters';
+import {
   ContentModerationService,
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
@@ -35,7 +39,10 @@ import {
   replacePostPhotos,
 } from './forum-post-photo';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
-import { ForumThreadsService } from './forum-threads.service';
+import {
+  ForumThreadsService,
+  forumThreadVisibleSql,
+} from './forum-threads.service';
 import {
   DEFAULT_REPLY_SORT,
   ReplySort,
@@ -119,10 +126,15 @@ function buildSearchExcerpt(body: string, term: string): string {
   if (collapsed.length <= SEARCH_EXCERPT_LENGTH) return collapsed;
   const matchIndex = foldSearchText(collapsed).indexOf(foldSearchText(term));
   if (matchIndex < 0)
-    return `${collapsed.slice(0, SEARCH_EXCERPT_LENGTH)}\u2026`;
+    return `${truncateCharacters(collapsed, SEARCH_EXCERPT_LENGTH)}\u2026`;
   const start = Math.max(0, matchIndex - Math.floor(SEARCH_EXCERPT_LENGTH / 3));
-  const window = collapsed.slice(start, start + SEARCH_EXCERPT_LENGTH);
-  return `${start > 0 ? '\u2026' : ''}${window}${start + SEARCH_EXCERPT_LENGTH < collapsed.length ? '\u2026' : ''}`;
+  const { start: safeStart, end: safeEnd } = widenToCodePointBoundaries(
+    collapsed,
+    start,
+    start + SEARCH_EXCERPT_LENGTH,
+  );
+  const window = collapsed.slice(safeStart, safeEnd);
+  return `${safeStart > 0 ? '\u2026' : ''}${window}${safeEnd < collapsed.length ? '\u2026' : ''}`;
 }
 
 export interface VoteResult {
@@ -285,7 +297,18 @@ export class ForumPostsService {
    *    a moderator can restore it;
    *  - the post is not hidden OR removed by moderation. Read paths keep a
    *    removed post as a visible `[removed]` tombstone; search must not, because
-   *    surfacing it means surfacing the text a moderator took down.
+   *    surfacing it means surfacing the text a moderator took down;
+   *  - the thread passes the forum's read gate (`forumThreadVisibleSql`): it is
+   *    published and through review, exactly as thread search requires.
+   *
+   * OPENING POSTS. A thread's opening post is a `forum_post` row (`is_op`), so
+   * its body is searchable here too, and it passes through every gate above
+   * on the same terms as a reply: the thread gate holds it back until the
+   * thread would show on the forum, and the post's own tombstone and
+   * moderation checks drop it once the author or a moderator takes it down.
+   * The forum list keeps a thread whose opening post was taken down (it
+   * renders the tombstone), so replies inside such a thread stay searchable
+   * as that thread stays listed.
    */
   async searchByText(
     viewerId: string,
@@ -310,7 +333,14 @@ export class ForumPostsService {
       // is exactly what deleting the thread retracted. Same reasoning as the
       // block and community-access gates below, applied to the new
       // thread-level tombstone.
-      .andWhere('t.deletedAt IS NULL');
+      .andWhere('t.deletedAt IS NULL')
+      // The forum's read gate on the thread (the frozen
+      // `forumThreadVisibleSql`, as thread search, the feed and saved threads
+      // apply it). A thread's opening post is a `forum_post` row from the
+      // moment the thread is created, so without this a scheduled,
+      // pending-review or rejected thread's title and an excerpt of its body
+      // reached every member whose search matched a word in it.
+      .andWhere(forumThreadVisibleSql('"t"'));
 
     // Post author: blocked either way, or muted by the viewer.
     this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
@@ -355,9 +385,15 @@ export class ForumPostsService {
     // (the EXISTS below), mirroring
     // `ForumThreadsService.applyCommunityAccessFilter` and `FeedService`'s
     // equivalent arm.
+    //
+    // `OR "t"."cross_posted" = true` (PRD-407): a cross-posted thread is shown
+    // to the whole forum by its author's choice, so its replies are as
+    // searchable as the thread is readable, the same arm
+    // `applyCommunityAccessFilter` carries.
     qb.andWhere(
       `(
         "t"."community_id" IS NULL
+        OR "t"."cross_posted" = true
         OR EXISTS (
           SELECT 1 FROM "communities" "__search_com"
           WHERE "__search_com"."id" = "t"."community_id"
@@ -844,7 +880,7 @@ export class ForumPostsService {
         source: 'forum',
         threadSlug,
         postId: saved.id,
-        excerpt: body.slice(0, 140),
+        excerpt: truncateCharacters(body, 140),
       },
     );
 
@@ -862,21 +898,27 @@ export class ForumPostsService {
         threadSlug,
         postId: saved.id,
         parentPostId: parentPost.id,
-        excerpt: body.slice(0, 140),
+        excerpt: truncateCharacters(body, 140),
       });
     }
 
     // A *top-level* reply (no parent post) is a reply to the thread itself —
     // notify the thread's original author with its own `ForumThreadReply` type.
     // Same de-dupe as the parent-reply case: skipped when the reply already
-    // `@mentioned` the thread author, so they're never double-notified.
-    if (!parentPost && !mentionNotifiedUserIds.has(thread.authorId)) {
-      await this.mentions.notifyThreadReply(thread.authorId, user.userId, {
+    // `@mentioned` the thread author, so they're never double-notified. A
+    // thread whose author erased their account (ENG-494) has nobody to tell.
+    const threadAuthorId = thread.authorId;
+    if (
+      !parentPost &&
+      threadAuthorId !== null &&
+      !mentionNotifiedUserIds.has(threadAuthorId)
+    ) {
+      await this.mentions.notifyThreadReply(threadAuthorId, user.userId, {
         actorId: user.userId,
         source: 'forum',
         threadSlug,
         postId: saved.id,
-        excerpt: body.slice(0, 140),
+        excerpt: truncateCharacters(body, 140),
       });
     }
 
@@ -887,7 +929,9 @@ export class ForumPostsService {
     // about the same reply twice.
     const alreadyNotified = new Set(mentionNotifiedUserIds);
     if (parentPost) alreadyNotified.add(parentPost.authorId);
-    if (!parentPost) alreadyNotified.add(thread.authorId);
+    if (!parentPost && threadAuthorId !== null) {
+      alreadyNotified.add(threadAuthorId);
+    }
     await this.notifySubscribers(
       thread,
       saved.id,
@@ -929,8 +973,15 @@ export class ForumPostsService {
    * are enforced one level down, inside `NotificationsService.create`, which
    * drops a notification whose actor the recipient has hidden.
    *
-   * Best-effort throughout: `notifyThreadReply` swallows its own failures, and
-   * the reply has already committed by the time this runs.
+   * A follow outlives the access it was made with, so the followers are first
+   * narrowed to the thread's current audience in one batched read
+   * (`MentionNotificationService.forumThreadAudience`): a follower who left
+   * the thread's gated community, is blocked with its author, or can no
+   * longer see it while it sits in review hears nothing.
+   *
+   * Best-effort throughout: `notifyThreadReply` swallows its own failures,
+   * `forumThreadAudience` answers nobody on a failed read, and the reply has
+   * already committed by the time this runs.
    */
   private async notifySubscribers(
     thread: ForumThread,
@@ -942,14 +993,27 @@ export class ForumPostsService {
       thread.id,
       actorId,
     );
-    for (const subscriberId of subscriberIds) {
-      if (alreadyNotified.has(subscriberId)) continue;
-      await this.mentions.notifyThreadReply(subscriberId, actorId, {
+    const candidateIds = subscriberIds.filter(
+      (subscriberId) => !alreadyNotified.has(subscriberId),
+    );
+    if (!candidateIds.length) return;
+    const audienceIds = await this.mentions.forumThreadAudience(
+      thread.slug,
+      candidateIds,
+    );
+    for (const subscriberId of candidateIds) {
+      if (!audienceIds.has(subscriberId)) continue;
+      await this.mentions.notifyThreadReply(
+        subscriberId,
         actorId,
-        source: 'forum',
-        threadSlug: thread.slug,
-        postId,
-      });
+        {
+          actorId,
+          source: 'forum',
+          threadSlug: thread.slug,
+          postId,
+        },
+        { isAudienceChecked: true },
+      );
     }
   }
 

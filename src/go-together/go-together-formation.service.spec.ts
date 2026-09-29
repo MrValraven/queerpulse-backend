@@ -1,8 +1,9 @@
-import { ConflictException, Logger } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { FindOperator } from 'typeorm';
 import { Event } from '../events/entities/event.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { GroupsService } from '../messaging/groups.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -15,6 +16,7 @@ import {
 } from './go-together-formation.service';
 import { MatchGraph, MatchUnit } from './go-together-grouping';
 import { GoTogetherHouseService } from './go-together-house.service';
+import { isGoTogetherLaunched } from './go-together-launch.guard';
 import {
   GoTogetherPoolService,
   MatchPool,
@@ -26,6 +28,14 @@ import {
   SCORING_VERSION,
   pairKey,
 } from './go-together-scoring';
+
+jest.mock('./go-together-launch.guard', () => ({
+  isGoTogetherLaunched: jest.fn(() => true),
+}));
+
+const mockIsGoTogetherLaunched = isGoTogetherLaunched as jest.MockedFunction<
+  typeof isGoTogetherLaunched
+>;
 
 const EVENT_ID = 'event-1';
 const HOUSE_ID = 'house-1';
@@ -184,16 +194,20 @@ function groupRow(
 /**
  * A pool where every pair scores the same and every pair is feasible unless
  * listed. It follows the real rules: a seated member without a questionnaire
- * stays in as an answerless member, a pending one is skipped, and a mutually
- * accepted pair is one unit only while both sit in the same place.
+ * stays in as an answerless member, a pending one is skipped unless listed in
+ * `keepAnswerlessEntryIds`, and a mutually accepted pair is one unit only
+ * while both sit in the same place and may share a group.
  */
 function poolFrom(
   poolEntries: EventMatchEntry[],
   infeasiblePairs: ReadonlySet<string>,
   missingProfiles: ReadonlySet<string>,
+  keepAnswerlessEntryIds: ReadonlySet<string> = new Set(),
 ): { pool: MatchPool; skippedEntryIds: string[] } {
   const isSkipped = (entry: EventMatchEntry): boolean =>
-    missingProfiles.has(entry.userId) && placeOf(entry) === 'pending';
+    missingProfiles.has(entry.userId) &&
+    placeOf(entry) === 'pending' &&
+    !keepAnswerlessEntryIds.has(entry.id);
   const members = poolEntries
     .filter((entry) => !isSkipped(entry))
     .map((entry) => ({
@@ -235,7 +249,8 @@ function poolFrom(
       !placed.has(partnerIndex) &&
       partner?.entry.pairStatus === 'accepted' &&
       partner.entry.pairPartnerId === member.entry.userId &&
-      placeOf(partner.entry) === placeOf(member.entry);
+      placeOf(partner.entry) === placeOf(member.entry) &&
+      graph.feasible(index, partnerIndex);
     const unitMembers =
       isPair && partnerIndex !== undefined ? [index, partnerIndex] : [index];
     unitMembers.forEach((person) => placed.add(person));
@@ -288,13 +303,42 @@ describe('GoTogetherFormationService', () => {
   };
   let notifications: { createForRecipients: jest.Mock };
   let loggedErrors: jest.SpyInstance;
+  /** Every group row read inside a seating transaction, with its options. */
+  let lockedGroupReads: { where: Where; lock?: unknown }[];
+  /** Whether a member still holds an active seat in the chat. */
+  let chatSeats: { exists: jest.Mock };
 
   async function build(scenario: Scenario = {}): Promise<void> {
+    mockIsGoTogetherLaunched.mockReturnValue(true);
     let groupSequence = 0;
     entries = inMemoryRepository(scenario.entries ?? [], () => 'unused');
     groups = inMemoryRepository(scenario.groups ?? [], () => {
       groupSequence += 1;
       return `new-group-${groupSequence}`;
+    });
+    // The seating transaction runs straight through against the same
+    // in-memory tables; the group read records its lock for the assertions.
+    lockedGroupReads = [];
+    const transactionManager = {
+      findOne: jest.fn(
+        async (target: unknown, options: { where: Where; lock?: unknown }) => {
+          if (target !== EventMatchGroup) return entries.findOne(options);
+          lockedGroupReads.push(options);
+          return groups.findOne(options);
+        },
+      ),
+      count: jest.fn(async (_target: unknown, options: { where: Where }) =>
+        entries.count(options),
+      ),
+      getRepository: jest.fn(() => entries),
+    };
+    Object.assign(entries, {
+      manager: {
+        transaction: jest.fn(
+          async (work: (manager: unknown) => Promise<unknown>) =>
+            work(transactionManager),
+        ),
+      },
     });
     config = {
       eventId: EVENT_ID,
@@ -327,13 +371,23 @@ describe('GoTogetherFormationService', () => {
       (scenario.missingProfiles ?? []).map((name) => `user-${name}`),
     );
     poolService = {
-      buildPool: jest.fn(async (poolEntries: EventMatchEntry[]) => {
-        const built = poolFrom(poolEntries, infeasiblePairs, missingProfiles);
-        const afterFirstPool = scenario.afterFirstPool;
-        scenario.afterFirstPool = undefined;
-        afterFirstPool?.(entries.rows);
-        return built;
-      }),
+      buildPool: jest.fn(
+        async (
+          poolEntries: EventMatchEntry[],
+          options: { keepAnswerlessEntryIds?: ReadonlySet<string> } = {},
+        ) => {
+          const built = poolFrom(
+            poolEntries,
+            infeasiblePairs,
+            missingProfiles,
+            options.keepAnswerlessEntryIds,
+          );
+          const afterFirstPool = scenario.afterFirstPool;
+          scenario.afterFirstPool = undefined;
+          afterFirstPool?.(entries.rows);
+          return built;
+        },
+      ),
     };
     groupsService = {
       createMatchedGroup: jest.fn(async () => ({
@@ -344,6 +398,7 @@ describe('GoTogetherFormationService', () => {
       leaveGroup: jest.fn(async () => ({ ok: true })),
     };
     notifications = { createForRecipients: jest.fn(async () => []) };
+    chatSeats = { exists: jest.fn(async () => true) };
     loggedErrors = jest
       .spyOn(Logger.prototype, 'error')
       .mockImplementation(() => undefined);
@@ -360,6 +415,10 @@ describe('GoTogetherFormationService', () => {
           useValue: {
             findOne: jest.fn(async () => ({ ...EVENT, ...scenario.event })),
           },
+        },
+        {
+          provide: getRepositoryToken(ConversationParticipant),
+          useValue: chatSeats,
         },
         { provide: GoTogetherPoolService, useValue: poolService },
         { provide: GroupsService, useValue: groupsService },
@@ -747,6 +806,39 @@ describe('GoTogetherFormationService', () => {
       expect(placedCount).toBe(0);
       expect(groupsService.addMatchedMembers).not.toHaveBeenCalled();
     });
+
+    it('seats nobody when a concurrent writer fills the last seat after the plan (ENG-432)', async () => {
+      await build({
+        entries: [
+          ...groupedRows('group-four', ['g1', 'g2', 'g3', 'g4']),
+          entryRow('late', { status: 'unmatched' }),
+        ],
+        groups: [groupRow('group-four')],
+        afterFirstPool: (rows) => {
+          rows.push(...groupedRows('group-four', ['racer']));
+        },
+      });
+
+      const placedCount = await service.placeLateJoiners(EVENT_ID);
+
+      expect(placedCount).toBe(0);
+      expect(lockedGroupReads).toHaveLength(1);
+      expect(lockedGroupReads[0]?.where.id).toBe('group-four');
+      expect(lockedGroupReads[0]?.lock).toEqual({ mode: 'for_no_key_update' });
+      expect(groupsService.addMatchedMembers).not.toHaveBeenCalled();
+      expect(
+        notificationsOf(NotificationType.GoTogetherGroupReady),
+      ).toHaveLength(0);
+      expect(row('late')).toEqual(
+        expect.objectContaining({ status: 'unmatched', groupId: null }),
+      );
+      expect(
+        entries.rows.filter(
+          (entry) =>
+            entry.groupId === 'group-four' && entry.status === 'grouped',
+        ),
+      ).toHaveLength(5);
+    });
   });
 
   describe('formLateGroup', () => {
@@ -921,6 +1013,44 @@ describe('GoTogetherFormationService', () => {
       expect(groupsService.addMatchedMembers).not.toHaveBeenCalled();
     });
 
+    it('refuses a merge whose last seat a concurrent writer took after the check, and keeps the old chat (ENG-432)', async () => {
+      await build(leavingScenario());
+      await service.removeMember({ ...row('leaver') });
+      groupsService.leaveGroup.mockClear();
+      const realBuildPool = poolService.buildPool.getMockImplementation();
+      poolService.buildPool.mockImplementationOnce(
+        async (poolEntries: EventMatchEntry[]) => {
+          const built: unknown = await realBuildPool?.(poolEntries);
+          entries.rows.push(...groupedRows('group-two', ['v', 'w']));
+          return built;
+        },
+      );
+
+      const failure: unknown = await service
+        .acceptMerge({ ...row('partner') })
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(ConflictException);
+      expect((failure as ConflictException).getResponse()).toEqual(
+        expect.objectContaining({ code: MERGE_EXPIRED_CODE }),
+      );
+      expect(row('partner')).toEqual(
+        expect.objectContaining({
+          status: 'grouped',
+          groupId: 'group-one',
+          mergeOfferGroupId: null,
+        }),
+      );
+      expect(groupsService.leaveGroup).not.toHaveBeenCalled();
+      expect(groupsService.addMatchedMembers).not.toHaveBeenCalled();
+      expect(
+        entries.rows.filter(
+          (entry) =>
+            entry.groupId === 'group-two' && entry.status === 'grouped',
+        ),
+      ).toHaveLength(5);
+    });
+
     it('dissolves a group its last member leaves', async () => {
       await build({
         entries: groupedRows('group-solo', ['last']),
@@ -937,6 +1067,148 @@ describe('GoTogetherFormationService', () => {
       expect(
         notificationsOf(NotificationType.GoTogetherMemberLeft),
       ).toHaveLength(0);
+    });
+
+    // M1: while Go together is held dark the merge and group routes answer
+    // 404, so a safety removal sends no offer the members could act on.
+    it('sends no merge offer or member-left notice while Go together is dark', async () => {
+      await build(leavingScenario());
+      mockIsGoTogetherLaunched.mockReturnValue(false);
+
+      await service.removeMember({ ...row('leaver') });
+
+      expect(row('leaver').status).toBe('withdrawn');
+      expect(row('partner').mergeOfferGroupId).toBeNull();
+      expect(row('m').mergeOfferGroupId).toBeNull();
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(0);
+    });
+
+    it('still dissolves a group its last member leaves while Go together is dark', async () => {
+      await build({
+        entries: groupedRows('group-solo', ['last']),
+        groups: [groupRow('group-solo')],
+      });
+      mockIsGoTogetherLaunched.mockReturnValue(false);
+
+      await service.removeMember({ ...row('last') });
+
+      expect(groupsService.dissolveMatchedGroup).toHaveBeenCalledWith(
+        'conversation-group-solo',
+        HOUSE_ID,
+      );
+      expect(groups.rows[0]!.dissolvedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('leaveGroup (PRD-418)', () => {
+    const seatedScenario = (startAt: Date): Scenario => ({
+      entries: [
+        entryRow('leaver', {
+          status: 'grouped',
+          groupId: 'group-one',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-partner',
+        }),
+        entryRow('partner', {
+          status: 'grouped',
+          groupId: 'group-one',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-leaver',
+        }),
+        entryRow('m', { status: 'grouped', groupId: 'group-one' }),
+        ...groupedRows('group-two', ['x', 'y', 'z']),
+      ],
+      groups: [groupRow('group-one'), groupRow('group-two')],
+      event: { startAt },
+    });
+
+    it('takes the member out of the group before the gathering starts', async () => {
+      await build(seatedScenario(EVENT.startAt));
+
+      const scope = await service.leaveGroup({ ...row('leaver') });
+
+      expect(scope).toBe('group');
+      expect(row('leaver')).toEqual(
+        expect.objectContaining({ status: 'withdrawn', groupId: null }),
+      );
+      expect(row('partner').pairStatus).toBe('none');
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(2);
+    });
+
+    it('from the start onward ends only the chat seat and keeps the member grouped', async () => {
+      const startAt = new Date('2026-10-10T20:00:00Z');
+      await build(seatedScenario(startAt));
+
+      const scope = await service.leaveGroup(
+        { ...row('leaver') },
+        new Date('2026-10-10T21:00:00Z'),
+      );
+
+      expect(scope).toBe('chat');
+      const [[seatQuery]] = chatSeats.exists.mock.calls as [[{ where: Where }]];
+      expect(seatQuery.where.conversationId).toBe('conversation-group-one');
+      expect(seatQuery.where.userId).toBe('user-leaver');
+      expect(seatQuery.where.leftAt).toBeInstanceOf(FindOperator);
+      expect(groupsService.leaveGroup).toHaveBeenCalledWith(
+        'conversation-group-one',
+        'user-leaver',
+        { isGoTogetherRemoval: true },
+      );
+      expect(row('leaver')).toEqual(
+        expect.objectContaining({
+          status: 'grouped',
+          groupId: 'group-one',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-partner',
+        }),
+      );
+      expect(row('partner')).toEqual(
+        expect.objectContaining({
+          status: 'grouped',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-leaver',
+        }),
+      );
+      expect(entries.update).not.toHaveBeenCalled();
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(0);
+    });
+  });
+
+  describe('leaveGroup after the start, with no active chat seat', () => {
+    it('is a quiet no-op: no chat call, no entry write', async () => {
+      await build({
+        entries: groupedRows('group-one', ['leaver', 'm', 'n']),
+        groups: [groupRow('group-one')],
+        event: { startAt: new Date('2026-10-10T20:00:00Z') },
+      });
+      chatSeats.exists.mockResolvedValue(false);
+
+      const scope = await service.leaveGroup(
+        { ...row('leaver') },
+        new Date('2026-10-10T21:00:00Z'),
+      );
+
+      expect(scope).toBe('chat');
+      expect(groupsService.leaveGroup).not.toHaveBeenCalled();
+      expect(loggedErrors).not.toHaveBeenCalled();
+      expect(entries.update).not.toHaveBeenCalled();
+      expect(row('leaver').status).toBe('grouped');
+    });
+  });
+
+  describe('hasLeftChat', () => {
+    it('is false while the member holds an active seat and true once they do not', async () => {
+      await build();
+
+      expect(await service.hasLeftChat('conversation-1', 'user-a')).toBe(false);
+      chatSeats.exists.mockResolvedValue(false);
+      expect(await service.hasLeftChat('conversation-1', 'user-a')).toBe(true);
     });
   });
 
@@ -996,6 +1268,37 @@ describe('GoTogetherFormationService', () => {
       expect(pooledUserIds).not.toContain('user-blocked');
     });
 
+    // M1: dark, the block still takes the blocker out of the shared group
+    // and its chat, and seats them nowhere else.
+    it('takes the blocker out to unmatched and reseats nobody while Go together is dark', async () => {
+      await build(blockScenario(['x', 'y', 'z']));
+      mockIsGoTogetherLaunched.mockReturnValue(false);
+
+      const wasSeparated = await service.moveAfterBlock(
+        EVENT_ID,
+        'user-blocker',
+        'user-blocked',
+      );
+
+      expect(wasSeparated).toBe(true);
+      expect(groupsService.leaveGroup).toHaveBeenCalledWith(
+        'conversation-group-one',
+        'user-blocker',
+        { isGoTogetherRemoval: true },
+      );
+      expect(row('blocker')).toEqual(
+        expect.objectContaining({ status: 'unmatched', groupId: null }),
+      );
+      expect(groupsService.addMatchedMembers).not.toHaveBeenCalled();
+      expect(poolService.buildPool).not.toHaveBeenCalled();
+      expect(notificationsOf(NotificationType.GoTogetherGroupReady)).toEqual(
+        [],
+      );
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(0);
+    });
+
     it('leaves the blocker unmatched when no other group has room', async () => {
       await build(blockScenario(['v', 'w', 'x', 'y', 'z']));
 
@@ -1038,10 +1341,258 @@ describe('GoTogetherFormationService', () => {
       );
     });
 
+    const smallGroupScenario = (event?: Partial<typeof EVENT>): Scenario => ({
+      entries: [
+        ...groupedRows('group-one', ['blocker', 'blocked', 'o1']),
+        ...groupedRows('group-two', ['x', 'y', 'z']),
+      ],
+      groups: [groupRow('group-one'), groupRow('group-two')],
+      infeasible: [['blocker', 'blocked']],
+      event,
+    });
+
+    it('is a no-op the second time for the same block: no move, no second notice', async () => {
+      await build(smallGroupScenario());
+
+      const firstRun = await service.moveAfterBlock(
+        EVENT_ID,
+        'user-blocker',
+        'user-blocked',
+      );
+      const leftNoticesAfterFirstRun = notificationsOf(
+        NotificationType.GoTogetherMemberLeft,
+      ).length;
+      const secondRun = await service.moveAfterBlock(
+        EVENT_ID,
+        'user-blocker',
+        'user-blocked',
+      );
+
+      expect(firstRun).toBe(true);
+      expect(leftNoticesAfterFirstRun).toBe(2);
+      expect(secondRun).toBe(false);
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(2);
+      expect(groupsService.addMatchedMembers).toHaveBeenCalledTimes(1);
+      expect(row('blocker').groupId).toBe('group-two');
+    });
+
+    it('lets exactly one of two concurrent runs move the blocker (the group route and the listener)', async () => {
+      await build(smallGroupScenario());
+
+      const results = await Promise.all([
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+      ]);
+
+      expect([...results].sort()).toEqual([false, true]);
+      expect(groupsService.leaveGroup).toHaveBeenCalledTimes(1);
+      expect(groupsService.leaveGroup).toHaveBeenCalledWith(
+        'conversation-group-one',
+        'user-blocker',
+        { isGoTogetherRemoval: true },
+      );
+      expect(groupsService.addMatchedMembers).toHaveBeenCalledTimes(1);
+      expect(
+        notificationsOf(NotificationType.GoTogetherGroupReady),
+      ).toHaveLength(1);
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(2);
+      expect(row('blocker').groupId).toBe('group-two');
+    });
+
+    const pairedBlockerScenario = (
+      overrides: Pick<Scenario, 'infeasible' | 'missingProfiles'>,
+    ): Scenario => ({
+      entries: [
+        entryRow('blocker', {
+          status: 'grouped',
+          groupId: 'group-one',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-partner',
+        }),
+        entryRow('partner', {
+          status: 'grouped',
+          groupId: 'group-one',
+          pairStatus: 'accepted',
+          pairPartnerId: 'user-blocker',
+        }),
+        ...groupedRows('group-one', ['blocked', 'o1']),
+        ...groupedRows('group-two', ['x', 'y', 'z']),
+      ],
+      groups: [groupRow('group-one'), groupRow('group-two')],
+      ...overrides,
+    });
+
+    function userIdsWhoLeftChat(): string[] {
+      return (groupsService.leaveGroup.mock.calls as [string, string][])
+        .map((call) => call[1])
+        .sort();
+    }
+
+    it('moves a blocker and a partner who deleted their questionnaire while seated together, in one of two concurrent runs (spec 5.3)', async () => {
+      await build(
+        pairedBlockerScenario({
+          infeasible: [['blocker', 'blocked']],
+          missingProfiles: ['partner'],
+        }),
+      );
+
+      const results = await Promise.all([
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+      ]);
+
+      expect([...results].sort()).toEqual([false, true]);
+      expect(userIdsWhoLeftChat()).toEqual(['user-blocker', 'user-partner']);
+      expect(groupsService.addMatchedMembers).toHaveBeenCalledTimes(1);
+      expect(groupsService.addMatchedMembers).toHaveBeenCalledWith(
+        'conversation-group-two',
+        HOUSE_ID,
+        ['user-blocker', 'user-partner'],
+      );
+      for (const [name, partnerUserId] of [
+        ['blocker', 'user-partner'],
+        ['partner', 'user-blocker'],
+      ] as const) {
+        expect(row(name)).toEqual(
+          expect.objectContaining({
+            status: 'grouped',
+            groupId: 'group-two',
+            pairStatus: 'accepted',
+            pairPartnerId: partnerUserId,
+          }),
+        );
+      }
+      expect(
+        notificationsOf(NotificationType.GoTogetherGroupReady),
+      ).toHaveLength(1);
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(2);
+      expect(groups.rows[0]!.dissolvedAt).toBeNull();
+    });
+
+    it('lets one run move a blocker and partner who may not share a group, with one merge offer', async () => {
+      await build(
+        pairedBlockerScenario({
+          // The pair is infeasible, so blocker and partner are two units.
+          infeasible: [
+            ['blocker', 'blocked'],
+            ['blocker', 'partner'],
+          ],
+        }),
+      );
+
+      const results = await Promise.all([
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+      ]);
+
+      expect([...results].sort()).toEqual([false, true]);
+      expect(userIdsWhoLeftChat()).toEqual(['user-blocker', 'user-partner']);
+      expect(
+        notificationsOf(NotificationType.GoTogetherMemberLeft),
+      ).toHaveLength(2);
+      expect(row('blocker').groupId).toBe('group-two');
+      expect(row('partner')).toEqual(
+        expect.objectContaining({ status: 'unmatched', groupId: null }),
+      );
+      expect(groups.rows[0]!.dissolvedAt).toBeNull();
+    });
+
+    it('reseats a blocker who deleted their questionnaire while seated when another group has room (spec 3.6)', async () => {
+      await build({
+        ...blockScenario(['x', 'y', 'z']),
+        missingProfiles: ['blocker'],
+      });
+
+      const wasSeparated = await service.moveAfterBlock(
+        EVENT_ID,
+        'user-blocker',
+        'user-blocked',
+      );
+
+      expect(wasSeparated).toBe(true);
+      expect(groupsService.addMatchedMembers).toHaveBeenCalledWith(
+        'conversation-group-two',
+        HOUSE_ID,
+        ['user-blocker'],
+      );
+      expect(row('blocker')).toEqual(
+        expect.objectContaining({ status: 'grouped', groupId: 'group-two' }),
+      );
+    });
+
+    it('still sends the old group exactly one merge offer when the reseat fails after the claim', async () => {
+      await build(smallGroupScenario());
+      poolService.buildPool.mockRejectedValueOnce(new Error('deadlock'));
+
+      const results = await Promise.all([
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+        service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+      ]);
+
+      expect([...results].sort()).toEqual([false, true]);
+      expect(loggedErrors).toHaveBeenCalledWith(
+        expect.stringContaining('could not reseat the members it took out'),
+      );
+      expect(groupsService.leaveGroup).toHaveBeenCalledTimes(1);
+      expect(groupsService.addMatchedMembers).not.toHaveBeenCalled();
+      expect(row('blocker')).toEqual(
+        expect.objectContaining({ status: 'unmatched', groupId: null }),
+      );
+      const leftNotices = notificationsOf(
+        NotificationType.GoTogetherMemberLeft,
+      );
+      expect(leftNotices.map((call) => call[0])).toEqual([
+        ['user-blocked'],
+        ['user-o1'],
+      ]);
+    });
+
+    it('moves nobody when the block lands more than twelve hours after the start', async () => {
+      await build(
+        smallGroupScenario({
+          startAt: new Date(Date.now() - 13 * 60 * 60 * 1000),
+        }),
+      );
+
+      const wasSeparated = await service.moveAfterBlock(
+        EVENT_ID,
+        'user-blocker',
+        'user-blocked',
+      );
+
+      expect(wasSeparated).toBe(false);
+      expect(groupsService.leaveGroup).not.toHaveBeenCalled();
+      expect(entries.update).not.toHaveBeenCalled();
+      expect(row('blocker')).toEqual(
+        expect.objectContaining({ status: 'grouped', groupId: 'group-one' }),
+      );
+    });
+
     describe('once the gathering has started', () => {
       const startedEvent: Partial<typeof EVENT> = {
         startAt: new Date(Date.now() - 60 * 60 * 1000),
       };
+
+      it('lets exactly one of two concurrent runs take the blocker out', async () => {
+        await build(smallGroupScenario(startedEvent));
+
+        const results = await Promise.all([
+          service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+          service.moveAfterBlock(EVENT_ID, 'user-blocker', 'user-blocked'),
+        ]);
+
+        expect([...results].sort()).toEqual([false, true]);
+        expect(groupsService.leaveGroup).toHaveBeenCalledTimes(1);
+        expect(row('blocker')).toEqual(
+          expect.objectContaining({ status: 'unmatched', groupId: null }),
+        );
+      });
 
       it('still separates the pair in chat but never reseats the blocker into another group', async () => {
         await build({
@@ -1151,6 +1702,87 @@ describe('GoTogetherFormationService', () => {
       expect(groupTwo!.dissolvedAt).toBeInstanceOf(Date);
       expect(groupOld!.dissolvedAt).toEqual(new Date(0));
       expect(entries.rows.every((entry) => entry.status === 'withdrawn')).toBe(
+        true,
+      );
+    });
+
+    // M2: the group stays open, so the reconcile pass (and a later hard
+    // delete's strict pass) finds it again and retries the chat.
+    it('logs a chat that cannot be ended and keeps its group open for a retry', async () => {
+      await build({
+        entries: groupedRows('group-one', ['a', 'b', 'c']),
+        groups: [groupRow('group-one')],
+      });
+      groupsService.dissolveMatchedGroup.mockRejectedValueOnce(
+        new Error('chat service is down'),
+      );
+
+      await expect(
+        service.dissolveEventGroups(EVENT_ID),
+      ).resolves.toBeUndefined();
+
+      expect(groups.rows[0]!.dissolvedAt).toBeNull();
+      expect(loggedErrors).toHaveBeenCalled();
+      expect(entries.rows.every((entry) => entry.status === 'withdrawn')).toBe(
+        true,
+      );
+
+      await service.dissolveEventGroups(EVENT_ID);
+
+      expect(groupsService.dissolveMatchedGroup).toHaveBeenCalledTimes(2);
+      expect(groups.rows[0]!.dissolvedAt).toBeInstanceOf(Date);
+    });
+
+    // M3: a refusal no retry can change (here the house lost its owner seat)
+    // would otherwise keep a gathering undeletable behind a 503 for good.
+    it('closes the group when the house can never end its chat, even when every chat must end', async () => {
+      await build({
+        entries: groupedRows('group-one', ['a', 'b', 'c']),
+        groups: [groupRow('group-one')],
+      });
+      groupsService.dissolveMatchedGroup.mockRejectedValueOnce(
+        new ForbiddenException('Only the group owner can do that'),
+      );
+
+      await expect(
+        service.dissolveEventGroups(EVENT_ID, {
+          shouldFailWhenChatStaysOpen: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(loggedErrors).toHaveBeenCalled();
+      expect(groups.rows[0]!.dissolvedAt).toBeInstanceOf(Date);
+      expect(entries.rows.every((entry) => entry.status === 'withdrawn')).toBe(
+        true,
+      );
+    });
+
+    // ENG-433: before a hard delete, a chat left open would outlive its group
+    // row for good, so the first failure stops everything and the gathering is
+    // kept for a retry.
+    it('throws on the first chat that cannot be ended when every chat must end', async () => {
+      await build({
+        entries: [
+          ...groupedRows('group-one', ['a', 'b', 'c']),
+          ...groupedRows('group-two', ['d', 'e', 'f']),
+        ],
+        groups: [groupRow('group-one'), groupRow('group-two')],
+      });
+      groupsService.dissolveMatchedGroup.mockRejectedValueOnce(
+        new Error('chat service is down'),
+      );
+
+      await expect(
+        service.dissolveEventGroups(EVENT_ID, {
+          shouldFailWhenChatStaysOpen: true,
+        }),
+      ).rejects.toThrow('chat service is down');
+
+      expect(groupsService.dissolveMatchedGroup).toHaveBeenCalledTimes(1);
+      expect(groups.rows.every((group) => group.dissolvedAt === null)).toBe(
+        true,
+      );
+      expect(entries.rows.every((entry) => entry.status === 'grouped')).toBe(
         true,
       );
     });

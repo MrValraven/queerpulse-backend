@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { BADGED_STAFF_ROLE_IDS } from '../users/staff-roles.registry';
@@ -90,6 +89,12 @@ export class AmbassadorStatusService {
       .getExists();
   }
 
+  /**
+   * Every active, visible ambassador on an active account, newest grant
+   * first. Uncapped on purpose (ENG-458): this list feeds the tag map, so a
+   * cap would strip the tag from whoever fell past it. Rows are three short
+   * fields and grants are made by hand.
+   */
   async listVisibleRoster(): Promise<PlatformAmbassadorRowDTO[]> {
     const rows = await this.ambassadors
       .createQueryBuilder('ambassador')
@@ -110,8 +115,7 @@ export class AmbassadorStatusService {
         notBadgedStaffClause('"ambassador"."user_id"'),
         NOT_BADGED_STAFF_PARAMETERS,
       )
-      .orderBy('ambassador.grantedAt', 'ASC')
-      .limit(DEFAULT_LIST_LIMIT)
+      .orderBy('ambassador.grantedAt', 'DESC')
       .getRawMany<{
         focusArea: string;
         grantedAt: Date;

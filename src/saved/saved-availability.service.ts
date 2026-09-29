@@ -258,7 +258,8 @@ export class SavedAvailabilityService {
   /**
    * `ForumThreadsService.loadOr404`, predicate for predicate: the thread
    * exists, its author is not blocked in either direction, and a thread scoped
-   * to a PRIVATE community is invisible to a non-member.
+   * to a PRIVATE community is invisible to a non-member unless it is
+   * cross-posted to the forum (PRD-407).
    *
    * Blocks only, no mute. `loadOr404` checks the same way and says why: a mute
    * is a soft silence that keeps content out of feeds and lists, and opening
@@ -302,9 +303,12 @@ export class SavedAvailabilityService {
       viewerId,
       '"thread"."author_id"',
     );
+    // A cross-posted thread passes the community gate outright (PRD-407), as
+    // it does in `loadOr404`: its author chose to show it to the whole forum.
     queryBuilder.andWhere(
       `(
         "thread"."community_id" IS NULL
+        OR "thread"."cross_posted" = true
         OR NOT EXISTS (
           SELECT 1 FROM "communities" "saved_com"
           WHERE "saved_com"."id" = "thread"."community_id"

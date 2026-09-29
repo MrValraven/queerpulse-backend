@@ -25,6 +25,7 @@ import { emptyAccessibilityAnswers } from '../listings/listing-accessibility';
 import { ConnectionsService } from '../connections/connections.service';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { FORUM_THREAD_VISIBLE_SQL } from '../forum/forum-threads.service';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -33,6 +34,7 @@ import { MemberPreferences } from '../preferences/entities/member-preferences.en
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
+import { FeedTab } from './dto/get-feed.query';
 import { FeedInteractionsService } from './feed-interactions.service';
 import { FeedMuteService } from './feed-mute.service';
 import { decodeRankedCursor } from './feed-ranked-cursor';
@@ -96,6 +98,8 @@ function qbStub(rows: unknown[] = []): QbStub {
 interface RawQbStub {
   select: jest.Mock<RawQbStub, unknown[]>;
   addSelect: jest.Mock<RawQbStub, unknown[]>;
+  // FEED-LIKE: the `forum_post_vote` join the like state rides on.
+  leftJoin: jest.Mock<RawQbStub, unknown[]>;
   where: jest.Mock<RawQbStub, unknown[]>;
   andWhere: jest.Mock<RawQbStub, unknown[]>;
   groupBy: jest.Mock<RawQbStub, unknown[]>;
@@ -106,6 +110,7 @@ function rawQbStub(rows: unknown[] = []): RawQbStub {
   const qb: RawQbStub = {
     select: jest.fn<RawQbStub, unknown[]>(),
     addSelect: jest.fn<RawQbStub, unknown[]>(),
+    leftJoin: jest.fn<RawQbStub, unknown[]>(),
     where: jest.fn<RawQbStub, unknown[]>(),
     andWhere: jest.fn<RawQbStub, unknown[]>(),
     groupBy: jest.fn<RawQbStub, unknown[]>(),
@@ -113,6 +118,7 @@ function rawQbStub(rows: unknown[] = []): RawQbStub {
   };
   qb.select.mockReturnValue(qb);
   qb.addSelect.mockReturnValue(qb);
+  qb.leftJoin.mockReturnValue(qb);
   qb.where.mockReturnValue(qb);
   qb.andWhere.mockReturnValue(qb);
   qb.groupBy.mockReturnValue(qb);
@@ -121,15 +127,24 @@ function rawQbStub(rows: unknown[] = []): RawQbStub {
 }
 
 /** One row of that aggregate, as the driver returns it (`count(*)` is a
- *  bigint, so it arrives as a string). */
+ *  bigint, so it arrives as a string). FEED-LIKE adds the opening post's id,
+ *  its live vote count and whether the viewer has voted on it, defaulting to
+ *  "no OP row" so every existing caller that only cares about the excerpt or
+ *  reply count keeps working unchanged. */
 const threadCardRow = (
   threadId: string,
   replyCount: number,
   opBody: string | null,
+  opPostId: string | null = null,
+  opVoteCount = 0,
+  hasViewerVoted = false,
 ) => ({
   thread_id: threadId,
   op_body: opBody,
   reply_count: String(replyCount),
+  op_post_id: opPostId,
+  op_vote_count: opVoteCount,
+  has_viewer_voted: hasViewerVoted,
 });
 
 const t = (iso: string) => new Date(iso);
@@ -1635,7 +1650,7 @@ describe('FeedService', () => {
     });
   });
 
-  it('falls back to a generic title/link for a flat (global) community post', async () => {
+  it('gives a flat (global) community post an empty title and the feed link', async () => {
     // Uses the "posts" tab rather than "communities": since Task 6, the
     // "communities" tab's real query excludes flat posts entirely (see the
     // `membershipScoped` describe block below) — this test is only about
@@ -1647,8 +1662,9 @@ describe('FeedService', () => {
 
     const page = await service.getFeed('viewer-1', 'posts', undefined);
 
+    // The frontend supplies the translated label for a flat post.
     expect(page.data[0]).toMatchObject({
-      title: 'Community feed',
+      title: '',
       link: '/feed',
     });
     expect(communities.find).not.toHaveBeenCalled();
@@ -2262,6 +2278,107 @@ describe('FeedService', () => {
     });
   });
 
+  describe('forum thread gate, cross-posts and masked bylines (ENG-416, PRD-407, ENG-417)', () => {
+    const threadTabs: readonly FeedTab[] = [
+      'all',
+      'posts',
+      'communities',
+      'connections',
+    ];
+
+    it('adds the forum visibility gate to the forum_thread source on every tab', async () => {
+      connectionsService.allAcceptedConnectionUserIds.mockResolvedValue([
+        'author-2',
+      ]);
+      for (const tab of threadTabs) {
+        // A fresh builder per query, so a tab that reads the source more
+        // than once is checked on every builder it made.
+        const threadQbs: QbStub[] = [];
+        forumThreads.createQueryBuilder.mockImplementation(() => {
+          const threadQb = qbStub([]);
+          threadQbs.push(threadQb);
+          return threadQb;
+        });
+
+        await service.getFeed('viewer-1', tab, undefined);
+
+        expect({ tab, hasQueried: threadQbs.length > 0 }).toEqual({
+          tab,
+          hasQueried: true,
+        });
+        for (const threadQb of threadQbs) {
+          const gateCalls = threadQb.andWhere.mock.calls.filter(
+            (call) => call[0] === FORUM_THREAD_VISIBLE_SQL,
+          );
+          expect({ tab, gateCount: gateCalls.length }).toEqual({
+            tab,
+            gateCount: 1,
+          });
+        }
+      }
+    });
+
+    it('admits a cross-posted thread from a gated community on the general feed', async () => {
+      const threadQb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      const { sql } = accessTierGateCall(threadQb);
+      expect(sql).toMatch(
+        /t\.community_id IS NULL\s*OR t\.cross_posted = true\s*OR EXISTS/,
+      );
+    });
+
+    it('keeps anonymous and official threads out of the connections tab', async () => {
+      connectionsService.allAcceptedConnectionUserIds.mockResolvedValue([
+        'author-2',
+      ]);
+      const threadQb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'connections', undefined);
+
+      const connectionCall = threadQb.andWhere.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          call[0].includes('connectionAuthorIds'),
+      );
+      expect(connectionCall?.[0]).toContain('t.is_anonymous = false');
+      expect(connectionCall?.[0]).toContain('t.is_official = false');
+      expect(connectionCall?.[1]).toEqual({
+        connectionAuthorIds: ['author-2'],
+      });
+    });
+
+    it('gives an anonymous thread no connection reason and no reasonSubject', async () => {
+      connectionsService.allAcceptedConnectionUserIds.mockResolvedValue([
+        'author-1',
+      ]);
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({
+            id: 'thread-anonymous-friend',
+            authorId: 'author-1',
+            isAnonymous: true,
+          }),
+        ]),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      const threadItem = page.data.find(
+        (item) => item.id === 'thread-anonymous-friend',
+      );
+      expect(threadItem).toBeDefined();
+      expect(threadItem?.reason).not.toBe('connection');
+      expect(threadItem?.reasonSubject ?? null).toBeNull();
+      expect(threadItem?.actor).toBeNull();
+      expect(threadItem?.bylineMask).toBe('anonymous');
+    });
+  });
+
   describe('forum card excerpt (contract C4 / PRD-167)', () => {
     it("previews the thread's opening post, HTML stripped", async () => {
       forumThreads.createQueryBuilder.mockReturnValue(
@@ -2317,6 +2434,80 @@ describe('FeedService', () => {
       const thread = page.data.find((item) => item.type === 'forum_thread');
       expect(thread?.excerpt).toBeNull();
       expect(thread?.replyCount).toBe(0);
+    });
+  });
+
+  describe('forum thread like state (FEED-LIKE)', () => {
+    it("carries the opening post's id, vote count and the viewer's own vote", async () => {
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ id: 'thread-1' })]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(
+        rawQbStub([
+          threadCardRow('thread-1', 1, 'The opening post.', 'op-1', 4, true),
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const thread = page.data.find((item) => item.type === 'forum_thread');
+      expect(thread).toMatchObject({
+        opPostId: 'op-1',
+        reactionCount: 4,
+        myReaction: 'like',
+      });
+    });
+
+    it('reports no like affordance for a thread with no live posts', async () => {
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ id: 'thread-1', opVoteCount: 9 })]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(rawQbStub([]));
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const thread = page.data.find((item) => item.type === 'forum_thread');
+      expect(thread).toMatchObject({
+        opPostId: null,
+        reactionCount: 0,
+        myReaction: null,
+      });
+    });
+
+    // FEED-LIKE: `assertCanVote` refuses a self-vote with a 403, so the feed
+    // must not offer a like that always fails. Applies to an anonymous
+    // thread too, because `authorId` holds the real author under the mask.
+    it("nulls a viewer's own thread's opPostId but keeps another member's", async () => {
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({ id: 'thread-own', authorId: 'viewer-1' }),
+          baseThread({
+            id: 'thread-other',
+            authorId: 'author-2',
+            isAnonymous: true,
+          }),
+        ]),
+      );
+      forumPosts.createQueryBuilder.mockReturnValue(
+        rawQbStub([
+          threadCardRow('thread-own', 0, 'My own post.', 'op-own', 2, false),
+          threadCardRow(
+            'thread-other',
+            0,
+            "Another member's post.",
+            'op-other',
+            5,
+            true,
+          ),
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const own = page.data.find((item) => item.id === 'thread-own');
+      const other = page.data.find((item) => item.id === 'thread-other');
+      expect(own).toMatchObject({ opPostId: null, reactionCount: 2 });
+      expect(other).toMatchObject({ opPostId: 'op-other', reactionCount: 5 });
     });
   });
 

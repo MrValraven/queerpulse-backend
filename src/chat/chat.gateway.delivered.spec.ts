@@ -100,13 +100,11 @@ describe('ChatGateway delivered receipts', () => {
         },
         {
           provide: getRepositoryToken(ConversationParticipant),
-          // `manager.findOne` backs the PRD-354 conversation-kind lookup
-          // `fanOutConversationMessage` runs (see `chat.gateway.spec.ts`'s own
-          // comment); unused by this file's delivered-ack/relay paths, but
-          // required for the gateway to construct at all.
-          //
-          // Task 13e: an ordinary direct thread, which the relay needs to
-          // resolve before it broadcasts.
+          // `manager.findOne` backs `loadLiveThreadAudience`, the
+          // conversation lookup (kind and `isOfficial`) every relay runs
+          // before it broadcasts, this file's `message:delivered` relay
+          // included (see `chat.gateway.spec.ts`'s own comment). It resolves
+          // an ordinary direct thread, so the relay reaches its audience.
           useValue: {
             find: jest.fn().mockResolvedValue([]),
             manager: {

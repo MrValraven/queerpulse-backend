@@ -18,6 +18,7 @@ import { AdminMagazineDeskViewsController } from './admin-magazine-desk-views.co
 import { AdminMagazineIssuesController } from './admin-magazine-issues.controller';
 import { AdminMagazineLifecycleController } from './admin-magazine-lifecycle.controller';
 import { AdminMagazinePiecesController } from './admin-magazine-pieces.controller';
+import { AdminMagazineWritersController } from './admin-magazine-writers.controller';
 import { AdminStorySubmissionsController } from './admin-story-submissions.controller';
 import { AdminStorySubmissionsService } from './admin-story-submissions.service';
 import { AdminWriterApplicationsController } from './admin-writer-applications.controller';
@@ -45,6 +46,7 @@ import { MagazineFrontController } from './magazine-front.controller';
 import { MagazineFrontService } from './magazine-front.service';
 import { MagazineIssueContentsController } from './magazine-issue-contents.controller';
 import { MagazineIssueContentsService } from './magazine-issue-contents.service';
+import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
 import { MagazineIssueCostsService } from './magazine-issue-costs.service';
 import { MagazineDeskPresenceGateway } from './magazine-desk-presence.gateway';
 import { MagazineDeskPresenceService } from './magazine-desk-presence.service';
@@ -53,6 +55,7 @@ import { MagazineLifecycleService } from './magazine-lifecycle.service';
 import { MagazinePieceService } from './magazine-piece.service';
 import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
 import { MagazineWriterController } from './magazine-writer.controller';
+import { MagazineWriterDirectoryService } from './magazine-writer-directory.service';
 import { MagazineService } from './magazine.service';
 import { StorySubmissionsService } from './story-submissions.service';
 import { WriterApplicationsController } from './writer-applications.controller';
@@ -129,6 +132,8 @@ import { WriterApplicationsService } from './writer-applications.service';
     // translations). Its own controller, per the admin-CRUD convention.
     AdminMagazineLifecycleController,
     AdminMagazinePiecesController,
+    // The desk's writer picker (`GET magazine/admin/writers`).
+    AdminMagazineWritersController,
     AdminStorySubmissionsController,
     MagazineWriterController,
     WriterApplicationsController,
@@ -139,6 +144,9 @@ import { WriterApplicationsService } from './writer-applications.service';
     MagazineFrontService,
     MagazineIssueContentsService,
     MagazineIssueCostsService,
+    // The member-wide bell for a shipped issue, called by `shipIssue`.
+    MagazineIssueAnnouncerService,
+    MagazineWriterDirectoryService,
     MagazineDeskViewsService,
     MagazineLifecycleService,
     StorySubmissionsService,

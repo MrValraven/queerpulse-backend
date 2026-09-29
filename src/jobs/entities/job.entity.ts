@@ -56,14 +56,21 @@ export class Job {
   @Column({ type: 'varchar' })
   title!: string;
 
-  // Validated to a known set in `CreateJobDto`, but stored as `varchar` (not
-  // a DB enum) — the spec's category set is open-ended, unlike `format`.
-  @Column({ type: 'varchar' })
-  category!: string;
+  // Stored as `varchar` holding a job field id from `JOB_FIELD_IDS` (validated
+  // in `CreateJobDto`). It is null only for listings created before the work
+  // taxonomy migration, until the poster next edits them.
+  @Column({ type: 'varchar', nullable: true })
+  category!: string | null;
 
+  // Optional profession id inside `category` (checked in `JobsService`).
+  @Column({ type: 'varchar', nullable: true })
+  profession!: string | null;
+
+  // A `JOB_COMMITMENT_IDS` id (see `job-vocabulary.ts`).
   @Column({ type: 'varchar' })
   commitment!: string;
 
+  // A `JOB_SENIORITY_IDS` id (see `job-vocabulary.ts`).
   @Column({ type: 'varchar' })
   seniority!: string;
 

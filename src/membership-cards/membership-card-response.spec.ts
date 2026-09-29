@@ -255,18 +255,83 @@ describe('toCardVerification', () => {
     expect(dto.holderPhotoUrl).toBeNull();
   });
 
+  // The caller hands over a URL `toVisibleAvatarUrl` already resolved, so the
+  // mapper passes it through once. Resolving it a second time would null a
+  // resolved `http://` dev URL.
   it('sends the face the card prints on a card that is active', () => {
+    const resolvedAvatar = `https://api.test/files/${CREST_KEY}`;
     const dto = toCardVerification(card(), 'active', {
       issuerName: 'Azores Queer',
       holderName: 'Rita V',
       role: 'member',
       hasPhoto: true,
       holderPronouns: null,
-      holderAvatarUrl: CREST_KEY,
+      holderAvatarUrl: resolvedAvatar,
       photoStyle: 'mono',
     });
-    expect(dto.holderPhotoUrl).toContain(CREST_KEY);
+    expect(dto.holderPhotoUrl).toBe(resolvedAvatar);
     expect(dto.photoStyle).toBe('mono');
+  });
+
+  it('carries a null holder name through for the client to localize', () => {
+    const dto = toCardVerification(card(), 'active', {
+      issuerName: 'Azores Queer',
+      holderName: null,
+      role: 'member',
+      hasPhoto: false,
+      holderPronouns: null,
+      holderAvatarUrl: null,
+      photoStyle: 'color',
+    });
+    expect(dto.holderName).toBeNull();
+  });
+});
+
+// The caller hands over an avatar `toVisibleAvatarUrl` already resolved, so
+// the holder's profile-wide photo switch has been applied before this point.
+describe('the photo on a holder card', () => {
+  const resolvedAvatar = `https://api.test/files/${CREST_KEY}`;
+  const context = {
+    communityName: 'Azores Queer',
+    communitySlug: 'azores-queer',
+    role: 'member',
+    holderName: 'Rita V',
+    holderAvatarUrl: resolvedAvatar,
+    token: 'signed.code',
+  };
+
+  it('passes the resolved face through once when both switches allow it', () => {
+    const dto = toMyCard(
+      card(),
+      program({ allowsMemberPhoto: true }),
+      'active',
+      context,
+    );
+    expect(dto.holderAvatarUrl).toBe(resolvedAvatar);
+  });
+
+  it('withholds it when the holder vetoed it on this card', () => {
+    const dto = toMyCard(
+      card({ isPhotoHidden: true }),
+      program({ allowsMemberPhoto: true }),
+      'active',
+      context,
+    );
+    expect(dto.holderAvatarUrl).toBeNull();
+    expect(dto.isPhotoHidden).toBe(true);
+  });
+
+  it('draws no face when the profile photo switch already emptied it', () => {
+    const dto = toMyCard(
+      card(),
+      program({ allowsMemberPhoto: true }),
+      'active',
+      {
+        ...context,
+        holderAvatarUrl: null,
+      },
+    );
+    expect(dto.holderAvatarUrl).toBeNull();
   });
 });
 

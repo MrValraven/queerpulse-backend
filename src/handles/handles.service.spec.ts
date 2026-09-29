@@ -6,9 +6,12 @@ import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { Handle, HandleOwnerKind } from './entities/handle.entity';
 import { HandleHistory } from './entities/handle-history.entity';
 import {
+  claimHandleWithin,
   HandleOwner,
   HandlesService,
   handleWriteError,
+  isHandleTakenWithin,
+  releaseHandleWithin,
 } from './handles.service';
 
 // --- in-memory fake registry -------------------------------------------------
@@ -802,7 +805,7 @@ describe('HandlesService.stopForwardingFor', () => {
 });
 
 // --- handleWriteError() ------------------------------------------------------
-// The verdict `assertWritable` throws on, exported so the sign-up path can read
+// The verdict `assertHandleWritable` throws on, exported so the sign-up path can read
 // the same answer as a value instead of a throw (`UsersService.nextAvailableSlug`
 // steps past a withheld name rather than refusing a Google sign-up). These pin
 // the waiver's exact reach, since two callers now depend on it meaning the same
@@ -830,5 +833,120 @@ describe('handleWriteError', () => {
     expect(handleWriteError('me', { isSystemOwnedClaim: true })).toBe(
       'invalid',
     );
+  });
+});
+
+// --- a deleted persona's reservation (ENG-449) --------------------------------
+// A persona delete releases its handle with no forwarding, then the
+// `handle_history` FK sets `previous_owner_subprofile_id` to null. The row
+// names nobody, so the name stays taken for the whole cooldown.
+
+describe('a reservation left by a deleted persona', () => {
+  const seedDeletedPersonaReservation = (
+    historyRows: Map<string, HandleHistory>,
+    reclaimableAt: Date,
+    isForwarding = false,
+  ) => {
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      reclaimableAt,
+      isForwarding,
+    );
+    const reservation = historyRows.get('nightform');
+    if (reservation) {
+      reservation.previousOwnerSubprofileId = null;
+    }
+  };
+
+  it('reads taken to everyone while it cools, the deleted persona id included', async () => {
+    const { service, manager, historyRows } = makeService();
+    seedDeletedPersonaReservation(historyRows, oneDayFromNow());
+
+    await expect(
+      service.isTaken(manager, 'nightform', subprofileOwner('sp-1')),
+    ).resolves.toBe(true);
+    await expect(
+      service.isTaken(manager, 'nightform', subprofileOwner('sp-2')),
+    ).resolves.toBe(true);
+    await expect(
+      service.isTaken(manager, 'nightform', profileOwner('user-9')),
+    ).resolves.toBe(true);
+  });
+
+  it('refuses a claim while it cools and never forwards', async () => {
+    const { service, manager, historyRows } = makeService();
+    seedDeletedPersonaReservation(historyRows, oneDayFromNow());
+
+    await expect(
+      service.claim(manager, 'nightform', subprofileOwner('sp-2')),
+    ).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.previousSubprofileOwnerOf('nightform')).resolves.toBe(
+      null,
+    );
+  });
+
+  // The case the SET NULL creates on its own: an earlier rename left a
+  // FORWARDING reservation, then the persona was deleted. The null owner alone
+  // has to keep the name taken and stop the forward.
+  it('keeps a forwarding reservation taken and silent once its persona id is null', async () => {
+    const { service, manager, historyRows } = makeService();
+    seedDeletedPersonaReservation(historyRows, oneDayFromNow(), true);
+
+    await expect(
+      service.isTaken(manager, 'nightform', subprofileOwner('sp-1')),
+    ).resolves.toBe(true);
+    await expect(service.previousSubprofileOwnerOf('nightform')).resolves.toBe(
+      null,
+    );
+    await expect(
+      service.claim(manager, 'nightform', subprofileOwner('sp-1')),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('frees the name once the cooldown lapses', async () => {
+    const { service, manager, rows, historyRows } = makeService();
+    seedDeletedPersonaReservation(historyRows, oneDayAgo());
+
+    await service.claim(manager, 'nightform', subprofileOwner('sp-2'));
+
+    expect(rows.get('nightform')).toMatchObject({ subprofileId: 'sp-2' });
+    expect(historyRows.has('nightform')).toBe(false);
+  });
+});
+
+// --- the transaction-level functions ------------------------------------------
+// `HandlesService` delegates to these, and the persona creator transfer calls
+// them directly inside its caller's transaction.
+
+describe('claimHandleWithin / releaseHandleWithin / isHandleTakenWithin', () => {
+  it('release writes a non-forwarding reservation that the claim path honours', async () => {
+    const rows = new Map<string, Handle>();
+    const { manager, historyRows } = makeService(rows);
+    await claimHandleWithin(
+      manager,
+      'robin-nightform',
+      subprofileOwner('sp-1'),
+    );
+
+    await releaseHandleWithin(
+      manager,
+      'robin-nightform',
+      subprofileOwner('sp-1'),
+      { isForwarding: false },
+    );
+
+    expect(rows.has('robin-nightform')).toBe(false);
+    expect(historyRows.get('robin-nightform')).toMatchObject({
+      previousOwnerSubprofileId: 'sp-1',
+      isForwarding: false,
+    });
+    await expect(
+      isHandleTakenWithin(manager, 'robin-nightform', subprofileOwner('sp-1')),
+    ).resolves.toBe(true);
+    await expect(
+      claimHandleWithin(manager, 'robin-nightform', subprofileOwner('sp-2')),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 });

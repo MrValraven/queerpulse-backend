@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, In, Repository } from 'typeorm';
+import { Brackets, In, IsNull, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { Community } from '../communities/entities/community.entity';
 import { Invite } from '../membership/entities/invite.entity';
@@ -30,6 +30,14 @@ export interface RecordRemovedAccountInput {
   removalKind: RemovalKind;
   communityId: string | null;
   removedAt: Date;
+}
+
+/** What the listener hands over when a removal is lifted or overturned. */
+export interface RetireRemovedAccountInput {
+  userId: string;
+  removalKind: RemovalKind;
+  /** The community for a lifted community ban; null for a platform ban. */
+  communityId: string | null;
 }
 
 /**
@@ -171,6 +179,32 @@ export class BanEvasionService {
       return;
     }
     await this.signals.save(this.signals.create(draft));
+  }
+
+  /**
+   * Retire the ban-evasion signal for an account whose removal was lifted or
+   * overturned (ENG-486).
+   *
+   * Deletes on the same `(removedUserId, removalKind, communityId)` key
+   * `recordRemovedAccount` upserts on, so it undoes exactly the row the
+   * matching ban wrote. A `communityId` of `null` is matched with `IsNull()`
+   * for the platform case, always named in the `where`: a delete has no
+   * fallback row the way the write side's `findOne` does, so leaving the
+   * column out would delete the account's signal rows for every community it
+   * was ever banned from, when only the one ban actually being lifted should
+   * go.
+   *
+   * A miss (a timed suspension that never had a signal row, a second retire
+   * for the same reinstatement) is not an error: `delete` is idempotent. The
+   * caller (the listener) decides what a failure means, same as the write
+   * side.
+   */
+  async retireRemovedAccount(input: RetireRemovedAccountInput): Promise<void> {
+    await this.signals.delete({
+      removedUserId: input.userId,
+      removalKind: input.removalKind,
+      communityId: input.communityId === null ? IsNull() : input.communityId,
+    });
   }
 
   /**

@@ -1,6 +1,8 @@
 import type { CursorPage } from '../common/cursor-pagination';
 import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
+import { truncateCharacters } from '../common/text-characters';
+import { readableMessageBody } from './legacy-message-body';
 import type { CropRect } from '../media-crops/crop-rect';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -318,7 +320,9 @@ export interface MessageResponse {
   /** The media attachment for a `kind:'gif'`/`kind:'image'`
    *  (`url`/`previewUrl`/`width`/`height`/`provider`), `kind:'document'`
    *  (`url`/`fileName`/`byteSize`/`contentType`/`provider`), or `kind:'sticker'`
-   *  (`url`/`previewUrl`/`width`/`height`/`provider`/`stickerId`/`label`)
+   *  (`url`/`previewUrl`/`width`/`height`/`provider`/`stickerId`/`label`,
+   *  plus an optional baked `labelPt` the client shows a Portuguese reader,
+   *  carried through `resolveAttachment`'s spread unchanged)
    *  message, else null. The client renders a gif/image/sticker inline and a
    *  document as a file-card bubble (name, format, size, a download link);
    *  `body` carries a "GIF"/"Photo"/"Document"/"Sticker" text fallback so
@@ -396,11 +400,15 @@ export interface ConversationMemberPreview {
  * historic call sites that have not threaded a viewer through yet; a missing
  * viewer reads as "not me" for both, which is the safe default (never shows a
  * false "you").
+ *
+ * `nameOptions` spells the actor and target names for the conversation the
+ * pill sits in (PRD-423: first names only in a matched Go together chat).
  */
 export function buildSystemEvent(
   event: SystemEvent | null,
   profileByUser: Map<string, Profile>,
   viewerId?: string,
+  nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
 ): MessageResponse['systemEvent'] {
   if (!event) {
     return null;
@@ -408,7 +416,9 @@ export function buildSystemEvent(
   const nameOf = (userId: string | undefined): string | null => {
     if (!userId) return null;
     const profile = profileByUser.get(userId);
-    return profile ? requireAuthorSummary(profile).displayName : 'Member';
+    return profile
+      ? requireAuthorSummary(profile, nameOptions).displayName
+      : 'Member';
   };
   const handleOf = (userId: string | undefined): string | null => {
     if (!userId) return null;
@@ -474,6 +484,9 @@ export function messageKindToResponseKind(
  * `thumbnailUrl` goes through `resolveAttachment`, the SAME resolver the
  * parent's own `attachment.previewUrl` uses, so a quote's thumbnail is always
  * as fetchable as the bubble it quotes.
+ *
+ * `nameOptions` spells `senderName` for the conversation the quote sits in
+ * (PRD-423: first names only in a matched Go together chat).
  */
 export function buildReplyTo(
   replyToId: string | null,
@@ -486,6 +499,7 @@ export function buildReplyTo(
   >,
   profileByUser: Map<string, Profile>,
   hiddenParentIds: ReadonlySet<string> = new Set(),
+  nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
 ): MessageResponse['replyTo'] {
   if (!replyToId) {
     return null;
@@ -530,12 +544,17 @@ export function buildReplyTo(
   }
   // A sticker parent stores no body text (see `MessagingCoreService.
   // postMessage`'s sticker branch), so its quote snippet uses the sticker's
-  // own label.
+  // own label. Always the English `label`: the reader's UI language lives in
+  // their browser (PRD-325), so server-rendered text cannot pick `labelPt`.
+  // The client already renders a sticker quote with its own localized kind
+  // label, and reads `labelPt` off the attachment wherever it names one. A
+  // legacy raw-key attachment body quotes as its English label
+  // (`legacy-message-body.ts`).
   const snippet =
     parent && !deleted
       ? isVisibleStickerAttachment && visibleAttachment
         ? (visibleAttachment as StickerAttachment).label
-        : parent.body.slice(0, 120)
+        : truncateCharacters(readableMessageBody(parent.kind, parent.body), 120)
       : '';
   return {
     id: replyToId,
@@ -543,8 +562,7 @@ export function buildReplyTo(
     senderName: isParentSenderFormerMember
       ? FORMER_MEMBER_DISPLAY_NAME
       : parentSenderProfile
-        ? `${parentSenderProfile.firstName} ${parentSenderProfile.lastName}`.trim() ||
-          'Someone'
+        ? displayNameFor(parentSenderProfile, nameOptions) || 'Someone'
         : 'Someone',
     senderIsFormerMember: isParentSenderFormerMember,
     deleted,
@@ -774,6 +792,15 @@ export interface ConversationResponse {
    *  DMs. */
   eventMatchGroupId: string | null;
   /**
+   * PRD-423: the durable marker (`Conversation.isGoTogetherChat`) that this
+   * chat was formed by Go together, and stays true after its matched group
+   * row is dissolved and `eventMatchGroupId` above goes null. The client
+   * reads this field to keep gating matched-chat behaviour (e.g. no profile
+   * links) once the group is gone, since `eventMatchGroupId` alone would
+   * reopen it. Always false for DMs.
+   */
+  isGoTogetherChat: boolean;
+  /**
    * DES-227: why THIS caller can no longer act as a member here, or null while
    * they still can. `'left'` (voluntary), `'removed'` (an owner/admin acted),
    * or `'dissolved'` (the group itself ended, independent of how this caller's
@@ -788,6 +815,11 @@ export interface ConversationResponse {
    *  disabling the link changes this value; the client renders it as a
    *  copyable/shareable URL, never a QR code (PRD-359 deferred). */
   inviteToken: string | null;
+  /** PRD-400: ISO instant the `inviteToken` above stops working (7 days from
+   *  its last issue or rotation). Surfaced under exactly the same rule as
+   *  `inviteToken` and null whenever it is null. Optional so a DM response
+   *  builder need not name it. */
+  inviteTokenExpiresAt?: string | null;
   /** SERVER-AUTHORITATIVE: whether THIS caller may create/rotate/disable the
    *  invite link (`POST`/`DELETE :id/invite-link`). True only for an
    *  owner/admin of an active, non-dissolved group. Optional/absent for DMs,
@@ -1075,16 +1107,18 @@ export const FORMER_IDENTITY_AUTHOR: AuthorSummary = {
  * The one spelling of "who wrote this message" for every messaging read path.
  * A NULL `senderId` is an erased member and maps to {@link FORMER_MEMBER_AUTHOR};
  * a live sender resolves through `profileByUser` exactly as
- * `requireAuthorSummary` always did.
+ * `requireAuthorSummary` always did, its name spelled by `nameOptions`
+ * (PRD-423).
  */
 export function senderAuthorSummary(
   senderId: string | null,
   profileByUser: ReadonlyMap<string, Profile>,
+  nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
 ): AuthorSummary {
   if (senderId === null) {
     return FORMER_MEMBER_AUTHOR;
   }
-  return requireAuthorSummary(profileByUser.get(senderId));
+  return requireAuthorSummary(profileByUser.get(senderId), nameOptions);
 }
 
 /** The non-null sender ids of a batch, de-duplicated, for one profile lookup. */
@@ -1100,10 +1134,58 @@ export function presentSenderIds(
   return [...senderIds];
 }
 
-function authorSummaryFrom(profile: Profile): AuthorSummary {
+/**
+ * PRD-423: how a member's name is spelled for the other people in one
+ * conversation. A matched Go together group chat
+ * (`Conversation.isGoTogetherChat` set) introduces strangers by first name
+ * and pronouns only, the same restraint the group card shows before anyone
+ * meets, so every name the chat hands a member (authors, the roster, reply
+ * quotes, reactors, system lines, the inbox preview) is the first name
+ * alone. Every other conversation shows the full name.
+ */
+export interface MemberNameOptions {
+  isMatchedGroup: boolean;
+}
+
+/** The {@link MemberNameOptions} of every conversation outside a matched
+ *  Go together group chat: first and last name. */
+export const FULL_MEMBER_NAMES: MemberNameOptions = { isMatchedGroup: false };
+
+/** The {@link MemberNameOptions} a conversation's own row calls for. The
+ *  durable `isGoTogetherChat` flag decides, so the chat keeps first names
+ *  after its group row is deleted. A live `eventMatchGroupId` implies the
+ *  flag (backfilled and set together), and it still counts for a row read
+ *  with only that column. A row that selected neither reads as full names,
+ *  so a caller that renders a matched chat must select `isGoTogetherChat`. */
+export function memberNameOptionsFor(
+  conversation:
+    | { isGoTogetherChat?: boolean; eventMatchGroupId?: string | null }
+    | null
+    | undefined,
+): MemberNameOptions {
+  return conversation?.isGoTogetherChat || conversation?.eventMatchGroupId
+    ? { isMatchedGroup: true }
+    : FULL_MEMBER_NAMES;
+}
+
+/** PRD-423: the one spelling of a member's name in messaging, see
+ *  {@link MemberNameOptions}. */
+export function displayNameFor(
+  profile: Pick<Profile, 'firstName' | 'lastName'>,
+  options: MemberNameOptions = FULL_MEMBER_NAMES,
+): string {
+  return options.isMatchedGroup
+    ? profile.firstName.trim()
+    : `${profile.firstName} ${profile.lastName}`.trim();
+}
+
+function authorSummaryFrom(
+  profile: Profile,
+  options: MemberNameOptions,
+): AuthorSummary {
   return {
     handle: profile.slug,
-    displayName: `${profile.firstName} ${profile.lastName}`.trim(),
+    displayName: displayNameFor(profile, options),
     // Every messaging caller loads the full `Profile` entity (no `select`),
     // so the column is always present here.
     pronouns: profile.pronouns,
@@ -1115,11 +1197,13 @@ function authorSummaryFrom(profile: Profile): AuthorSummary {
   };
 }
 
-/** Maps a `Profile` to an `AuthorSummary`, or `null` when there isn't one. */
+/** Maps a `Profile` to an `AuthorSummary`, or `null` when there isn't one.
+ *  `nameOptions` spells the name for the conversation it is shown in (PRD-423). */
 export function toAuthorSummary(
   p: Profile | undefined | null,
+  nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
 ): AuthorSummary | null {
-  return p ? authorSummaryFrom(p) : null;
+  return p ? authorSummaryFrom(p, nameOptions) : null;
 }
 
 /**
@@ -1130,6 +1214,7 @@ export function toAuthorSummary(
  */
 export function requireAuthorSummary(
   p: Profile | undefined | null,
+  nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
 ): AuthorSummary {
-  return p ? authorSummaryFrom(p) : UNKNOWN_AUTHOR;
+  return p ? authorSummaryFrom(p, nameOptions) : UNKNOWN_AUTHOR;
 }

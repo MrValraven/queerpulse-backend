@@ -21,13 +21,16 @@ import { PlatformAmbassadorsController } from './platform-ambassadors.controller
  * The QueerPulse Ambassadors programme: the grant lifecycle, the private
  * circle it seats ambassadors in, the admin routes and the member roster.
  *
- * Plain imports, no `forwardRef`: nothing imports this module, and none of
- * `CommunitiesModule`, `MembershipCardsModule` (the circle's card programme),
+ * Plain imports, no `forwardRef`: none of `CommunitiesModule`,
+ * `MembershipCardsModule` (the circle's card programme),
  * `OfficialMessagesModule` (the house account that owns the circle) or
- * `NotificationsModule` reaches back to it. Modules that only need the cheap
- * status reads import the leaf `AmbassadorStatusModule` instead, which keeps
- * it that way. `CommunityMember` is registered again here for the circle
- * summary's head count (overlapping `forFeature` is permitted).
+ * `NotificationsModule` reaches back to it. `AdminMembersModule` imports this
+ * module for `releaseStaffSeat` (ENG-457), and nothing this module imports
+ * reaches `AdminMembersModule`, so that edge closes no cycle either. Modules
+ * that only need the cheap status reads import the leaf
+ * `AmbassadorStatusModule` instead, which keeps it that way. `CommunityMember`
+ * is registered again here for the circle summary's head count (overlapping
+ * `forFeature` is permitted).
  */
 @Module({
   imports: [
@@ -38,8 +41,8 @@ import { PlatformAmbassadorsController } from './platform-ambassadors.controller
       CommunityMember,
       Profile,
       User,
-      // Read-only, and only for `RolesOrStaffGuard` on the admin controller,
-      // same as `PartnersModule`.
+      // Read-only: `RolesOrStaffGuard` on the admin controller, same as
+      // `PartnersModule`, and the `partnerships` check in `releaseStaffSeat`.
       UserStaffRole,
     ]),
     AmbassadorStatusModule,
@@ -50,5 +53,6 @@ import { PlatformAmbassadorsController } from './platform-ambassadors.controller
   ],
   controllers: [AdminAmbassadorsController, PlatformAmbassadorsController],
   providers: [AmbassadorsService, AmbassadorCircleService],
+  exports: [AmbassadorsService],
 })
 export class AmbassadorsModule {}

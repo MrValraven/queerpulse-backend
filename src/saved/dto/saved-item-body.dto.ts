@@ -20,8 +20,8 @@ import { SavedKind } from '../entities/saved-item.entity';
  * (ENG-45): five `@IsString()` fields with no ceiling, member-controlled, and
  * `title`/`meta`/`description` are echoed verbatim onto the share read
  * (`SharedSavedListController` → `SavedListsService.getShared` →
- * `toSavedItemDTO`), which is served to any active member who holds a share
- * link, including people the owner never sent it to.
+ * `toSharedSavedItemDTOs`), which is served to any active member who holds a
+ * share link, including people the owner never sent it to.
  *
  * `href` ALSO ships on that shared payload. Nothing renders it there today
  * (`SavedListSharedPage`'s `SharedSavedListRow` prints only `title`, `meta` and

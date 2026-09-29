@@ -3,9 +3,12 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
@@ -19,6 +22,7 @@ import {
   LessThanOrEqual,
   MoreThan,
   Not,
+  Raw,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
@@ -39,6 +43,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { restrictToAttendeesVisibleTo } from './attendee-roster-visibility';
 import { AttendeeStatusFilter } from './dto/list-attendees.query';
 import type { EventCostFilter } from './dto/list-events.query';
 import type {
@@ -95,6 +100,7 @@ import {
   type FormatDetails,
 } from './gathering-family';
 import { toCsvRow } from '../common/csv';
+import { EVENT_DELETING, type EventDeletingEvent } from './event.events';
 import { RsvpService } from './rsvp.service';
 import { occurrenceStartAt } from './series-occurrences';
 
@@ -276,7 +282,13 @@ export class EventsService {
     // Resolves+validates an optional `listingId` against a real, live
     // directory listing — see `CreateEventInput.listingId`.
     private readonly listingLookup: ListingLookupService,
+    // `remove()` announces an imminent hard delete through `emitAsync` and
+    // waits for it, so modules whose rows the cascade removes (Go together's
+    // matched groups) wind down first without this module importing them.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
+
+  private readonly logger = new Logger(EventsService.name);
 
   // Events are reported (and taken down) under the `event` taxonomy code, keyed
   // by the event's uuid.
@@ -1173,6 +1185,15 @@ export class EventsService {
    * `membership_card_scans.event_id` is the deliberate exception: a nullable,
    * FK-less column on an append-only scan log, left pointing at a gone event
    * on purpose so the record of who scanned what, and when, keeps its shape.
+   *
+   * GO TOGETHER (ENG-433). The cascade also takes the gathering's Go together
+   * config, groups and entries, and each matched group chat would then keep
+   * running as an ordinary house-owned group: its `event_match_group_id` is
+   * nulled, so the banner and the closed-group guard keyed on it both stop
+   * applying. `EVENT_DELETING` goes out first and the delete waits for it;
+   * Go together's listener dissolves every matched chat the way the reconcile
+   * pass does for a cancelled gathering. When that fails, the delete stops
+   * here with a 503 and the gathering stays, so a retry finds it intact.
    */
   async remove(slug: string, userId: string): Promise<{ ok: true }> {
     const event = await this.loadEventOr404(slug);
@@ -1213,8 +1234,29 @@ export class EventsService {
       }
     }
 
+    await this.windDownBeforeDelete(event.id);
     await this.events.delete({ id: event.id });
     return { ok: true };
+  }
+
+  /**
+   * Runs every `EVENT_DELETING` listener and waits for all of them. A listener
+   * that throws turns into a 503 naming what went wrong for the host; the
+   * underlying error goes to the log.
+   */
+  private async windDownBeforeDelete(eventId: string): Promise<void> {
+    try {
+      await this.eventEmitter.emitAsync(EVENT_DELETING, {
+        eventId,
+      } satisfies EventDeletingEvent);
+    } catch (error) {
+      this.logger.error(
+        `Could not wind down gathering ${eventId} before deleting it: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+      throw new ServiceUnavailableException(
+        "This gathering's Go together group chats could not be closed, so it was kept. Try deleting it again in a moment.",
+      );
+    }
   }
 
   /**
@@ -1887,6 +1929,23 @@ export class EventsService {
     // In-query (not the old post-query filter) so a page of `PAGE_SIZE`
     // attendees comes back full instead of silently short.
     this.blockFilter.excludeBlocked(qb, viewerId, '"r"."user_id"');
+    // PRD-414: each attendee's own "Who can see you're going?" answer. A
+    // non-organiser reads only the rows that answer admits them to (their own,
+    // `everyone`, and `connections` when they are connected); organisers read
+    // every row. In-query for the same full-page reason as the block filter,
+    // so this page's `total` counts the rows this viewer may page through,
+    // while `goingCount` and `seatsTaken` below keep counting everybody: a
+    // hidden member still takes a seat, as a number with no face or name.
+    if (!isOrganizer) {
+      restrictToAttendeesVisibleTo(qb, viewerId, 'r');
+    }
+    // Named rows only for active accounts, organisers included (see
+    // `activeAttendeeAccountClause`). In-query so the page stays full; the
+    // roster counts below still count everybody.
+    qb.andWhere(
+      EventsService.activeAttendeeAccountClause('"r"."user_id"'),
+      EventsService.ACTIVE_ATTENDEE_ACCOUNT_PARAMETERS,
+    );
 
     const {
       items,
@@ -1963,6 +2022,14 @@ export class EventsService {
       where: {
         eventId: event.id,
         status: In([RsvpStatus.Going, RsvpStatus.Waitlisted]),
+        // Active accounts only, the same line `attendees()` draws, so the
+        // file and the dashboard name the same people and the row cap counts
+        // only rows that can carry a name.
+        userId: Raw(
+          (userIdColumn) =>
+            EventsService.activeAttendeeAccountClause(userIdColumn),
+          EventsService.ACTIVE_ATTENDEE_ACCOUNT_PARAMETERS,
+        ),
       },
       order: { status: 'ASC', waitlistPosition: 'ASC', createdAt: 'ASC' },
       take: EventsService.ATTENDEE_EXPORT_LIMIT,
@@ -1990,8 +2057,11 @@ export class EventsService {
         .map((row) => {
           const profile = profiles.get(row.userId)!;
           // The attendee's free-text answers go through `toAttendeeView`, the
-          // same organiser view the dashboard reads, so a `justMe` choice
-          // leaves these cells empty in the file exactly as it does on screen.
+          // same organiser view the dashboard reads, so the file and the
+          // screen always agree. Every row is here with its answers filled,
+          // whatever the attendee picked for "Who can see you're going?":
+          // that setting governs other members, and these answers were
+          // written for the host.
           const view = toAttendeeView(row, profile, true);
           return [
             `${profile.firstName} ${profile.lastName}`.trim(),
@@ -2539,7 +2609,32 @@ export class EventsService {
   private static readonly PULSE_OVER_FETCH_FACTOR = 4;
 
   /**
-   * MSG-12 — `EventDetail.goingAttendeesPreview`'s query. Two privacy layers,
+   * The named attendee lists (`attendees()`, the going preview, the CSV door
+   * list) name members whose account is active, for every viewer, organisers
+   * included. A suspended, deactivated or pending-deletion account drops out
+   * of the names: by-name check-in answers "Member not found" for exactly
+   * those accounts, so a host who could read the name and tap it met a dead
+   * end. Same `UserStatus.Active` line `ProfilesService.visibleMemberIds`
+   * draws for the directory, in the join-free EXISTS shape the feed uses, so
+   * a `LIMIT` or a page counts only rows that can carry a name.
+   *
+   * Names only. `rosterCounts` and the preview's `total` keep counting these
+   * members: their seat is still held, as a number with no name attached.
+   *
+   * `userIdColumn` is a quoted `"alias"."user_id"` on a query builder, or the
+   * property path TypeORM hands a `Raw` find operator (rewritten to the same
+   * column by its property-name pass).
+   */
+  private static activeAttendeeAccountClause(userIdColumn: string): string {
+    return `EXISTS (SELECT 1 FROM "users" "__attendee_account" WHERE "__attendee_account"."id" = ${userIdColumn} AND "__attendee_account"."status" = :attendeeAccountActive)`;
+  }
+
+  private static readonly ACTIVE_ATTENDEE_ACCOUNT_PARAMETERS = {
+    attendeeAccountActive: UserStatus.Active,
+  };
+
+  /**
+   * MSG-12: `EventDetail.goingAttendeesPreview`'s query. Three privacy layers,
    * same primitives `attendees()` already uses:
    *  - `Event.showAttendeeCount` (MSG-18 "Show attendee count" toggle): when
    *    the host has turned it off, a non-organizer viewer gets no preview at
@@ -2550,9 +2645,14 @@ export class EventsService {
    *    blocking member must never surface here in either direction. See
    *    `attendees()`'s own doc for why blocks (not mutes) are the right
    *    primitive for a guest list.
-   * There is currently no per-member "hide me from attendee lists" opt-out
-   * anywhere in this codebase (checked `Profile` and every existing privacy
-   * toggle) — only the event-level toggle above exists to honor today.
+   *  - Each attendee's own "Who can see you're going?" answer (PRD-414,
+   *    `event_rsvps.visibility`) via `restrictToAttendeesVisibleTo`: a
+   *    non-organiser sees a face only when that answer admits them
+   *    (`everyone` or unset, `connections` for an accepted connection, and
+   *    always their own row). `justMe` reaches organisers only.
+   * `total` is counted BEFORE the per-attendee filter, so a member who hid
+   * their attendance still counts toward the "+N more" line as a number, with
+   * no face or name attached.
    */
   private async buildGoingAttendeesPreview(
     event: Event,
@@ -2573,6 +2673,15 @@ export class EventsService {
     const total = await qb.getCount();
     if (total === 0) return { attendees: [], total: 0 };
 
+    if (!isOrganizer) {
+      restrictToAttendeesVisibleTo(qb, viewerId, 'r');
+    }
+    // Faces for active accounts only, organisers included, joined after the
+    // count so `total` keeps counting everybody.
+    qb.andWhere(
+      EventsService.activeAttendeeAccountClause('"r"."user_id"'),
+      EventsService.ACTIVE_ATTENDEE_ACCOUNT_PARAMETERS,
+    );
     const rows = await qb.take(EventsService.ATTENDEE_PREVIEW_LIMIT).getMany();
     const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
     const attendees = rows

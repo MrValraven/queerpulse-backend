@@ -10,13 +10,18 @@ import {
 import { countByFilterClauses } from '../common/facet-counts';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
+  PROFILE_PUBLIC_SEARCH_COLUMNS,
+  PROFILE_PUBLIC_SEARCH_FIELDS,
   PROFILE_SEARCH_COLUMNS,
   PROFILE_SEARCH_FIELDS,
   foldedHaystack,
   foldedSearchQuery,
   foldedSearchTerm,
+  searchRankExpression,
   weightedSearchVector,
+  type WeightedSearchField,
 } from '../search/search-text';
+import { ProfileVisibility } from '../users/entities/profile.entity';
 import { ListMembersQuery } from './dto/list-members.query';
 import {
   DIRECTORY_IDENTITY_FACETS,
@@ -132,10 +137,61 @@ export function csv(raw: string | undefined): string[] {
 }
 
 /**
+ * An `open` profile: the tier whose card shows what the limited card hides.
+ * A literal enum value in place of a bound parameter, so the clauses built on
+ * it also work inside the `addSelect` expressions `searchMembers` builds.
+ */
+const OPEN_PROFILE_CLAUSE = `"p"."visibility" = '${ProfileVisibility.Open}'`;
+
+/**
+ * Rows whose bio a directory viewer may read, and so may be searched and
+ * ranked on (ENG-438). The same `open` gate `toMemberCard` applies before it
+ * borrows a bio for the card blurb: a `network`/`private` member's bio sits
+ * behind the limited card.
+ */
+export const BIO_SEARCHABLE_CLAUSE = OPEN_PROFILE_CLAUSE;
+
+/**
+ * Rows whose neighbourhood a directory viewer may see (ENG-439): the same
+ * two-layer gate `toMemberCard` applies to `location`/`hood` for a non-owner
+ * (the profile is `open` AND the member left `hoodVisible` on). Both the
+ * "Where they're based" filter and its counts sit behind it, so a hidden
+ * location neither matches nor counts.
+ */
+export const HOOD_VISIBLE_CLAUSE = `(${OPEN_PROFILE_CLAUSE} AND "p"."hood_visible" = true)`;
+
+/** The full-text OR substring match over one field list. */
+function textMatchOver(
+  fields: WeightedSearchField[],
+  columns: readonly string[],
+): string {
+  return (
+    `${weightedSearchVector('p', fields)} @@ ${foldedSearchQuery('memberSearchTerm')} ` +
+    `OR ${foldedHaystack('p', [...columns])} LIKE ${foldedSearchTerm('memberSearchPattern')}`
+  );
+}
+
+/**
  * The name/bio half of the member search predicate: the weighted full-text
- * match OR the folded substring match, left unparenthesised so the caller can
- * OR further branches into the same group. Binds `:memberSearchTerm` and
- * `:memberSearchPattern`, which `applyDirectoryFilters` sets.
+ * match OR the folded substring match. The whole expression is an OR of
+ * parenthesised branches, so the caller can OR further branches into the
+ * same group. Binds `:memberSearchTerm` and `:memberSearchPattern`, which
+ * `applyDirectoryFilters` sets.
+ *
+ * Bio-gated (ENG-438): a row whose bio the viewer may read matches over every
+ * profile field, and any other row matches over the fields minus the bios.
+ * Written as two exclusive branches. The shorter "matches everywhere AND
+ * (bio readable OR matches without the bio)" leaks: `websearch_to_tsquery`
+ * accepts a negated word, so "ana -word" would drop exactly the private Anas
+ * whose hidden bio says "word". The first branch keeps the
+ * index-backed expressions from `1795100000000-AddSearchTextIndexes`
+ * verbatim. The second branch is backed by the partial indexes in
+ * `1824900000000-AddProfilePublicSearchIndexes` (`WHERE "visibility" <>
+ * 'open'`), so both OR arms have an index path and Postgres can BitmapOr
+ * them. Keep the second branch's gate a literal `NOT "p"."visibility" =
+ * 'open'`: the planner proves the partial predicate from it, and a bound
+ * parameter or a reworded gate could drop that proof and bring back the
+ * sequential scan. The spec pins it.
  *
  * Exported so `searchMembers` can order text hits ahead of hits that came
  * only through a profession or field of work, using the very expression the
@@ -143,9 +199,34 @@ export function csv(raw: string | undefined): string[] {
  */
 export function memberSearchTextMatch(): string {
   return (
-    `${weightedSearchVector('p', PROFILE_SEARCH_FIELDS)} @@ ${foldedSearchQuery('memberSearchTerm')} ` +
-    `OR ${foldedHaystack('p', PROFILE_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('memberSearchPattern')}`
+    `(${BIO_SEARCHABLE_CLAUSE} AND (${textMatchOver(PROFILE_SEARCH_FIELDS, PROFILE_SEARCH_COLUMNS)})) ` +
+    `OR (NOT ${BIO_SEARCHABLE_CLAUSE} AND (${textMatchOver(PROFILE_PUBLIC_SEARCH_FIELDS, PROFILE_PUBLIC_SEARCH_COLUMNS)}))`
   );
+}
+
+/**
+ * The relevance score for the directory's default search ordering, gated
+ * exactly like `memberSearchTextMatch`: a hidden bio must not lift a row's
+ * rank any more than it may make the row match. Binds `:memberSearchTerm`
+ * only. For `searchMembers`' `member_search_rank` select, in place of a
+ * `searchRankExpression` built over the full profile field list.
+ */
+export function memberSearchRank(): string {
+  const tsQuery = foldedSearchQuery('memberSearchTerm');
+  const foldedTerm = foldedSearchTerm('memberSearchTerm');
+  const fullRank = searchRankExpression(
+    weightedSearchVector('p', PROFILE_SEARCH_FIELDS),
+    tsQuery,
+    foldedHaystack('p', PROFILE_SEARCH_COLUMNS),
+    foldedTerm,
+  );
+  const publicRank = searchRankExpression(
+    weightedSearchVector('p', PROFILE_PUBLIC_SEARCH_FIELDS),
+    tsQuery,
+    foldedHaystack('p', PROFILE_PUBLIC_SEARCH_COLUMNS),
+    foldedTerm,
+  );
+  return `(CASE WHEN ${BIO_SEARCHABLE_CLAUSE} THEN ${fullRank} ELSE ${publicRank} END)`;
 }
 
 /**
@@ -229,6 +310,8 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
   //
   // The haystack includes `bio` and `bio_pt`. `bio_pt` matters most: a
   // Portuguese-speaking member writes their real self-description there.
+  // Both are searched only on `open` profiles (ENG-438); see
+  // `memberSearchTextMatch`.
   //
   // Not a facet group and so never skipped: a count is "how many of MY current
   // results", and the search term is part of what makes them the member's.
@@ -240,6 +323,10 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
     // default LIKE escape character.
     const term = `%${escapeLikeTerm(q.query)}%`;
     const { searchProfessions, searchDisciplines } = memberSearchIds(q);
+    // Every arm of this OR needs an index path or the group seq-scans:
+    // the text arms use the search indexes, and the `&&` arms below use the
+    // GIN indexes on `profession` / `discipline` from
+    // `1824910000000-AddProfileProfessionDisciplineGinIndexes`.
     const searchBranches = [memberSearchTextMatch()];
     const searchParameters: Record<string, unknown> = {
       memberSearchTerm: q.query,
@@ -301,6 +388,11 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
   // neighbourhood "match" is the same substring test `matchNeighbourhood` uses
   // for the card's `hood` field — filtering and display can't drift apart
   // because they share one function.
+  //
+  // Gated by `HOOD_VISIBLE_CLAUSE` (ENG-439), the card's own location gate:
+  // a member whose card hides their neighbourhood (not `open`, or
+  // `hoodVisible` off) never matches a neighbourhood. Without it, ticking one
+  // neighbourhood at a time would sort the members who hid theirs into it.
   if (skip !== 'hoods') {
     const hoods = knownNeighbourhoods(csv(q.hoods));
     if (csv(q.hoods).length) {
@@ -308,9 +400,9 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
         qb.andWhere('1 = 0');
       } else {
         qb.andWhere(
-          '(' +
+          `(${HOOD_VISIBLE_CLAUSE} AND (` +
             hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') +
-            ')',
+            '))',
           Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
         );
       }
@@ -425,10 +517,18 @@ export async function countDirectoryFacets(
     // the COALESCE is what makes that true of members who never wrote a
     // location at all (`NULL ILIKE '%'` is NULL, which would quietly
     // undercount exactly the members that row promises to include).
+    //
+    // Every real neighbourhood's clause carries `HOOD_VISIBLE_CLAUSE`, the
+    // filter's own gate (ENG-439), so a hidden location adds to no count.
+    // `All of Lisbon` stays ungated: it counts the whole hood-unrestricted
+    // population, which says nothing about where anyone lives.
     countByFilterClauses(
       base('hoods'),
       HOOD_FACET_IDS,
-      (param) => `COALESCE("p"."location", '') ILIKE :${param}`,
+      (param, option) =>
+        option === ALL_OF_LISBON
+          ? `COALESCE("p"."location", '') ILIKE :${param}`
+          : `${HOOD_VISIBLE_CLAUSE} AND COALESCE("p"."location", '') ILIKE :${param}`,
       (option) => (option === ALL_OF_LISBON ? '%' : `%${option}%`),
     ),
     // Identities count per FACET, not per stored label, and so cannot use the

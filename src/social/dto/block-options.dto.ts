@@ -5,7 +5,17 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
-import { REASON_CODES, ReasonCode } from '../../reports/reason-catalogue';
+import { ReportSubjectType } from '../../reports/entities/report.entity';
+import { ReasonCode, reasonsFor } from '../../reports/reason-catalogue';
+
+/**
+ * The codes a `member` report offers, the only subject the companion report
+ * is ever filed under (`SocialService.blockMember`). Read from the catalogue
+ * so it follows every change there.
+ */
+const MEMBER_REASON_CODES: readonly ReasonCode[] = reasonsFor(
+  ReportSubjectType.Member,
+).map((option) => option.code);
 
 /**
  * Optional body for `POST /blocks/:slug` (spec §3 Tier 1 "social";
@@ -35,17 +45,19 @@ export class BlockOptionsDto {
    * meant the transparency report counted none of those filings under the
    * reason they actually happened for.
    *
-   * Validated against `REASON_CODES`, the real taxonomy, rather than a
-   * hand-written list beside it: the codes offered per subject type live in
-   * `reason-catalogue.ts` and a second copy here would drift silently the first
-   * time one is added. `REASON_CODES` also excludes the system-filed listing
-   * codes by construction, so a client cannot file one through this door.
+   * Validated against the codes a `member` report offers, read from
+   * `reason-catalogue.ts` so no hand-written copy here can drift from it
+   * (ENG-488). `ReportsService.create` refuses a code the subject type does not
+   * offer, and the companion report runs AFTER the block commits, so checking
+   * here is what keeps a bad code from committing the block and then failing
+   * its report. The member set also excludes the system-filed listing codes,
+   * so a client cannot file one through this door.
    *
    * OPTIONAL, and omitting it keeps the old behaviour exactly: `blockMember`
    * falls back to `other`, so every existing caller (and any client that never
    * ships the new field) files precisely the report it filed before.
    */
   @IsOptional()
-  @IsIn(REASON_CODES)
+  @IsIn(MEMBER_REASON_CODES)
   reasonCode?: ReasonCode;
 }

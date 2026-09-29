@@ -35,10 +35,16 @@ import {
 } from './entities/message.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { toStoredPlainText } from '../communities/community-plain-text';
+import { CAPTIONED_MESSAGE_KINDS } from '../common/mentions';
+import { truncateCharacters } from '../common/text-characters';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { IdentityAttributionService } from '../identities/identity-attribution.service';
 import { IdentitiesService } from '../identities/identities.service';
 import { sanitizeMessageBody } from './dto/trim-message-body';
+import {
+  readableMessageBody,
+  readableMessageEditedAt,
+} from './legacy-message-body';
 import {
   messageAttachmentReferenceFromImageUrl,
   storageKeyFromImageUrl,
@@ -81,6 +87,9 @@ import {
   ConversationMemberPreview,
   ConversationMemberSummary,
   FORMER_IDENTITY_AUTHOR,
+  FULL_MEMBER_NAMES,
+  MemberNameOptions,
+  memberNameOptionsFor,
   MessageResponse,
   messageKindToResponseKind,
   MessageView,
@@ -94,19 +103,27 @@ import {
 } from './message-response';
 import {
   MESSAGE_SUBJECT_TYPE,
+  notFromBlockedGroupMemberPredicate,
   notModeratedMessagePredicate,
+  notPastViewerLeftAtPredicate,
+  withinLeftAtCeilingPredicate,
 } from './message-visibility-predicates';
 import {
   applyUnreadConversationScope,
   notHiddenForViewerMessagePredicate,
   NOT_SENT_AS_SEAT_IDENTITY_PREDICATE,
 } from './unread-conversations-query';
-import { EDIT_WINDOW_MS } from './messaging.constants';
+import {
+  EDIT_WINDOW_MS,
+  MAX_ATTACHMENT_CAPTION_LENGTH,
+  UNEDITABLE_MESSAGE_KINDS,
+} from './messaging.constants';
 import {
   renderMessageByViewerClass,
   ViewerRenderClassKeyComponent,
 } from './viewer-render-classes';
 import { isEvidenceHoldActive } from './message-evidence-hold';
+import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
 import {
   claimUnclaimedConversation,
@@ -137,6 +154,17 @@ function isIdentityNotInConversationError(error: unknown): boolean {
     body !== null &&
     (body as { code?: unknown }).code === 'IDENTITY_NOT_IN_CONVERSATION'
   );
+}
+
+/**
+ * PRD-423: the conversation row a `toMessageResponses` caller already read,
+ * handed over so the page needs no lookup of its own to learn its kind and
+ * whether it is a matched Go together chat.
+ */
+export interface PageConversationHint {
+  kind: ConversationKind;
+  isGoTogetherChat: boolean;
+  eventMatchGroupId: string | null;
 }
 
 /**
@@ -175,9 +203,12 @@ export type MessageLike = Pick<
  * appears once per key as the business itself. `ownOnly` is a thread whose
  * seats cannot be attributed, where only the reader's own reactions are
  * listed, so no reactor who might be a staff member is named.
+ * PRD-423: `individuals` carries the conversation's `nameOptions`, so a
+ * matched Go together chat names each reactor by first name only; absent
+ * reads as full names.
  */
 export type ReactorView =
-  | { shape: 'individuals' }
+  | { shape: 'individuals'; nameOptions?: MemberNameOptions }
   | { shape: 'ownOnly' }
   | {
       shape: 'customerOfMailbox';
@@ -359,6 +390,41 @@ export class MessagingCoreService {
   }
 
   /**
+   * PRD-400: the members of GROUP `conversationId` whose join floor covers
+   * the message `messageId` (it was posted before they joined), compared in
+   * SQL through `groupJoinHistoryFloorCoversPredicate`. The group live relays
+   * use it so a frame about pre-join history (an edit of it, or a new reply
+   * quoting it) never reaches a newer member with the old content. Reads the
+   * message whatever its `deleted_at`, since a quoted parent may be gone. A
+   * group with no floored seat (every member seated at creation) returns an
+   * empty set.
+   */
+  async loadGroupJoinFlooredUserIds(
+    conversationId: string,
+    messageId: string,
+  ): Promise<Set<string>> {
+    const rows = await this.participants
+      .createQueryBuilder('seat')
+      .withDeleted()
+      .select('seat.user_id', 'userId')
+      .innerJoin(
+        'messages',
+        'join_floored_message',
+        '"join_floored_message"."id" = :messageId AND "join_floored_message"."conversation_id" = seat.conversation_id',
+        { messageId },
+      )
+      .where('seat.conversation_id = :conversationId', { conversationId })
+      .andWhere(
+        groupJoinHistoryFloorCoversPredicate(
+          '"join_floored_message"."created_at"',
+          'seat',
+        ),
+      )
+      .getRawMany<{ userId: string }>();
+    return new Set(rows.map((row) => row.userId));
+  }
+
+  /**
    * The WRITE-path counterpart of {@link requireParticipant}: the caller must
    * not only be a participant, they must still be ENTITLED TO ACT in the
    * conversation.
@@ -515,7 +581,13 @@ export class MessagingCoreService {
   ): Promise<ReactorView> {
     const conversation = await this.conversations.findOne({
       where: { id: conversationId },
-      select: { id: true, kind: true, isOfficial: true },
+      select: {
+        id: true,
+        kind: true,
+        isOfficial: true,
+        isGoTogetherChat: true,
+        eventMatchGroupId: true,
+      },
     });
     if (!conversation) {
       return { shape: 'ownOnly' };
@@ -524,7 +596,10 @@ export class MessagingCoreService {
       conversation.kind === ConversationKind.Group ||
       conversation.isOfficial
     ) {
-      return { shape: 'individuals' };
+      return {
+        shape: 'individuals',
+        nameOptions: memberNameOptionsFor(conversation),
+      };
     }
     const { threadSeats } = await this.loadDirectThreadSeats(
       conversationId,
@@ -580,7 +655,8 @@ export class MessagingCoreService {
    */
   async loadMessageListContext(
     conversations: ReadonlyArray<
-      Pick<Conversation, 'id' | 'kind' | 'isOfficial'>
+      Pick<Conversation, 'id' | 'kind' | 'isOfficial'> &
+        Partial<Pick<Conversation, 'isGoTogetherChat' | 'eventMatchGroupId'>>
     >,
     messages: ReadonlyArray<
       Pick<Message, 'senderId' | 'senderIdentityId'> &
@@ -590,7 +666,10 @@ export class MessagingCoreService {
   ): Promise<{
     renderCounterpart: (conversationId: string) => AuthorSummary | null;
     renderSender: (
-      message: Pick<Message, 'senderId' | 'senderIdentityId'>,
+      message: Pick<
+        Message,
+        'senderId' | 'senderIdentityId' | 'conversationId'
+      >,
     ) => AuthorSummary;
   }> {
     const conversationIds = conversations.map(
@@ -679,11 +758,27 @@ export class MessagingCoreService {
           : null,
       );
     }
+    // PRD-423: a hit from a matched Go together chat names its sender by
+    // first name, as the thread itself does.
+    const matchedGroupConversationIds = new Set(
+      conversations
+        .filter(
+          (conversation) => memberNameOptionsFor(conversation).isMatchedGroup,
+        )
+        .map((conversation) => conversation.id),
+    );
     return {
       renderCounterpart: (conversationId) =>
         counterpartByConversationId.get(conversationId) ?? null,
       renderSender: (message) =>
-        renderMessageSender(message, profileByUser, senderIdentityContext),
+        renderMessageSender(
+          message,
+          profileByUser,
+          senderIdentityContext,
+          matchedGroupConversationIds.has(message.conversationId)
+            ? { isMatchedGroup: true }
+            : FULL_MEMBER_NAMES,
+        ),
     };
   }
 
@@ -822,6 +917,16 @@ export class MessagingCoreService {
       // through `toMessageResponses`, so the filter has to live here.
       .andWhere(this.notModeratedPredicate())
       .andWhere(this.notHiddenForViewerPredicate())
+      // ENG-401: a member who left or was removed from a group previews only
+      // the newest message posted while they belonged to it, the same
+      // `leftAt` ceiling their history and unread count apply. Without it the
+      // row kept showing each new message's sender and body after removal.
+      .andWhere(notPastViewerLeftAtPredicate('m', ':hiddenForUserId'))
+      // ENG-402: PRD-354's group block filter, as the thread applies it. A
+      // group message from someone blocked either way with the viewer is no
+      // preview candidate, so the row falls back to the newest message the
+      // thread actually shows them.
+      .andWhere(notFromBlockedGroupMemberPredicate('m', ':hiddenForUserId'))
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
@@ -867,13 +972,17 @@ export class MessagingCoreService {
       // removed from a group cannot READ anything posted after they left, so
       // those messages must not keep driving an unread badge they can never
       // clear (BE-MSG-08).
-      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
+      .andWhere(withinLeftAtCeilingPredicate('m.created_at', 'p'))
       // A moderator-taken-down message never counts toward unread — the viewer
       // can no longer see it, so it must not drive a badge.
       .andWhere(this.notModeratedPredicate())
       // A message THIS viewer "deleted for me" (PRD-227) never counts toward
       // their own unread badge either — it no longer exists for them.
       .andWhere(this.notHiddenForViewerPredicate())
+      // ENG-402: a group message from someone blocked either way with the
+      // viewer is filtered out of the thread (PRD-354), so it never counts
+      // toward unread here: reading the thread could never clear it.
+      .andWhere(notFromBlockedGroupMemberPredicate('m', ':userId'))
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
@@ -929,7 +1038,8 @@ export class MessagingCoreService {
    * (`MentionNotificationService.notify`, fired once per SEND), which isn't
    * queryable back to "is this specific message still unread" without a
    * second join through its JSONB payload. Rather than add that join, this
-   * re-derives the fact directly from the message body with the SAME token
+   * re-derives the fact directly from the message text (the body, or an
+   * attachment message's caption) with the SAME token
    * shape `extractMentions` (`common/mentions.ts`) uses for the member
    * bucket: `@slug` at a whitespace/string-start boundary, lowercase only
    * (the extractor's char class carries no `i` flag, so an uppercase `@Sam`
@@ -965,10 +1075,26 @@ export class MessagingCoreService {
       .andWhere(NOT_SENT_AS_SEAT_IDENTITY_PREDICATE)
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
-      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
+      .andWhere(withinLeftAtCeilingPredicate('m.created_at', 'p'))
       .andWhere(this.notModeratedPredicate())
       .andWhere(this.notHiddenForViewerPredicate())
-      .andWhere('m.body ~ :mentionPattern', { mentionPattern })
+      // ENG-402: a blocked group member's mention is hidden from the thread
+      // (PRD-354), so it never flags the row either.
+      .andWhere(notFromBlockedGroupMemberPredicate('m', ':userId'))
+      // Carried 09-15 item 2: the SQL twin of `messageMentionText`
+      // (`common/mentions.ts`), the text the send-time fan-out scans. A
+      // captioned kind contributes its caption, since its `body` is only the
+      // "Photo" / "Document" fallback label; every other message contributes
+      // its body.
+      .andWhere(
+        `(CASE WHEN m.kind IN (:...mentionCaptionKinds)
+          THEN coalesce(m.attachment ->> 'caption', '')
+          ELSE m.body END) ~ :mentionPattern`,
+        {
+          mentionPattern,
+          mentionCaptionKinds: [...CAPTIONED_MESSAGE_KINDS],
+        },
+      )
       .setParameter(
         'messageSubjectType',
         MessagingCoreService.MESSAGE_SUBJECT_TYPE,
@@ -1170,6 +1296,9 @@ export class MessagingCoreService {
     // A caller that passes no seat or no identity context previews the note
     // with the business as its actor, the customer's rendering.
     viewerSeatIdentityId?: string,
+    // PRD-423: the conversation's name spelling, so a matched Go together
+    // chat previews its sender and system pill by first name only.
+    nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
   ): ViewerMessageResponse {
     const isSystem = message.kind === MessageKind.System;
     // Final fix F1 (C1): an image or document sent as a business previews by
@@ -1185,12 +1314,20 @@ export class MessagingCoreService {
     return {
       id: message.id,
       conversationId,
-      body: message.body,
+      // A legacy raw-key attachment body previews as its English label, and
+      // a legacy sticker edit previews as a bare sticker
+      // (`legacy-message-body.ts`).
+      body: readableMessageBody(message.kind, message.body),
       sender: senderIdentityContext
-        ? renderMessageSender(message, profileByUser, senderIdentityContext)
-        : senderAuthorSummary(message.senderId, profileByUser),
+        ? renderMessageSender(
+            message,
+            profileByUser,
+            senderIdentityContext,
+            nameOptions,
+          )
+        : senderAuthorSummary(message.senderId, profileByUser, nameOptions),
       createdAt: message.createdAt.toISOString(),
-      editedAt: message.editedAt ? message.editedAt.toISOString() : null,
+      editedAt: readableMessageEditedAt(message.kind, message.editedAt),
       reactions,
       // `lastMessagesByConversation` never returns a soft-deleted row.
       deletedAt: null,
@@ -1210,7 +1347,12 @@ export class MessagingCoreService {
       attachment: resolveAttachment(previewAttachment),
       systemEvent: isSystem
         ? withMovedNoteMailbox(
-            buildSystemEvent(message.systemEvent, profileByUser, viewerId),
+            buildSystemEvent(
+              message.systemEvent,
+              profileByUser,
+              viewerId,
+              nameOptions,
+            ),
             {
               viewerSeatIdentityId,
               identityDescriptionById:
@@ -1256,12 +1398,16 @@ export class MessagingCoreService {
    * query per member); an id absent from it (no row) reads as sharing on, the
    * same default `PreferencesService.getMessagingPrivacyForUsers` applies.
    * `deliveredAt` is untouched — delivery receipts are out of PRD-364's scope.
+   *
+   * PRD-423: `nameOptions` spells each member's name for this conversation,
+   * first names only in a matched Go together chat.
    */
   buildMemberSummaries(
     participants: ConversationParticipant[],
     profileByUser: Map<string, Profile>,
     viewerId: string,
     privacyByUser: Map<string, MessagingPrivacyDTO>,
+    nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
   ): ConversationMemberSummary[] {
     const rank: Record<ConversationRole, number> = {
       [ConversationRole.Owner]: 0,
@@ -1275,6 +1421,7 @@ export class MessagingCoreService {
       .map((participant) => {
         const summary = requireAuthorSummary(
           profileByUser.get(participant.userId),
+          nameOptions,
         );
         const isViewerRow = participant.userId === viewerId;
         const subjectSharesReadReceipts =
@@ -1319,6 +1466,8 @@ export class MessagingCoreService {
   buildMemberPreview(
     participants: ConversationParticipant[],
     profileByUser: Map<string, Profile>,
+    // PRD-423: first names only in a matched Go together chat.
+    nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
   ): ConversationMemberPreview[] {
     return participants
       .filter((participant) => participant.leftAt == null)
@@ -1326,6 +1475,7 @@ export class MessagingCoreService {
       .map((participant) => {
         const summary = requireAuthorSummary(
           profileByUser.get(participant.userId),
+          nameOptions,
         );
         return {
           id: participant.userId,
@@ -1402,7 +1552,9 @@ export class MessagingCoreService {
     // kind straight through, so this method skips its own `conversations`
     // lookup entirely. Left undefined by callers that have not looked it up
     // yet, in which case the fallback `findOne` below runs exactly as before.
-    conversationKind?: ConversationKind,
+    // PRD-423: a caller that also read `isGoTogetherChat` passes a
+    // `PageConversationHint`, which spares a group page its lookup too.
+    conversationKind?: ConversationKind | PageConversationHint,
     // Final review I2: `renderMessageForViewerClasses` passes a loader that
     // shares the identity rows, staff and preferences across the classes it
     // renders. Every other caller loads them for this call alone.
@@ -1523,7 +1675,7 @@ export class MessagingCoreService {
       viewer,
       moderationRows,
       viewerHiddenReplyParentRows,
-      resolvedConversationKind,
+      pageConversation,
       // Fix round 1 (Task 11): this page's sender identities, kind-resolved
       // and display-resolved, and one `StaffNameResolver` covering every one
       // of them for THIS viewer, so a business sender renders as itself with
@@ -1572,12 +1724,10 @@ export class MessagingCoreService {
       // the caller hasn't already (the fallback for a caller that never
       // looked it up); `getMessages` and friends now pass `conversationKind`
       // straight through, since they already loaded it for their own
-      // block-filter branching, so this resolves with no extra query at all.
-      conversationKind !== undefined
-        ? Promise.resolve(conversationKind)
-        : this.conversations
-            .findOne({ where: { id: conversationId }, select: { kind: true } })
-            .then((found) => found?.kind ?? null),
+      // block-filter branching, so a direct page resolves with no extra
+      // query at all. PRD-423: a group page also reads whether it is a
+      // matched Go together chat, see `resolvePageConversation`.
+      this.resolvePageConversation(conversationId, conversationKind),
       // Task 23: the businesses this page's moved notes name ride the same
       // batch, so a note costs no query of its own.
       loadSenderIdentities(
@@ -1585,6 +1735,10 @@ export class MessagingCoreService {
         viewerId,
       ),
     ]);
+    const resolvedConversationKind = pageConversation.kind;
+    // PRD-423: every name this page hands the viewer (authors, reply
+    // quotes, system pills) is spelled for this conversation.
+    const nameOptions = pageConversation.nameOptions;
     const viewerIsStaff =
       viewer?.role === UserRole.Admin || viewer?.role === UserRole.Moderator;
     // ENG-240 hot-path fix: the viewer's OWN participant row, split out of
@@ -1670,11 +1824,19 @@ export class MessagingCoreService {
                 .where('parent.id IN (:...parentIds)', {
                   parentIds: parents.map((parent) => parent.id),
                 })
+                // PRD-400: a group seat's JOIN floor withholds a pre-join
+                // parent the same way, so a post-join reply never hands a new
+                // member the snippet or thumbnail key of history from before
+                // they joined. Their own later "clear chat" moves
+                // `clearedAt` alone and keeps quoting as before.
                 .andWhere(
-                  mailboxStaffHistoryFloorCoversPredicate(
+                  `(${mailboxStaffHistoryFloorCoversPredicate(
                     'parent.created_at',
                     'seat',
-                  ),
+                  )} OR ${groupJoinHistoryFloorCoversPredicate(
+                    'parent.created_at',
+                    'seat',
+                  )})`,
                 )
                 .getRawMany<{ parentId: string }>()
             ).map((row) => row.parentId),
@@ -1780,6 +1942,9 @@ export class MessagingCoreService {
       // be offered as an editable/deletable message of its own, no matter how
       // recent or who the viewer is.
       const isSystemMessage = m.kind === MessageKind.System;
+      // ENG-405: a sticker has no member-written text to edit, and
+      // `MessagesService.editMessage` refuses it with the same list.
+      const isUneditableKind = UNEDITABLE_MESSAGE_KINDS.includes(m.kind);
       // Fix round 1 (Task 11), corrected in fix round 2: a business/persona/
       // company sender renders as the identity itself, with the staff first
       // name alongside only when attribution allows it for THIS viewer. Task
@@ -1790,6 +1955,7 @@ export class MessagingCoreService {
         m,
         profileByUser,
         senderIdentityContext,
+        nameOptions,
       );
       // Task 13c: `buildReplyTo` names a quoted parent after its human
       // author's profile. A parent sent AS a business is quoted under the
@@ -1801,6 +1967,7 @@ export class MessagingCoreService {
         quotableParentById,
         profileByUser,
         hiddenReplyParentIds,
+        nameOptions,
       );
       const replyParent = m.replyToId
         ? quotableParentById.get(m.replyToId)
@@ -1821,16 +1988,21 @@ export class MessagingCoreService {
                 replyParent,
                 profileByUser,
                 senderIdentityContext,
+                nameOptions,
               ).displayName,
             }
           : plainReplyTo;
       return {
         id: m.id,
         conversationId: m.conversationId,
-        body: isDeleted ? '' : m.body,
+        // A legacy raw-key attachment body reads as its English label, and a
+        // sticker edited before ENG-405 reads as a bare, unedited sticker
+        // (`legacy-message-body.ts`). The `message:updated` frame reuses this
+        // response, so a live frame reads the same.
+        body: isDeleted ? '' : readableMessageBody(m.kind, m.body),
         sender,
         createdAt: m.createdAt.toISOString(),
-        editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+        editedAt: readableMessageEditedAt(m.kind, m.editedAt),
         reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
         deletedAt: effectiveDeletedAt ? effectiveDeletedAt.toISOString() : null,
         deliveredAt: delivered ? otherDeliveredAt.toISOString() : null,
@@ -1867,6 +2039,7 @@ export class MessagingCoreService {
         canEdit:
           !isDeleted &&
           !isSystemMessage &&
+          !isUneditableKind &&
           isAuthor &&
           withinEditWindow &&
           isViewerActiveParticipant,
@@ -1900,7 +2073,12 @@ export class MessagingCoreService {
             ),
         systemEvent:
           m.kind === MessageKind.System
-            ? buildSystemEvent(m.systemEvent, profileByUser, viewerId)
+            ? buildSystemEvent(
+                m.systemEvent,
+                profileByUser,
+                viewerId,
+                nameOptions,
+              )
             : null,
       };
     });
@@ -1932,6 +2110,44 @@ export class MessagingCoreService {
     return responses.map((response, index) =>
       toViewerMessageResponse(response, rows[index]!, viewerMessageContext),
     );
+  }
+
+  /**
+   * PRD-423: the kind and name spelling of the one conversation a
+   * `toMessageResponses` page belongs to. A caller that already knows the
+   * page is a direct thread costs no query (only a group can be a matched Go
+   * together chat); a group page reads `isGoTogetherChat` in one
+   * primary-key lookup, and a caller that passed no kind reads both columns
+   * in that same lookup. A caller that hands over a `PageConversationHint`
+   * (the row it already read) costs no query at all.
+   */
+  private async resolvePageConversation(
+    conversationId: string,
+    conversationKind: ConversationKind | PageConversationHint | undefined,
+  ): Promise<{
+    kind: ConversationKind | null;
+    nameOptions: MemberNameOptions;
+  }> {
+    if (typeof conversationKind === 'object') {
+      return {
+        kind: conversationKind.kind,
+        nameOptions: memberNameOptionsFor(conversationKind),
+      };
+    }
+    if (
+      conversationKind !== undefined &&
+      conversationKind !== ConversationKind.Group
+    ) {
+      return { kind: conversationKind, nameOptions: FULL_MEMBER_NAMES };
+    }
+    const conversation = await this.conversations.findOne({
+      where: { id: conversationId },
+      select: { kind: true, isGoTogetherChat: true, eventMatchGroupId: true },
+    });
+    return {
+      kind: conversationKind ?? conversation?.kind ?? null,
+      nameOptions: memberNameOptionsFor(conversation),
+    };
   }
 
   /**
@@ -2290,6 +2506,11 @@ export class MessagingCoreService {
         provider: 'sticker',
         stickerId: sticker.id,
         label: sticker.label,
+        // Baked beside `label` so a Portuguese reader's client can name the
+        // sticker without a catalogue lookup, and keeps the name it had when
+        // sent. Left off entirely when the sticker has no Portuguese name,
+        // matching every row sent before this field existed.
+        ...(sticker.labelPt ? { labelPt: sticker.labelPt } : {}),
       };
     }
     const entityKind =
@@ -2304,8 +2525,15 @@ export class MessagingCoreService {
               : MessageKind.User;
     // DTO callers arrive already sanitized; server-composed bodies (enquiries,
     // a materialized connection note) get the same pass here. A sticker send's
-    // `body` was already dropped to '' above, so it stores no text.
-    const storedBody = sanitizeMessageBody(body);
+    // `body` was already dropped to '' above, so it stores no text. A photo,
+    // document or GIF whose body arrives as a raw catalog key (a forward of a
+    // legacy row, or a client whose translation had not loaded) stores its
+    // English label, so no new raw-key row is written
+    // (`legacy-message-body.ts`).
+    const storedBody = readableMessageBody(
+      entityKind,
+      sanitizeMessageBody(body),
+    );
     if (!storedBody && !resolvedAttachment) {
       throw new BadRequestException('body must not be empty');
     }
@@ -2607,20 +2835,14 @@ export class MessagingCoreService {
     // eslint-disable-next-line no-control-regex -- deliberately matching C0/DEL control bytes to strip them.
     const withoutControlCharacters = fileName.replace(/[\x00-\x1f\x7f]/g, '');
     const trimmed = withoutControlCharacters.trim();
-    const bounded = trimmed.slice(
-      0,
+    // Cut by character so an emoji at the bound never leaves a lone
+    // surrogate in the `jsonb` attachment (see `truncateCharacters`).
+    const bounded = truncateCharacters(
+      trimmed,
       MessagingCoreService.MAX_DISPLAY_FILE_NAME_LENGTH,
     );
     return bounded.length > 0 ? bounded : 'Document';
   }
-
-  // The longest a caption may be — generous for a genuine WhatsApp-style
-  // caption, tight enough that a pathological value can't bloat every
-  // response/broadcast that echoes it back. The DTO already enforces this at
-  // the transport boundary (`GifAttachmentDto.caption`'s own `@MaxLength`);
-  // repeated here because this method also runs against `AttachmentInput`
-  // wire values that bypass the DTO's own validation in unit tests.
-  private static readonly MAX_ATTACHMENT_CAPTION_LENGTH = 1000;
 
   /**
    * Bounds and cleans a `kind:'gif'`/`kind:'image'`/`kind:'document'` send's
@@ -2654,10 +2876,12 @@ export class MessagingCoreService {
    * whitespace, all markup) is also dropped rather than persisted as an empty
    * string — unlike a document's `fileName`, a caption is OPTIONAL, so there
    * is no placeholder to fall back to and none is needed.
+   *
+   * Public so `MessagesService.editMessage` stores an edited caption
+   * (ENG-405) through this exact pass, keeping a sent and an edited caption
+   * byte-for-byte alike.
    */
-  private sanitizeAttachmentCaption(
-    caption: string | undefined,
-  ): string | undefined {
+  sanitizeAttachmentCaption(caption: string | undefined): string | undefined {
     if (caption === undefined) {
       return undefined;
     }
@@ -2670,9 +2894,13 @@ export class MessagingCoreService {
       '',
     );
     const withoutMarkup = toStoredPlainText(withoutControlCharacters);
-    const bounded = withoutMarkup.slice(
-      0,
-      MessagingCoreService.MAX_ATTACHMENT_CAPTION_LENGTH,
+    // Counted and cut in `@MaxLength`'s unit, so a caption the DTO (send) or
+    // `withEditedCaption` (edit) accepted is stored whole, and a longer one
+    // is cut on a character boundary with no lone surrogate for the `jsonb`
+    // write to refuse.
+    const bounded = truncateCharacters(
+      withoutMarkup,
+      MAX_ATTACHMENT_CAPTION_LENGTH,
     );
     return bounded.length > 0 ? bounded : undefined;
   }

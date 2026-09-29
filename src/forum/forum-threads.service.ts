@@ -9,6 +9,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { truncateCharacters } from '../common/text-characters';
 import {
   DataSource,
   EntityManager,
@@ -39,6 +40,7 @@ import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { isGatedTier } from '../communities/community-gate';
+import { COMMUNITY_MODERATION_SUBJECT_TYPE } from '../communities/community-read-gate';
 import {
   ownRosterRowCountsSql,
   parentStaffOfSpaceSql,
@@ -435,6 +437,21 @@ interface ResolvedThreadFields {
    * claimed later by `publishThread`. See `ForumThread.fannedOutAt`.
    */
   fannedOutAt: Date | null;
+}
+
+/** The community a thread in the staff review queue was written in. */
+export interface ForumReviewQueueCommunity {
+  slug: string;
+  name: string;
+}
+
+/**
+ * One row of `GET /admin/forum/review`: the ordinary thread response (read
+ * with the moderator view) plus the thread's community, or null for a thread
+ * that belongs to no community.
+ */
+export interface ForumReviewQueueRow extends ForumThreadResponse {
+  community: ForumReviewQueueCommunity | null;
 }
 
 @Injectable()
@@ -1124,15 +1141,32 @@ export class ForumThreadsService {
    * Returns `{ ok: true }` rather than the thread. It fires on every thread
    * open, the client already holds the thread it just rendered, and the only
    * field the stamp changes is the one the client is about to clear anyway.
+   *
+   * `upTo` (PRD-409) is the timestamp of the newest reply the member actually
+   * had on screen. Stamping "now" marked a reply that arrived while the page
+   * was open as read before anybody saw it. A value in the future is clamped
+   * to now, so a skewed client clock cannot push the watermark past replies
+   * that have yet to be written. Omitted, it means now, as it always did.
    */
-  async markRead(slug: string, user: CurrentUserData): Promise<{ ok: true }> {
+  async markRead(
+    slug: string,
+    user: CurrentUserData,
+    upTo?: string,
+  ): Promise<{ ok: true }> {
     // A moderator never meets the scheduled/under-review gate, here or anywhere
     // else: they can open the thread, so stamping where they got to must not
     // 404. The author passes on their own rows without a flag.
     const thread = await this.loadOr404(slug, user.userId, {
       includeUnpublished: isModeratorRole(user.role),
     });
-    await this.subscriptions.markRead(thread.id, user.userId);
+    // `@IsISO8601()` admits a few shapes `Date.parse` cannot read (an ISO week
+    // date, say). Those fall back to now, the same as an omitted `upTo`, so an
+    // Invalid Date never reaches the watermark write.
+    const requestedReadAt = upTo ? Date.parse(upTo) : Number.NaN;
+    const readAt = Number.isNaN(requestedReadAt)
+      ? new Date()
+      : new Date(Math.min(requestedReadAt, Date.now()));
+    await this.subscriptions.markRead(thread.id, user.userId, readAt);
     return { ok: true };
   }
 
@@ -1153,6 +1187,13 @@ export class ForumThreadsService {
     if (input.communitySlug) {
       communityId = await this.membership.assertMemberBySlug(
         input.communitySlug,
+        authorId,
+      );
+      // `assertMemberBySlug` above already 403s a non-member, so only a
+      // member reaches this check: a community a moderator took down 404s
+      // for a member who is not its staff.
+      await this.assertCommunityNotTakenDown(
+        { id: communityId, slug: input.communitySlug },
         authorId,
       );
     }
@@ -1189,7 +1230,14 @@ export class ForumThreadsService {
     // decides it.
     const publishedAt =
       this.parseScheduledInstant(input.publishAt, 'publishAt') ?? new Date();
-    const closesAt = this.parseScheduledInstant(input.closesAt, 'closesAt');
+    // ENG-423: the one-year cap on `closesAt` runs from the moment the thread
+    // opens. Measured from now, a thread scheduled eleven months ahead could
+    // only stay open for one month.
+    const closesAt = this.parseScheduledInstant(
+      input.closesAt,
+      'closesAt',
+      publishedAt,
+    );
     this.assertClosesAfterPublish(publishedAt, closesAt);
     // The opening post's photos and the thread's poll, resolved here with
     // everything else that can REJECT the request, so a blank option label, a
@@ -1416,32 +1464,100 @@ export class ForumThreadsService {
    * All three are best-effort and none may throw back at the caller: by the
    * time this runs the thread has committed, and a failed notification must
    * never look like a failed post.
+   *
+   * EACH ONE IS SCOPED TO WHO CAN READ THE THREAD AND WHO IS SHOWN WRITING IT
+   * (ENG-418). A thread in a gated community, or in a space, is readable by
+   * its roster alone, so it announces nothing on the author's public profile,
+   * links into no topic page, and sends no excerpt of its body to a member
+   * the gate would refuse. A thread whose author is masked (anonymous, or
+   * posted as QueerPulse Official) must not tie the author's own profile or
+   * name to it, so it records no profile activity and its mention payloads
+   * carry no `actorId`.
    */
   private async runThreadFanOut(
     thread: ForumThread,
     body: string,
   ): Promise<void> {
+    const isForumWide = await this.isThreadForumWide(thread);
+    const isAuthorMasked = thread.isAnonymous || thread.isOfficial;
+    // An erased author (ENG-494) has no profile to record activity on and
+    // nobody to name as the actor.
+    const authorId = thread.authorId;
     // Public profile activity for the author. Fire-and-forget on the event bus
-    // — a listener failure must never affect thread creation (see profiles
-    // `ActivityListener`).
-    this.eventEmitter.emit(FORUM_THREAD_CREATED, {
-      authorId: thread.authorId,
-      threadSlug: thread.slug,
-      title: thread.title,
-    } satisfies ForumThreadCreatedEvent);
-    // DISC-5 — best-effort, never throws (see `TopicPostLinkService.linkThread`);
-    // a matching tag materializes a `topic_post` row and fans out DISC-3's
-    // topic-follow notification (`TOPIC_POST_LINKED`, topics module).
-    await this.topicPostLink.linkThread(thread, body);
+    // (a listener failure must never affect thread creation; see profiles
+    // `ActivityListener`). The activity row is public, so it is recorded only
+    // for a thread every member can open, under the author's own name.
+    if (authorId !== null && !isAuthorMasked && isForumWide) {
+      this.eventEmitter.emit(FORUM_THREAD_CREATED, {
+        authorId,
+        threadSlug: thread.slug,
+        title: thread.title,
+      } satisfies ForumThreadCreatedEvent);
+    }
+    // DISC-5, best-effort and never throws (see
+    // `TopicPostLinkService.linkThread`); a matching tag materializes a
+    // `topic_post` row and fans out DISC-3's topic-follow notification
+    // (`TOPIC_POST_LINKED`, topics module). A topic page is open to every
+    // member, so only a forum-wide thread belongs on one.
+    if (isForumWide) {
+      await this.topicPostLink.linkThread(thread, body);
+    }
     // No body, nothing to have mentioned anybody in. Guarded rather than left
     // to `extractMentions` returning nothing, so the intent is on the page.
-    if (!body) return;
-    await this.mentions.notify(body, thread.authorId, {
-      actorId: thread.authorId,
+    // An erased author's opening post went with their account, so a null
+    // author has no body here either; the null check keeps `notify` typed.
+    if (!body || authorId === null) return;
+    // The second argument stays the real author: `notify` uses it only for
+    // the block filter and to skip a self-mention. What the bell and the push
+    // show as the actor comes from `payload.actorId` alone, so a masked
+    // author's payload leaves it out.
+    await this.mentions.notify(body, authorId, {
+      ...(isAuthorMasked ? {} : { actorId: authorId }),
       source: 'forum',
       threadSlug: thread.slug,
-      excerpt: body.slice(0, 140),
+      ...(isForumWide ? { excerpt: truncateCharacters(body, 140) } : {}),
     });
+  }
+
+  /**
+   * Can every active member read this thread (ENG-418)? True for a thread
+   * that belongs to no community, for a cross-posted thread (which the town
+   * square carries by the author's choice, see `applyCommunityAccessFilter`),
+   * and for a thread in a top-level, live, `public` community. A space never
+   * counts, even a public one: its threads reach a reader only through their
+   * standing in it, the same rule `applyCommunityAccessFilter` applies.
+   *
+   * Runs against the `communities` entity via the thread repo's shared entity
+   * manager, as `isCommunityHiddenFrom` does, so `ForumModule` needs no extra
+   * repository registration.
+   *
+   * NEVER THROWS. `create` runs the fan-out after the thread has committed,
+   * so a failed probe there would answer 500 for a thread that exists, and a
+   * retry would post it twice. A failed probe is logged and answers false,
+   * the privacy-safe reading: the thread announces itself as gated (no
+   * profile activity, no topic link, no mention excerpt).
+   */
+  private async isThreadForumWide(thread: ForumThread): Promise<boolean> {
+    if (thread.communityId === null) return true;
+    if (thread.crossPosted) return true;
+    try {
+      return await this.threads.manager
+        .createQueryBuilder(Community, 'com')
+        .where('com.id = :communityId', { communityId: thread.communityId })
+        .andWhere('com.accessTier = :publicTier', {
+          publicTier: AccessTier.Public,
+        })
+        .andWhere('com.parentId IS NULL')
+        .andWhere('com.archivedAt IS NULL')
+        .getExists();
+    } catch (error) {
+      this.logger.warn(
+        `Forum-wide probe failed for forum thread ${thread.slug}; announcing it as gated: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -1502,7 +1618,7 @@ export class ForumThreadsService {
     user: CurrentUserData,
     cursor: string | undefined,
     limit: number | undefined,
-  ): Promise<CursorPage<ForumThreadResponse>> {
+  ): Promise<CursorPage<ForumReviewQueueRow>> {
     const qb = this.threads
       .createQueryBuilder('t')
       .where('t.review_state = :pendingReview', {
@@ -1516,10 +1632,55 @@ export class ForumThreadsService {
       't',
       true,
     );
+    const [responses, communityById] = await Promise.all([
+      this.toThreadResponses(page.rows, user.userId, true),
+      this.reviewQueueCommunities(page.rows),
+    ]);
+    const communityIdByThreadId = new Map(
+      page.rows.map((row) => [row.id, row.communityId]),
+    );
+    const data = responses.map((response) => {
+      const communityId = communityIdByThreadId.get(response.id) ?? null;
+      return {
+        ...response,
+        community: communityId
+          ? (communityById.get(communityId) ?? null)
+          : null,
+      };
+    });
     return {
-      data: await this.toThreadResponses(page.rows, user.userId, true),
+      data,
       pageInfo: { nextCursor: page.nextCursor, hasMore: page.hasMore },
     };
+  }
+
+  /**
+   * The community each queued thread was written in, so a reviewer can see
+   * "In {community}" beside it (PRD-461). ONE query for the whole page, keyed
+   * by community id, and only the two columns the row shows. A thread with no
+   * community is simply absent from the map.
+   */
+  private async reviewQueueCommunities(
+    rows: ForumThread[],
+  ): Promise<Map<string, ForumReviewQueueCommunity>> {
+    const communityIds = [
+      ...new Set(
+        rows
+          .map((row) => row.communityId)
+          .filter((communityId): communityId is string => communityId != null),
+      ),
+    ];
+    if (!communityIds.length) return new Map();
+    const communities = await this.threads.manager.find(Community, {
+      where: { id: In(communityIds) },
+      select: { id: true, slug: true, name: true },
+    });
+    return new Map(
+      communities.map((community) => [
+        community.id,
+        { slug: community.slug, name: community.name },
+      ]),
+    );
   }
 
   /**
@@ -1623,9 +1784,12 @@ export class ForumThreadsService {
     approve: boolean,
     note?: string,
   ): Promise<void> {
+    // An erased author (ENG-494) has nobody left to tell.
+    const authorId = thread.authorId;
+    if (authorId === null) return;
     try {
       await this.notifications.create(
-        thread.authorId,
+        authorId,
         NotificationType.ForumThreadReviewed,
         {
           source: 'forum',
@@ -1637,7 +1801,7 @@ export class ForumThreadsService {
       );
     } catch (error) {
       this.logger.warn(
-        `Failed to notify ${thread.authorId} of the review verdict on forum thread ${thread.slug}: ${
+        `Failed to notify ${authorId} of the review verdict on forum thread ${thread.slug}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -1752,16 +1916,22 @@ export class ForumThreadsService {
     ) {
       throw new NotFoundException('Thread not found');
     }
+    // An erased author (ENG-494) blocks nobody, so there is no pair to check.
     if (
       viewerId &&
+      thread.authorId !== null &&
       (await this.blockFilter.isBlockedEitherWay(viewerId, thread.authorId))
     ) {
       throw new NotFoundException('Thread not found');
     }
+    // A cross-posted thread skips the community gate (PRD-407): its author
+    // chose to show it to the whole forum, which is the same row the browse
+    // list admits through `applyCommunityAccessFilter`.
     if (
       viewerId &&
       !options?.bypassCommunityAccess &&
       thread.communityId &&
+      !thread.crossPosted &&
       (await this.isCommunityHiddenFrom(thread.communityId, viewerId))
     ) {
       throw new NotFoundException('Thread not found');
@@ -1785,17 +1955,54 @@ export class ForumThreadsService {
    *
    * A flat/global thread (`communityId: null`) has no roster, so this is a
    * no-op for the forum's ordinary threads.
+   *
+   * A CROSS-POSTED thread is held to the roster too (PRD-407). Cross-posting
+   * widens who can READ a community thread to the whole forum, and replies
+   * and poll votes stay with the community that owns it. A non-member who
+   * opens one gets the 403 below, whose copy already says why.
+   *
+   * A community a moderator has TAKEN DOWN takes no new replies or poll
+   * votes from anyone but its own staff, and says so with the same 404 its
+   * board answers (`assertCommunityNotTakenDown`). That check runs before the
+   * roster check, so a non-member learns nothing more than a member does.
    */
   async assertCanReplyInThread(
     thread: ForumThread,
     userId: string,
   ): Promise<void> {
     if (!thread.communityId) return;
+    const communitySlug = await this.membership.slugById(thread.communityId);
+    if (communitySlug) {
+      await this.assertCommunityNotTakenDown(
+        { id: thread.communityId, slug: communitySlug },
+        userId,
+      );
+    }
     if (!(await this.membership.isMember(thread.communityId, userId))) {
       throw new ForbiddenException(
         'Only members of this community can reply in its threads',
       );
     }
+  }
+
+  /**
+   * 404 when a moderator has hidden or removed the community itself, unless
+   * the caller is its owner, co-owner or mod. The takedown half of
+   * `assertCommunityInteriorReadable`, which closes the community's board
+   * and roster the same way, so its threads cannot be written into while the
+   * community reads as gone. Staff keep writing, as they keep reading.
+   */
+  private async assertCommunityNotTakenDown(
+    community: { id: string; slug: string },
+    userId: string,
+  ): Promise<void> {
+    const moderation = await this.contentModeration.stateFor(
+      COMMUNITY_MODERATION_SUBJECT_TYPE,
+      community.slug,
+    );
+    if (!moderation.hidden && !moderation.removed) return;
+    if (await this.membership.isOwnerOrMod(community.id, userId)) return;
+    throw new NotFoundException('Community not found');
   }
 
   /**
@@ -2218,6 +2425,68 @@ export class ForumThreadsService {
   }
 
   /**
+   * DELETE /forum/threads/:slug/co-author: take the co-author credit off a
+   * thread (PRD-408).
+   *
+   * The credit is written by the author alone, so the credited member had no
+   * say in having their name on the thread. Either half of the byline may
+   * remove it: the co-author withdrawing their name, or the author retracting
+   * the credit. Anybody else gets the same 404 as a thread that does not
+   * exist, so the route discloses nothing about a thread the caller has no
+   * part in.
+   *
+   * Loaded straight by slug, past the read gates `loadOr404` applies. A
+   * co-author who has since blocked the author, or who is off the roster of the
+   * thread's gated community, would otherwise be refused the one action that
+   * takes their name off it. The two identity checks below are the whole gate,
+   * and a withdrawn thread is a 404 like everywhere else.
+   *
+   * Idempotent: removing a credit that is already gone writes nothing and
+   * echoes the thread as it stands, for the author. For anyone else a thread
+   * with no co-author has nobody to match, so it 404s.
+   */
+  async removeCoAuthor(
+    slug: string,
+    user: CurrentUserData,
+  ): Promise<ForumThreadResponse> {
+    const thread = await this.threads.findOne({ where: { slug } });
+    if (!thread || thread.deletedAt) {
+      throw new NotFoundException('Thread not found');
+    }
+    const isCoAuthor =
+      thread.coAuthorId != null && thread.coAuthorId === user.userId;
+    const isAuthor = thread.authorId === user.userId;
+    if (!isCoAuthor && !isAuthor) {
+      throw new NotFoundException('Thread not found');
+    }
+    if (thread.coAuthorId != null) {
+      await this.threads.update({ id: thread.id }, { coAuthorId: null });
+      thread.coAuthorId = null;
+    }
+
+    const [byline, op, isSubscribed] = await Promise.all([
+      this.bylineRefs(thread),
+      this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
+      this.subscriptions.isSubscribed(thread.id, user.userId),
+    ]);
+    return toForumThreadResponse(
+      thread,
+      byline.author,
+      { userId: user.userId, isModerator: isModeratorRole(user.role) },
+      op.opPost,
+      op.myVote,
+      isSubscribed,
+      op.moderation,
+      // No watermark is resolved on a write echo, so the unread count is null:
+      // "no unread information".
+      null,
+      byline.coAuthor,
+      op.opPhotos,
+      op.poll,
+    );
+  }
+
+  /**
    * `GET /communities/:slug/pulse`'s threads lane — a community's own most
    * recent threads, newest-first. Reuses `toThreadResponses`' batched
    * author/OP/vote hydration (same shape the list/search views already
@@ -2291,7 +2560,13 @@ export class ForumThreadsService {
     publishedAt: Date,
   ): ResolvedPollInput | null {
     if (!poll) return null;
-    const closesAt = this.parseScheduledInstant(poll.closesAt, 'poll.closesAt');
+    // Capped a year from publication, as the thread's own `closesAt` is
+    // (ENG-423).
+    const closesAt = this.parseScheduledInstant(
+      poll.closesAt,
+      'poll.closesAt',
+      publishedAt,
+    );
     this.assertClosesAfterPublish(publishedAt, closesAt);
     return {
       labels: resolvePollLabels(poll),
@@ -2310,6 +2585,15 @@ export class ForumThreadsService {
       normalized,
     );
     if (!coAuthorId) {
+      throw new BadRequestException(
+        'No member with that handle to credit as co-author',
+      );
+    }
+    // A block in either direction reads exactly like an unknown handle
+    // (PRD-408): crediting somebody who blocked you would put your thread on
+    // their name, and a distinct message would let the author probe who has
+    // blocked them.
+    if (await this.blockFilter.isBlockedEitherWay(authorId, coAuthorId)) {
       throw new BadRequestException(
         'No member with that handle to credit as co-author',
       );
@@ -2333,10 +2617,17 @@ export class ForumThreadsService {
    * including the shape of the messages. The DTO still owns the FORMAT
    * (`@IsISO8601()`), so the `Number.isNaN` branch below only fires for a
    * caller that reached the service another way.
+   *
+   * `windowStart` (ENG-423) moves the one-year cap for a deadline: a
+   * `closesAt` is capped a year after the thread PUBLISHES, so a thread
+   * scheduled months ahead keeps its full year open. "In the future" is still
+   * measured from now either way, since a deadline already in the past is
+   * wrong whenever the thread opens.
    */
   private parseScheduledInstant(
     value: string | undefined,
     field: string,
+    windowStart?: Date,
   ): Date | null {
     if (value === undefined) return null;
     const at = new Date(value);
@@ -2347,8 +2638,13 @@ export class ForumThreadsService {
     if (at.getTime() <= now) {
       throw new BadRequestException(`${field} must be in the future`);
     }
-    if (at.getTime() - now > MAX_SCHEDULE_AHEAD_MS) {
-      throw new BadRequestException(`${field} must be at most a year from now`);
+    const capStart = windowStart ? windowStart.getTime() : now;
+    if (at.getTime() - capStart > MAX_SCHEDULE_AHEAD_MS) {
+      throw new BadRequestException(
+        windowStart
+          ? `${field} must be at most a year after the thread is published`
+          : `${field} must be at most a year from now`,
+      );
     }
     return at;
   }
@@ -2366,12 +2662,14 @@ export class ForumThreadsService {
   private async bylineRefs(
     thread: ForumThread,
   ): Promise<{ author: MemberRef | null; coAuthor: MemberRef | null }> {
-    const ids = thread.coAuthorId
-      ? [thread.authorId, thread.coAuthorId]
-      : [thread.authorId];
+    // A null author (erased, ENG-494) resolves to no ref, so the response
+    // mapper renders `UNKNOWN_AUTHOR`.
+    const ids = [thread.authorId, thread.coAuthorId].filter(
+      (userId): userId is string => userId !== null,
+    );
     const refs = await new MemberLookup(this.profiles).byUserIds(ids);
     return {
-      author: refs.get(thread.authorId) ?? null,
+      author: thread.authorId ? (refs.get(thread.authorId) ?? null) : null,
       coAuthor: thread.coAuthorId
         ? (refs.get(thread.coAuthorId) ?? null)
         : null,
@@ -2634,6 +2932,11 @@ export class ForumThreadsService {
   // row (`ownRosterRowCountsSql`), or staff standing in the parent, which
   // gives full mod powers in every space with no space roster row
   // (`parentStaffOfSpaceSql`). Mirrors `FeedService`'s equivalent arm.
+  //
+  // `OR t.cross_posted = true` (PRD-407): cross-posting is the author's
+  // deliberate choice to show a community thread in the town square too, so a
+  // cross-posted thread is readable by every member whatever its community's
+  // tier. Writing into it stays a roster action (`assertCanReplyInThread`).
   private applyCommunityAccessFilter(
     qb: SelectQueryBuilder<ForumThread>,
     viewerId: string,
@@ -2641,6 +2944,7 @@ export class ForumThreadsService {
     qb.andWhere(
       `(
         t.community_id IS NULL
+        OR t.cross_posted = true
         OR EXISTS (
           SELECT 1 FROM "communities" "com"
           WHERE "com"."id" = t.community_id
@@ -2894,11 +3198,12 @@ export class ForumThreadsService {
     // Authors AND co-authors in one id set, so a page of co-written guides
     // still costs the one profile query a page of ordinary threads does. This
     // is the batched counterpart of `bylineRefs`.
+    // A null author (erased, ENG-494) contributes no id.
     const authorIds = [
       ...new Set(
-        rows.flatMap((t) =>
-          t.coAuthorId ? [t.authorId, t.coAuthorId] : [t.authorId],
-        ),
+        rows
+          .flatMap((t) => [t.authorId, t.coAuthorId])
+          .filter((userId): userId is string => userId !== null),
       ),
     ];
     const threadIds = rows.map((t) => t.id);
@@ -2959,7 +3264,7 @@ export class ForumThreadsService {
       const op = opByThread.get(t.id) ?? null;
       return toForumThreadResponse(
         t,
-        authors.get(t.authorId) ?? null,
+        t.authorId ? (authors.get(t.authorId) ?? null) : null,
         viewer,
         op,
         op ? (myVoteByPost.get(op.id) ?? 0) : 0,

@@ -28,6 +28,10 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
+  isJobFieldId,
+  professionBelongsToField,
+} from '../profiles/professions';
+import {
   JobApplication,
   JobApplicationAnswer,
   JobApplicationStatus,
@@ -55,6 +59,8 @@ import {
 export interface CreateJobInput {
   title: string;
   category: string;
+  // Optional profession id inside `category`; `null` clears it on update.
+  profession?: string | null;
   commitment: string;
   seniority: string;
   format: JobFormat;
@@ -184,6 +190,16 @@ export class JobsService {
   }
 
   async create(posterId: string, dto: CreateJobInput): Promise<JobDetailDTO> {
+    // Checked before the company step so a mismatched pair never leaves an
+    // inline-created company behind.
+    if (
+      dto.profession &&
+      !professionBelongsToField(dto.profession, dto.category)
+    ) {
+      throw new BadRequestException(
+        'That profession is not in the chosen field',
+      );
+    }
     const companyRef = await this.resolveCompanyForCreate(posterId, dto);
     const job = await this.createWithUniqueSlug(posterId, companyRef.id, dto);
     return this.buildDetail(job, posterId);
@@ -251,6 +267,7 @@ export class JobsService {
             companyId,
             title: dto.title,
             category: dto.category,
+            profession: dto.profession ?? null,
             commitment: dto.commitment,
             seniority: dto.seniority,
             format: dto.format,
@@ -332,7 +349,18 @@ export class JobsService {
       .orderBy('j.created_at', 'DESC');
 
     if (query.cat) {
-      qb.andWhere('j.category = :cat', { cat: query.cat });
+      const categoryIds = [
+        ...new Set(
+          query.cat
+            .split(',')
+            .map((id) => id.trim())
+            .filter(isJobFieldId),
+        ),
+      ];
+      // Unknown ids drop out; a list with none left applies no category filter.
+      if (categoryIds.length > 0) {
+        qb.andWhere('j.category IN (:...cats)', { cats: categoryIds });
+      }
     }
     if (query.type) {
       qb.andWhere('j.commitment = :type', { type: query.type });
@@ -407,9 +435,32 @@ export class JobsService {
       throw new ForbiddenException('Only the poster can update this job');
     }
 
+    // A legacy listing (null category) has to pick a field before any edit
+    // saves. The `??` also covers an explicit `category: null`, which
+    // `@IsOptional` lets through.
+    const nextCategory = dto.category ?? job.category;
+    if (nextCategory === null) {
+      throw new BadRequestException('Choose a field for this job');
+    }
+    let nextProfession =
+      dto.profession !== undefined ? dto.profession : job.profession;
+    if (
+      nextProfession &&
+      !professionBelongsToField(nextProfession, nextCategory)
+    ) {
+      if (dto.profession !== undefined) {
+        throw new BadRequestException(
+          'That profession is not in the chosen field',
+        );
+      }
+      // The field changed under a profession that no longer belongs to it.
+      nextProfession = null;
+    }
+
     Object.assign(job, {
       ...(dto.title !== undefined ? { title: dto.title } : {}),
-      ...(dto.category !== undefined ? { category: dto.category } : {}),
+      category: nextCategory,
+      profession: nextProfession ?? null,
       ...(dto.commitment !== undefined ? { commitment: dto.commitment } : {}),
       ...(dto.seniority !== undefined ? { seniority: dto.seniority } : {}),
       ...(dto.format !== undefined ? { format: dto.format } : {}),

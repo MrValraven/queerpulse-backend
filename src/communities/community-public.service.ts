@@ -9,15 +9,18 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { toImageUrl } from '../common/image-url';
-import { PublicCommunityResponse } from './community-public-response';
+import {
+  CommunityGateCardResponse,
+  CommunityRulesResponse,
+  PublicCommunityResponse,
+} from './community-public-response';
 import {
   CommunityUpcomingGathering,
   CommunityUpcomingGatheringsResponse,
 } from './community-upcoming-gatherings-response';
-import {
-  CommunityInvite,
-  CommunityInviteStatus,
-} from './entities/community-invite.entity';
+import { hasLivePendingInvite } from './community-invite-liveness';
+import { CommunityInvite } from './entities/community-invite.entity';
+import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import {
   CommunityMember,
   RosterRole,
@@ -124,6 +127,10 @@ const UPCOMING_GATHERINGS_MAX_PAGE = 10;
  * is not `public`. All three methods answer the same question at three
  * different distances: what may somebody outside a community's roster be
  * shown of it.
+ *
+ * `getRules`, backing `GET /communities/:slug/rules`, serves the house rules
+ * to the gate card's audience, since those are the people asked to accept
+ * them at the door.
  */
 @Injectable()
 export class CommunityPublicService {
@@ -134,12 +141,17 @@ export class CommunityPublicService {
     private readonly members: Repository<CommunityMember>,
     @InjectRepository(Event)
     private readonly events: Repository<Event>,
-    // The private tier's one exception, read by `getGateCard` alone: a standing
-    // invitation is what lets somebody off a private community's roster learn
-    // it is there. `listUpcomingGatherings` deliberately does NOT pass that
+    // The private tier's one exception, read by `getGateCard` and `getRules`
+    // alone: a live invitation is what lets somebody off a private
+    // community's roster learn it is there. `listUpcomingGatherings` deliberately does NOT pass that
     // option, so its gate stays exactly as narrow as it is today.
     @InjectRepository(CommunityInvite)
     private readonly invites: Repository<CommunityInvite>,
+    // Read by `getGateCard` alone, for the CALLER'S own newest request, so the
+    // card can show an applicant that their request is in and let them
+    // withdraw it.
+    @InjectRepository(CommunityJoinRequest)
+    private readonly joinRequests: Repository<CommunityJoinRequest>,
     // PRD-145: the prospective-member gatherings list applies the same
     // moderator-takedown gate `CommunitiesService.getBySlug` applies, so a
     // hidden or removed community stays a 404 there too.
@@ -196,16 +208,70 @@ export class CommunityPublicService {
    * A roster member who calls this gets the card rather than a refusal. It
    * discloses nothing to somebody already inside, and refusing them would be a
    * second membership rule to keep in step with `getBySlug`'s.
+   *
+   * On top of the closed list it carries `myJoinRequestStatus`, the caller's
+   * OWN newest join request (any status), read the way `buildDetail` reads it
+   * for `CommunityDetailDTO`. It is a fact about the caller alone, so the
+   * card can tell an applicant their request is in and offer the withdraw.
    */
   async getGateCard(
     slug: string,
     viewerId: string,
-  ): Promise<PublicCommunityResponse> {
+  ): Promise<CommunityGateCardResponse> {
     const { community } = await this.assertCommunityVisible(slug, viewerId, {
       allowPendingInvite: true,
     });
-    const { memberCount, nextGathering } = await this.loadCardFacts(community);
-    return this.toPublicCard(community, memberCount, nextGathering);
+    const [{ memberCount, nextGathering }, latestRequest] = await Promise.all([
+      this.loadCardFacts(community),
+      this.joinRequests.findOne({
+        where: { communityId: community.id, userId: viewerId },
+        order: { createdAt: 'DESC' },
+        select: { id: true, status: true },
+      }),
+    ]);
+    return {
+      ...this.toPublicCard(community, memberCount, nextGathering),
+      myJoinRequestStatus: latestRequest?.status ?? null,
+    };
+  }
+
+  /**
+   * `GET /communities/:slug/rules`: a community's house rules, its current
+   * rules version, and the version the caller last agreed to, for the join
+   * wizard.
+   *
+   * WHY A GATED OUTSIDER MAY READ THEM. Joining a `request`, `invite` or
+   * `private` community requires agreeing to its current rules at the door
+   * (`CommunitiesService.assertRulesAccepted` refuses a join whose
+   * `acceptedRulesVersion` is stale), and nobody can agree to text they were
+   * never shown. So the audience is exactly the gate card's: anybody who may
+   * see the card may read what they are being asked to accept.
+   *
+   * WHAT THEY STILL MAY NOT READ: the roster, the owner or any moderator, any
+   * post or reply, or the member-facing detail DTO. This route serves the
+   * three fields of `CommunityRulesResponse` and nothing more.
+   *
+   * One widening over the gate card: a roster member of an ARCHIVED community
+   * is admitted (PRD-143 parity), since members keep reading an archive.
+   * Every failing case is a 404, as everywhere in this file.
+   */
+  async getRules(
+    slug: string,
+    viewerId: string,
+  ): Promise<CommunityRulesResponse> {
+    const { community, membership } = await this.assertCommunityVisible(
+      slug,
+      viewerId,
+      {
+        allowPendingInvite: true,
+        allowArchivedForRoster: true,
+      },
+    );
+    return {
+      rules: community.rules ?? [],
+      rulesVersion: community.rulesVersion,
+      rulesAcceptedVersion: membership?.rulesVersionAccepted ?? null,
+    };
   }
 
   /**
@@ -336,7 +402,8 @@ export class CommunityPublicService {
    * `CommunitiesService.getBySlug`'s, in its order and with its 404-never-403
    * posture, so a second weaker copy of that rule cannot drift into being:
    * private tier without a roster role, a moderator takedown, and an archived
-   * community, the last two forgiven only for that community's own staff.
+   * community, the last two forgiven only for that community's own staff (and
+   * the archive also for its roster, when a caller opts in).
    */
   private async assertCommunityVisible(
     slug: string,
@@ -344,15 +411,28 @@ export class CommunityPublicService {
     // `allowPendingInvite` opens the private-tier branch below to the holder
     // of a standing invitation, which is the carve-out
     // `CommunitiesService.getBySlug` already makes. Off by default, so a
-    // caller has to ask for it: `getGateCard` does, and
-    // `listUpcomingGatherings` must not.
-    options: { allowPendingInvite?: boolean } = {},
-    // Returns the caller's roster role alongside the community because it
-    // already loaded it to answer the gates below. `listUpcomingGatherings`
-    // reads it for its own tier gate, and without this it would run a second
-    // identical `members.findOne` on a method that advertises three queries
-    // flat.
-  ): Promise<{ community: Community; role: RosterRole | null }> {
+    // caller has to ask for it: `getGateCard` and `getRules` do, and
+    // `listUpcomingGatherings` must not. Only a LIVE invitation counts
+    // (pending, unexpired, from somebody still on staff, no block between
+    // the two people), through the shared `hasLivePendingInvite`.
+    //
+    // `allowArchivedForRoster` lets any roster member through an archived
+    // community (staff already pass). `getRules` asks for it, matching the
+    // archive rule members get everywhere else (PRD-143).
+    options: {
+      allowPendingInvite?: boolean;
+      allowArchivedForRoster?: boolean;
+    } = {},
+    // Returns the caller's roster role and row alongside the community
+    // because it already loaded them to answer the gates below.
+    // `listUpcomingGatherings` reads the role for its own tier gate and
+    // `getRules` reads the row's accepted rules version; without this each
+    // would run a second identical `members.findOne`.
+  ): Promise<{
+    community: Community;
+    role: RosterRole | null;
+    membership: CommunityMember | null;
+  }> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
       throw new NotFoundException('Community not found');
@@ -364,13 +444,7 @@ export class CommunityPublicService {
     if (community.accessTier === AccessTier.Private && !role) {
       const hasPendingInvite =
         options.allowPendingInvite === true &&
-        (await this.invites.exists({
-          where: {
-            communityId: community.id,
-            invitedUserId: viewerId,
-            status: CommunityInviteStatus.Pending,
-          },
-        }));
+        (await hasLivePendingInvite(this.invites, community.id, viewerId));
       if (!hasPendingInvite) {
         throw new NotFoundException('Community not found');
       }
@@ -384,10 +458,13 @@ export class CommunityPublicService {
     if ((moderation.hidden || moderation.removed) && !isCommunityStaff) {
       throw new NotFoundException('Community not found');
     }
-    if (community.archivedAt != null && !isCommunityStaff) {
+    const isArchiveReader =
+      isCommunityStaff ||
+      (options.allowArchivedForRoster === true && role !== null);
+    if (community.archivedAt != null && !isArchiveReader) {
       throw new NotFoundException('Community not found');
     }
-    return { community, role };
+    return { community, role, membership };
   }
 
   /**

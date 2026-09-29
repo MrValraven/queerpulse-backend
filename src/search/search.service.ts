@@ -189,11 +189,11 @@ export class SearchService {
         () =>
           wants(SearchResultType.Business)
             ? this.skipping(offset, probeLimit, (fetchLimit) =>
+                // ENG-445: a bounded, relevance-ordered read. `listDirectory`
+                // loaded up to 200 cards to keep six, in badge-then-name order.
                 this.directory
-                  .listDirectory({ q: query })
-                  .then((rows) =>
-                    rows.slice(0, fetchLimit).map(businessToResult),
-                  ),
+                  .searchByText(query, fetchLimit)
+                  .then((rows) => rows.map(businessToResult)),
               )
             : Promise.resolve<SearchResultDTO[]>([]),
         () =>

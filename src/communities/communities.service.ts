@@ -118,6 +118,10 @@ import {
 } from './community-tag-request-response';
 import { resolveStaffCommunity } from './community-staff-access';
 import { CommunityMembershipService } from './community-membership.service';
+import { CommunityBanEvasionService } from '../ban-evasion/community-ban-evasion.service';
+import { BlockFilterService } from '../social/block-filter.service';
+import { findLivePendingInvite } from './community-invite-liveness';
+import { assertCommunityInteriorReadable } from './community-read-gate';
 import { SubcommunityCascadeService } from './subcommunity-cascade.service';
 import {
   isSpaceVisibleTo,
@@ -409,6 +413,15 @@ export class CommunitiesService {
     // Writes a parent's leave, ban, freeze, archive and tier change onto its
     // spaces inside the caller's transaction.
     private readonly subcommunityCascade: SubcommunityCascadeService,
+    // ENG-428. The one-bit "does this joiner correlate with somebody THIS
+    // community banned" answer `join` reads before an instant admission.
+    // Never throws: a correlation outage answers false and the door behaves
+    // as it did before the check existed.
+    private readonly communityBanEvasion: CommunityBanEvasionService,
+    // `roster` hides members blocked either way from a viewer who is not on
+    // the community's staff. Exported by `SocialModule`, which this module
+    // already imports for the post feeds.
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   private readonly logger = new Logger(CommunitiesService.name);
@@ -1913,15 +1926,16 @@ export class CommunitiesService {
     return this.buildDetail(saved, actorId, actorRole);
   }
 
-  // `public` joins land on the roster instantly; `request` creates a pending
-  // `CommunityJoinRequest` for an owner/mod to triage. The two invitation
-  // tiers gate on a pending `CommunityInvite` (PRD-140, PRD-141): a holder is
-  // admitted at once and their invitation flips to `accepted`, and anybody
-  // else is refused — 404 for `private` (which never confirms it exists) and
-  // `invite_required` for `invite` (which is publicly listed, so refusing
-  // loudly leaks nothing). Idempotent throughout: already being on the roster
-  // short-circuits to `joined` regardless of tier, so a repeat call (or a UI
-  // double-click) never 500s.
+  // `public` joins land on the roster instantly. On every other tier a live
+  // pending `CommunityInvite` admits its holder at once and flips to
+  // `accepted` (PRD-140, PRD-141), so an invitee to a `request` community is
+  // let in by the invitation its staff sent. Without one, `request` creates a
+  // pending `CommunityJoinRequest` for an owner/mod to triage, and the two
+  // invitation tiers refuse: 404 for `private` (which never confirms it
+  // exists) and `invite_required` for `invite` (which is publicly listed, so
+  // refusing loudly leaks nothing). Idempotent throughout: already being on
+  // the roster short-circuits to `joined` regardless of tier, so a repeat call
+  // (or a UI double-click) never 500s.
   async join(
     slug: string,
     userId: string,
@@ -1953,14 +1967,15 @@ export class CommunitiesService {
     if (community.archivedAt != null) {
       throw new NotFoundException('Community not found');
     }
-    // The caller's standing invitation, read once for both invitation tiers.
-    // Loaded here rather than at the top because every gate above it is
-    // cheaper and refuses more people, and an invitation overrides none of
-    // them: it is not a way past a ban, a takedown, a freeze or the house
-    // rules, only a way through the door those gates leave shut.
+    // The caller's standing invitation, read once for every tier with a door
+    // to open: `private`, `invite` and `request`. A `public` community admits
+    // everyone already, so an invitation there has nothing to add. Loaded
+    // here, after the gates above, because each of them is cheaper and
+    // refuses more people, and an invitation overrides none of them: it opens
+    // the door those gates leave shut and leaves a ban, a takedown, a freeze
+    // and the house rules exactly where they were.
     const pendingInvite =
-      community.accessTier === AccessTier.Private ||
-      community.accessTier === AccessTier.Invite
+      community.accessTier !== AccessTier.Public
         ? await this.pendingInviteFor(community.id, userId)
         : null;
     if (community.accessTier === AccessTier.Private && !pendingInvite) {
@@ -1990,10 +2005,17 @@ export class CommunitiesService {
     // A frozen community stays visible but takes no new members until an
     // owner/mod lifts the freeze (see `Community.frozenAt`). Existing members
     // short-circuit above, so this only blocks a genuinely new join.
+    //
+    // DES-407. Coded, with the reason, so the join panel can say why the
+    // community is paused (a manual pause, an emergency report, a pile-up of
+    // reports, or a paused parent) in the member's own language.
     if (community.frozenAt) {
-      throw new ForbiddenException(
-        'This community is frozen while moderators review recent reports',
-      );
+      throw new ForbiddenException({
+        code: 'COMMUNITY_FROZEN',
+        message:
+          'This community is paused and is taking no new members right now.',
+        frozenReason: community.frozenReason ?? null,
+      });
     }
 
     // A `not_now` (or `not_a_fit`) decline sets a date before which this
@@ -2021,6 +2043,10 @@ export class CommunitiesService {
     // the assurance the gate is asking for, given by somebody the community
     // trusts more than an arbitrary member. Routing an invitee into a review
     // queue the same staff would then approve would only add a wait.
+    //
+    // The ENG-428 ban-evasion hold below runs only on an instant public
+    // admission, so an invitee on any tier returns from here without that
+    // correlation check.
     if (pendingInvite) {
       const wasAccepted = await this.acceptInvite(pendingInvite, community);
       if (wasAccepted) {
@@ -2032,7 +2058,9 @@ export class CommunitiesService {
       }
       // The invitation was revoked or declined between the read above and the
       // write. Fall through and answer exactly as an uninvited caller would
-      // have been answered, so a withdrawn invitation is not quietly honoured.
+      // have been answered, so a withdrawn invitation is not quietly honoured:
+      // a 404 on `private`, `invite_required` on `invite`, and an ordinary
+      // request on `request`.
       if (community.accessTier === AccessTier.Private) {
         throw new NotFoundException('Community not found');
       }
@@ -2061,7 +2089,20 @@ export class CommunitiesService {
         !community.requiresSecondVouch ||
         (await this.hasMemberVouch(community.id, userId)));
 
-    if (instantJoinAllowed) {
+    // ENG-428. An open door admitted a returning banned member in one tap, and
+    // the correlation ran only on queued requests. A joiner who correlates with
+    // somebody THIS community banned is routed to the same reviewable request
+    // the second-vouch gate uses, where `flagJoinRequests` badges them for the
+    // moderators who issued the ban. The applicant is told only that a request
+    // is with the mods, which is what every reviewed join says.
+    const isHeldForBanEvasionReview =
+      instantJoinAllowed &&
+      (await this.communityBanEvasion.isMatchingCommunityBan(
+        community.id,
+        userId,
+      ));
+
+    if (instantJoinAllowed && !isHeldForBanEvasionReview) {
       // ON CONFLICT DO NOTHING absorbs a race between two concurrent joins
       // without a pre-check + 23505 — mirrors `CommunityPostsService
       // .addReaction`/`EventsService.addCohost`'s insert idiom.
@@ -2088,8 +2129,10 @@ export class CommunitiesService {
       return { outcome: 'joined', role: RosterRole.Member, request: null };
     }
 
-    // request, or a second-vouch-gated public join -> pending. The two
-    // invitation tiers never reach here: they were answered above.
+    // A request-tier caller holding no live invitation, a second-vouch-gated
+    // public join, or a public join held for ban-evasion review -> pending.
+    // The two invitation tiers never reach here, and neither does a
+    // request-tier invitee: each was answered above.
     return this.createJoinRequest(community, slug, userId, dto);
   }
 
@@ -2131,7 +2174,12 @@ export class CommunitiesService {
       };
     } catch (err) {
       if (isUniqueViolation(err)) {
-        throw new ConflictException('A join request is already pending');
+        // PRD-411. Coded, so the join panel can tell the applicant their
+        // request is already with the moderators.
+        throw new ConflictException({
+          code: 'COMMUNITY_JOIN_REQUEST_PENDING',
+          message: 'A join request is already pending',
+        });
       }
       throw err;
     }
@@ -2268,22 +2316,18 @@ export class CommunitiesService {
   }
 
   /**
-   * This member's standing invitation to this community, or null. One indexed
-   * lookup against `UQ_community_invites_pending`, which is unique over
-   * exactly this predicate, so there can never be a second row to choose
-   * between.
+   * This member's LIVE invitation to this community, or null. Live means
+   * pending, unexpired, sent by somebody who still holds a staff role here
+   * (or in the parent), and with no block between inviter and invitee
+   * (ENG-429, ENG-425). A dead row answers null, so `getBySlug` and `join`
+   * treat its holder exactly as they treat anybody uninvited.
+   * `UQ_community_invites_pending` keeps it to one row per person.
    */
   private async pendingInviteFor(
     communityId: string,
     userId: string,
   ): Promise<CommunityInvite | null> {
-    return this.invites.findOne({
-      where: {
-        communityId,
-        invitedUserId: userId,
-        status: CommunityInviteStatus.Pending,
-      },
-    });
+    return findLivePendingInvite(this.invites, communityId, userId);
   }
 
   /**
@@ -2320,6 +2364,8 @@ export class CommunitiesService {
         );
       }
 
+      // `expires_at > now()` in the guard too (ENG-429): an invitation that
+      // lapsed between the read and this write stays unspent.
       const claim = await invitesRepo
         .createQueryBuilder()
         .update(CommunityInvite)
@@ -2327,7 +2373,7 @@ export class CommunitiesService {
           status: CommunityInviteStatus.Accepted,
           respondedAt: () => 'now()',
         })
-        .where('id = :id AND status = :pending', {
+        .where('id = :id AND status = :pending AND expires_at > now()', {
           id: invite.id,
           pending: CommunityInviteStatus.Pending,
         })
@@ -2556,14 +2602,22 @@ export class CommunitiesService {
   // gate closes the roster to a non-member outright for every tier but
   // `public`, and only then does `rosterVisible` decide for `public`.
   //
-  // DELIBERATELY NOT block/mute filtered, unlike the post feeds in
-  // `CommunityPostsService.listPosts`. A roster is a factual membership
-  // record, not a content feed: hiding a blocked member from it would tell the
-  // viewer that someone they blocked is *absent* from a space they are in fact
-  // in — actively misleading, and worse for the blocker than the truth, since
-  // deciding whether to join or post somewhere may depend on exactly that.
-  // Blocks already do the work that matters here by severing interaction; they
-  // are not a "make them disappear from the world" primitive.
+  // BLOCKS SHAPE THE ROSTER for everyone outside the community's staff
+  // (Decision 8). A viewer whose effective role here is anything below mod
+  // (a plain member, a signed-in visitor to a public roster, a parent member
+  // browsing a space) sees nobody they blocked and nobody who blocked them,
+  // in both directions, the same severance the post feeds apply. The filter
+  // lives inside the query, so the paginated `total`, the page boundaries and
+  // the search matches all count only the people this viewer can see, and no
+  // gap in a count points at the person hidden.
+  //
+  // Staff (owner, co-owner, mod, resolved through the same effective role the
+  // gates above use, so a parent's staff keep it inside every space) read the
+  // full roster. Moderation needs the whole record: a mod who blocked someone
+  // still has to be able to find them on the roster to act on a report.
+  //
+  // Mutes leave the roster as it is. A mute quiets someone's posts for the
+  // muter, and the membership record stays whole.
   async roster(
     slug: string,
     viewerId: string,
@@ -2576,6 +2630,19 @@ export class CommunitiesService {
     if (community.accessTier === AccessTier.Private && !role) {
       throw new NotFoundException('Community not found');
     }
+
+    // ENG-426. The roster follows the same interior rule as posts and
+    // replies: a takedown closes it to everyone but the community's staff, an
+    // archive to everyone off the roster, and a space under a gone, archived
+    // or taken-down parent to everyone with no role in the space. Placed after
+    // the private 404 above, so a private community is still only ever
+    // answered with that same 404.
+    await assertCommunityInteriorReadable({
+      community,
+      viewerRole: role,
+      communities: this.communities,
+      contentModeration: this.contentModeration,
+    });
 
     // THE TIER GATE, ahead of `rosterVisible`. Every tier but `public` closes
     // its roster to a non-member outright: a `request`-tier community that
@@ -2599,6 +2666,18 @@ export class CommunitiesService {
       .createQueryBuilder('m')
       .where('m.community_id = :communityId', { communityId: community.id })
       .orderBy('m.joined_at', 'ASC');
+
+    // Decision 8 (see the note above the method): a viewer below staff loses
+    // every member blocked in either direction, inside the query so `total`
+    // agrees with the rows. Staff keep the full roster.
+    const isStaffViewer = CommunitiesService.isStaffRole(role);
+    if (!isStaffViewer) {
+      this.blockFilter.excludeBlocked(
+        rosterMembersQuery,
+        viewerId,
+        '"m"."user_id"',
+      );
+    }
 
     // Server-side search across the WHOLE roster, so a big community is
     // searchable at all: filtering only the pages already fetched can never
@@ -2637,8 +2716,9 @@ export class CommunitiesService {
     });
   }
 
-  // Also NOT block/mute filtered, for a stronger reason than `roster` above:
-  // this is a moderation queue, not a feed. Silently hiding a join request
+  // The join-request queue stays unfiltered by blocks and mutes, for the same
+  // reason `roster` above keeps its full record for staff: it is a moderation
+  // queue, read only by staff. Silently hiding a join request
   // because the reviewing mod happens to have blocked (or muted) the applicant
   // would strand that request as permanently pending, with no one aware it
   // exists — a block by one mod would become an invisible, unaccountable veto.
@@ -3522,10 +3602,10 @@ export class CommunitiesService {
    *
    * NOT block-filtered, and there is nothing here to filter: every row
    * describes the caller's own relationship to a community, so no other
-   * member's identity or content is exposed. (`BlockFilterService` is used in
-   * this module only by `CommunityPostsService`, over post/reply *authors* —
-   * see the notes on `roster` and `listJoinRequests` for why the membership
-   * surfaces stay unfiltered.)
+   * member's identity or content is exposed. (`BlockFilterService` shapes the
+   * post feeds by author, and `roster` for a viewer below staff; see the
+   * notes on `roster` and `listJoinRequests` for where the full record stays
+   * with staff.)
    */
   async myCommunities(userId: string): Promise<MyCommunityDTO[]> {
     const rows = await this.members
@@ -4272,6 +4352,10 @@ export class CommunitiesService {
           actorId,
           source: 'community',
           communitySlug: community.slug,
+          // `communityName` and `role` are what the bell allowlist forwards
+          // for this kind; `fromRole`/`toRole` stay for any stored-row reader.
+          communityName: community.name,
+          role: toRole,
           fromRole,
           toRole,
         },
@@ -4283,7 +4367,10 @@ export class CommunitiesService {
   }
 
   /** Best-effort "you were removed" notification for `removeMember` (never
-   *  sent for a self-leave — see the caller). */
+   *  sent for a self-leave; see the caller). The payload names the community
+   *  (PRD-413) and carries no actor, the same posture as `notifyMemberBanned`:
+   *  the bell names the community and keeps the moderator who acted unnamed.
+   *  `actorId` still travels as the block/mute argument. */
   private async notifyMemberRemoved(
     community: Community,
     actorId: string,
@@ -4294,9 +4381,9 @@ export class CommunitiesService {
         targetUserId,
         NotificationType.CommunityMemberRemoved,
         {
-          actorId,
           source: 'community',
           communitySlug: community.slug,
+          communityName: community.name,
         },
         actorId,
       );
@@ -4371,6 +4458,7 @@ export class CommunitiesService {
           actorId,
           source: 'community',
           communitySlug: community.slug,
+          communityName: community.name,
           youAreNowOwner: true,
           counterpartId: fromOwnerId ?? actorId,
         },
@@ -4388,6 +4476,7 @@ export class CommunitiesService {
           actorId,
           source: 'community',
           communitySlug: community.slug,
+          communityName: community.name,
           youAreNowOwner: false,
           counterpartId: toOwnerId,
         },
@@ -4414,7 +4503,12 @@ export class CommunitiesService {
       await this.notifications.createForRecipients(
         recipientIds,
         NotificationType.CommunityArchived,
-        { actorId, source: 'community', communitySlug: community.slug },
+        {
+          actorId,
+          source: 'community',
+          communitySlug: community.slug,
+          communityName: community.name,
+        },
         actorId,
       );
     } catch {
@@ -4443,6 +4537,7 @@ export class CommunitiesService {
           actorId,
           source: 'community',
           communitySlug: community.slug,
+          communityName: community.name,
           ...metadata,
         },
         actorId,

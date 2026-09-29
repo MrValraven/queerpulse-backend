@@ -11,6 +11,8 @@ import type { Profile } from '../users/entities/profile.entity';
 import {
   AuthorSummary,
   FORMER_IDENTITY_AUTHOR,
+  FULL_MEMBER_NAMES,
+  MemberNameOptions,
   senderAuthorSummary,
 } from './message-response';
 
@@ -130,6 +132,9 @@ export async function loadSenderIdentityContext(
  * `FORMER_IDENTITY_AUTHOR`, because `senderIdentityId` carries no foreign key
  * precisely so a deleted business keeps naming the identity it was sent as.
  * The human who typed for it stays unnamed.
+ *
+ * `nameOptions` spells a personal sender's name for the conversation the
+ * message sits in (PRD-423: first names only in a matched Go together chat).
  */
 export function renderMessageSender(
   message: {
@@ -138,10 +143,11 @@ export function renderMessageSender(
   },
   profileByUser: ReadonlyMap<string, Profile>,
   context: SenderIdentityContext,
+  nameOptions: MemberNameOptions = FULL_MEMBER_NAMES,
 ): AuthorSummary {
   const { senderId, senderIdentityId } = message;
   if (!senderId || !senderIdentityId) {
-    return senderAuthorSummary(senderId, profileByUser);
+    return senderAuthorSummary(senderId, profileByUser, nameOptions);
   }
   const identityKind = context.identityKindById.get(senderIdentityId);
   const identityDescription =
@@ -164,7 +170,7 @@ export function renderMessageSender(
     });
   }
   if (identityKind === IdentityKind.Profile) {
-    return senderAuthorSummary(senderId, profileByUser);
+    return senderAuthorSummary(senderId, profileByUser, nameOptions);
   }
   return FORMER_IDENTITY_AUTHOR;
 }

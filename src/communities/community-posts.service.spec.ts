@@ -13,6 +13,7 @@ import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityMembershipService } from './community-membership.service';
+import { COMMUNITY_POST_CREATED } from './community.events';
 import { CommunityPostsService } from './community-posts.service';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
@@ -123,6 +124,8 @@ const rawQbStub = (rows: unknown[] = []) => {
   qb.getRawMany = jest.fn().mockResolvedValue(rows);
   return qb;
 };
+
+const GRINNING_FACE = '\u{1F600}';
 
 const COMMUNITY: Community = {
   id: 'c1',
@@ -241,9 +244,12 @@ describe('CommunityPostsService', () => {
   // back to `CommunityPostsService.VISIBLE`); `excludeHidden` is a pass-through
   // on the query builder, mirroring the `blockFilter` stub above — the real
   // in-SQL exclusion is exercised against a live DB in e2e, not here.
+  // `stateFor` backs `assertCommunityInteriorReadable`'s takedown gate
+  // (ENG-426) and defaults to fully visible: `hidden: false, removed: false`.
   let contentModeration: {
     statesForAnyType: jest.Mock;
     excludeHidden: jest.Mock;
+    stateFor: jest.Mock;
   };
   let storage: { deleteObjectByReference: jest.Mock };
   // `listCommunityReports`'s open-report query (`createQueryBuilder`, default
@@ -258,6 +264,9 @@ describe('CommunityPostsService', () => {
   // page with no photo report never touches either repository.
   let eventPhotos: { find: jest.Mock };
   let events: { find: jest.Mock };
+  // `COMMUNITY_POST_CREATED`, the profile-activity fire-and-forget the
+  // excerpt-boundary spec below reads back.
+  let eventEmitter: { emit: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -355,6 +364,7 @@ describe('CommunityPostsService', () => {
     contentModeration = {
       statesForAnyType: jest.fn().mockResolvedValue(new Map()),
       excludeHidden: jest.fn((qb: unknown) => qb),
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
     storage = {
       deleteObjectByReference: jest.fn().mockResolvedValue(undefined),
@@ -368,6 +378,7 @@ describe('CommunityPostsService', () => {
     reports = { createQueryBuilder: jest.fn(() => reportsQbStub()) };
     eventPhotos = { find: jest.fn().mockResolvedValue([]) };
     events = { find: jest.fn().mockResolvedValue([]) };
+    eventEmitter = { emit: jest.fn() };
     communityMembership = {
       effectiveRole: jest.fn(
         async (community: { id: string }, userId: string) => {
@@ -408,7 +419,7 @@ describe('CommunityPostsService', () => {
         },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: StorageService, useValue: storage },
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: EventEmitter2, useValue: eventEmitter },
         {
           provide: CommunityMembershipService,
           useValue: communityMembership,
@@ -515,6 +526,37 @@ describe('CommunityPostsService', () => {
       expect(res.body).toBe('hi there');
       expect(res.reactions).toHaveLength(4);
       expect(res.replyCount).toBe(0);
+    });
+
+    it('keeps an emoji at the 140-character mention/roster excerpt boundary whole', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      members.find.mockResolvedValue([{ userId: 'member-2' }]);
+      const body = 'a'.repeat(139) + GRINNING_FACE;
+      await service.createPost('queer-devs', 'author-1', { body });
+
+      const [, , mentionPayload] = mentions.notify.mock.calls[0] as [
+        string,
+        string,
+        Record<string, unknown>,
+      ];
+      expect(mentionPayload.excerpt).toBe(body);
+
+      const [, , rosterPayload] = notifications.createForRecipients.mock
+        .calls[0] as [string[], unknown, Record<string, unknown>, string];
+      expect(rosterPayload.excerpt).toBe(body);
+    });
+
+    it('keeps an emoji at the 80-character profile-activity excerpt boundary whole', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const body = 'a'.repeat(79) + GRINNING_FACE;
+      await service.createPost('queer-devs', 'author-1', { body });
+
+      const emittedEvent = eventEmitter.emit.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(emittedEvent[0]).toBe(COMMUNITY_POST_CREATED);
+      expect(emittedEvent[1].excerpt).toBe(body);
     });
 
     it('404s an unknown community slug', async () => {
@@ -1507,12 +1549,174 @@ describe('CommunityPostsService', () => {
       expect(posts.save).not.toHaveBeenCalled();
     });
 
-    it('still serves reads: a closed room keeps its history', async () => {
+    // ENG-426: archiving closes reads to everyone off the roster (PRD-143). For
+    // the roster itself it stays exactly what the doc comment above
+    // promises: read-only.
+    it('still serves reads to the roster: an archived community keeps its history', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
       const qb = qbStub();
       posts.createQueryBuilder.mockReturnValue(qb);
       await expect(
         service.listPosts('queer-devs', 'u1'),
       ).resolves.toBeDefined();
+    });
+  });
+
+  // A moderator takedown of the community itself (hidden or removed) closes
+  // its board to new writing for everyone but its own staff, with the same
+  // 404 its reads answer (`assertCommunityInteriorReadable`), so a write can
+  // never confirm the community exists. Deletes, restores and taking back
+  // your own reaction stay open: a member may still retract what they said.
+  describe('taken-down community: assertMemberForWrite gate', () => {
+    beforeEach(() => {
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: true,
+      });
+    });
+
+    it('404s a new post from a member, reading the takedown by community slug', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.createPost('queer-devs', 'u1', { body: 'hi' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(contentModeration.stateFor).toHaveBeenCalledWith(
+        'community',
+        'queer-devs',
+      );
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('404s a signed-in non-member before the roster refusal', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.createPost('queer-devs', 'stranger', { body: 'hi' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('treats a hidden community the same as a removed one', async () => {
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.addReply('queer-devs', 'p1', 'u1', 'hi'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('404s a reply and a reaction from a member', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const qb = insertQbStub();
+      reactions.createQueryBuilder.mockReturnValue(qb);
+      await expect(
+        service.addReply('queer-devs', 'p1', 'u1', 'hi'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.addReaction('queer-devs', 'p1', 'u1', ReactionKey.Heart),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(replies.save).not.toHaveBeenCalled();
+      expect(qb.execute).not.toHaveBeenCalled();
+    });
+
+    it('404s the author editing a post or a reply', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.updatePost('queer-devs', 'p1', 'author-1', { body: 'edited' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.updateReply('queer-devs', 'p1', 'r1', 'author-1', 'edited'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(posts.save).not.toHaveBeenCalled();
+      expect(postEdits.save).not.toHaveBeenCalled();
+      expect(replies.save).not.toHaveBeenCalled();
+      expect(replyEdits.save).not.toHaveBeenCalled();
+    });
+
+    it('404s the flat create, like and reply aliases', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const qb = insertQbStub();
+      reactions.createQueryBuilder.mockReturnValue(qb);
+      await expect(
+        service.createFlatPost('u1', {
+          body: 'hi',
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.likeFlatPost('p1', 'u1', true),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.addFlatReply('p1', 'u1', 'hi'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(posts.save).not.toHaveBeenCalled();
+      expect(qb.execute).not.toHaveBeenCalled();
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('404s the flat post and reply edits for the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.updateFlatPost('p1', 'author-1', { body: 'edited' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.updateFlatReply('p1', 'r1', 'author-1', 'edited'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(posts.save).not.toHaveBeenCalled();
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('lets the community owner and a mod keep posting', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      const ownerPost = await service.createPost('queer-devs', 'owner-1', {
+        body: 'a note from the owner',
+      });
+      expect(ownerPost.body).toBe('a note from the owner');
+
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      const modPost = await service.createPost('queer-devs', 'mod-1', {
+        body: 'a note from a mod',
+      });
+      expect(modPost.body).toBe('a note from a mod');
+    });
+
+    it('still lets the author delete their own post', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      const deleted = await service.deletePost('queer-devs', 'p1', 'author-1');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deletedAt: expect.any(Date) as unknown,
+          deletedById: 'author-1',
+        }),
+      );
+      expect(deleted.deleted).toBe(true);
+    });
+
+    it('still lets a member take back a reaction and a like', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await service.removeReaction('queer-devs', 'p1', 'u1', ReactionKey.Heart);
+      await service.likeFlatPost('p1', 'u1', false);
+      expect(reactions.delete).toHaveBeenCalledWith({
+        postId: 'p1',
+        userId: 'u1',
+        key: ReactionKey.Heart,
+      });
+      expect(reactions.delete).toHaveBeenCalledWith({
+        postId: 'p1',
+        userId: 'u1',
+        key: ReactionKey.Like,
+      });
     });
   });
 
@@ -1706,6 +1910,42 @@ describe('CommunityPostsService', () => {
       expect(page.items).toEqual([]);
       expect(page.total).toBe(0);
     });
+
+    // ENG-426: a moderator takedown closes the board to everyone off the
+    // community's own staff, even on the `public` tier where the tier gate
+    // alone would otherwise let any signed-in stranger straight in.
+    it('listPosts 404s a taken-down public community to a signed-in non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Public,
+      });
+      members.findOne.mockResolvedValue(null);
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(
+        service.listPosts('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('getPost', () => {
+    // ENG-426: an archive closes a community's interior to everyone off its
+    // roster (PRD-143), even on the `public` tier.
+    it('getPost 404s an archived public community to a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Public,
+        archivedAt: new Date('2026-01-06T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getPost('queer-devs', 'p1', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
   });
 
   describe('listReplies', () => {
@@ -1735,6 +1975,22 @@ describe('CommunityPostsService', () => {
       // one this file's `replies` mock returns for the window/count queries.
       replies.createQueryBuilder.mockReturnValue(qbStub());
       const page = await service.listReplies('queer-devs', 'p1', 'member-1');
+      expect(page.items).toEqual([]);
+    });
+
+    // ENG-426/PRD-143: an archive closes a board to everyone off the roster.
+    // Reads stay open for the roster itself, the same promise
+    // `assertNotArchived`'s doc comment makes for posts, extended to replies.
+    it('listReplies keeps serving an archived community to its roster', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        archivedAt: new Date('2026-01-06T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      replies.createQueryBuilder.mockReturnValue(qbStub());
+
+      const page = await service.listReplies('queer-devs', 'p1', 'member-1');
+
       expect(page.items).toEqual([]);
     });
   });

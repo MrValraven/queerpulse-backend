@@ -31,11 +31,20 @@ import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
 // Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
 const DEFAULT_PAGE_SIZE = 20;
 
-// How many of a member's newest named vouchers `getNamedVoucherIds` will scan.
+// How many of a member's newest named vouchers `getNamedVoucherIds` will scan
+// by default (a caller may ask for more via its `scanLimit` parameter).
 // Bounds the `IN (...)` list the viewer-relative mutual-voucher intersection
 // builds from it, so one very heavily vouched member can never turn a profile
 // read into an unbounded query. See that method for what the cap means.
 const NAMED_VOUCHER_SCAN_CAP = 500;
+
+// A hard ceiling on the roster-visibility id scan `resolveVisibleNamedVoucherIds`
+// asks `getNamedVoucherIds` for, computed from `offset + limit +
+// NAMED_VOUCHER_SCAN_CAP`. Without it, an arbitrarily large client-supplied
+// `offset` on the vouchers roster could grow that scan, and the `IN (...)`
+// list built from it, without bound. Comfortably under Postgres's ~65535
+// bind-parameter limit.
+const MAX_NAMED_VOUCHER_ROSTER_SCAN = 5000;
 
 // Caps how many *new* vouches a single member can give in a day (COM-26):
 // vouching has only ever had a per-minute throttle
@@ -46,6 +55,11 @@ const NAMED_VOUCHER_SCAN_CAP = 500;
 // day is normal); it exists to catch abuse, not to gate everyday use.
 const DAILY_VOUCH_LIMIT = 20;
 
+/** Machine-readable code on the daily-cap 403, mirroring
+ *  `ACCOUNT_RESTRICTED_CODE`'s convention, so the client can say "try again
+ *  tomorrow" and never offer an immediate retry. */
+export const VOUCH_DAILY_LIMIT_CODE = 'VOUCH_DAILY_LIMIT';
+
 // Start of the current UTC calendar day — the lower bound of the "vouches
 // given today" count. UTC (not local) so the reset instant is deterministic
 // across deploy regions, same convention as `invites.service.ts`'s monthly
@@ -55,6 +69,16 @@ function currentDayStart(now: Date): Date {
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
   );
 }
+
+/**
+ * "Which of these members may the current viewer see by name in a list?",
+ * answered in one batch. The controller binds
+ * `ProfilesService.visibleMemberIds` to the viewer and passes it in: that
+ * service depends on this one, so it cannot be injected here.
+ */
+export type VisibleMemberIdsResolver = (
+  userIds: string[],
+) => Promise<Set<string>>;
 
 const VOUCH_RELATIONSHIP_SET = new Set<VouchRelationship>(VOUCH_RELATIONSHIPS);
 
@@ -235,9 +259,15 @@ export class VouchService {
         })
         .getCount();
       if (givenToday >= DAILY_VOUCH_LIMIT) {
-        throw new ForbiddenException(
-          `You can vouch for up to ${DAILY_VOUCH_LIMIT} members per day. Try again tomorrow.`,
-        );
+        // Same coded body as `assertNotRestricted`: the message is unchanged,
+        // and `code` lets the client tell the daily cap apart from every other
+        // 403 without matching on copy.
+        throw new ForbiddenException({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: `You can vouch for up to ${DAILY_VOUCH_LIMIT} members per day. Try again tomorrow.`,
+          code: VOUCH_DAILY_LIMIT_CODE,
+        });
       }
 
       // Take a write lock on the vouchee row so concurrent vouches for the
@@ -395,36 +425,72 @@ export class VouchService {
     return { ok: true };
   }
 
+  /**
+   * The "Vouched for by" roster of `target`, as `viewerId` may see it.
+   *
+   * Takes an already-resolved profile on purpose (ENG-436). The caller
+   * (`MembersController.vouchers`) resolves the slug through
+   * `ProfilesService.findBySlugOrThrow` with the viewer, so this roster is
+   * gated exactly like the profile it belongs to: account status, block,
+   * hidden-from, "Hide me for 24 hours" and moderator takedown all return the
+   * same 404 before any vouch is read. `ProfilesService` depends on this
+   * service, so the resolution lives in the controller and this module keeps
+   * its one-way import.
+   *
+   * The roster is a list of people, so the same boundary holds on each named
+   * voucher: `visibleMemberIds` is `ProfilesService.visibleMemberIds` bound
+   * to the viewer, passed in by the controller for the same one-way-import
+   * reason. Resolved once, on the target's whole named-voucher pool, before
+   * the page is built. See `resolveVisibleNamedVoucherIds`.
+   */
   async listVouchers(
-    slug: string,
+    target: Profile,
+    // The authenticated caller. Decides whether they ARE the target member
+    // (see the `vouchersVisible` gate below).
+    viewerId: string,
+    visibleMemberIds: VisibleMemberIdsResolver,
     page?: PageParams,
-    // The authenticated caller, when known — used only to decide whether they
-    // ARE the target member (see `vouchersVisible` gate below). `undefined`
-    // is treated the same as "some other member": never the owner.
-    viewerId?: string,
   ): Promise<{ count: number; vouchers: VoucherView[] }> {
-    const target = await this.profiles.findOne({ where: { slug } });
-    if (!target) {
-      throw new NotFoundException('Member not found');
-    }
-    // `count` is the full tally; `rows` is the requested (bounded) page. Both
-    // run through `activeVouchesReceivedBy`, so the number and the roster are
-    // filtered identically: a filtered roster beside an unfiltered number is
-    // the "no vouches yet, 7 vouches" contradiction this endpoint already has
-    // in its `vouchersVisible` branch, and it must not be reproduced here.
+    // `count` is the member's true total, built from `activeVouchesReceivedBy`
+    // alone, so withdrawn and block-severed vouches leave the number. It never
+    // goes through the viewer-relative visibility filter below, so it stays
+    // the total every visitor sees on the card.
     const count = await this.activeVouchesReceivedBy(target.userId).getCount();
     // Names hidden: when the target has turned `vouchersVisible` off, a
     // non-owner viewer still gets the true `count` ("Names hidden — visitors
     // see the number only") but never the roster of who vouched — the owner
     // always sees the real list, same as the photoVisible/hoodVisible content
     // gates in toFullProfile.
-    const isOwner = viewerId !== undefined && viewerId === target.userId;
+    const isOwner = viewerId === target.userId;
     if (!isOwner && !target.vouchersVisible) {
       return { count, vouchers: [] };
     }
+    // The viewer-relative visibility boundary is resolved for the target's
+    // WHOLE named-voucher pool in one batched call, then folded into the same
+    // WHERE clause the page is paginated from. Resolving it up front, ahead of
+    // the offset/limit, keeps every page full and stable: pagination runs
+    // over the already-filtered set, so a hidden voucher stays out of the
+    // count of rows any page can claim. See `resolveVisibleNamedVoucherIds`.
+    const visibleVoucherIds = await this.resolveVisibleNamedVoucherIds(
+      target.userId,
+      viewerId,
+      visibleMemberIds,
+      page,
+    );
+    // A row is kept when it is anonymous (never dropped, see
+    // `resolveVisibleNamedVoucherIds`), when it is the viewer's own vouch
+    // (always shown to them, the owner exception every profile gate makes),
+    // or when its voucher is in the resolved visible set.
+    let visibilityClause = 'v.anonymous = true OR v.voucherId = :viewerId';
+    const visibilityParams: Record<string, unknown> = { viewerId };
+    if (visibleVoucherIds.size) {
+      visibilityClause += ' OR v.voucherId IN (:...visibleVoucherIds)';
+      visibilityParams.visibleVoucherIds = [...visibleVoucherIds];
+    }
     // `id` tiebreaks `createdAt` so an OFFSET page boundary that lands inside
     // a batch of same-instant vouches can't repeat or skip one.
-    const rows = await this.activeVouchesReceivedBy(target.userId)
+    const pageRows = await this.activeVouchesReceivedBy(target.userId)
+      .andWhere(`(${visibilityClause})`, visibilityParams)
       .orderBy('v.createdAt', 'DESC')
       .addOrderBy('v.id', 'DESC')
       .offset(page?.offset ?? 0)
@@ -434,9 +500,9 @@ export class VouchService {
     // identity can't leak) and emit a redacted view. Non-anonymous rows resolve
     // as usual.
     const voucherProfiles = await this.profilesByUserIds(
-      rows.filter((v) => !v.anonymous).map((v) => v.voucherId),
+      pageRows.filter((v) => !v.anonymous).map((v) => v.voucherId),
     );
-    const vouchers = rows.map((v) =>
+    const vouchers = pageRows.map((v) =>
       v.anonymous
         ? this.toShieldedVouchView(v.note, v.createdAt, v.relationships)
         : this.toVouchView(
@@ -537,7 +603,8 @@ export class VouchService {
 
   /**
    * The user ids who currently hold an ACTIVE, NON-ANONYMOUS vouch for
-   * `voucheeId`, newest first and capped at `NAMED_VOUCHER_SCAN_CAP`.
+   * `voucheeId`, newest first and capped at `scanLimit` (default
+   * `NAMED_VOUCHER_SCAN_CAP`).
    *
    * Three exclusions carry the whole privacy contract of this read, and they
    * live here rather than in the caller so no later caller can forget them:
@@ -554,19 +621,25 @@ export class VouchService {
    *    would de-anonymize them the moment that viewer's connection set is
    *    small, which is exactly the common case.
    *
-   * The cap bounds the `IN (...)` list the caller builds from this set. A
-   * member with more named vouchers than the cap yields a count over their
-   * newest `NAMED_VOUCHER_SCAN_CAP` vouchers, which is a lower bound, never an
-   * over-count. The trust cue this backs ("members you know vouched for them")
-   * reads the same at 8 as at 80.
+   * `scanLimit` bounds the `IN (...)` list the caller builds from this set. A
+   * caller asking for the default sees a count over their newest
+   * `NAMED_VOUCHER_SCAN_CAP` vouchers, which is a lower bound, never an
+   * over-count. `ProfilesService.getMutualVouchers` (the "members you know
+   * vouched for them" cue) keeps that default, since the cue reads the same
+   * at 8 as at 80. `resolveVisibleNamedVoucherIds` passes a wider limit,
+   * because a roster page beyond the first needs the scan to stay exact
+   * further into the member's history.
    */
-  async getNamedVoucherIds(voucheeId: string): Promise<string[]> {
+  async getNamedVoucherIds(
+    voucheeId: string,
+    scanLimit: number = NAMED_VOUCHER_SCAN_CAP,
+  ): Promise<string[]> {
     const rows = await this.activeVouchesReceivedBy(voucheeId)
       .andWhere('v.anonymous = false')
       .select('v.voucherId', 'voucher_id')
       .orderBy('v.createdAt', 'DESC')
       .addOrderBy('v.id', 'DESC')
-      .limit(NAMED_VOUCHER_SCAN_CAP)
+      .limit(scanLimit)
       .getRawMany<{ voucher_id: string }>();
     return rows.map((row) => row.voucher_id);
   }
@@ -734,6 +807,50 @@ export class VouchService {
     // contract. Called once per builder — it binds a fixed parameter name.
     this.blockFilter.excludeBlocked(query, voucheeId, '"v"."voucher_id"');
     return query;
+  }
+
+  /**
+   * ENG-436, the viewer layer on top of the target-relative filter above. A
+   * NAMED voucher shows only when the viewer could find them in `/members`:
+   * an active account with no block either way, no hide from this viewer, no
+   * "Hide me for 24 hours" and no takedown. `visibleMemberIds` answers that
+   * for the target's whole named-voucher pool in one batched call, resolved
+   * BEFORE `listVouchers` paginates, so a hidden voucher can never shrink a
+   * page or shift a later one the way filtering an already-paginated page
+   * did. The viewer's own id is excluded from what gets resolved: their own
+   * vouch always shows to them (the owner exception every profile gate
+   * makes), independent of whether the resolver would count them visible to
+   * themselves. Anonymous vouches carry no identity to resolve at all, so
+   * `listVouchers` keeps both of those cases unconditionally, straight past
+   * this set.
+   *
+   * Built on `getNamedVoucherIds`, widening its scan past the default
+   * `NAMED_VOUCHER_SCAN_CAP` so a page deep into the roster stays exact: the
+   * rows a page ending at `offset + limit` can contain come from the newest
+   * `offset + limit + H` named rows, where H is
+   * how many of those are hidden from this viewer. `NAMED_VOUCHER_SCAN_CAP`
+   * stands in for H, the same worst-case headroom `getNamedVoucherIds`
+   * already gives its default caller, so the scan is exact unless more than
+   * `NAMED_VOUCHER_SCAN_CAP` named vouchers ahead of the page's end are
+   * hidden from this viewer. `MAX_NAMED_VOUCHER_ROSTER_SCAN` clamps the sum
+   * so a huge client-supplied `offset` cannot grow it, or the `IN (...)` list
+   * built from it, without bound.
+   */
+  private async resolveVisibleNamedVoucherIds(
+    voucheeId: string,
+    viewerId: string,
+    visibleMemberIds: VisibleMemberIdsResolver,
+    page: PageParams | undefined,
+  ): Promise<Set<string>> {
+    const scanLimit = Math.min(
+      (page?.offset ?? 0) +
+        (page?.limit ?? DEFAULT_PAGE_SIZE) +
+        NAMED_VOUCHER_SCAN_CAP,
+      MAX_NAMED_VOUCHER_ROSTER_SCAN,
+    );
+    const namedVoucherIds = await this.getNamedVoucherIds(voucheeId, scanLimit);
+    const idsToResolve = namedVoucherIds.filter((id) => id !== viewerId);
+    return visibleMemberIds(idsToResolve);
   }
 
   private async profilesByUserIds(

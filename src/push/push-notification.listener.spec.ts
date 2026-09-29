@@ -37,12 +37,20 @@ function build(opts: {
     lastName: string;
     slug: string;
     avatarUrl: string | null;
+    photoVisible: boolean;
   } | null;
   // PRD-336: the user ids `PushMessageListener.eligibleMessagePushRecipientUserIds`
   // reports as already covered by its own merged message push (empty = nobody
   // covered, matching every pre-PRD-336 test's expectation that `pushMention`
   // always sends).
   messagePushCoveredUserIds?: string[];
+  // PRD-423: the conversation row a message mention's `conversationId`
+  // resolves to (undefined = none found, which reads as full names).
+  conversationRow?: {
+    id: string;
+    eventMatchGroupId: string | null;
+    isGoTogetherChat?: boolean;
+  };
 }) {
   const profilesRepo = {
     findOne: jest.fn().mockResolvedValue(opts.actorProfile ?? null),
@@ -97,6 +105,9 @@ function build(opts: {
       .fn()
       .mockResolvedValue(new Set(opts.messagePushCoveredUserIds ?? [])),
   };
+  const conversationsRepo = {
+    findOne: jest.fn().mockResolvedValue(opts.conversationRow ?? null),
+  };
   const listener = new PushNotificationListener(
     profilesRepo as never,
     push as never,
@@ -104,6 +115,7 @@ function build(opts: {
     notificationPreferences as never,
     notificationDelivery as never,
     pushMessageListener as never,
+    conversationsRepo as never,
   );
   return {
     listener,
@@ -112,6 +124,7 @@ function build(opts: {
     notificationDelivery,
     profilesRepo,
     pushMessageListener,
+    conversationsRepo,
   };
 }
 
@@ -134,6 +147,7 @@ const ACTOR = {
   lastName: 'Silva',
   slug: 'ana-silva',
   avatarUrl: 'https://lh3.googleusercontent.com/a/ana.png',
+  photoVisible: true,
 };
 
 describe('PushNotificationListener', () => {
@@ -273,6 +287,83 @@ describe('PushNotificationListener', () => {
       PushPayload,
     ];
     expect(payload.data.url).toBe('/messages?c=conv-1&m=msg-9');
+  });
+
+  it('names the mentioner by first name only inside a matched Go together chat (PRD-423)', async () => {
+    const { listener, push, conversationsRepo } = build({
+      actorProfile: ACTOR,
+      conversationRow: {
+        id: 'conv-1',
+        eventMatchGroupId: 'group-1',
+        isGoTogetherChat: true,
+      },
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'message',
+          conversationId: 'conv-1',
+          messageId: 'msg-9',
+        }),
+      ),
+    );
+    expect(conversationsRepo.findOne).toHaveBeenCalledWith({
+      where: { id: 'conv-1' },
+      select: { id: true, isGoTogetherChat: true, eventMatchGroupId: true },
+    });
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.body).toBe('Ana mentioned you.');
+    expect(payload.l10n?.params).toEqual({ name: 'Ana' });
+  });
+
+  it('keeps the first name once the matched group row is gone (PRD-423)', async () => {
+    const { listener, push } = build({
+      actorProfile: ACTOR,
+      conversationRow: {
+        id: 'conv-1',
+        eventMatchGroupId: null,
+        isGoTogetherChat: true,
+      },
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'message',
+          conversationId: 'conv-1',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.body).toBe('Ana mentioned you.');
+  });
+
+  it('keeps the full name for a mention in an ordinary group chat', async () => {
+    const { listener, push } = build({
+      actorProfile: ACTOR,
+      conversationRow: { id: 'conv-1', eventMatchGroupId: null },
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'message',
+          conversationId: 'conv-1',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload.body).toBe('Ana Silva mentioned you.');
   });
 
   it('falls back to the notifications centre when the payload names no destination', async () => {
@@ -495,6 +586,28 @@ describe('PushNotificationListener', () => {
       PushPayload,
     ];
     expect(payload).not.toHaveProperty('icon');
+  });
+
+  // ENG-412: a member who hid their photo keeps it off every recipient's lock
+  // screen, even when the avatar is a public https URL.
+  it('omits the icon when the actor has hidden their photo', async () => {
+    const { listener, push } = build({
+      actorProfile: { ...ACTOR, photoVisible: false },
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.ConnectionAccepted, {
+          byUserId: 'actor-1',
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload).not.toHaveProperty('icon');
+    // The name still reads; only the face is withheld.
+    expect(payload.body).toBe('Ana Silva accepted your connection request.');
   });
 
   // The two load-bearing whitelist exclusions: both already push elsewhere, so
@@ -853,5 +966,194 @@ describe('PushNotificationListener', () => {
       ).not.toHaveBeenCalled();
       expect(push.sendToUsers).toHaveBeenCalledTimes(1);
     });
+  });
+
+  describe('Go together time-sensitive notices (PRD-420)', () => {
+    async function pushFor(
+      type: NotificationType,
+      payload: Record<string, unknown>,
+      pushDisabledCategories: string[] = [],
+    ) {
+      const built = build({ pushDisabledCategories });
+      await built.listener.handleNotificationBatchCreated(
+        emit(makeNotification(type, payload)),
+      );
+      const splitCalls = built.push.sendSplitByPreviewPreference.mock.calls as [
+        string[],
+        PushPayload,
+        unknown,
+      ][];
+      const sentCall = (): [string[], PushPayload, unknown] => {
+        const [firstCall] = splitCalls;
+        if (!firstCall) throw new Error('No push was sent');
+        return firstCall;
+      };
+      return { ...built, sentCall };
+    }
+
+    it('pushes a member-left notice carrying a merge offer, gated on EventReminders, naming nobody', async () => {
+      const { sentCall, notificationPreferences } = await pushFor(
+        NotificationType.GoTogetherMemberLeft,
+        {
+          eventId: 'e1',
+          eventSlug: 'pride-picnic',
+          eventTitle: 'Pride picnic',
+          groupId: 'group-1',
+          mergeOfferGroupId: 'group-2',
+        },
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'event_reminders');
+      const [userIds, payload, genericCopy] = sentCall();
+      expect(userIds).toEqual(['recipient-1']);
+      expect(payload.title).toBe('Go together');
+      expect(payload.body).toBe(
+        'Someone left your group. Another group has room for you',
+      );
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:goTogether.memberLeft.title',
+        bodyKey: 'push:goTogether.memberLeft.bodyMergeOffer',
+        params: {},
+      });
+      expect(payload.data.url).toBe('/gatherings/pride-picnic');
+      expect(payload.body).not.toContain('Pride picnic');
+      expect(payload).not.toHaveProperty('icon');
+      expect(payload.timestamp).toBe(NOTIFICATION_CREATED_AT.getTime());
+      expect(genericCopy).toBe(GENERIC_PUSH_COPY.notification);
+    });
+
+    it('uses the plain member-left body when no group had room', async () => {
+      const { sentCall } = await pushFor(
+        NotificationType.GoTogetherMemberLeft,
+        { eventSlug: 'pride-picnic', mergeOfferGroupId: null },
+      );
+
+      const [, payload] = sentCall();
+      expect(payload.body).toBe('Someone left your group for a gathering');
+      expect(payload.l10n?.bodyKey).toBe('push:goTogether.memberLeft.body');
+    });
+
+    it('does not push a member-left notice when EventReminders is off', async () => {
+      const { push } = await pushFor(
+        NotificationType.GoTogetherMemberLeft,
+        { eventSlug: 'pride-picnic', mergeOfferGroupId: 'group-2' },
+        ['event_reminders'],
+      );
+
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it('pushes the unmatched notice with a body for a later pass and one for the final pass', async () => {
+      const ongoing = await pushFor(NotificationType.GoTogetherUnmatched, {
+        eventSlug: 'pride-picnic',
+        isFinal: false,
+      });
+      const final = await pushFor(NotificationType.GoTogetherUnmatched, {
+        isFinal: true,
+      });
+
+      const [, ongoingPayload] = ongoing.sentCall();
+      expect(ongoingPayload.body).toBe(
+        "We couldn't find a group for you yet. We'll keep looking",
+      );
+      expect(ongoingPayload.l10n).toEqual({
+        titleKey: 'push:goTogether.unmatched.title',
+        bodyKey: 'push:goTogether.unmatched.body',
+        params: {},
+      });
+      expect(ongoingPayload.data.url).toBe('/gatherings/pride-picnic');
+      const [, finalPayload] = final.sentCall();
+      expect(finalPayload.body).toBe(
+        "We weren't able to place you in a group this time",
+      );
+      expect(finalPayload.l10n?.bodyKey).toBe(
+        'push:goTogether.unmatched.bodyFinal',
+      );
+      expect(finalPayload.data.url).toBe('/notifications');
+    });
+
+    it('uses its own body when the host switched Go together off', async () => {
+      const { sentCall } = await pushFor(NotificationType.GoTogetherUnmatched, {
+        eventSlug: 'pride-picnic',
+        isFinal: true,
+        reason: 'hostSwitchedOff',
+      });
+
+      const [, payload] = sentCall();
+      expect(payload.body).toBe(
+        'The host switched Go together off for this gathering',
+      );
+      expect(payload.l10n?.bodyKey).toBe(
+        'push:goTogether.unmatched.bodyHostSwitchedOff',
+      );
+      expect(payload.data.url).toBe('/gatherings/pride-picnic');
+    });
+
+    it('pushes the meet-again prompt to that group feedback page', async () => {
+      const { sentCall, notificationPreferences } = await pushFor(
+        NotificationType.GoTogetherMeetAgain,
+        { eventSlug: 'pride-picnic', groupId: 'group-1' },
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'event_reminders');
+      const [, payload] = sentCall();
+      expect(payload.body).toBe('Want to meet your group again?');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:goTogether.meetAgain.title',
+        bodyKey: 'push:goTogether.meetAgain.body',
+        params: {},
+      });
+      expect(payload.data.url).toBe('/go-together/feedback/group-1');
+    });
+
+    it('falls back to the notifications centre for a meet-again row with no group', async () => {
+      const { sentCall } = await pushFor(
+        NotificationType.GoTogetherMeetAgain,
+        {},
+      );
+
+      const [, payload] = sentCall();
+      expect(payload.data.url).toBe('/notifications');
+    });
+  });
+
+  // PRD-463: a moderator took a published listing down. The push says it came
+  // off the board and sends the poster to the notifications centre, where the
+  // moderator's reason is.
+  it('pushes a hidden GroupListingDecided with its own copy and l10n keys', async () => {
+    const { listener, push } = build({});
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.GroupListingDecided, {
+          source: 'housing_group',
+          decision: 'hidden',
+          groupSlug: 'sao-bento-flatshares',
+          groupName: 'Sao Bento flatshares',
+          listingTitle: 'Sunny room off Rua da Bica',
+          reason: 'The listing asks for a broker fee.',
+        }),
+      ),
+    );
+
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(userIds).toEqual(['recipient-1']);
+    expect(payload.title).toBe('About your listing');
+    expect(payload.body).toBe(
+      "Sunny room off Rua da Bica was taken off the group's board. Tap to read why.",
+    );
+    expect(payload.l10n).toEqual({
+      titleKey: 'push:groupListing.hidden.title',
+      bodyKey: 'push:groupListing.hidden.body',
+      params: { title: 'Sunny room off Rua da Bica' },
+    });
+    expect(payload.data.url).toBe('/notifications');
   });
 });

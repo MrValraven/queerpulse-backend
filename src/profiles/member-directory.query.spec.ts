@@ -1,8 +1,12 @@
 import { type SelectQueryBuilder } from 'typeorm';
 import {
+  BIO_SEARCHABLE_CLAUSE,
+  HOOD_VISIBLE_CLAUSE,
   applyDirectoryFilters,
   countDirectoryFacets,
   memberSearchIds,
+  memberSearchRank,
+  memberSearchTextMatch,
   zeroedFacetCounts,
   type DirectoryFacetGroup,
 } from './member-directory.query';
@@ -16,6 +20,12 @@ import { NEIGHBOURHOODS } from './neighbourhoods';
 import { LANGUAGE_CODES } from './languages';
 import { OPEN_TO_PRESET_IDS } from './open-to';
 import { LISTED_DISCIPLINE_IDS } from './professions';
+import {
+  PROFILE_PUBLIC_SEARCH_COLUMNS,
+  PROFILE_PUBLIC_SEARCH_FIELDS,
+  foldedHaystack,
+  weightedSearchVector,
+} from '../search/search-text';
 
 /** Records every predicate applied, which is all these tests care about. */
 type WhereCall = [string, Record<string, unknown> | undefined];
@@ -221,6 +231,23 @@ describe('applyDirectoryFilters', () => {
     );
   });
 
+  // ENG-439: the card shows a neighbourhood only for an `open` profile whose
+  // member left `hoodVisible` on, so the filter must not match anyone else,
+  // or ticking one neighbourhood at a time sorts the hiders into theirs.
+  it('matches a neighbourhood only where the card would show it', () => {
+    const spy = qbSpy();
+    applyDirectoryFilters(spy.qb, { hoods: 'Anjos,Arroios' });
+    const found = spy.calls.find(([text]) => text.includes('p.location'));
+    expect(found).toBeDefined();
+    const [predicate, parameters] = found!;
+    expect(HOOD_VISIBLE_CLAUSE).toContain(`"p"."visibility" = 'open'`);
+    expect(HOOD_VISIBLE_CLAUSE).toContain('"p"."hood_visible" = true');
+    expect(predicate).toBe(
+      `(${HOOD_VISIBLE_CLAUSE} AND (p.location ILIKE :hood0 OR p.location ILIKE :hood1))`,
+    );
+    expect(parameters).toEqual({ hood0: '%Anjos%', hood1: '%Arroios%' });
+  });
+
   it('matches nothing rather than everything when a facet id is unknown', () => {
     const spy = qbSpy();
     applyDirectoryFilters(spy.qb, { disciplines: 'sorcery' });
@@ -406,6 +433,27 @@ describe('countDirectoryFacets', () => {
     );
   });
 
+  // ENG-439: a hidden neighbourhood adds to no count, so the badges cannot be
+  // diffed into the filter the predicate above closes.
+  it('counts a neighbourhood only where the card would show it', async () => {
+    const spies = new Map<DirectoryFacetGroup, ReturnType<typeof qbSpy>>();
+    await countDirectoryFacets((skip) => {
+      const spy = qbSpy();
+      spies.set(skip, spy);
+      return spy.qb;
+    });
+    const hoodSelects = spies.get('hoods')!.selects;
+    expect(hoodSelects).toHaveLength(NEIGHBOURHOODS.length + 1);
+    NEIGHBOURHOODS.forEach((_, index) =>
+      expect(hoodSelects[index]![0]).toContain(HOOD_VISIBLE_CLAUSE),
+    );
+    // "All of Lisbon" counts the whole hood-unrestricted population, which
+    // places nobody, so it keeps counting everyone.
+    expect(hoodSelects[NEIGHBOURHOODS.length]![0]).not.toContain(
+      HOOD_VISIBLE_CLAUSE,
+    );
+  });
+
   it('leaves staff ambassadors out of every focus-area count', async () => {
     const spies = new Map<DirectoryFacetGroup, ReturnType<typeof qbSpy>>();
     await countDirectoryFacets((skip) => {
@@ -470,5 +518,70 @@ describe('memberSearchIds', () => {
       searchProfessions: [],
       searchDisciplines: ['healthcare'],
     });
+  });
+});
+
+// ENG-438: a `network`/`private` member's bio sits behind the limited card, so
+// member search must not match or rank on it.
+describe('bio-gated member search', () => {
+  /** The second branch: every row whose bio the viewer cannot read. */
+  function hiddenBioBranch(sql: string): string {
+    const marker = `OR (NOT ${BIO_SEARCHABLE_CLAUSE} AND`;
+    const index = sql.indexOf(marker);
+    expect(index).toBeGreaterThan(-1);
+    return sql.slice(index);
+  }
+
+  it('gates the bio columns behind an open profile', () => {
+    expect(BIO_SEARCHABLE_CLAUSE).toBe(`"p"."visibility" = 'open'`);
+    const sql = memberSearchTextMatch();
+    // The open branch keeps both bios in the index-backed expressions.
+    expect(sql.startsWith(`(${BIO_SEARCHABLE_CLAUSE} AND (`)).toBe(true);
+    expect(sql).toContain('"p"."bio_pt"');
+    // Every other row matches on name, handle and short bio only.
+    const hidden = hiddenBioBranch(sql);
+    expect(hidden).toContain('"p"."first_name"');
+    expect(hidden).toContain('"p"."tagline"');
+    expect(hidden).not.toContain('"p"."bio"');
+    expect(hidden).not.toContain('"p"."bio_pt"');
+  });
+
+  // `1824900000000-AddProfilePublicSearchIndexes` backs this branch with
+  // partial indexes `WHERE "visibility" <> 'open'`. The planner proves that
+  // predicate from the literal gate below, and matches the index on the exact
+  // expressions `search-text.spec.ts` pins against the migration.
+  it('keeps the hidden-bio branch on its partial indexes', () => {
+    const hidden = hiddenBioBranch(memberSearchTextMatch());
+    expect(hidden.startsWith(`OR (NOT "p"."visibility" = 'open' AND (`)).toBe(
+      true,
+    );
+    expect(hidden).toContain(
+      `${weightedSearchVector('p', PROFILE_PUBLIC_SEARCH_FIELDS)} @@ `,
+    );
+    expect(hidden).toContain(
+      `${foldedHaystack('p', PROFILE_PUBLIC_SEARCH_COLUMNS)} LIKE `,
+    );
+  });
+
+  it('applies the gated match as the directory search predicate', () => {
+    const spy = qbSpy();
+    applyDirectoryFilters(spy.qb, { query: 'ana -word' });
+    const found = spy.calls.find(([text]) =>
+      text.includes('websearch_to_tsquery'),
+    );
+    expect(found![0]).toBe(`(${memberSearchTextMatch()})`);
+  });
+
+  it('ranks a hidden-bio row without its bio', () => {
+    const rank = memberSearchRank();
+    expect(rank.startsWith(`(CASE WHEN ${BIO_SEARCHABLE_CLAUSE} THEN`)).toBe(
+      true,
+    );
+    const elseBranch = rank.slice(rank.indexOf(' ELSE '));
+    expect(elseBranch).toContain('"p"."first_name"');
+    expect(elseBranch).not.toContain('"p"."bio"');
+    expect(elseBranch).not.toContain('"p"."bio_pt"');
+    // It binds the raw term only, like the ordering it replaces.
+    expect(rank).not.toContain(':memberSearchPattern');
   });
 });

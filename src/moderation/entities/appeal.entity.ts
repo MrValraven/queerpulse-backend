@@ -120,9 +120,10 @@ export class Appeal {
    *
    * Deliberately NOT backfilled. An appeal decided before this column existed
    * has no recoverable decision timestamp, and reconstructing one from
-   * `mod_audit_logs` would silently miss every cold appeal (no `reportId` means
-   * no `appeal_upheld`/`appeal_overturned` row). A decided appeal with a NULL
-   * `decidedAt` is "decided, time unrecorded", which is the truth.
+   * `mod_audit_logs` would silently miss any appeal decided with neither a
+   * `reportId` nor an `appellantId` (no `appeal_upheld`/`appeal_overturned` row
+   * for that appeal). A decided appeal with a NULL `decidedAt` is "decided,
+   * time unrecorded", which is the truth.
    */
   @Index('IDX_appeals_decided_at')
   @Column({ type: 'timestamptz', precision: 3, nullable: true })

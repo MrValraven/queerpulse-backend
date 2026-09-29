@@ -3,6 +3,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThan, Repository } from 'typeorm';
 import { Event } from '../events/entities/event.entity';
+import { EVENT_DELETING, EventDeletingEvent } from '../events/event.events';
 import {
   MATCHED_GROUP_MEMBER_LEFT,
   MatchedGroupMemberLeftEvent,
@@ -12,12 +13,11 @@ import {
   EntryStatus,
   EventMatchEntry,
 } from './entities/event-match-entry.entity';
+import { BLOCK_MOVE_GRACE_MS } from './go-together-formation.helpers';
 import { GoTogetherFormationService } from './go-together-formation.service';
 
 /** Entries a block can still change. Withdrawn entries are history. */
 const LIVE_ENTRY_STATUSES: EntryStatus[] = ['waiting', 'grouped', 'unmatched'];
-/** A gathering counts as upcoming until twelve hours after it started. */
-const UPCOMING_GRACE_MS = 12 * 60 * 60 * 1000;
 
 @Injectable()
 export class GoTogetherListener {
@@ -30,9 +30,30 @@ export class GoTogetherListener {
     private readonly formation: GoTogetherFormationService,
   ) {}
 
+  /**
+   * A gathering is about to be hard-deleted (ENG-433). The delete cascades its
+   * config, groups and entries, and a matched chat whose group row is gone
+   * loses its `event_match_group_id`, so it would carry on as an ordinary
+   * house-owned group with no banner and outside the closed-group guard.
+   * Every matched chat is dissolved here first, the way the reconcile pass
+   * does for a cancelled gathering. Errors propagate on purpose
+   * (`suppressErrors: false`): `EventsService.remove` awaits this through
+   * `emitAsync` and keeps the gathering when a chat could not be ended.
+   */
+  @OnEvent(EVENT_DELETING, { suppressErrors: false })
+  async onEventDeleting(event: EventDeletingEvent): Promise<void> {
+    await this.formation.dissolveEventGroups(event.eventId, {
+      shouldFailWhenChatStaysOpen: true,
+    });
+  }
+
   /** A block must take effect in a shared chat right away (spec 3.6); the
    *  5-minute reconcile pass is too slow for someone who just blocked a
-   *  stranger they are about to meet. */
+   *  stranger they are about to meet. It is the path for every block. A
+   *  block from the group sheet also awaits the move itself
+   *  (`GoTogetherGroupService.blockMember`), and this listener runs the same
+   *  move at the same time; whichever run claims the blocker first wins, and
+   *  the other changes nothing. */
   @OnEvent(MEMBER_BLOCKED)
   async onMemberBlocked(event: MemberBlockedEvent): Promise<void> {
     try {
@@ -45,14 +66,16 @@ export class GoTogetherListener {
   }
 
   /**
-   * Leaving the matched chat before the gathering counts as leaving the group
-   * (spec 3.6): the entry is withdrawn, an accepted partner goes solo and the
-   * group left behind gets a merge offer when it got small. Once the
-   * gathering has started only the chat membership ends: the member stays in
-   * the group record and keeps the meet-again page. Only an entry still
-   * seated in that group is touched. `removeMember` calls the chat's leave
-   * again, which is a no-op for a member who already left and flagged as Go
-   * together's own removal, so no second event comes back here.
+   * Leaving the matched chat follows the same rule as the group sheet's
+   * Leave (spec 3.6, PRD-418), through the one shared
+   * `GoTogetherFormationService.leaveGroup`: before the gathering starts the
+   * entry is withdrawn, an accepted partner goes solo and the group left
+   * behind gets a merge offer when it got small; from the start onward only
+   * the chat membership ends, and the member stays in the group record and
+   * keeps the meet-again page. Only an entry still seated in that group is
+   * touched. `leaveGroup` calls the chat's leave again, which is a no-op for
+   * a member who already left and flagged as Go together's own removal, so
+   * no second event comes back here.
    */
   @OnEvent(MATCHED_GROUP_MEMBER_LEFT)
   async onMatchedGroupMemberLeft(
@@ -68,14 +91,7 @@ export class GoTogetherListener {
         },
       });
       if (!seatedEntry) return;
-      const gathering = await this.events.findOne({
-        where: { id: seatedEntry.eventId },
-        select: { id: true, startAt: true },
-      });
-      const hasStarted =
-        !gathering || gathering.startAt.getTime() <= now.getTime();
-      if (hasStarted) return;
-      await this.formation.removeMember(seatedEntry);
+      await this.formation.leaveGroup(seatedEntry, now);
     } catch (error) {
       this.logger.error(
         `Go together chat leave handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
@@ -100,7 +116,7 @@ export class GoTogetherListener {
     const upcomingEvents = await this.events.find({
       where: {
         id: In(eventIds),
-        startAt: MoreThan(new Date(now.getTime() - UPCOMING_GRACE_MS)),
+        startAt: MoreThan(new Date(now.getTime() - BLOCK_MOVE_GRACE_MS)),
       },
       select: ['id'],
     });

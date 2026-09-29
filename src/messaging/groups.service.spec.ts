@@ -10,6 +10,7 @@ import {
   GroupsService,
 } from './groups.service';
 import { MessagingCoreService } from './messaging-core.service';
+import { CONVERSATION_CREATED } from './messaging.events';
 import {
   ConversationParticipant,
   ConversationRole,
@@ -183,6 +184,7 @@ describe('GroupsService, section 8 (Groups)', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     count: jest.Mock;
+    query: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
@@ -255,6 +257,12 @@ describe('GroupsService, section 8 (Groups)', () => {
       // Defaults keep every existing seat-path test under the cap.
       findOne: jest.fn().mockResolvedValue({ id: CONVERSATION_ID }),
       count: jest.fn().mockResolvedValue(0),
+      // PRD-400: `readGroupJoinHistoryFloor`'s clock reading for a new seat.
+      query: jest
+        .fn()
+        .mockResolvedValue([
+          { floorInstant: new Date('2026-01-31T23:59:59.999Z') },
+        ]),
     };
     dataSource = {
       transaction: jest.fn(
@@ -433,7 +441,11 @@ describe('GroupsService, section 8 (Groups)', () => {
       expect(manager.update).toHaveBeenCalledWith(
         Conversation,
         { id: CONVERSATION_ID },
-        { dissolvedAt: expect.any(Date), inviteToken: null },
+        {
+          dissolvedAt: expect.any(Date),
+          inviteToken: null,
+          inviteTokenExpiresAt: null,
+        },
       );
       expect(manager.update).toHaveBeenCalledWith(
         ConversationParticipant,
@@ -870,6 +882,32 @@ describe('GroupsService, section 8 (Groups)', () => {
         .filter(Boolean);
       expect(savedTypes).toContain('group_photo_changed');
     });
+
+    it('fans a group refresh to active members on a description change', async () => {
+      conversations.findOne.mockResolvedValue(activeGroup());
+
+      await service.updateGroup(CONVERSATION_ID, OWNER_ID, {
+        description: 'New description',
+      });
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(CONVERSATION_CREATED, {
+        conversationId: CONVERSATION_ID,
+        memberUserIds: [OWNER_ID],
+      });
+    });
+
+    it('fans no group refresh for a rename alone (the pill carries the title)', async () => {
+      conversations.findOne.mockResolvedValue(activeGroup());
+
+      await service.updateGroup(CONVERSATION_ID, OWNER_ID, {
+        title: 'New name',
+      });
+
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        CONVERSATION_CREATED,
+        expect.anything(),
+      );
+    });
   });
 
   // Item 7: two concurrent rotations can both commit, and only the LAST
@@ -892,7 +930,120 @@ describe('GroupsService, section 8 (Groups)', () => {
         OWNER_ID,
       );
 
-      expect(result).toEqual({ inviteToken: 'the-actually-persisted-token' });
+      expect(result).toEqual({
+        inviteToken: 'the-actually-persisted-token',
+        inviteTokenExpiresAt: expect.any(String),
+      });
+    });
+  });
+
+  // PRD-400 (owner decision 2026-09-29): history from join, links for 7 days.
+  describe('PRD-400: join history floor and invite link expiry', () => {
+    const JOIN_FLOOR = new Date('2026-01-31T23:59:59.999Z');
+
+    type SavedSeat = {
+      userId: string;
+      role?: string;
+      clearedAt?: Date | null;
+      historyFloorAt?: Date | null;
+    };
+
+    const savedSeats = (): SavedSeat[] =>
+      manager.save.mock.calls
+        .flatMap(([entity]: [unknown]): unknown[] =>
+          Array.isArray(entity) ? (entity as unknown[]) : [entity],
+        )
+        .filter(
+          (entity): entity is SavedSeat =>
+            typeof entity === 'object' &&
+            entity !== null &&
+            'role' in entity &&
+            'userId' in entity,
+        );
+
+    beforeEach(() => {
+      manager.save.mockImplementation((entity: unknown) =>
+        Array.isArray(entity)
+          ? Promise.resolve(entity)
+          : Promise.resolve({
+              id: 'pill-1',
+              createdAt: new Date('2026-02-01T00:00:00.000Z'),
+              ...(entity as object),
+            }),
+      );
+      profiles.find.mockResolvedValue([
+        { userId: MEMBER_ID, slug: 'newcomer' },
+      ]);
+    });
+
+    it('addMembers floors a brand-new seat at its join in clearedAt and historyFloorAt', async () => {
+      await service.addMembers(CONVERSATION_ID, OWNER_ID, ['newcomer']);
+
+      expect(manager.query).toHaveBeenCalledTimes(1);
+      expect(savedSeats()).toEqual([
+        expect.objectContaining({
+          userId: MEMBER_ID,
+          clearedAt: JOIN_FLOOR,
+          historyFloorAt: JOIN_FLOOR,
+        }),
+      ]);
+    });
+
+    it('addMembers reads the floor inside the seating transaction, before the member_added pill is written', async () => {
+      await service.addMembers(CONVERSATION_ID, OWNER_ID, ['newcomer']);
+
+      const pillSaveIndex = manager.save.mock.calls.findIndex(
+        ([entity]) =>
+          (entity as { kind?: MessageKind }).kind === MessageKind.System,
+      );
+      expect(pillSaveIndex).toBeGreaterThanOrEqual(0);
+      expect(manager.query.mock.invocationCallOrder[0]).toBeLessThan(
+        manager.save.mock.invocationCallOrder[pillSaveIndex]!,
+      );
+    });
+
+    it('createGroup seats the creator and every founding member with no floor', async () => {
+      await service.createGroup(OWNER_ID, 'Book club', ['newcomer']);
+
+      expect(manager.query).not.toHaveBeenCalled();
+      for (const seat of savedSeats()) {
+        expect(seat.clearedAt).toBeUndefined();
+        expect(seat.historyFloorAt).toBeUndefined();
+      }
+    });
+
+    it('createOrRotateInviteLink writes a 7-day expiry together with the token', async () => {
+      const before = Date.now();
+
+      const result = await service.createOrRotateInviteLink(
+        CONVERSATION_ID,
+        OWNER_ID,
+      );
+
+      const [, written] = conversations.update.mock.calls[0] as [
+        unknown,
+        { inviteToken: string; inviteTokenExpiresAt: Date },
+      ];
+      const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+      expect(written.inviteToken).toEqual(expect.any(String));
+      expect(written.inviteTokenExpiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + sevenDaysMs,
+      );
+      expect(written.inviteTokenExpiresAt.getTime()).toBeLessThanOrEqual(
+        Date.now() + sevenDaysMs,
+      );
+      expect(result.inviteTokenExpiresAt).toBe(
+        written.inviteTokenExpiresAt.toISOString(),
+      );
+    });
+
+    it('disableInviteLink clears the expiry together with the token', async () => {
+      await service.disableInviteLink(CONVERSATION_ID, OWNER_ID);
+
+      expect(conversations.update).toHaveBeenCalledWith(
+        { id: CONVERSATION_ID },
+        { inviteToken: null, inviteTokenExpiresAt: null },
+      );
     });
   });
 });

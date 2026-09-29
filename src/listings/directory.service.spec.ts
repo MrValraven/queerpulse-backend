@@ -547,6 +547,140 @@ describe('DirectoryService', () => {
     });
   });
 
+  describe('searchByText (ENG-445)', () => {
+    type DirectoryQueryStub = Record<
+      | 'where'
+      | 'andWhere'
+      | 'select'
+      | 'orderBy'
+      | 'addOrderBy'
+      | 'setParameters'
+      | 'take'
+      | 'getMany',
+      jest.Mock
+    >;
+    let directoryQuery: DirectoryQueryStub;
+
+    beforeEach(() => {
+      const chain = (): jest.Mock =>
+        jest.fn(() => directoryQuery as unknown as object);
+      directoryQuery = {
+        where: chain(),
+        andWhere: chain(),
+        select: chain(),
+        orderBy: chain(),
+        addOrderBy: chain(),
+        setParameters: chain(),
+        take: chain(),
+        getMany: jest.fn().mockResolvedValue([]),
+      };
+      Object.assign(listings, {
+        createQueryBuilder: jest.fn().mockReturnValue(directoryQuery),
+      });
+    });
+
+    it('reads only the rows the caller shows, capped at the requested limit', async () => {
+      await service.searchByText('lux', 7);
+
+      expect(directoryQuery.take).toHaveBeenCalledTimes(1);
+      expect(directoryQuery.take).toHaveBeenCalledWith(7);
+    });
+
+    it('orders by name relevance first, then the grid badge and name order', async () => {
+      await service.searchByText('  Lux ', 6);
+
+      // The last `orderBy` wins in TypeORM: relevance replaces the grid's
+      // leading key, and the grid's badge and name keys follow it.
+      const lastOrderBy = directoryQuery.orderBy.mock.calls.at(-1) as [
+        string,
+        string,
+      ];
+      expect(lastOrderBy[0]).toContain(
+        'LOWER(listing.name) = :directoryRankExact',
+      );
+      expect(lastOrderBy[1]).toBe('ASC');
+      const addOrderByCalls = directoryQuery.addOrderBy.mock.calls.slice(
+        -2,
+      ) as [string, string][];
+      expect(addOrderByCalls[0]![0]).toContain('safeSpaceStatus');
+      expect(addOrderByCalls[1]).toEqual(['listing.name', 'ASC']);
+      expect(directoryQuery.setParameters).toHaveBeenCalledWith({
+        directoryRankExact: 'lux',
+        directoryRankPrefix: 'lux%',
+        directoryRankContains: '%lux%',
+      });
+    });
+
+    it('escapes LIKE wildcards in the relevance patterns', async () => {
+      await service.searchByText('50%_off', 6);
+
+      expect(directoryQuery.setParameters).toHaveBeenCalledWith({
+        directoryRankExact: '50%_off',
+        directoryRankPrefix: '50\\%\\_off%',
+        directoryRankContains: '%50\\%\\_off%',
+      });
+    });
+
+    it('keeps every directory visibility filter: live, takedown, closed or paused', async () => {
+      await service.searchByText('lux', 6);
+
+      expect(directoryQuery.where).toHaveBeenCalledWith(
+        'listing.status = :status',
+        { status: ListingStatus.Live },
+      );
+      const predicates = directoryQuery.andWhere.mock.calls.map(
+        (call: unknown[]) => String(call[0]),
+      );
+      expect(
+        predicates.some((predicate) =>
+          predicate.includes('content_moderation'),
+        ),
+      ).toBe(true);
+      expect(predicates).toContain('listing.isHiddenByOwner = false');
+    });
+    it('reads only the result columns and runs none of the card lookups', async () => {
+      directoryQuery.getMany.mockResolvedValue([
+        {
+          id: 'listing-1',
+          slug: 'lux-cafe',
+          name: 'Lux Cafe',
+          cats: ['food'],
+          hood: 'Anjos',
+        },
+        {
+          id: 'listing-2',
+          slug: 'no-cat',
+          name: 'No Cat',
+          cats: [],
+          hood: 'Graça',
+        },
+      ]);
+      const cardLookups = service as unknown as {
+        mediaCropService: { getMany: jest.Mock };
+        safeSpaceBadges: { openSuspensionsByListing: jest.Mock };
+      };
+
+      const rows = await service.searchByText('lux', 6);
+
+      expect(directoryQuery.select).toHaveBeenCalledWith([
+        'listing.id',
+        'listing.slug',
+        'listing.name',
+        'listing.cats',
+        'listing.hood',
+      ]);
+      expect(rows).toEqual([
+        { slug: 'lux-cafe', name: 'Lux Cafe', cat: 'food', hood: 'Anjos' },
+        { slug: 'no-cat', name: 'No Cat', cat: '', hood: 'Graça' },
+      ]);
+      expect(cardLookups.mediaCropService.getMany).not.toHaveBeenCalled();
+      expect(
+        cardLookups.safeSpaceBadges.openSuspensionsByListing,
+      ).not.toHaveBeenCalled();
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+  });
+
   /**
    * `GET /directory/by-member/:slug` backs the "Places <first name> runs"
    * strip on a PUBLIC profile, so every card it returns publishes the tie

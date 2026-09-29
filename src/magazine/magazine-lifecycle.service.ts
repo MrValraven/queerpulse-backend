@@ -2,12 +2,15 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateArticleTranslationDto } from './dto/create-article-translation.dto';
 import { SetArticleLifecycleDto } from './dto/set-article-lifecycle.dto';
 import {
@@ -25,6 +28,7 @@ import {
   LifecycleDeskResponse,
   toArticleLifecycleRecord,
 } from './magazine-lifecycle-response';
+import { notifyPieceWriter } from './magazine-writer-notifier';
 
 /**
  * How far ahead the review queue looks by default. Thirty days is one
@@ -50,6 +54,8 @@ const MAX_REVIEW_HORIZON_DAYS = 365;
  */
 @Injectable()
 export class MagazineLifecycleService {
+  private readonly logger = new Logger(MagazineLifecycleService.name);
+
   constructor(
     @InjectRepository(MagazineArticle)
     private readonly articles: Repository<MagazineArticle>,
@@ -59,6 +65,7 @@ export class MagazineLifecycleService {
     private readonly pieces: Repository<MagazinePiece>,
     @InjectRepository(MagazinePieceEvent)
     private readonly pieceEvents: Repository<MagazinePieceEvent>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -308,6 +315,12 @@ export class MagazineLifecycleService {
    *
    * The byline stays the ORIGINAL writer's. The translator is credited
    * separately (`translatorAuthorId`), because both people wrote this.
+   *
+   * The new piece carries the original's `care` record forward: consent and
+   * the sensitivity read already cover what the translation reports, so the
+   * desk trusts that record and moves straight to translating. The
+   * translator hears about the job the same way any writer hears about a
+   * commission.
    */
   async createTranslation(
     pieceId: string,
@@ -402,6 +415,10 @@ export class MagazineLifecycleService {
       issueId: original.issueId,
       articleId: translation.id,
       art: 'none',
+      // Carried forward as-is: the consent and sensitivity read on the
+      // original already cover the people and content this translation
+      // reports on.
+      care: piece.care === null ? null : structuredClone(piece.care),
     });
     await this.pieces.save(translationPiece);
 
@@ -420,6 +437,14 @@ export class MagazineLifecycleService {
       'translation_opened',
       `${dto.locale}: ${slug}`,
     );
+
+    await notifyPieceWriter({
+      notifications: this.notifications,
+      logger: this.logger,
+      piece: translationPiece,
+      actorId,
+      type: NotificationType.MagazinePieceCommissioned,
+    });
 
     const translator = translatorAuthorId
       ? await this.authors.findOne({ where: { id: translatorAuthorId } })

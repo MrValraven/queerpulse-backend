@@ -1,5 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { In, IsNull, Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { assertCommunityInteriorReadable } from './community-read-gate';
 import {
   CommunityMember,
   RosterRole,
@@ -45,7 +47,7 @@ export function isCommunityStaffRole(role: RosterRole): boolean {
 /**
  * A live community by slug, or a 404. Archived communities 404 like they do
  * everywhere else in this module: existence is never leaked, and an archived
- * room has nothing left to curate.
+ * community has nothing left to curate.
  */
 export async function loadActiveCommunityOr404(
   communities: Repository<Community>,
@@ -54,6 +56,24 @@ export async function loadActiveCommunityOr404(
   const community = await communities.findOne({
     where: { slug, archivedAt: IsNull() },
   });
+  if (!community) {
+    throw new NotFoundException('Community not found');
+  }
+  return community;
+}
+
+/**
+ * A community by slug, or a 404, with no archive filter. Backs
+ * `resolveMemberCommunity` only (PRD-412): a roster member of an archived
+ * community keeps reading its Library shelf and pulse lanes, so the resolver
+ * underneath those reads must not 404 the community out from under them.
+ * Every write-side resolver keeps `loadActiveCommunityOr404`.
+ */
+export async function loadCommunityOr404(
+  communities: Repository<Community>,
+  slug: string,
+): Promise<Community> {
+  const community = await communities.findOne({ where: { slug } });
   if (!community) {
     throw new NotFoundException('Community not found');
   }
@@ -153,10 +173,18 @@ export async function resolveStaffCommunity(
 
 /**
  * Resolve the community and assert the caller is on its roster at any role.
- * The member-scoped read tier: a private community's shelf is readable by the
- * people in the room and by nobody else, which is exactly what roster
- * membership already encodes (every access tier gates who can GET onto that
- * roster in the first place).
+ * The member-scoped READ tier: a private community's shelf is readable by
+ * its own members and by nobody else, which is exactly what roster
+ * membership already encodes (every access tier gates who can get onto that
+ * roster in the first place). This is the one resolver in the pair that
+ * admits an archived community (PRD-143 parity), so a member who watched
+ * their community get archived keeps reading what this backs. Every write
+ * stays on `resolveStaffCommunity` or `loadActiveCommunityOr404`, which
+ * still 404 an archived slug.
+ *
+ * Called directly only by `resolveMemberCommunityInterior` below, which adds
+ * the takedown closure every real caller needs. Call that one for a member
+ * read.
  */
 export async function resolveMemberCommunity(
   communities: Repository<Community>,
@@ -164,7 +192,7 @@ export async function resolveMemberCommunity(
   slug: string,
   userId: string,
 ): Promise<ResolvedCommunityAccess> {
-  const community = await loadActiveCommunityOr404(communities, slug);
+  const community = await loadCommunityOr404(communities, slug);
   const { membership, role } = await loadEffectiveAccess(
     members,
     community,
@@ -174,4 +202,44 @@ export async function resolveMemberCommunity(
     throw new ForbiddenException('Only roster members can do that');
   }
   return { community, membership, role };
+}
+
+/**
+ * `resolveMemberCommunity` plus the takedown closure posts, replies and the
+ * roster already run through `assertCommunityInteriorReadable` (ENG-426): a
+ * plain member of a community a moderator has hidden or removed gets the
+ * same 404 here, on this member-scoped read tier. Staff (owner, co-owner or
+ * moderator) keep reading it for moderation, the same exemption `getBySlug`
+ * grants.
+ *
+ * `resolveMemberCommunity` above already requires a resolved role before
+ * returning, so `assertCommunityInteriorReadable`'s archive branch never
+ * trips here (it only fires for `viewerRole === null`). Archived-member
+ * access stays unaffected; only the takedown branch does any work.
+ *
+ * Call this for a member read that must match the takedown closure
+ * `getBySlug`/posts/replies/roster already apply.
+ * `CommunityResourcesService.listBySlug` (the Library shelf) and
+ * `CommunityOwnerReviewService.getState` are its two callers.
+ */
+export async function resolveMemberCommunityInterior(
+  communities: Repository<Community>,
+  members: Repository<CommunityMember>,
+  contentModeration: Pick<ContentModerationService, 'stateFor'>,
+  slug: string,
+  userId: string,
+): Promise<ResolvedCommunityAccess> {
+  const resolved = await resolveMemberCommunity(
+    communities,
+    members,
+    slug,
+    userId,
+  );
+  await assertCommunityInteriorReadable({
+    community: resolved.community,
+    viewerRole: resolved.role,
+    communities,
+    contentModeration,
+  });
+  return resolved;
 }

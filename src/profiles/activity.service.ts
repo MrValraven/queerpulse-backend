@@ -14,8 +14,11 @@ export interface RecordActivityInput {
   sub?: string | null;
   toLink?: string | null;
   // What the row is ABOUT, so the read path can re-check that the subject is
-  // still public. Both null for a subject with no visibility dimension (a
-  // forum thread). See `ActivitySubjectKind`.
+  // still public. A forum thread row carries the `forum_thread` kind and the
+  // thread's slug, and `ActivityVisibilityService` re-checks it on every read
+  // (deleted, scheduled, under review, masked or gated threads drop out).
+  // Leave both null only for a subject with no visibility dimension. See
+  // `ActivitySubjectKind`.
   subjectKind?: ActivitySubjectKind | null;
   subjectId?: string | null;
   occurredAt?: Date;

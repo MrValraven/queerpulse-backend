@@ -40,6 +40,7 @@ describe('AdminLegalRequestsController', () => {
     findOne: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
+    listAmendments: jest.Mock;
     voidRecord: jest.Mock;
   };
 
@@ -56,6 +57,7 @@ describe('AdminLegalRequestsController', () => {
       findOne: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      listAmendments: jest.fn(),
       voidRecord: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
@@ -137,17 +139,34 @@ describe('AdminLegalRequestsController', () => {
       expect(result).toBe(created);
     });
 
-    it('PATCH /:id delegates to update with the id and body', async () => {
+    it('PATCH /:id delegates to update with the id, the acting admin and the body', async () => {
       const dto: UpdateLegalRequestDto = {
         outcome: LegalRequestOutcome.Refused,
       };
       const updated = { id: 'request-1' };
       service.update.mockResolvedValue(updated);
 
-      const result = await controller.update('request-1', dto);
+      const result = await controller.update(actingAdmin, 'request-1', dto);
 
-      expect(service.update).toHaveBeenCalledWith('request-1', dto);
+      expect(service.update).toHaveBeenCalledWith('request-1', 'admin-1', dto);
       expect(result).toBe(updated);
+    });
+
+    it('GET /:id/amendments delegates to listAmendments with the id', async () => {
+      const history = [
+        {
+          id: 'amendment-1',
+          actorName: 'Ada Lovelace',
+          changes: { outcome: { from: 'pending', to: 'refused' } },
+          createdAt: '2026-08-05T09:00:00.000Z',
+        },
+      ];
+      service.listAmendments.mockResolvedValue(history);
+
+      const result = await controller.listAmendments('request-1');
+
+      expect(service.listAmendments).toHaveBeenCalledWith('request-1');
+      expect(result).toBe(history);
     });
 
     it('POST /:id/void delegates to voidRecord with the id, admin and reason', async () => {
@@ -179,6 +198,7 @@ describe('AdminLegalRequestsController', () => {
           'findOne',
           'create',
           'update',
+          'listAmendments',
           'voidRecord',
         ]),
       );

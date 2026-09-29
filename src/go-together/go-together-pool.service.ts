@@ -6,6 +6,7 @@ import {
   ConnectionStatus,
 } from '../connections/entities/connection.entity';
 import { Block } from '../social/entities/block.entity';
+import { EventMatchConfig } from './entities/event-match-config.entity';
 import { EventMatchEntry } from './entities/event-match-entry.entity';
 import { EventMatchGroup } from './entities/event-match-group.entity';
 import { FriendMatchProfile } from './entities/friend-match-profile.entity';
@@ -15,12 +16,14 @@ import {
   MeetAgainVerdict,
 } from './entities/match-feedback.entity';
 import { MatchGroupFeedback } from './entities/match-group-feedback.entity';
+import { currentHostAnswers } from './go-together-answers';
 import { MatchGraph, MatchUnit } from './go-together-grouping';
+import type { HostQuestion } from './go-together-questionnaire.catalog';
 import {
   ComponentScores,
   MatchCandidate,
   PairContext,
-  computeInterestIdf,
+  interestIdfFromFrequencies,
   isPairFeasible,
   pairKey,
   scorePair,
@@ -43,13 +46,50 @@ const NEUTRAL_COMPONENTS: ComponentScores = {
   hostBonus: 0,
 };
 
+/**
+ * How long one platform-wide interest IDF is reused: one 5-minute matching
+ * tick. Every pool build inside a tick (the cutoff run, the late joiners, the
+ * late group, merges and moves) scores on the same scale, and the aggregate
+ * below runs about once per tick.
+ */
+export const INTEREST_IDF_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Document frequency per interest tag over every current questionnaire, plus
+ * the questionnaire total, in one aggregate. Only counts leave the database;
+ * nobody's interest list is loaded. Aliases are snake_case, quoted the same
+ * way everywhere they appear. A profile whose `interests` is not an array
+ * counts toward the total and holds no tag.
+ */
+export const INTEREST_FREQUENCY_SQL = `
+  SELECT
+    "interest"."tag_id" AS "tag_id",
+    COUNT(DISTINCT "profile"."user_id")::int AS "document_frequency",
+    (SELECT COUNT(*)::int FROM "friend_match_profiles") AS "profile_total"
+  FROM "friend_match_profiles" "profile"
+  CROSS JOIN LATERAL jsonb_array_elements_text(
+    CASE
+      WHEN jsonb_typeof("profile"."answers" -> 'interests') = 'array'
+        THEN "profile"."answers" -> 'interests'
+      ELSE '[]'::jsonb
+    END
+  ) AS "interest"("tag_id")
+  GROUP BY "interest"."tag_id"`;
+
+interface InterestFrequencyRow {
+  tag_id: string;
+  document_frequency: number;
+  profile_total: number;
+}
+
 export interface PoolMember {
   entry: EventMatchEntry;
   /**
    * Null for a member seated in a group (`status: 'grouped'`) whose
-   * questionnaire is gone. They stay in the pool so their seat counts toward
-   * the group size and their blocks and avoidances still apply; they are
-   * feasible with everyone else and score `NEUTRAL_SCORE`.
+   * questionnaire is gone, or for one listed in the build's
+   * `keepAnswerlessEntryIds`. They stay in the pool so their seat counts
+   * toward the group size and their blocks and avoidances still apply; they
+   * are feasible with everyone else and score `NEUTRAL_SCORE`.
    */
   candidate: MatchCandidate | null;
 }
@@ -72,10 +112,12 @@ export interface MatchPool {
 
 /**
  * Loads everything the pure engine needs for one set of entries, in a fixed
- * number of batched queries: answers, the interest IDF over every profile,
- * blocks, avoidances and connections among the members, and past-group
- * "go together again" anchors. The score and feasibility matrices are
- * computed once here so the solver never touches the database.
+ * number of batched queries: the members' answers, the host questions of the
+ * gathering, blocks, avoidances and connections among the members, and
+ * past-group "go together again" anchors. The platform-wide interest IDF comes
+ * from one aggregate shared for `INTEREST_IDF_TTL_MS`. The score and
+ * feasibility matrices are computed once here so the solver never touches the
+ * database.
  */
 @Injectable()
 export class GoTogetherPoolService {
@@ -83,6 +125,8 @@ export class GoTogetherPoolService {
     @InjectRepository(FriendMatchProfile)
     private readonly profiles: Repository<FriendMatchProfile>,
     @InjectRepository(Block) private readonly blocks: Repository<Block>,
+    @InjectRepository(EventMatchConfig)
+    private readonly configs: Repository<EventMatchConfig>,
     @InjectRepository(MatchAvoidance)
     private readonly avoidances: Repository<MatchAvoidance>,
     @InjectRepository(Connection)
@@ -95,23 +139,42 @@ export class GoTogetherPoolService {
     private readonly groupFeedback: Repository<MatchGroupFeedback>,
   ) {}
 
+  private interestIdfCache: {
+    computedAtMs: number;
+    idf: Promise<ReadonlyMap<string, number>>;
+  } | null = null;
+
+  /**
+   * `keepAnswerlessEntryIds` lists pending entries that stay in the pool as
+   * answerless members when their questionnaire is gone, the way a seated
+   * member does. A move after a block passes the members it just took out
+   * of their group, so a pair whose partner deleted their questionnaire
+   * while seated still forms one unit and moves together (spec 5.3).
+   */
   async buildPool(
     poolEntries: EventMatchEntry[],
-    options: { includeAnchors: boolean; now?: Date },
+    options: {
+      includeAnchors: boolean;
+      now?: Date;
+      keepAnswerlessEntryIds?: ReadonlySet<string>;
+    },
   ): Promise<{ pool: MatchPool; skippedEntryIds: string[] }> {
     const userIds = poolEntries.map((entry) => entry.userId);
+    const eventIds = [...new Set(poolEntries.map((entry) => entry.eventId))];
     const [
       profileRows,
-      interestRows,
+      interestIdf,
+      configRows,
       blockRows,
       avoidanceRows,
       connectionRows,
     ] = await Promise.all([
       this.profiles.find({ where: { userId: In(userIds) } }),
-      this.profiles
-        .createQueryBuilder('profile')
-        .select(`profile.answers -> 'interests'`, 'interests')
-        .getRawMany<{ interests: string[] | null }>(),
+      this.sharedInterestIdf(),
+      this.configs.find({
+        where: { eventId: In(eventIds) },
+        select: { eventId: true, hostQuestions: true },
+      }),
       this.blocks.find({
         where: { blockerId: In(userIds), blockedId: In(userIds) },
         select: { blockerId: true, blockedId: true },
@@ -130,12 +193,16 @@ export class GoTogetherPoolService {
       }),
     ]);
     const profileByUser = new Map(profileRows.map((row) => [row.userId, row]));
+    const hostQuestionsByEvent = new Map<string, readonly HostQuestion[]>(
+      configRows.map((row) => [row.eventId, row.hostQuestions]),
+    );
     const skippedEntryIds: string[] = [];
     const members: PoolMember[] = [];
     for (const entry of poolEntries) {
       const profile = profileByUser.get(entry.userId);
       if (!profile) {
-        if (entry.status === 'grouped' && entry.groupId !== null) {
+        const isSeated = entry.status === 'grouped' && entry.groupId !== null;
+        if (isSeated || options.keepAnswerlessEntryIds?.has(entry.id)) {
           members.push({ entry, candidate: null });
         } else {
           skippedEntryIds.push(entry.id);
@@ -147,16 +214,19 @@ export class GoTogetherPoolService {
         candidate: {
           userId: entry.userId,
           answers: profile.answers,
-          hostAnswers: entry.hostAnswers,
+          // Only answers to the questions the host asks now: an answer to an
+          // edited or removed question never scores.
+          hostAnswers: currentHostAnswers(
+            hostQuestionsByEvent.get(entry.eventId) ?? [],
+            entry.hostAnswers,
+          ),
           lens: entry.lens,
         },
       });
     }
 
     const context: PairContext = {
-      interestIdf: computeInterestIdf(
-        interestRows.map((row) => row.interests ?? []),
-      ),
+      interestIdf,
       blockedPairs: new Set(
         blockRows.map((row) => pairKey(row.blockerId, row.blockedId)),
       ),
@@ -236,6 +306,36 @@ export class GoTogetherPoolService {
       },
       skippedEntryIds,
     };
+  }
+
+  /**
+   * The platform-wide interest IDF, recomputed at most once per
+   * `INTEREST_IDF_TTL_MS` and shared by every pool build in that time. A
+   * failed read is dropped from the cache, so the next build asks again.
+   */
+  private sharedInterestIdf(): Promise<ReadonlyMap<string, number>> {
+    const nowMs = Date.now();
+    const cached = this.interestIdfCache;
+    if (cached && nowMs - cached.computedAtMs < INTEREST_IDF_TTL_MS) {
+      return cached.idf;
+    }
+    const idf = this.loadInterestIdf();
+    this.interestIdfCache = { computedAtMs: nowMs, idf };
+    idf.catch(() => {
+      if (this.interestIdfCache?.idf === idf) this.interestIdfCache = null;
+    });
+    return idf;
+  }
+
+  private async loadInterestIdf(): Promise<ReadonlyMap<string, number>> {
+    const rows = await this.profiles.query<InterestFrequencyRow[]>(
+      INTEREST_FREQUENCY_SQL,
+    );
+    const documentFrequency = new Map(
+      rows.map((row) => [row.tag_id, Number(row.document_frequency)]),
+    );
+    const profileTotal = Number(rows[0]?.profile_total ?? 0);
+    return interestIdfFromFrequencies(documentFrequency, profileTotal);
   }
 
   /**

@@ -154,6 +154,8 @@ export class BanRatificationService {
         hold.reasonCode ?? undefined,
         hold.note ?? undefined,
         hold.expiresAt.toISOString(),
+        undefined,
+        hold.targetUserId,
       );
     }
 
@@ -250,66 +252,78 @@ export class BanRatificationService {
     const now = new Date();
     const isRatifying = dto.decision === 'ratify';
 
-    const committed = await this.dataSource.transaction(async (manager) => {
-      // Claim the transition with a conditional UPDATE before doing anything
-      // consequential, the same race-safe shape `actOnReport` uses: two
-      // moderators confirming the same hold at the same instant must not both
-      // apply the ban and both write an audit row.
-      const claimed = await manager.update(
-        BanRatification,
-        { id: hold.id, status: BanRatificationStatus.Pending },
-        {
-          status: isRatifying
-            ? BanRatificationStatus.Ratified
-            : BanRatificationStatus.Declined,
-          decidedBy: actorId,
-          decidedAt: now,
-          decisionNote: dto.note ?? null,
-        },
-      );
-      if (claimed.affected !== 1) {
-        throw new ConflictException(
-          'Another moderator decided this ban while you were looking at it.',
+    const { committed, banAuditLogId } = await this.dataSource.transaction(
+      async (
+        manager,
+      ): Promise<{
+        committed: BanRatification;
+        banAuditLogId: string | null;
+      }> => {
+        // Claim the transition with a conditional UPDATE before doing anything
+        // consequential, the same race-safe shape `actOnReport` uses: two
+        // moderators confirming the same hold at the same instant must not both
+        // apply the ban and both write an audit row.
+        const claimed = await manager.update(
+          BanRatification,
+          { id: hold.id, status: BanRatificationStatus.Pending },
+          {
+            status: isRatifying
+              ? BanRatificationStatus.Ratified
+              : BanRatificationStatus.Declined,
+            decidedBy: actorId,
+            decidedAt: now,
+            decisionNote: dto.note ?? null,
+          },
         );
-      }
+        if (claimed.affected !== 1) {
+          throw new ConflictException(
+            'Another moderator decided this ban while you were looking at it.',
+          );
+        }
 
-      if (isRatifying) {
-        await this.enforcement.applyRatifiedBan(manager, hold.targetUserId);
-        // Written in the RATIFIER's name, under the canonical `ban` code, at
-        // the moment the ban actually takes effect. That is what makes the
-        // member's appeal against "the ban" resolve to a real row, and what
-        // keeps the conflict-of-interest guard in `reviewAppeal` pointed at a
-        // moderator who was genuinely part of the decision.
-        await this.audit.writeAuditLog(
-          hold.reportId,
-          actorId,
-          'ban',
-          hold.reasonCode ?? undefined,
-          hold.note ?? undefined,
-          undefined,
-          manager,
-        );
-      } else {
-        await this.enforcement.restoreUser(manager, hold.targetUserId);
-        await this.audit.writeAuditLog(
-          hold.reportId,
-          actorId,
-          BAN_DECLINED_AUDIT_ACTION,
-          hold.reasonCode ?? undefined,
-          dto.note ?? undefined,
-          undefined,
-          manager,
-        );
-      }
+        let ratifiedBanAuditLogId: string | null = null;
+        if (isRatifying) {
+          await this.enforcement.applyRatifiedBan(manager, hold.targetUserId);
+          // Written in the RATIFIER's name, under the canonical `ban` code, at
+          // the moment the ban actually takes effect. That is what makes the
+          // member's appeal against "the ban" resolve to a real row, and what
+          // keeps the conflict-of-interest guard in `reviewAppeal` pointed at a
+          // moderator who was genuinely part of the decision. The member rides
+          // on it as `targetUserId` (ENG-480), so an appeal finds it even when
+          // the ban came off a content report or straight from the drawer.
+          ratifiedBanAuditLogId = await this.audit.writeAuditLog(
+            hold.reportId,
+            actorId,
+            'ban',
+            hold.reasonCode ?? undefined,
+            hold.note ?? undefined,
+            undefined,
+            manager,
+            hold.targetUserId,
+          );
+        } else {
+          await this.enforcement.restoreUser(manager, hold.targetUserId);
+          await this.audit.writeAuditLog(
+            hold.reportId,
+            actorId,
+            BAN_DECLINED_AUDIT_ACTION,
+            hold.reasonCode ?? undefined,
+            dto.note ?? undefined,
+            undefined,
+            manager,
+            hold.targetUserId,
+          );
+        }
 
-      hold.status = isRatifying
-        ? BanRatificationStatus.Ratified
-        : BanRatificationStatus.Declined;
-      hold.decidedBy = actorId;
-      hold.decidedAt = now;
-      hold.decisionNote = dto.note ?? null;
-      return hold;
-    });
+        hold.status = isRatifying
+          ? BanRatificationStatus.Ratified
+          : BanRatificationStatus.Declined;
+        hold.decidedBy = actorId;
+        hold.decidedAt = now;
+        hold.decisionNote = dto.note ?? null;
+        return { committed: hold, banAuditLogId: ratifiedBanAuditLogId };
+      },
+    );
 
     if (isRatifying) {
       // Post-commit, outside the transaction, and in this order for the same
@@ -326,7 +340,12 @@ export class BanRatificationService {
       this.eventEmitter.emit(ACCOUNT_REMOVED, removed);
     }
 
-    await this.notifyMemberBestEffort(committed, isRatifying, actorId);
+    await this.notifyMemberBestEffort(
+      committed,
+      isRatifying,
+      actorId,
+      banAuditLogId,
+    );
 
     return (await this.toRows([committed]))[0]!;
   }
@@ -348,6 +367,9 @@ export class BanRatificationService {
     hold: BanRatification,
     isRatifying: boolean,
     actorId: string,
+    // The ratified `ban` row's id (ENG-480), so the bell can open the appeal
+    // form on that decision. Null on a decline: there is nothing to appeal.
+    banAuditLogId: string | null = null,
   ): Promise<void> {
     if (hold.targetUserId === actorId) return;
     try {
@@ -362,6 +384,7 @@ export class BanRatificationService {
           action: isRatifying ? 'ban' : 'suspension_lifted',
           reasonCode: hold.reasonCode ?? 'other',
           note: hold.note ?? '',
+          ...(isRatifying && banAuditLogId ? { actionId: banAuditLogId } : {}),
         },
       );
     } catch {

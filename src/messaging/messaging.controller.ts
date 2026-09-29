@@ -70,6 +70,7 @@ import {
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiGoneResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -124,7 +125,12 @@ export class ConversationsController {
       '`members` roster and `draft` body are empty/absent here; read ' +
       '`GET /conversations/:id` for those. Task 19: each row carries ' +
       '`claimReleasedBy`, `claimReleasedAt` and `claimTakenOverFrom`, ' +
-      'set for a staff caller of a business mailbox and null otherwise.',
+      'set for a staff caller of a business mailbox and null otherwise. ' +
+      'ENG-403: `q` narrows the page to conversations whose displayed name ' +
+      "(a group's title, a direct partner's name) contains it, " +
+      'accent-folded; `kind=group` keeps groups only; `excludeLeft=true` ' +
+      'keeps only conversations the caller still has a seat in. All three ' +
+      'keep every visibility rule of the plain list.',
   })
   @ApiForbiddenResponse({
     description:
@@ -139,6 +145,9 @@ export class ConversationsController {
       cursor: query.cursor,
       limit: query.limit,
       mailboxIdentityId: query.as,
+      search: query.q,
+      kind: query.kind,
+      excludeLeft: query.excludeLeft,
     });
   }
 
@@ -327,6 +336,10 @@ export class ConversationsController {
   @ApiNotFoundResponse({
     description: 'The link is unknown, or the group has ended.',
   })
+  @ApiGoneResponse({
+    description:
+      'PRD-400: the link is past its 7-day window (`INVITE_LINK_EXPIRED`). A current member still gets the preview.',
+  })
   previewGroupJoin(
     @Param('token', InviteTokenParamPipe) token: string,
     @CurrentUser() user: CurrentUserData,
@@ -350,6 +363,10 @@ export class ConversationsController {
   })
   @ApiNotFoundResponse({
     description: 'The link is unknown, or the group has ended.',
+  })
+  @ApiGoneResponse({
+    description:
+      'PRD-400: the link is past its 7-day window (`INVITE_LINK_EXPIRED`). A current member is still answered with their group.',
   })
   joinGroupByToken(
     @Param('token', InviteTokenParamPipe) token: string,
@@ -512,6 +529,8 @@ export class ConversationsController {
   /**
    * Create or ROTATE the group's join-by-link token (PRD-358, owner/admin;
    * service re-checks). Rotating invalidates whichever token was live.
+   * PRD-400: every issue or rotation is valid for 7 days, and the response
+   * says until when.
    */
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post(':id/invite-link')
@@ -519,7 +538,9 @@ export class ConversationsController {
   @ApiOperation({
     summary: 'Create or rotate a group invite link (owner/admin only)',
   })
-  @ApiOkResponse({ description: 'The new invite token.' })
+  @ApiOkResponse({
+    description: 'The new invite token and the ISO instant it expires.',
+  })
   @ApiForbiddenResponse({
     description:
       'The caller is not a group owner/admin, or the group has ended.',
@@ -527,7 +548,7 @@ export class ConversationsController {
   createInviteLink(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
-  ): Promise<{ inviteToken: string }> {
+  ): Promise<{ inviteToken: string; inviteTokenExpiresAt: string }> {
     return this.messagingService.createOrRotateInviteLink(id, user.userId);
   }
 
@@ -579,10 +600,17 @@ export class ConversationsController {
   })
   @ApiOkResponse({
     description:
-      "Backward paging (default, `cursor` or `before`/`beforeId`): `{ data, pageInfo: { nextCursor, hasMore } }`, newest-first; pass `nextCursor` back as `cursor` for the older page. Forward reconcile (`after`/`afterId`): a bare array, oldest-first. Both are floored by the caller's clear point and ceilinged at a group leave; moderator-taken-down messages render as tombstones.",
+      "Backward paging (default, `cursor` or `before`/`beforeId`): `{ data, pageInfo: { nextCursor, hasMore } }`, newest-first; pass `nextCursor` back as `cursor` for the older page. Window (`around=<messageId>`, PRD-401): the same envelope centred on that message, whose `pageInfo` adds `hasNewer`, `newerAfter` and `newerAfterId` for paging newer through `after`/`afterId`; 404 when the caller may not see the message. Forward reconcile (`after`/`afterId`): a bare array, oldest-first. All are floored by the caller's clear point and ceilinged at a group leave; moderator-taken-down messages render as tombstones.",
   })
   @ApiForbiddenResponse({
     description: 'The caller is not a participant of this conversation.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      '`around` names a message that is not in this conversation, or one the caller may not see.',
+  })
+  @ApiBadRequestResponse({
+    description: '`around` was combined with `before`, `after` or `cursor`.',
   })
   messages(
     @Param('id', ParseUUIDPipe) id: string,
@@ -596,6 +624,7 @@ export class ConversationsController {
       afterId: query.afterId,
       limit: query.limit,
       cursor: query.cursor,
+      around: query.around,
     });
   }
 
@@ -1300,6 +1329,7 @@ export class MessageRequestController {
       user.userId,
       dto.toSlug,
       dto.body,
+      dto.clientMessageId,
     );
   }
 }

@@ -7,12 +7,23 @@ import {
 } from './entities/deletion-request.entity';
 import { CommunityOwnerOrphanService } from '../communities/community-owner-orphan.service';
 import { EventPhoto } from '../events/entities/event-photo.entity';
+import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { releaseHandleWithin } from '../handles/handles.service';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+
+// Step 2d releases erased personas' handles through the registry's own
+// release. Partial mock: every other export stays real.
+jest.mock('../handles/handles.service', () => ({
+  ...jest.requireActual<Record<string, unknown>>('../handles/handles.service'),
+  releaseHandleWithin: jest.fn(),
+}));
 
 /**
  * Step 4 of `eraseAccount`: what a member's erasure does to the objects they
@@ -62,6 +73,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     createQueryBuilder: jest.Mock;
     query: jest.Mock;
     delete: jest.Mock;
+    find: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
   let communityOwnerOrphan: { handleOwnerErasure: jest.Mock };
@@ -117,9 +129,14 @@ describe('AccountDeletionProcessorService storage erasure', () => {
 
     manager = {
       createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
-      query: jest.fn().mockResolvedValue(undefined),
+      // `[]` is what `manager.query` returns for a statement that matches no
+      // rows, and step 2b reads its results as arrays.
+      query: jest.fn().mockResolvedValue([]),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      // Step 2d's persona and handle reads. None by default.
+      find: jest.fn().mockResolvedValue([]),
     };
+    (releaseHandleWithin as jest.Mock).mockReset().mockResolvedValue(undefined);
 
     // The `MediaReferenceResolver` step 4 uses is constructed below from this
     // same DataSource stub, so the stub is also what decides which keys come
@@ -309,6 +326,67 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       );
     });
 
+    // ENG-449: a sole-owned persona cascades away with the user row, so its
+    // registry handle is released (no forwarding) inside the erasure
+    // transaction first, and the name stays reserved for the cooldown.
+    it("releases the erased member's persona handles without forwarding before deleting the user row", async () => {
+      manager.find.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === Subprofile
+            ? [{ id: 'persona-1' }]
+            : entity === Handle
+              ? [{ name: 'after-dark', subprofileId: 'persona-1' }]
+              : [],
+        ),
+      );
+
+      await service.processDueDeletions();
+
+      // N5: the persona row is locked FIRST, matching the lock order every
+      // other persona writer uses (persona row, then handles): see
+      // `subprofile-membership.service.ts`'s `pessimistic_write` reads.
+      expect(manager.find).toHaveBeenCalledWith(Subprofile, {
+        where: { userId: USER_ID },
+        select: { id: true },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(manager.find).toHaveBeenCalledWith(
+        Handle,
+        expect.objectContaining({
+          where: expect.objectContaining({
+            ownerKind: HandleOwnerKind.Subprofile,
+          }) as unknown,
+        }),
+      );
+      const findCalls = manager.find.mock.calls as unknown[][];
+      const subprofileFindOrder =
+        manager.find.mock.invocationCallOrder[
+          findCalls.findIndex((call) => call[0] === Subprofile)
+        ] ?? -1;
+      const handleFindOrder =
+        manager.find.mock.invocationCallOrder[
+          findCalls.findIndex((call) => call[0] === Handle)
+        ] ?? -1;
+      expect(subprofileFindOrder).toBeLessThan(handleFindOrder);
+      expect(releaseHandleWithin).toHaveBeenCalledWith(
+        manager,
+        'after-dark',
+        { kind: 'subprofile', subprofileId: 'persona-1' },
+        { isForwarding: false },
+      );
+      expect(firstCallOrder(releaseHandleWithin as jest.Mock)).toBeLessThan(
+        firstCallOrder(manager.delete),
+      );
+    });
+
+    it('releases nothing when the member created no persona', async () => {
+      await service.processDueDeletions();
+
+      expect(releaseHandleWithin).not.toHaveBeenCalled();
+      expect(manager.find).not.toHaveBeenCalledWith(Handle, expect.anything());
+      expect(manager.delete).toHaveBeenCalled();
+    });
+
     it('stops before deleting anything when the persona handover fails', async () => {
       // A failed handover must never fall through to the cascade, which would
       // delete the shared personas it was meant to save. The request stays
@@ -327,6 +405,82 @@ describe('AccountDeletionProcessorService storage erasure', () => {
         { id: REQUEST_ID },
         expect.objectContaining({ status: DeletionRequestStatus.Erased }),
       );
+    });
+
+    // M2: step 0b's forum thread deletion runs isolated and only logs a
+    // failure, so the processor sweeps inside the transaction, after the user
+    // delete has blanked `author_id`, for anything that would otherwise
+    // publish later under the placeholder byline.
+    it("sweeps the erased member's unpublished and withdrawn forum threads after the user delete, scoped to authorless rows", async () => {
+      const WITHDRAWN_THREAD_ID = 'withdrawn-thread-id';
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('SELECT "t"."id" FROM "forum_thread"')
+            ? [{ id: WITHDRAWN_THREAD_ID }]
+            : [],
+        ),
+      );
+
+      await service.processDueDeletions();
+
+      const queryCalls = manager.query.mock.calls as Array<[string, unknown[]]>;
+      const captureIndex = queryCalls.findIndex(([sql]) =>
+        sql.includes('SELECT "t"."id" FROM "forum_thread"'),
+      );
+      const sweepIndex = queryCalls.findIndex(([sql]) =>
+        sql.includes('DELETE FROM "forum_thread"'),
+      );
+      expect(captureIndex).toBeGreaterThanOrEqual(0);
+      expect(sweepIndex).toBeGreaterThanOrEqual(0);
+
+      // The withdrawn ids are read while `author_id` still names the member.
+      const [captureSql, captureParams] = queryCalls[captureIndex]!;
+      expect(captureSql).toContain('"t"."author_id" = $1');
+      expect(captureSql).toContain('"t"."deleted_at" IS NOT NULL');
+      expect(captureParams).toEqual([USER_ID]);
+      expect(manager.query.mock.invocationCallOrder[captureIndex]).toBeLessThan(
+        firstCallOrder(manager.delete),
+      );
+
+      // The sweep runs after the user delete and can only reach authorless
+      // threads: unpublished ones, or this member's own withdrawn ones.
+      const [sweepSql, sweepParams] = queryCalls[sweepIndex]!;
+      expect(firstCallOrder(manager.delete)).toBeLessThan(
+        manager.query.mock.invocationCallOrder[sweepIndex]!,
+      );
+      expect(sweepSql).toContain('"t"."author_id" IS NULL');
+      expect(sweepSql).toContain(`NOT (${forumThreadVisibleSql('"t"')})`);
+      expect(sweepSql).toMatch(
+        /"t"\."deleted_at" IS NOT NULL\s*AND "t"\."id" = ANY\(\$1::uuid\[\]\)/,
+      );
+      expect(sweepParams).toEqual([[WITHDRAWN_THREAD_ID]]);
+    });
+
+    it('leaves the request parked when the forum thread sweep fails', async () => {
+      manager.query.mockImplementation((sql: string) =>
+        sql.includes('DELETE FROM "forum_thread"')
+          ? Promise.reject(new Error('sweep failed'))
+          : Promise.resolve([]),
+      );
+
+      await service.processDueDeletions();
+
+      // The erasure reached the sweep: the user delete ran, then the sweep
+      // failed after it and rolled the transaction back.
+      expect(manager.delete).toHaveBeenCalledWith(User, { id: USER_ID });
+      const sweepCallIndex = (
+        manager.query.mock.calls as Array<[string, unknown[]]>
+      ).findIndex(([sql]) => sql.includes('DELETE FROM "forum_thread"'));
+      expect(sweepCallIndex).toBeGreaterThanOrEqual(0);
+      expect(firstCallOrder(manager.delete)).toBeLessThan(
+        manager.query.mock.invocationCallOrder[sweepCallIndex]!,
+      );
+
+      expect(deletionRequests.update).not.toHaveBeenCalledWith(
+        { id: REQUEST_ID },
+        expect.objectContaining({ status: DeletionRequestStatus.Erased }),
+      );
+      expect(storage.listUserObjects).not.toHaveBeenCalled();
     });
 
     it('checks references only after the user row deletion has committed', async () => {

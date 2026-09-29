@@ -1,10 +1,13 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsEnum,
   IsIn,
+  IsInt,
   IsObject,
   IsOptional,
   IsString,
+  Min,
   MaxLength,
   MinLength,
 } from 'class-validator';
@@ -83,4 +86,18 @@ export class UpdateSubprofileDTO {
   // here with a 16 KB serialized-size cap enforced in
   // `SubprofilesService.assertJsonbSize` before persisting.
   @IsOptional() @IsObject() skinData?: SkinData;
+
+  // ENG-451 save precondition, request-only: it never lands on the persona.
+  // When it differs from the stored `edit_version` the PATCH answers 409
+  // `PERSONA_EDIT_CONFLICT` and changes nothing.
+  @ApiPropertyOptional({
+    type: Number,
+    minimum: 0,
+    description:
+      'The editVersion this save was built on. A stored editVersion that differs answers 409 { code: "PERSONA_EDIT_CONFLICT", currentEditVersion }. When omitted the save is unconditional.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  expectedEditVersion?: number;
 }

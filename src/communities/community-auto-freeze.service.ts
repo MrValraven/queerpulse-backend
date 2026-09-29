@@ -235,7 +235,12 @@ export class CommunityAutoFreezeService {
       await this.notifications.createForRecipients(
         recipientIds,
         NotificationType.CommunityFrozen,
-        { source: 'community', communitySlug: community.slug, reason },
+        {
+          source: 'community',
+          communitySlug: community.slug,
+          communityName: community.name,
+          reason,
+        },
       );
     } catch (error) {
       this.logger.error(

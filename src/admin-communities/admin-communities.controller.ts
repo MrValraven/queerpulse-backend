@@ -22,6 +22,7 @@ import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { AdminRemoveMemberQuery } from './dto/admin-remove-member.query';
 import { ListAdminCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
 import { ReassignOwnerDto } from './dto/reassign-owner.dto';
 import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
@@ -240,9 +241,14 @@ export class AdminCommunitiesController {
 
   @ApiOperation({
     summary: 'Remove any roster member outright (admin override).',
+    description:
+      'Always sends the removed member a notification naming the community. ' +
+      'Pass `barReturn=true` to also write a permanent bar against this ' +
+      'community; without it the member stays free to rejoin.',
   })
   @ApiNoContentResponse({
-    description: 'The member was removed from the roster.',
+    description:
+      'The member was removed from the roster, and barred when `barReturn=true`.',
   })
   @ApiBadRequestResponse({
     description:
@@ -259,11 +265,13 @@ export class AdminCommunitiesController {
     @CurrentUser() currentUser: CurrentUserData,
     @Param('slug') slug: string,
     @Param('memberSlug') memberSlug: string,
+    @Query() query: AdminRemoveMemberQuery,
   ): Promise<void> {
     return this.adminCommunities.removeMember(
       slug,
       currentUser.userId,
       memberSlug,
+      { shouldBarReturn: query.barReturn === true },
     );
   }
 }

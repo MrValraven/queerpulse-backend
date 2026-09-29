@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
@@ -280,6 +281,7 @@ describe('EventsService venue confirmation (LOC-16)', () => {
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
         { provide: ListingLookupService, useValue: listingLookup },
+        { provide: EventEmitter2, useValue: { emitAsync: jest.fn() } },
       ],
     }).compile();
     service = module.get(EventsService);

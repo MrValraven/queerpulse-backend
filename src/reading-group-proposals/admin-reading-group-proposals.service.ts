@@ -1,11 +1,12 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { slugify } from '../common/slug.util';
 import {
@@ -196,12 +197,29 @@ export class AdminReadingGroupProposalsService {
       );
     }
 
-    const proposal = await this.loadOr404(id);
-    proposal.status = ReadingGroupProposalStatus.Declined;
-    proposal.decidedAt = new Date();
-    proposal.decidedBy = adminUserId;
-    proposal.decisionNote = trimmedReason;
-    const saved = await this.proposals.save(proposal);
+    const updateResult = await this.proposals.update(
+      {
+        id,
+        status: ReadingGroupProposalStatus.Pending,
+        createdCommunitySlug: IsNull(),
+      },
+      {
+        status: ReadingGroupProposalStatus.Declined,
+        decidedAt: new Date(),
+        decidedBy: adminUserId,
+        decisionNote: trimmedReason,
+      },
+    );
+
+    if (!updateResult.affected) {
+      await this.loadOr404(id);
+      throw new ConflictException({
+        message: 'This proposal has already been decided.',
+        code: 'reading_group_proposal_already_decided',
+      });
+    }
+
+    const saved = await this.loadOr404(id);
 
     await this.notifyDecided(saved, {
       decision: 'declined',
@@ -222,12 +240,32 @@ export class AdminReadingGroupProposalsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminReadingGroupProposalDTO> {
-    const proposal = await this.loadOr404(id);
-    proposal.status = ReadingGroupProposalStatus.Archived;
-    proposal.decidedAt = new Date();
-    proposal.decidedBy = adminUserId;
-    proposal.decisionNote = AdminReadingGroupProposalsService.trimToNull(note);
-    const saved = await this.proposals.save(proposal);
+    const updateResult = await this.proposals.update(
+      {
+        id,
+        status: In([
+          ReadingGroupProposalStatus.Pending,
+          ReadingGroupProposalStatus.Declined,
+        ]),
+        createdCommunitySlug: IsNull(),
+      },
+      {
+        status: ReadingGroupProposalStatus.Archived,
+        decidedAt: new Date(),
+        decidedBy: adminUserId,
+        decisionNote: AdminReadingGroupProposalsService.trimToNull(note),
+      },
+    );
+
+    if (!updateResult.affected) {
+      await this.loadOr404(id);
+      throw new ConflictException({
+        message: 'This proposal has already been decided.',
+        code: 'reading_group_proposal_already_decided',
+      });
+    }
+
+    const saved = await this.loadOr404(id);
     return this.toDTO(saved);
   }
 

@@ -199,7 +199,17 @@ export interface StickerAttachment {
   height: number;
   provider: 'sticker';
   stickerId: string;
+  /** The sticker's English name, baked at send. */
   label: string;
+  /** The sticker's Portuguese name, baked at send from `Sticker.labelPt`.
+   *  Absent when the sticker had no Portuguese name at send time, and on
+   *  every row sent before this field existed, so readers treat a missing
+   *  value as "use `label`". Only the client can choose between the two:
+   *  the reader's UI language lives in their browser's localStorage
+   *  (PRD-325), so every server-rendered text that names the sticker
+   *  (reply-quote snippet, starred snippet, moderation evidence) keeps
+   *  `label`, and a push names only the generic kind ("Sticker"). */
+  labelPt?: string;
 }
 
 /**

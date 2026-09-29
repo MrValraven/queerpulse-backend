@@ -53,13 +53,17 @@ export class IdentityAttributionSettingsService {
   }
 
   /**
-   * Owner only. `assertMayActAs` runs first, so a moderation-removed persona
-   * refuses with `IDENTITY_REMOVED` before ownership is even asked, in line
-   * with "it speaks no more". A staff member who is not the owner is refused
-   * `IDENTITY_NOT_OWNER` and nothing changes; the same refusal covers an
-   * ownerless listing, where `ownerUserIdOf` answers null and no caller can
-   * ever equal it, so the switch stays locked until the listing gains an
-   * owner again.
+   * The owner, or on an ownerless listing any staff member (PRD-432).
+   * `assertMayActAs` runs first, so a moderation-removed persona refuses
+   * with `IDENTITY_REMOVED` before ownership is even asked, in line with "it
+   * speaks no more", and a caller who is not staff never gets further. A
+   * staff member who is not the owner of an owned mailbox is refused
+   * `IDENTITY_NOT_OWNER` and nothing changes. When `ownerUserIdOf` answers
+   * null (a listing the platform holds while it has no owner, co-managers
+   * remain), nobody else could ever change the switch, so every staff member
+   * of that listing may. An unlinked persona is refused
+   * `IDENTITY_STAFF_NAMES_LOCKED` (ENG-456): it never names its staff, so
+   * the switch has nothing to change there.
    */
   async updateOwnerSwitch(
     userId: string,
@@ -68,11 +72,20 @@ export class IdentityAttributionSettingsService {
   ): Promise<IdentityAttributionDto> {
     await this.identities.assertMayActAs(userId, identityId);
     const identity = await this.mailboxIdentity(identityId);
-    const ownerUserId = await this.identities.ownerUserIdOf(identity);
-    if (ownerUserId !== userId) {
+    const [ownerUserId, isUnlinkedPersona] = await Promise.all([
+      this.identities.ownerUserIdOf(identity),
+      this.isUnlinkedPersona(identity),
+    ]);
+    if (ownerUserId !== null && ownerUserId !== userId) {
       throw new ForbiddenException({
         code: 'IDENTITY_NOT_OWNER',
         message: 'Only this mailbox owner may change this switch',
+      });
+    }
+    if (isUnlinkedPersona) {
+      throw new ForbiddenException({
+        code: 'IDENTITY_STAFF_NAMES_LOCKED',
+        message: 'This persona never shows who replied',
       });
     }
     await this.identityRepository.update(identity.id, {
@@ -81,6 +94,7 @@ export class IdentityAttributionSettingsService {
     return this.buildAttributionDto(
       { ...identity, shouldShowStaffNames },
       userId,
+      { ownerUserId, isUnlinkedPersona },
     );
   }
 
@@ -108,7 +122,9 @@ export class IdentityAttributionSettingsService {
        DO UPDATE SET "should_allow_naming" = EXCLUDED."should_allow_naming"`,
       [identityId, userId, shouldAllowNaming],
     );
-    return this.buildAttributionDto(identity, userId, shouldAllowNaming);
+    return this.buildAttributionDto(identity, userId, {
+      shouldAllowMyName: shouldAllowNaming,
+    });
   }
 
   /**
@@ -141,26 +157,53 @@ export class IdentityAttributionSettingsService {
 
   /**
    * `shouldShowStaffNames` is `identity`'s own column. `shouldAllowMyName` is
-   * the caller's own row, read fresh unless the caller just wrote it
-   * (`knownShouldAllowMyName`), in which case no extra query is needed.
-   * `isOwner` is `ownerUserIdOf(identity) === userId`.
+   * the caller's own row. `isOwner` is `ownerUserIdOf(identity) === userId`.
+   * Each is read fresh unless the caller already knows it (`known`), in
+   * which case no extra query is needed.
+   *
+   * Every caller has already confirmed `userId` staffs `identity`, so an
+   * owner of null (an ownerless listing) lets this caller change the
+   * switch (PRD-432). An unlinked persona (ENG-456) locks it for everyone and
+   * says why in `staffNamesLockedReason`.
    */
   private async buildAttributionDto(
     identity: Identity,
     userId: string,
-    knownShouldAllowMyName?: boolean,
+    known: {
+      shouldAllowMyName?: boolean;
+      ownerUserId?: string | null;
+      isUnlinkedPersona?: boolean;
+    } = {},
   ): Promise<IdentityAttributionDto> {
-    const [ownerUserId, shouldAllowMyName] = await Promise.all([
-      this.identities.ownerUserIdOf(identity),
-      knownShouldAllowMyName === undefined
-        ? this.ownStaffPreference(identity.id, userId)
-        : Promise.resolve(knownShouldAllowMyName),
-    ]);
+    const [ownerUserId, shouldAllowMyName, isUnlinkedPersona] =
+      await Promise.all([
+        known.ownerUserId === undefined
+          ? this.identities.ownerUserIdOf(identity)
+          : Promise.resolve(known.ownerUserId),
+        known.shouldAllowMyName === undefined
+          ? this.ownStaffPreference(identity.id, userId)
+          : Promise.resolve(known.shouldAllowMyName),
+        known.isUnlinkedPersona === undefined
+          ? this.isUnlinkedPersona(identity)
+          : Promise.resolve(known.isUnlinkedPersona),
+      ]);
+    const isOwner = ownerUserId === userId;
     return {
       shouldShowStaffNames: identity.shouldShowStaffNames,
       shouldAllowMyName,
-      isOwner: ownerUserId === userId,
+      isOwner,
+      isAllowedToChangeStaffNames:
+        !isUnlinkedPersona && (isOwner || ownerUserId === null),
+      staffNamesLockedReason: isUnlinkedPersona ? 'unlinkedPersona' : null,
     };
+  }
+
+  /** ENG-456: `IdentitiesService.isUnlinkedPersona`, read only for a
+   *  persona, so a listing or company costs no query. */
+  private isUnlinkedPersona(identity: Identity): Promise<boolean> {
+    return identity.kind === IdentityKind.Subprofile
+      ? this.identities.isUnlinkedPersona(identity)
+      : Promise.resolve(false);
   }
 
   private async ownStaffPreference(

@@ -33,6 +33,12 @@ describe('FeatureUsageInterceptor', () => {
     expect(tally.drain().get('housing')).toBe(1);
   });
 
+  it('records nothing for an untracked feature such as Go together', () => {
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue('goTogether');
+    interceptor.intercept(contextFor(), next);
+    expect(tally.drain().size).toBe(0);
+  });
+
   it('records nothing for an untagged controller', () => {
     jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(undefined);
     interceptor.intercept(contextFor(), next);

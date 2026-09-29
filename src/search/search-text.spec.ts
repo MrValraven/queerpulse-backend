@@ -4,6 +4,9 @@ import {
   foldSearchText,
   FORUM_THREAD_SEARCH_COLUMNS,
   FORUM_THREAD_SEARCH_FIELDS,
+  PROFILE_BIO_COLUMNS,
+  PROFILE_PUBLIC_SEARCH_COLUMNS,
+  PROFILE_PUBLIC_SEARCH_FIELDS,
   PROFILE_SEARCH_COLUMNS,
   PROFILE_SEARCH_FIELDS,
   foldedHaystack,
@@ -34,6 +37,19 @@ const PROFILES_HAYSTACK_AS_INDEXED =
   `coalesce("bio", '') || ' ' || coalesce("bio_pt", '')), ` +
   `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
 
+// The profile fields minus both bios, as `1824900000000-AddProfilePublicSearchIndexes`
+// indexed them for the non-open rows (member search's hidden-bio branch).
+const PROFILES_PUBLIC_VECTOR_AS_INDEXED =
+  `setweight(to_tsvector('simple', translate(lower(coalesce("first_name", '')), 'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')), 'A') || ` +
+  `setweight(to_tsvector('simple', translate(lower(coalesce("last_name", '')), 'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')), 'A') || ` +
+  `setweight(to_tsvector('simple', translate(lower(coalesce("slug", '')), 'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')), 'A') || ` +
+  `setweight(to_tsvector('simple', translate(lower(coalesce("tagline", '')), 'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')), 'B')`;
+
+const PROFILES_PUBLIC_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("first_name", '') || ' ' || coalesce("last_name", '') || ' ' || ` +
+  `coalesce("slug", '') || ' ' || coalesce("tagline", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
 const FORUM_THREAD_VECTOR_AS_INDEXED =
   `setweight(to_tsvector('simple', translate(lower(coalesce("title", '')), ` +
   `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')), 'A')`;
@@ -56,6 +72,18 @@ describe('search-text expressions match the indexes that back them', () => {
   it('profiles trigram haystack', () => {
     expect(foldedHaystack('', PROFILE_SEARCH_COLUMNS)).toBe(
       PROFILES_HAYSTACK_AS_INDEXED,
+    );
+  });
+
+  it('profiles public tsvector (fields minus bios)', () => {
+    expect(weightedSearchVector('', PROFILE_PUBLIC_SEARCH_FIELDS)).toBe(
+      PROFILES_PUBLIC_VECTOR_AS_INDEXED,
+    );
+  });
+
+  it('profiles public trigram haystack (columns minus bios)', () => {
+    expect(foldedHaystack('', PROFILE_PUBLIC_SEARCH_COLUMNS)).toBe(
+      PROFILES_PUBLIC_HAYSTACK_AS_INDEXED,
     );
   });
 
@@ -116,6 +144,24 @@ describe('search-text query side', () => {
     expect(PROFILE_SEARCH_FIELDS.map((field) => field.column)).toContain(
       'bio_pt',
     );
+  });
+
+  // ENG-438: what member search may match for a member whose bio the viewer
+  // cannot read. Every non-bio field survives with its weight; both bios go.
+  it('derives the public member fields as the full list minus both bios', () => {
+    expect(PROFILE_BIO_COLUMNS).toEqual(['bio', 'bio_pt']);
+    expect(PROFILE_PUBLIC_SEARCH_COLUMNS).toEqual([
+      'first_name',
+      'last_name',
+      'slug',
+      'tagline',
+    ]);
+    expect(PROFILE_PUBLIC_SEARCH_FIELDS).toEqual([
+      { column: 'first_name', weight: 'A' },
+      { column: 'last_name', weight: 'A' },
+      { column: 'slug', weight: 'A' },
+      { column: 'tagline', weight: 'B' },
+    ]);
   });
 });
 

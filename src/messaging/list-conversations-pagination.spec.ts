@@ -120,6 +120,8 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
     avatarUrl: null,
     description: null,
     dissolvedAt: null,
+    // PRD-423: an ordinary group, formed outside Go together.
+    isGoTogetherChat: false,
     inviteToken: null,
     createdAt: new Date('2026-01-01T00:00:00Z'),
   };
@@ -223,6 +225,22 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
       // The watermark-bearing roster builder must never run for a list row:
       // it is the exact query ENG-253 removed from this response.
       expect(core.buildMemberSummaries).not.toHaveBeenCalled();
+    });
+
+    // PRD-423: `isGoTogetherChat` (`Conversation.isGoTogetherChat`) rides the
+    // list row alongside `eventMatchGroupId`, and stays true even once the
+    // matched group row is deleted (`eventMatchGroupId` goes null).
+    it('carries `isGoTogetherChat` through from the conversation row', async () => {
+      conversations.find.mockResolvedValueOnce([
+        { ...GROUP_CONVERSATION, isGoTogetherChat: true },
+      ]);
+      participants.createQueryBuilder.mockReturnValueOnce(
+        makeParticipantsQb([buildGroupParticipant({ draft: null })]),
+      );
+
+      const page = await service.listConversations(USER_ID, {});
+
+      expect(page.data[0]!.isGoTogetherChat).toBe(true);
     });
 
     it('omits `draft` and sends a bounded `draftPreview` plus `hasDraft` instead', async () => {
@@ -395,6 +413,37 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
       expect(qb.take).toHaveBeenCalledWith(2);
     });
 
+    // ENG-401 and ENG-402: the sort key skips exactly what the preview
+    // skips, so a group the caller left sorts by the last message they could
+    // read, and a blocked member's posts never lift a group to the top.
+    it("orders by last activity capped at the caller's leftAt and blind to a blocked group member's messages", async () => {
+      const qb = makeParticipantsQb([]);
+      participants.createQueryBuilder.mockReturnValueOnce(qb);
+
+      await service.listConversations(USER_ID, {});
+
+      const [orderExpression] = qb.orderBy.mock.calls[0] as [string, string];
+      const normalised = orderExpression.replace(/\s+/g, ' ');
+      expect(normalised).toContain(
+        '(participant.left_at IS NULL OR message.created_at <= participant.left_at)',
+      );
+      expect(normalised).toContain('message.sender_id <> ALL (ARRAY(');
+      expect(normalised).toContain(
+        '"blocked_by_viewer"."blocker_id" = :userId',
+      );
+      expect(normalised).toContain(
+        '"blocker_of_viewer"."blocked_id" = :userId',
+      );
+      expect(normalised).toContain(
+        "message.kind = 'system' OR message.sender_id IS NULL OR",
+      );
+      // The select that feeds the next cursor reads the same expression.
+      expect(qb.addSelect).toHaveBeenCalledWith(
+        orderExpression,
+        'last_activity',
+      );
+    });
+
     it('returns an empty envelope for a caller with no threads, never an error', async () => {
       participants.createQueryBuilder.mockReturnValueOnce(
         makeParticipantsQb([]),
@@ -434,6 +483,8 @@ describe('ConversationsService.getConversation (ENG-253 single-conversation read
     avatarUrl: null,
     description: null,
     dissolvedAt: null,
+    // PRD-423: an ordinary group, formed outside Go together.
+    isGoTogetherChat: false,
     inviteToken: null,
     createdAt: new Date('2026-01-01T00:00:00Z'),
   };
@@ -524,6 +575,28 @@ describe('ConversationsService.getConversation (ENG-253 single-conversation read
     expect(result.members).toHaveLength(1);
     expect(result.members[0]!.lastReadInstant).toBe('2026-01-01T00:05:00.000Z');
     expect(core.buildMemberSummaries).toHaveBeenCalledTimes(1);
+  });
+
+  // PRD-423: the single-conversation read path is what the client re-reads
+  // after a Go together group row is deleted, so `isGoTogetherChat` has to
+  // keep surfacing here even once `eventMatchGroupId` on the same row is null.
+  it('carries `isGoTogetherChat` through even once the matched group row is gone', async () => {
+    conversations.find.mockResolvedValueOnce([
+      {
+        ...GROUP_CONVERSATION,
+        isGoTogetherChat: true,
+        eventMatchGroupId: null,
+      },
+    ]);
+    core.requireParticipant.mockResolvedValueOnce(buildGroupParticipant());
+
+    const result = await service.getConversation(
+      GROUP_CONVERSATION_ID,
+      USER_ID,
+    );
+
+    expect(result.isGoTogetherChat).toBe(true);
+    expect(result.eventMatchGroupId).toBeNull();
   });
 
   it('authorizes through the shared `requireParticipant` membership check', async () => {

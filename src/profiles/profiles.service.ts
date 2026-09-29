@@ -23,15 +23,6 @@ import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
-import {
-  PROFILE_SEARCH_COLUMNS,
-  PROFILE_SEARCH_FIELDS,
-  foldedHaystack,
-  foldedSearchQuery,
-  foldedSearchTerm,
-  searchRankExpression,
-  weightedSearchVector,
-} from '../search/search-text';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -69,6 +60,7 @@ import {
   applyDirectoryFilters,
   countDirectoryFacets,
   memberSearchIds,
+  memberSearchRank,
   memberSearchTextMatch,
   type DirectoryFacetCounts,
   type DirectoryFacetGroup,
@@ -266,13 +258,14 @@ export class ProfilesService {
 
   /**
    * Resolve `slug` to a `Profile`, applying the same not-found-indistinguish-
-   * able-from-hidden gates `getBySlug` has always applied — block, hidden-from
-   * (member profile v2 Task 5), self-hide (member profile v2 Task 6), and
-   * moderator takedown — WITHOUT assembling a full/limited response. Factored
-   * out of `getBySlug` so any endpoint that needs "does the viewer get to know
-   * this member/slug exists at all?" (currently `getBySlug` itself and the
-   * `GET /:slug/mutuals` controller route) shares one answer instead of
-   * re-deriving or drifting out of sync.
+   * able-from-hidden gates `getBySlug` has always applied (account status,
+   * ENG-435; block; hidden-from, member profile v2 Task 5; self-hide, member
+   * profile v2 Task 6; moderator takedown) WITHOUT assembling a full/limited
+   * response. Factored out of `getBySlug` so any endpoint that needs "does
+   * the viewer get to know this member/slug exists at all?" (`getBySlug`
+   * itself, the `GET /:slug/mutuals` and `GET /:slug/vouchers` routes, board
+   * responses, recognition) shares one answer, so no caller re-derives it or
+   * drifts out of sync.
    *
    * A slug with no live profile is not automatically a 404: PRD-204 forwards a
    * renamed-away-from username while its reclaim cooldown is still running.
@@ -294,7 +287,7 @@ export class ProfilesService {
   }
 
   /**
-   * The four "does the viewer get to know this member exists at all?" gates,
+   * The five "does the viewer get to know this member exists at all?" gates,
    * each throwing the SAME 404 so a hidden member is indistinguishable from a
    * slug that was never real. Shared by `findBySlugOrThrow` and by the moved-
    * handle path below, which must not answer "moved" for a member the viewer
@@ -308,6 +301,23 @@ export class ProfilesService {
     // Computed once, up front, so every owner-exception below (self-hide,
     // takedown) reads the same answer.
     const isOwner = profile.userId === viewerUserId;
+    // Account-status gate (ENG-435). A deactivated member ("Hide me", or
+    // inside the 30-day erasure grace) or a suspended one is hidden by every
+    // `status = 'active'` predicate in the codebase, and the step-away sheet
+    // promises the profile disappears right away. A bare slug lookup reads
+    // the profile row alone, so it has to ask the same question here, with
+    // the same 404 as the gates below. The owner keeps their own view, which
+    // is the exception every other gate here makes too, and platform staff
+    // (admin/moderator) keep theirs with the same exemption as the takedown
+    // gate below, so moderation links (ban-evasion review, reports) to a
+    // suspended or deactivated member still open.
+    if (
+      !isOwner &&
+      !ProfilesService.isStaffRole(viewerRole) &&
+      !(await this.isAccountActive(profile.userId))
+    ) {
+      throw new NotFoundException('Profile not found');
+    }
     // Block-gate the lookup (P1-3): never surface a member's profile to someone
     // they've blocked, or who has blocked them — the same 404 subprofiles and
     // flatmate profiles already return, so a block is indistinguishable from a
@@ -343,6 +353,18 @@ export class ProfilesService {
     if (!isOwner && !ProfilesService.isStaffRole(viewerRole)) {
       await this.assertNotTakenDown(profile.slug, profile.userId);
     }
+  }
+
+  /**
+   * Whether the member behind `userId` has an `active` account: the same
+   * `u.status = :active` predicate the directory, related cards and board
+   * responses join on, read as one indexed existence check so no user row
+   * is loaded next to the profile.
+   */
+  private async isAccountActive(userId: string): Promise<boolean> {
+    return this.profiles.exists({
+      where: { userId, user: { status: UserStatus.Active } },
+    });
   }
 
   /**
@@ -430,7 +452,7 @@ export class ProfilesService {
       this.boardPosts.find({ where: { userId }, order: { position: 'ASC' } }),
       this.skills.find({ where: { userId }, order: { position: 'ASC' } }),
       this.shapings.find({ where: { userId } }),
-      this.loadVisibleActivity(userId),
+      this.loadVisibleActivity(userId, viewerUserId),
       this.loadGroups(userId),
       this.loadRelated(profile, viewerUserId),
       this.loadFeaturedCommunities(userId),
@@ -457,10 +479,11 @@ export class ProfilesService {
     // and independent of each other and of the parallel block above, so they
     // run together rather than in series.
     // `activityBand` is one primary-key lookup on a two-column table;
-    // `mutualVoucherCount` is two bounded trust-graph reads; `respondsWithin`
-    // is one grouped aggregate over `connections`; `shouldIncludeUnlistedWork`
-    // is zero or one connection-pair lookup (see below); `ownAmbassador` is
-    // one primary-key-shaped lookup, resolved only on the owner path.
+    // `mutualVoucherCount` is up to three bounded trust-graph reads;
+    // `respondsWithin` is one grouped aggregate over `connections`;
+    // `shouldIncludeUnlistedWork` is zero or one connection-pair lookup (see
+    // below); `ownAmbassador` is one primary-key-shaped lookup, resolved only
+    // on the owner path.
     const [
       activityBand,
       mutualVoucherCount,
@@ -591,10 +614,10 @@ export class ProfilesService {
       photo_visible: boolean;
       user_id: string;
     }>();
-    // Moderator takedown is the fourth gate and has no single-column in-query
-    // form (see `dropTakenDown`), so it runs post-query, same as everywhere
-    // else in this file — and before the grouping below, so a taken-down
-    // responder never reaches the counts or the avatar list. `dropTakenDown`
+    // Moderator takedown is the fourth gate. This read is a bounded pool with
+    // no OFFSET, so it drops takedowns after the fetch (see `dropTakenDown`),
+    // and before the grouping below, so a taken-down responder never reaches
+    // the counts or the avatar list. `dropTakenDown`
     // reads `.userId` (camelCase); the raw row keeps its own `user_id` too,
     // widened rather than renamed, since nothing downstream needs it.
     const rows = await this.dropTakenDown(
@@ -652,27 +675,36 @@ export class ProfilesService {
    * either). Reading `ACTIVITY_READ_LIMIT` rows and slicing after the filter
    * keeps the page full when a few drop.
    */
-  private async loadVisibleActivity(userId: string): Promise<Activity[]> {
+  private async loadVisibleActivity(
+    userId: string,
+    viewerUserId: string,
+  ): Promise<Activity[]> {
     const rows = await this.activities.find({
       where: { userId },
       order: { occurredAt: 'DESC' },
       take: ACTIVITY_READ_LIMIT,
     });
-    const visible = await this.activityVisibility.filterVisible(rows);
+    const visible = await this.activityVisibility.filterVisible(
+      rows,
+      viewerUserId,
+    );
     return visible.slice(0, ACTIVITY_LIMIT);
   }
 
   /**
    * "How many members you know vouched for them" for ONE profile read.
    *
-   * Reuses the two existing batched primitives rather than adding a third
-   * trust-graph query shape: `VouchService.getNamedVoucherIds` (active,
-   * non-anonymous vouchers, capped) intersected with
-   * `ConnectionsService.acceptedConnectionsAmong` (which candidate ids are the
-   * viewer's accepted connections, one bounded query). Both are the same
-   * methods the connection-card `{mutuals, vouchBadge}` batch is built from,
-   * so there is one definition of "vouched for them" and one of "you know
-   * them" in the codebase.
+   * Built entirely from existing batched primitives: `VouchService.getNamedVoucherIds`
+   * (active, non-anonymous vouchers, capped), narrowed through
+   * `visibleMemberIds` (the same member-set boundary the `/:slug/vouchers`
+   * roster applies: account status, block, hidden-from, 24h hide, moderator
+   * takedown), then intersected with
+   * `ConnectionsService.acceptedConnectionsAmong` (which candidate ids are
+   * the viewer's accepted connections, one bounded query). All three are the
+   * same primitives the connection-card `{mutuals, vouchBadge}` batch and
+   * the vouchers roster are built from, keeping one definition of "vouched
+   * for them", one of "you know them", and one of "visible to this viewer"
+   * for both the count and the roster.
    *
    * Returns `null` rather than a number in the two cases documented on
    * {@link MutualVoucherCount}: the viewer is the member, or the member has
@@ -682,6 +714,11 @@ export class ProfilesService {
    * to suppress it. The plain `vouchCount` beside it is unaffected, matching
    * `VouchService.listVouchers`, which still returns the true total with an
    * empty roster.
+   *
+   * Frontend dependency: `profileToMember` (queerpulse
+   * members.adapters.ts) reads a non-owner's null here as "roster hidden",
+   * since `vouchersVisible` is owner-only; keep null reserved for these two
+   * cases (pinned in members.adapters.test.ts).
    *
    * The viewer can never be counted in their own answer: nobody is an accepted
    * connection of themselves, so a vouch the viewer made drops out for free
@@ -703,11 +740,17 @@ export class ProfilesService {
     if (!voucherIds.length) {
       return 0;
     }
+    const visibleVoucherIds = await this.visibleMemberIds(
+      viewerUserId,
+      voucherIds,
+    );
+    if (!visibleVoucherIds.size) {
+      return 0;
+    }
     const connectedVouchers =
-      await this.connectionsService.acceptedConnectionsAmong(
-        viewerUserId,
-        voucherIds,
-      );
+      await this.connectionsService.acceptedConnectionsAmong(viewerUserId, [
+        ...visibleVoucherIds,
+      ]);
     return connectedVouchers.size;
   }
 
@@ -867,9 +910,9 @@ export class ProfilesService {
       .orderBy('p.firstName', 'ASC')
       .addOrderBy('p.userId', 'ASC')
       // Read a wider pool than we render: the fourth gate (moderator takedown)
-      // has no in-query form here, so it drops rows AFTER the fetch and reading
-      // exactly `RELATED_LIMIT` would leave a short row of cards whenever a
-      // match had been taken down.
+      // drops rows AFTER the fetch here (a bounded pool with no OFFSET, see
+      // `dropTakenDown`), and reading exactly `RELATED_LIMIT` would leave a
+      // short row of cards whenever a match had been taken down.
       .take(RELATED_READ_LIMIT);
     const pool = await this.dropTakenDown(await qb.getMany());
     const rows = pool.slice(0, RELATED_LIMIT);
@@ -1069,11 +1112,13 @@ export class ProfilesService {
    * "ONE spelling" precedent (see `applyMemberVisibilityGates`) exists to
    * prevent.
    *
-   * Post-query rather than in-query on purpose. The subject is addressed by two
-   * different columns and a REMOVED member counts as well as a hidden one, so
-   * `ContentModerationService.excludeHidden` (one column, hidden-but-not-removed
-   * only) is the wrong predicate here. Callers therefore over-fetch and slice,
-   * the same shape `MemberSuggestionsService.dropTakenDown` uses.
+   * For bounded pools with no OFFSET (related cards, board reads), where a
+   * post-fetch drop is cheap: callers over-fetch and slice, the same shape
+   * `MemberSuggestionsService.dropTakenDown` uses. Readers that paginate or
+   * count in SQL (the member directory) use the in-query form,
+   * `excludeTakenDownMembers`. `ContentModerationService.excludeHidden` is the
+   * wrong predicate for either: it reads one column and skips removals, while
+   * a member is keyed by slug OR userId and a removal counts too.
    */
   private async dropTakenDown<T extends { slug: string; userId: string }>(
     candidates: T[],
@@ -1825,8 +1870,8 @@ export class ProfilesService {
           return inner;
         }, 'ranked')
         // Read a wider pool than we render: the fourth gate (moderator
-        // takedown) has no in-query form here, so it drops rows AFTER the
-        // fetch (see `dropTakenDown` below), and capping the SQL at exactly
+        // takedown) drops rows AFTER the fetch here, a bounded pool with no
+        // OFFSET (see `dropTakenDown` below), and capping the SQL at exactly
         // `BOARD_MATCHES_PER_POST` would leave a short (or, in the
         // degenerate case, missing) bucket whenever one of a post's top 3
         // matches had been taken down — same reasoning as `RELATED_READ_LIMIT`
@@ -1843,10 +1888,9 @@ export class ProfilesService {
           matched_user_id: string;
         }>();
 
-      // Moderator takedown is the fourth gate and has no single-column
-      // in-query form (see `dropTakenDown`), so it runs post-query, same as
-      // everywhere else in this file — BEFORE the per-post trim below, so a
-      // taken-down member never occupies one of the BOARD_MATCHES_PER_POST
+      // Moderator takedown is the fourth gate, dropped post-query over this
+      // bounded pool (see `dropTakenDown`) BEFORE the per-post trim below, so
+      // a taken-down member never occupies one of the BOARD_MATCHES_PER_POST
       // slots a visible member could have filled instead.
       const visibleRows = await this.dropTakenDown(
         rows.map((row) => ({ ...row, userId: row.matched_user_id })),
@@ -1964,9 +2008,10 @@ export class ProfilesService {
    *
    * Three of the four member gates live here. The fourth, moderator takedown,
    * is keyed by slug OR userId in `content_moderation` and counts a removal as
-   * well as a hide, so it has no single-column `NOT EXISTS` form: callers apply
-   * it separately (`assertNotTakenDown` for a single profile, `dropTakenDown`
-   * over a fetched pool).
+   * well as a hide, and each caller applies it in the form its read needs:
+   * `assertNotTakenDown` for a single profile, `dropTakenDown` over a bounded
+   * fetched pool, `excludeTakenDownMembers` in SQL for the paginated
+   * directory.
    */
   private applyMemberVisibilityGates<E extends ObjectLiteral>(
     qb: SelectQueryBuilder<E>,
@@ -2015,8 +2060,71 @@ export class ProfilesService {
         active: UserStatus.Active,
       });
     this.applyMemberVisibilityGates(qb, viewerUserId);
+    // ENG-437: the fourth gate, in SQL. `/members` and the global search
+    // Members tab both read this builder under OFFSET pagination with a
+    // total and facet counts, so a post-fetch `dropTakenDown` would under-fill
+    // pages, skip the row past each dropped one and leave the counts wrong.
+    this.excludeTakenDownMembers(qb);
     applyDirectoryFilters(qb, q, skip);
     return qb;
+  }
+
+  /**
+   * The moderator-takedown gate as a `NOT EXISTS`, for readers that paginate
+   * or count in SQL and so cannot filter after the fetch. Same rule as
+   * `assertNotTakenDown` and `dropTakenDown`: a `member` subject keyed by slug
+   * OR userId, withheld when it is hidden or removed. The unique
+   * `(subject_type, subject_id)` index serves both keys. Applies to every
+   * viewer, staff included, like the other list readers; staff still open a
+   * taken-down profile by slug through `findBySlugOrThrow`.
+   *
+   * `alias` is spliced into raw SQL, so pass a fixed alias (never user input).
+   * Call at most once per query builder (fixed bound parameter name).
+   */
+  private excludeTakenDownMembers<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
+    alias = 'p',
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "member_takedown"
+        WHERE "member_takedown"."subject_type" = :memberTakedownSubjectType
+          AND "member_takedown"."subject_id" IN ("${alias}"."slug", "${alias}"."user_id"::text)
+          AND ("member_takedown"."hidden_at" IS NOT NULL OR "member_takedown"."removed_at" IS NOT NULL)
+      )`,
+      { memberTakedownSubjectType: ProfilesService.MEMBER_SUBJECT_TYPE },
+    );
+  }
+
+  /**
+   * Which of `userIds` may appear by name in a list `viewerUserId` is reading:
+   * the member-set boundary the directory applies (active account, block
+   * either way, hidden-from, "Hide me for 24 hours", moderator takedown), as
+   * ONE query for the whole batch. For lists of people that another service
+   * builds, such as the vouchers roster, so they hold the same line as
+   * `/members` without a second spelling of any gate.
+   */
+  async visibleMemberIds(
+    viewerUserId: string,
+    userIds: string[],
+  ): Promise<Set<string>> {
+    const candidateIds = [...new Set(userIds)];
+    if (!candidateIds.length) {
+      return new Set();
+    }
+    const qb = this.profiles
+      .createQueryBuilder('p')
+      .innerJoin('p.user', 'u', 'u.status = :active', {
+        active: UserStatus.Active,
+      })
+      .select('p.user_id', 'user_id')
+      .where('p.user_id IN (:...visibleCandidateIds)', {
+        visibleCandidateIds: candidateIds,
+      });
+    this.applyMemberVisibilityGates(qb, viewerUserId);
+    this.excludeTakenDownMembers(qb);
+    const rows = await qb.getRawMany<{ user_id: string }>();
+    return new Set(rows.map((row) => row.user_id));
   }
 
   async searchMembers(
@@ -2046,13 +2154,9 @@ export class ProfilesService {
     const page = q.page && q.page > 0 ? q.page : 1;
     const qb = this.directoryBaseQuery(q, viewerUserId);
 
-    // The relevance ordering below needs the same folded search expressions the
-    // search PREDICATE uses (now in `applyDirectoryFilters`). They are pure
-    // string builders over the alias, so rebuilding them here costs nothing and
-    // keeps the shared filter function free of any ordering concern.
-    const memberSearchVector = weightedSearchVector('p', PROFILE_SEARCH_FIELDS);
-    const memberSearchHaystack = foldedHaystack('p', PROFILE_SEARCH_COLUMNS);
-    const memberSearchTsQuery = foldedSearchQuery('memberSearchTerm');
+    // The relevance ordering below reads `memberSearchRank`, gated on the
+    // same bio-visibility rule as the search PREDICATE in
+    // `applyDirectoryFilters`, so a hidden bio lifts no one's rank.
     const hasSearchTerm = Boolean(q.query);
 
     // Text hits first, whatever the sort. A member found only through a
@@ -2215,15 +2319,7 @@ export class ProfilesService {
         // rewrites it into a DISTINCT-id subquery and re-parses each ORDER BY
         // term as `alias.column`.
         if (hasSearchTerm) {
-          qb.addSelect(
-            searchRankExpression(
-              memberSearchVector,
-              memberSearchTsQuery,
-              memberSearchHaystack,
-              foldedSearchTerm('memberSearchTerm'),
-            ),
-            'member_search_rank',
-          );
+          qb.addSelect(memberSearchRank(), 'member_search_rank');
           orderFirst('member_search_rank', 'DESC').addOrderBy(
             'p.joinedAt',
             'DESC',

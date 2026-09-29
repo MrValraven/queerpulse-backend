@@ -31,6 +31,7 @@ import { UserRole } from '../users/entities/user.entity';
 import {
   AdminLegalRequestDTO,
   AdminLegalRequestPageDTO,
+  LegalRequestAmendmentDTO,
 } from './legal-request-response';
 import { CreateLegalRequestDto } from './dto/create-legal-request.dto';
 import { ListLegalRequestsQuery } from './dto/list-legal-requests.query';
@@ -105,6 +106,20 @@ export class AdminLegalRequestsController {
 
   @ApiOperation({
     summary:
+      "A record's amendment history, newest first: who changed which " +
+      'fields, and from what to what.',
+  })
+  @ApiOkResponse({ description: 'The amendments, newest first.' })
+  @ApiNotFoundResponse({ description: 'No legal request with that id.' })
+  @Get(':id/amendments')
+  listAmendments(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<LegalRequestAmendmentDTO[]> {
+    return this.legalRequests.listAmendments(id);
+  }
+
+  @ApiOperation({
+    summary:
       'Record a demand. The outcome may be left pending and completed later.',
   })
   @ApiOkResponse({ description: 'The recorded demand.' })
@@ -123,7 +138,9 @@ export class AdminLegalRequestsController {
   }
 
   @ApiOperation({
-    summary: 'Amend a record (partial; omitted fields stay as they are).',
+    summary:
+      'Amend a record (partial; omitted fields stay as they are). Each ' +
+      'change is recorded in the amendment history with the acting admin.',
   })
   @ApiOkResponse({ description: 'The record as it now stands.' })
   @ApiBadRequestResponse({
@@ -135,10 +152,11 @@ export class AdminLegalRequestsController {
   })
   @Patch(':id')
   update(
+    @CurrentUser() actingAdmin: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateLegalRequestDto,
   ): Promise<AdminLegalRequestDTO> {
-    return this.legalRequests.update(id, dto);
+    return this.legalRequests.update(id, actingAdmin.userId, dto);
   }
 
   @ApiOperation({

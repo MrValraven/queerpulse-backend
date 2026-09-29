@@ -1,5 +1,5 @@
 import type { MemberCard } from '../profiles/profile-response';
-import type { DirectoryCardDTO } from '../listings/listing-response';
+import type { BusinessSearchRow } from '../listings/directory.service';
 import type { CommunityCardDTO } from '../communities/community-response';
 import type { EventSummary } from '../events/event-response';
 import type { ForumThreadResponse } from '../forum/forum-response';
@@ -107,7 +107,7 @@ export function forumPostToResult(row: ForumPostSearchRow): SearchResultDTO {
   };
 }
 
-export function businessToResult(card: DirectoryCardDTO): SearchResultDTO {
+export function businessToResult(card: BusinessSearchRow): SearchResultDTO {
   return {
     type: 'business',
     slug: card.slug,
@@ -130,7 +130,8 @@ export function jobToResult(row: JobSearchRow): SearchResultDTO {
     type: 'job',
     slug: row.slug,
     name: row.title,
-    sub: joinSub(row.category, row.location),
+    // The category is an id and labels live in the frontend catalog.
+    sub: joinSub(row.location),
   };
 }
 

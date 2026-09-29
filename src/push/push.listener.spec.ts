@@ -110,6 +110,8 @@ function build(opts: {
   // absolute https URL is a public avatar; a storage key resolves to our
   // auth-gated `/files/*` route and must NOT become the push icon.
   senderAvatarUrl?: string;
+  // ENG-412: the sender's `photoVisible` flag. Defaults to visible.
+  senderPhotoVisible?: boolean;
   // Conversation shape (PRD-333). Defaults to a 1:1 DM.
   conversationKind?: ConversationKind;
   groupTitle?: string | null;
@@ -188,6 +190,7 @@ function build(opts: {
       lastName: 'Doe',
       slug: 'alex',
       avatarUrl: opts.senderAvatarUrl ?? null,
+      photoVisible: opts.senderPhotoVisible ?? true,
     }),
     createQueryBuilder: jest.fn().mockReturnValue({
       innerJoin: jest.fn().mockReturnThis(),
@@ -522,6 +525,23 @@ it('omits icon when the sender has no avatar', async () => {
   const [, payload] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
   expect(payload).not.toHaveProperty('icon');
   expect(payload.actions).toEqual([{ action: 'view', title: 'View' }]);
+});
+
+it('omits icon when the sender hid their photo, keeping their name (ENG-412)', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+    // A public https avatar that would otherwise become the icon.
+    senderAvatarUrl: 'https://lh3.googleusercontent.com/a/alex.png',
+    senderPhotoVisible: false,
+  });
+  await listener.handleMessageCreated(makeEvent());
+  const [, payload] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(payload).not.toHaveProperty('icon');
+  expect(payload.title).toBe('Alex Doe');
 });
 
 it('omits icon for a storage-key avatar (our /files/* route, not a direct public URL)', async () => {

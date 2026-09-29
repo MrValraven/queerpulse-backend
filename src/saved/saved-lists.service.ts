@@ -24,7 +24,7 @@ import {
   SharedSavedListDTO,
   toSavedListDTO,
 } from './saved-list-response';
-import { toResolvedSavedItemDTOs } from './saved-response';
+import { toSharedSavedItemDTOs } from './saved-response';
 
 /** Bytes of entropy behind a share link, hex-encoded to 64 characters —
  *  identical to `CalendarFeedTokenService`, for identical reasons. */
@@ -320,9 +320,13 @@ export class SavedListsService {
       order: { createdAt: 'DESC' },
     });
     // One batched resolution for the whole list, at most one query per distinct
-    // kind on it. An unavailable item stays IN the list with its snapshot: the
-    // recipient was handed a curated set, and silently shrinking it would hide
-    // that the sender ever recommended the place.
+    // kind on it. An unavailable item stays IN the list: the recipient was
+    // handed a curated set, and silently shrinking it would hide that the
+    // sender ever recommended the place. Its snapshot is blanked (ENG-443),
+    // through `toSharedSavedItemDTOs`: the subject can be unavailable
+    // specifically because its owner blocked or hid from THIS recipient, and
+    // the snapshot (a flatmate's name and neighbourhood, say) would otherwise
+    // disclose exactly who is hiding from them.
     const availableRefs = await this.availability.availableRefs(
       items,
       viewerId,
@@ -330,7 +334,7 @@ export class SavedListsService {
     return {
       name: list.name,
       itemCount: items.length,
-      items: toResolvedSavedItemDTOs(items, availableRefs),
+      items: toSharedSavedItemDTOs(items, availableRefs),
     };
   }
 

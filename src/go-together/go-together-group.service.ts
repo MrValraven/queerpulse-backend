@@ -1,20 +1,29 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Event } from '../events/entities/event.entity';
+import { ReportSubjectType } from '../reports/entities/report.entity';
+import type { ReportDTO } from '../reports/report-response';
+import { ReportsService } from '../reports/reports.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import type { BlockOptionsDto } from '../social/dto/block-options.dto';
+import { SocialService } from '../social/social.service';
 import { Profile } from '../users/entities/profile.entity';
 import type { CheckInStatus } from './dto/check-in.dto';
+import type { GroupMemberReportDto } from './dto/group-member-report.dto';
 import { EventMatchConfig } from './entities/event-match-config.entity';
 import { EventMatchEntry } from './entities/event-match-entry.entity';
 import { EventMatchGroup } from './entities/event-match-group.entity';
 import { MatchFeedback } from './entities/match-feedback.entity';
 import { MatchGroupFeedback } from './entities/match-group-feedback.entity';
+import { hasGatheringStarted } from './go-together-formation.helpers';
 import { GoTogetherFormationService } from './go-together-formation.service';
 import type {
   GoTogetherGroupMember,
@@ -74,6 +83,15 @@ function groupNotFound(): NotFoundException {
   return new NotFoundException('Group not found');
 }
 
+function memberNotFound(): NotFoundException {
+  return new NotFoundException('Member not found');
+}
+
+/** A filed report as the group sheet gets it back: everything `POST
+ *  /reports` answers except the subject, which here is the member's user id
+ *  and never leaves the server. */
+export type GroupMemberReportResponse = Omit<ReportDTO, 'subjectId'>;
+
 /**
  * A formed group as its members see it: the card, check-in, leaving and
  * accepting a merge offer. Only a member currently grouped in the group can
@@ -81,6 +99,8 @@ function groupNotFound(): NotFoundException {
  */
 @Injectable()
 export class GoTogetherGroupService {
+  private readonly logger = new Logger(GoTogetherGroupService.name);
+
   constructor(
     @InjectRepository(EventMatchEntry)
     private readonly entries: Repository<EventMatchEntry>,
@@ -96,6 +116,8 @@ export class GoTogetherGroupService {
     private readonly groupFeedback: Repository<MatchGroupFeedback>,
     private readonly formation: GoTogetherFormationService,
     private readonly blockFilter: BlockFilterService,
+    private readonly social: SocialService,
+    private readonly reports: ReportsService,
   ) {}
 
   async getGroup(
@@ -144,7 +166,7 @@ export class GoTogetherGroupService {
       const profile = profileByUserId.get(entry.userId);
       if (!profile) continue;
       members.push({
-        slug: profile.slug,
+        memberRef: entry.id,
         firstName: profile.firstName,
         pronouns: profile.pronouns,
         avatarUrl: toVisibleAvatarUrl(profile),
@@ -154,6 +176,9 @@ export class GoTogetherGroupService {
       });
     }
     const feedbackState = feedbackWindow(config, now);
+    const hasLeftChat = group.conversationId
+      ? await this.formation.hasLeftChat(group.conversationId, userId)
+      : false;
 
     return {
       id: group.id,
@@ -169,6 +194,8 @@ export class GoTogetherGroupService {
       meetingPointNote: config?.meetingPointNote ?? null,
       conversationId: group.conversationId,
       isDissolved: group.dissolvedAt !== null,
+      isLeaveChatOnly: hasGatheringStarted(event, now),
+      hasLeftChat,
       members,
       mergeOffer: callerEntry.mergeOfferGroupId
         ? { groupId: callerEntry.mergeOfferGroupId }
@@ -212,9 +239,15 @@ export class GoTogetherGroupService {
     return this.getGroup(groupId, userId, now);
   }
 
-  async leave(groupId: string, userId: string): Promise<void> {
+  /** PRD-418: before the gathering starts the member leaves the group;
+   *  from the start onward only the chat (`isLeaveChatOnly` on the card). */
+  async leave(
+    groupId: string,
+    userId: string,
+    now: Date = new Date(),
+  ): Promise<void> {
     const entry = await this.findGroupedEntry(groupId, userId);
-    await this.formation.removeMember(entry);
+    await this.formation.leaveGroup(entry, now);
   }
 
   async acceptMerge(
@@ -235,6 +268,100 @@ export class GoTogetherGroupService {
     }
     await this.formation.acceptMerge(entry);
     return this.getGroup(targetGroupId, userId);
+  }
+
+  /**
+   * PRD-421: Block from the group sheet. `memberRef` resolves to a member
+   * seated in this group, server side, and the ordinary person block runs
+   * for them (`SocialService.blockMember`, the service behind
+   * `POST /blocks/:slug`) with the same optional body: the same
+   * `MEMBER_BLOCKED` event and the same companion report on `alsoReport`.
+   *
+   * The event's listener is not awaited by the block, so this route then
+   * awaits the move out of the group itself (`moveAfterBlock`, the step the
+   * listener runs), and the sheet's refetch right after the answer already
+   * sees the blocker gone. The listener's own run for the same block then
+   * finds the pair apart and changes nothing. A failed move is logged and
+   * the block stands. Nothing about the member comes back.
+   */
+  async blockMember(
+    groupId: string,
+    userId: string,
+    memberRef: string,
+    options?: BlockOptionsDto,
+  ): Promise<void> {
+    const target = await this.resolveGroupMember(groupId, userId, memberRef);
+    const profile = await this.profiles.findOne({
+      where: { userId: target.userId },
+      select: { userId: true, slug: true },
+    });
+    if (!profile) throw memberNotFound();
+    await this.social.blockMember(userId, profile.slug, options);
+    try {
+      await this.formation.moveAfterBlock(
+        target.eventId,
+        userId,
+        target.userId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Go together could not move the blocker out of group ${groupId}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * PRD-421: Report from the group sheet. `memberRef` resolves to a member
+   * seated in this group, server side, and the report is filed through the
+   * ordinary pipeline (`ReportsService.create`, the service behind
+   * `POST /reports`) as a `member` subject addressed by user id, so its
+   * flood caps, severity and moderation queue are the usual ones.
+   */
+  async reportMember(
+    groupId: string,
+    userId: string,
+    memberRef: string,
+    report: GroupMemberReportDto,
+  ): Promise<GroupMemberReportResponse> {
+    const target = await this.resolveGroupMember(groupId, userId, memberRef);
+    const filed = await this.reports.create(userId, {
+      reasonCode: report.reasonCode,
+      detail: report.detail,
+      anonymous: report.anonymous,
+      evidence: report.evidence,
+      subjectType: ReportSubjectType.Member,
+      subjectId: target.userId,
+    });
+    return {
+      id: filed.id,
+      subjectType: filed.subjectType,
+      reasonCode: filed.reasonCode,
+      severity: filed.severity,
+      status: filed.status,
+      createdAt: filed.createdAt,
+      slaDueAt: filed.slaDueAt,
+      acknowledgement: filed.acknowledgement,
+    };
+  }
+
+  /** The member behind `memberRef` (their entry id), seated in the group
+   *  the caller is seated in. A non-member caller gets the usual 404, an
+   *  unknown or departed member a 404 of their own, and the caller's own
+   *  ref a 400. */
+  private async resolveGroupMember(
+    groupId: string,
+    userId: string,
+    memberRef: string,
+  ): Promise<EventMatchEntry> {
+    await this.findGroupedEntry(groupId, userId);
+    const target = await this.entries.findOne({
+      where: { id: memberRef, groupId, status: 'grouped' },
+    });
+    if (!target) throw memberNotFound();
+    if (target.userId === userId) {
+      throw new BadRequestException('You cannot target yourself');
+    }
+    return target;
   }
 
   private async findGroupedEntry(

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
+import { ModerationModule } from '../moderation/moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CoopJoinRequest } from './entities/coop-join-request.entity';
 import { HousingCoop } from './entities/housing-coop.entity';
@@ -21,6 +22,10 @@ import { HousingService } from './housing.service';
     // `AdminQueueNotificationsService`: tells the co-op join-request queue's
     // reviewers when `createJoinRequest` lands a new application.
     AdminQueueNotificationsModule,
+    // `ModAuditService` (ENG-490): co-op delete and join-request triage record
+    // the acting admin. Plain import: the `ModerationModule` graph contains no
+    // housing module.
+    ModerationModule,
   ],
   controllers: [HousingController],
   providers: [HousingService],

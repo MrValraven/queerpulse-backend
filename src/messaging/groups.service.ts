@@ -31,10 +31,15 @@ import { Message, MessageKind, SystemEvent } from './entities/message.entity';
 import {
   computeGroupLeftReason,
   ConversationResponse,
+  memberNameOptionsFor,
   MessageResponse,
   requireAuthorSummary,
 } from './message-response';
-import { MAX_GROUP_MEMBERS } from './messaging.constants';
+import { readGroupJoinHistoryFloor } from './group-join-history-floor';
+import {
+  GROUP_INVITE_LINK_TTL_MS,
+  MAX_GROUP_MEMBERS,
+} from './messaging.constants';
 import {
   CONVERSATION_CREATED,
   CONVERSATION_MEMBERSHIP_REVOKED,
@@ -371,6 +376,8 @@ export class GroupsService {
             createdBy: input.ownerUserId,
             description: toStoredPlainTextOrNull(input.description),
             eventMatchGroupId: input.eventMatchGroupId,
+            // PRD-423: outlives the group link, see the entity.
+            isGoTogetherChat: true,
           }),
         );
         const memberIdentityIdByUserId = await this.profileIdentityIdsByUser(
@@ -583,7 +590,7 @@ export class GroupsService {
             await manager.update(
               Conversation,
               { id: conversationId },
-              { dissolvedAt, inviteToken: null },
+              { dissolvedAt, inviteToken: null, inviteTokenExpiresAt: null },
             );
             await manager.update(
               GroupInvite,
@@ -1079,6 +1086,18 @@ export class GroupsService {
         actorId: actorUserId,
       });
     }
+    // The photo and description pills carry no new value, so every member's
+    // client refetches the group (`conversation:new`) to show them. A rename
+    // needs no refresh: its pill carries the new title, which the client
+    // patches in place. Best effort like the pills: the write already
+    // committed, so a failed fan-out must not 500 the PATCH.
+    if (avatarChanged || descriptionChanged) {
+      try {
+        await this.fanGroupRefresh(conversationId);
+      } catch {
+        // best-effort: members pick the change up on their next inbox read.
+      }
+    }
     return this.toGroupConversationResponse(convo, actorUserId);
   }
 
@@ -1185,7 +1204,11 @@ export class GroupsService {
         await manager.update(
           Conversation,
           { id: conversationId },
-          { dissolvedAt: systemMessage.createdAt, inviteToken: null },
+          {
+            dissolvedAt: systemMessage.createdAt,
+            inviteToken: null,
+            inviteTokenExpiresAt: null,
+          },
         );
         if (memberUserIds.length) {
           await manager.update(
@@ -1208,6 +1231,7 @@ export class GroupsService {
     // second fetch.
     convo.dissolvedAt = systemMessage.createdAt;
     convo.inviteToken = null;
+    convo.inviteTokenExpiresAt = null;
 
     await this.broadcastSystemMessage(systemMessage);
     this.emitBestEffort(CONVERSATION_CREATED, {
@@ -1227,27 +1251,43 @@ export class GroupsService {
    * url-safe with no padding, so it drops straight into a shareable link with
    * no further escaping. No QR code (PRD-359 deferred): the token itself is
    * the whole feature.
+   *
+   * PRD-400: every issue or rotation starts a fresh validity window of
+   * `GROUP_INVITE_LINK_TTL_MS`, written in the same UPDATE as the token, and
+   * the response carries that expiry so the panel can say when the link
+   * stops working.
    */
   async createOrRotateInviteLink(
     conversationId: string,
     actorUserId: string,
-  ): Promise<{ inviteToken: string }> {
+  ): Promise<{ inviteToken: string; inviteTokenExpiresAt: string }> {
     await this.requireGroupRole(
       conversationId,
       actorUserId,
       ConversationRole.Admin,
     );
     const inviteToken = randomBytes(32).toString('base64url');
-    await this.conversations.update({ id: conversationId }, { inviteToken });
+    const inviteTokenExpiresAt = new Date(
+      Date.now() + GROUP_INVITE_LINK_TTL_MS,
+    );
+    await this.conversations.update(
+      { id: conversationId },
+      { inviteToken, inviteTokenExpiresAt },
+    );
     // Two concurrent rotations can both commit here, and only the LAST write
     // is actually live, so re-read rather than trust the token THIS call
     // generated, so a caller who lost the race is told the truth (the
     // token that is really shareable) instead of one nobody can join with.
     const persisted = await this.conversations.findOne({
       where: { id: conversationId },
-      select: { inviteToken: true },
+      select: { inviteToken: true, inviteTokenExpiresAt: true },
     });
-    return { inviteToken: persisted?.inviteToken ?? inviteToken };
+    return {
+      inviteToken: persisted?.inviteToken ?? inviteToken,
+      inviteTokenExpiresAt: (
+        persisted?.inviteTokenExpiresAt ?? inviteTokenExpiresAt
+      ).toISOString(),
+    };
   }
 
   /**
@@ -1267,7 +1307,7 @@ export class GroupsService {
     );
     await this.conversations.update(
       { id: conversationId },
-      { inviteToken: null },
+      { inviteToken: null, inviteTokenExpiresAt: null },
     );
   }
 
@@ -1276,7 +1316,10 @@ export class GroupsService {
    * and `addMatchedMembers`: a member with no prior row gets a fresh
    * `member` seat, a member who left or was removed has their row revived,
    * and each seat gets its own `member_added` pill (actor = `actorUserId`).
-   * The caller broadcasts the returned pills after commit. Callers have
+   * PRD-400: the fresh seat reads the group from its join onward, floored
+   * just before its own pill (`readGroupJoinHistoryFloor`); a revived row
+   * keeps the resume floor below. The caller broadcasts the returned pills
+   * after commit. Callers have
    * already filtered out active members and run their own consent gates.
    */
   private async seatMembersInTransaction(
@@ -1314,10 +1357,19 @@ export class GroupsService {
     }
     // A brand-new seat carries its member's own profile identity (the
     // column is NOT NULL); a reactivated row keeps the one it has.
+    const newSeatUserIds = seats
+      .filter(({ existing }) => !existing)
+      .map(({ userId }) => userId);
     const newSeatIdentityIdByUserId = await this.profileIdentityIdsByUser(
       manager,
-      seats.filter(({ existing }) => !existing).map(({ userId }) => userId),
+      newSeatUserIds,
     );
+    // PRD-400: a brand-new seat reads the group from its join onward (see
+    // `readGroupJoinHistoryFloor`). One reading per transaction, shared by
+    // every new seat in it.
+    const joinHistoryFloor = newSeatUserIds.length
+      ? await readGroupJoinHistoryFloor(manager)
+      : null;
     for (const { userId, existing } of seats) {
       if (existing) {
         // Re-activation resumes history FROM THE RE-ADD POINT onward.
@@ -1358,6 +1410,8 @@ export class GroupsService {
             userId,
             identityId: newSeatIdentityIdByUserId.get(userId),
             role: ConversationRole.Member,
+            clearedAt: joinHistoryFloor,
+            historyFloorAt: joinHistoryFloor,
           }),
         );
       }
@@ -1807,6 +1861,9 @@ export class GroupsService {
     const activeMemberCount = participantRows.filter(
       (row) => row.leftAt == null,
     ).length;
+    // PRD-423: a matched Go together chat names its members, its preview
+    // sender and its system pills by first name only.
+    const nameOptions = memberNameOptionsFor(convo);
     const members = hasCallerLeft
       ? []
       : this.core.buildMemberSummaries(
@@ -1814,6 +1871,7 @@ export class GroupsService {
           profileByUser,
           userId,
           privacyByUser,
+          nameOptions,
         );
 
     const lastMessage = lastByConvo.get(convo.id) ?? null;
@@ -1864,6 +1922,7 @@ export class GroupsService {
     const pendingInvites = pendingInviteRows.map((invite) => {
       const inviteeSummary = requireAuthorSummary(
         inviteeProfileByUser.get(invite.inviteeId),
+        nameOptions,
       );
       return {
         id: invite.id,
@@ -1888,6 +1947,9 @@ export class GroupsService {
             profileByUser,
             reactionsByMessage.get(clearedLastMessage.id) ?? [],
             userId,
+            undefined,
+            undefined,
+            nameOptions,
           )
         : null,
       unreadCount: unreadByConvo.get(convo.id) ?? 0,
@@ -1924,6 +1986,7 @@ export class GroupsService {
       memberPreview: this.core.buildMemberPreview(
         participantRows,
         profileByUser,
+        nameOptions,
       ),
       isOfficial: false,
       muted: callerRow?.muted ?? false,
@@ -1936,6 +1999,8 @@ export class GroupsService {
       description: convo.description,
       dissolvedAt: convo.dissolvedAt?.toISOString() ?? null,
       eventMatchGroupId: convo.eventMatchGroupId,
+      // PRD-423: the durable Go together marker, outlives eventMatchGroupId.
+      isGoTogetherChat: convo.isGoTogetherChat,
       leftReason: computeGroupLeftReason({
         leftAt: callerRow?.leftAt,
         removedAt: callerRow?.removedAt,
@@ -1949,6 +2014,14 @@ export class GroupsService {
         (callerRow?.role === ConversationRole.Owner ||
           callerRow?.role === ConversationRole.Admin)
           ? convo.inviteToken
+          : null,
+      inviteTokenExpiresAt:
+        !callerRow?.leftAt &&
+        !convo.dissolvedAt &&
+        convo.inviteToken &&
+        (callerRow?.role === ConversationRole.Owner ||
+          callerRow?.role === ConversationRole.Admin)
+          ? (convo.inviteTokenExpiresAt?.toISOString() ?? null)
           : null,
       // Owner/admin only, active, not dissolved (`canDissolve`/
       // `canTransferOwnership` are OWNER only: an admin can manage the

@@ -110,3 +110,50 @@ export function toResolvedSavedItemDTOs(
     ),
   );
 }
+
+/**
+ * The shared-list variant of {@link toResolvedSavedItemDTO} (ENG-443).
+ *
+ * The snapshot-stays rule above is written for the OWNER: they saved the
+ * item, so an unavailable row's title and meta are what let them recognise
+ * something they lost. `SavedListsService.getShared` hands that same
+ * snapshot to a RECIPIENT who saved nothing, and when the subject is
+ * unavailable because its owner blocked the recipient or hid from them
+ * specifically, the snapshot can be that person's name and neighbourhood (a
+ * flatmate listing, say). Carrying it across the unavailable boundary tells
+ * the recipient exactly who is hiding from them, which is the one thing an
+ * unavailable-item card must never say. This is the only formatter that
+ * blanks the snapshot, and `getShared` is its only caller.
+ */
+export function toSharedSavedItemDTO(
+  row: SavedItem,
+  isAvailable: boolean,
+): ResolvedSavedItemDTO {
+  if (!isAvailable) {
+    return {
+      id: toSavedId(row.subjectType, row.subjectId),
+      kind: row.subjectType,
+      title: '',
+      href: null,
+      meta: undefined,
+      description: undefined,
+      readTime: undefined,
+      savedAt: row.createdAt.toISOString(),
+      availability: 'unavailable',
+    };
+  }
+  return toResolvedSavedItemDTO(row, isAvailable);
+}
+
+/** Maps a whole shared-list page through {@link toSharedSavedItemDTO}. */
+export function toSharedSavedItemDTOs(
+  rows: readonly SavedItem[],
+  availableRefs: ReadonlySet<string>,
+): ResolvedSavedItemDTO[] {
+  return rows.map((row) =>
+    toSharedSavedItemDTO(
+      row,
+      availableRefs.has(toSavedId(row.subjectType, row.subjectId)),
+    ),
+  );
+}

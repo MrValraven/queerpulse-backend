@@ -118,12 +118,19 @@ export class CardHoldersService {
           programEnabled: program.isEnabled,
           communityFrozenAt: community.frozenAt,
           communityArchivedAt: community.archivedAt,
+          // This is the issuer roster: it keeps showing the card's own
+          // status so Pause, Revoke and Reinstate act on what they say, so
+          // it does not gate on the holder's account.
+          holderStatus: null,
         }),
         {
           holderSlug: profile?.slug ?? '',
+          // Null when the holder has no profile row or no name on it: the
+          // client prints its own localized fallback.
           holderName: profile
-            ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-            : 'A member',
+            ? [profile.firstName, profile.lastName].filter(Boolean).join(' ') ||
+              null
+            : null,
           // The holder's `photoVisible` switch reaches the issuer roster too.
           // This list is owner-or-mod gated, and that is a permission to
           // administer cards, not a permission to see a face its owner has

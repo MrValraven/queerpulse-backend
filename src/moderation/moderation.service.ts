@@ -40,6 +40,7 @@ import {
 } from '../messaging/entities/conversation-participant.entity';
 import { Message } from '../messaging/entities/message.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
@@ -62,7 +63,9 @@ import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
 import {
+  appealAlreadyDecided,
   appealWindowClosed,
+  contentActionUnsupported,
   enforcementTargetUnresolved,
 } from './enforcement-refusals';
 import {
@@ -87,7 +90,9 @@ import { ListAppealsQuery, ModAppealsTab } from './dto/list-appeals.query';
 import { ReportSubjectResolverService } from './report-subject-resolver.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
+  ACCOUNT_REINSTATED,
   ACCOUNT_REMOVED,
+  AccountReinstatedEvent,
   AccountRemovedEvent,
 } from '../ban-evasion/ban-evasion.events';
 import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
@@ -202,6 +207,14 @@ const APPEALABLE_ACTIONS = [
   COMMUNITY_REMOVAL_AUDIT_ACTION,
 ];
 
+// The appealable actions that lock a member out of their account. A suspended
+// member files through the bare appeal route (`AccountSuspendedPage`,
+// `AccountBannedPage`) with no `actionId`, so the fallback in
+// `resolveAppealTarget` limits itself to these for them: the appeal lands on
+// the lockout they are living under, and a content sanction written after it
+// (a removed post, say) cannot claim the one appeal each action allows.
+const ACCOUNT_LOCKOUT_ACTIONS = ['suspend', 'ban', BAN_PENDING_AUDIT_ACTION];
+
 // Loose enough to guard `Repository.findOne({ where: { userId: subjectId } })`
 // from a Postgres "invalid input syntax for type uuid" error when a
 // non-member subjectId (a slug, a content id, ...) is checked against a
@@ -226,6 +239,10 @@ export class ModerationService {
     @InjectRepository(ModAuditLog)
     private readonly auditLogs: Repository<ModAuditLog>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // Read-only: `resolveAppealTarget` reads the appellant's account status
+    // to steer a suspended member's bare appeal onto their lockout. Provided
+    // through `UsersModule`'s re-exported `TypeOrmModule`.
+    @InjectRepository(User) private readonly users: Repository<User>,
     // Read-only: a `listing`-subject report's detail view surfaces the live
     // listing's pasted evidence (item #13). Registered directly on
     // `ModerationModule` (TypeORM allows the same entity in multiple modules —
@@ -274,6 +291,44 @@ export class ModerationService {
     'hide_content',
     'remove_content',
   ]);
+
+  /**
+   * ENG-484. The subject types a `hide_content` / `remove_content` can land on:
+   * exactly the ones with a read path that honours `content_moderation`.
+   *
+   * AN ALLOWLIST ON PURPOSE. A takedown on a subject nobody reads writes a row,
+   * resolves the report and tells the moderator it worked while the content
+   * stays up. Listing what IS wired means a subject type added to the taxonomy
+   * later refuses takedowns until someone gives it a reader and adds it here.
+   *
+   * Left out, each for a reason: `conversation` is moderated one `message` at
+   * a time, `identity` through the `listing` / `business` / `company` behind
+   * it, and a `venue` report describes a place in prose with nothing to hide.
+   * A takedown on any of them answers {@link contentActionUnsupported}.
+   */
+  private static readonly CONTENT_TAKEDOWN_SUBJECT_TYPES: ReadonlySet<ReportSubjectType> =
+    new Set<ReportSubjectType>([
+      ReportSubjectType.Member,
+      ReportSubjectType.Post,
+      ReportSubjectType.Reply,
+      ReportSubjectType.Message,
+      ReportSubjectType.Community,
+      ReportSubjectType.Housing,
+      ReportSubjectType.Flatmate,
+      ReportSubjectType.Landlord,
+      ReportSubjectType.LandlordRecommendation,
+      ReportSubjectType.Listing,
+      ReportSubjectType.Business,
+      ReportSubjectType.ListingPublicQuestion,
+      ReportSubjectType.Review,
+      ReportSubjectType.Company,
+      ReportSubjectType.Job,
+      ReportSubjectType.Event,
+      ReportSubjectType.EventPhoto,
+      ReportSubjectType.Subprofile,
+      ReportSubjectType.MagazineComment,
+      ReportSubjectType.Volunteering,
+    ]);
 
   // The actions that produce a member-facing outcome the sanctioned member
   // should be told about. `warn` has no account effect (so `enforceAgainstUser`
@@ -469,6 +524,7 @@ export class ModerationService {
       actorRole,
       dto.action,
     );
+    ModerationService.assertContentActionSupported(report, dto.action);
     // The report's own state machine (BE-COM-03): `open -> resolved |
     // escalated`, `escalated -> resolved`, and `resolved` is TERMINAL. Nothing
     // used to read `report.status` here at all, so a resolved report could be
@@ -480,8 +536,8 @@ export class ModerationService {
     // Report status, enforcement against the member, and the audit row commit
     // together or not at all. A resolved report whose suspension failed to
     // write is exactly the bug this method exists to fix, in a subtler form.
-    const { saved, enforceResult } = await this.dataSource.transaction(
-      async (manager) => {
+    const { saved, enforceResult, auditLogId } =
+      await this.dataSource.transaction(async (manager) => {
         // Claim the transition with a conditional UPDATE before doing anything
         // consequential — the same race-safe pattern
         // `CommunitiesService.triageJoinRequest` uses. Two moderators acting on
@@ -533,7 +589,15 @@ export class ModerationService {
         }
         const saved = await manager.save(report);
 
-        await this.audit.writeAuditLog(
+        // ENG-480: the row names the member the decision landed on, so the
+        // author of hidden content can appeal it and the admin member drawer
+        // lists it. The id comes back out for the appeal deep link.
+        const auditTargetUserId = await this.auditTargetUserIdFor(
+          report,
+          dto,
+          enforceResult,
+        );
+        const auditLogId = await this.audit.writeAuditLog(
           saved.id,
           actorId,
           auditAction,
@@ -541,26 +605,34 @@ export class ModerationService {
           dto.note,
           auditDuration,
           manager,
+          auditTargetUserId,
         );
 
         // The takedown itself — enrolled in this same transaction so a
         // `hide_content`/`remove_content` can never resolve the report and log
         // an audit entry while leaving the reported content live (the P3 gap).
         if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
-          await this.contentModeration.applyAction(manager, {
-            subjectType: report.subjectType,
-            subjectId: report.subjectId,
-            action: dto.action as 'hide_content' | 'remove_content',
-            actorId,
-            reportId: saved.id,
-            reasonCode: dto.reasonCode,
-            note: dto.note,
-          });
+          // ENG-446 follow-up: a legacy slug-filed persona report, or one
+          // filed with an uppercase persona uuid, canonicalises to the
+          // current persona id(s) the same way `revertReportedTakedown` does,
+          // so the takedown lands under a key the read paths actually check.
+          const takedownSubjectIds =
+            await this.resolvePersonaTakedownSubjectIds(manager, report);
+          for (const subjectId of takedownSubjectIds) {
+            await this.contentModeration.applyAction(manager, {
+              subjectType: report.subjectType,
+              subjectId,
+              action: dto.action as 'hide_content' | 'remove_content',
+              actorId,
+              reportId: saved.id,
+              reasonCode: dto.reasonCode,
+              note: dto.note,
+            });
+          }
         }
 
-        return { saved, enforceResult };
-      },
-    );
+        return { saved, enforceResult, auditLogId };
+      });
 
     // Outside the transaction: revocation touches a different aggregate and
     // must not be able to roll the enforcement back if it fails. It is defence
@@ -621,11 +693,16 @@ export class ModerationService {
 
     // Tell the *sanctioned member* the outcome and why (warn/suspend/ban) — the
     // gap the audit named. Best-effort, post-commit, same as the reporter path.
+    // PRD-458: a takedown tells the content's author too, through the same
+    // notification, carrying the audit row id for the appeal deep link.
     await this.notifyModerationOutcome(
       actorId,
       dto,
-      await this.resolveOutcomeTarget(report, dto, enforceResult),
+      ModerationService.CONTENT_ACTIONS.has(dto.action)
+        ? await this.resolveContentAuthorTarget(report)
+        : await this.resolveOutcomeTarget(report, dto, enforceResult),
       enforceResult?.kind,
+      auditLogId,
     );
 
     // `hasFullReportVisibility` is false exactly when the caller authorized
@@ -1045,6 +1122,9 @@ export class ModerationService {
         ratificationId?: string;
         isNewBanHold?: boolean;
       } | null;
+      // The audit row this report's action wrote (ENG-480), for the appeal
+      // deep link on the member's notification.
+      auditLogId: string;
     }> = [];
 
     for (const report of rows) {
@@ -1055,7 +1135,10 @@ export class ModerationService {
         // it lands in `failed` with a reason, which is exactly what this
         // method's continue-on-error contract is for.
         const expectedStatus = ModerationService.assertActionableStatus(report);
-        const enforceResult = await this.dataSource.transaction(
+        // ENG-484, inside the per-report `try` so a mixed batch lands the
+        // refused rows in `failed` and still actions the rest.
+        ModerationService.assertContentActionSupported(report, dto.action);
+        const { enforceResult, auditLogId } = await this.dataSource.transaction(
           async (manager) => {
             // Race-safe claim before any consequence — see `actOnReport`.
             const claimed = await manager.update(
@@ -1104,7 +1187,13 @@ export class ModerationService {
             }
             await manager.save(report);
 
-            await this.audit.writeAuditLog(
+            // Same member attribution as the single-report path (ENG-480).
+            const auditTargetUserId = await this.auditTargetUserIdFor(
+              report,
+              dto,
+              enforceResult,
+            );
+            const auditLogId = await this.audit.writeAuditLog(
               report.id,
               actorId,
               auditAction,
@@ -1112,25 +1201,31 @@ export class ModerationService {
               dto.note,
               auditDuration,
               manager,
+              auditTargetUserId,
             );
 
             if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
-              await this.contentModeration.applyAction(manager, {
-                subjectType: report.subjectType,
-                subjectId: report.subjectId,
-                action: dto.action as 'hide_content' | 'remove_content',
-                actorId,
-                reportId: report.id,
-                reasonCode: dto.reasonCode,
-                note: dto.note,
-              });
+              // Same canonicalisation as the single-report path above.
+              const takedownSubjectIds =
+                await this.resolvePersonaTakedownSubjectIds(manager, report);
+              for (const subjectId of takedownSubjectIds) {
+                await this.contentModeration.applyAction(manager, {
+                  subjectType: report.subjectType,
+                  subjectId,
+                  action: dto.action as 'hide_content' | 'remove_content',
+                  actorId,
+                  reportId: report.id,
+                  reasonCode: dto.reasonCode,
+                  note: dto.note,
+                });
+              }
             }
 
-            return enforceResult;
+            return { enforceResult, auditLogId };
           },
         );
 
-        outcomes.push({ report, enforceResult });
+        outcomes.push({ report, enforceResult, auditLogId });
         updated.push(report.id);
       } catch (error) {
         failed.push({
@@ -1180,12 +1275,18 @@ export class ModerationService {
     // uses. Batch-actioning a queue is how most reports are actually closed, so
     // leaving this out meant the majority of reporters got nothing at all — see
     // `notifyReporterOfOutcomeBestEffort` for what they are and are not told.
-    for (const { report, enforceResult } of outcomes) {
+    //
+    // PRD-458: a takedown reaches the content's author, same as the
+    // single-report path.
+    for (const { report, enforceResult, auditLogId } of outcomes) {
       await this.notifyModerationOutcome(
         actorId,
         dto,
-        await this.resolveOutcomeTarget(report, dto, enforceResult),
+        ModerationService.CONTENT_ACTIONS.has(dto.action)
+          ? await this.resolveContentAuthorTarget(report)
+          : await this.resolveOutcomeTarget(report, dto, enforceResult),
         enforceResult?.kind,
+        auditLogId,
       );
       await this.notifyReporterOfOutcomeBestEffort(report, actorId);
     }
@@ -1255,6 +1356,80 @@ export class ModerationService {
   }
 
   /**
+   * PRD-458. The author a `hide_content` / `remove_content` should be told
+   * about, or null when there is nobody to tell.
+   *
+   * NEVER REFUSES, unlike a `warn` in {@link resolveOutcomeTarget}. An
+   * unclaimed listing has no author and an ambiguous subject (a question and
+   * the answer under it) has two, and the takedown is still the right call on
+   * both: the content comes down and nobody is told. Telling one of two
+   * candidate authors would tell the wrong person half the time.
+   *
+   * A lookup failure also answers null. This runs post-commit on both action
+   * paths, where the takedown has already landed and must not turn into a 500.
+   */
+  private async resolveContentAuthorTarget(
+    report: Report,
+  ): Promise<{ userId: string; expiresAt: null } | null> {
+    try {
+      const resolution = await this.subjectResolver.resolve(report);
+      if (resolution.isAuthorAmbiguous || !resolution.authorUserId) {
+        return null;
+      }
+      return { userId: resolution.authorUserId, expiresAt: null };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * ENG-480. The member an action's audit row should name in `targetUserId`.
+   *
+   *  - An account enforcement (`restrict`, `suspend`, a `ban` hold) names the
+   *    account it actually landed on.
+   *  - `warn`, `hide_content` and `remove_content` name the author of the
+   *    reported thing (a `member` subject resolves to the member), and nobody
+   *    when two people could have written it.
+   *  - `dismiss` and `escalate` name nobody: no decision landed on a person.
+   *
+   * Without this a sanction decided on a content report carried no member at
+   * all, so the author's appeal could not find it and the admin member drawer
+   * never listed it.
+   */
+  private async auditTargetUserIdFor(
+    report: Report,
+    dto: { action: ModActionCode },
+    enforceResult: { userId: string } | null,
+  ): Promise<string | null> {
+    if (enforceResult?.userId) return enforceResult.userId;
+    if (
+      dto.action !== 'warn' &&
+      !ModerationService.CONTENT_ACTIONS.has(dto.action)
+    ) {
+      return null;
+    }
+    const target = await this.resolveContentAuthorTarget(report);
+    return target?.userId ?? null;
+  }
+
+  /**
+   * ENG-484. Refuses a takedown on a subject type nothing reads a takedown
+   * for. See {@link CONTENT_TAKEDOWN_SUBJECT_TYPES}. Runs before any
+   * transaction opens, so a refused action changes nothing.
+   */
+  private static assertContentActionSupported(
+    report: Report,
+    action: ModActionCode,
+  ): void {
+    if (
+      ModerationService.CONTENT_ACTIONS.has(action) &&
+      !ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES.has(report.subjectType)
+    ) {
+      throw contentActionUnsupported(report.subjectType);
+    }
+  }
+
+  /**
    * Writes the resolution block (COM-7) onto `report` IN PLACE — mutates the
    * entity the caller is about to `manager.save()`, rather than returning a
    * value, so `actOnReport`/`bulkActOnReports` can call this right where they
@@ -1292,11 +1467,12 @@ export class ModerationService {
     // Resolved from the action the moderator ASKED for, never the recorded one:
     // this decides WHO hears about the outcome, and a pending ban still lands
     // on the same member a full ban would have.
-    const outcomeTarget = await this.resolveOutcomeTarget(
-      report,
-      dto,
-      enforceResult,
-    );
+    // PRD-458: a takedown now tells the content's author, so `member` is
+    // listed whenever that author resolves, from the same lookup the
+    // post-commit notification uses.
+    const outcomeTarget = ModerationService.CONTENT_ACTIONS.has(dto.action)
+      ? await this.resolveContentAuthorTarget(report)
+      : await this.resolveOutcomeTarget(report, dto, enforceResult);
 
     const notified: ResolutionNotifiedParty[] = [];
     if (outcomeTarget && outcomeTarget.userId !== actorId) {
@@ -1391,6 +1567,10 @@ export class ModerationService {
     // they had been banned while the decision is still open would be a
     // statement the software cannot stand behind.
     enforcementKind?: string,
+    // The `mod_audit_logs` row the decision wrote (ENG-480). Rides on the
+    // payload as `actionId` so the bell opens the appeal form on this exact
+    // decision. Omitted from the payload when absent.
+    actionId?: string,
   ): Promise<void> {
     // A moderator acting on their own report never notifies themselves.
     if (!target || target.userId === actorId) return;
@@ -1404,8 +1584,9 @@ export class ModerationService {
           action,
           reasonCode: dto.reasonCode,
           // KEPT, and unreachable by construction since PRD-287. Every action
-          // that gets this far is in `OUTCOME_ACTIONS` (nothing else resolves
-          // an outcome target above), and `RequiresMemberFacingNote` on both
+          // that gets this far is in `OUTCOME_ACTIONS` or is a takedown
+          // (PRD-458), all of them in `MEMBER_FACING_MOD_ACTIONS`, and
+          // `RequiresMemberFacingNote` on both
           // `ModActionDto` and `ModBulkActionDto` refuses those without a
           // note of at least `MIN_MEMBER_FACING_NOTE_LENGTH` characters, so
           // `dto.note` is a real sentence here on both paths. The fallback
@@ -1418,6 +1599,7 @@ export class ModerationService {
           ...(target.expiresAt
             ? { expiresAt: target.expiresAt.toISOString() }
             : {}),
+          ...(actionId ? { actionId } : {}),
         },
       );
     } catch {
@@ -1532,7 +1714,8 @@ export class ModerationService {
   // POST /appeals — a member (crucially, possibly a SUSPENDED one, via
   // `AppealSubmitGuard`) contests a moderation decision taken on them. Resolves
   // the specific enforcement action being appealed (best-effort), enforces one
-  // open appeal per action, and returns a narrow member-facing acknowledgement.
+  // open appeal per action and one appeal in total on a resolved action
+  // (PRD-459), and returns a narrow member-facing acknowledgement.
   async submitAppeal(
     appellantUserId: string,
     dto: CreateAppealDto,
@@ -1560,6 +1743,31 @@ export class ModerationService {
       throw new ConflictException(
         'You already have an appeal awaiting review. A moderator will get to it.',
       );
+    }
+
+    // PRD-459: each decision can be appealed ONCE, and the appeal's outcome is
+    // final. So once this member's appeal on this action has been decided
+    // (upheld or overturned), a second one on the same action is refused with
+    // a typed 409. Only a resolved action can be counted this way; a cold
+    // appeal keeps the awaiting-only rule above.
+    //
+    // The statuses are listed explicitly as the DECIDED ones. An awaiting
+    // appeal is the rule above, and any status added later that ends an appeal
+    // without a decision (a withdrawal, say) leaves the member free to file
+    // again until someone opts it in here.
+    //
+    // No unique index backs this check. Deciding an appeal takes a moderator,
+    // and the awaiting row is what stops a second filing while it is open, so
+    // there is no concurrent-filing race for an index to close.
+    if (target) {
+      const decidedAppeal = await this.appeals.findOne({
+        where: {
+          appellantId: appellantUserId,
+          actionId: target.actionId,
+          status: In([AppealStatus.Upheld, AppealStatus.Overturned]),
+        },
+      });
+      if (decidedAppeal) throw appealAlreadyDecided();
     }
 
     // TS-11: §05 publishes a 14-day filing window, and nothing enforced it.
@@ -1664,15 +1872,24 @@ export class ModerationService {
    *     report-less by `community-governance-log.service.ts` with the barred
    *     member in `target_user_id`) and the direct admin restriction from the
    *     member drawer appealable at all. Backed by
-   *     `IDX_mod_audit_logs_target_created_at`.
+   *     `IDX_mod_audit_logs_target_created_at`. Since ENG-480 it is also how a
+   *     sanction decided on a CONTENT report (a hidden post, a warned review
+   *     author) reaches its author: the queue writes the author as the target.
+   *
+   * Either way, the report behind the row is loaded for its severity and
+   * community. A report found through path 2 is not about the member, so it is
+   * loaded only when the row names them (see {@link reportForAppealLog}).
    *
    * Two entry points, both covering both ways:
    *  - `actionId` supplied — the member deep-linked a specific action. Accepted
-   *    only if that action is about THEM, by either route (ownership scoping).
-   *    A mismatch is a 403, never a silent re-resolve, because the member asked
-   *    to appeal a specific thing.
+   *    only if that action is about THEM, by either route (ownership scoping),
+   *    and is one of the `APPEALABLE_ACTIONS`. A mismatch is a 403 with no
+   *    silent re-resolve, because the member asked to appeal a specific thing.
    *  - no `actionId` — the common locked-out case. Takes the most recent
-   *    appealable action against them, whichever route it came by.
+   *    appealable action against them, whichever route it came by. For a
+   *    member whose account is `Suspended` the candidates are only the
+   *    `ACCOUNT_LOCKOUT_ACTIONS`, so the appeal lands on the suspension or
+   *    ban itself.
    *
    * Returns `null` when nothing resolvable is found (a cold appeal): the appeal
    * still stands, unlinked, rather than being rejected on a lookup miss, and
@@ -1711,30 +1928,63 @@ export class ModerationService {
 
     if (actionId) {
       const log = await this.auditLogs.findOne({ where: { id: actionId } });
-      const report =
+      const memberReport =
         log && log.reportId ? reportsById.get(log.reportId) : undefined;
       // The audit row is theirs if it is linked to a report about them OR it
       // names them directly. Either is proof enough that they are appealing a
       // decision made about themselves.
       const isTargetedAtMember = log?.targetUserId === appellantUserId;
-      if (!log || (!report && !isTargetedAtMember)) {
+      // Being theirs is necessary and still short of enough. Since ENG-480 the
+      // bookkeeping rows an appeal decision writes (`appeal_upheld`,
+      // `suspension_lifted`, `content_restored`, ...) name the member in
+      // `targetUserId` too, so the deep link applies the same
+      // `APPEALABLE_ACTIONS` filter the no-`actionId` lookup below does. A
+      // decided appeal's own outcome row can never be appealed in its turn.
+      const isAppealableAction =
+        !!log && APPEALABLE_ACTIONS.includes(log.action);
+      if (
+        !log ||
+        !isAppealableAction ||
+        (!memberReport && !isTargetedAtMember)
+      ) {
         throw new ForbiddenException(
           'That moderation action is not one you can appeal.',
         );
       }
-      return this.describeAppealTarget(log, report ?? null);
+      return this.describeAppealTarget(
+        log,
+        await this.reportForAppealLog(log, reportsById, appellantUserId),
+      );
     }
 
     // The two candidate sets, read in parallel and reconciled by recency: a
     // member may hold both a report-backed sanction and a report-less one (a
     // platform warning last month, a community ban yesterday), and the appeal
     // should land on whichever actually happened last.
+    //
+    // A suspended member only reaches this form through the bare route on the
+    // suspended and banned pages, so what they are contesting is the lockout.
+    // Since ENG-480 a content sanction names its author too, and a moderator
+    // who suspends someone and then removes their posts writes a newer
+    // `remove_content` row. Taking that row would start the 14-day clock from
+    // it and, once decided, spend the one appeal the action allows, leaving
+    // the suspension with no way in. So for them both queries are limited to
+    // the lockout actions. A user row that is missing reads as not suspended
+    // and keeps the full list.
+    const appellant = await this.users.findOne({
+      where: { id: appellantUserId },
+      select: { id: true, status: true },
+    });
+    const candidateActions =
+      appellant?.status === UserStatus.Suspended
+        ? ACCOUNT_LOCKOUT_ACTIONS
+        : APPEALABLE_ACTIONS;
     const [latestByReport, latestByTarget] = await Promise.all([
       reportsById.size
         ? this.auditLogs.findOne({
             where: {
               reportId: In([...reportsById.keys()]),
-              action: In(APPEALABLE_ACTIONS),
+              action: In(candidateActions),
             },
             order: { createdAt: 'DESC' },
           })
@@ -1742,7 +1992,7 @@ export class ModerationService {
       this.auditLogs.findOne({
         where: {
           targetUserId: appellantUserId,
-          action: In(APPEALABLE_ACTIONS),
+          action: In(candidateActions),
         },
         order: { createdAt: 'DESC' },
       }),
@@ -1756,10 +2006,35 @@ export class ModerationService {
       log.createdAt.getTime() > newest.createdAt.getTime() ? log : newest,
     );
 
-    const report = latestAction.reportId
-      ? (reportsById.get(latestAction.reportId) ?? null)
-      : null;
-    return this.describeAppealTarget(latestAction, report);
+    return this.describeAppealTarget(
+      latestAction,
+      await this.reportForAppealLog(latestAction, reportsById, appellantUserId),
+    );
+  }
+
+  /**
+   * The report behind an appealed audit row, for the appeal's `reportId`,
+   * severity and community (ENG-480).
+   *
+   * A `member` report about the appellant is already in `reportsById`. Any
+   * other report (the post, review or listing a content sanction was decided
+   * on) is loaded by id, and only when the row names the appellant in
+   * `targetUserId`: that is the proof the decision landed on them, so an
+   * appeal can never borrow the context of a report about someone else.
+   */
+  private async reportForAppealLog(
+    log: ModAuditLog,
+    reportsById: Map<string, Report>,
+    appellantUserId: string,
+  ): Promise<Report | null> {
+    if (!log.reportId) return null;
+    const memberReport = reportsById.get(log.reportId);
+    if (memberReport) return memberReport;
+    if (log.targetUserId !== appellantUserId) return null;
+    const contentReport = await this.reports.findOne({
+      where: { id: log.reportId },
+    });
+    return contentReport ?? null;
   }
 
   /**
@@ -1928,15 +2203,17 @@ export class ModerationService {
     // review their own case has no legitimate reason to see a "review anyway"
     // path. Silent when the appeal has no resolvable `actionId` (a cold
     // appeal) — there is no original decision to compare against.
-    if (appeal.actionId) {
-      const originalAction = await this.auditLogs.findOne({
-        where: { id: appeal.actionId },
-      });
-      if (originalAction?.actorId === actorId) {
-        throw new ForbiddenException(
-          'You made the original decision being appealed and cannot review this appeal.',
-        );
-      }
+    //
+    // Read once here and reused: the overturn below reverts it, and the
+    // post-commit ban-evasion emit reads its action. Audit rows are immutable,
+    // so reading it outside the transaction loses nothing.
+    const originalAction = appeal.actionId
+      ? await this.auditLogs.findOne({ where: { id: appeal.actionId } })
+      : null;
+    if (originalAction?.actorId === actorId) {
+      throw new ForbiddenException(
+        'You made the original decision being appealed and cannot review this appeal.',
+      );
     }
 
     const decidedStatus =
@@ -1969,10 +2246,18 @@ export class ModerationService {
       // class of bug as a sanction that never applied: a moderation decision
       // that does not take effect. Undo it as part of the same decision.
       if (dto.decision === 'overturn') {
-        await this.revertOriginalAction(manager, appeal, actorId);
+        await this.revertOriginalAction(
+          manager,
+          appeal,
+          actorId,
+          originalAction,
+        );
       }
 
-      if (appeal.reportId) {
+      // ENG-480: the decision row names the appellant, and is written for a
+      // report-less appeal too, so the admin member drawer shows how an
+      // appeal against a drawer sanction or a community ban ended.
+      if (appeal.reportId || appeal.appellantId) {
         await this.audit.writeAuditLog(
           appeal.reportId,
           actorId,
@@ -1981,6 +2266,7 @@ export class ModerationService {
           dto.note,
           undefined,
           manager,
+          appeal.appellantId,
         );
       }
 
@@ -2008,6 +2294,24 @@ export class ModerationService {
       }
     }
 
+    // ENG-486. An overturned platform ban means the account is no longer
+    // removed, so the ban-evasion signal recorded when the ban was ratified is
+    // now false. Post-commit and best effort, like the `ACCOUNT_REMOVED` emit:
+    // the listener deletes on its own and can never undo the overturn.
+    if (
+      dto.decision === 'overturn' &&
+      originalAction?.action === 'ban' &&
+      saved.appellantId
+    ) {
+      const reinstated: AccountReinstatedEvent = {
+        userId: saved.appellantId,
+        removalKind: RemovalKind.PlatformBan,
+        communityId: null,
+        reinstatedAt: decidedAtInstant,
+      };
+      this.eventEmitter.emit(ACCOUNT_REINSTATED, reinstated);
+    }
+
     return this.toAppealRow(saved);
   }
 
@@ -2028,16 +2332,20 @@ export class ModerationService {
    *    for the report's subject, restoring the content to fully visible, and
    *    record a `content_restored` audit entry.
    *  - `restrict` -> clear `users.restricted` / `restrictedUntil` on the
-   *    reported member (the flags `NotRestrictedGuard` reads), and record a
-   *    `restriction_lifted` entry. Deliberately does NOT touch `status`: a
-   *    restriction never changed it (see
-   *    `AccountEnforcementService.enforceAgainstUser`).
+   *    restricted member (the flags `NotRestrictedGuard` reads), and record a
+   *    `restriction_lifted` entry. The member is the row's `targetUserId`
+   *    (ENG-480), which reaches the author of a content report too, and falls
+   *    back to the `member` report's subject for rows written before it.
+   *    Deliberately does NOT touch `status`: a restriction never changed it
+   *    (see `AccountEnforcementService.enforceAgainstUser`).
    *  - `community_member_removed` -> nothing is undone. See the comment at the
    *    branch: an overturn records that the removal was wrong, and the member
    *    can rejoin themselves, because the removal never barred the return.
    *  - `suspend` / `ban`, `warn`, or a cold appeal with no resolvable original
    *    action -> the pre-existing account-restore path, which is a silent
-   *    no-op when the member is not actually suspended.
+   *    no-op when the member is not actually suspended. A report-less
+   *    `suspend` / `ban` / pending ban (the admin member drawer) restores the
+   *    row's `targetUserId` instead, since there is no report to resolve.
    *
    * Runs inside `reviewAppeal`'s transaction, so the reversal, the appeal's
    * new status and the `appeal_overturned` audit row commit together.
@@ -2046,21 +2354,17 @@ export class ModerationService {
     manager: EntityManager,
     appeal: Appeal,
     actorId: string,
+    // The appealed audit row, read once by `reviewAppeal`. Null for a cold
+    // appeal.
+    originalAction: ModAuditLog | null,
   ): Promise<void> {
-    const originalAction = appeal.actionId
-      ? await manager.findOne(ModAuditLog, { where: { id: appeal.actionId } })
-      : null;
     const action = originalAction?.action ?? null;
     const report = appeal.reportId
       ? await manager.findOne(Report, { where: { id: appeal.reportId } })
       : null;
 
     if (report && (action === 'hide_content' || action === 'remove_content')) {
-      await this.contentModeration.revert(
-        manager,
-        report.subjectType,
-        report.subjectId,
-      );
+      await this.revertReportedTakedown(manager, report);
       await this.audit.writeAuditLog(
         appeal.reportId,
         actorId,
@@ -2069,18 +2373,25 @@ export class ModerationService {
         undefined,
         undefined,
         manager,
+        originalAction?.targetUserId ?? null,
       );
       return;
     }
 
     if (action === 'restrict') {
-      const profile = report
-        ? await this.accountEnforcement.resolveReportedProfile(report)
-        : null;
-      if (profile) {
+      // ENG-480: the row names the restricted member, the author of the
+      // reported content included. A row written before that names nobody,
+      // so fall back to the subject of a `member` report.
+      const profile =
+        !originalAction?.targetUserId && report
+          ? await this.accountEnforcement.resolveReportedProfile(report)
+          : null;
+      const restrictedUserId =
+        originalAction?.targetUserId ?? profile?.userId ?? null;
+      if (restrictedUserId) {
         await manager.update(
           User,
-          { id: profile.userId },
+          { id: restrictedUserId },
           { restricted: false, restrictedUntil: null },
         );
         await this.audit.writeAuditLog(
@@ -2091,6 +2402,7 @@ export class ModerationService {
           undefined,
           undefined,
           manager,
+          restrictedUserId,
         );
       }
       return;
@@ -2115,6 +2427,25 @@ export class ModerationService {
       appeal.reportId,
     );
 
+    // ENG-480. A report-less account sanction (the admin member drawer's
+    // restrict, or a ban hold opened there) has no report for the call above
+    // to resolve, so it restored nobody. The row names the member directly.
+    // Limited to the account-lockout actions: a community ban also names its
+    // member, and overturning it must not lift an unrelated platform
+    // suspension.
+    if (
+      !appeal.reportId &&
+      originalAction?.targetUserId &&
+      (action === 'suspend' ||
+        action === 'ban' ||
+        action === BAN_PENDING_AUDIT_ACTION)
+    ) {
+      await this.accountEnforcement.restoreSuspendedUser(
+        manager,
+        originalAction.targetUserId,
+      );
+    }
+
     // TS-12. An overturned appeal has to close the door the pending hold left
     // open. Without this a member could win their appeal on Tuesday and still
     // be permanently banned on Wednesday, by a second moderator ratifying a
@@ -2126,6 +2457,78 @@ export class ModerationService {
         appeal.appellantId,
       );
     }
+  }
+
+  /**
+   * Lifts the `content_moderation` row an overturned hide/remove wrote, keyed
+   * as the report names its subject.
+   *
+   * One legacy shape needs more. A persona report filed by slug (before
+   * `ReportsService` began requiring the persona uuid) wrote its takedown
+   * under that slug, and migration `1824700000000-RekeyPersonaTakedownsToId`
+   * then moved the row to the uuid of every persona holding the slug. So the
+   * overturn lifts the slug key (in case the migration has not run yet) and
+   * the uuid key of each persona whose slug equals it, the same mapping the
+   * migration's `by_slug` step used. An uppercase-uuid report canonicalises
+   * to its lowercase form, the shape `subprofiles.id` reads back as.
+   */
+  private async revertReportedTakedown(
+    manager: EntityManager,
+    report: Report,
+  ): Promise<void> {
+    await this.contentModeration.revert(
+      manager,
+      report.subjectType,
+      report.subjectId,
+    );
+    const canonicalSubjectIds = await this.resolvePersonaTakedownSubjectIds(
+      manager,
+      report,
+    );
+    for (const subjectId of canonicalSubjectIds) {
+      if (subjectId === report.subjectId) {
+        continue;
+      }
+      await this.contentModeration.revert(
+        manager,
+        report.subjectType,
+        subjectId,
+      );
+    }
+  }
+
+  /**
+   * Resolves a persona report's `subjectId` to the persona id(s) its
+   * `content_moderation` row should actually be keyed by. Shared by the apply
+   * path (`actOnReport`, `bulkActOnReports`) and {@link revertReportedTakedown}
+   * so a takedown and its reversal always agree on the key (ENG-446's fix,
+   * extended to every legacy shape).
+   *
+   * A non-persona report resolves to itself, unchanged. A persona report
+   * already keyed by a lowercase uuid resolves to itself too. An uppercase
+   * uuid (filed before `ReportsService` began requiring a lowercase one)
+   * lowercases to the form `subprofiles.id::text` reads back as. A slug
+   * (filed before `ReportsService` began requiring the uuid at all) fans out
+   * to every persona currently holding it, the same mapping migration
+   * `1824700000000-RekeyPersonaTakedownsToId`'s `by_slug` step used: a slug
+   * is unique per creator only, so more than one persona can share it, and
+   * each gets its own row.
+   */
+  private async resolvePersonaTakedownSubjectIds(
+    manager: EntityManager,
+    report: Report,
+  ): Promise<string[]> {
+    if (report.subjectType !== ReportSubjectType.Subprofile) {
+      return [report.subjectId];
+    }
+    if (UUID_RE.test(report.subjectId)) {
+      return [report.subjectId.toLowerCase()];
+    }
+    const personasWithSlug = await manager.find(Subprofile, {
+      where: { slug: report.subjectId },
+      select: { id: true },
+    });
+    return personasWithSlug.map((persona) => persona.id);
   }
 
   /**
@@ -2296,8 +2699,9 @@ export class ModerationService {
    * deleted is still a report about that slug.
    *
    * The uuid columns are compared as `::text` against the `varchar`
-   * `subject_id` so a slug or the `"unspecified"` sentinel sitting in that
-   * column can never make Postgres throw "invalid input syntax for type uuid" —
+   * `subject_id` so a slug or a public-form `unlinked:<uuid>` id (see
+   * `reports/unlinked-subject.ts`) sitting in that column can never make
+   * Postgres throw "invalid input syntax for type uuid":
    * the same hazard `UUID_RE` guards on the entity side.
    */
   private applyCommunityFilter(

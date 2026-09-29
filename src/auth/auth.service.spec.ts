@@ -138,12 +138,12 @@ function buildMocks() {
       Promise.resolve({ id: 'reauth-row', ...v }),
     ),
   };
-  // Read-side only — `suspensionInfoFor` reads the member's latest
-  // moderation-outcome notification for the reason. Empty by default.
+  // Read-side only: `suspensionInfoFor` reads the member's recent
+  // moderation-outcome notifications for the reason. Empty by default.
   const notifications = {
-    findOne: jest
-      .fn<Promise<Pick<Notification, 'payload'> | null>, [unknown]>()
-      .mockResolvedValue(null),
+    find: jest
+      .fn<Promise<Pick<Notification, 'payload'>[]>, [unknown]>()
+      .mockResolvedValue([]),
   };
   // Read-side only — `staffRolesFor` reads the caller's staff-role grants.
   // Empty by default.
@@ -1091,25 +1091,32 @@ describe('AuthService.suspensionInfoFor', () => {
     );
 
     expect(info).toEqual({ suspendedUntil: null, suspension: null });
-    expect(mocks.notifications.findOne).not.toHaveBeenCalled();
+    expect(mocks.notifications.find).not.toHaveBeenCalled();
   });
 
-  it('returns the expiry + reason from the latest moderation-outcome notification', async () => {
+  it('returns the expiry + reason from the latest suspend moderation-outcome notification', async () => {
     const until = new Date('2026-09-01T00:00:00.000Z');
-    mocks.notifications.findOne.mockResolvedValue({
-      payload: { note: 'Seven days for harassment.', reasonCode: 'harassment' },
-    });
+    mocks.notifications.find.mockResolvedValue([
+      {
+        payload: {
+          action: 'suspend',
+          note: 'Seven days for harassment.',
+          reasonCode: 'harassment',
+        },
+      },
+    ]);
 
     const info = await service.suspensionInfoFor(
       asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: until }),
     );
 
-    expect(mocks.notifications.findOne).toHaveBeenCalledWith(
+    expect(mocks.notifications.find).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           userId: 'u1',
         }) as Partial<Notification>,
         order: { createdAt: 'DESC' },
+        take: 20,
       }),
     );
     expect(info).toEqual({
@@ -1121,10 +1128,52 @@ describe('AuthService.suspensionInfoFor', () => {
     });
   });
 
-  it('reports a permanent ban as suspended with a null expiry', async () => {
-    mocks.notifications.findOne.mockResolvedValue({
-      payload: { note: 'Permanent removal.', reasonCode: 'harassment' },
+  it('skips a newer content-takedown outcome and keeps the suspension reason', async () => {
+    const until = new Date('2026-09-01T00:00:00.000Z');
+    mocks.notifications.find.mockResolvedValue([
+      {
+        payload: {
+          action: 'hide_content',
+          note: 'We hid the post that named someone.',
+          reasonCode: 'doxxing',
+        },
+      },
+      {
+        payload: {
+          action: 'restriction_lifted',
+          note: 'Restriction over.',
+          reasonCode: 'other',
+        },
+      },
+      {
+        payload: {
+          action: 'suspend',
+          note: 'Seven days for harassment.',
+          reasonCode: 'harassment',
+        },
+      },
+    ]);
+
+    const info = await service.suspensionInfoFor(
+      asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: until }),
+    );
+
+    expect(info.suspension).toEqual({
+      note: 'Seven days for harassment.',
+      reasonCode: 'harassment',
     });
+  });
+
+  it('reports a permanent ban as suspended with a null expiry', async () => {
+    mocks.notifications.find.mockResolvedValue([
+      {
+        payload: {
+          action: 'ban',
+          note: 'Permanent removal.',
+          reasonCode: 'harassment',
+        },
+      },
+    ]);
 
     const info = await service.suspensionInfoFor(
       asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: null }),
@@ -1139,7 +1188,7 @@ describe('AuthService.suspensionInfoFor', () => {
 
   it('falls back to a null reason when no moderation-outcome notification exists', async () => {
     const until = new Date('2026-09-01T00:00:00.000Z');
-    mocks.notifications.findOne.mockResolvedValue(null);
+    mocks.notifications.find.mockResolvedValue([]);
 
     const info = await service.suspensionInfoFor(
       asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: until }),

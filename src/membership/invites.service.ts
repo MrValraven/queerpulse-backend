@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { RecognitionEntitlementsService } from '../recognition/recognition-entitlements.service';
 import { DEFAULT_INVITE_MONTHLY_QUOTA } from '../recognition/recognition.catalog';
+import { resolveMonthlyInviteLimit } from './monthly-invite-limit';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { randomBytes } from 'node:crypto';
@@ -705,12 +706,15 @@ export class InvitesService {
     levelBonus: number,
     ambassadorBonus: number,
   ): number {
-    if (inviter?.inviteMonthlyQuota != null) return inviter.inviteMonthlyQuota;
-    const base = this.config.get<number>(
-      'app.inviteMonthlyQuota',
-      DEFAULT_INVITE_MONTHLY_QUOTA,
-    );
-    return base + levelBonus + ambassadorBonus;
+    return resolveMonthlyInviteLimit({
+      inviteQuotaOverride: inviter?.inviteMonthlyQuota ?? null,
+      base: this.config.get<number>(
+        'app.inviteMonthlyQuota',
+        DEFAULT_INVITE_MONTHLY_QUOTA,
+      ),
+      levelBonus,
+      ambassadorBonus,
+    });
   }
 
   // Enforces "N invites per calendar month". Counts every invite the member

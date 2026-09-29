@@ -5,9 +5,11 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
 } from 'class-validator';
 
 import { PieceFormat } from '../entities/magazine-piece.entity';
+import { DESK_ANGLE_MAX, DESK_FEE_TEXT_MAX } from './desk-text-limits';
 
 const PIECE_FORMATS: PieceFormat[] = ['article', 'deck'];
 
@@ -39,4 +41,11 @@ export class TriagePitchDto {
   @IsOptional() @IsDateString() dueOn?: string;
 
   @IsOptional() @IsInt() wordTarget?: number;
+
+  @IsOptional() @IsString() @MaxLength(DESK_ANGLE_MAX) angle?: string;
+
+  @IsOptional() @IsString() @MaxLength(DESK_FEE_TEXT_MAX) fee?: string;
+
+  /** Used only when the pitch has no `submitterId`. */
+  @IsOptional() @IsUUID() writerId?: string;
 }

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { gatheringPath } from '../events/event-paths';
@@ -79,18 +80,38 @@ function toICSDateUTC(date: Date): string {
 // matches how long a typical unbounded gathering actually runs.
 const DEFAULT_DURATION_MS = 2 * 60 * 60 * 1000;
 
+// The taxonomy code a moderator takedown is recorded under for a gathering,
+// the same value `EventsService.SUBJECT_TYPE` uses for the public
+// browse/search/detail gate. Kept as its own constant here because that one
+// is private to `EventsService`.
+const EVENT_MODERATION_SUBJECT_TYPE = 'event';
+
 @Injectable()
 export class CalendarFeedService {
   constructor(
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
     private readonly configService: ConfigService,
+    // ENG-482: a taken-down gathering must drop out of this feed the same way
+    // it drops out of the public browse/search surfaces
+    // (`EventsService.excludeModeratedEvents`).
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /** Builds the member's feed as an RFC 5545 `VCALENDAR` string: every
    *  published event they're going to or maybe attending, soonest first. Past
    *  events stay on the feed too (a calendar app's own view handles "past"),
-   *  matching what a real calendar subscription would show. */
+   *  matching what a real calendar subscription would show.
+   *
+   *  ENG-482: a gathering a moderator has hidden or removed is dropped before
+   *  the feed is built, UNLESS the member subscribing is that gathering's own
+   *  host (`event.hostId === userId`, checked in the visibility filter below),
+   *  since the host still manages the event through its hosting context.
+   *  `EventsService.assertCanView` extends that same detail-page carve-out to
+   *  a co-host too; this feed checks only `hostId`, so a co-host's own
+   *  subscription still drops the event. `hostId` is nullable on the entity,
+   *  so a gathering with no host simply never qualifies for the carve-out
+   *  either way. */
   async buildFeed(userId: string): Promise<string> {
     const rsvps = await this.rsvps.find({
       where: { userId, status: In([RsvpStatus.Going, RsvpStatus.Maybe]) },
@@ -105,7 +126,19 @@ export class CalendarFeedService {
       },
       order: { startAt: 'ASC' },
     });
-    return this.wrap(events);
+    if (events.length === 0) {
+      return this.wrap([]);
+    }
+    const moderationStates = await this.contentModeration.statesFor(
+      EVENT_MODERATION_SUBJECT_TYPE,
+      events.map((event) => event.id),
+    );
+    const visibleEvents = events.filter((event) => {
+      if (event.hostId === userId) return true;
+      const moderation = moderationStates.get(event.id);
+      return !moderation?.hidden && !moderation?.removed;
+    });
+    return this.wrap(visibleEvents);
   }
 
   private wrap(events: Event[]): string {

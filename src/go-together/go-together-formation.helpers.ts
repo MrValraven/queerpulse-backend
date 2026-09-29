@@ -13,6 +13,46 @@ import { ComponentScores, pairKey } from './go-together-scoring';
  * ids. These helpers translate between the two for one built pool.
  */
 
+/**
+ * Whether the gathering is still ahead, the one line every "after the start"
+ * rule reads: leaving, merge offers and moving after a block. A gathering
+ * that can no longer be read counts as started, so nobody is reseated or
+ * offered a merge into a gathering that is gone. A true answer also tells
+ * the compiler the gathering was read.
+ */
+export function isGatheringUpcoming<Gathering extends { startAt: Date }>(
+  gathering: Gathering | null,
+  now: Date,
+): gathering is Gathering {
+  return gathering !== null && gathering.startAt.getTime() > now.getTime();
+}
+
+/** A block still moves people this long after the gathering started; past
+ *  it, the two are only hidden from each other on the card. */
+export const BLOCK_MOVE_GRACE_MS = 12 * 60 * 60 * 1000;
+
+/** Whether a block between groupmates came too late to move anyone: the
+ *  gathering started more than {@link BLOCK_MOVE_GRACE_MS} ago. A gathering
+ *  that can no longer be read is not past it. */
+export function isPastBlockMoveGrace(
+  gathering: { startAt: Date } | null,
+  now: Date,
+): boolean {
+  return (
+    gathering !== null &&
+    gathering.startAt.getTime() <= now.getTime() - BLOCK_MOVE_GRACE_MS
+  );
+}
+
+/** The negation of {@link isGatheringUpcoming}, for reads that only need
+ *  the answer. */
+export function hasGatheringStarted(
+  gathering: { startAt: Date } | null,
+  now: Date,
+): boolean {
+  return !isGatheringUpcoming(gathering, now);
+}
+
 /** The entries behind one unit, in unit order. */
 export function unitEntries(
   pool: MatchPool,

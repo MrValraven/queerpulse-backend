@@ -171,6 +171,7 @@ describe('AdminMemberModerationService', () => {
         userId: 'member-1',
         suspendedUntil,
         status: UserStatus.Suspended,
+        auditLogId: 'audit-restrict-1',
       });
 
       const result = await service.restrictMember('admin-1', 'member-1', {
@@ -191,6 +192,8 @@ describe('AdminMemberModerationService', () => {
         expect.objectContaining({
           action: 'suspend',
           expiresAt: suspendedUntil.toISOString(),
+          // ENG-480: the appeal deep link names this exact decision.
+          actionId: 'audit-restrict-1',
         }),
       );
       expect(result).toEqual({

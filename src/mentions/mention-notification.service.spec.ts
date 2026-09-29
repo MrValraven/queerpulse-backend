@@ -56,6 +56,18 @@ function build() {
     .spyOn(MemberLookup.prototype, 'userIdsForSlugs')
     .mockResolvedValue(new Map());
 
+  // A forum fan-out reads platform staff roles and author blocks; default
+  // nobody is staff and nobody is blocked.
+  const users = { find: jest.fn().mockResolvedValue([]) };
+  const blockFilter = {
+    blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+  };
+  // A community fan-out reads the community's takedown state; default
+  // visible, so the community-source cases below keep their own audience.
+  const contentModeration = {
+    stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+  };
+
   const service = new MentionNotificationService(
     profiles,
     communities as never,
@@ -64,7 +76,10 @@ function build() {
     events as never,
     threads as never,
     conversationParticipants as never,
+    users as never,
     notifications as never,
+    blockFilter as never,
+    contentModeration as never,
   );
 
   return {
@@ -81,7 +96,10 @@ function build() {
   };
 }
 
-const payloadBase = { postId: 'post-1' };
+// A global post: a `community` source with no `communitySlug`, which every
+// member reads. A payload with no source at all fails closed (U10), so the
+// fan-out tests below name the one open source explicitly.
+const payloadBase = { source: 'community', postId: 'post-1' };
 
 describe('MentionNotificationService.notify', () => {
   afterEach(() => {

@@ -92,6 +92,8 @@ describe('GoTogetherEntryService', () => {
   };
   let profiles: { findOne: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+  /** The config row as the post-write `FOR SHARE` re-read sees it. */
+  let lockedConfigs: { findOne: jest.Mock };
   let eligibility: { eventBlocker: jest.Mock; memberBlockers: jest.Mock };
   let host: { effectiveConfig: jest.Mock; ensureConfigRow: jest.Mock };
   let profileService: {
@@ -121,10 +123,14 @@ describe('GoTogetherEntryService', () => {
         ),
       ),
     };
+    lockedConfigs = { findOne: jest.fn().mockResolvedValue(config) };
+    const manager = {
+      getRepository: (entity: unknown) =>
+        entity === EventMatchConfig ? lockedConfigs : entries,
+    };
     dataSource = {
-      transaction: jest.fn(
-        (work: (manager: { getRepository: () => unknown }) => unknown) =>
-          work({ getRepository: () => entries }),
+      transaction: jest.fn((work: (inner: typeof manager) => unknown) =>
+        work(manager),
       ),
     };
     eligibility = {
@@ -538,5 +544,270 @@ describe('GoTogetherEntryService', () => {
       direction: 'received',
     });
     expect(card.profile).toEqual({ exists: true, needsRefresh: false });
+  });
+
+  describe('answering host questions again', () => {
+    const editedConfig = {
+      ...config,
+      hostQuestions: [
+        ...config.hostQuestions,
+        {
+          id: 'q2',
+          prompt: 'Walk there together?',
+          options: [
+            { id: 'o1', label: 'Yes' },
+            { id: 'o2', label: 'No' },
+          ],
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      host.effectiveConfig.mockResolvedValue(editedConfig);
+      lockedConfigs.findOne.mockResolvedValue(editedConfig);
+      entryRows.push({
+        id: 'entry-me',
+        eventId: 'event-1',
+        userId: 'me',
+        status: 'waiting',
+        pairStatus: 'none',
+        pairPartnerId: null,
+        // q2 was added after this member opted in.
+        hostAnswers: { q1: 'o2' },
+        lens: null,
+      });
+    });
+
+    it('lists the questions a waiting member has to answer again on the card', async () => {
+      const card = await service.card('picnic', 'me');
+      expect(card.state).toBe('waiting');
+      expect(card.unansweredHostQuestionIds).toEqual(['q2']);
+    });
+
+    it('lists none outside the waiting state', async () => {
+      entryRows[0] = { ...entryRows[0], status: 'unmatched' };
+      const card = await service.card('picnic', 'me');
+      expect(card.state).toBe('unmatched');
+      expect(card.unansweredHostQuestionIds).toEqual([]);
+    });
+
+    it('merges the new answer over the saved ones and keeps the pairing', async () => {
+      await service.updateHostAnswers('picnic', 'me', {
+        hostAnswers: { q2: 'o1' },
+      });
+      expect(entries.update).toHaveBeenCalledTimes(1);
+      expect(entries.update).toHaveBeenCalledWith(
+        { id: 'entry-me', status: 'waiting' },
+        { hostAnswers: { q1: 'o2', q2: 'o1' } },
+      );
+      expect(entries.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses an option the question does not have', async () => {
+      await expectRejection(
+        service.updateHostAnswers('picnic', 'me', {
+          hostAnswers: { q2: 'o9' },
+        }),
+        BadRequestException,
+        { code: 'GO_TOGETHER_INVALID_ANSWERS' },
+      );
+      expect(entries.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses answers that still leave a question open', async () => {
+      await expectRejection(
+        service.updateHostAnswers('picnic', 'me', { hostAnswers: {} }),
+        BadRequestException,
+        { code: 'GO_TOGETHER_INVALID_ANSWERS' },
+      );
+    });
+
+    it('refuses a member who is not waiting', async () => {
+      entryRows[0] = { ...entryRows[0], status: 'grouped' };
+      await expectRejection(
+        service.updateHostAnswers('picnic', 'me', {
+          hostAnswers: { q2: 'o1' },
+        }),
+        ConflictException,
+        { code: 'GO_TOGETHER_NOT_WAITING' },
+      );
+      expect(entries.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a member who can no longer join, as opt-in does', async () => {
+      eligibility.memberBlockers.mockResolvedValue(
+        new Map([['me', 'notGoing']]),
+      );
+      await expectRejection(
+        service.updateHostAnswers('picnic', 'me', {
+          hostAnswers: { q2: 'o1' },
+        }),
+        ForbiddenException,
+        { code: 'GO_TOGETHER_INELIGIBLE', reason: 'notGoing' },
+      );
+      expect(entries.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses once opt-in has closed', async () => {
+      eligibility.eventBlocker.mockReturnValue('closed');
+      await expectRejection(
+        service.updateHostAnswers('picnic', 'me', {
+          hostAnswers: { q2: 'o1' },
+        }),
+        ConflictException,
+        { code: 'GO_TOGETHER_UNAVAILABLE', reason: 'closed' },
+      );
+    });
+  });
+
+  describe('a host save landing between the checks and the write', () => {
+    const switchedOff = { ...config, enabled: false } as EventMatchConfig;
+    const editedQuestion = {
+      ...config,
+      hostQuestions: [
+        {
+          id: 'q1',
+          prompt: 'Coffee or tea?',
+          options: [
+            { id: 'o1', label: 'Espresso' },
+            { id: 'o2', label: 'Tea' },
+          ],
+        },
+      ],
+    };
+    const closedFields = {
+      status: 'withdrawn',
+      pairStatus: 'none',
+      pairPartnerId: null,
+      mergeOfferGroupId: null,
+      lens: null,
+      lensConsentedAt: null,
+    };
+
+    it('re-reads the config under a share lock after a solo opt-in', async () => {
+      await service.optIn('picnic', 'me', {
+        mode: 'solo',
+        hostAnswers: { q1: 'o2' },
+      });
+      expect(lockedConfigs.findOne).toHaveBeenCalledWith({
+        where: { eventId: 'event-1' },
+        lock: { mode: 'pessimistic_read' },
+      });
+      expect(entries.update).not.toHaveBeenCalled();
+    });
+
+    it('withdraws a solo opt-in when the host switched Go together off meanwhile', async () => {
+      lockedConfigs.findOne.mockResolvedValue(switchedOff);
+      await service.optIn('picnic', 'me', {
+        mode: 'solo',
+        hostAnswers: { q1: 'o2' },
+      });
+      expect(entries.update).toHaveBeenCalledWith(
+        { eventId: 'event-1', userId: 'me', status: 'waiting' },
+        closedFields,
+      );
+    });
+
+    it('sends no pair invite when the opt-in was withdrawn by a switch-off', async () => {
+      lockedConfigs.findOne.mockResolvedValue(switchedOff);
+      await service.optIn('picnic', 'me', {
+        mode: 'pair',
+        partnerSlug: 'friend-slug',
+        hostAnswers: { q1: 'o2' },
+      });
+      expect(entries.update).toHaveBeenCalledWith(
+        { eventId: 'event-1', userId: 'me', status: 'waiting' },
+        closedFields,
+      );
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('drops an answer to a question the host edited meanwhile', async () => {
+      entryRows.push({
+        id: 'entry-me',
+        eventId: 'event-1',
+        userId: 'me',
+        status: 'withdrawn',
+        pairStatus: 'none',
+        pairPartnerId: null,
+        hostAnswers: {},
+        lens: null,
+      });
+      lockedConfigs.findOne.mockResolvedValue(editedQuestion);
+      await service.optIn('picnic', 'me', {
+        mode: 'solo',
+        hostAnswers: { q1: 'o1' },
+      });
+      expect(entries.update).toHaveBeenCalledWith(
+        { id: 'entry-me' },
+        { hostAnswers: {} },
+      );
+    });
+
+    it('refuses an acceptance when the host switched Go together off meanwhile', async () => {
+      entryRows.push({
+        id: 'entry-friend',
+        eventId: 'event-1',
+        userId: 'friend',
+        pairPartnerId: 'me',
+        pairStatus: 'pending',
+        status: 'waiting',
+        lens: null,
+      });
+      lockedConfigs.findOne.mockResolvedValue(switchedOff);
+      await expectRejection(
+        service.acceptPair('picnic', 'me', { hostAnswers: { q1: 'o2' } }),
+        ConflictException,
+        { code: 'GO_TOGETHER_UNAVAILABLE', reason: 'notEnabled' },
+      );
+      expect(entries.update).not.toHaveBeenCalled();
+      expect(entries.save).not.toHaveBeenCalled();
+    });
+
+    it('stores an acceptance without the answer to a question edited meanwhile', async () => {
+      entryRows.push({
+        id: 'entry-friend',
+        eventId: 'event-1',
+        userId: 'friend',
+        pairPartnerId: 'me',
+        pairStatus: 'pending',
+        status: 'waiting',
+        lens: null,
+      });
+      lockedConfigs.findOne.mockResolvedValue(editedQuestion);
+      await service.acceptPair('picnic', 'me', { hostAnswers: { q1: 'o1' } });
+      expect(entries.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'me',
+          pairStatus: 'accepted',
+          hostAnswers: {},
+        }),
+      );
+    });
+
+    it('withdraws a waiting member answering again after a switch-off', async () => {
+      entryRows.push({
+        id: 'entry-me',
+        eventId: 'event-1',
+        userId: 'me',
+        status: 'waiting',
+        pairStatus: 'none',
+        pairPartnerId: null,
+        hostAnswers: {},
+        lens: null,
+      });
+      lockedConfigs.findOne.mockResolvedValue(switchedOff);
+      await service.updateHostAnswers('picnic', 'me', {
+        hostAnswers: { q1: 'o1' },
+      });
+      expect(entries.update).toHaveBeenCalledWith(
+        { id: 'entry-me', status: 'waiting' },
+        { hostAnswers: { q1: 'o1' } },
+      );
+      expect(entries.update).toHaveBeenLastCalledWith(
+        { eventId: 'event-1', userId: 'me', status: 'waiting' },
+        closedFields,
+      );
+    });
   });
 });

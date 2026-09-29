@@ -30,10 +30,12 @@ import {
   ConversationKind,
 } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { groupJoinHistoryFloorCoversPredicate } from '../messaging/group-join-history-floor';
 import { isCoveredByMailboxStaffFloor } from '../messaging/mailbox-seats';
 import { isEvidenceHoldActive } from '../messaging/message-evidence-hold';
 import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates';
 import { MAX_GROUP_MEMBERS } from '../messaging/messaging.constants';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
   Report,
   ReportSeverity,
@@ -64,10 +66,23 @@ import {
   type ReportFloodCap,
 } from './report-flood-limits';
 import { MetricsService } from '../metrics/metrics.service';
-import { reasonsFor, ReasonCode, ReasonOption } from './reason-catalogue';
+import {
+  isReasonOfferedFor,
+  reasonsFor,
+  ReasonCode,
+  ReasonOption,
+  SYSTEM_REASON_CODES,
+} from './reason-catalogue';
 import { deriveSeverity, slaDueAtFor } from './report-severity';
 import { ReportDTO, toReportDTO } from './report-response';
 import { REPORT_CREATED, ReportCreatedEvent } from './report.events';
+import {
+  isUnlinkedSubjectId,
+  LEGACY_UNLINKED_SUBJECT_ID,
+  mintUnlinkedSubjectId,
+  UNLINKED_SUBJECT_RE,
+  UNLINKED_SUBJECT_TYPES,
+} from './unlinked-subject';
 import {
   GroupSnapshotEvidence,
   MailboxIdentitySnapshotEvidence,
@@ -102,6 +117,21 @@ export const REPORT_NOT_PARTICIPANT_CODE = 'REPORT_NOT_PARTICIPANT';
  * `''` and whose attachment route could only answer 404.
  */
 export const REPORT_EVIDENCE_EXPIRED_CODE = 'REPORT_EVIDENCE_EXPIRED';
+
+/**
+ * ENG-488: a `reasonCode` the subject type does not offer (see
+ * `isReasonOfferedFor`). The reason picker only ever shows the offered codes,
+ * so this is a hand-built or stale request and a 400 is the honest answer.
+ */
+export const REPORT_REASON_NOT_OFFERED_CODE = 'REPORT_REASON_NOT_OFFERED';
+
+/**
+ * ENG-483: a `subjectId` carrying the `unlinked:` prefix that is either
+ * malformed or filed under a subject type the public form never uses (see
+ * `unlinked-subject.ts`).
+ */
+export const REPORT_UNLINKED_SUBJECT_INVALID_CODE =
+  'REPORT_UNLINKED_SUBJECT_INVALID';
 
 // PRD-356: the most active-member ids a `GroupSnapshotEvidence` entry ever
 // stores, the same number as `MAX_GROUP_MEMBERS`, a group's own hard ceiling
@@ -338,6 +368,33 @@ export class ReportsService {
     input: CreateReportInput,
     clientIp: string | null = null,
   ): Promise<ReportDTO> {
+    // ENG-483: a filing that names no record gets its own subject id per
+    // incident, so it runs first and every check below (dedupe, both sets of
+    // flood caps, the insert) keys on the id it settles on.
+    input = this.withUnlinkedSubjectSettled(input);
+
+    // ENG-488: only a reason the subject type offers. Checked before anything
+    // reads the database, so a refused filing costs one comparison. The
+    // system-filed listing codes are offered on no subject and reach here only
+    // from `ListingsService`, so they pass.
+    if (
+      !SYSTEM_REASON_CODES.includes(input.reasonCode) &&
+      !isReasonOfferedFor(input.subjectType, input.reasonCode)
+    ) {
+      throw new BadRequestException({
+        code: REPORT_REASON_NOT_OFFERED_CODE,
+        message: 'That reason does not apply to this kind of report.',
+      });
+    }
+
+    // Persona report (ENG-446): a moderator takedown is stored under the
+    // report's `subjectId`, and every persona read looks it up by the
+    // persona's lowercase uuid. So the id is canonicalised here, before the
+    // dedupe lookup and the insert both read it.
+    if (input.subjectType === ReportSubjectType.Subprofile) {
+      input = await this.withCanonicalPersonaSubject(input);
+    }
+
     // A member can't report their own message — mirrors the DTO's `canReport`
     // flag (`!isDeleted && !isAuthor` in `MessagingCoreService.toMessageResponses`),
     // which is only a UI convenience unless the server enforces the same rule.
@@ -646,6 +703,77 @@ export class ReportsService {
   }
 
   /**
+   * A persona report names the persona by its uuid, the key every persona
+   * takedown read uses (`subprofile-takedown.ts`). A slug, or any other string,
+   * is refused with the same 404 an unknown persona gets: a slug is unique per
+   * creator only, so it cannot say which persona is meant, and a takedown
+   * stored under it would withhold nothing. The uuid is lowercased so an
+   * uppercase spelling lands on the same key `subprofiles.id::text` produces.
+   *
+   * Read through the report repository's own manager, so this one existence
+   * check needs no extra `forFeature` registration in `ReportsModule`.
+   */
+  private async withCanonicalPersonaSubject(
+    input: CreateReportInput,
+  ): Promise<CreateReportInput> {
+    if (!UUID_RE.test(input.subjectId)) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    const subprofileId = input.subjectId.toLowerCase();
+    const doesPersonaExist = await this.reports.manager.exists(Subprofile, {
+      where: { id: subprofileId },
+    });
+    if (!doesPersonaExist) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    return { ...input, subjectId: subprofileId };
+  }
+
+  /**
+   * ENG-483: settles the subject id of a filing that names no record (see
+   * `unlinked-subject.ts`), before the dedupe lookup, the flood caps and the
+   * insert all read it.
+   *
+   * - The legacy `"unspecified"` sentinel on a `member` or `venue` filing is
+   *   rewritten to a freshly minted unlinked id. A stale client therefore
+   *   files each report as its own incident, and gives up only double-submit
+   *   idempotency, since two taps now mint two ids. On any other subject type
+   *   the string is left exactly as it was filed.
+   * - An `unlinked:` id is accepted only well-formed and only on `member` or
+   *   `venue`, the two subject types the public form files, and is lowercased
+   *   so two spellings of one uuid dedupe and cap as the one incident they are.
+   *   Anything else carrying the prefix is a 400.
+   *
+   * Every other id passes through untouched. Distinct ids per incident open no
+   * new route past the per-subject cap: a `member` subject id is not checked
+   * for existence, so a script could already vary it at will. The binding
+   * limits on this path are the daily caps and the burst throttle.
+   */
+  private withUnlinkedSubjectSettled(
+    input: CreateReportInput,
+  ): CreateReportInput {
+    const isUnlinkedSubjectType = UNLINKED_SUBJECT_TYPES.includes(
+      input.subjectType,
+    );
+    if (
+      isUnlinkedSubjectType &&
+      input.subjectId === LEGACY_UNLINKED_SUBJECT_ID
+    ) {
+      return { ...input, subjectId: mintUnlinkedSubjectId() };
+    }
+    if (!isUnlinkedSubjectId(input.subjectId)) {
+      return input;
+    }
+    if (!isUnlinkedSubjectType || !UNLINKED_SUBJECT_RE.test(input.subjectId)) {
+      throw new BadRequestException({
+        code: REPORT_UNLINKED_SUBJECT_INVALID_CODE,
+        message: 'That report is not addressed to anything it can be filed on.',
+      });
+    }
+    return { ...input, subjectId: input.subjectId.toLowerCase() };
+  }
+
+  /**
    * The rolling flood caps for a SIGNED-IN filing, unchanged by PRD-280: a
    * signed-out one is counted by `assertAnonymousReportingWindowIsClear`
    * instead and never reaches here.
@@ -707,6 +835,10 @@ export class ReportsService {
    * distinct subjects belonging to the same target, for instance a message id
    * per message. The daily cap is what bounds that, and the refusal log below
    * is what puts a moderator onto it.
+   *
+   * A public-form filing that names no record carries its own `unlinked:` id
+   * per incident (ENG-483, `withUnlinkedSubjectSettled`), so this cap counts
+   * one incident's retries there, and the daily cap is its binding limit.
    *
    * ## No row lock
    *
@@ -1243,13 +1375,14 @@ export class ReportsService {
   /**
    * PRD-368: refuse a `message` report unless the reporter was a participant
    * of the message's conversation when the message was sent. A former
-   * participant qualifies when they left AFTER it was sent (they received it);
-   * someone who joined a group later but can read its history qualifies too,
-   * since they hold a participant row with no earlier `leftAt`. A signed-out
-   * filing is never a participant, and a message id that resolves to nothing
-   * gets the same coded 403, so the route never reveals which ids exist.
-   * A mailbox staff seat gets that same refusal for a message at or before
-   * its history floor (`isBehindMailboxStaffFloor`).
+   * participant qualifies when they left AFTER it was sent (they received it).
+   * A signed-out filing is never a participant, and a message id that
+   * resolves to nothing gets the same coded 403, so the route never reveals
+   * which ids exist. Two seats get that same refusal for a message at or
+   * before their history floor (`isBehindSeatHistoryFloor`): a mailbox staff
+   * seat, and a group seat taken after the group began (PRD-400), whose
+   * member reads the group from the moment they joined and so can report
+   * only what was sent after that.
    */
   private async assertReporterWasInConversation(
     reporterId: string | null,
@@ -1271,7 +1404,7 @@ export class ReportsService {
           participant.leftAt.getTime() > message.createdAt.getTime());
       if (
         wasPresentWhenSent &&
-        !(await this.isBehindMailboxStaffFloor(participant, message))
+        !(await this.isBehindSeatHistoryFloor(participant, message))
       ) {
         return;
       }
@@ -1284,38 +1417,61 @@ export class ReportsService {
   }
 
   /**
-   * Task 13h review (M1): whether `message` sits at or before the history
-   * floor of the reporter's MAILBOX STAFF seat. A staff member never sees
-   * what their mailbox thread held before their floor, so reporting such a
-   * message by id would hand moderators private content the reporter could
-   * never read. The rule is `isCoveredByMailboxStaffFloor`, the in-memory
-   * twin of the SQL every read path composes; it holds only for a staff seat
-   * in a direct, non-official thread, so a personal or group seat and a
-   * customer's own seat are never refused here.
+   * Whether `message` sits at or before the history floor of the reporter's
+   * seat. Reporting such a message by id would hand moderators content the
+   * reporter could never read. Two seats carry that floor:
+   *  - Task 13h review (M1), a MAILBOX STAFF seat: a staff member never sees
+   *    what their mailbox thread held before their floor. The rule is
+   *    `isCoveredByMailboxStaffFloor`, the in-memory twin of the SQL every
+   *    read path composes; it holds only for a staff seat in a direct,
+   *    non-official thread, so a personal seat and a customer's own seat
+   *    are never refused by it.
+   *  - PRD-400, a GROUP seat taken after the group began: its `historyFloorAt`
+   *    is the join floor, and an unavailable reply quote still names a
+   *    pre-join parent's id. The rule is `groupJoinHistoryFloorCoversPredicate`
+   *    run in SQL through the `Message` repository. `message.createdAt`
+   *    loads truncated to the millisecond, so an in-memory `<=` would refuse
+   *    a message stamped within the millisecond after the floor, which the
+   *    joiner's history shows; SQL compares the full microseconds, exactly
+   *    as every read path does.
    *
-   * The two lookups the rule needs run only for a seat that has a floor at
-   * all (`history_floor_at` set), so an ordinary filing costs no extra
-   * query, and a staff member's own "clear chat" leaves their reports as
-   * they were.
+   * The lookups run only for a seat that has a floor at all
+   * (`history_floor_at` set), so an ordinary filing costs no extra query.
+   * A personal "clear chat" moves `clearedAt` alone, so it leaves every
+   * report its seat could file as it was.
    */
-  private async isBehindMailboxStaffFloor(
-    participant: Pick<ConversationParticipant, 'historyFloorAt' | 'identityId'>,
+  private async isBehindSeatHistoryFloor(
+    participant: Pick<
+      ConversationParticipant,
+      'id' | 'historyFloorAt' | 'identityId'
+    >,
     message: Message,
   ): Promise<boolean> {
     if (!participant.historyFloorAt) {
       return false;
     }
-    const [seatIdentity, conversation] = await Promise.all([
-      this.identities.getById(participant.identityId),
-      this.conversations.findOne({
-        where: { id: message.conversationId },
-        select: { id: true, kind: true, isOfficial: true },
-      }),
-    ]);
+    const conversation = await this.conversations.findOne({
+      where: { id: message.conversationId },
+      select: { id: true, kind: true, isOfficial: true },
+    });
+    if (conversation?.kind === ConversationKind.Group) {
+      return this.messages
+        .createQueryBuilder('message')
+        .withDeleted()
+        .innerJoin(ConversationParticipant, 'seat', 'seat.id = :seatId', {
+          seatId: participant.id,
+        })
+        .where('message.id = :messageId', { messageId: message.id })
+        .andWhere(
+          groupJoinHistoryFloorCoversPredicate('message.created_at', 'seat'),
+        )
+        .getExists();
+    }
+    const seatIdentity = await this.identities.getById(participant.identityId);
     return isCoveredByMailboxStaffFloor(message.createdAt, {
       historyFloorAt: participant.historyFloorAt,
       identityKind: seatIdentity?.kind,
-      isGroupConversation: conversation?.kind === ConversationKind.Group,
+      isGroupConversation: false,
       isOfficialConversation: conversation?.isOfficial ?? false,
     });
   }

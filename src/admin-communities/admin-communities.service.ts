@@ -10,11 +10,20 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
-import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import {
+  ACCOUNT_REMOVED,
+  AccountRemovedEvent,
+} from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
+import {
+  COMMUNITY_BAN_AUDIT_ACTION,
+  CommunityGovernanceLogService,
+} from '../communities/community-governance-log.service';
 import {
   COMMUNITY_MEMBER_LEFT,
   CommunityMemberLeftEvent,
 } from '../communities/community.events';
+import { CommunityBan } from '../communities/entities/community-ban.entity';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
   CommunityMember,
@@ -33,6 +42,8 @@ import { SubcommunityCascadeService } from '../communities/subcommunity-cascade.
 // report scope reads two different tables that both want the word.
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Event as Gathering } from '../events/entities/event.entity';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   Report,
   ReportStatus,
@@ -205,11 +216,14 @@ export class AdminCommunitiesService {
     private readonly profiles: Repository<Profile>,
     @InjectRepository(User)
     private readonly users: Repository<User>,
+    @InjectRepository(CommunityBan)
+    private readonly bans: Repository<CommunityBan>,
     private readonly dataSource: DataSource,
     private readonly governanceLog: CommunityGovernanceLogService,
     private readonly subcommunityCascade: SubcommunityCascadeService,
     private readonly eventEmitter: EventEmitter2,
     private readonly spaceRequestApprovals: SpaceRequestApprovalsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listCommunities(): Promise<AdminCommunityListDTO> {
@@ -1001,11 +1015,25 @@ export class AdminCommunitiesService {
    * `SubcommunityCascadeService.removeParentMemberFromSpaces`, so every space
    * keeps an accountable owner. A space carries no spaces of its own, so the
    * cascade is skipped when `community.parentId` is set.
+   *
+   * The removed member is always told (PRD-413): a bell naming the community,
+   * and no actor, so the member's block list cannot suppress it and the admin
+   * is never named. It is a platform action, so it reaches them the way any
+   * other platform decision does.
+   *
+   * Barring the return is the admin's explicit choice (`shouldBarReturn`,
+   * from `barReturn=true`), and absent it the member stays free to rejoin,
+   * which is what this route always did. The bar it writes is permanent from
+   * the start. A community moderator's permanent bar waits for a second
+   * signature (`CommunitiesService.barReturn`); this one needs none, because
+   * the actor is platform staff answering for the whole platform, which is
+   * the check a second community signatory stands in for.
    */
   async removeMember(
     slug: string,
     actorUserId: string,
     memberSlug: string,
+    options: { shouldBarReturn?: boolean } = {},
   ): Promise<void> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
@@ -1054,12 +1082,26 @@ export class AdminCommunitiesService {
       } satisfies CommunityMemberLeftEvent);
     }
 
+    const ban = options.shouldBarReturn
+      ? await this.writePermanentBar(community.id, actorUserId, targetUserId)
+      : null;
+
+    // One entry, under the action that describes what happened: a bar and a
+    // plain removal differ in whether the person can come back, the same
+    // split `CommunitiesService.removeMember` records.
     await this.governanceLog.log({
       communityId: community.id,
       actorUserId,
-      action: GovernanceLogAction.MemberRemoved,
+      action: ban
+        ? GovernanceLogAction.MemberBanned
+        : GovernanceLogAction.MemberRemoved,
       targetUserId,
-      metadata: { adminOverride: true },
+      metadata: ban
+        ? {
+            adminOverride: true,
+            banExpiresAt: ban.expiresAt?.toISOString() ?? null,
+          }
+        : { adminOverride: true },
     });
     for (const spaceId of reassignedSpaceIds) {
       await this.governanceLog.log({
@@ -1073,6 +1115,127 @@ export class AdminCommunitiesService {
           previousOwnerId: targetUserId,
         },
       });
+    }
+
+    if (ban) {
+      // The `mod_audit_logs` mirror `POST /appeals` resolves a target from, so
+      // an admin bar can be appealed like a community one. Best effort inside
+      // the helper: the removal has already committed.
+      await this.governanceLog.logModerationAudit({
+        actorUserId,
+        action: COMMUNITY_BAN_AUDIT_ACTION,
+        targetUserId,
+        note: null,
+        // Null for the permanent bar written here. A timed bar already on
+        // file keeps its end date, so the record carries that one.
+        duration: ban.expiresAt?.toISOString() ?? null,
+      });
+      await this.notifyMemberBanned(community, ban);
+    } else {
+      await this.notifyMemberRemoved(community, targetUserId);
+    }
+  }
+
+  /**
+   * Writes the permanent `community_bans` row an admin removal leaves behind
+   * when `barReturn=true`, and hands back the row now in force. `ON CONFLICT
+   * DO NOTHING` against the unique (community, user) index, so barring someone
+   * already barred keeps the ban already on file, and that row is the one
+   * read back, so the audit rows and the bell describe the terms the member
+   * is actually serving.
+   *
+   * Emits `ACCOUNT_REMOVED` after the insert so ban evasion (TS-05) records
+   * the correlation material, as `CommunitiesService.barReturn` does.
+   */
+  private async writePermanentBar(
+    communityId: string,
+    actorUserId: string,
+    targetUserId: string,
+  ): Promise<CommunityBan | null> {
+    await this.bans
+      .createQueryBuilder()
+      .insert()
+      .into(CommunityBan)
+      .values({
+        communityId,
+        userId: targetUserId,
+        bannedByUserId: actorUserId,
+        reason: null,
+        expiresAt: null,
+        ruleIndex: null,
+        ruleVersion: null,
+        ruleText: null,
+      })
+      .orIgnore()
+      .execute();
+
+    const removed: AccountRemovedEvent = {
+      userId: targetUserId,
+      removalKind: RemovalKind.CommunityBan,
+      communityId,
+      removedAt: new Date(),
+    };
+    this.eventEmitter.emit(ACCOUNT_REMOVED, removed);
+
+    return this.bans.findOne({ where: { communityId, userId: targetUserId } });
+  }
+
+  /**
+   * Best-effort "you were removed" bell for an admin removal that leaves the
+   * member free to rejoin. Same kind and field names the community-side
+   * removal uses, with the community's name so the bell can say where. No
+   * actor argument and no actor in the payload: see `removeMember`.
+   */
+  private async notifyMemberRemoved(
+    community: Community,
+    targetUserId: string,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(
+        targetUserId,
+        NotificationType.CommunityMemberRemoved,
+        {
+          source: 'community',
+          communitySlug: community.slug,
+          communityName: community.name,
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Removal notification failed for community ${community.id}: ${String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort "you were removed and cannot rejoin" bell, sent in place of
+   * the removal bell when the admin barred the return. Payload shape of
+   * `CommunitiesService.notifyMemberBanned`, so one renderer reads both. No
+   * actor argument and no actor in the payload: see `removeMember`.
+   */
+  private async notifyMemberBanned(
+    community: Community,
+    ban: CommunityBan,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(
+        ban.userId,
+        NotificationType.CommunityBanned,
+        {
+          source: 'community',
+          communitySlug: community.slug,
+          communityName: community.name,
+          reason: ban.reason,
+          expiresAt: ban.expiresAt?.toISOString() ?? null,
+          ruleText: ban.ruleText,
+          ruleIndex: ban.ruleIndex,
+          ruleVersion: ban.ruleVersion,
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Ban notification failed for community ${community.id}: ${String(error)}`,
+      );
     }
   }
 

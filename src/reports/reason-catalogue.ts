@@ -433,3 +433,28 @@ export function reasonsFor(subjectType: ReportSubjectType): ReasonOption[] {
     label: REASON_LABELS[code],
   }));
 }
+
+/**
+ * Whether `reasonCode` is one `subjectType` offers (ENG-488). `POST /reports`
+ * validates the code against the whole taxonomy only, so without this a caller
+ * could file `outing` against a venue or `venue_safety` against a message:
+ * codes the reason picker never shows for that subject, which then derive a
+ * severity and land in queue counts for a harm the subject cannot carry.
+ */
+export function isReasonOfferedFor(
+  subjectType: ReportSubjectType,
+  reasonCode: ReasonCode,
+): boolean {
+  return SUBJECT_REASONS[subjectType].includes(reasonCode);
+}
+
+/**
+ * The system-filed listing codes (see the `ReasonCode` union comment). Offered
+ * on no subject, and filed only server-side by `ListingsService`, so the
+ * offered-reason check in `ReportsService.create` lets them through. The DTO's
+ * `@IsIn(REASON_CODES)` already keeps them out of `POST /reports`.
+ */
+export const SYSTEM_REASON_CODES: readonly ReasonCode[] = [
+  'listing_dispute',
+  'listing_owner_notify',
+];

@@ -2,13 +2,16 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { FindOperator, IsNull } from 'typeorm';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Community } from '../communities/entities/community.entity';
+import { Connection } from '../connections/entities/connection.entity';
 import { Event as GatheringEvent } from '../events/entities/event.entity';
+import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import {
   Subprofile,
   SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from '../subprofiles/entities/subprofile.entity';
+import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from '../subprofiles/subprofile-takedown';
 import { ActivityVisibilityService } from './activity-visibility.service';
 import {
   Activity,
@@ -17,7 +20,19 @@ import {
 } from './entities/activity.entity';
 
 type FindMock = { find: jest.Mock };
-type ActivityRepoMock = FindMock & { delete: jest.Mock };
+type ForumThreadQueryBuilderMock = {
+  select: jest.Mock;
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  getRawMany: jest.Mock;
+};
+type ActivityRepoMock = FindMock & {
+  delete: jest.Mock;
+  manager: { createQueryBuilder: jest.Mock; getRepository: jest.Mock };
+  forumThreadQueryBuilder: ForumThreadQueryBuilderMock;
+  eventRsvps: FindMock;
+  connections: FindMock;
+};
 
 interface Repos {
   activities: ActivityRepoMock;
@@ -30,8 +45,43 @@ async function buildService(): Promise<{
   service: ActivityVisibilityService;
   repos: Repos;
 }> {
+  const forumThreadQueryBuilder: ForumThreadQueryBuilderMock = {
+    select: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    getRawMany: jest.fn().mockResolvedValue([]),
+  };
+  // The Event arm's PRD-414 RSVP-visibility gate reads `EventRsvp` and
+  // `Connection` off `this.activities.manager.getRepository(...)`, the same
+  // pattern the forum-thread check above uses to read `ForumThread` off
+  // `manager.createQueryBuilder` with no injected repository token of its
+  // own. Both are stubbed here and dispatched on the entity class the
+  // service asks for.
+  const eventRsvps: FindMock = { find: jest.fn().mockResolvedValue([]) };
+  const connections: FindMock = { find: jest.fn().mockResolvedValue([]) };
+  const getRepository = jest.fn((entity: unknown) => {
+    if (entity === EventRsvp) {
+      return eventRsvps;
+    }
+    if (entity === Connection) {
+      return connections;
+    }
+    throw new Error(
+      'ActivityVisibilityService asked for an unstubbed repository',
+    );
+  });
   const repos: Repos = {
-    activities: { find: jest.fn(), delete: jest.fn().mockResolvedValue({}) },
+    activities: {
+      find: jest.fn(),
+      delete: jest.fn().mockResolvedValue({}),
+      manager: {
+        createQueryBuilder: jest.fn().mockReturnValue(forumThreadQueryBuilder),
+        getRepository,
+      },
+      forumThreadQueryBuilder,
+      eventRsvps,
+      connections,
+    },
     communities: { find: jest.fn().mockResolvedValue([]) },
     events: { find: jest.fn().mockResolvedValue([]) },
     subprofiles: { find: jest.fn().mockResolvedValue([]) },
@@ -51,7 +101,7 @@ async function buildService(): Promise<{
 function row(overrides: Partial<Activity> & { id: string }): Activity {
   return {
     // Every column the gate reads, so a row is a real `Activity` and a new
-    // column added to the entity fails this spec rather than passing silently.
+    // column added to the entity fails this spec loudly.
     userId: 'member-1',
     kind: ActivityKind.Event,
     title: 'a row',
@@ -82,14 +132,20 @@ describe('ActivityVisibilityService.filterVisible', () => {
 
     const visible = await service.filterVisible([rsvpRow]);
 
-    // The whole row goes, never just its link: "RSVP'd to X" is itself the
+    // The whole row goes along with its link: "RSVP'd to X" is itself the
     // disclosure.
     expect(visible).toEqual([]);
   });
 
   it('keeps an event row while the gathering is still public', async () => {
     const { service, repos } = await buildService();
-    repos.events.find.mockResolvedValue([{ slug: 'open-gathering' }]);
+    repos.events.find.mockResolvedValue([
+      { id: 'event-1', slug: 'open-gathering' },
+    ]);
+    // The RSVP behind the row is still there (the Event arm's second gate).
+    repos.activities.eventRsvps.find.mockResolvedValue([
+      { eventId: 'event-1', userId: 'member-1', visibility: null },
+    ]);
     const rsvpRow = row({
       id: 'row-1',
       subjectKind: ActivitySubjectKind.Event,
@@ -183,11 +239,47 @@ describe('ActivityVisibilityService.filterVisible', () => {
     ]);
   });
 
+  // N4: a persona row keeps asserting "published a persona" once a moderator
+  // takes the persona down, even though its own `removedAt` stays null. The
+  // gate must drop it, batched into the same query as the column filters.
+  it('drops a persona row under a moderator takedown in one batched query', async () => {
+    const { service, repos } = await buildService();
+    // The persona still satisfies every column filter; a real query drops it
+    // through the NOT EXISTS clause, so the mock returns empty to model that.
+    repos.subprofiles.find.mockResolvedValue([]);
+    const personaRow = row({
+      id: 'row-1',
+      kind: ActivityKind.Persona,
+      subjectKind: ActivitySubjectKind.Persona,
+      subjectId: 'persona-id',
+    });
+
+    await expect(service.filterVisible([personaRow])).resolves.toEqual([]);
+
+    expect(repos.subprofiles.find).toHaveBeenCalledTimes(1);
+    const [{ where }] = repos.subprofiles.find.mock.calls[0] as [
+      { where: { id: FindOperator<string> } },
+    ];
+    const sql = where.id.getSql?.('Subprofile.id') ?? '';
+    expect(sql).toContain('Subprofile.id IN (:...personaIds)');
+    expect(sql).toContain('NOT EXISTS');
+    expect(sql).toContain('FROM "content_moderation" "cm"');
+    expect(sql).toContain('"cm"."subject_id" = Subprofile.id::text');
+    expect(sql).toContain(
+      '"cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL',
+    );
+    expect(where.id.objectLiteralParameters).toEqual({
+      personaIds: ['persona-id'],
+      subprofileTakedownSubjectType: SUBPROFILE_MODERATION_SUBJECT_TYPE,
+    });
+  });
+
   it('passes rows with no subject reference through untouched', async () => {
     const { service } = await buildService();
-    // A forum thread (no visibility dimension) and a legacy row written before
-    // the subject columns existed. Neither is verifiable, and neither is
-    // suspect: the write gate already passed them.
+    // Rows written before the subject columns existed. Neither is verifiable,
+    // and neither is suspect: the write gate already passed them. A legacy
+    // forum row gets its thread subject from the backfill migration, after
+    // which the forum-thread re-check below applies to it.
     const forumRow = row({
       id: 'row-1',
       kind: ActivityKind.Post,
@@ -202,7 +294,12 @@ describe('ActivityVisibilityService.filterVisible', () => {
 
   it('preserves the order of the rows it keeps', async () => {
     const { service, repos } = await buildService();
-    repos.events.find.mockResolvedValue([{ slug: 'still-public' }]);
+    repos.events.find.mockResolvedValue([
+      { id: 'event-1', slug: 'still-public' },
+    ]);
+    repos.activities.eventRsvps.find.mockResolvedValue([
+      { eventId: 'event-1', userId: 'member-1', visibility: null },
+    ]);
     const first = row({ id: 'row-1' });
     const dropped = row({
       id: 'row-2',
@@ -300,6 +397,73 @@ describe('ActivityVisibilityService.filterVisible', () => {
     expect(visible).toEqual([]);
   });
 
+  it('filterVisible drops an anonymous, withdrawn, scheduled or private-community thread row and purges it', async () => {
+    const { service, repos } = await buildService();
+    // The lookup filters on every gate in SQL, so of these five threads only
+    // the forum-wide one under its writer's own byline comes back.
+    repos.activities.forumThreadQueryBuilder.getRawMany.mockResolvedValue([
+      { slug: 'open-thread' },
+    ]);
+    const threadRow = (id: string, slug: string) =>
+      row({
+        id,
+        kind: ActivityKind.Post,
+        subjectKind: ActivitySubjectKind.ForumThread,
+        subjectId: slug,
+        toLink: `/thread/${slug}`,
+      });
+    const anonymousRow = threadRow('row-1', 'anonymous-thread');
+    const withdrawnRow = threadRow('row-2', 'withdrawn-thread');
+    const scheduledRow = threadRow('row-3', 'scheduled-thread');
+    const privateCommunityRow = threadRow('row-4', 'private-community-thread');
+    const openRow = threadRow('row-5', 'open-thread');
+
+    const visible = await service.filterVisible([
+      anonymousRow,
+      withdrawnRow,
+      scheduledRow,
+      privateCommunityRow,
+      openRow,
+    ]);
+    await flush();
+
+    expect(visible).toEqual([openRow]);
+    const builder = repos.activities.forumThreadQueryBuilder;
+    expect(builder.where).toHaveBeenCalledWith('t.slug IN (:...slugs)', {
+      slugs: [
+        'anonymous-thread',
+        'withdrawn-thread',
+        'scheduled-thread',
+        'private-community-thread',
+        'open-thread',
+      ],
+    });
+    const gateSql = (
+      builder.andWhere.mock.calls as unknown as Array<[string]>
+    ).map(([sql]) => sql);
+    expect(gateSql).toEqual(
+      expect.arrayContaining([
+        't.deleted_at IS NULL',
+        't.is_anonymous = false',
+        't.is_official = false',
+      ]),
+    );
+    expect(gateSql.join(' ')).toContain('t.published_at <= now()');
+    expect(gateSql.join(' ')).toContain('t.cross_posted = true');
+    expect(gateSql.join(' ')).toContain(
+      '"activity_com"."access_tier" = :activityPublicTier',
+    );
+
+    const deleteCalls = repos.activities.delete.mock.calls as unknown as Array<
+      [{ id: FindOperator<string> }]
+    >;
+    const firstCall = deleteCalls[0];
+    if (!firstCall) {
+      throw new Error('expected a purge, none was issued');
+    }
+    expect(firstCall[0].id.value).toEqual(['row-1', 'row-2', 'row-3', 'row-4']);
+  });
+
   it('runs no subject lookups at all when nothing needs verifying', async () => {
     const { service, repos } = await buildService();
 
@@ -308,9 +472,10 @@ describe('ActivityVisibilityService.filterVisible', () => {
     expect(repos.events.find).not.toHaveBeenCalled();
     expect(repos.communities.find).not.toHaveBeenCalled();
     expect(repos.subprofiles.find).not.toHaveBeenCalled();
+    expect(repos.activities.manager.createQueryBuilder).not.toHaveBeenCalled();
   });
 
-  it('batches one lookup per kind rather than one per row', async () => {
+  it('batches one lookup per kind for any number of rows', async () => {
     const { service, repos } = await buildService();
     repos.communities.find.mockResolvedValue([]);
 
@@ -333,5 +498,194 @@ describe('ActivityVisibilityService.filterVisible', () => {
     ]);
 
     expect(repos.communities.find).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ActivityVisibilityService.filterVisible: PRD-414 RSVP visibility (Event arm)', () => {
+  const GATHERING_SLUG = 'the-gathering';
+  const GATHERING_ID = 'event-uuid-1';
+
+  /** A public, published gathering, returned for both the subject re-check
+   *  and the slug-to-id lookup the RSVP gate runs afterwards. */
+  const stubPublicGathering = (repos: Repos) => {
+    repos.events.find.mockResolvedValue([
+      { id: GATHERING_ID, slug: GATHERING_SLUG },
+    ]);
+  };
+
+  function eventRow(overrides: Partial<Activity> & { id: string }): Activity {
+    return row({
+      subjectKind: ActivitySubjectKind.Event,
+      subjectId: GATHERING_SLUG,
+      ...overrides,
+    });
+  }
+
+  it('shows a stranger everyone and null RSVPs, hides connections and justMe', async () => {
+    const { service, repos } = await buildService();
+    stubPublicGathering(repos);
+    repos.activities.eventRsvps.find.mockResolvedValue([
+      {
+        eventId: GATHERING_ID,
+        userId: 'attendee-everyone',
+        visibility: 'everyone',
+      },
+      { eventId: GATHERING_ID, userId: 'attendee-null', visibility: null },
+      {
+        eventId: GATHERING_ID,
+        userId: 'attendee-connections',
+        visibility: 'connections',
+      },
+      {
+        eventId: GATHERING_ID,
+        userId: 'attendee-justme',
+        visibility: 'justMe',
+      },
+    ]);
+    repos.activities.connections.find.mockResolvedValue([]);
+    const everyoneRow = eventRow({ id: 'row-1', userId: 'attendee-everyone' });
+    const nullRow = eventRow({ id: 'row-2', userId: 'attendee-null' });
+    const connectionsRow = eventRow({
+      id: 'row-3',
+      userId: 'attendee-connections',
+    });
+    const justMeRow = eventRow({ id: 'row-4', userId: 'attendee-justme' });
+
+    const visible = await service.filterVisible(
+      [everyoneRow, nullRow, connectionsRow, justMeRow],
+      'stranger-1',
+    );
+
+    expect(visible).toEqual([everyoneRow, nullRow]);
+  });
+
+  it('shows the owner every one of their own rows, whatever the RSVP visibility says', async () => {
+    const { service, repos } = await buildService();
+    stubPublicGathering(repos);
+    const everyoneRow = eventRow({ id: 'row-1', userId: 'the-attendee' });
+    const connectionsRow = eventRow({ id: 'row-2', userId: 'the-attendee' });
+    const justMeRow = eventRow({ id: 'row-3', userId: 'the-attendee' });
+
+    const visible = await service.filterVisible(
+      [everyoneRow, connectionsRow, justMeRow],
+      'the-attendee',
+    );
+
+    expect(visible).toEqual([everyoneRow, connectionsRow, justMeRow]);
+    // The owner shortcut drops every one of their own rows before the RSVP
+    // and connection lookups run at all.
+    expect(repos.activities.eventRsvps.find).not.toHaveBeenCalled();
+    expect(repos.activities.connections.find).not.toHaveBeenCalled();
+  });
+
+  it("shows a connections-only row to the attendee's accepted connection", async () => {
+    const { service, repos } = await buildService();
+    stubPublicGathering(repos);
+    repos.activities.eventRsvps.find.mockResolvedValue([
+      {
+        eventId: GATHERING_ID,
+        userId: 'connected-attendee',
+        visibility: 'connections',
+      },
+      {
+        eventId: GATHERING_ID,
+        userId: 'unconnected-attendee',
+        visibility: 'connections',
+      },
+    ]);
+    repos.activities.connections.find.mockResolvedValue([
+      {
+        requesterId: 'viewer-1',
+        addresseeId: 'connected-attendee',
+        status: 'accepted',
+      },
+    ]);
+    const connectedRow = eventRow({
+      id: 'row-1',
+      userId: 'connected-attendee',
+    });
+    const unconnectedRow = eventRow({
+      id: 'row-2',
+      userId: 'unconnected-attendee',
+    });
+
+    const visible = await service.filterVisible(
+      [connectedRow, unconnectedRow],
+      'viewer-1',
+    );
+
+    expect(visible).toEqual([connectedRow]);
+  });
+
+  // M5: the roster lists live RSVP rows only, so an activity row with no
+  // RSVP behind it shows to its owner alone, and stays in the table.
+  it('shows a row with no RSVP behind it to its owner alone', async () => {
+    const { service, repos } = await buildService();
+    stubPublicGathering(repos);
+    repos.activities.eventRsvps.find.mockResolvedValue([]);
+    const orphanRow = eventRow({ id: 'row-1', userId: 'former-attendee' });
+
+    const strangerView = await service.filterVisible([orphanRow], 'stranger-1');
+    const anonymousView = await service.filterVisible([orphanRow], null);
+    const ownerView = await service.filterVisible(
+      [orphanRow],
+      'former-attendee',
+    );
+    await flush();
+
+    expect(strangerView).toEqual([]);
+    expect(anonymousView).toEqual([]);
+    expect(ownerView).toEqual([orphanRow]);
+    expect(repos.activities.delete).not.toHaveBeenCalled();
+  });
+
+  // O3: a self-cancel or a host removal leaves the RSVP row in place with
+  // `status = 'cancelled'` and never deletes it, so the roster drops the
+  // attendee while the row would otherwise survive this gate untouched. A
+  // cancelled RSVP is treated exactly like a missing one.
+  it('shows a row behind a cancelled RSVP to its owner alone', async () => {
+    const { service, repos } = await buildService();
+    stubPublicGathering(repos);
+    repos.activities.eventRsvps.find.mockResolvedValue([
+      {
+        eventId: GATHERING_ID,
+        userId: 'cancelled-attendee',
+        visibility: 'everyone',
+        status: 'cancelled',
+      },
+    ]);
+    const cancelledRow = eventRow({
+      id: 'row-1',
+      userId: 'cancelled-attendee',
+    });
+
+    const strangerView = await service.filterVisible(
+      [cancelledRow],
+      'stranger-1',
+    );
+    const ownerView = await service.filterVisible(
+      [cancelledRow],
+      'cancelled-attendee',
+    );
+    await flush();
+
+    expect(strangerView).toEqual([]);
+    expect(ownerView).toEqual([cancelledRow]);
+    expect(repos.activities.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps a row the RSVP setting hides in the table', async () => {
+    const { service, repos } = await buildService();
+    stubPublicGathering(repos);
+    repos.activities.eventRsvps.find.mockResolvedValue([
+      { eventId: GATHERING_ID, userId: 'attendee-1', visibility: 'justMe' },
+    ]);
+    const hiddenRow = eventRow({ id: 'row-1', userId: 'attendee-1' });
+
+    const visible = await service.filterVisible([hiddenRow], 'stranger-1');
+    await flush();
+
+    expect(visible).toEqual([]);
+    expect(repos.activities.delete).not.toHaveBeenCalled();
   });
 });

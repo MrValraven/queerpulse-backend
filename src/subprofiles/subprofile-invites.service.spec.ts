@@ -112,6 +112,7 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     position: 0,
     skinData: null,
     removedAt: null,
+    editVersion: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -142,11 +143,17 @@ describe('SubprofileInvitesService', () => {
     >
   >;
   let membersRepo: jest.Mocked<
-    Pick<Repository<SubprofileMember>, 'findOne' | 'count' | 'create' | 'save'>
+    Pick<
+      Repository<SubprofileMember>,
+      'findOne' | 'find' | 'count' | 'create' | 'save'
+    >
   >;
   let subprofilesRepo: jest.Mocked<Pick<Repository<Subprofile>, 'find'>>;
   let profilesRepo: jest.Mocked<Pick<Repository<Profile>, 'findOne' | 'find'>>;
-  let blockFilter: { isBlockedEitherWay: jest.Mock };
+  let blockFilter: {
+    isBlockedEitherWay: jest.Mock;
+    blockedAgainstAnyOf: jest.Mock;
+  };
   let subprofilesService: { assertMember: jest.Mock };
   let events: { emit: jest.Mock };
   let identities: { ensureIdentityFor: jest.Mock };
@@ -161,6 +168,7 @@ describe('SubprofileInvitesService', () => {
   // three different entities within the same transaction.
   let manager: {
     findOne: jest.Mock;
+    find: jest.Mock;
     count: jest.Mock;
     save: jest.Mock;
     create: jest.Mock;
@@ -186,6 +194,11 @@ describe('SubprofileInvitesService', () => {
     };
     membersRepo = {
       findOne: jest.fn().mockResolvedValue(null),
+      // ENG-450: `invite()`/`accept()` batch-load every current owner's
+      // userId from this before the block re-check. Defaults to a lone
+      // creator so existing tests that never set up a co-owner roster still
+      // pass through the (now empty-guardian) block check as before.
+      find: jest.fn().mockResolvedValue([{ userId: 'creator' }]),
       count: jest.fn().mockResolvedValue(1),
       create: jest
         .fn()
@@ -203,7 +216,10 @@ describe('SubprofileInvitesService', () => {
       findOne: jest.fn().mockResolvedValue(makeProfile()),
       find: jest.fn().mockResolvedValue([]),
     };
-    blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
+    blockFilter = {
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      blockedAgainstAnyOf: jest.fn().mockResolvedValue(new Set()),
+    };
     subprofilesService = {
       assertMember: jest.fn().mockResolvedValue(makeSubprofile()),
     };
@@ -228,6 +244,11 @@ describe('SubprofileInvitesService', () => {
         if (entity === Subprofile) return Promise.resolve(makeSubprofile());
         return Promise.resolve(null); // no existing member row / pending invite
       }),
+      // ENG-450 / M5: `accept()`'s in-transaction block re-check reads the
+      // roster through this, inside the persona row lock. Defaults to a lone
+      // creator so existing tests that never set up a co-owner roster still
+      // pass through the (now empty-guardian) block check as before.
+      find: jest.fn().mockResolvedValue([{ userId: 'creator' }]),
       count: jest.fn().mockImplementation((entity: unknown) => {
         if (entity === SubprofileMember) return Promise.resolve(1);
         if (entity === SubprofileInvite) return Promise.resolve(0);
@@ -371,14 +392,48 @@ describe('SubprofileInvitesService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('rejects inviting a blocked-either-way member with BadRequestException', async () => {
+    it('rejects inviting the inviter’s own block with BadRequestException and the invite-blocked code', async () => {
       profilesRepo.findOne.mockResolvedValue(
         makeProfile({ userId: 'bob', slug: 'bob-slug' }),
       );
-      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+      // The inviter is always one of the current owners `membersRepo.find`
+      // returns (default fixture: `[{ userId: 'creator' }]`), so a block
+      // against just the inviter is caught by the same batched owner check.
+      // There is no separate inviter-only case to test any more.
+      blockFilter.blockedAgainstAnyOf.mockResolvedValue(new Set(['bob']));
+
+      const caught: unknown = await service
+        .invite('creator', 'sp1', 'bob-slug')
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+
+      expect(caught).toBeInstanceOf(BadRequestException);
+      expect((caught as BadRequestException).getResponse()).toMatchObject({
+        code: 'SUBPROFILE_INVITE_BLOCKED',
+      });
+    });
+
+    it('rejects inviting someone blocked by a co-owner other than the inviter', async () => {
+      profilesRepo.findOne.mockResolvedValue(
+        makeProfile({ userId: 'bob', slug: 'bob-slug' }),
+      );
+      membersRepo.find.mockResolvedValue([
+        { userId: 'creator' } as SubprofileMember,
+        { userId: 'co-owner-1' } as SubprofileMember,
+      ]);
+      blockFilter.blockedAgainstAnyOf.mockResolvedValue(new Set(['bob']));
+
       await expect(
         service.invite('creator', 'sp1', 'bob-slug'),
       ).rejects.toThrow(BadRequestException);
+      // Every current owner is passed as a guardian.
+      expect(blockFilter.blockedAgainstAnyOf).toHaveBeenCalledWith(
+        ['bob'],
+        ['creator', 'co-owner-1'],
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
 
     it('404s when no profile matches the given slug', async () => {
@@ -589,6 +644,83 @@ describe('SubprofileInvitesService', () => {
         BadRequestException,
       );
       expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    // ENG-450 / M5: a block formed any time between the invite being sent
+    // and this accept must still stop the seat, so the re-check re-reads the
+    // roster fresh through `manager.find`, INSIDE the locked transaction, so
+    // a concurrently-accepting blocked pair cannot both pass a stale
+    // pre-lock read.
+    it('rejects and closes the invite when a block with a current owner was added after the invite was sent', async () => {
+      invitesRepo.findOne.mockResolvedValue(
+        makeInvite({ id: 'inv1', subprofileId: 'sp1', invitedUserId: 'bob' }),
+      );
+      manager.find.mockResolvedValue([
+        { userId: 'creator' } as SubprofileMember,
+        { userId: 'co-owner-1' } as SubprofileMember,
+      ]);
+      blockFilter.blockedAgainstAnyOf.mockResolvedValue(new Set(['bob']));
+
+      const caught: unknown = await service.accept('bob', 'inv1').then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(caught).toBeInstanceOf(BadRequestException);
+      expect((caught as BadRequestException).getResponse()).toMatchObject({
+        code: 'SUBPROFILE_INVITE_BLOCKED',
+      });
+      // The transaction ran (the lock was taken and the block re-checked
+      // inside it) but never wrote anything: no member row, no Accepted save.
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.save).not.toHaveBeenCalled();
+      // The invite is closed OUTSIDE the transaction (mirrors `revoke`'s
+      // shape), once the rollback is guaranteed, so it stops offering an
+      // accept that would only fail again.
+      expect(invitesRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'inv1',
+          status: SubprofileInviteStatus.Revoked,
+        }),
+      );
+      // Every current owner is a guardian.
+      expect(blockFilter.blockedAgainstAnyOf).toHaveBeenCalledWith(
+        ['bob'],
+        expect.arrayContaining(['creator', 'co-owner-1']),
+      );
+    });
+
+    it('rejects when the block is against the original inviter, even if they have since left the persona', async () => {
+      invitesRepo.findOne.mockResolvedValue(
+        makeInvite({
+          id: 'inv1',
+          subprofileId: 'sp1',
+          invitedUserId: 'bob',
+          invitedByUserId: 'creator',
+        }),
+      );
+      // The inviter has left the roster, leaving only a successor co-owner.
+      manager.find.mockResolvedValue([
+        { userId: 'successor' } as SubprofileMember,
+      ]);
+      blockFilter.blockedAgainstAnyOf.mockResolvedValue(new Set(['bob']));
+
+      await expect(service.accept('bob', 'inv1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(blockFilter.blockedAgainstAnyOf).toHaveBeenCalledWith(
+        ['bob'],
+        expect.arrayContaining(['successor', 'creator']),
+      );
+    });
+
+    it('never blocks when no block exists (default fixture stays unblocked)', async () => {
+      invitesRepo.findOne.mockResolvedValue(
+        makeInvite({ id: 'inv1', subprofileId: 'sp1', invitedUserId: 'bob' }),
+      );
+
+      await expect(service.accept('bob', 'inv1')).resolves.toBeUndefined();
+      expect(invitesRepo.save).not.toHaveBeenCalled();
     });
   });
 

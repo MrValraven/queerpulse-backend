@@ -57,6 +57,31 @@ describe('AdminForumService', () => {
     );
   });
 
+  it('passes each queue row through with its community, or null for none', async () => {
+    // `ForumThreadsService.listPendingReview` loads the page's communities in
+    // one query; this service hands its rows to the admin page unchanged.
+    const rows = [
+      {
+        slug: 'hike-sunday',
+        community: { slug: 'lisbon-hikers', name: 'Lisbon Hikers' },
+      },
+      { slug: 'global-question', community: null },
+    ];
+    threads.listPendingReview.mockResolvedValue({
+      data: rows,
+      pageInfo: { nextCursor: null, hasMore: false },
+    } as unknown as Awaited<
+      ReturnType<ForumThreadsService['listPendingReview']>
+    >);
+
+    const page = await service.listReviewQueue(moderator, undefined, 20);
+
+    expect(page.data.map((row) => row.community)).toEqual([
+      { slug: 'lisbon-hikers', name: 'Lisbon Hikers' },
+      null,
+    ]);
+  });
+
   it("translates the DTO's verb into the service's approve flag", async () => {
     // The wire says `approve`/`reject`; the service writes `review_state`. The
     // translation happens exactly here so there is no third vocabulary.

@@ -2,7 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage } from '../common/cursor-pagination';
 import { ForumThreadResponse } from '../forum/forum-response';
-import { ForumThreadsService } from '../forum/forum-threads.service';
+import {
+  ForumReviewQueueRow,
+  ForumThreadsService,
+} from '../forum/forum-threads.service';
 import { ReviewThreadDto } from './dto/review-thread.dto';
 
 /**
@@ -20,11 +23,14 @@ import { ReviewThreadDto } from './dto/review-thread.dto';
 export class AdminForumService {
   constructor(private readonly threads: ForumThreadsService) {}
 
+  // Each row carries the thread's `community` ({ slug, name } or null), which
+  // `listPendingReview` loads for the whole page in one query, so the queue
+  // can say "In {community}" beside a thread.
   listReviewQueue(
     user: CurrentUserData,
     cursor: string | undefined,
     limit: number | undefined,
-  ): Promise<CursorPage<ForumThreadResponse>> {
+  ): Promise<CursorPage<ForumReviewQueueRow>> {
     return this.threads.listPendingReview(user, cursor, limit);
   }
 

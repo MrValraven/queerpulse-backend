@@ -276,18 +276,26 @@ export class ModAuditService {
     // When inside a transaction, pass the manager so the audit row commits
     // with the action it records instead of surviving a rollback.
     manager?: EntityManager,
-  ): Promise<void> {
+    // The member the action landed on (ENG-480). A content-report sanction
+    // carries the content's author here, so an appeal by that author can find
+    // the row and the admin member drawer lists it. Null for rows with no
+    // person on the receiving end (dismiss, escalate).
+    targetUserId?: string | null,
+  ): Promise<string> {
     const repo = manager ? manager.getRepository(ModAuditLog) : this.auditLogs;
-    await repo.save(
-      repo.create({
-        reportId,
-        actorId,
-        action,
-        reasonCode: reasonCode ?? null,
-        note: note ?? null,
-        duration: duration ?? null,
-      }),
-    );
+    const row = repo.create({
+      reportId,
+      actorId,
+      action,
+      reasonCode: reasonCode ?? null,
+      note: note ?? null,
+      duration: duration ?? null,
+      targetUserId: targetUserId ?? null,
+    });
+    const saved = await repo.save(row);
+    // The saved row's id is the `actionId` an appeal deep link carries. Read
+    // it guardedly: a repository mock can resolve to the input with no id.
+    return saved?.id ?? row?.id;
   }
 
   // --- actor-name resolution (shared by the audit reads above and by

@@ -4,8 +4,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { Topic } from '../content/entities/topic.entity';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import {
   AdminTopicResponse,
@@ -29,6 +30,8 @@ export class AdminTopicsService {
     private readonly topics: Repository<Topic>,
     @InjectRepository(TopicFollow)
     private readonly topicFollows: Repository<TopicFollow>,
+    private readonly dataSource: DataSource,
+    private readonly modAudit: ModAuditService,
   ) {}
 
   /** Every topic, archived ones included, alphabetically by tag. */
@@ -115,11 +118,28 @@ export class AdminTopicsService {
    * so without this the rows would survive as invisible followers and a later
    * topic reusing the tag would inherit them while its `follower_count`
    * started at zero. Prefer `archive` for a topic anyone has used.
+   *
+   * Both deletes and the audit row commit in one transaction (ENG-490): a
+   * failure between the topic delete and the follow cleanup used to leave the
+   * table half-deleted, and the action recorded no actor, so nobody could
+   * answer who ran it. `actorId` is the acting staff member from the
+   * controller's `@CurrentUser()`.
    */
-  async remove(id: string): Promise<void> {
+  async remove(id: string, actorId: string): Promise<void> {
     const topic = await this.loadOr404(id);
-    await this.topics.delete(id);
-    await this.topicFollows.delete({ topicSlug: topic.tag });
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(Topic, id);
+      await manager.delete(TopicFollow, { topicSlug: topic.tag });
+      await this.modAudit.writeAuditLog(
+        null,
+        actorId,
+        'topic_hard_delete',
+        undefined,
+        `Deleted topic #${topic.tag} (${topic.label})`,
+        undefined,
+        manager,
+      );
+    });
   }
 
   private async loadOr404(id: string): Promise<Topic> {

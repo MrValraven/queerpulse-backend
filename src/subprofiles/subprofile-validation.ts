@@ -71,8 +71,13 @@ export type PublishUnmetCode =
   | 'not_enough_items'
   | 'blocked_terms';
 
+// ENG-453: the tagline is public identity text just like the display name and
+// bio, and the live-edit re-screen already reads it (`SubprofilesService`
+// .update, around the `prevStatus === Published` block). This publish-time
+// screen had fallen out of step with it, so a tagline set before that
+// re-screen existed could carry a blocked term straight through publish.
 function containsBlockedTerm(sp: Subprofile): boolean {
-  return textHasBlockedTerm(sp.displayName, sp.bio, sp.handle);
+  return textHasBlockedTerm(sp.displayName, sp.bio, sp.handle, sp.tagline);
 }
 
 // The three namespace checks every claimed handle passes, for both link kinds.

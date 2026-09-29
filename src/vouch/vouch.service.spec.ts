@@ -7,7 +7,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, IsNull, QueryFailedError } from 'typeorm';
+import { DataSource, In, IsNull, QueryFailedError } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -20,6 +20,54 @@ const uniqueViolation = () =>
   new QueryFailedError('insert', [], {
     code: '23505',
   } as unknown as Error);
+
+/**
+ * The explicit (not index-signature) shape of a `vouches.createQueryBuilder`
+ * mock, so a caller can do `builder.getMany.mockResolvedValue(...)` without
+ * `noUncheckedIndexedAccess` treating every property as possibly `undefined`.
+ */
+type VouchesQueryBuilderMock = {
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  select: jest.Mock;
+  addSelect: jest.Mock;
+  orderBy: jest.Mock;
+  addOrderBy: jest.Mock;
+  groupBy: jest.Mock;
+  offset: jest.Mock;
+  limit: jest.Mock;
+  getCount: jest.Mock;
+  getMany: jest.Mock;
+  getRawMany: jest.Mock;
+};
+
+/**
+ * A standalone `vouches.createQueryBuilder('v')` mock, independent of every
+ * other one. Most tests in this file share ONE builder object across every
+ * call `listVouchers` makes (count, the named-id scan, the page), which is
+ * enough when a test only checks that some clause was applied somewhere. A
+ * test that needs to prove WHICH of those three queries a clause landed on
+ * (the roster's visibility filter belongs on the page query alone) instead
+ * gives `vouches.createQueryBuilder` a `mockImplementation` that returns one
+ * of these per call, in the fixed order `listVouchers` issues them: count,
+ * then the id scan, then the page.
+ */
+function newVouchesQueryBuilder(): VouchesQueryBuilderMock {
+  return {
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
+    groupBy: jest.fn().mockReturnThis(),
+    offset: jest.fn().mockReturnThis(),
+    limit: jest.fn().mockReturnThis(),
+    getCount: jest.fn(),
+    getMany: jest.fn(),
+    getRawMany: jest.fn(),
+  };
+}
 
 describe('VouchService', () => {
   let service: VouchService;
@@ -36,7 +84,15 @@ describe('VouchService', () => {
   let vouchesQuery: Record<string, jest.Mock>;
   let activeVouchesCount: number;
   let activeVouchesPage: unknown[];
+  // What `getNamedVoucherIds`' raw query returns: the target's WHOLE active,
+  // non-anonymous voucher pool, every page of it, which
+  // `resolveVisibleNamedVoucherIds` resolves visibility for up front, before
+  // `listVouchers` paginates.
+  let namedVoucherRows: { voucher_id: string }[];
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
+  // The viewer-bound `ProfilesService.visibleMemberIds` the controller hands
+  // `listVouchers` (ENG-436). Everyone is visible by default.
+  let visibleMemberIds: jest.Mock<Promise<Set<string>>, [string[]]>;
   let profiles: {
     findOne: jest.Mock;
     find: jest.Mock;
@@ -61,6 +117,7 @@ describe('VouchService', () => {
   beforeEach(async () => {
     activeVouchesCount = 0;
     activeVouchesPage = [];
+    namedVoucherRows = [];
     vouchesQuery = {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
@@ -73,7 +130,7 @@ describe('VouchService', () => {
       limit: jest.fn().mockReturnThis(),
       getCount: jest.fn(() => Promise.resolve(activeVouchesCount)),
       getMany: jest.fn(() => Promise.resolve(activeVouchesPage)),
-      getRawMany: jest.fn(() => Promise.resolve([])),
+      getRawMany: jest.fn(() => Promise.resolve(namedVoucherRows)),
     };
     vouches = {
       findOne: jest.fn().mockResolvedValue(null),
@@ -88,12 +145,15 @@ describe('VouchService', () => {
       // builder back for chaining.
       excludeBlocked: jest.fn((query: unknown) => query),
     };
+    visibleMemberIds = jest.fn((userIds: string[]) =>
+      Promise.resolve(new Set(userIds)),
+    );
     profiles = {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
       // `createVouch` resolves the vouchee through an ACTIVE-user join, so it
-      // goes via a query builder while `withdrawVouch`/`listVouchers` still use
-      // `findOne`. Delegating `getOne()` to the same `findOne` mock keeps every
+      // goes via a query builder while `withdrawVouch` still uses `findOne`
+      // (`listVouchers` takes a resolved profile). Delegating `getOne()` to the same `findOne` mock keeps every
       // `profiles.findOne.mockResolvedValue(...)` below meaningful for both.
       createQueryBuilder: jest.fn(() => ({
         innerJoin: jest.fn().mockReturnThis(),
@@ -274,6 +334,24 @@ describe('VouchService', () => {
         expect(emitter.emit).not.toHaveBeenCalled();
       });
 
+      it('carries the VOUCH_DAILY_LIMIT code with the unchanged message and status', async () => {
+        profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+        vouchesGivenToday = 20;
+        const error: unknown = await service
+          .createVouch('u1', 'them')
+          .catch((thrown: unknown) => thrown);
+        expect(error).toBeInstanceOf(ForbiddenException);
+        const forbidden = error as ForbiddenException;
+        expect(forbidden.getStatus()).toBe(403);
+        expect(forbidden.getResponse()).toEqual({
+          statusCode: 403,
+          error: 'Forbidden',
+          message:
+            'You can vouch for up to 20 members per day. Try again tomorrow.',
+          code: 'VOUCH_DAILY_LIMIT',
+        });
+      });
+
       // The cap counts COALESCE(reactivated_at, created_at), so a
       // withdraw-and-re-vouch cycle costs a slot instead of being free.
       it('counts reactivations, not just first-time vouches', async () => {
@@ -441,14 +519,25 @@ describe('VouchService', () => {
     });
   });
 
+  // `listVouchers` takes the target already resolved: the controller runs the
+  // slug through `ProfilesService.findBySlugOrThrow` first (ENG-436), so the
+  // slug-level gates (status, block, hidden-from, 24h hide, takedown) are
+  // covered by that method's spec and the 404 never reaches this service.
+  const target = (overrides: Partial<Profile> = {}): Profile =>
+    ({
+      userId: 'u2',
+      slug: 'them',
+      vouchersVisible: true,
+      ...overrides,
+    }) as Profile;
+
   describe('listVouchers excludes withdrawn and block-severed rows', () => {
     it('filters count and rows by withdrawnAt IS NULL', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'target',
-        vouchersVisible: true,
-      });
-      await service.listVouchers('target');
+      await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
       expect(vouchesQuery.andWhere).toHaveBeenCalledWith(
         'v.withdrawnAt IS NULL',
       );
@@ -456,17 +545,17 @@ describe('VouchService', () => {
       expect(vouchesQuery.getMany).toHaveBeenCalled();
     });
 
-    it('applies the block severance to the count AND the roster, target-relative', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'target',
-        vouchersVisible: true,
-      });
-      await service.listVouchers('target', undefined, 'some-other-viewer');
-      // Two builders (the count and the page), each severed against the
-      // TARGET, never the viewer — a block is mutual, so the vouch stops
-      // existing for everyone rather than being hidden from one side.
-      expect(blockFilter.excludeBlocked).toHaveBeenCalledTimes(2);
+    it('applies the block severance to the count, the named-voucher-id resolution AND the page, target-relative', async () => {
+      await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
+      // Three builders, each severed against the TARGET: a block is mutual,
+      // so the vouch stops existing for everyone. The count, the whole-roster
+      // named-voucher-id read `resolveVisibleNamedVoucherIds` resolves
+      // visibility for up front (ENG-436), and the paginated page itself.
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledTimes(3);
       expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
         vouchesQuery,
         'u2',
@@ -476,20 +565,22 @@ describe('VouchService', () => {
   });
 
   describe('listVouchers', () => {
-    it('404s an unknown member', async () => {
-      profiles.findOne.mockResolvedValue(null);
-      await expect(service.listVouchers('ghost')).rejects.toBeInstanceOf(
-        NotFoundException,
+    it('reads the roster of the resolved target and never looks the slug up again', async () => {
+      await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
+      expect(profiles.findOne).not.toHaveBeenCalled();
+      expect(vouchesQuery.where).toHaveBeenCalledWith(
+        'v.voucheeId = :voucheeId',
+        { voucheeId: 'u2' },
       );
     });
 
     it('returns the full count and a bounded, mapped page', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: true,
-      });
       activeVouchesCount = 42;
+      namedVoucherRows = [{ voucher_id: 'v1' }];
       activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
       ];
@@ -502,7 +593,15 @@ describe('VouchService', () => {
           photoVisible: true,
         },
       ]);
-      const res = await service.listVouchers('them', { limit: 10, offset: 5 });
+      const res = await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+        {
+          limit: 10,
+          offset: 5,
+        },
+      );
       expect(vouchesQuery.offset).toHaveBeenCalledWith(5);
       expect(vouchesQuery.limit).toHaveBeenCalledWith(10);
       expect(res.count).toBe(42); // total, not page length
@@ -521,12 +620,8 @@ describe('VouchService', () => {
     });
 
     it("honours the voucher's own photoVisible toggle", async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: true,
-      });
       activeVouchesCount = 1;
+      namedVoucherRows = [{ voucher_id: 'v1' }];
       activeVouchesPage = [
         { voucherId: 'v1', note: null, createdAt: new Date('2026-01-01') },
       ];
@@ -540,19 +635,18 @@ describe('VouchService', () => {
           photoVisible: false,
         },
       ]);
-      const res = await service.listVouchers('them');
+      const res = await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
       // The name still identifies the voucher (that is what a named vouch is);
       // the face is the thing they turned off.
       expect(res.vouchers[0]!.slug).toBe('val');
       expect(res.vouchers[0]!.avatarUrl).toBeNull();
     });
 
-    it('shields anonymous vouchers — no identity leaks, only note/timestamp', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: true,
-      });
+    it('shields anonymous vouchers: no identity leaks, only note/timestamp', async () => {
       activeVouchesCount = 1;
       activeVouchesPage = [
         {
@@ -567,8 +661,12 @@ describe('VouchService', () => {
       profiles.find.mockResolvedValue([
         { userId: 'secret', slug: 'nova', firstName: 'Nova', lastName: 'Mar' },
       ]);
-      const res = await service.listVouchers('them');
-      // The anonymous voucher's id is never queried for a profile — the whole
+      const res = await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
+      // The anonymous voucher's id is never queried for a profile: the whole
       // page is anonymous, so no profile lookup happens at all.
       expect(profiles.find).not.toHaveBeenCalled();
       expect(res.vouchers).toEqual([
@@ -586,81 +684,268 @@ describe('VouchService', () => {
     });
 
     it('defaults to a bounded page when no pagination is supplied', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: true,
-      });
-      await service.listVouchers('them');
+      await service.listVouchers(
+        target(),
+        'some-other-viewer',
+        visibleMemberIds,
+      );
       expect(vouchesQuery.offset).toHaveBeenCalledWith(0);
       expect(vouchesQuery.limit).toHaveBeenCalledWith(20);
     });
   });
 
+  describe('listVouchers member-set boundary on named vouchers (ENG-436)', () => {
+    it('drops a named voucher the viewer may not see and keeps the count', async () => {
+      // `visibleMemberIds` is the one batched answer for status, block either
+      // way, hidden-from, the 24h hide and takedown, so any of those lands
+      // here as "not in the set". `namedVoucherRows` is the target's WHOLE
+      // named-voucher pool (what `getNamedVoucherIds` reads), resolved up
+      // front; `activeVouchesPage` is the already-filtered, already-paginated
+      // page the visibility clause leaves for `getMany` to return.
+      activeVouchesCount = 2;
+      namedVoucherRows = [{ voucher_id: 'v1' }, { voucher_id: 'v2' }];
+      visibleMemberIds.mockResolvedValue(new Set(['v2']));
+      activeVouchesPage = [
+        { voucherId: 'v2', note: null, createdAt: new Date('2026-01-01') },
+      ];
+      profiles.find.mockResolvedValue([
+        { userId: 'v2', slug: 'wren', firstName: 'Wren', lastName: 'Sol' },
+      ]);
+      const res = await service.listVouchers(
+        target(),
+        'viewer-1',
+        visibleMemberIds,
+      );
+      // One call resolves the whole roster.
+      expect(visibleMemberIds).toHaveBeenCalledTimes(1);
+      expect(visibleMemberIds).toHaveBeenCalledWith(['v1', 'v2']);
+      // The visibility boundary is folded into the SAME query the page is
+      // paginated from, so the dropped voucher never eats into a page.
+      expect(vouchesQuery.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('IN (:...visibleVoucherIds)') as unknown,
+        expect.objectContaining({
+          viewerId: 'viewer-1',
+          visibleVoucherIds: ['v2'],
+        }) as unknown,
+      );
+      expect(res.vouchers.map((voucher) => voucher.slug)).toEqual(['wren']);
+      // The dropped voucher is never resolved to a profile either.
+      expect(profiles.find).toHaveBeenCalledWith({
+        where: { userId: In(['v2']) },
+      });
+      expect(res.count).toBe(2);
+    });
+
+    it('keeps page 2 full when a hidden voucher sits earlier in the order (stable pagination)', async () => {
+      // The target has 5 active named vouchers, newest first: v1 (hidden from
+      // this viewer), v2..v5 (all visible). Filtering v1 out first leaves
+      // [v2, v3, v4, v5]; page 2 at size 2 (offset 2) over THAT filtered order
+      // is [v4, v5], a full page. The old behaviour (filter an
+      // already-paginated page) would instead have paginated [v1..v5] first,
+      // landed on [v3, v4] at offset 2, then dropped nothing (v1 sat on page
+      // 1), so this fixture only distinguishes the two behaviours once the
+      // filter and the pagination are proven to run in the right order below.
+      //
+      // `listVouchers` issues exactly three `vouches.createQueryBuilder`
+      // calls, in this order: the count, the named-voucher-id scan
+      // (`resolveVisibleNamedVoucherIds`), then the paginated page. Giving
+      // each its own builder lets the assertions below pin the visibility
+      // filter and the offset/limit to the SAME (page) builder, and confirm
+      // the count and id-scan builders never see them.
+      const countBuilder = newVouchesQueryBuilder();
+      const idScanBuilder = newVouchesQueryBuilder();
+      const pageBuilder = newVouchesQueryBuilder();
+      const builders = [countBuilder, idScanBuilder, pageBuilder];
+      let nextBuilder = 0;
+      vouches.createQueryBuilder.mockImplementation(
+        () => builders[nextBuilder++],
+      );
+      countBuilder.getCount.mockResolvedValue(5);
+      idScanBuilder.getRawMany.mockResolvedValue([
+        { voucher_id: 'v1' },
+        { voucher_id: 'v2' },
+        { voucher_id: 'v3' },
+        { voucher_id: 'v4' },
+        { voucher_id: 'v5' },
+      ]);
+      visibleMemberIds.mockResolvedValue(new Set(['v2', 'v3', 'v4', 'v5']));
+      pageBuilder.getMany.mockResolvedValue([
+        { voucherId: 'v4', note: null, createdAt: new Date('2026-01-02') },
+        { voucherId: 'v5', note: null, createdAt: new Date('2026-01-01') },
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'v4', slug: 'juno', firstName: 'Juno', lastName: 'Vale' },
+        { userId: 'v5', slug: 'sol', firstName: 'Sol', lastName: 'Rae' },
+      ]);
+      const res = await service.listVouchers(
+        target(),
+        'viewer-1',
+        visibleMemberIds,
+        { limit: 2, offset: 2 },
+      );
+      // The resolver sees the whole named-voucher pool in one call.
+      expect(visibleMemberIds).toHaveBeenCalledTimes(1);
+      expect(visibleMemberIds).toHaveBeenCalledWith([
+        'v1',
+        'v2',
+        'v3',
+        'v4',
+        'v5',
+      ]);
+      // The id-scan widens past the default 500-row cap by `offset + limit`,
+      // so a page this deep stays exact (2 + 2 + 500 = 504).
+      expect(idScanBuilder.limit).toHaveBeenCalledWith(504);
+      // The visibility filter (the resolved, visible ids only) lands on the
+      // PAGE builder alone, confirmed below against the other two.
+      expect(pageBuilder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('IN (:...visibleVoucherIds)') as unknown,
+        expect.objectContaining({
+          viewerId: 'viewer-1',
+          visibleVoucherIds: ['v2', 'v3', 'v4', 'v5'],
+        }) as unknown,
+      );
+      const countBuilderClauses = countBuilder.andWhere.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
+      );
+      const idScanBuilderClauses = idScanBuilder.andWhere.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
+      );
+      expect(
+        countBuilderClauses.some((clause) =>
+          clause.includes('visibleVoucherIds'),
+        ),
+      ).toBe(false);
+      expect(
+        idScanBuilderClauses.some((clause) =>
+          clause.includes('visibleVoucherIds'),
+        ),
+      ).toBe(false);
+      // The offset/limit for THIS page sit on the same page builder too.
+      expect(pageBuilder.offset).toHaveBeenCalledWith(2);
+      expect(pageBuilder.limit).toHaveBeenCalledWith(2);
+      expect(countBuilder.offset).not.toHaveBeenCalled();
+      expect(countBuilder.limit).not.toHaveBeenCalled();
+      // `count` comes from the count builder alone and reports the true
+      // total, hidden voucher included.
+      expect(res.count).toBe(5);
+      // A full page of 2 rows, exactly the requested page size.
+      expect(res.vouchers.map((voucher) => voucher.slug)).toEqual([
+        'juno',
+        'sol',
+      ]);
+    });
+
+    it('keeps anonymous rows so a vanished shielded row cannot reveal its author', async () => {
+      // Split builders (see `newVouchesQueryBuilder`) so the empty-visible-set
+      // SQL below can be pinned to the page query specifically.
+      const countBuilder = newVouchesQueryBuilder();
+      const idScanBuilder = newVouchesQueryBuilder();
+      const pageBuilder = newVouchesQueryBuilder();
+      const builders = [countBuilder, idScanBuilder, pageBuilder];
+      let nextBuilder = 0;
+      vouches.createQueryBuilder.mockImplementation(
+        () => builders[nextBuilder++],
+      );
+      countBuilder.getCount.mockResolvedValue(1);
+      idScanBuilder.getRawMany.mockResolvedValue([]); // no named vouchers at all
+      pageBuilder.getMany.mockResolvedValue([
+        {
+          voucherId: 'secret',
+          note: null,
+          createdAt: new Date('2026-01-01'),
+          anonymous: true,
+        },
+      ]);
+      visibleMemberIds.mockResolvedValue(new Set());
+      const res = await service.listVouchers(
+        target(),
+        'viewer-1',
+        visibleMemberIds,
+      );
+      // Anonymous authors are never even asked about: the target has no
+      // named voucher to resolve.
+      expect(visibleMemberIds).toHaveBeenCalledWith([]);
+      // With no visible ids at all, the `IN` branch is never appended: the
+      // page query's visibility filter reduces to the anonymous-or-own
+      // clause alone, which never emits an `IN ()`.
+      expect(pageBuilder.andWhere).toHaveBeenCalledWith(
+        '(v.anonymous = true OR v.voucherId = :viewerId)',
+        { viewerId: 'viewer-1' },
+      );
+      expect(res.vouchers).toHaveLength(1);
+      expect(res.vouchers[0]!.anonymous).toBe(true);
+    });
+
+    it('always shows the viewer their own vouch, even inside their own 24h hide', async () => {
+      activeVouchesCount = 1;
+      // The target's only named voucher is the viewer's own, so it is
+      // excluded before resolution: the viewer sees their own vouch
+      // unconditionally, independent of whether the resolver counts them
+      // visible to themselves.
+      namedVoucherRows = [{ voucher_id: 'viewer-1' }];
+      visibleMemberIds.mockResolvedValue(new Set());
+      activeVouchesPage = [
+        {
+          voucherId: 'viewer-1',
+          note: null,
+          createdAt: new Date('2026-01-01'),
+        },
+      ];
+      profiles.find.mockResolvedValue([
+        { userId: 'viewer-1', slug: 'me', firstName: 'Me', lastName: 'Self' },
+      ]);
+      const res = await service.listVouchers(
+        target(),
+        'viewer-1',
+        visibleMemberIds,
+      );
+      expect(visibleMemberIds).toHaveBeenCalledWith([]);
+      expect(res.vouchers.map((voucher) => voucher.slug)).toEqual(['me']);
+    });
+
+    it('applies the boundary to the owner too, so a deactivated voucher leaves their own list', async () => {
+      activeVouchesCount = 1;
+      namedVoucherRows = [{ voucher_id: 'v1' }];
+      visibleMemberIds.mockResolvedValue(new Set());
+      // Not visible to the owner either, so the SQL filter leaves the page
+      // empty.
+      activeVouchesPage = [];
+      const res = await service.listVouchers(target(), 'u2', visibleMemberIds);
+      expect(visibleMemberIds).toHaveBeenCalledWith(['v1']);
+      expect(res.vouchers).toEqual([]);
+      expect(res.count).toBe(1);
+    });
+
+    it('skips the lookup entirely when the roster is count-only', async () => {
+      activeVouchesCount = 3;
+      await service.listVouchers(
+        target({ vouchersVisible: false }),
+        'viewer-1',
+        visibleMemberIds,
+      );
+      expect(visibleMemberIds).not.toHaveBeenCalled();
+    });
+  });
+
   describe('listVouchers vouchersVisible gate', () => {
     it('hides the roster (count-only) for a non-owner viewer when vouchersVisible is off', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: false,
-      });
       activeVouchesCount = 7;
       activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
       ];
       const res = await service.listVouchers(
-        'them',
-        undefined,
+        target({ vouchersVisible: false }),
         'some-other-viewer',
+        visibleMemberIds,
       );
       expect(res).toEqual({ count: 7, vouchers: [] });
       // The gate short-circuits before the page query even runs.
       expect(vouchesQuery.getMany).not.toHaveBeenCalled();
     });
 
-    it('hides the roster for an unauthenticated/unknown viewer the same way', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: false,
-      });
-      activeVouchesCount = 3;
-      const res = await service.listVouchers('them');
-      expect(res).toEqual({ count: 3, vouchers: [] });
-    });
-
     it('still shows the full roster to the owner even when vouchersVisible is off', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: false,
-      });
       activeVouchesCount = 1;
-      activeVouchesPage = [
-        { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
-      ];
-      profiles.find.mockResolvedValue([
-        {
-          userId: 'v1',
-          slug: 'val',
-          firstName: 'Val',
-          lastName: 'Reis',
-          photoVisible: true,
-        },
-      ]);
-      const res = await service.listVouchers('them', undefined, 'u2');
-      expect(res.count).toBe(1);
-      expect(res.vouchers).toHaveLength(1);
-      expect(res.vouchers[0]!.slug).toBe('val');
-    });
-
-    it('shows the full roster to a non-owner viewer when vouchersVisible is on', async () => {
-      profiles.findOne.mockResolvedValue({
-        userId: 'u2',
-        slug: 'them',
-        vouchersVisible: true,
-      });
-      activeVouchesCount = 1;
+      namedVoucherRows = [{ voucher_id: 'v1' }];
       activeVouchesPage = [
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
       ];
@@ -674,9 +959,34 @@ describe('VouchService', () => {
         },
       ]);
       const res = await service.listVouchers(
-        'them',
-        undefined,
+        target({ vouchersVisible: false }),
+        'u2',
+        visibleMemberIds,
+      );
+      expect(res.count).toBe(1);
+      expect(res.vouchers).toHaveLength(1);
+      expect(res.vouchers[0]!.slug).toBe('val');
+    });
+
+    it('shows the full roster to a non-owner viewer when vouchersVisible is on', async () => {
+      activeVouchesCount = 1;
+      namedVoucherRows = [{ voucher_id: 'v1' }];
+      activeVouchesPage = [
+        { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
+      ];
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'v1',
+          slug: 'val',
+          firstName: 'Val',
+          lastName: 'Reis',
+          photoVisible: true,
+        },
+      ]);
+      const res = await service.listVouchers(
+        target(),
         'some-other-viewer',
+        visibleMemberIds,
       );
       expect(res.vouchers).toHaveLength(1);
     });

@@ -749,3 +749,57 @@ describe('toForumThreadResponse composer fields', () => {
     ).toBeNull();
   });
 });
+
+// PRD-408: the thread page offers the credited member a way to take their name
+// off, so the response has to say whether the viewer IS that member.
+describe('toForumThreadResponse viewerIsCoAuthor', () => {
+  const coAuthored = makeThread({ coAuthorId: 'bo-1' });
+
+  it('viewerIsCoAuthor is true only for the co-author', () => {
+    const coAuthorView = toForumThreadResponse(coAuthored, null, {
+      userId: 'bo-1',
+      isModerator: false,
+    });
+    const authorView = toForumThreadResponse(coAuthored, null, {
+      userId: 'author-1',
+      isModerator: false,
+    });
+    const moderatorView = toForumThreadResponse(coAuthored, null, {
+      userId: 'mod-1',
+      isModerator: true,
+    });
+    const strangerView = toForumThreadResponse(coAuthored, null, {
+      userId: 'other-1',
+      isModerator: false,
+    });
+
+    expect(coAuthorView.viewerIsCoAuthor).toBe(true);
+    expect(authorView.viewerIsCoAuthor).toBe(false);
+    expect(moderatorView.viewerIsCoAuthor).toBe(false);
+    expect(strangerView.viewerIsCoAuthor).toBe(false);
+  });
+
+  it('is false for everybody on a thread with no co-author', () => {
+    // A neutral viewer carries an empty id; a thread with no credit must not
+    // match it through a null comparison.
+    const neutralView = toForumThreadResponse(makeThread(), null, {
+      userId: '',
+      isModerator: false,
+    });
+
+    expect(neutralView.viewerIsCoAuthor).toBe(false);
+  });
+
+  it('stays true for the co-author on an anonymous thread', () => {
+    // The byline hides both names from other readers, and the credited member
+    // still knows they are credited, so they can still withdraw.
+    const anonymousView = toForumThreadResponse(
+      makeThread({ coAuthorId: 'bo-1', isAnonymous: true }),
+      null,
+      { userId: 'bo-1', isModerator: false },
+    );
+
+    expect(anonymousView.coAuthor).toBeNull();
+    expect(anonymousView.viewerIsCoAuthor).toBe(true);
+  });
+});

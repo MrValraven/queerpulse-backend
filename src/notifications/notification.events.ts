@@ -64,3 +64,21 @@ export interface NotificationBatchCreatedEvent {
    */
   notification: Notification;
 }
+
+/**
+ * Fired after a member's OWN notification rows change read state or are
+ * deleted: mark one read, mark all read, the mentions inbox's mark all read,
+ * and dismiss. Emitted only when the write actually touched a row.
+ *
+ * NOTE: this is the **event-emitter topic name**, which is a separate
+ * namespace from socket event names (same as `NOTIFICATION_CREATED` above).
+ * The chat gateway relays it to the member's `user:${userId}` room as the
+ * socket event `notification:changed`, so their OTHER tabs and devices
+ * refetch the bell list and unread badge.
+ */
+export const NOTIFICATION_STATE_CHANGED = 'notification.state_changed';
+
+export interface NotificationStateChangedEvent {
+  /** The member whose rows changed; the gateway fans out to their user room. */
+  userId: string;
+}

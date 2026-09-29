@@ -1,4 +1,4 @@
-import { FindOperator } from 'typeorm';
+import { FindOperator, In } from 'typeorm';
 import { EventStatus } from '../events/entities/event.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { EventMatchConfig } from './entities/event-match-config.entity';
@@ -6,12 +6,23 @@ import { EventMatchEntry } from './entities/event-match-entry.entity';
 import { EventMatchGroup } from './entities/event-match-group.entity';
 import { MatchFeedback } from './entities/match-feedback.entity';
 import { MemberBlocker } from './go-together-eligibility.service';
+import { isGoTogetherLaunched } from './go-together-launch.guard';
 import {
+  ACTIVE_MATCH_CONDITION,
+  ACTIVE_MATCH_JOIN,
   GoTogetherMatchingService,
   MATCHING_LOCK_KEY,
   RETENTION_LOCK_KEY,
 } from './go-together-matching.service';
 import { ComponentScores, pairKey } from './go-together-scoring';
+
+jest.mock('./go-together-launch.guard', () => ({
+  isGoTogetherLaunched: jest.fn(() => true),
+}));
+
+const mockIsGoTogetherLaunched = isGoTogetherLaunched as jest.MockedFunction<
+  typeof isGoTogetherLaunched
+>;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -58,7 +69,7 @@ function matchesWhere(row: Row, where: Where): boolean {
 }
 
 interface BuilderCall {
-  kind: 'update' | 'delete';
+  kind: 'update' | 'delete' | 'select';
   values: Row;
   clauses: string[];
   params: Row;
@@ -68,17 +79,23 @@ interface FakeQueryBuilder {
   update(): FakeQueryBuilder;
   delete(): FakeQueryBuilder;
   from(): FakeQueryBuilder;
+  innerJoin(): FakeQueryBuilder;
+  select(): FakeQueryBuilder;
+  addSelect(): FakeQueryBuilder;
   set(values: Row): FakeQueryBuilder;
   where(clause: string, params?: Row): FakeQueryBuilder;
   andWhere(clause: string, params?: Row): FakeQueryBuilder;
   returning(): FakeQueryBuilder;
   execute(): Promise<unknown>;
+  getRawMany(): Promise<unknown[]>;
 }
 
-/** A query builder that records the statement and hands it to `onExecute`. */
+/** A query builder that records the statement and hands it to `onExecute`,
+ *  or to `onRawMany` for a read. */
 function fakeQueryBuilder(
   calls: BuilderCall[],
   onExecute: (call: BuilderCall) => unknown,
+  onRawMany: (call: BuilderCall) => unknown[],
 ): FakeQueryBuilder {
   const call: BuilderCall = {
     kind: 'update',
@@ -99,6 +116,9 @@ function fakeQueryBuilder(
       return builder;
     },
     from: () => builder,
+    innerJoin: () => builder,
+    select: () => builder,
+    addSelect: () => builder,
     set: (values: Row) => {
       call.values = values;
       return builder;
@@ -107,6 +127,10 @@ function fakeQueryBuilder(
     andWhere: addClause,
     returning: () => builder,
     execute: () => Promise.resolve(onExecute(call)),
+    getRawMany: () => {
+      call.kind = 'select';
+      return Promise.resolve().then(() => onRawMany(call));
+    },
   };
   return builder;
 }
@@ -115,6 +139,7 @@ function fakeQueryBuilder(
 function inMemoryRepository<Entity extends object>(
   rows: Entity[],
   onExecute: (call: BuilderCall) => unknown = () => ({ raw: [], affected: 0 }),
+  onRawMany: (call: BuilderCall) => unknown[] = () => [],
 ) {
   const read = (where: Where): Entity[] =>
     rows.filter((row) => matchesWhere(row as unknown as Row, where));
@@ -143,7 +168,7 @@ function inMemoryRepository<Entity extends object>(
       return Promise.resolve(input);
     }),
     createQueryBuilder: jest.fn(() =>
-      fakeQueryBuilder(builderCalls, onExecute),
+      fakeQueryBuilder(builderCalls, onExecute, onRawMany),
     ),
   };
 }
@@ -276,7 +301,12 @@ interface Scenario {
   groups?: EventMatchGroup[];
   feedback?: MatchFeedback[];
   blocks?: { blockerId: string; blockedId: string }[];
-  deletedCounts?: { groups: number; entries: number; profiles: number };
+  deletedCounts?: {
+    groups: number;
+    entries: number;
+    configs: number;
+    profiles: number;
+  };
 }
 
 function build(scenario: Scenario = {}) {
@@ -284,6 +314,7 @@ function build(scenario: Scenario = {}) {
   const deletedCounts = scenario.deletedCounts ?? {
     groups: 0,
     entries: 0,
+    configs: 0,
     profiles: 0,
   };
   const lockRunner = {
@@ -303,41 +334,83 @@ function build(scenario: Scenario = {}) {
 
   const configRows = scenario.configs ?? [];
   const eventRows = scenario.events ?? [];
+  const groupRows = scenario.groups ?? [];
   // The conditional claim UPDATE: only rows whose claim column is still null
   // (and that match the pass's conditions) are stamped and returned. The
   // cutoff claim uses the cutoff clamped to 7 days to 6 hours before the
   // event's current start, as the service's EXISTS clause does.
-  const configs = inMemoryRepository(configRows, (call) => {
-    const column = Object.keys(call.values)[0] as ClaimColumn;
-    const stampedAt = call.values[column] as Date;
-    const claimed = configRows.filter((row) => {
-      if (row[column] !== null) return false;
-      if (column === 'matchedAt') {
-        const eventRow = eventRows.find(
-          (candidate) => candidate.id === row.eventId,
-        );
-        if (!row.enabled || !eventRow) return false;
-        const startMs = eventRow.startAt.getTime();
-        const effectiveCutoffMs = Math.min(
-          Math.max(row.cutoffAt.getTime(), startMs - 7 * DAY_MS),
-          startMs - 6 * HOUR_MS,
-        );
-        return effectiveCutoffMs <= asTime(call.params.now);
-      }
-      return (
-        row.matchedAt !== null &&
-        (call.params.eventIds as string[]).includes(row.eventId)
+  // The active-match read: every config joined to its event, kept while the
+  // event's end (or start, with no end) is after `activeSince`, or while its
+  // prompt went out and one of its groups still holds per-pair scores.
+  const readActiveMatches = (call: BuilderCall): Row[] =>
+    configRows.flatMap((row) => {
+      const eventRow = eventRows.find(
+        (candidate) => candidate.id === row.eventId,
       );
+      if (!eventRow) return [];
+      const lastMomentMs = (eventRow.endAt ?? eventRow.startAt).getTime();
+      const isRecent = lastMomentMs > asTime(call.params.activeSince);
+      const hasOpenFeedback =
+        row.feedbackPromptedAt !== null &&
+        groupRows.some(
+          (groupRow) =>
+            groupRow.eventId === row.eventId &&
+            groupRow.trainingWrittenAt === null &&
+            groupRow.pairComponents !== null,
+        );
+      if (!isRecent && !hasOpenFeedback) return [];
+      return [
+        {
+          event_id: row.eventId,
+          enabled: row.enabled,
+          matched_at: row.matchedAt,
+          late_group_at: row.lateGroupAt,
+          feedback_prompted_at: row.feedbackPromptedAt,
+          slug: eventRow.slug,
+          title: eventRow.title,
+          status: eventRow.status,
+          start_at: eventRow.startAt,
+          end_at: eventRow.endAt,
+        },
+      ];
     });
-    claimed.forEach((row) => Object.assign(row, { [column]: stampedAt }));
-    return { raw: claimed.map((row) => ({ event_id: row.eventId })) };
-  });
+  const configs = inMemoryRepository(
+    configRows,
+    (call) => {
+      if (call.kind === 'delete') {
+        return { raw: [], affected: deletedCounts.configs };
+      }
+      const column = Object.keys(call.values)[0] as ClaimColumn;
+      const stampedAt = call.values[column] as Date;
+      const claimed = configRows.filter((row) => {
+        if (row[column] !== null) return false;
+        if (column === 'matchedAt') {
+          const eventRow = eventRows.find(
+            (candidate) => candidate.id === row.eventId,
+          );
+          if (!row.enabled || !eventRow) return false;
+          const startMs = eventRow.startAt.getTime();
+          const effectiveCutoffMs = Math.min(
+            Math.max(row.cutoffAt.getTime(), startMs - 7 * DAY_MS),
+            startMs - 6 * HOUR_MS,
+          );
+          return effectiveCutoffMs <= asTime(call.params.now);
+        }
+        return (
+          row.matchedAt !== null &&
+          (call.params.eventIds as string[]).includes(row.eventId)
+        );
+      });
+      claimed.forEach((row) => Object.assign(row, { [column]: stampedAt }));
+      return { raw: claimed.map((row) => ({ event_id: row.eventId })) };
+    },
+    readActiveMatches,
+  );
   const events = inMemoryRepository(eventRows);
   const entries = inMemoryRepository(scenario.entries ?? [], () => ({
     raw: [],
     affected: deletedCounts.entries,
   }));
-  const groupRows = scenario.groups ?? [];
   const groups = inMemoryRepository(groupRows, (call) => {
     if (call.kind === 'delete') {
       return { raw: [], affected: deletedCounts.groups };
@@ -405,6 +478,7 @@ function build(scenario: Scenario = {}) {
 
   return {
     service,
+    dataSource,
     lockRunner,
     configs,
     events,
@@ -450,9 +524,15 @@ function entryOf(
   return row;
 }
 
+/** The active-match reads the harness served, one per tick that ran. */
+function activeMatchReads(harness: ReturnType<typeof build>): BuilderCall[] {
+  return harness.configs.builderCalls.filter((call) => call.kind === 'select');
+}
+
 describe('GoTogetherMatchingService', () => {
   afterEach(() => {
     jest.useRealTimers();
+    mockIsGoTogetherLaunched.mockReturnValue(true);
   });
 
   describe('advisory lock', () => {
@@ -499,6 +579,295 @@ describe('GoTogetherMatchingService', () => {
       expect(harness.loggerError).toHaveBeenCalledWith(
         expect.stringContaining('database went away'),
       );
+    });
+  });
+
+  describe('launch key', () => {
+    it('runs only the reconcile safety pass while Go together is held dark', async () => {
+      mockIsGoTogetherLaunched.mockReturnValue(false);
+      const harness = build({
+        configs: [
+          config('event-grouped', { matchedAt: hoursFromNow(-2) }),
+          config('event-due'),
+          config('event-past', {
+            matchedAt: hoursFromNow(-80),
+            feedbackPromptedAt: new Date(NOW.getTime() - 8 * DAY_MS),
+          }),
+        ],
+        events: [
+          event('event-grouped', { startAt: hoursFromNow(5) }),
+          event('event-due'),
+          event('event-past', { startAt: hoursFromNow(-230) }),
+        ],
+        entries: [
+          entry('entry-banned', 'event-grouped', 'user-banned', {
+            status: 'grouped',
+            groupId: 'group-1',
+          }),
+        ],
+        groups: [
+          group('group-past', 'event-past', {
+            pairComponents: { [pairKey('user-a', 'user-b')]: components(1) },
+          }),
+        ],
+      });
+      harness.eligibility.memberBlockers.mockResolvedValue(
+        new Map<string, MemberBlocker>([['user-banned', 'bannedFromEvent']]),
+      );
+
+      await harness.service.tick();
+
+      // A member banned from the gathering still leaves their group.
+      expect(harness.formation.removeMember).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'user-banned' }),
+      );
+      // Nothing forms, fills, prompts or writes training rows.
+      expect(harness.formation.formForEvent).not.toHaveBeenCalled();
+      expect(harness.formation.placeLateJoiners).not.toHaveBeenCalled();
+      expect(harness.formation.formLateGroup).not.toHaveBeenCalled();
+      expect(harness.notifications.createForRecipients).not.toHaveBeenCalled();
+      expect(harness.trainingRows.save).not.toHaveBeenCalled();
+      expect(configOf(harness, 'event-due').matchedAt).toBeNull();
+      expect(
+        harness.configs.builderCalls.filter((call) => call.kind === 'update'),
+      ).toEqual([]);
+    });
+
+    it('runs the passes once the key is back on', async () => {
+      const harness = build({
+        configs: [config('event-a')],
+        events: [event('event-a')],
+      });
+
+      await harness.service.tick();
+
+      expect(harness.formation.formForEvent).toHaveBeenCalledWith('event-a');
+    });
+
+    it('keeps the retention sweep running while Go together is held dark', async () => {
+      mockIsGoTogetherLaunched.mockReturnValue(false);
+      jest.useFakeTimers({ now: NOW });
+      const harness = build();
+
+      await harness.service.retentionSweep();
+
+      expect(harness.lockRunner.query).toHaveBeenCalledWith(
+        'SELECT pg_try_advisory_lock($1) AS locked',
+        [RETENTION_LOCK_KEY],
+      );
+      expect(harness.groups.builderCalls[0]?.kind).toBe('delete');
+      expect(harness.entries.builderCalls[0]?.kind).toBe('delete');
+      expect(harness.configs.builderCalls[0]?.kind).toBe('delete');
+    });
+  });
+
+  describe('active matches', () => {
+    // TypeORM rewrites `alias.property` only when a space, comma or bracket
+    // follows it; a path ending a line reaches Postgres raw. The fragments are
+    // written in quoted snake_case so there is nothing to rewrite.
+    it.each([
+      ['condition', ACTIVE_MATCH_CONDITION],
+      ['join', ACTIVE_MATCH_JOIN],
+    ])('writes the active-match %s in quoted snake_case', (_name, fragment) => {
+      expect(fragment).not.toMatch(/\b(config|event)\.\w+\s*\n/);
+      expect(fragment).not.toMatch(/(^|[^"])\b(config|event)\.[a-zA-Z]/);
+      expect(fragment).not.toMatch(/"[a-z_]*[A-Z]/);
+    });
+
+    it('names each column of the condition with its quoted alias', () => {
+      expect(ACTIVE_MATCH_CONDITION).toContain(
+        'COALESCE("event"."end_at", "event"."start_at") > :activeSince',
+      );
+      expect(ACTIVE_MATCH_CONDITION).toContain(
+        '"config"."feedback_prompted_at" IS NOT NULL',
+      );
+      expect(ACTIVE_MATCH_CONDITION).toContain(
+        '"open_group"."event_id" = "config"."event_id"',
+      );
+      expect(ACTIVE_MATCH_JOIN).toBe('"event"."id" = "config"."event_id"');
+    });
+
+    it('loads the configs once per tick, only for gatherings that ended under 14 days ago', async () => {
+      const harness = build({
+        configs: [
+          config('event-upcoming', { matchedAt: hoursFromNow(-2) }),
+          config('event-closing', {
+            matchedAt: hoursFromNow(-400),
+            feedbackPromptedAt: new Date(NOW.getTime() - 8 * DAY_MS),
+          }),
+          config('event-long-over', {
+            matchedAt: hoursFromNow(-900),
+            feedbackPromptedAt: new Date(NOW.getTime() - 8 * DAY_MS),
+          }),
+        ],
+        events: [
+          event('event-upcoming', { startAt: hoursFromNow(30) }),
+          event('event-closing', {
+            startAt: new Date(NOW.getTime() - 10 * DAY_MS),
+            endAt: new Date(NOW.getTime() - 10 * DAY_MS + 3 * HOUR_MS),
+          }),
+          event('event-long-over', {
+            startAt: new Date(NOW.getTime() - 20 * DAY_MS),
+            endAt: new Date(NOW.getTime() - 20 * DAY_MS + 3 * HOUR_MS),
+          }),
+        ],
+      });
+
+      await harness.service.runPasses(NOW);
+
+      const reads = activeMatchReads(harness);
+      expect(reads).toHaveLength(1);
+      expect(reads[0]?.params.activeSince).toEqual(
+        new Date(NOW.getTime() - 14 * DAY_MS),
+      );
+      expect(reads[0]?.clauses).toHaveLength(1);
+      expect(reads[0]?.clauses[0]).toContain(
+        'COALESCE("event"."end_at", "event"."start_at") > :activeSince',
+      );
+      expect(reads[0]?.clauses[0]).toContain(
+        '"open_group"."training_written_at" IS NULL',
+      );
+      // No pass re-reads configs or scans every open group on its own.
+      expect(harness.configs.find).not.toHaveBeenCalled();
+      const groupReads = harness.groups.find.mock.calls.map(
+        ([options]) => options.where,
+      );
+      expect(groupReads).toHaveLength(1);
+      expect(groupReads[0]?.eventId).toEqual(In(['event-closing']));
+    });
+
+    it('closes the feedback window when it falls due, however long ago the gathering was', async () => {
+      // Held dark for a while: the prompt went out 8 days ago, on relaunch,
+      // for a gathering 20 days over, which is outside the 14-day window.
+      const harness = build({
+        configs: [
+          config('event-late', {
+            matchedAt: hoursFromNow(-600),
+            feedbackPromptedAt: new Date(NOW.getTime() - 8 * DAY_MS),
+          }),
+        ],
+        events: [
+          event('event-late', {
+            startAt: new Date(NOW.getTime() - 20 * DAY_MS),
+            endAt: new Date(NOW.getTime() - 20 * DAY_MS + 3 * HOUR_MS),
+          }),
+        ],
+        groups: [
+          group('group-late', 'event-late', {
+            pairComponents: {
+              [pairKey('user-ana', 'user-bea')]: components(0.8),
+            },
+          }),
+        ],
+        feedback: [
+          verdict('group-late', 'user-ana', 'user-bea', 'yes'),
+          verdict('group-late', 'user-bea', 'user-ana', 'yes'),
+        ],
+      });
+
+      await harness.service.runPasses(NOW);
+
+      const lateGroup = harness.groups.rows.find(
+        (row) => row.id === 'group-late',
+      );
+      expect(lateGroup?.trainingWrittenAt).toEqual(NOW);
+      expect(lateGroup?.pairComponents).toBeNull();
+      expect(harness.trainingRows.rows).toHaveLength(1);
+    });
+
+    it('logs once and ends the tick when the shared read fails', async () => {
+      const harness = build({
+        configs: [config('event-a')],
+        events: [event('event-a')],
+      });
+      harness.configs.createQueryBuilder.mockImplementationOnce(() => {
+        const failing = fakeQueryBuilder(
+          [],
+          () => ({ raw: [] }),
+          () => {
+            throw new Error('read timed out');
+          },
+        );
+        return failing;
+      });
+
+      await harness.service.runPasses(NOW);
+
+      expect(harness.loggerError).toHaveBeenCalledTimes(1);
+      expect(harness.loggerError).toHaveBeenCalledWith(
+        expect.stringContaining('read timed out'),
+      );
+      expect(harness.formation.formForEvent).not.toHaveBeenCalled();
+      expect(configOf(harness, 'event-a').matchedAt).toBeNull();
+    });
+
+    it('keeps running the other passes when one pass fails', async () => {
+      const harness = build({
+        configs: [
+          config('event-due'),
+          config('event-past', { matchedAt: hoursFromNow(-80) }),
+        ],
+        events: [
+          event('event-due'),
+          event('event-past', {
+            startAt: hoursFromNow(-48),
+            endAt: hoursFromNow(-44),
+          }),
+        ],
+        entries: [
+          entry('entry-ana', 'event-past', 'user-ana', {
+            status: 'grouped',
+            groupId: 'group-1',
+          }),
+        ],
+        groups: [group('group-1', 'event-past')],
+      });
+      // The second builder is the cutoff claim: it fails outright.
+      const createBuilder = harness.configs.createQueryBuilder;
+      const realBuilder = createBuilder.getMockImplementation();
+      let builderCount = 0;
+      createBuilder.mockImplementation(() => {
+        builderCount += 1;
+        if (builderCount === 2) {
+          return fakeQueryBuilder(
+            [],
+            () => {
+              throw new Error('claim deadlocked');
+            },
+            () => [],
+          );
+        }
+        return realBuilder!();
+      });
+
+      await harness.service.runPasses(NOW);
+
+      expect(harness.loggerError).toHaveBeenCalledWith(
+        expect.stringContaining('cutoff pass failed'),
+      );
+      expect(harness.formation.formForEvent).not.toHaveBeenCalled();
+      // The feedback prompt pass still ran after the failed cutoff.
+      expect(harness.notifications.createForRecipients).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(configOf(harness, 'event-past').feedbackPromptedAt).toEqual(NOW);
+    });
+
+    it('shows a claim the cutoff pass kept to the later passes of the same tick', async () => {
+      // Moved to 5.5 hours out after its cutoff was saved: formation and the
+      // late group both fall due in one tick.
+      const harness = build({
+        configs: [config('event-soon', { cutoffAt: hoursFromNow(20) })],
+        events: [event('event-soon', { startAt: hoursFromNow(5.5) })],
+      });
+
+      await harness.service.runPasses(NOW);
+
+      expect(harness.formation.formForEvent).toHaveBeenCalledWith('event-soon');
+      expect(harness.formation.formLateGroup).toHaveBeenCalledWith(
+        'event-soon',
+      );
+      expect(activeMatchReads(harness)).toHaveLength(1);
     });
   });
 
@@ -1132,10 +1501,10 @@ describe('GoTogetherMatchingService', () => {
   });
 
   describe('retention sweep', () => {
-    it('deletes groups and entries of gatherings over 90 days old and questionnaires idle for 12 months, under its own lock', async () => {
+    it('deletes groups, entries and configs of gatherings over 90 days old and questionnaires idle for 12 months, under its own lock', async () => {
       jest.useFakeTimers({ now: NOW });
       const harness = build({
-        deletedCounts: { groups: 2, entries: 9, profiles: 4 },
+        deletedCounts: { groups: 2, entries: 9, configs: 3, profiles: 4 },
       });
 
       await harness.service.retentionSweep();
@@ -1157,6 +1526,22 @@ describe('GoTogetherMatchingService', () => {
         params: { eventsBefore },
       });
       expect(entryDelete?.clauses[0]).toContain('"start_at" < :eventsBefore');
+      // The host's config goes on the same schedule, after the rows that
+      // belong to its gathering.
+      const [configDelete] = harness.configs.builderCalls;
+      expect(configDelete).toMatchObject({
+        kind: 'delete',
+        params: { eventsBefore },
+      });
+      expect(configDelete?.clauses[0]).toContain('"start_at" < :eventsBefore');
+      const [groupBuilderOrder] =
+        harness.groups.createQueryBuilder.mock.invocationCallOrder;
+      const [entryBuilderOrder] =
+        harness.entries.createQueryBuilder.mock.invocationCallOrder;
+      const [configBuilderOrder] =
+        harness.configs.createQueryBuilder.mock.invocationCallOrder;
+      expect(groupBuilderOrder).toBeLessThan(entryBuilderOrder!);
+      expect(entryBuilderOrder).toBeLessThan(configBuilderOrder!);
       // Every lens goes once its gathering ended, matched or not.
       const lensClear = harness.entries.builderCalls[1];
       expect(lensClear).toMatchObject({
@@ -1175,7 +1560,7 @@ describe('GoTogetherMatchingService', () => {
       });
       expect(profileDelete?.clauses[0]).toContain('"last_used_at"');
       expect(harness.loggerLog).toHaveBeenCalledWith(
-        expect.stringMatching(/2 group.*9 entr.*4 questionnaire/),
+        expect.stringMatching(/2 group.*9 entr.*3 config.*4 questionnaire/),
       );
       expect(unlockCalls(harness.lockRunner)).toEqual([
         ['SELECT pg_advisory_unlock($1)', [RETENTION_LOCK_KEY]],

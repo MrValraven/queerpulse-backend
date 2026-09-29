@@ -89,17 +89,18 @@ export class EventAnnouncementsService {
         recipientIds,
         NotificationType.EventAnnouncement,
         {
+          // `source` + `eventSlug` are what the client builds the deep link
+          // from; the client keys events by slug.
+          source: 'event',
           eventId: event.id,
-          // The client keys events by slug, so the deep link needs it.
           eventSlug: event.slug,
           title: event.title,
           announcementId: saved.id,
-          // The host's own words ride along deliberately. Every recipient is
-          // somebody the host addressed on purpose and every one of them can
-          // read the same text on the event page, so withholding it from the
-          // bell would only make "the door code is 4471" arrive as "a host
-          // said something". The body is capped at
-          // `MAX_EVENT_ANNOUNCEMENT_LENGTH` and is plain text.
+          // The host's own words are stored with the row for the record. The
+          // bell omits them by allowlist decision (`notification-response.ts`
+          // forwards `title` only): the row names the gathering and opens its
+          // page, where the announcement is shown in full. The body is capped
+          // at `MAX_EVENT_ANNOUNCEMENT_LENGTH` and is plain text.
           body: trimmed,
           // The actor, so block/mute filtering applies like any other
           // member-driven type.

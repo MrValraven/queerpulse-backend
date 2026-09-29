@@ -43,13 +43,20 @@ const PIECE_STAGES: PieceStage[] = [
 ];
 
 /**
- * `PATCH /magazine/admin/pieces/:id`. Every creation field is patchable,
- * plus workflow fields that only make sense post-commission. `brief`/`care`
- * are typed `unknown` on purpose: the jsonb shapes (`PieceBrief`/`PieceCare`)
- * aren't expressible as class-validator decorators, so they're validated by
- * hand via `validatePieceBrief`/`validatePieceCare` in
- * `piece-jsonb.validation.ts`, called by the service before `save()`
- * (mirrors the `CreateDeckDto.slides` idiom).
+ * `PATCH /magazine/admin/pieces/:id`. Every creation field except `angle` and
+ * `fee` is patchable, plus workflow fields that only make sense
+ * post-commission. `brief`/`care` are typed `unknown` on purpose: the jsonb
+ * shapes (`PieceBrief`/`PieceCare`) aren't expressible as class-validator
+ * decorators, so they're validated by hand via
+ * `validatePieceBrief`/`validatePieceCare` in `piece-jsonb.validation.ts`,
+ * called by the service before `save()` (mirrors the `CreateDeckDto.slides`
+ * idiom).
+ *
+ * `angle` and `fee` are commission-time-only fields (see `CreatePieceDto`):
+ * once a piece exists, its angle lives in `brief.angle` and its fee in the
+ * payment row, both already reachable through `brief`/`care` and the
+ * payment endpoints, so accepting them again here would give the desk two
+ * disagreeing write paths for the same value.
  */
 // `issueId` is omitted from the partial base and re-declared below so it can
 // be widened to `string | null` (detach → standalone). Re-widening an
@@ -57,7 +64,7 @@ const PIECE_STAGES: PieceStage[] = [
 // property type must be assignable to the base's `string`), so the field is
 // dropped from the base and added fresh here instead.
 export class UpdatePieceDto extends PartialType(
-  OmitType(CreatePieceDto, ['issueId'] as const),
+  OmitType(CreatePieceDto, ['issueId', 'angle', 'fee'] as const),
 ) {
   @IsOptional() @IsIn(PIECE_STAGES) stage?: PieceStage;
 

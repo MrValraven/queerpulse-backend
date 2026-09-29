@@ -1,8 +1,9 @@
-import { FindOptionsWhere, In, Repository } from 'typeorm';
+import { FindOptionsWhere, In, IsNull, Repository } from 'typeorm';
 import {
   EntryStatus,
   EventMatchEntry,
 } from './entities/event-match-entry.entity';
+import { EventMatchGroup } from './entities/event-match-group.entity';
 
 /**
  * Entry writes that race member actions. A member can withdraw, leave or be
@@ -98,4 +99,45 @@ export async function guardedMoveIntoGroup(
     );
   }
   return moved;
+}
+
+/**
+ * ENG-432: the seating write into a group that already exists (a merge, a
+ * late joiner, a move after a block). The seat count and the move share one
+ * transaction that first locks the target group row `FOR NO KEY UPDATE`
+ * (`for_no_key_update`), so two writers aiming at the same group run one
+ * after the other: the second one counts the seats the first one just took.
+ * That mode also holds off a concurrent dissolve, and it leaves the
+ * `FOR KEY SHARE` lock that the foreign keys on `event_match_entries`
+ * (`group_id`, `merge_offer_group_id`) take on this row free, so a merge
+ * offer written to an entry meanwhile cannot deadlock against this write. The whole unit moves
+ * only while it fits under `maxSize` together and the group is still open;
+ * otherwise nobody moves and the result is empty. Chat seats and
+ * notifications stay with the caller, after the commit.
+ */
+export async function guardedMoveIntoOpenGroup(
+  entries: Repository<EventMatchEntry>,
+  members: EventMatchEntry[],
+  groupId: string,
+  fromStatuses: EntryStatus[],
+  maxSize: number,
+): Promise<EventMatchEntry[]> {
+  if (members.length === 0) return [];
+  return entries.manager.transaction(async (manager) => {
+    const lockedGroup = await manager.findOne(EventMatchGroup, {
+      where: { id: groupId, dissolvedAt: IsNull() },
+      lock: { mode: 'for_no_key_update' },
+    });
+    if (!lockedGroup) return [];
+    const seatedCount = await manager.count(EventMatchEntry, {
+      where: { groupId, status: 'grouped' },
+    });
+    if (seatedCount + members.length > maxSize) return [];
+    return guardedMoveIntoGroup(
+      manager.getRepository(EventMatchEntry),
+      members,
+      groupId,
+      fromStatuses,
+    );
+  });
 }

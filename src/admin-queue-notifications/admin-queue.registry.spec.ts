@@ -163,15 +163,20 @@ const EXPECTED: Record<
     tier: UserRole.Admin,
     capabilities: ['communities'],
   },
+  [AdminQueueKey.HousingGroupJoinRequests]: {
+    route: '/admin/housing-groups',
+    tier: UserRole.Moderator,
+    capabilities: ['housing_moderator'],
+  },
 };
 
 describe('ADMIN_QUEUE_REGISTRY', () => {
   it('covers every key exactly once', () => {
-    // 29 as of CommunitySpaceRequests. The frontend mirror at
-    // adminQueueRoutes.ts carries the same 29 keys, and the two sides have to
+    // 30 as of HousingGroupJoinRequests. The frontend mirror at
+    // adminQueueRoutes.ts carries the same 30 keys, and the two sides have to
     // agree.
-    expect(ADMIN_QUEUE_KEYS).toHaveLength(29);
-    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(29);
+    expect(ADMIN_QUEUE_KEYS).toHaveLength(30);
+    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(30);
     expect(Object.keys(ADMIN_QUEUE_REGISTRY).sort()).toEqual(
       [...ADMIN_QUEUE_KEYS].sort(),
     );

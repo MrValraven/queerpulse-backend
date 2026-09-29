@@ -22,6 +22,7 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandleOwner, HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -32,6 +33,9 @@ import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
+import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
+import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
+import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import {
   AffiliationOption,
   hasQualifyingOwner,
@@ -66,10 +70,15 @@ import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { isSectionAllowed } from './subprofile-kinds';
-import { deriveLinkedPersonaHandle } from './persona-handle';
+import {
+  deriveLinkedPersonaHandle,
+  handleIsKindName,
+  handleNamesOwner,
+} from './persona-handle';
 import {
   ACCENT_KEYS,
   AVAILABILITY_KEYS,
+  handleUnmetCodes,
   linkedHandleUnmetCodes,
   isValidAffiliation,
   MAX_AFFILIATIONS,
@@ -77,6 +86,7 @@ import {
   MAX_GALLERY_PHOTOS,
   MAX_ITEMS_PER_SECTION,
   MAX_SUBPROFILES,
+  type PublishUnmetCode,
   slugifyDisplayName,
   validatePublish,
   validateSocialLinks,
@@ -227,6 +237,10 @@ interface SubprofileLockChecks {
   /** Set for an edit only the creator may make: refused unless this user is
    * still the creator on the locked row. */
   requiredCreatorUserId?: string;
+  /** ENG-451: the `editVersion` an editor write was built on. When set and
+   * the locked row holds another value, the write is refused with the 409
+   * `PERSONA_EDIT_CONFLICT` before it changes anything. */
+  expectedEditVersion?: number;
 }
 
 /** How `SubprofilesService.saveEditUnderLock` persists an edit. */
@@ -234,6 +248,12 @@ interface SubprofileEditSaveOptions extends SubprofileLockChecks {
   /** True when the edit itself sets a new `slug`; otherwise the committed
    * slug is kept, so a slug the creator transfer suffixed is never reverted. */
   hasEditedSlug: boolean;
+  /** True when the edit itself sets `handle`: a typed or cleared handle, a
+   * link switch, or a name the edit's transaction claimed or derived.
+   * Otherwise the committed handle is kept, the way `slug` is, so an edit
+   * that waited on a creator transfer never writes back the departed
+   * creator's name the transfer re-issued (PRD-431). */
+  hasEditedHandle: boolean;
   /** True when the edit itself switches `linkVisibility` (resending the
    * loaded value is no switch). Otherwise the committed link state is kept,
    * the way `slug` is, so a stale edit never flips it back. */
@@ -246,16 +266,46 @@ interface SubprofileEditSaveOptions extends SubprofileLockChecks {
    * switch whose locked row no longer matches them is refused with a 409. */
   loadedLinkVisibility: SubprofileLinkVisibility;
   loadedStatus: SubprofileStatus;
+  /** True for the PATCH editor write (ENG-451): the save stores the locked
+   * row's `editVersion` plus 1. Every other save keeps the committed value. */
+  shouldAdvanceEditVersion?: boolean;
+}
+
+/** The typed code of the 409 an editor write gets when its
+ * `expectedEditVersion` is stale. The frontend's `isPersonaEditConflict`
+ * reads it off the body. */
+const PERSONA_EDIT_CONFLICT_CODE = 'PERSONA_EDIT_CONFLICT';
+
+/** The 409 an editor write (PATCH, section PUT, social-links PUT,
+ * affiliations PUT, item revision restore) gets when someone else saved the
+ * persona after this editor loaded it (ENG-451). `currentEditVersion` is the
+ * stored value, so the client knows which version to reload. */
+class PersonaEditConflictException extends ConflictException {
+  constructor(currentEditVersion: number) {
+    super({
+      code: PERSONA_EDIT_CONFLICT_CODE,
+      message:
+        'Someone else saved this persona while you were editing. Reload it and try again.',
+      currentEditVersion,
+    });
+  }
 }
 
 /** The 409 a write gets when the persona's link state, status or handle moved
  * between the unlocked load and the locked write. Its own class, so `publish`
- * can rethrow it apart from a handle-registry conflict. */
+ * can rethrow it apart from a handle-registry conflict. Publish, unpublish
+ * and a creator transfer leave `edit_version` alone, so an editor can pass
+ * the version check and still meet this. It carries the same
+ * `PERSONA_EDIT_CONFLICT` code and the locked row's `currentEditVersion`, so
+ * the editor offers its Reload alert for it too. */
 class PersonaChangedMeanwhileException extends ConflictException {
-  constructor() {
-    super(
-      'This persona changed while you were editing. Reload it and try again.',
-    );
+  constructor(currentEditVersion: number) {
+    super({
+      code: PERSONA_EDIT_CONFLICT_CODE,
+      message:
+        'This persona changed while you were editing. Reload it and try again.',
+      currentEditVersion,
+    });
   }
 }
 
@@ -277,6 +327,49 @@ class LostDerivedHandleRaceError extends Error {
 /** The registry owner for a persona's handle. */
 function subprofileHandleOwner(subprofileId: string): HandleOwner {
   return { kind: 'subprofile', subprofileId };
+}
+
+/** The checks publish runs on a handle, for a published persona renamed in
+ * place (PRD-427). Linked: `linkedHandleUnmetCodes`. Unlinked: the three
+ * namespace checks, then `handle_names_owner` (when the creator slug is
+ * known) and `handle_is_kind`, as `validatePublish` orders them, plus the
+ * blocked-term screen on the handle alone. The rest of the persona's text is
+ * outside a handle change. */
+function publishedHandleUnmetCodes(
+  handle: string,
+  handleTaken: boolean,
+  persona: Subprofile,
+  creatorSlug: string | null,
+): PublishUnmetCode[] {
+  if (persona.linkVisibility === SubprofileLinkVisibility.Linked) {
+    return linkedHandleUnmetCodes(handle, handleTaken, persona.kind);
+  }
+  const unmet = handleUnmetCodes(handle, handleTaken);
+  if (
+    unmet.length === 0 &&
+    creatorSlug &&
+    handleNamesOwner(handle, creatorSlug)
+  ) {
+    unmet.push('handle_names_owner');
+  }
+  if (unmet.length === 0 && handleIsKindName(handle, persona.kind)) {
+    unmet.push('handle_is_kind');
+  }
+  if (textHasBlockedTerm(handle)) {
+    unmet.push('blocked_terms');
+  }
+  return unmet;
+}
+
+/** The 409 a published persona's handle rename gets when the typed name is
+ * taken, whether the availability check or the registry claim found it
+ * (PRD-427). */
+function handleTakenOnRenameException(): ConflictException {
+  return new ConflictException({
+    code: 'HANDLE_TAKEN',
+    message: 'That handle is already taken.',
+    unmet: ['handle_taken'],
+  });
 }
 
 /** The 422 a linked persona gets when its creator has no profile row, so no
@@ -451,14 +544,27 @@ export class SubprofilesService {
   // data loss. Both writes happen inside one transaction, so a failure
   // partway through never leaves the pre-restore snapshot without its
   // matching item overwrite (or vice versa).
+  //
+  // A restore is a persona content write like the four editor writes
+  // (ENG-451): it takes the persona row lock first, refuses a stale
+  // `expectedEditVersion` with the 409 `PERSONA_EDIT_CONFLICT` before any
+  // item row is touched, and raises `edit_version` by exactly 1. The locked
+  // read also gives the 404 / membership 403 `getOwned` gives. Returns the
+  // raised version, for the response.
   async restoreRevision(
     userId: string,
     subprofileId: string,
     itemId: string,
     revisionId: string,
-  ): Promise<void> {
-    await this.getOwned(userId, subprofileId);
-    await this.dataSource.transaction(async (manager) => {
+    expectedEditVersion?: number,
+  ): Promise<number> {
+    return this.dataSource.transaction(async (manager) => {
+      const advancedEditVersion = await this.lockAndAdvanceEditVersion(
+        manager,
+        subprofileId,
+        userId,
+        expectedEditVersion,
+      );
       const item = await manager.findOne(SubprofileItem, {
         where: { id: itemId, subprofileId },
       });
@@ -482,6 +588,7 @@ export class SubprofilesService {
         editableSnapshot(revision.snapshot as unknown as EditableItemContent),
       );
       await manager.save(item);
+      return advancedEditVersion;
     });
   }
 
@@ -823,14 +930,10 @@ export class SubprofilesService {
     const isCreator = sp.userId === userId;
     const prevVisibility = sp.visibility;
     const prevStatus = sp.status;
-    // A registry row exists for this persona IFF it is published, whatever its
-    // link kind (see the invariant documented on `publish`), and its name
-    // equals `prevHandle`. Read off the loaded row, before `Object.assign`.
-    // A published persona can still hold no handle (a linked row the backfill
-    // skipped), so the handle-edit branch below reads `prevStatus` instead.
-    const wasPublishedWithHandle =
-      sp.status === SubprofileStatus.Published && !!prevHandle;
-    const { linkVisibility, ...rest } = dto;
+    // `expectedEditVersion` is the ENG-451 save precondition, checked under
+    // the row lock by `lockCurrentSubprofile`. It is request-only, so it is
+    // kept out of `rest` and never assigned onto the entity.
+    const { linkVisibility, expectedEditVersion, ...rest } = dto;
 
     if (
       rest.accent !== undefined &&
@@ -894,23 +997,27 @@ export class SubprofilesService {
       throw new BadRequestException('ctaLabel and ctaUrl must be set together');
     }
 
-    // Global-namespace names to free as a side effect of this update. A name
-    // freed by a link switch must not forward (`isForwarding: false`): its old
-    // address leading to the new one would tie a pseudonymous persona to the
-    // member who runs it.
-    const releases: Array<{ name: string; isForwarding: boolean }> = [];
     // Set when a PUBLISHED persona is linked: it stays published, so it must
     // hold a handle the moment the edit commits. The claim runs in the same
-    // transaction as the release below.
+    // transaction as the link switch's release.
     let shouldClaimLinkedHandleNow = false;
+    // Set when the handle of a PUBLISHED persona changes with no link switch
+    // (PRD-427): it stays published, so the new name is validated and claimed,
+    // and the old one released with forwarding, in the edit's transaction.
+    let shouldRenamePublishedHandle = false;
+    // Set when a linked persona goes unlinked (ENG-447): the clean break that
+    // deletes its followers, endorsements and old nested addresses runs in the
+    // edit's transaction.
+    const isUnlinkingSwitch =
+      !!linkVisibility &&
+      prevLink === SubprofileLinkVisibility.Linked &&
+      linkVisibility === SubprofileLinkVisibility.Unlinked;
 
     if (linkVisibility && linkVisibility !== prevLink) {
       sp.linkVisibility = linkVisibility;
-      // Either direction frees the name a published persona held, and drops
-      // it from the row unless this same edit typed a new one.
-      if (wasPublishedWithHandle && prevHandle) {
-        releases.push({ name: prevHandle, isForwarding: false });
-      }
+      // Either direction frees the name a published persona holds (released
+      // in the transaction below, read off the locked row), and drops it
+      // from the row unless this same edit typed a new one.
       const hasTypedNewHandle = !!sp.handle && sp.handle !== prevHandle;
       if (!hasTypedNewHandle) {
         sp.handle = null;
@@ -931,21 +1038,16 @@ export class SubprofilesService {
       prevStatus === SubprofileStatus.Published &&
       (sp.handle ?? null) !== (prevHandle ?? null)
     ) {
-      // RULE (chosen): changing the `handle` of an already-published persona,
-      // of either link kind, invalidates its live address. Mirroring the
-      // existing "must re-validate" rule, we revert it to DRAFT and RELEASE the
-      // old registry name now, with forwarding so `PERSONA_MOVED` can point
-      // old links at the new name; the claim happens (under the new name) on
-      // the next publish. No release/reclaim churn while it stays a draft.
-      //
-      // A published persona with no stored handle (a linked row the backfill
-      // skipped, or one published before the deploy) drafts as well, so a
-      // typed handle is validated and claimed at publish before `/p/` serves
-      // it. It held no registry name, so there is nothing to release.
-      sp.status = SubprofileStatus.Draft;
-      if (prevHandle) {
-        releases.push({ name: prevHandle, isForwarding: true });
-      }
+      // PRD-427: changing the `handle` of a published persona, of either link
+      // kind, keeps it PUBLISHED. In the edit's transaction the new name is
+      // validated with the checks publish runs on a handle, claimed, and the
+      // old one released WITH forwarding, so `PERSONA_MOVED` sends old links
+      // to the new address during the cooldown and the page never goes
+      // offline (`renamePublishedHandle`). A published persona with no stored
+      // handle (a linked row the backfill skipped) claims the typed one the
+      // same way, with nothing to release. A linked persona whose handle is
+      // cleared claims its derived default.
+      shouldRenamePublishedHandle = true;
     }
 
     // --- Task 4: creator-only destructive ops ------------------------------
@@ -1007,6 +1109,12 @@ export class SubprofilesService {
     const saveOptions: SubprofileEditSaveOptions = {
       editorUserId: userId,
       hasEditedSlug: rest.slug !== undefined && rest.slug !== prevSlug,
+      // Read before the transaction below assigns a claimed or derived name,
+      // which then sets the flag for its own save. A link switch owns the
+      // handle as well (it clears or re-claims it).
+      hasEditedHandle:
+        (sp.handle ?? null) !== (prevHandle ?? null) ||
+        sp.linkVisibility !== prevLink,
       // The merged state: a `null` or resent `linkVisibility` is no switch.
       hasEditedLinkVisibility: sp.linkVisibility !== prevLink,
       hasLinkDependentChange:
@@ -1015,6 +1123,10 @@ export class SubprofilesService {
       loadedLinkVisibility: prevLink,
       loadedStatus: prevStatus,
       requiredCreatorUserId: hasCreatorOnlyChange ? userId : undefined,
+      // ENG-451: refused with the 409 under the row lock when stale, and
+      // raised by 1 on every successful PATCH, sent or not.
+      expectedEditVersion,
+      shouldAdvanceEditVersion: true,
     };
 
     // --- Task 5: re-screen a published persona's identity text on edit -----
@@ -1037,11 +1149,10 @@ export class SubprofilesService {
     // A linked draft stores its `/p/<handle>` on the row, so the owner can
     // preview that address before publish (see `deriveLinkedDraftHandle`).
     // This edit leaves one without a handle when it links a draft, clears
-    // the handle field, drafts a published persona whose handle it cleared,
-    // or saves a row stored before this rule. The name is filled in under the
-    // row lock below. The creator-only gate and `saveOptions` above were
-    // decided on the user's own input first, so a co-owner's unrelated edit
-    // never reads as a handle change.
+    // the handle field, or saves a row stored before this rule. The name is
+    // filled in under the row lock below. The creator-only gate and
+    // `saveOptions` above were decided on the user's own input first, so a
+    // co-owner's unrelated edit never reads as a handle change.
     const shouldDeriveLinkedDraftHandle =
       sp.linkVisibility === SubprofileLinkVisibility.Linked &&
       sp.status !== SubprofileStatus.Published &&
@@ -1053,10 +1164,14 @@ export class SubprofilesService {
     // assign `sp.handle`, so the snapshot only keeps each run independent of
     // whatever the transaction body writes to `sp`.
     const typedLinkedHandle = shouldClaimLinkedHandleNow ? sp.handle : null;
+    // The same snapshot for the handle a published persona is renamed to.
+    const typedRenamedHandle = shouldRenamePublishedHandle
+      ? (sp.handle ?? null)
+      : null;
     if (
-      releases.length ||
       saveOptions.hasEditedLinkVisibility ||
-      shouldDeriveLinkedDraftHandle
+      shouldDeriveLinkedDraftHandle ||
+      shouldRenamePublishedHandle
     ) {
       try {
         await this.retryLostDerivedHandleRace(() =>
@@ -1071,20 +1186,54 @@ export class SubprofilesService {
               sp.id,
               saveOptions,
             );
-            for (const { name, isForwarding } of releases) {
-              await this.handles.release(
-                m,
-                name,
-                subprofileHandleOwner(sp.id),
-                { isForwarding },
-              );
-            }
             if (saveOptions.hasEditedLinkVisibility) {
+              // The switch was decided on the loaded link and status, so a
+              // row that moved since is refused before any registry work
+              // (the save below would refuse it too, after the fact).
+              if (
+                current.linkVisibility !== prevLink ||
+                current.status !== prevStatus
+              ) {
+                throw new PersonaChangedMeanwhileException(current.editVersion);
+              }
+              // Either direction frees the name the COMMITTED row holds while
+              // published: a creator transfer or a rename that committed
+              // while this edit waited on the lock may have moved it off the
+              // loaded one. No forwarding: the old address leading to the
+              // new one would tie a pseudonymous persona to the member who
+              // runs it.
+              if (
+                current.status === SubprofileStatus.Published &&
+                current.handle
+              ) {
+                await this.handles.release(
+                  m,
+                  current.handle,
+                  subprofileHandleOwner(sp.id),
+                  { isForwarding: false },
+                );
+              }
               // A link switch cuts every address the persona held before it,
               // so names an earlier rename released stop forwarding too.
               await this.handles.stopForwardingFor(m, sp.id);
             }
+            if (isUnlinkingSwitch) {
+              await this.cutTiesToNamedPersona(m, sp.id);
+            }
+            // Set when this run assigns `sp.handle` below, so the save keeps
+            // that name over the committed one. Fresh per retry.
+            let hasAssignedHandle = saveOptions.hasEditedHandle;
+            if (shouldRenamePublishedHandle) {
+              hasAssignedHandle = true;
+              sp.handle = await this.renamePublishedHandle(m, current, {
+                previousHandle: prevHandle,
+                typedHandle: typedRenamedHandle,
+                loadedLinkVisibility: prevLink,
+                personaSlug: saveOptions.hasEditedSlug ? sp.slug : current.slug,
+              });
+            }
             if (shouldClaimLinkedHandleNow) {
+              hasAssignedHandle = true;
               sp.handle = await this.claimHandleForNewlyLinkedPersona(
                 m,
                 current,
@@ -1103,6 +1252,7 @@ export class SubprofilesService {
               shouldDeriveLinkedDraftHandle &&
               !hasLinkOrStatusMovedMeanwhile
             ) {
+              hasAssignedHandle = true;
               sp.handle = await this.deriveLinkedDraftHandle(
                 m,
                 sp.id,
@@ -1112,12 +1262,10 @@ export class SubprofilesService {
             }
             // Writes the claimed or derived `handle` too: a link switch
             // keeps the edit's own link state, status and handle.
-            await this.applyCommittedColumnsAndSave(
-              m,
-              sp,
-              current,
-              saveOptions,
-            );
+            await this.applyCommittedColumnsAndSave(m, sp, current, {
+              ...saveOptions,
+              hasEditedHandle: hasAssignedHandle,
+            });
           }),
         );
       } catch (err) {
@@ -1134,6 +1282,7 @@ export class SubprofilesService {
     id: string,
     section: string,
     items: SubprofileItemInputDTO[],
+    expectedEditVersion?: number,
   ): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
 
@@ -1232,7 +1381,16 @@ export class SubprofilesService {
       sectionEnum,
     );
 
-    await this.dataSource.transaction(async (manager) => {
+    sp.editVersion = await this.dataSource.transaction(async (manager) => {
+      // ENG-451: the persona row lock and the edit-version precondition come
+      // first, before any item row is read or written.
+      const advancedEditVersion = await this.lockAndAdvanceEditVersion(
+        manager,
+        id,
+        userId,
+        expectedEditVersion,
+      );
+
       // Protect Your Work (revision history), Task 7: this used to be an
       // unconditional `manager.delete(...)` of every row in the section
       // followed by inserting `items.length` brand-new rows. That is no
@@ -1389,6 +1547,7 @@ export class SubprofilesService {
           })
           .execute();
       }
+      return advancedEditVersion;
     });
 
     if (newlyCreditedHandles.length) {
@@ -1425,6 +1584,7 @@ export class SubprofilesService {
     userId: string,
     id: string,
     items: { platform: string; urlOrHandle: string }[],
+    expectedEditVersion?: number,
   ): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
 
@@ -1432,7 +1592,14 @@ export class SubprofilesService {
       throw new BadRequestException('Invalid social links');
     }
 
-    await this.dataSource.transaction(async (manager) => {
+    sp.editVersion = await this.dataSource.transaction(async (manager) => {
+      // ENG-451: lock and precondition first, before the delete.
+      const advancedEditVersion = await this.lockAndAdvanceEditVersion(
+        manager,
+        id,
+        userId,
+        expectedEditVersion,
+      );
       await manager.delete(SubprofileSocialLink, { subprofileId: id });
       const rows = items.map((item, index) =>
         manager.create(SubprofileSocialLink, {
@@ -1445,6 +1612,7 @@ export class SubprofilesService {
       if (rows.length) {
         await manager.save(rows);
       }
+      return advancedEditVersion;
     });
 
     return this.ownerDTO(sp);
@@ -1467,6 +1635,7 @@ export class SubprofilesService {
     userId: string,
     id: string,
     items: { targetType: string; targetSlug: string; role: string }[],
+    expectedEditVersion?: number,
   ): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
 
@@ -1645,7 +1814,14 @@ export class SubprofilesService {
       }
     }
 
-    await this.dataSource.transaction(async (manager) => {
+    sp.editVersion = await this.dataSource.transaction(async (manager) => {
+      // ENG-451: lock and precondition first, before the delete.
+      const advancedEditVersion = await this.lockAndAdvanceEditVersion(
+        manager,
+        id,
+        userId,
+        expectedEditVersion,
+      );
       await manager.delete(SubprofileAffiliation, { subprofileId: id });
       const rows = items.map((item, index) =>
         manager.create(SubprofileAffiliation, {
@@ -1659,6 +1835,7 @@ export class SubprofilesService {
       if (rows.length) {
         await manager.save(rows);
       }
+      return advancedEditVersion;
     });
 
     return this.ownerDTO(sp);
@@ -1765,7 +1942,7 @@ export class SubprofilesService {
           current.status !== sp.status ||
           (current.handle ?? null) !== (sp.handle ?? null);
         if (hasPersonaMovedMeanwhile) {
-          throw new PersonaChangedMeanwhileException();
+          throw new PersonaChangedMeanwhileException(current.editVersion);
         }
         const nameToClaim =
           sp.handle ??
@@ -1850,7 +2027,7 @@ export class SubprofilesService {
           (current.handle ?? null) !== handle ||
           current.linkVisibility !== sp.linkVisibility
         ) {
-          throw new PersonaChangedMeanwhileException();
+          throw new PersonaChangedMeanwhileException(current.editVersion);
         }
         await this.handles.release(m, handle, subprofileHandleOwner(sp.id));
         await m.update(
@@ -1867,6 +2044,7 @@ export class SubprofilesService {
       await this.saveSubprofile(sp, {
         editorUserId: userId,
         hasEditedSlug: false,
+        hasEditedHandle: false,
         hasEditedLinkVisibility: false,
         hasLinkDependentChange: true,
         loadedLinkVisibility: sp.linkVisibility,
@@ -1889,7 +2067,7 @@ export class SubprofilesService {
     // take first, and re-checks the caller as creator on the locked row: a
     // concurrent `leave` may have handed the persona to a successor since,
     // and a stale delete would destroy it for every remaining co-owner. Lock
-    // order stays persona row, then the handle row the delete cascades into.
+    // order stays persona row, then the handle row the delete releases.
     const deleted = await this.dataSource.transaction(async (manager) => {
       const current = await this.lockCurrentSubprofile(manager, id, {
         editorUserId: userId,
@@ -1906,10 +2084,16 @@ export class SubprofilesService {
         .map((row) => row.userId)
         .filter((memberUserId) => memberUserId !== current.userId);
       const displayName = current.displayName;
-      // `subprofile_items` AND the persona's `handles` registry row (if any)
-      // both cascade via their FK's ON DELETE CASCADE on `subprofile_id`, so
-      // deleting the subprofile auto-frees its global handle and no explicit
-      // release is needed.
+      // ENG-449: release the persona's registry handle BEFORE the row goes,
+      // with no forwarding, so the name stays reserved for the reclaim
+      // cooldown and no printed QR or shared `/p/` link opens a stranger's
+      // page the moment the persona is gone. The reservation (and
+      // every older one the persona left) survives the delete:
+      // `handle_history.previous_owner_subprofile_id` is `ON DELETE SET NULL`
+      // (`1824710000000-KeepHandleHistoryOnPersonaDelete`). Read by owner, so
+      // a registry row whose name drifted from `handle` is released too.
+      await this.releaseRegistryHandlesBeforeDelete(manager, current.id);
+      // `subprofile_items` cascade via their FK on `subprofile_id`.
       await manager.remove(current);
       return { coOwnerIds, displayName };
     });
@@ -2166,13 +2350,14 @@ export class SubprofilesService {
    * Save an edit of `sp` without ever writing back a stale creator or address.
    *
    * `sp` was read before any lock, and the creator role can move to another
-   * co-owner meanwhile (`transferCreatorWithin`, which rewrites `user_id` and
-   * may suffix `slug`). TypeORM's `save` writes every column whose in-memory
-   * value differs from the database, so saving the stale copy as is would
-   * put the old creator and slug back. This re-reads the row under
-   * `pessimistic_write`, the lock the transfer holds while it writes, and
-   * copies the committed `userId` (and `slug` and the link state, unless
-   * this edit changes them) onto `sp` before saving. Re-reading and applying
+   * co-owner meanwhile (`transferCreatorWithin`, which rewrites `user_id`,
+   * may suffix `slug` and may re-issue a creator-named `handle`). TypeORM's
+   * `save` writes every column whose in-memory value differs from the
+   * database, so saving the stale copy as is would put the old creator, slug
+   * and handle back. This re-reads the row under `pessimistic_write`, the
+   * lock the transfer holds while it writes, and copies the committed
+   * `userId` (and `slug`, `handle` and the link state, unless this edit
+   * changes them) onto `sp` before saving. Re-reading and applying
    * the edit to the fresh values keeps `save`'s own behaviour, including the
    * `updatedAt` it writes back onto `sp` for the response, and the response
    * then shows the persona's current creator and address.
@@ -2224,14 +2409,14 @@ export class SubprofilesService {
       (current.linkVisibility !== options.loadedLinkVisibility ||
         current.status !== options.loadedStatus);
     if (hasSwitchedLinkOverMovedRow) {
-      throw new PersonaChangedMeanwhileException();
+      throw new PersonaChangedMeanwhileException(current.editVersion);
     }
     const hasLinkMovedMeanwhile =
       !options.hasEditedLinkVisibility &&
       current.linkVisibility !== sp.linkVisibility;
     if (hasLinkMovedMeanwhile) {
       if (options.hasLinkDependentChange) {
-        throw new PersonaChangedMeanwhileException();
+        throw new PersonaChangedMeanwhileException(current.editVersion);
       }
       sp.linkVisibility = current.linkVisibility;
       sp.status = current.status;
@@ -2239,8 +2424,23 @@ export class SubprofilesService {
     }
     sp.userId = current.userId;
     sp.removedAt = current.removedAt;
+    // `edit_version` (ENG-451) is committed state as well: saving the loaded
+    // copy as is would put an older counter back. The PATCH editor write
+    // raises it by exactly 1 over the locked row; any other save keeps it.
+    sp.editVersion = options.shouldAdvanceEditVersion
+      ? current.editVersion + 1
+      : current.editVersion;
     if (!options.hasEditedSlug) {
       sp.slug = current.slug;
+    }
+    // `handle` is committed state too (PRD-431): a creator transfer re-issues
+    // a creator-named handle under this same lock without moving the link or
+    // bumping `edit_version`, so an edit loaded before it would otherwise
+    // write the departed creator's name back over the re-issued one. An
+    // edit that sets the handle itself keeps its own: those paths already
+    // refuse a row whose handle moved (`renamePublishedHandle`, publish).
+    if (!options.hasEditedHandle) {
+      sp.handle = current.handle;
     }
     await manager.save(sp);
   }
@@ -2435,6 +2635,151 @@ export class SubprofilesService {
     return derivedHandle;
   }
 
+  /**
+   * PRD-427: the handle a PUBLISHED persona takes when its owner changes it
+   * with no link switch. The persona stays published, so in the edit's
+   * transaction the new name passes the checks publish runs on a handle, the
+   * registry claim moves to it, and the old name is released WITH forwarding
+   * (`HandlesService.rename`), so `PERSONA_MOVED` sends old links to the new
+   * address during the cooldown.
+   *
+   * - A typed handle that another owner holds (or that sits in someone
+   *   else's cooldown) is a 409, and nothing changes: the check runs before
+   *   any write, and a claim lost to a concurrent writer throws inside the
+   *   transaction, which rolls back.
+   * - Any other failed check is the publish checklist's 422.
+   * - A cleared handle on a linked persona claims its derived default
+   *   (`<creatorSlug>-<personaSlug>`); an unlinked persona has no default,
+   *   so clearing is refused with `handle_invalid` (unpublishing is how it
+   *   goes offline).
+   *
+   * Decided on the loaded row, so a status, link or handle change committed
+   * since the load is refused with the 409 before the registry is touched.
+   */
+  private async renamePublishedHandle(
+    manager: EntityManager,
+    current: Subprofile,
+    rename: {
+      previousHandle: string | null;
+      typedHandle: string | null;
+      loadedLinkVisibility: SubprofileLinkVisibility;
+      personaSlug: string;
+    },
+  ): Promise<string> {
+    const { previousHandle, typedHandle, loadedLinkVisibility, personaSlug } =
+      rename;
+    const hasPersonaMovedMeanwhile =
+      current.status !== SubprofileStatus.Published ||
+      current.linkVisibility !== loadedLinkVisibility ||
+      (current.handle ?? null) !== (previousHandle ?? null);
+    if (hasPersonaMovedMeanwhile) {
+      throw new PersonaChangedMeanwhileException(current.editVersion);
+    }
+    const isLinked = current.linkVisibility === SubprofileLinkVisibility.Linked;
+    if (!typedHandle) {
+      if (!isLinked) {
+        throw new UnprocessableEntityException({
+          code: 'SUBPROFILE_NOT_READY',
+          message:
+            'A published persona needs an address. Unpublish it to take it offline.',
+          unmet: ['handle_invalid'],
+        });
+      }
+      const derivedHandle = await this.deriveLinkedPersonaHandleUnderLock(
+        manager,
+        current,
+        null,
+        personaSlug,
+      );
+      await this.claimPersonaHandle(
+        manager,
+        previousHandle,
+        derivedHandle,
+        current.id,
+        true,
+      );
+      return derivedHandle;
+    }
+    const owner = subprofileHandleOwner(current.id);
+    const handleTaken = await this.handles.isTaken(manager, typedHandle, owner);
+    const creatorProfile = isLinked
+      ? null
+      : await manager.findOne(Profile, { where: { userId: current.userId } });
+    const unmet = publishedHandleUnmetCodes(
+      typedHandle,
+      handleTaken,
+      current,
+      creatorProfile?.slug ?? null,
+    );
+    if (unmet.includes('handle_taken')) {
+      throw handleTakenOnRenameException();
+    }
+    if (unmet.length) {
+      throw new UnprocessableEntityException({
+        code: 'SUBPROFILE_NOT_READY',
+        message: 'That handle is not available.',
+        unmet,
+      });
+    }
+    // Releases the old name with forwarding, then claims the new one. A
+    // name taken since the check above gets the same 409 body as the check,
+    // so the frontend reads one shape for a taken handle.
+    try {
+      await this.handles.rename(manager, previousHandle, typedHandle, owner);
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        throw handleTakenOnRenameException();
+      }
+      throw err;
+    }
+    return typedHandle;
+  }
+
+  /**
+   * ENG-447: the clean break when a linked persona goes unlinked. Nothing
+   * that belonged to the named persona carries to its pseudonymous address:
+   * its follower rows, its endorsements (withdrawn ones too, since each can
+   * carry a note written to the named owner), and every old nested
+   * `/members/<creator>/<slug>` address recorded for it on a creator
+   * transfer. Follower and endorsement counts are computed from these rows,
+   * so they read zero from the next request. Pending invites and co-owners
+   * stay: they are owners. Runs in the switch's transaction, so a refused
+   * switch keeps every row.
+   */
+  private async cutTiesToNamedPersona(
+    manager: EntityManager,
+    subprofileId: string,
+  ): Promise<void> {
+    await manager.delete(SubprofileFollower, { subprofileId });
+    await manager.delete(SubprofileEndorsement, { subprofileId });
+    await manager.delete(SubprofileAddressHistory, { subprofileId });
+  }
+
+  /**
+   * ENG-449: frees every registry name the persona holds before its row is
+   * deleted, through `HandlesService.release` with no forwarding, so each
+   * name stays reserved for the reclaim cooldown and no old link ever leads
+   * anywhere. Read by owner: by the registry invariant this is the published
+   * persona's `handle`, and a draft holds none.
+   */
+  private async releaseRegistryHandlesBeforeDelete(
+    manager: EntityManager,
+    subprofileId: string,
+  ): Promise<void> {
+    const heldHandles = await manager.find(Handle, {
+      where: { ownerKind: HandleOwnerKind.Subprofile, subprofileId },
+      select: { name: true },
+    });
+    for (const heldHandle of heldHandles) {
+      await this.handles.release(
+        manager,
+        heldHandle.name,
+        subprofileHandleOwner(subprofileId),
+        { isForwarding: false },
+      );
+    }
+  }
+
   /** The persona row under `pessimistic_write`, the lock every roster writer
    * and the creator transfer take first. Under it: an editor with no roster
    * row any more gets the same 403 `getOwned` gives, and with
@@ -2468,7 +2813,44 @@ export class SubprofilesService {
         'Only the persona creator can make this change',
       );
     }
+    // ENG-451: under the lock, so two saves built on the same version
+    // serialize here and the second one reads the raised value.
+    const { expectedEditVersion } = checks;
+    if (
+      expectedEditVersion !== undefined &&
+      current.editVersion !== expectedEditVersion
+    ) {
+      throw new PersonaEditConflictException(current.editVersion);
+    }
     return current;
+  }
+
+  /**
+   * The persona row lock a replace-all editor write (section, social links,
+   * affiliations) or an item revision restore takes first in its
+   * transaction, before it touches any row (ENG-451). It re-checks the editor's roster row and a stale
+   * `expectedEditVersion` under the lock (`lockCurrentSubprofile`), then
+   * raises `edit_version` by exactly 1. The whole transaction rolls back if a
+   * later step fails, the raise included. Returns the stored version, for the
+   * response.
+   */
+  private async lockAndAdvanceEditVersion(
+    manager: EntityManager,
+    subprofileId: string,
+    editorUserId: string,
+    expectedEditVersion: number | undefined,
+  ): Promise<number> {
+    const current = await this.lockCurrentSubprofile(manager, subprofileId, {
+      editorUserId,
+      expectedEditVersion,
+    });
+    const advancedEditVersion = current.editVersion + 1;
+    await manager.update(
+      Subprofile,
+      { id: subprofileId },
+      { editVersion: advancedEditVersion },
+    );
+    return advancedEditVersion;
   }
 
   /**

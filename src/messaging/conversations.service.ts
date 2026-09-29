@@ -13,6 +13,7 @@ import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialE
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { decodeCursor, encodeCursor } from '../common/cursor-pagination';
 import { toImageUrl } from '../common/image-url';
+import { truncateCharacters } from '../common/text-characters';
 import { ConnectionsService } from '../connections/connections.service';
 import { Identity, IdentityKind } from '../identities/entities/identity.entity';
 import { IdentityAttributionService } from '../identities/identity-attribution.service';
@@ -35,6 +36,14 @@ import {
 } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { loadSenderIdentityContext } from './author-summary';
+import {
+  conversationKindPredicate,
+  conversationNameSearchParameters,
+  conversationNameSearchPredicate,
+  ListConversationsOptions,
+  normalizedListSearchTerm,
+  stillSeatedPredicate,
+} from './conversation-list-search';
 import { movedNoteMailboxIdentityIds } from './viewer-message-fields';
 import {
   claimUnclaimedConversation,
@@ -64,12 +73,15 @@ import {
   AuthorSummary,
   computeGroupLeftReason,
   ConversationResponse,
+  memberNameOptionsFor,
   presentSenderIds,
   toAuthorSummary,
 } from './message-response';
 import {
   MESSAGE_SUBJECT_TYPE,
+  notFromBlockedGroupMemberPredicate,
   notModeratedMessagePredicate,
+  withinLeftAtCeilingPredicate,
 } from './message-visibility-predicates';
 import { DEFAULT_LIMIT, MAX_LIMIT } from './messaging.constants';
 import { MessagingCoreService } from './messaging-core.service';
@@ -157,11 +169,11 @@ export class ConversationsService {
    */
   async listConversations(
     userId: string,
-    options: { cursor?: string; limit?: number; mailboxIdentityId?: string },
+    options: ListConversationsOptions,
   ): Promise<ConversationListPageWithStaffClaim>;
   async listConversations(
     userId: string,
-    options?: { cursor?: string; limit?: number; mailboxIdentityId?: string },
+    options?: ListConversationsOptions,
   ): Promise<ConversationResponse[] | ConversationListPageWithStaffClaim> {
     // Overload dispatch: the facade's single-argument call keeps returning a
     // bare array; the HTTP list route always passes a (possibly empty)
@@ -207,6 +219,14 @@ export class ConversationsService {
     // (private to that service, so re-stated here), and the takedown
     // `NOT EXISTS` is the shared `notModeratedMessagePredicate`, both under
     // the `message` alias this correlated subquery already uses.
+    //
+    // ENG-401 and ENG-402: the preview also stops at the caller's own
+    // `leftAt` ceiling and skips a group message from someone blocked either
+    // way with them, so the sort key does too, through the same shared
+    // predicates. A group the caller left sorts by the last message they were
+    // allowed to read, and a blocked member's posts never lift a group to
+    // the top of the inbox. The ceiling reads `participant`, the caller's own
+    // seat this builder already walks.
     const lastActivityExpression = `COALESCE(
         (SELECT MAX(message.created_at) FROM messages message
           WHERE message.conversation_id = participant.conversation_id
@@ -215,7 +235,9 @@ export class ConversationsService {
               SELECT 1 FROM message_hides hide
               WHERE hide.message_id = message.id AND hide.user_id = :userId
             )
-            AND ${notModeratedMessagePredicate('message')}),
+            AND ${notModeratedMessagePredicate('message')}
+            AND ${withinLeftAtCeilingPredicate('message.created_at', 'participant')}
+            AND ${notFromBlockedGroupMemberPredicate('message', ':userId')}),
         (SELECT conversation.created_at FROM conversations conversation
           WHERE conversation.id = participant.conversation_id)
       )`;
@@ -231,7 +253,11 @@ export class ConversationsService {
       // live conversation off the end of a long-tenured member's inbox.
       //
       // Cleared ("delete for me"): the thread exists for this member only if
-      // some message landed after their clear point.
+      // some message landed after their clear point. ENG-401 and ENG-402
+      // (fix round 1): that message must also be one the preview can show
+      // them, inside their `leftAt` ceiling and from nobody blocked with them
+      // in a group, so a cleared group they then left, or one whose only
+      // newer posts come from a blocked member, takes no capped slot.
       .andWhere(
         `(
           participant.cleared_at IS NULL
@@ -240,6 +266,8 @@ export class ConversationsService {
             WHERE message.conversation_id = participant.conversation_id
               AND message.deleted_at IS NULL
               AND message.created_at > participant.cleared_at
+              AND ${withinLeftAtCeilingPredicate('message.created_at', 'participant')}
+              AND ${notFromBlockedGroupMemberPredicate('message', ':userId')}
           )
         )`,
       )
@@ -284,6 +312,26 @@ export class ConversationsService {
       queryBuilder.andWhere('participant.identity_id = :mailboxIdentityId', {
         mailboxIdentityId,
       });
+    }
+    // ENG-403: the forward picker's server-side search. All three narrow
+    // the same builder, after every visibility rule above, so a search page
+    // is a subset of the plain one and the keyset seek and `take(limit + 1)`
+    // below page it exactly. See `conversation-list-search.ts` for which
+    // name each kind of thread is matched on.
+    const searchTerm = normalizedListSearchTerm(options?.search);
+    if (searchTerm !== null) {
+      queryBuilder.andWhere(
+        conversationNameSearchPredicate('participant'),
+        conversationNameSearchParameters(searchTerm),
+      );
+    }
+    if (options?.kind !== undefined) {
+      queryBuilder.andWhere(conversationKindPredicate('participant'), {
+        listKind: options.kind,
+      });
+    }
+    if (options?.excludeLeft === true) {
+      queryBuilder.andWhere(stillSeatedPredicate('participant'));
     }
     if (decodedCursor) {
       // Keyset seek: strictly OLDER activity than the cursor's row, with
@@ -762,8 +810,15 @@ export class ConversationsService {
       const activeMemberCount = groupParticipants.filter(
         (p) => p.leftAt == null,
       ).length;
+      // PRD-423: a matched Go together chat names its members, its preview
+      // sender and its system pills by first name only.
+      const nameOptions = memberNameOptionsFor(convo);
       const memberPreview = isGroup
-        ? this.core.buildMemberPreview(groupParticipants, profileByUser)
+        ? this.core.buildMemberPreview(
+            groupParticipants,
+            profileByUser,
+            nameOptions,
+          )
         : [];
       const members =
         isGroup && fullDetail
@@ -772,6 +827,7 @@ export class ConversationsService {
               profileByUser,
               userId,
               privacyByUser,
+              nameOptions,
             )
           : [];
       const lastMessage = lastByConvo.get(convo.id) ?? null;
@@ -849,6 +905,7 @@ export class ConversationsService {
               userId,
               identityContext,
               part.identityId,
+              nameOptions,
             )
           : null,
         unreadCount: unreadByConvo.get(convo.id) ?? 0,
@@ -962,7 +1019,7 @@ export class ConversationsService {
         // read path (`fullDetail`); a list row gets the bounded preview +
         // boolean below instead, always (both paths).
         draft: fullDetail ? part.draft : undefined,
-        draftPreview: part.draft ? part.draft.slice(0, 120) : null,
+        draftPreview: part.draft ? truncateCharacters(part.draft, 120) : null,
         hasDraft: !!part.draft && part.draft.length > 0,
         hasLeft: isGroup ? part.leftAt != null : false,
         description: isGroup ? convo.description : null,
@@ -970,6 +1027,8 @@ export class ConversationsService {
           ? (convo.dissolvedAt?.toISOString() ?? null)
           : null,
         eventMatchGroupId: isGroup ? convo.eventMatchGroupId : null,
+        // PRD-423: the durable Go together marker, outlives eventMatchGroupId.
+        isGoTogetherChat: isGroup ? convo.isGoTogetherChat : false,
         leftReason: isGroup
           ? computeGroupLeftReason({
               leftAt: part.leftAt,
@@ -986,6 +1045,16 @@ export class ConversationsService {
           (part.role === ConversationRole.Owner ||
             part.role === ConversationRole.Admin)
             ? convo.inviteToken
+            : null,
+        // PRD-400: the token's expiry, under exactly the same rule.
+        inviteTokenExpiresAt:
+          isGroup &&
+          !part.leftAt &&
+          !convo.dissolvedAt &&
+          convo.inviteToken &&
+          (part.role === ConversationRole.Owner ||
+            part.role === ConversationRole.Admin)
+            ? (convo.inviteTokenExpiresAt?.toISOString() ?? null)
             : null,
         // Computed exactly like `GroupsService.toGroupConversationResponse`'s
         // matching fields: owner/admin only, active, not dissolved for
@@ -2205,6 +2274,8 @@ export class ConversationsService {
       description: null,
       dissolvedAt: null,
       eventMatchGroupId: null,
+      // PRD-423: a DM is never Go together, mirrors `eventMatchGroupId: null`.
+      isGoTogetherChat: false,
       leftReason: null,
       inviteToken: null,
       pendingInvites: [],

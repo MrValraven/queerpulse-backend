@@ -82,7 +82,8 @@ export class TopicPost {
   @Column({ type: 'varchar' })
   authorInitials!: string;
 
-  /** The frontend's `AvatarTint` ('coral' | 'jade' | 'plum'). */
+  /** The frontend's `AvatarTint` ('coral' | 'jade' | 'plum' | 'default').
+   *  'default' is the neutral tint of `ERASED_AUTHOR_TOPIC_BYLINE`. */
   @Column({ type: 'varchar' })
   authorTone!: string;
 

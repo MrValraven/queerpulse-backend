@@ -13,7 +13,11 @@ const logger = new Logger('StickerResponse');
 export interface StickerResponse {
   id: string;
   slug: string;
+  /** The English name. */
   label: string;
+  /** The Portuguese name, or null when none was written; readers in
+   *  Portuguese fall back to `label`. */
+  labelPt: string | null;
   url: string;
   width: number;
   height: number;
@@ -23,7 +27,11 @@ export interface StickerResponse {
 export interface StickerPackResponse {
   id: string;
   slug: string;
+  /** The English pack name. */
   name: string;
+  /** The Portuguese pack name, or null; readers in Portuguese fall back to
+   *  `name`. */
+  namePt: string | null;
   description: string | null;
   coverStickerId: string | null;
   stickers: StickerResponse[];
@@ -63,6 +71,7 @@ export function toStickerResponse(sticker: Sticker): StickerResponse | null {
     id: sticker.id,
     slug: sticker.slug,
     label: sticker.label,
+    labelPt: sticker.labelPt ?? null,
     url,
     width: sticker.width,
     height: sticker.height,
@@ -82,6 +91,7 @@ export function toStickerPackResponse(pack: StickerPack): StickerPackResponse {
     id: pack.id,
     slug: pack.slug,
     name: pack.name,
+    namePt: pack.namePt ?? null,
     description: pack.description,
     // An unresolvable cover reads as "no cover" and the picker falls back to
     // the first sticker, so a deleted cover never blanks a pack's tile.

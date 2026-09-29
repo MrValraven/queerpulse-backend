@@ -26,6 +26,8 @@ export interface AmbassadorActorDTO {
 export interface AdminAmbassadorDTO {
   id: string;
   member: {
+    // The key `GET /admin/ambassadors/history?userId=` takes.
+    userId: string;
     slug: string;
     firstName: string;
     lastName: string;
@@ -44,9 +46,13 @@ export interface AdminAmbassadorDTO {
   inviteQuotaOverride: number | null;
 }
 
-/** `GET /admin/ambassadors/circle`. */
+/**
+ * `GET /admin/ambassadors/circle`. Before the first grant or staff seat founds
+ * the circle, `isFounded` is false, `slug` is null and the count is 0.
+ */
 export interface AmbassadorCircleSummaryDTO {
-  slug: string;
+  isFounded: boolean;
+  slug: string | null;
   memberCount: number;
   isViewerMember: boolean;
 }
@@ -81,6 +87,7 @@ export function toAdminAmbassador(
   return {
     id: ambassador.id,
     member: {
+      userId: memberProfile.userId,
       slug: memberProfile.slug,
       firstName: memberProfile.firstName,
       lastName: memberProfile.lastName,

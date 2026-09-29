@@ -9,6 +9,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
@@ -92,6 +93,7 @@ describe('VolunteeringService', () => {
     isOwnerOrMod: jest.Mock;
   };
   let notificationsService: { create: jest.Mock };
+  let contentModerationService: { stateFor: jest.Mock };
   let managerFindOne: jest.Mock;
 
   const baseDto = {
@@ -175,6 +177,12 @@ describe('VolunteeringService', () => {
       isOwnerOrMod: jest.fn().mockResolvedValue(false),
     };
     notificationsService = { create: jest.fn().mockResolvedValue(null) };
+    // Default: every subject resolves visible (no takedown row), so the
+    // existing tests exercise the un-moderated path unchanged. The
+    // hidden/removed cases below override this per test.
+    contentModerationService = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
     managerFindOne = jest.fn();
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -224,6 +232,10 @@ describe('VolunteeringService', () => {
         // global bus; `EventEmitterModule.forRoot()` is not in this testing
         // module, so the token has to be provided explicitly.
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        {
+          provide: ContentModerationService,
+          useValue: contentModerationService,
+        },
       ],
     }).compile();
     service = module.get(VolunteeringService);
@@ -433,6 +445,120 @@ describe('VolunteeringService', () => {
       expect(detail.spotsPct).toBe(75); // round(3/4 * 100)
       expect(detail.canReviewApplicants).toBe(false);
       expect(detail.canEditOpportunity).toBe(false);
+    });
+
+    it('404s a hidden opportunity for an ordinary viewer (moderator takedown withheld exactly like an unknown slug)', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'mentor-qyc',
+        org: 'Queer Youth Collective',
+        partnerId: null,
+        role: 'Mentor',
+        causes: [OpportunityCause.Youth],
+        commit: OpportunityCommitLevel.Low,
+        time: '2 hrs / week',
+        location: 'Lisbon',
+        skills: [],
+        desc: 'Mentor queer youth.',
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+        spotsTotal: 4,
+        applyRole: 'Volunteer Coordinator',
+        posterId: 'poster-1',
+        status: OpportunityStatus.Open,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      contentModerationService.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(service.getBySlug('mentor-qyc', 'viewer-1')).rejects.toThrow(
+        'Opportunity not found',
+      );
+      expect(contentModerationService.stateFor).toHaveBeenCalledWith(
+        'volunteering',
+        'mentor-qyc',
+      );
+    });
+
+    it('still shows a hidden opportunity to its own poster', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'mentor-qyc',
+        org: 'Queer Youth Collective',
+        partnerId: null,
+        role: 'Mentor',
+        causes: [OpportunityCause.Youth],
+        commit: OpportunityCommitLevel.Low,
+        time: '2 hrs / week',
+        location: 'Lisbon',
+        skills: [],
+        desc: 'Mentor queer youth.',
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+        spotsTotal: 4,
+        applyRole: 'Volunteer Coordinator',
+        posterId: 'poster-1',
+        status: OpportunityStatus.Open,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      contentModerationService.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      const detail = await service.getBySlug('mentor-qyc', 'poster-1');
+      expect(detail.slug).toBe('mentor-qyc');
+    });
+
+    it('still shows a removed opportunity to platform staff', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'mentor-qyc',
+        org: 'Queer Youth Collective',
+        partnerId: null,
+        role: 'Mentor',
+        causes: [OpportunityCause.Youth],
+        commit: OpportunityCommitLevel.Low,
+        time: '2 hrs / week',
+        location: 'Lisbon',
+        skills: [],
+        desc: 'Mentor queer youth.',
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+        spotsTotal: 4,
+        applyRole: 'Volunteer Coordinator',
+        posterId: 'poster-1',
+        status: OpportunityStatus.Open,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      contentModerationService.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: true,
+      });
+
+      const detail = await service.getBySlug(
+        'mentor-qyc',
+        'moderator-1',
+        'moderator',
+      );
+      expect(detail.slug).toBe('mentor-qyc');
     });
 
     it('guards divide-by-zero when spotsTotal is 0', async () => {
@@ -805,6 +931,24 @@ describe('VolunteeringService', () => {
   });
 
   describe('signup', () => {
+    it('refuses a signup to a hidden opportunity, the same way getBySlug withholds its detail', async () => {
+      managerFindOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        spotsTotal: 5,
+      });
+      contentModerationService.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(service.signup('x', 'user-1', {})).rejects.toThrow(
+        'Opportunity not found',
+      );
+      expect(signups.save).not.toHaveBeenCalled();
+    });
+
     it('maps a full opportunity (accepted-only count) to 409 Conflict', async () => {
       managerFindOne.mockResolvedValue({
         id: 'opp-1',

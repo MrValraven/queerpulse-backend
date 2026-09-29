@@ -24,18 +24,23 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { HostConfigDto } from './dto/host-config.dto';
-import { OptInDto, PairAnswersDto } from './dto/opt-in.dto';
+import {
+  OptInDto,
+  PairAnswersDto,
+  UpdateHostAnswersDto,
+} from './dto/opt-in.dto';
 import { GoTogetherEntryService } from './go-together-entry.service';
 import { GoTogetherHostService } from './go-together-host.service';
+import { GoTogetherLaunchGuard } from './go-together-launch.guard';
 
-@Feature('events')
+@Feature('goTogether')
 @ApiTags('Go together')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({
   description: 'Requires an authenticated, active member session.',
 })
 @Controller('events')
-@UseGuards(ActiveMemberGuard)
+@UseGuards(ActiveMemberGuard, GoTogetherLaunchGuard)
 export class GoTogetherEventController {
   constructor(
     private readonly entries: GoTogetherEntryService,
@@ -64,6 +69,22 @@ export class GoTogetherEventController {
     @Body() dto: OptInDto,
   ) {
     return this.entries.optIn(slug, user.userId, dto);
+  }
+
+  @Put(':slug/go-together/host-answers')
+  @UseGuards(NotRestrictedGuard)
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
+  @ApiOperation({
+    summary:
+      'Answer host questions again after the host changed them. Waiting members only.',
+  })
+  @ApiOkResponse({ description: 'The updated card.' })
+  updateHostAnswers(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: UpdateHostAnswersDto,
+  ) {
+    return this.entries.updateHostAnswers(slug, user.userId, dto);
   }
 
   @Delete(':slug/go-together')

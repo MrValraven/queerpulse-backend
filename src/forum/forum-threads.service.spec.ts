@@ -7,7 +7,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, IsNull } from 'typeorm';
+import { DataSource, In, IsNull } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { TopicPostLinkService } from '../content/topic-post-link.service';
@@ -15,7 +15,10 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { AccessTier } from '../communities/entities/community.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -30,6 +33,8 @@ import {
   ForumThreadsService,
   forumThreadVisibleSql,
 } from './forum-threads.service';
+
+const GRINNING_FACE = '\u{1F600}';
 
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
 // configurable row list — mirrors `moderation.service.spec.ts`'s `qbStub`,
@@ -283,8 +288,10 @@ describe('ForumThreadsService', () => {
   let notifications: { create: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   // PRD-167 — the thread card's `excerpt` has to know whether a moderator took
-  // the OP down. Default: nothing moderated.
-  let contentModeration: { statesForAnyType: jest.Mock };
+  // the OP down. Default: nothing moderated. `stateFor` is the community
+  // takedown read behind thread create and the reply gate, fully visible by
+  // default.
+  let contentModeration: { statesForAnyType: jest.Mock; stateFor: jest.Mock };
   // BE-COM-19's staff audit trail, which `deleteThread` appends to when a
   // moderator takes down a thread they did not write (PRD-160).
   let modAudit: { writeAuditLog: jest.Mock };
@@ -297,6 +304,15 @@ describe('ForumThreadsService', () => {
     subscribeQuietly: jest.Mock;
     unsubscribe: jest.Mock;
     markRead: jest.Mock;
+  };
+  // Community roster lookups: `assertMemberBySlug` on create and `isMember`
+  // on the reply gate (PRD-407 pins that cross-posting leaves it closed).
+  // `slugById` and `isOwnerOrMod` back the community takedown gate.
+  let membership: {
+    assertMemberBySlug: jest.Mock;
+    isMember: jest.Mock;
+    slugById: jest.Mock;
+    isOwnerOrMod: jest.Mock;
   };
   // The `EntityManager` `dataSource.transaction` hands its callback — hoisted
   // so `deleteThread`'s two `update` calls can be asserted on.
@@ -362,6 +378,7 @@ describe('ForumThreadsService', () => {
     mentions = { notify: jest.fn().mockResolvedValue(new Set<string>()) };
     contentModeration = {
       statesForAnyType: jest.fn().mockResolvedValue(new Map<string, unknown>()),
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
     modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
     topicPostLink = { linkThread: jest.fn().mockResolvedValue(undefined) };
@@ -426,6 +443,16 @@ describe('ForumThreadsService', () => {
       markRead: jest.fn(),
     };
 
+    membership = {
+      assertMemberBySlug: jest.fn(),
+      // Roster check behind `assertCanReplyInThread`. Default: on the roster.
+      isMember: jest.fn().mockResolvedValue(true),
+      // The takedown gate's slug lookup and staff exemption. Default: a known
+      // community, and the caller is not its staff.
+      slugById: jest.fn().mockResolvedValue('lisbon-hikers'),
+      isOwnerOrMod: jest.fn().mockResolvedValue(false),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ForumThreadsService,
@@ -438,10 +465,7 @@ describe('ForumThreadsService', () => {
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: MentionNotificationService, useValue: mentions },
         { provide: EventEmitter2, useValue: eventEmitter },
-        {
-          provide: CommunityMembershipService,
-          useValue: { assertMemberBySlug: jest.fn() },
-        },
+        { provide: CommunityMembershipService, useValue: membership },
         // `TopicPostLinkService` (thread-create tag reconciliation) and
         // `ModAuditService` (BE-COM-19's lock/pin/official audit rows) are
         // constructor dependencies of the service under test — stubbed here
@@ -551,6 +575,30 @@ describe('ForumThreadsService', () => {
         avatarUrl: null,
       });
     });
+
+    // ENG-494: `forum_thread.author_id` is `ON DELETE SET NULL`, so a thread
+    // outlives its author's erasure and keeps its replies on the list.
+    it('lists a thread whose author was erased under the placeholder author', async () => {
+      const qb = qbStub([baseThread({ authorId: null, replyCount: 3 })]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      expect(page.data).toHaveLength(1);
+      expect(page.data[0]).toEqual(
+        expect.objectContaining({
+          slug: 'hello-world',
+          replyCount: 3,
+          canEdit: false,
+          author: { handle: '', displayName: 'Member', avatarUrl: null },
+        }),
+      );
+    });
   });
 
   describe('getBySlug', () => {
@@ -590,6 +638,17 @@ describe('ForumThreadsService', () => {
 
       await service.loadOr404('hello-world');
 
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+    });
+
+    it('block check is skipped for a null thread author', async () => {
+      // ENG-494: an erased author blocks nobody, so a viewer reaches the
+      // thread and the block lookup is never asked about a null id.
+      threads.findOne.mockResolvedValue(baseThread({ authorId: null }));
+
+      const thread = await service.loadOr404('hello-world', 'viewer-1');
+
+      expect(thread.slug).toBe('hello-world');
       expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
     });
 
@@ -2300,6 +2359,7 @@ describe('ForumThreadsService', () => {
       expect(subscriptions.markRead).toHaveBeenCalledWith(
         'thread-1',
         'member-1',
+        expect.any(Date),
       );
       // Opening a thread must never sign anybody up for a notification per
       // reply for the rest of its life.
@@ -2885,6 +2945,625 @@ describe('ForumThreadsService', () => {
           closesAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
         }),
       ).resolves.toBeDefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ENG-418: the fan-out is scoped to who can read the thread and who is shown
+  // writing it
+  // ---------------------------------------------------------------------------
+  describe('scope-aware fan-out (ENG-418)', () => {
+    interface ClaimQbStub {
+      update: jest.Mock;
+      set: jest.Mock;
+      where: jest.Mock;
+      execute: jest.Mock;
+    }
+    const claimQbStub = (): ClaimQbStub => {
+      const claimQb: ClaimQbStub = {
+        update: jest.fn((): ClaimQbStub => claimQb),
+        set: jest.fn((): ClaimQbStub => claimQb),
+        where: jest.fn((): ClaimQbStub => claimQb),
+        execute: jest.fn(() => Promise.resolve({ affected: 1 })),
+      };
+      return claimQb;
+    };
+
+    const opBody = 'Come and help, @ana';
+
+    // Opens a thread that is visible and still owes its announcement, so the
+    // read path runs the whole fan-out once. A fresh row per call, because the
+    // fan-out marks the in-memory row as paid.
+    const openOwingThread = async (
+      overrides: Partial<ForumThread> = {},
+    ): Promise<void> => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ fannedOutAt: null, ...overrides }),
+      );
+      threads.createQueryBuilder.mockReturnValue(claimQbStub());
+      await service.getBySlug('hello-world', 'viewer-1');
+    };
+
+    const mentionPayload = (): Record<string, unknown> => {
+      const [, , payload] = mentions.notify.mock.calls[0] as [
+        string,
+        string,
+        Record<string, unknown>,
+      ];
+      return payload;
+    };
+
+    const threadCreatedEmits = (): unknown[][] =>
+      (eventEmitter.emit.mock.calls as unknown[][]).filter(
+        ([eventName]) => eventName === FORUM_THREAD_CREATED,
+      );
+
+    beforeEach(() => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        authorId: 'author-1',
+        body: opBody,
+        deletedAt: null,
+        editedAt: null,
+      });
+    });
+
+    it('does not record profile activity for an anonymous thread', async () => {
+      await openOwingThread({ isAnonymous: true });
+
+      expect(threadCreatedEmits()).toHaveLength(0);
+      // The thread is still forum-wide, so the rest of the fan-out runs.
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not record profile activity for an official thread', async () => {
+      await openOwingThread({ isOfficial: true });
+
+      expect(threadCreatedEmits()).toHaveLength(0);
+    });
+
+    it('does not record profile activity for a thread in a private community', async () => {
+      // The default community probe answers "no" to both questions: the
+      // viewer is not shut out, and the community is not a public top-level
+      // one, which is the gated case.
+      await openOwingThread({ communityId: 'community-1' });
+
+      expect(threadCreatedEmits()).toHaveLength(0);
+    });
+
+    it('records profile activity for a named thread every member can read', async () => {
+      await openOwingThread();
+
+      expect(threadCreatedEmits()).toHaveLength(1);
+      expect(threadCreatedEmits()[0]?.[1]).toEqual({
+        authorId: 'author-1',
+        threadSlug: 'hello-world',
+        title: 'Hello world',
+      });
+    });
+
+    it('links topics only for forum-wide threads', async () => {
+      await openOwingThread({ communityId: 'community-1' });
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+
+      // A public, top-level, live community: the first probe is the read
+      // gate (not hidden), the second is the forum-wide question (yes).
+      const forumWideProbe = communityAccessQbStub(true);
+      threads.manager.createQueryBuilder
+        .mockReturnValueOnce(communityAccessQbStub(false))
+        .mockReturnValueOnce(forumWideProbe);
+      await openOwingThread({ communityId: 'community-1' });
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(1);
+      expect(forumWideProbe.andWhere).toHaveBeenCalledWith(
+        'com.accessTier = :publicTier',
+        { publicTier: AccessTier.Public },
+      );
+      expect(forumWideProbe.andWhere).toHaveBeenCalledWith(
+        'com.parentId IS NULL',
+      );
+      expect(forumWideProbe.andWhere).toHaveBeenCalledWith(
+        'com.archivedAt IS NULL',
+      );
+
+      // A cross-posted thread is forum-wide by the author's choice, whatever
+      // its community's tier, so no probe is needed.
+      await openOwingThread({ communityId: 'community-1', crossPosted: true });
+      expect(topicPostLink.linkThread).toHaveBeenCalledTimes(2);
+    });
+
+    it('omits actorId from mention payloads on an anonymous thread', async () => {
+      await openOwingThread({ isAnonymous: true });
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      // The real author still reaches `notify` for the block filter and the
+      // self-mention skip; the payload the bell reads names nobody.
+      const [, notifiedAuthorId] = mentions.notify.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(notifiedAuthorId).toBe('author-1');
+      expect(mentionPayload()).not.toHaveProperty('actorId');
+      expect(mentionPayload()).toMatchObject({
+        source: 'forum',
+        threadSlug: 'hello-world',
+      });
+    });
+
+    it('omits the mention excerpt on a gated community thread', async () => {
+      await openOwingThread({ communityId: 'community-1' });
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(mentionPayload()).not.toHaveProperty('excerpt');
+      expect(mentionPayload()).toMatchObject({
+        actorId: 'author-1',
+        threadSlug: 'hello-world',
+      });
+    });
+
+    it('a failed forum-wide probe fans out as gated and create still resolves', async () => {
+      // The probe runs after the thread has committed. A rejection must not
+      // turn a posted thread into a 500 (a retry would post it twice), so it
+      // answers "not forum-wide", the privacy-safe reading.
+      membership.assertMemberBySlug.mockResolvedValue('community-1');
+      threads.manager.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getExists: jest.fn().mockRejectedValue(new Error('pool timeout')),
+      });
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello, World!',
+          body: opBody,
+          category: 'general',
+          communitySlug: 'lisbon-hikers',
+        }),
+      ).resolves.toBeDefined();
+
+      expect(threadCreatedEmits()).toHaveLength(0);
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(mentionPayload()).not.toHaveProperty('excerpt');
+    });
+
+    it('keeps the excerpt and the actor on a named forum-wide thread', async () => {
+      await openOwingThread();
+
+      expect(mentionPayload()).toEqual({
+        actorId: 'author-1',
+        source: 'forum',
+        threadSlug: 'hello-world',
+        excerpt: opBody,
+      });
+    });
+
+    it('keeps an emoji at the 140-character mention excerpt boundary whole', async () => {
+      const body = `${'a'.repeat(139)}${GRINNING_FACE}`;
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        authorId: 'author-1',
+        body,
+        deletedAt: null,
+        editedAt: null,
+      });
+
+      await openOwingThread();
+
+      expect(mentionPayload().excerpt).toBe(body);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PRD-407: a cross-posted thread reaches the whole forum for reading
+  // ---------------------------------------------------------------------------
+  describe('cross-post reach (PRD-407)', () => {
+    it('list admits a cross-posted thread to a non-member', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined);
+
+      const { sql } = accessTierGateCall(qb);
+      expect(sql).toContain('OR t.cross_posted = true');
+    });
+
+    it('loadOr404 serves a cross-posted gated thread to a non-member', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ communityId: 'community-1', crossPosted: true }),
+      );
+      // Were the community gate consulted, it would hide this thread.
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(true),
+      );
+
+      await expect(
+        service.loadOr404('hello-world', 'viewer-1'),
+      ).resolves.toMatchObject({ slug: 'hello-world' });
+      expect(threads.manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('still hides a gated thread that is not cross-posted', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ communityId: 'community-1' }),
+      );
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(true),
+      );
+
+      await expect(
+        service.loadOr404('hello-world', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('a non-member still cannot reply to a cross-posted thread', async () => {
+      membership.isMember.mockResolvedValue(false);
+
+      await expect(
+        service.assertCanReplyInThread(
+          baseThread({ communityId: 'community-1', crossPosted: true }),
+          'viewer-1',
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(membership.isMember).toHaveBeenCalledWith(
+        'community-1',
+        'viewer-1',
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // A community a moderator took down takes no new threads, replies or poll
+  // votes from anyone but its own staff, with the board's own 404.
+  // ---------------------------------------------------------------------------
+  describe('taken-down community', () => {
+    beforeEach(() => {
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: true,
+      });
+    });
+
+    it('assertCanReplyInThread 404s a member, reading the takedown by community slug', async () => {
+      await expect(
+        service.assertCanReplyInThread(
+          baseThread({ communityId: 'community-1' }),
+          'viewer-1',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(membership.slugById).toHaveBeenCalledWith('community-1');
+      expect(contentModeration.stateFor).toHaveBeenCalledWith(
+        'community',
+        'lisbon-hikers',
+      );
+    });
+
+    it('assertCanReplyInThread 404s a non-member before the roster refusal', async () => {
+      membership.isMember.mockResolvedValue(false);
+      await expect(
+        service.assertCanReplyInThread(
+          baseThread({ communityId: 'community-1', crossPosted: true }),
+          'viewer-1',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('assertCanReplyInThread treats a hidden community the same as a removed one', async () => {
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+      await expect(
+        service.assertCanReplyInThread(
+          baseThread({ communityId: 'community-1' }),
+          'viewer-1',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('assertCanReplyInThread lets the community staff through', async () => {
+      membership.isOwnerOrMod.mockResolvedValue(true);
+      await expect(
+        service.assertCanReplyInThread(
+          baseThread({ communityId: 'community-1' }),
+          'mod-1',
+        ),
+      ).resolves.toBeUndefined();
+      expect(membership.isOwnerOrMod).toHaveBeenCalledWith(
+        'community-1',
+        'mod-1',
+      );
+    });
+
+    it('assertCanReplyInThread leaves a thread outside any community alone', async () => {
+      await expect(
+        service.assertCanReplyInThread(baseThread(), 'viewer-1'),
+      ).resolves.toBeUndefined();
+      expect(contentModeration.stateFor).not.toHaveBeenCalled();
+    });
+
+    it('create 404s a member starting a thread in the community', async () => {
+      membership.assertMemberBySlug.mockResolvedValue('community-1');
+      await expect(
+        service.create('author-1', {
+          title: 'Hello, World!',
+          body: 'First post body',
+          category: 'general',
+          communitySlug: 'lisbon-hikers',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(contentModeration.stateFor).toHaveBeenCalledWith(
+        'community',
+        'lisbon-hikers',
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('create lets the community staff start a thread', async () => {
+      membership.assertMemberBySlug.mockResolvedValue('community-1');
+      membership.isOwnerOrMod.mockResolvedValue(true);
+      profiles.find.mockResolvedValue([baseProfile()]);
+      await expect(
+        service.create('author-1', {
+          title: 'Hello, World!',
+          body: 'First post body',
+          category: 'general',
+          communitySlug: 'lisbon-hikers',
+        }),
+      ).resolves.toBeDefined();
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PRD-408: the co-author credit
+  // ---------------------------------------------------------------------------
+  describe('co-author credit (PRD-408)', () => {
+    it('refuses a co-author who blocked the author with the unknown-handle message', async () => {
+      // `MemberLookup.userIdsForSlugs` resolves the handle through a profile
+      // query builder: the handle names a real, active member.
+      interface HandleQbStub {
+        innerJoin: jest.Mock;
+        where: jest.Mock;
+        getMany: jest.Mock;
+      }
+      const handleQb: HandleQbStub = {
+        innerJoin: jest.fn((): HandleQbStub => handleQb),
+        where: jest.fn((): HandleQbStub => handleQb),
+        getMany: jest.fn((): Promise<Profile[]> =>
+          Promise.resolve([baseProfile({ userId: 'bea-1', slug: 'bea' })]),
+        ),
+      };
+      Object.assign(profiles, { createQueryBuilder: jest.fn(() => handleQb) });
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      const attempt = service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        coAuthorHandle: 'bea',
+      });
+
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(
+        'No member with that handle to credit as co-author',
+      );
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+        'author-1',
+        'bea-1',
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('the credited member can remove their credit', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ coAuthorId: 'member-1' }));
+
+      const echo = await service.removeCoAuthor('hello-world', member);
+
+      expect(threads.update).toHaveBeenCalledWith(
+        { id: 'thread-1' },
+        { coAuthorId: null },
+      );
+      expect(echo.coAuthor).toBeNull();
+      expect(echo.viewerIsCoAuthor).toBe(false);
+    });
+
+    it('the author can retract the credit', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ authorId: 'member-1', coAuthorId: 'bea-1' }),
+      );
+
+      await service.removeCoAuthor('hello-world', member);
+
+      expect(threads.update).toHaveBeenCalledWith(
+        { id: 'thread-1' },
+        { coAuthorId: null },
+      );
+    });
+
+    it('a third member gets 404 removing a credit', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ coAuthorId: 'bea-1' }));
+
+      await expect(
+        service.removeCoAuthor('hello-world', member),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(threads.update).not.toHaveBeenCalled();
+    });
+
+    it('404s removing a credit from a withdrawn thread', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ coAuthorId: 'member-1', deletedAt: new Date() }),
+      );
+
+      await expect(
+        service.removeCoAuthor('hello-world', member),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(threads.update).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PRD-409: the read watermark records what the member saw
+  // ---------------------------------------------------------------------------
+  describe('read watermark upTo (PRD-409)', () => {
+    it('markRead clamps upTo to now', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+      await service.markRead('hello-world', member, nextWeek.toISOString());
+      const afterCall = Date.now();
+
+      const [, , readAt] = subscriptions.markRead.mock.calls[0] as [
+        string,
+        string,
+        Date,
+      ];
+      expect(readAt.getTime()).toBeLessThanOrEqual(afterCall);
+      expect(readAt.getTime()).toBeLessThan(nextWeek.getTime());
+    });
+
+    it('markRead stamps a past upTo exactly', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      const upTo = '2026-09-01T10:00:00.000Z';
+
+      await service.markRead('hello-world', member, upTo);
+
+      expect(subscriptions.markRead).toHaveBeenCalledWith(
+        'thread-1',
+        'member-1',
+        new Date(upTo),
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ENG-423: a deadline's one-year cap runs from publication
+  // ---------------------------------------------------------------------------
+  describe('deadline window (ENG-423)', () => {
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    it('closesAt is measured from a scheduled publishAt', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+      const publishAt = new Date(Date.now() + 300 * dayMs);
+      // More than a year from now, less than a year after publication.
+      const closesAt = new Date(Date.now() + 400 * dayMs);
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello',
+          body: 'Body',
+          category: 'general',
+          publishAt: publishAt.toISOString(),
+          closesAt: closesAt.toISOString(),
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('refuses a closesAt more than a year after a scheduled publishAt', async () => {
+      const publishAt = new Date(Date.now() + 30 * dayMs);
+      const closesAt = new Date(publishAt.getTime() + 366 * dayMs);
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello',
+          body: 'Body',
+          category: 'general',
+          publishAt: publishAt.toISOString(),
+          closesAt: closesAt.toISOString(),
+        }),
+      ).rejects.toThrow(
+        'closesAt must be at most a year after the thread is published',
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('holds a poll deadline to the same window', async () => {
+      const publishAt = new Date(Date.now() + 30 * dayMs);
+      const pollClosesAt = new Date(publishAt.getTime() + 366 * dayMs);
+
+      await expect(
+        service.create('author-1', {
+          title: 'Hello',
+          body: 'Body',
+          category: 'general',
+          publishAt: publishAt.toISOString(),
+          poll: {
+            options: [{ label: 'Yes' }, { label: 'No' }],
+            closesAt: pollClosesAt.toISOString(),
+          },
+        }),
+      ).rejects.toThrow(
+        'poll.closesAt must be at most a year after the thread is published',
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PRD-461 follow-up: each review queue row names its community
+  // ---------------------------------------------------------------------------
+  describe('listPendingReview community', () => {
+    it('names the community on a community thread and null on a global one', async () => {
+      threads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({
+            id: 'thread-1',
+            reviewState: 'pending',
+            communityId: 'community-1',
+          }),
+          baseThread({
+            id: 'thread-2',
+            slug: 'global-thread',
+            reviewState: 'pending',
+            communityId: null,
+          }),
+        ]),
+      );
+      threads.manager.find.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === Community
+            ? [
+                {
+                  id: 'community-1',
+                  slug: 'lisbon-hikers',
+                  name: 'Lisbon Hikers',
+                },
+              ]
+            : [],
+        ),
+      );
+
+      const page = await service.listPendingReview(moderator, undefined, 20);
+
+      expect(page.data.map((row) => [row.id, row.community])).toEqual([
+        ['thread-1', { slug: 'lisbon-hikers', name: 'Lisbon Hikers' }],
+        ['thread-2', null],
+      ]);
+      // One batched community read covers the whole page.
+      const communityReads = (
+        threads.manager.find.mock.calls as unknown[][]
+      ).filter((call: unknown[]) => call[0] === Community);
+      expect(communityReads).toHaveLength(1);
+      expect(communityReads[0]?.[1]).toEqual({
+        where: { id: In(['community-1']) },
+        select: { id: true, slug: true, name: true },
+      });
+    });
+
+    it('skips the community read when no queued thread has a community', async () => {
+      threads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ reviewState: 'pending', communityId: null })]),
+      );
+
+      const page = await service.listPendingReview(moderator, undefined, 20);
+
+      expect(page.data[0]?.community).toBeNull();
+      expect(
+        threads.manager.find.mock.calls.some(
+          (call: unknown[]) => call[0] === Community,
+        ),
+      ).toBe(false);
     });
   });
 });

@@ -237,10 +237,11 @@ export class OfficialConversationsService {
 
   /**
    * Writes the immutable audit row straight to the `ModAuditLog` repository.
-   * `ModAuditService.writeAuditLog` has no `targetUserId` /
-   * `targetName`, and an official message's trail must say WHO it went to.
-   * Same entity, same columns, same append-only semantics; it also avoids
-   * importing the whole `ModerationModule` graph for one insert.
+   * `ModAuditService.writeAuditLog` takes an optional trailing `targetUserId`
+   * now, but still carries no `targetName`, and an official message's trail
+   * must say WHO it went to by name too. Same entity, same columns, same
+   * append-only semantics; it also avoids importing the whole
+   * `ModerationModule` graph for one insert.
    */
   async writeAudit(input: {
     actorId: string;

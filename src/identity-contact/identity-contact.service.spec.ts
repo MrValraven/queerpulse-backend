@@ -184,6 +184,7 @@ function makeContact(
     blockFilter as never,
     { resyncConversation: jest.fn(() => Promise.resolve([])) } as never,
     users as never,
+    {} as never, // MessagesService, used only by `messageRequest`
   );
   const messaging = Object.create(
     MessagingService.prototype,

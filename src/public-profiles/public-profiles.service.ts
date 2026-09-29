@@ -60,7 +60,7 @@ export class PublicProfilesService {
    * Resolve a published profile for an anonymous caller.
    *
    * ---------------------------------------------------------------------------
-   * THE GATE — all three conditions, expressed as inner joins in one query
+   * THE GATE: all four conditions, expressed as inner joins in one query
    * ---------------------------------------------------------------------------
    * 1. `member_preferences.public_profile_enabled = true`. This is the switch
    *    the member actually flipped, and this endpoint is the thing that finally
@@ -81,6 +81,16 @@ export class PublicProfilesService {
    *    member should not keep a published page.
    *
    * 3. `profiles.visibility = 'open'`.
+   *
+   * 4. `profiles.hidden_until` is null or already in the past. "Hide me for 24
+   *    hours" (member profile v2 Task 6) takes a member out of every non-owner
+   *    viewer's results while it is live, the same self-hide gate
+   *    `ProfilesService.assertVisibleOrNotFound` applies to the in-app profile
+   *    (`profiles.service.ts`, the `hiddenUntil` check). An anonymous visitor
+   *    on the open web is a non-owner viewer too, and the indexable page must
+   *    not keep serving name, face, bio and links while the in-app profile is
+   *    hidden: that would make the public page the one surface a 24-hour
+   *    self-hide fails to cover.
    *
    * ---------------------------------------------------------------------------
    * VISIBILITY COMPOSITION RULE: the public flag INTERSECTS visibility, never
@@ -148,16 +158,20 @@ export class PublicProfilesService {
     // reaches the open web. The write-time gate only knew what was public at
     // the instant of the action, and this is the one surface that serves a
     // logged-out visitor. `filterVisible` also purges what it rejects, so the
-    // row stops being served to every audience, not just this one.
-    const visibleActivity =
-      await this.activityVisibility.filterVisible(activity);
+    // row stops being served to every audience. `null`
+    // viewer: this endpoint has no session, so PRD-414's RSVP-visibility gate
+    // treats the caller as a stranger to every attendee.
+    const visibleActivity = await this.activityVisibility.filterVisible(
+      activity,
+      null,
+    );
 
     return toPublicProfile(profile, socials, work, visibleActivity);
   }
 
   /**
    * THE GATE, as a builder, so every path that resolves a profile for the open
-   * web goes through the same three conditions. Read the long note on
+   * web goes through the same four conditions. Read the long note on
    * `getBySlug` for why each one is here.
    *
    * Factored out for the moved-username path below, which has to answer the
@@ -171,17 +185,26 @@ export class PublicProfilesService {
    * `where` would RESET the clause and drop the visibility gate with it.
    */
   private publishedProfileQuery(): SelectQueryBuilder<Profile> {
-    return this.profiles
-      .createQueryBuilder('p')
-      .innerJoin('p.user', 'u', 'u.status = :active', {
-        active: UserStatus.Active,
-      })
-      .innerJoin(
-        MemberPreferences,
-        'mp',
-        'mp.user_id = p.user_id AND mp.public_profile_enabled = true',
-      )
-      .where('p.visibility = :open', { open: ProfileVisibility.Open });
+    return (
+      this.profiles
+        .createQueryBuilder('p')
+        .innerJoin('p.user', 'u', 'u.status = :active', {
+          active: UserStatus.Active,
+        })
+        .innerJoin(
+          MemberPreferences,
+          'mp',
+          'mp.user_id = p.user_id AND mp.public_profile_enabled = true',
+        )
+        .where('p.visibility = :open', { open: ProfileVisibility.Open })
+        // Self-hide gate (member profile v2 Task 6, "Hide me for 24 hours"),
+        // same raw predicate `ProfilesService.applyMemberVisibilityGates` and
+        // `FeedService`/`MemberSuggestionsService` apply over their own query
+        // builders: a live `hidden_until` excludes the member from every
+        // non-owner reader, and an anonymous open-web visitor is never the
+        // owner.
+        .andWhere('(p.hidden_until IS NULL OR p.hidden_until <= now())')
+    );
   }
 
   /**

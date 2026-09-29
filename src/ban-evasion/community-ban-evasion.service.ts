@@ -149,6 +149,43 @@ export class CommunityBanEvasionService {
   }
 
   /**
+   * True when this member correlates with somebody THIS community banned.
+   *
+   * SERVER-INTERNAL: this call carries no caller role check, because
+   * `CommunitiesService.join` calls it directly about the person trying to
+   * join, ahead of any moderator ever seeing the request.
+   *
+   * The narrowing is the same as `flagJoinRequests`: THIS community's own
+   * `community_ban` rows, the same matcher (`matchKinds`) and the same
+   * review-worthy threshold, so the bit a joiner's outcome depends on stays
+   * exactly the one a moderator sees on the queue.
+   *
+   * NEVER THROWS. A failed correlation read is logged and answered `false`,
+   * keeping a correlation outage to a degraded "let them ask to join" for
+   * every join in the community.
+   */
+  async isMatchingCommunityBan(
+    communityId: string,
+    userId: string,
+  ): Promise<boolean> {
+    try {
+      const bansHere = await this.signals.find({
+        where: { communityId, removalKind: RemovalKind.CommunityBan },
+      });
+      if (!bansHere.length) return false;
+      const [material] = await this.banEvasion.correlationMaterialForUsers([
+        userId,
+      ]);
+      return isMatchingBannedMember(material ?? null, bansHere);
+    } catch (error) {
+      this.logger.warn(
+        `Ban-evasion match failed for a join to ${communityId}: ${String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * This community's OWN escalations, newest first.
    *
    * Why it exists: `escalate` is idempotent, so a moderator who already asked

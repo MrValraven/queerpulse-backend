@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { AuthService } from '../auth/auth.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
@@ -20,6 +20,7 @@ import {
 } from '../reports/entities/report.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
@@ -29,6 +30,8 @@ import { ModerationService } from './moderation.service';
 import { BanRatificationService } from './ban-ratification.service';
 import { BanRatification } from './entities/ban-ratification.entity';
 import { BAN_PENDING_AUDIT_ACTION } from './ban-ratification-window';
+import { ACCOUNT_REINSTATED } from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -162,6 +165,9 @@ describe('ModerationService', () => {
   let applyContentAction: jest.Mock;
   let revertContent: jest.Mock;
   let managerUpdate: jest.Mock;
+  // The overturn of a legacy slug-filed persona report looks the personas up
+  // through the manager. Empty by default: no other case reaches it.
+  let managerFind: jest.Mock;
   let communityMembership: {
     isOwnerOrMod: jest.Mock;
     communityIdForPost: jest.Mock;
@@ -179,6 +185,8 @@ describe('ModerationService', () => {
   // Task 21 review M3: resolves an `identity` report's business display name
   // for the queue.
   let identities: { describeIdentities: jest.Mock };
+  // ENG-486: an overturned `ban` emits `ACCOUNT_REINSTATED` post-commit.
+  let eventEmit: jest.Mock;
 
   beforeEach(async () => {
     reports = {
@@ -237,6 +245,7 @@ describe('ModerationService', () => {
     // An OVERTURNED appeal now undoes the original takedown (BE-COM-08).
     revertContent = jest.fn().mockResolvedValue(undefined);
     managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
+    managerFind = jest.fn().mockResolvedValue([]);
     // Defaults to "no community, not staff" so every pre-existing test below
     // (all acting as a platform Moderator/Admin) never touches this path, and
     // any test that *does* reach the carve-out fails closed unless it
@@ -257,6 +266,7 @@ describe('ModerationService', () => {
     };
 
     dataSourceQuery = jest.fn().mockResolvedValue([]);
+    eventEmit = jest.fn();
 
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
@@ -295,6 +305,7 @@ describe('ModerationService', () => {
           : (appeals.save(e) as Promise<unknown>);
       },
       update: managerUpdate,
+      find: managerFind,
       findOne: (entity: unknown, opts: unknown): Promise<unknown> => {
         if (entity === User) return users.findOne(opts) as Promise<unknown>;
         // `revertOriginalAction` resolves the appealed action through the
@@ -366,7 +377,7 @@ describe('ModerationService', () => {
         // `actOnReport` emits `ACCOUNT_REMOVED` post-commit (TS-05). The spec
         // never imported `EventEmitterModule`, so the token needs a stub or
         // Nest cannot construct the service at all.
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: EventEmitter2, useValue: { emit: eventEmit } },
         // TS-12: the second-moderator hold. Defaults to "nothing to withdraw",
         // so every pre-existing appeal test is unaffected.
         {
@@ -871,6 +882,65 @@ describe('ModerationService', () => {
       expect(auditLogs.save).toHaveBeenCalledWith(
         expect.objectContaining({ duration: '7d' }),
       );
+    });
+
+    // N3 (ENG-446 follow-up): applying a takedown to a legacy persona report
+    // canonicalises its subjectId the same way `revertReportedTakedown`
+    // already does for an overturn, so the write lands under a key the read
+    // paths actually check.
+    describe('applying a takedown to a legacy persona report', () => {
+      it('fans a slug-filed report out to every persona holding that slug', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Subprofile,
+            subjectId: 'nightform',
+          }),
+        );
+        managerFind.mockResolvedValue([{ id: 'sp-a' }, { id: 'sp-b' }]);
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'hide_content',
+          reasonCode: 'harassment',
+          note: 'Legacy slug-filed report.',
+        });
+
+        expect(managerFind).toHaveBeenCalledWith(Subprofile, {
+          where: { slug: 'nightform' },
+          select: { id: true },
+        });
+        expect(applyContentAction).toHaveBeenCalledTimes(2);
+        const appliedSubjectIds = (
+          applyContentAction.mock.calls as unknown[][]
+        ).map((call) => (call[1] as { subjectId: string }).subjectId);
+        expect(appliedSubjectIds).toEqual(['sp-a', 'sp-b']);
+      });
+
+      it('lowercases an uppercase-uuid report before applying the takedown', async () => {
+        const upperPersonaId = '5E000000-0000-4000-8000-0000000000AA';
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Subprofile,
+            subjectId: upperPersonaId,
+          }),
+        );
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'remove_content',
+          reasonCode: 'harassment',
+          note: 'Legacy uppercase-uuid report.',
+        });
+
+        expect(managerFind).not.toHaveBeenCalled();
+        expect(applyContentAction).toHaveBeenCalledTimes(1);
+        expect(applyContentAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            subjectType: ReportSubjectType.Subprofile,
+            subjectId: upperPersonaId.toLowerCase(),
+            action: 'remove_content',
+          }),
+        );
+      });
     });
 
     // The community-owner/mod dismiss carve-out: `PATCH /mod/reports/:id`
@@ -2444,6 +2514,238 @@ describe('ModerationService', () => {
       ).rejects.toThrow(/14 days/);
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
+
+    // PRD-459: each decision can be appealed once, and the appeal's outcome is
+    // final. A second appeal on a decided action is a typed 409; a cold appeal
+    // has no action to count against and keeps the awaiting-only rule.
+    describe('each decision can be appealed once (PRD-459)', () => {
+      const REASON = 'I would like this decision looked at again.';
+      const decidedAppeal = (status: AppealStatus) => ({
+        id: 'appeal-0',
+        appellantId: APPELLANT_ID,
+        actionId: 'log-1',
+        status,
+      });
+      // Answers the awaiting lookup with `awaiting` and every other lookup
+      // (the decided one) with `decided`.
+      const appealsOnFile = (input: {
+        awaiting?: unknown;
+        decided?: unknown;
+      }) =>
+        appeals.findOne.mockImplementation(
+          ({ where }: { where: { status?: unknown } }) =>
+            Promise.resolve(
+              where.status === AppealStatus.Awaiting
+                ? (input.awaiting ?? null)
+                : (input.decided ?? null),
+            ),
+        );
+      const refusalOf = async (
+        attempt: Promise<unknown>,
+      ): Promise<{ error: unknown; body: Record<string, unknown> }> => {
+        try {
+          await attempt;
+        } catch (error) {
+          return {
+            error,
+            body: (error as HttpException).getResponse() as Record<
+              string,
+              unknown
+            >,
+          };
+        }
+        throw new Error('expected the appeal to be refused');
+      };
+
+      beforeEach(() => {
+        auditLogs.findOne.mockResolvedValue(auditRow(new Date()));
+        dataSourceQuery.mockResolvedValue([]);
+      });
+
+      it.each([AppealStatus.Upheld, AppealStatus.Overturned])(
+        'refuses a second appeal once the first was %s',
+        async (status) => {
+          appealsOnFile({ decided: decidedAppeal(status) });
+
+          const { error, body } = await refusalOf(
+            service.submitAppeal(APPELLANT_ID, {
+              actionId: 'log-1',
+              reason: REASON,
+            }),
+          );
+
+          expect(error).toBeInstanceOf(ConflictException);
+          expect(body).toMatchObject({
+            statusCode: 409,
+            code: 'APPEAL_ALREADY_DECIDED',
+            message:
+              'This decision has already been appealed. The appeal decision is final.',
+          });
+          expect(appeals.findOne).toHaveBeenCalledWith({
+            where: {
+              appellantId: APPELLANT_ID,
+              actionId: 'log-1',
+              status: In([AppealStatus.Upheld, AppealStatus.Overturned]),
+            },
+          });
+          expect(appeals.create).not.toHaveBeenCalled();
+          expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+        },
+      );
+
+      it('counts the latest decision the same way when no action is named', async () => {
+        appealsOnFile({ decided: decidedAppeal(AppealStatus.Upheld) });
+
+        const { body } = await refusalOf(
+          service.submitAppeal(APPELLANT_ID, { reason: REASON }),
+        );
+
+        expect(body).toMatchObject({ code: 'APPEAL_ALREADY_DECIDED' });
+        expect(appeals.create).not.toHaveBeenCalled();
+      });
+
+      it('keeps the awaiting refusal while the first appeal is open', async () => {
+        appealsOnFile({ awaiting: decidedAppeal(AppealStatus.Awaiting) });
+
+        const { error, body } = await refusalOf(
+          service.submitAppeal(APPELLANT_ID, {
+            actionId: 'log-1',
+            reason: REASON,
+          }),
+        );
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(body.code).toBeUndefined();
+        expect(String(body.message)).toMatch(/awaiting review/);
+        expect(appeals.create).not.toHaveBeenCalled();
+      });
+
+      it('files a first appeal on the action', async () => {
+        appealsOnFile({});
+
+        await service.submitAppeal(APPELLANT_ID, {
+          actionId: 'log-1',
+          reason: REASON,
+        });
+
+        expect(appeals.create).toHaveBeenCalledWith(
+          expect.objectContaining({ actionId: 'log-1' }),
+        );
+      });
+
+      it('leaves a cold appeal to the awaiting-only rule', async () => {
+        auditLogs.findOne.mockResolvedValue(null);
+        appealsOnFile({ decided: decidedAppeal(AppealStatus.Upheld) });
+
+        await service.submitAppeal(APPELLANT_ID, { reason: REASON });
+
+        expect(appeals.findOne).toHaveBeenCalledTimes(1);
+        expect(appeals.create).toHaveBeenCalledWith(
+          expect.objectContaining({ actionId: null }),
+        );
+      });
+    });
+
+    // Since ENG-480 the bookkeeping rows an appeal decision writes name the
+    // member in `targetUserId`, so a deep link to one proves ownership. It is
+    // still no decision the member can contest.
+    it.each(['appeal_upheld', 'suspension_lifted', 'content_restored'])(
+      'refuses a deep link to a %s bookkeeping row',
+      async (action) => {
+        auditLogs.findOne.mockResolvedValue({
+          ...auditRow(new Date()),
+          action,
+        });
+
+        await expect(
+          service.submitAppeal(APPELLANT_ID, {
+            actionId: 'log-1',
+            reason: 'I would like this decision looked at again.',
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(appeals.create).not.toHaveBeenCalled();
+      },
+    );
+
+    // A suspended member reaches the form only through the bare route on the
+    // suspended and banned pages, with no `actionId`. A moderator who
+    // suspends someone and then removes their posts leaves a newer
+    // `remove_content` row naming them, and the bare appeal must still land
+    // on the suspension.
+    describe('a bare appeal from a suspended member targets the lockout', () => {
+      const REASON = 'I would like my suspension looked at again.';
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const suspendRow = {
+        ...auditRow(hourAgo),
+        id: 'log-suspend',
+        action: 'suspend',
+      };
+      const removalRow = {
+        ...auditRow(new Date()),
+        id: 'log-removal',
+        action: 'remove_content',
+      };
+      // Answers the way the table would: the newest row naming the member
+      // whose action is in the `In(...)` list the query passed.
+      const auditTable = (rows: Array<typeof suspendRow>) =>
+        auditLogs.findOne.mockImplementation(
+          ({
+            where,
+          }: {
+            where: { targetUserId?: string; action: { value: string[] } };
+          }) =>
+            Promise.resolve(
+              rows
+                .filter(
+                  (row) =>
+                    row.targetUserId === where.targetUserId &&
+                    where.action.value.includes(row.action),
+                )
+                .sort(
+                  (left, right) =>
+                    right.createdAt.getTime() - left.createdAt.getTime(),
+                )[0] ?? null,
+            ),
+        );
+
+      beforeEach(() => {
+        auditTable([suspendRow, removalRow]);
+        dataSourceQuery.mockResolvedValue([]);
+      });
+
+      it('resolves to the suspend row over a newer remove_content row', async () => {
+        users.findOne.mockResolvedValue({
+          id: APPELLANT_ID,
+          status: UserStatus.Suspended,
+        });
+
+        await service.submitAppeal(APPELLANT_ID, { reason: REASON });
+
+        expect(appeals.create).toHaveBeenCalledWith(
+          expect.objectContaining({ actionId: 'log-suspend' }),
+        );
+        expect(auditLogs.findOne).toHaveBeenCalledWith({
+          where: {
+            targetUserId: APPELLANT_ID,
+            action: In(['suspend', 'ban', 'ban_pending_ratification']),
+          },
+          order: { createdAt: 'DESC' },
+        });
+      });
+
+      it('keeps the newest appealable row for an active member', async () => {
+        users.findOne.mockResolvedValue({
+          id: APPELLANT_ID,
+          status: UserStatus.Active,
+        });
+
+        await service.submitAppeal(APPELLANT_ID, { reason: REASON });
+
+        expect(appeals.create).toHaveBeenCalledWith(
+          expect.objectContaining({ actionId: 'log-removal' }),
+        );
+      });
+    });
   });
 
   describe('reviewAppeal', () => {
@@ -2556,12 +2858,84 @@ describe('ModerationService', () => {
           ReportSubjectType.Post,
           'post-1',
         );
+        expect(managerFind).not.toHaveBeenCalled();
         expect(auditLogs.save).toHaveBeenCalledWith(
           expect.objectContaining({
             reportId: 'report-1',
             actorId: 'actor-1',
             action: 'content_restored',
           }),
+        );
+      });
+
+      // ENG-446: a legacy persona report filed by slug had its takedown moved
+      // to the uuid of every persona holding that slug.
+      it('lifts the uuid key of every persona holding the slug a legacy persona report named', async () => {
+        appeals.findOne.mockResolvedValue(baseAppeal());
+        auditLogs.findOne.mockResolvedValue({
+          id: 'log-1',
+          reportId: 'report-1',
+          actorId: 'actor-2',
+          action: 'remove_content',
+          reasonCode: 'harassment',
+          note: null,
+          duration: null,
+          createdAt: new Date('2026-01-01T12:00:00.000Z'),
+        });
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Subprofile,
+            subjectId: 'nightform',
+          }),
+        );
+        managerFind.mockResolvedValue([{ id: 'sp-a' }, { id: 'sp-b' }]);
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The persona was fine.',
+        });
+
+        expect(managerFind).toHaveBeenCalledWith(Subprofile, {
+          where: { slug: 'nightform' },
+          select: { id: true },
+        });
+        const revertedKeys = (revertContent.mock.calls as unknown[][]).map(
+          (call) => call[2],
+        );
+        expect(revertedKeys).toEqual(['nightform', 'sp-a', 'sp-b']);
+      });
+
+      it('lifts only the uuid key for a persona report filed by uuid', async () => {
+        appeals.findOne.mockResolvedValue(baseAppeal());
+        auditLogs.findOne.mockResolvedValue({
+          id: 'log-1',
+          reportId: 'report-1',
+          actorId: 'actor-2',
+          action: 'hide_content',
+          reasonCode: 'harassment',
+          note: null,
+          duration: null,
+          createdAt: new Date('2026-01-01T12:00:00.000Z'),
+        });
+        const personaId = '5e000000-0000-4000-8000-0000000000aa';
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Subprofile,
+            subjectId: personaId,
+          }),
+        );
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The persona was fine.',
+        });
+
+        expect(managerFind).not.toHaveBeenCalled();
+        expect(revertContent).toHaveBeenCalledTimes(1);
+        expect(revertContent).toHaveBeenCalledWith(
+          expect.anything(),
+          ReportSubjectType.Subprofile,
+          personaId,
         );
       });
 
@@ -2853,8 +3227,8 @@ describe('ModerationService', () => {
         expect(memberCall()).toHaveLength(3);
       });
 
-      it.each(['dismiss', 'escalate', 'hide_content', 'remove_content'])(
-        '%s does not notify the member (no account-facing outcome)',
+      it.each(['dismiss', 'escalate'])(
+        '%s does not notify the member (no decision landed on them)',
         async (action) => {
           await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
             action,
@@ -2863,6 +3237,39 @@ describe('ModerationService', () => {
           } as never);
 
           expect(memberCall()).toBeUndefined();
+        },
+      );
+
+      // PRD-458: a takedown used to close the report and tell the author
+      // nothing. It now reaches them on the same channel as a warning, with
+      // the audit row id so the bell opens the appeal form on this decision.
+      it.each(['hide_content', 'remove_content'] as const)(
+        '%s tells the author, carrying the audit row id',
+        async (action) => {
+          auditLogs.save.mockImplementation((row: object) =>
+            Promise.resolve({ id: 'audit-9', ...row }),
+          );
+
+          await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+            action,
+            reasonCode: 'harassment',
+            note: 'We took this down because it named someone.',
+          });
+
+          expect(memberCall()).toEqual([
+            'user-1',
+            NotificationType.ModerationOutcome,
+            expect.objectContaining({
+              source: 'moderation',
+              action,
+              note: 'We took this down because it named someone.',
+              actionId: 'audit-9',
+            }),
+          ]);
+          const savedReport = (reports.save.mock.calls as unknown[][]).at(
+            -1,
+          )?.[0] as Report;
+          expect(savedReport.resolutionNotified).toContain('member');
         },
       );
 
@@ -3608,6 +4015,19 @@ describe('ModerationService', () => {
           action: 'remove_content',
         }),
       );
+      // PRD-458 / ENG-480: two people could have written it, so nobody is
+      // named on the audit row and nobody is told.
+      expect(auditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'remove_content',
+          targetUserId: null,
+        }),
+      );
+      expect(
+        notificationsCreate.mock.calls.find(
+          (args) => args[1] === NotificationType.ModerationOutcome,
+        ),
+      ).toBeUndefined();
     });
 
     it('still lets the moderator dismiss the report', async () => {
@@ -3817,6 +4237,468 @@ describe('ModerationService', () => {
         surgeOpenStatuses: [ReportStatus.Open, ReportStatus.Escalated],
         surgeMinOpen: 5,
         surgeMinReporters: 3,
+      });
+    });
+  });
+
+  /**
+   * ENG-480 / ENG-484 / PRD-458. A sanction decided on a CONTENT report used
+   * to carry no member at all: the author's appeal could not find it, an
+   * overturned restriction lifted nothing, and a takedown told nobody. A
+   * takedown on a subject nothing reads was accepted and did nothing.
+   */
+  describe('content reports name the member they land on', () => {
+    const postReport = (overrides: Partial<Report> = {}) =>
+      baseReport({
+        subjectType: ReportSubjectType.Post,
+        subjectId: '11111111-2222-3333-4444-555555555555',
+        ...overrides,
+      });
+    const memberFacingNote = 'We took this down because it named someone.';
+
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue(postReport());
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: 'author-9',
+        excerpt: 'the reported body',
+        communityId: null,
+        isAuthorAmbiguous: false,
+      });
+      users.findOne.mockResolvedValue({
+        id: 'author-9',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+      });
+    });
+
+    describe('the audit row carries targetUserId', () => {
+      it.each(['hide_content', 'remove_content', 'warn'] as const)(
+        '%s on a post names its author',
+        async (action) => {
+          await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+            action,
+            reasonCode: 'harassment',
+            note: memberFacingNote,
+          });
+
+          expect(auditLogs.save).toHaveBeenCalledWith(
+            expect.objectContaining({
+              reportId: 'report-1',
+              action,
+              targetUserId: 'author-9',
+            }),
+          );
+        },
+      );
+
+      it('suspend on a post names the account the suspension landed on', async () => {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: memberFacingNote,
+          duration: '7d',
+        });
+
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: 'suspend',
+            targetUserId: 'author-9',
+          }),
+        );
+      });
+
+      it.each(['dismiss', 'escalate'] as const)(
+        '%s names nobody',
+        async (action) => {
+          await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+            action,
+            reasonCode: 'other',
+            note: 'Nothing wrong here.',
+          });
+
+          expect(auditLogs.save).toHaveBeenCalledWith(
+            expect.objectContaining({ action, targetUserId: null }),
+          );
+        },
+      );
+
+      it('the bulk path names the author and tells them, one row per report', async () => {
+        reports.find.mockResolvedValue([
+          postReport({ id: 'report-1' }),
+          postReport({ id: 'report-2' }),
+        ]);
+
+        const result = await service.bulkActOnReports('actor-1', {
+          ids: ['report-1', 'report-2'],
+          action: 'remove_content',
+          reasonCode: 'harassment',
+          note: memberFacingNote,
+        });
+
+        expect(result.updated).toEqual(['report-1', 'report-2']);
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reportId: 'report-2',
+            action: 'remove_content',
+            targetUserId: 'author-9',
+          }),
+        );
+        const authorCalls = notificationsCreate.mock.calls.filter(
+          (args) =>
+            args[0] === 'author-9' &&
+            args[1] === NotificationType.ModerationOutcome,
+        );
+        expect(authorCalls).toHaveLength(2);
+        expect(authorCalls[0]?.[2]).toMatchObject({
+          action: 'remove_content',
+          note: memberFacingNote,
+        });
+      });
+
+      it('a takedown on content with no author closes the report and tells nobody', async () => {
+        subjectResolver.resolve.mockResolvedValue({
+          authorUserId: null,
+          excerpt: null,
+          communityId: null,
+          isAuthorAmbiguous: false,
+        });
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'hide_content',
+          reasonCode: 'harassment',
+          note: memberFacingNote,
+        });
+
+        expect(applyContentAction).toHaveBeenCalled();
+        expect(
+          notificationsCreate.mock.calls.find(
+            (args) => args[1] === NotificationType.ModerationOutcome,
+          ),
+        ).toBeUndefined();
+        const savedReport = (reports.save.mock.calls as unknown[][]).at(
+          -1,
+        )?.[0] as Report;
+        expect(savedReport.resolutionNotified).not.toContain('member');
+      });
+    });
+
+    describe('a takedown on a subject nothing reads is refused (ENG-484)', () => {
+      it.each([
+        ReportSubjectType.Conversation,
+        ReportSubjectType.Identity,
+        ReportSubjectType.Venue,
+      ])('refuses hide_content on a %s report', async (subjectType) => {
+        reports.findOne.mockResolvedValue(postReport({ subjectType }));
+
+        await expect(
+          service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+            action: 'hide_content',
+            reasonCode: 'harassment',
+            note: memberFacingNote,
+          }),
+        ).rejects.toMatchObject({
+          response: {
+            statusCode: 400,
+            code: 'CONTENT_ACTION_UNSUPPORTED',
+            subjectType,
+          },
+        });
+        expect(managerUpdate).not.toHaveBeenCalled();
+        expect(auditLogs.save).not.toHaveBeenCalled();
+        expect(applyContentAction).not.toHaveBeenCalled();
+      });
+
+      it('still lets the moderator dismiss a conversation report', async () => {
+        reports.findOne.mockResolvedValue(
+          postReport({ subjectType: ReportSubjectType.Conversation }),
+        );
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'dismiss',
+          reasonCode: 'other',
+          note: 'Nothing wrong here.',
+        });
+
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'dismiss' }),
+        );
+      });
+
+      it('accepts a takedown on a volunteering posting', async () => {
+        reports.findOne.mockResolvedValue(
+          postReport({
+            subjectType: ReportSubjectType.Volunteering,
+            subjectId: 'beach-cleanup',
+          }),
+        );
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'remove_content',
+          reasonCode: 'spam',
+          note: memberFacingNote,
+        });
+
+        expect(applyContentAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            subjectType: ReportSubjectType.Volunteering,
+            subjectId: 'beach-cleanup',
+          }),
+        );
+      });
+
+      it('lands a refused row in failed and still actions the rest of a batch', async () => {
+        reports.find.mockResolvedValue([
+          postReport({ id: 'report-1' }),
+          postReport({
+            id: 'report-2',
+            subjectType: ReportSubjectType.Conversation,
+          }),
+        ]);
+
+        const result = await service.bulkActOnReports('actor-1', {
+          ids: ['report-1', 'report-2'],
+          action: 'hide_content',
+          reasonCode: 'harassment',
+          note: memberFacingNote,
+        });
+
+        expect(result.updated).toEqual(['report-1']);
+        expect(result.failed).toEqual([
+          { id: 'report-2', reason: matchStringContaining('nothing to hide') },
+        ]);
+        expect(applyContentAction).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('an appeal on a content-report decision finds its report', () => {
+      const contentRow = (overrides: Partial<ModAuditLog> = {}) => ({
+        id: 'log-7',
+        reportId: 'report-1',
+        actorId: 'mod-1',
+        action: 'hide_content',
+        targetUserId: 'author-9',
+        createdAt: new Date(),
+        ...overrides,
+      });
+
+      beforeEach(() => {
+        reports.find.mockResolvedValue([]);
+        appeals.findOne.mockResolvedValue(null);
+      });
+
+      it('resolves reportId and severity for a deep-linked action', async () => {
+        auditLogs.findOne.mockResolvedValue(contentRow());
+
+        await service.submitAppeal('author-9', {
+          actionId: 'log-7',
+          reason: 'The post quoted a public article and named nobody.',
+        });
+
+        expect(reports.findOne).toHaveBeenCalledWith({
+          where: { id: 'report-1' },
+        });
+        expect(appeals.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            actionId: 'log-7',
+            reportId: 'report-1',
+            severity: ReportSeverity.High,
+          }),
+        );
+      });
+
+      it('resolves the report for the latest decision when no action is named', async () => {
+        auditLogs.findOne.mockResolvedValue(contentRow());
+
+        await service.submitAppeal('author-9', {
+          reason: 'The post quoted a public article and named nobody.',
+        });
+
+        expect(appeals.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            actionId: 'log-7',
+            reportId: 'report-1',
+          }),
+        );
+      });
+
+      it('refuses a deep link to a decision that names someone else', async () => {
+        auditLogs.findOne.mockResolvedValue(
+          contentRow({ targetUserId: 'someone-else' }),
+        );
+
+        await expect(
+          service.submitAppeal('author-9', {
+            actionId: 'log-7',
+            reason: 'The post quoted a public article and named nobody.',
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(reports.findOne).not.toHaveBeenCalled();
+        expect(appeals.create).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('an overturn reaches the member the row names', () => {
+      const appealOn = (overrides: Partial<Appeal> = {}): Appeal => ({
+        id: 'appeal-1',
+        reportId: 'report-1',
+        actionId: 'log-1',
+        appellantId: 'author-9',
+        severity: ReportSeverity.High,
+        community: null,
+        argument: 'That was not what I wrote.',
+        status: AppealStatus.Awaiting,
+        decision: null,
+        slaDueAt: new Date('2026-01-09T00:00:00.000Z'),
+        decidedAt: null,
+        createdAt: new Date('2026-01-02T00:00:00.000Z'),
+        ...overrides,
+      });
+      const originalRow = (overrides: Partial<ModAuditLog> = {}) => ({
+        id: 'log-1',
+        reportId: 'report-1',
+        actorId: 'actor-2',
+        action: 'restrict',
+        targetUserId: 'author-9',
+        reasonCode: 'harassment',
+        note: null,
+        duration: '7d',
+        createdAt: new Date('2026-01-01T12:00:00.000Z'),
+        ...overrides,
+      });
+
+      it('lifts a restriction decided on a content report', async () => {
+        appeals.findOne.mockResolvedValue(appealOn());
+        auditLogs.findOne.mockResolvedValue(originalRow());
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The restriction was not warranted.',
+        });
+
+        expect(managerUpdate).toHaveBeenCalledWith(
+          User,
+          { id: 'author-9' },
+          { restricted: false, restrictedUntil: null },
+        );
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: 'restriction_lifted',
+            targetUserId: 'author-9',
+          }),
+        );
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reportId: 'report-1',
+            action: 'appeal_overturned',
+            targetUserId: 'author-9',
+          }),
+        );
+      });
+
+      it('restores a member suspended by a report-less drawer ban hold', async () => {
+        appeals.findOne.mockResolvedValue(
+          appealOn({ reportId: null, appellantId: 'author-9' }),
+        );
+        auditLogs.findOne.mockResolvedValue(
+          originalRow({
+            reportId: null,
+            action: BAN_PENDING_AUDIT_ACTION,
+            duration: null,
+          }),
+        );
+        users.findOne.mockResolvedValue({
+          id: 'author-9',
+          role: UserRole.Member,
+          status: UserStatus.Suspended,
+        });
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The ban was not warranted.',
+        });
+
+        expect(userUpdates()).toContainEqual([
+          User,
+          { id: 'author-9' },
+          expect.objectContaining({ status: UserStatus.Active }),
+        ]);
+        // Written with no report now, so the drawer shows how it ended.
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reportId: null,
+            action: 'appeal_overturned',
+            targetUserId: 'author-9',
+          }),
+        );
+      });
+
+      it('leaves a platform suspension alone when a community ban is overturned', async () => {
+        appeals.findOne.mockResolvedValue(appealOn({ reportId: null }));
+        auditLogs.findOne.mockResolvedValue(
+          originalRow({
+            reportId: null,
+            action: 'community_ban_applied',
+            duration: null,
+          }),
+        );
+        users.findOne.mockResolvedValue({
+          id: 'author-9',
+          role: UserRole.Member,
+          status: UserStatus.Suspended,
+        });
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The community ban was not warranted.',
+        });
+
+        expect(userUpdates()).toHaveLength(0);
+      });
+
+      // ENG-486: the ban-evasion signal written when the ban was ratified says
+      // this account is removed, which an overturn makes false.
+      it('emits ACCOUNT_REINSTATED when a ban is overturned', async () => {
+        appeals.findOne.mockResolvedValue(appealOn());
+        auditLogs.findOne.mockResolvedValue(
+          originalRow({ action: 'ban', duration: null }),
+        );
+        users.findOne.mockResolvedValue({
+          id: 'author-9',
+          role: UserRole.Member,
+          status: UserStatus.Suspended,
+        });
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The ban was not warranted.',
+        });
+
+        expect(eventEmit).toHaveBeenCalledWith(
+          ACCOUNT_REINSTATED,
+          expect.objectContaining({
+            userId: 'author-9',
+            removalKind: RemovalKind.PlatformBan,
+            communityId: null,
+          }),
+        );
+      });
+
+      it('emits nothing when a ban is upheld', async () => {
+        appeals.findOne.mockResolvedValue(appealOn());
+        auditLogs.findOne.mockResolvedValue(
+          originalRow({ action: 'ban', duration: null }),
+        );
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'uphold',
+          note: 'The ban stands.',
+        });
+
+        expect(eventEmit).not.toHaveBeenCalledWith(
+          ACCOUNT_REINSTATED,
+          expect.anything(),
+        );
       });
     });
   });

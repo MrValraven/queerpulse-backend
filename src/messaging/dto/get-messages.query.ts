@@ -49,6 +49,19 @@ export class GetMessagesQuery {
   @IsString()
   cursor?: string;
 
+  // PRD-401: a window of history centred on this message (about half the page
+  // limit older, the message itself, and the rest newer), in the backward
+  // page's `{ data, pageInfo }` envelope. `pageInfo.nextCursor` pages older
+  // from the window's start through `cursor`, and `pageInfo.newerAfter` /
+  // `pageInfo.newerAfterId` page newer from its end through `after` /
+  // `afterId`. Used by jump-to-message for a message far older than the loaded
+  // pages. Mutually exclusive with `before`/`beforeId`, `after`/`afterId` and
+  // `cursor` (a 400 when combined). A message the caller may not see answers
+  // 404, exactly like a message that does not exist.
+  @IsOptional()
+  @IsUUID('4')
+  around?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

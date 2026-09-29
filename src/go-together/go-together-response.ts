@@ -11,6 +11,12 @@ export interface GoTogetherCardResponse {
   cutoffAt: string | null;
   optInClosesAt: string;
   hostQuestions: HostQuestion[];
+  /** Ids of the current host questions a waiting member has no usable answer
+   *  to, because the host changed or added them after this member opted in.
+   *  The card asks for these again through
+   *  `PUT /events/:slug/go-together/host-answers`. Empty in every other
+   *  state. */
+  unansweredHostQuestionIds: string[];
   pair: {
     partner: MemberRef;
     status: 'pending' | 'accepted';

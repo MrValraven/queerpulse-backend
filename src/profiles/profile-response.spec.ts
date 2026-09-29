@@ -117,11 +117,79 @@ describe('profile-response mappers', () => {
       profession: [],
       languages: [],
       vouchCount: 2,
-      visibility: 'open',
-      photoVisible: true,
-      hoodVisible: true,
-      vouchersVisible: true,
     });
+  });
+
+  it('toProfileCard carries the privacy settings only for the owner', () => {
+    const p = profile({
+      visibility: ProfileVisibility.Private,
+      photoVisible: false,
+      hoodVisible: false,
+      vouchersVisible: false,
+    });
+    expect(toProfileCard(p, 0, { isOwner: true })).toMatchObject({
+      visibility: 'private',
+      photoVisible: false,
+      hoodVisible: false,
+      vouchersVisible: false,
+    });
+  });
+
+  // ENG-444: a card reaches every member, so a stored toggle on it is a list
+  // of who hid what. The keys must be ABSENT for a non-owner, the same pin the
+  // Ambassador toggle has below.
+  it.each(['visibility', 'photoVisible', 'hoodVisible', 'vouchersVisible'])(
+    '%s is absent from every card a non-owner receives',
+    (key) => {
+      const hider = profile({
+        visibility: ProfileVisibility.Private,
+        photoVisible: false,
+        hoodVisible: false,
+        vouchersVisible: false,
+      });
+      expect(key in toProfileCard(hider, 0)).toBe(false);
+      expect(
+        key in toProfileCard(hider, 0, { shouldIncludeUnlistedWork: true }),
+      ).toBe(false);
+      expect(key in toMemberCard(hider, 0)).toBe(false);
+      expect(key in toMemberCard(hider, 0, false, null)).toBe(false);
+    },
+  );
+
+  it.each(['photoVisible', 'hoodVisible', 'vouchersVisible'])(
+    '%s is absent from a non-owner full or limited profile, and present for the owner',
+    (key) => {
+      const hider = profile({
+        photoVisible: false,
+        hoodVisible: false,
+        vouchersVisible: false,
+      });
+      expect(key in toFullProfile(hider, emptyRels, 2)).toBe(false);
+      expect(key in toFullProfile(hider, emptyRels, 2, false, true)).toBe(
+        false,
+      );
+      expect(key in toLimitedProfile(hider, 2)).toBe(false);
+      expect(key in toFullProfile(hider, emptyRels, 2, true)).toBe(true);
+      expect(key in toLimitedProfile(hider, 2, true)).toBe(true);
+      expect(key in toMemberCard(hider, 2, true)).toBe(true);
+    },
+  );
+
+  // The one setting a single-profile read keeps for every viewer: the page's
+  // hero eyebrow and the limited note's wording both read it, and `limited`
+  // already says the profile is not open to this viewer.
+  it('keeps visibility on the full and limited profile for every viewer', () => {
+    expect(
+      toFullProfile(
+        profile({ visibility: ProfileVisibility.Network }),
+        emptyRels,
+        2,
+      ).visibility,
+    ).toBe('network');
+    expect(
+      toLimitedProfile(profile({ visibility: ProfileVisibility.Private }), 2)
+        .visibility,
+    ).toBe('private');
   });
 
   it('toFullProfile serializes joinedAt as ISO and carries new scalars', () => {
@@ -169,6 +237,43 @@ describe('profile-response mappers', () => {
     const viewed = toFullProfile(profile(), emptyRels, 2);
     expect(viewed.identities).toEqual([]);
     expect(viewed.lookingFor).toEqual([]);
+  });
+
+  it('toFullProfile sends the lookingForPublic toggle only to the owner', () => {
+    const ownedPublic = toFullProfile(
+      profile({ lookingForPublic: true }),
+      emptyRels,
+      2,
+      true,
+    );
+    expect(ownedPublic.lookingForPublic).toBe(true);
+
+    const ownedPrivate = toFullProfile(
+      profile({ lookingForPublic: false }),
+      emptyRels,
+      2,
+      true,
+    );
+    expect(ownedPrivate.lookingForPublic).toBe(false);
+    expect(ownedPrivate.lookingFor).toEqual(['Community & friendship']);
+
+    // A visitor gets the list itself when the member opted in. The stored
+    // toggle is absent for a visitor whichever way it is set (ENG-444).
+    const viewedPublic = toFullProfile(
+      profile({ lookingForPublic: true }),
+      emptyRels,
+      2,
+    );
+    expect(viewedPublic).not.toHaveProperty('lookingForPublic');
+    expect(viewedPublic.lookingFor).toEqual(['Community & friendship']);
+
+    const viewedPrivate = toFullProfile(
+      profile({ lookingForPublic: false }),
+      emptyRels,
+      2,
+    );
+    expect(viewedPrivate).not.toHaveProperty('lookingForPublic');
+    expect(viewedPrivate.lookingFor).toEqual([]);
   });
 
   it('toFullProfile exposes hiddenUntil only to the owner', () => {
@@ -346,11 +451,10 @@ describe('profile-response mappers', () => {
     const viewed = toFullProfile(p, emptyRels, 2);
     expect(viewed.avatarUrl).toBeNull();
     expect(viewed.location).toBeNull();
-    // The boolean itself is still the true value for a non-owner too — only
-    // the CONTENT is gated, never the toggle (a viewer needs to know whether
-    // e.g. the vouchers endpoint is worth calling).
-    expect(viewed.photoVisible).toBe(false);
-    expect(viewed.hoodVisible).toBe(false);
+    // The toggles themselves are owner-only (ENG-444): a non-owner gets the
+    // gated content and no word on which switch produced it.
+    expect('photoVisible' in viewed).toBe(false);
+    expect('hoodVisible' in viewed).toBe(false);
   });
 
   it('toFullProfile shows avatarUrl/location to a non-owner viewer when the toggle is on', () => {
@@ -488,9 +592,6 @@ describe('profile-response mappers', () => {
       languages: [],
       vouchCount: 5,
       visibility: 'private',
-      photoVisible: true,
-      hoodVisible: true,
-      vouchersVisible: true,
       verified: true,
       joinedAt: '2024-03-01T00:00:00.000Z',
       // The limited card carries the trust cue too: it IS the "should I ask to
@@ -524,7 +625,7 @@ describe('profile-response mappers', () => {
     // contradicts itself.
     const viewed = toLimitedProfile(p, 5);
     expect(viewed.avatarUrl).toBeNull();
-    expect(viewed.photoVisible).toBe(false);
+    expect('photoVisible' in viewed).toBe(false);
 
     // Mirrors toFullProfile/toMemberCard: an owner-preview call still sees
     // their own real photo regardless of the toggle.
@@ -569,9 +670,9 @@ describe('profile-response mappers', () => {
     expect(card.avatarUrl).toBeNull();
     expect(card.location).toBeNull();
     expect(card.hood).toBeNull();
-    // The toggle itself is still the true stored value on the card.
-    expect(card.photoVisible).toBe(false);
-    expect(card.hoodVisible).toBe(false);
+    // The toggles themselves stay off a non-owner's card (ENG-444).
+    expect('photoVisible' in card).toBe(false);
+    expect('hoodVisible' in card).toBe(false);
   });
 
   it('toMemberCard shows avatarUrl/location/hood to a non-owner viewer when the toggle is on', () => {
@@ -734,6 +835,24 @@ describe('profile-response mappers', () => {
     ).toBe('Cooks a lot');
     expect(toMemberCard(profile({ tagline: '', bio: '' }), 1).tagline).toBe('');
   });
+
+  // ENG-438: a `network`/`private` member's bio sits behind the limited card,
+  // so its opening must not print on a card every member scrolls past.
+  it.each([ProfileVisibility.Network, ProfileVisibility.Private])(
+    'toMemberCard borrows no bio for a %s profile',
+    (visibility) => {
+      const hidden = profile({ visibility, tagline: '', bio: LONG_BIO });
+      expect(toMemberCard(hidden, 1).tagline).toBe('');
+      // The owner's own row matches what strangers see, as the editor's card
+      // preview promises.
+      expect(toMemberCard(hidden, 1, true).tagline).toBe('');
+      // A written short bio is still theirs to show, on any tier.
+      expect(
+        toMemberCard(profile({ visibility, tagline: 'Cooks a lot' }), 1)
+          .tagline,
+      ).toBe('Cooks a lot');
+    },
+  );
 
   it('toProfileCard keeps the tagline raw when a member has only a bio', () => {
     // The trap: ProfileDTO inherits `tagline` from the card. The profile editor

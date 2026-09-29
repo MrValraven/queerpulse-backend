@@ -1,5 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IdentityKind } from '../entities/identity.entity';
+import {
+  STAFF_NAMES_LOCKED_REASONS,
+  type StaffNamesLockedReason,
+} from './identity-attribution.dto';
 import type { IdentityDescription } from '../identities.service';
 
 /**
@@ -68,6 +72,17 @@ export class MailboxSummaryDto {
       'when they have never changed it. Null for the profile mailbox.',
   })
   shouldAllowMyName!: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    enum: STAFF_NAMES_LOCKED_REASONS,
+    nullable: true,
+    description:
+      'ENG-456: set when customers never see a staff name from this ' +
+      'mailbox, whatever both switches say: `unlinkedPersona` for a persona ' +
+      'that keeps who runs it private. Null otherwise.',
+  })
+  staffNamesLockedReason!: StaffNamesLockedReason | null;
 }
 
 /** Hand-maps one mailbox to its response shape. */
@@ -80,6 +95,7 @@ export function toMailboxSummary(input: {
   isReadOnly: boolean;
   shouldShowStaffNames: boolean | null;
   shouldAllowMyName: boolean | null;
+  staffNamesLockedReason: StaffNamesLockedReason | null;
 }): MailboxSummaryDto {
   return {
     identityId: input.identityId,
@@ -92,5 +108,6 @@ export function toMailboxSummary(input: {
     isReadOnly: input.isReadOnly,
     shouldShowStaffNames: input.shouldShowStaffNames,
     shouldAllowMyName: input.shouldAllowMyName,
+    staffNamesLockedReason: input.staffNamesLockedReason,
   };
 }

@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { maxLength } from 'class-validator';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
@@ -22,9 +23,22 @@ import {
 import { ACCOUNT_RESTRICTED_CODE } from '../auth/guards/not-restricted.guard';
 import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  countCharacters,
+  truncateCharacters,
+  widenToCodePointBoundaries,
+} from '../common/text-characters';
+import {
+  CAPTIONED_MESSAGE_KINDS,
+  messageMentionText,
+} from '../common/mentions';
 import { ConnectionsService } from '../connections/connections.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
-import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  foldedTextExpression,
+} from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
@@ -35,6 +49,7 @@ import {
   AttachmentInput,
   DocumentAttachment,
   GifAttachment,
+  isStickerAttachment,
   Message,
   MessageKind,
   StickerAttachment,
@@ -63,6 +78,9 @@ import {
   MAX_LIMIT,
   MAX_SEARCH_LIMIT,
   EDIT_WINDOW_MS,
+  CAPTION_EDIT_MESSAGE_KINDS,
+  MAX_ATTACHMENT_CAPTION_LENGTH,
+  UNEDITABLE_MESSAGE_KINDS,
 } from './messaging.constants';
 import {
   MESSAGE_DELETED,
@@ -72,7 +90,10 @@ import {
 } from './messaging.events';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { seatExcludedFromMailboxPredicate } from './mailbox-seats';
-import { MessagingCoreService } from './messaging-core.service';
+import {
+  MessagingCoreService,
+  type PageConversationHint,
+} from './messaging-core.service';
 import { StorageService } from '../storage/storage.service';
 
 /**
@@ -87,6 +108,15 @@ import { StorageService } from '../storage/storage.service';
  * (`conversations.service.ts`).
  */
 export const SYSTEM_MESSAGE_IMMUTABLE_CODE = 'SYSTEM_MESSAGE_IMMUTABLE';
+
+/**
+ * ENG-405: a sticker message carries no text its author wrote that an edit
+ * could change (its `body` is empty and its label comes from the catalogue).
+ * `canEdit` already withholds Edit from it; this coded 403 is the endpoint's
+ * own refusal for a client that offers the action anyway. Same coded-exception
+ * convention as `SYSTEM_MESSAGE_IMMUTABLE_CODE` above.
+ */
+export const MESSAGE_KIND_NOT_EDITABLE_CODE = 'MESSAGE_KIND_NOT_EDITABLE';
 
 /**
  * PRD-372: an official thread only carries messages FROM the platform. The
@@ -120,14 +150,37 @@ function buildSearchSnippet(body: string, query: string): string {
   const TRAIL = 90;
   const index = body.toLowerCase().indexOf(query.toLowerCase());
   if (index < 0) {
-    return body.length > LEAD + TRAIL
-      ? `${body.slice(0, LEAD + TRAIL).trimEnd()}…`
+    return countCharacters(body) > LEAD + TRAIL
+      ? `${truncateCharacters(body, LEAD + TRAIL).trimEnd()}…`
       : body;
   }
-  const start = Math.max(0, index - LEAD);
-  const end = Math.min(body.length, index + query.length + TRAIL);
+  // The window's edges are code-unit offsets, so each is widened off the
+  // middle of an emoji's surrogate pair before the cut.
+  const { start, end } = widenToCodePointBoundaries(
+    body,
+    Math.max(0, index - LEAD),
+    Math.min(body.length, index + query.length + TRAIL),
+  );
   const core = body.slice(start, end).trim();
   return `${start > 0 ? '…' : ''}${core}${end < body.length ? '…' : ''}`;
+}
+
+/**
+ * ENG-405: the text a search hit's snippet is cut from, matching what
+ * `searchMessages` matched on. A photo, document or GIF contributes its
+ * caption (its `body` is only the "Photo"/"Document"/"GIF" fallback, which
+ * search skips). A sticker contributes '' and is never matched: it has no
+ * caption, and search skips its body along with the captioned kinds', since
+ * a sticker edited before ENG-405 still holds the edit's text there. Every
+ * other kind contributes its body.
+ */
+export function searchHitText(
+  message: Pick<Message, 'kind' | 'body' | 'attachment'>,
+): string {
+  if (!CAPTIONED_MESSAGE_KINDS.includes(message.kind)) {
+    return message.body;
+  }
+  return messageMentionText(message);
 }
 
 /** Query options for `getMessages`; mirrors `GetMessagesQuery`. */
@@ -138,6 +191,31 @@ export interface GetMessagesOptions {
   afterId?: string;
   limit?: number;
   cursor?: string;
+  /** PRD-401: centre the page on this message id (see `getMessagesAround`). */
+  around?: string;
+}
+
+/**
+ * PRD-401: a window of thread history centred on one message, in the backward
+ * page's envelope. `data` is newest-first like every backward page.
+ * `pageInfo.nextCursor`/`hasMore` page OLDER from the window's oldest row
+ * (sent back as `cursor`); `newerAfter`/`newerAfterId` are the exact keyset of
+ * the window's newest row, sent back as `after`/`afterId` to page NEWER
+ * through the forward path until it rejoins the live tail. `hasNewer` is false
+ * once the window already reaches the newest visible message.
+ */
+export interface MessageHistoryWindowPage extends MessageHistoryPage {
+  pageInfo: MessageHistoryPage['pageInfo'] & {
+    hasNewer: boolean;
+    newerAfter: string | null;
+    newerAfterId: string | null;
+  };
+}
+
+/** One history row with its exact microsecond `created_at` text. */
+interface ExactHistoryRow {
+  message: Message;
+  exactCreatedAt: string;
 }
 
 /**
@@ -176,13 +254,22 @@ export class MessagesService {
    * Thread history. The backward "load older" path (the default) returns a
    * `MessageHistoryPage` envelope so the client can keep paging; the forward
    * reconcile path (`opts.after`) returns a bare array, which is what
-   * reconnect history sync merges.
+   * reconnect history sync merges. `opts.around` (PRD-401) returns a
+   * `MessageHistoryWindowPage` centred on one message.
    */
   async getMessages(
     conversationId: string,
     userId: string,
     opts: GetMessagesOptions,
   ): Promise<MessageHistoryPage | MessageResponse[]> {
+    const hasKeysetCursor = Boolean(
+      opts.before || opts.beforeId || opts.after || opts.afterId || opts.cursor,
+    );
+    if (opts.around && hasKeysetCursor) {
+      throw new BadRequestException(
+        '`around` cannot be combined with `before`, `after` or `cursor`',
+      );
+    }
     const participant = await this.core.requireParticipant(
       conversationId,
       userId,
@@ -193,13 +280,33 @@ export class MessagesService {
     // inbox), so a blocked-either-way sender's messages otherwise keep
     // showing to every other member forever. Filtered IN SQL below (never a
     // post-query `.filter()`) so a cursor page never under-fills. One extra
-    // lightweight lookup, shared by both the backward page and the forward
-    // reconnect-sync branch below.
+    // lightweight lookup, shared by the backward page, the PRD-401 window
+    // and the forward reconnect-sync branch below.
     const conversation = await this.conversations.findOne({
       where: { id: conversationId },
-      select: { kind: true },
+      select: { kind: true, isGoTogetherChat: true, eventMatchGroupId: true },
     });
     const isGroupConversation = conversation?.kind === ConversationKind.Group;
+    // PRD-423: the row just read, handed to `toMessageResponses` so a page
+    // learns whether it is a matched Go together chat with no second lookup.
+    const pageConversation: PageConversationHint | undefined = conversation
+      ? {
+          kind: conversation.kind,
+          isGoTogetherChat: conversation.isGoTogetherChat ?? false,
+          eventMatchGroupId: conversation.eventMatchGroupId ?? null,
+        }
+      : undefined;
+    // PRD-401: jump-to-message for a message older than the loaded pages.
+    if (opts.around) {
+      return this.getMessagesAround(
+        conversationId,
+        userId,
+        participant,
+        opts.around,
+        limit,
+        pageConversation,
+      );
+    }
     // Forward reconciliation (reconnect history sync): everything strictly NEWER
     // than the caller's last known (after, afterId), oldest→newest, so a client
     // that was offline while the socket buffered nothing can backfill the gap by
@@ -214,6 +321,7 @@ export class MessagesService {
         opts.afterId,
         limit,
         isGroupConversation,
+        pageConversation,
       );
     }
     // An explicit `before`/`beforeId` wins; otherwise decode the frontend's
@@ -231,49 +339,13 @@ export class MessagesService {
         beforeId = decoded.beforeId;
       }
     }
-    const qb = this.messages
-      .createQueryBuilder('m')
-      .where('m.conversation_id = :id', { id: conversationId });
-    if (participant.clearedAt) {
-      // History is floored at the caller's clear point: messages at-or-before
-      // it don't exist for them (WhatsApp "cleared" semantics). The other
-      // participant, with their own (or no) clearedAt, still sees everything.
-      qb.andWhere('m.created_at > :clearedAt', {
-        clearedAt: participant.clearedAt.toISOString(),
-      });
-    }
-    if (participant.leftAt) {
-      // P0 hardening: a removed/left group member's read access CEILINGS at
-      // the moment they left — mirrors `clearedAt`'s floor but in the
-      // opposite direction. Without this, a former member kept unbounded
-      // read access to everything posted after their departure.
-      qb.andWhere('m.created_at <= :leftAt', {
-        leftAt: participant.leftAt.toISOString(),
-      });
-    }
-    // PRD-227 "delete for me": a message THIS viewer hid never exists for
-    // them again — in pagination, in a jump-to-message, anywhere in the
-    // thread — while the other participant's copy is completely untouched
-    // (their own read never joins `message_hides` on their id).
-    qb.andWhere(
-      `NOT EXISTS (
-        SELECT 1 FROM "message_hides" "mh"
-        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hidingUserId
-      )`,
-      { hidingUserId: userId },
+    const qb = this.visibleHistoryQuery(
+      conversationId,
+      userId,
+      participant.clearedAt,
+      participant.leftAt,
+      isGroupConversation,
     );
-    if (isGroupConversation) {
-      // PRD-354: see the comment above this method's `conversation` lookup.
-      // `unless` keeps a group's own system pills ("Ana added Bea", "Cy is
-      // now the owner") visible to every member even when their actor is
-      // blocked either way with the viewer: a pill reports what happened in
-      // the group, not a message FROM the blocked member, and hiding it
-      // would leave silent gaps in the roster history (e.g. a member added
-      // pill missing while the add itself still shows in the roster).
-      this.blockFilter.excludeBlocked(qb, userId, '"m"."sender_id"', {
-        unless: `"m"."kind" = 'system'`,
-      });
-    }
     if (before) {
       if (beforeId) {
         // Composite keyset cursor: strictly "older" than (before, beforeId) in
@@ -332,7 +404,7 @@ export class MessagesService {
         Boolean(participant.leftAt),
         // ENG-240 hot-path fix: already looked up above for the block filter,
         // so `toMessageResponses` skips its own `conversations.findOne`.
-        conversation?.kind,
+        pageConversation,
       ),
       pageInfo: { nextCursor, hasMore },
     };
@@ -359,37 +431,19 @@ export class MessagesService {
     afterId: string | undefined,
     limit: number,
     isGroupConversation: boolean,
+    // PRD-423: the row `getMessages` read, so the page needs no lookup.
+    pageConversation?: PageConversationHint,
   ): Promise<MessageResponse[]> {
-    const qb = this.messages
-      .createQueryBuilder('m')
-      .where('m.conversation_id = :id', { id: conversationId });
-    if (clearedAt) {
-      qb.andWhere('m.created_at > :clearedAt', {
-        clearedAt: clearedAt.toISOString(),
-      });
-    }
-    if (leftAt) {
-      // P0 hardening — see the matching comment in `getMessages`.
-      qb.andWhere('m.created_at <= :leftAt', {
-        leftAt: leftAt.toISOString(),
-      });
-    }
-    // PRD-227 "delete for me" — see the matching comment in `getMessages`;
-    // reconnect sync must not resurrect a message this viewer hid.
-    qb.andWhere(
-      `NOT EXISTS (
-        SELECT 1 FROM "message_hides" "mh"
-        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hidingUserId
-      )`,
-      { hidingUserId: userId },
+    // Every visibility rule of the backward page (floor, ceiling, hides,
+    // PRD-354 group block filter), so reconnect sync can never resurrect a
+    // message the thread itself hides.
+    const qb = this.visibleHistoryQuery(
+      conversationId,
+      userId,
+      clearedAt,
+      leftAt,
+      isGroupConversation,
     );
-    if (isGroupConversation) {
-      // PRD-354: see the matching comment (including the system-pill
-      // `unless`) in `getMessages`.
-      this.blockFilter.excludeBlocked(qb, userId, '"m"."sender_id"', {
-        unless: `"m"."kind" = 'system'`,
-      });
-    }
     if (afterId) {
       qb.andWhere(
         '(m.created_at, m.id) > (:after::timestamptz, :afterId::uuid)',
@@ -415,8 +469,185 @@ export class MessagesService {
       // this; `isGroupConversation` carries every bit of it `toMessageResponses`
       // actually needs (Group vs not), so this skips its own `conversations`
       // lookup too.
-      isGroupConversation ? ConversationKind.Group : ConversationKind.Direct,
+      pageConversation ??
+        (isGroupConversation
+          ? ConversationKind.Group
+          : ConversationKind.Direct),
     );
+  }
+
+  /**
+   * The ONE definition of which rows of a conversation's history exist for
+   * `userId`, shared by the backward page, reconnect sync and the PRD-401
+   * window so the three can never drift:
+   *  - the `clearedAt` floor: messages at or before the caller's clear point
+   *    don't exist for them (WhatsApp "cleared" semantics). A mailbox staff
+   *    seat's privacy floor is written into `clearedAt` too
+   *    (`ConversationParticipant.historyFloorAt`), so this also hides
+   *    pre-hire history;
+   *  - the `leftAt` ceiling (P0 hardening): a removed or departed group
+   *    member reads only what was posted while they belonged;
+   *  - PRD-227 "delete for me": a message THIS viewer hid never exists for
+   *    them again, while every other participant's copy is untouched;
+   *  - PRD-354, groups only: a blocked-either-way sender's messages are
+   *    filtered IN SQL (so a keyset page never under-fills). `unless` keeps a
+   *    group's own system pills visible whoever their actor is: a pill
+   *    reports what happened in the group, and hiding it would leave silent
+   *    gaps in the roster history.
+   * Moderator takedowns are deliberately left IN: `toMessageResponses`
+   * renders them as tombstones that keep their slot in the timeline.
+   */
+  private visibleHistoryQuery(
+    conversationId: string,
+    userId: string,
+    clearedAt: Date | null,
+    leftAt: Date | null,
+    isGroupConversation: boolean,
+  ): SelectQueryBuilder<Message> {
+    const qb = this.messages
+      .createQueryBuilder('m')
+      .where('m.conversation_id = :id', { id: conversationId });
+    if (clearedAt) {
+      qb.andWhere('m.created_at > :clearedAt', {
+        clearedAt: clearedAt.toISOString(),
+      });
+    }
+    if (leftAt) {
+      qb.andWhere('m.created_at <= :leftAt', {
+        leftAt: leftAt.toISOString(),
+      });
+    }
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "message_hides" "mh"
+        WHERE "mh"."message_id" = m.id AND "mh"."user_id" = :hidingUserId
+      )`,
+      { hidingUserId: userId },
+    );
+    if (isGroupConversation) {
+      this.blockFilter.excludeBlocked(qb, userId, '"m"."sender_id"', {
+        unless: `"m"."kind" = 'system'`,
+      });
+    }
+    return qb;
+  }
+
+  /**
+   * Runs a visible-history query with soft-deleted rows included (they render
+   * as tombstones) and pairs every entity with its exact microsecond
+   * `created_at` text, which is what every keyset boundary binds.
+   */
+  private async loadExactHistoryRows(
+    qb: SelectQueryBuilder<Message>,
+  ): Promise<ExactHistoryRow[]> {
+    const { entities, raw } = await qb
+      .withDeleted()
+      .addSelect(EXACT_CREATED_AT_SELECT, 'cursor_created_at')
+      .getRawAndEntities<{ m_id: string; cursor_created_at: string }>();
+    const exactById = new Map(
+      raw.map((rawRow) => [rawRow.m_id, rawRow.cursor_created_at]),
+    );
+    return entities.map((message) => ({
+      message,
+      exactCreatedAt:
+        exactById.get(message.id) ?? message.createdAt.toISOString(),
+    }));
+  }
+
+  /**
+   * PRD-401: a window of history centred on `aroundId`, so jump-to-message
+   * reaches a message however far back it is in one request. The target is
+   * first looked up through the SAME visibility rules as every history page
+   * (`visibleHistoryQuery`); a message outside what this caller may see, or
+   * one that is not in this conversation at all, answers the same 404, so the
+   * response never tells the two apart. Around it: up to half the page limit
+   * of older rows and the rest newer, each fetched with one extra row to
+   * decide `hasMore`/`hasNewer` exactly, ordered on the same
+   * `(created_at, id)` keyset the backward and forward paths use, so the
+   * window's cursors hand straight over to them.
+   */
+  private async getMessagesAround(
+    conversationId: string,
+    userId: string,
+    participant: ConversationParticipant,
+    aroundId: string,
+    limit: number,
+    // PRD-423: the row `getMessages` read (kind and the Go together flags).
+    pageConversation: PageConversationHint | undefined,
+  ): Promise<MessageHistoryWindowPage> {
+    const isGroupConversation =
+      pageConversation?.kind === ConversationKind.Group;
+    const visibleQuery = () =>
+      this.visibleHistoryQuery(
+        conversationId,
+        userId,
+        participant.clearedAt,
+        participant.leftAt,
+        isGroupConversation,
+      );
+    const [target] = await this.loadExactHistoryRows(
+      visibleQuery().andWhere('m.id = :aroundId', { aroundId }).take(1),
+    );
+    if (!target) {
+      throw new NotFoundException('Message not found');
+    }
+    const olderCount = Math.floor((limit - 1) / 2);
+    const newerCount = limit - 1 - olderCount;
+    const anchor = {
+      anchorCreatedAt: target.exactCreatedAt,
+      anchorId: target.message.id,
+    };
+    const [olderRows, newerRows] = await Promise.all([
+      this.loadExactHistoryRows(
+        visibleQuery()
+          .andWhere(
+            '(m.created_at, m.id) < (:anchorCreatedAt::timestamptz, :anchorId::uuid)',
+            anchor,
+          )
+          .orderBy('m.created_at', 'DESC')
+          .addOrderBy('m.id', 'DESC')
+          .take(olderCount + 1),
+      ),
+      this.loadExactHistoryRows(
+        visibleQuery()
+          .andWhere(
+            '(m.created_at, m.id) > (:anchorCreatedAt::timestamptz, :anchorId::uuid)',
+            anchor,
+          )
+          .orderBy('m.created_at', 'ASC')
+          .addOrderBy('m.id', 'ASC')
+          .take(newerCount + 1),
+      ),
+    ]);
+    const hasMore = olderRows.length > olderCount;
+    const hasNewer = newerRows.length > newerCount;
+    const olderInWindow = olderRows.slice(0, olderCount);
+    const newerInWindow = newerRows.slice(0, newerCount);
+    // Newest-first, the order every backward page uses.
+    const windowRows = [...newerInWindow.reverse(), target, ...olderInWindow];
+    const oldestRow = windowRows[windowRows.length - 1];
+    const newestRow = windowRows[0];
+    return {
+      data: await this.core.toMessageResponses(
+        windowRows.map((row) => row.message),
+        userId,
+        Boolean(participant.leftAt),
+        pageConversation,
+      ),
+      pageInfo: {
+        nextCursor:
+          hasMore && oldestRow
+            ? encodeMessageHistoryCursor(
+                oldestRow.exactCreatedAt,
+                oldestRow.message.id,
+              )
+            : null,
+        hasMore,
+        hasNewer,
+        newerAfter: hasNewer && newestRow ? newestRow.exactCreatedAt : null,
+        newerAfterId: hasNewer && newestRow ? newestRow.message.id : null,
+      },
+    };
   }
 
   /**
@@ -510,9 +741,25 @@ export class MessagesService {
       : '';
     const searchQuery = this.messages
       .createQueryBuilder('m')
+      // ENG-405: a photo, document or GIF is matched on its caption, the same
+      // `attachment ->> 'caption'` match `listStarredMessages` uses. Its
+      // `body` is the "Photo"/"Document"/"GIF" fallback, so it is skipped: a
+      // search for "photo" or "gif" would otherwise match every photo or GIF
+      // ever sent. A sticker's body is skipped too (`CAPTIONED_MESSAGE_KINDS`
+      // lists it): a sticker edited before ENG-405 still holds the edit's
+      // text there, which would otherwise surface as a hit with a blank
+      // snippet. Every other kind keeps its body match. `searchHitText`
+      // cuts the snippet from the same field.
       .where(
-        `${foldedHaystack('m', ['body'])} LIKE ${foldedTerm} ESCAPE '\\'`,
-        { pattern },
+        `(
+          (m.kind NOT IN (:...captionOnlySearchKinds)
+            AND ${foldedHaystack('m', ['body'])} LIKE ${foldedTerm} ESCAPE '\\')
+          OR ${foldedTextExpression("coalesce(m.attachment ->> 'caption', '')")} LIKE ${foldedTerm} ESCAPE '\\'
+        )`,
+        {
+          pattern,
+          captionOnlySearchKinds: [...CAPTIONED_MESSAGE_KINDS],
+        },
       )
       // Participation gate + clearedAt floor + leftAt ceiling, all in one
       // non-row-multiplying `EXISTS` (see this method's own doc for why an
@@ -636,7 +883,7 @@ export class MessagesService {
     const hits = rows.map((m) => ({
       id: m.id,
       conversationId: m.conversationId,
-      snippet: buildSearchSnippet(m.body, query),
+      snippet: buildSearchSnippet(searchHitText(m), query),
       sender: listContext.renderSender(m),
       createdAt: m.createdAt.toISOString(),
       // Coordinator follow-up (ENG-251): `kind`/`attachment` ride the same
@@ -942,23 +1189,57 @@ export class MessagesService {
     // real triage value the generic push doesn't carry, and the same fact the
     // "Mentions" inbox (`mentions-inbox.service.ts`) exists to surface across
     // the app. So only the exact-counterpart case is excluded here; a mention
-    // of a fellow GROUP participant (or of anyone in a group, third party or
-    // not) still earns its own notification, unchanged.
-    if (isNew) {
+    // of a fellow GROUP participant still earns its own notification.
+    //
+    // ENG-400: every recipient of this fan-out, for every entity kind, is
+    // held to the conversation's current participants
+    // (`MentionNotificationService.restrictGroupsToSource`). A `c/`, `e/`,
+    // `b/` or `t/` mention still renders as a link in the thread; the
+    // community staff, host, listing owner or thread author it names hears
+    // about it only when they already sit in this conversation.
+    //
+    // Carried 09-15 item 2: an attachment message's `body` is the client's
+    // localized "Photo"/"Document" fallback, and the member's own words live
+    // in the sanitized `attachment.caption`. The caption is what gets scanned
+    // and excerpted, and an uncaptioned attachment contributes no text.
+    const mentionText = this.mentionTextFor(response, body);
+    if (isNew && mentionText) {
       await this.mentions.notify(
-        body,
+        mentionText,
         userId,
         {
           actorId: userId,
           source: 'message',
           conversationId,
           messageId: response.id,
-          excerpt: body.slice(0, 140),
+          // Cut by character: the excerpt is stored in the notification's
+          // `jsonb` payload, which refuses a lone surrogate.
+          excerpt: truncateCharacters(mentionText, 140),
+          // PRD-423: the bell and the Mentions inbox read this server-side
+          // key to name the mentioner by first name, with no profile link.
+          ...(convo.isGoTogetherChat ? { isGoTogetherChat: true } : {}),
         },
         directCounterpartUserIds,
       );
     }
     return { response, isNew };
+  }
+
+  /**
+   * The text a sent message's `@`-mention fan-out scans and excerpts. A plain
+   * text message contributes its `body`. A gif, image, document or sticker
+   * message contributes its sanitized attachment caption, or nothing when the
+   * member typed none: its `body` holds the client's localized fallback label
+   * ("Photo", "Document"), which is display filler with no mention in it.
+   * The kind rule lives in `messageMentionText` (`common/mentions.ts`), shared
+   * with the unread-mention flag and the group mention push.
+   */
+  private mentionTextFor(response: MessageResponse, body: string): string {
+    return messageMentionText({
+      kind: response.kind,
+      body,
+      attachment: response.attachment,
+    });
   }
 
   /**
@@ -1232,13 +1513,16 @@ export class MessagesService {
   }
 
   /**
-   * Edit a message's `body` in place. Author-only, within a 15-minute window
-   * of `createdAt`, and only while the message is not (soft-)deleted. Stamps
-   * `editedAt` and emits `MESSAGE_UPDATED` so live sockets in the conversation
-   * see the new body — mirrors `deleteMessage`'s guard shape but is stricter:
-   * this is not idempotent (a repeat call keeps overwriting the body/edited
-   * timestamp) and the edit window is enforced on the server as the authority,
-   * even though the client also hides the Edit action past 15 minutes.
+   * Edit a message's text in place: the `body` of a text message, or the
+   * caption of a photo, document or GIF (ENG-405); a sticker is refused.
+   * An empty edit clears a caption and is refused on every other kind.
+   * Author-only, within a 15-minute window of `createdAt`, and only while
+   * the message is not (soft-)deleted. Stamps `editedAt` and emits
+   * `MESSAGE_UPDATED` so live sockets in the conversation see the edit.
+   * Mirrors `deleteMessage`'s guard shape and is stricter: a repeat call
+   * keeps overwriting the text and the edited timestamp, and the edit window
+   * is enforced on the server as the authority, even though the client also
+   * hides the Edit action past 15 minutes.
    */
   async editMessage(
     conversationId: string,
@@ -1267,6 +1551,14 @@ export class MessagesService {
         code: SYSTEM_MESSAGE_IMMUTABLE_CODE,
       });
     }
+    // ENG-405: see `MESSAGE_KIND_NOT_EDITABLE_CODE`.
+    if (UNEDITABLE_MESSAGE_KINDS.includes(message.kind)) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        message: 'A sticker message cannot be edited',
+        code: MESSAGE_KIND_NOT_EDITABLE_CODE,
+      });
+    }
     if (message.senderId !== userId) {
       throw new ForbiddenException('You can only edit your own messages');
     }
@@ -1293,7 +1585,21 @@ export class MessagesService {
     if (await this.core.isMessageTakenDown(messageId)) {
       throw new ForbiddenException('This message can no longer be edited');
     }
-    message.body = body;
+    // ENG-405: a photo, document or GIF bubble renders its caption, and its
+    // `body` is only the send-time "Photo"/"Document"/"GIF" fallback. The edit
+    // therefore lands on the caption, and `body` keeps the fallback the inbox
+    // preview and push already read. Search and mentions read the caption.
+    // An empty edit clears a caption (the DTO allows it for that reason); a
+    // text message keeps the `@MinLength(1)`-style refusal it always had.
+    if (CAPTION_EDIT_MESSAGE_KINDS.includes(message.kind)) {
+      message.attachment = this.withEditedCaption(message.attachment, body);
+    } else if (body.trim().length === 0) {
+      throw new BadRequestException(
+        'body must be longer than or equal to 1 characters',
+      );
+    } else {
+      message.body = body;
+    }
     message.editedAt = new Date();
     const saved = await this.messages.save(message);
     const view = toMessageView(saved);
@@ -1311,5 +1617,37 @@ export class MessagesService {
       message: response!,
     } satisfies MessageUpdatedEvent);
     return response!;
+  }
+
+  /**
+   * ENG-405: the photo, document or GIF attachment with its caption replaced
+   * by `editedText`, cleaned through the same `sanitizeAttachmentCaption` pass
+   * a send uses. Text that sanitizes down to nothing leaves no caption, so the
+   * bubble shows the bare media and previews keep their "Photo"/"Document"/
+   * "GIF" fallback. Refuses a caption longer than a send may carry, and a row
+   * with no photo, document or GIF attachment to hold one.
+   */
+  private withEditedCaption(
+    attachment: GifAttachment | DocumentAttachment | StickerAttachment | null,
+    editedText: string,
+  ): GifAttachment | DocumentAttachment {
+    if (!attachment || isStickerAttachment(attachment)) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        message: 'This message has no caption to edit',
+        code: MESSAGE_KIND_NOT_EDITABLE_CODE,
+      });
+    }
+    if (!maxLength(editedText, MAX_ATTACHMENT_CAPTION_LENGTH)) {
+      throw new BadRequestException(
+        `A caption can be at most ${MAX_ATTACHMENT_CAPTION_LENGTH} characters`,
+      );
+    }
+    const caption = this.core.sanitizeAttachmentCaption(editedText);
+    const withoutCaption = { ...attachment };
+    delete withoutCaption.caption;
+    return caption === undefined
+      ? withoutCaption
+      : { ...withoutCaption, caption };
   }
 }

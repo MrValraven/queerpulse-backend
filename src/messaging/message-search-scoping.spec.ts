@@ -5,7 +5,11 @@ import { escapeLikeTerm } from '../common/like-escape';
 import { ConnectionsService } from '../connections/connections.service';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
-import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  foldedTextExpression,
+} from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
@@ -203,23 +207,129 @@ describe('MessagesService.searchMessages scoping (ENG-268 / ENG-252 / ENG-251)',
   });
 
   describe('text matching (ENG-268 accent/case folding)', () => {
+    // ENG-405: the body branch skips a photo, document or GIF (its body is
+    // the "Photo"/"Document"/"GIF" fallback) and a sticker (a legacy edit's
+    // text may sit in its body), and every kind also matches its caption,
+    // the same `attachment ->> 'caption'` match starred search uses.
+    const bodyMatch = `${foldedHaystack('m', ['body'])} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`;
+    const captionMatch = `${foldedTextExpression("coalesce(m.attachment ->> 'caption', '')")} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`;
+
     it('matches via the shared foldedHaystack/foldedSearchTerm vocabulary that replaced the old bare ILIKE', async () => {
       await service.searchMessages('me', 'café');
-      expect(qb.where).toHaveBeenCalledWith(
-        `${foldedHaystack('m', ['body'])} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
-        { pattern: `%${escapeLikeTerm('café')}%` },
+      const [whereSql, params] = qb.where.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(whereSql).toContain(bodyMatch);
+      expect(whereSql).not.toMatch(/ILIKE/i);
+      expect(params).toEqual({
+        pattern: `%${escapeLikeTerm('café')}%`,
+        captionOnlySearchKinds: ['gif', 'image', 'document', 'sticker'],
+      });
+    });
+
+    it('never matches a sticker on its body, so a sticker edited before the fix leaves no blank-snippet hit', async () => {
+      await service.searchMessages('me', 'typed');
+      const [whereSql, params] = qb.where.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      const collapse = (sql: string) => sql.replace(/\s+/g, ' ');
+      expect(collapse(whereSql)).toContain(
+        collapse(`m.kind NOT IN (:...captionOnlySearchKinds) AND ${bodyMatch}`),
       );
-      // The `.where()` SQL is entirely the folded expression: `ILIKE` is gone.
+      expect(params.captionOnlySearchKinds).toContain(MessageKind.Sticker);
+    });
+
+    it('keeps a search for "gif" off every captionless GIF by matching a GIF on its caption alone (ENG-405)', async () => {
+      await service.searchMessages('me', 'gif');
+      const [whereSql, params] = qb.where.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      const collapse = (sql: string) => sql.replace(/\s+/g, ' ');
+      // The body branch is the only one that could see the "GIF" fallback,
+      // and it runs only for kinds outside the caption-only list.
+      expect(collapse(whereSql)).toContain(
+        collapse(`m.kind NOT IN (:...captionOnlySearchKinds) AND ${bodyMatch}`),
+      );
+      expect(params.captionOnlySearchKinds).toContain(MessageKind.Gif);
+      expect(params.captionOnlySearchKinds).not.toContain(MessageKind.User);
+    });
+
+    it('matches a caption on every kind and skips the body of a photo, document or GIF (ENG-405)', async () => {
+      await service.searchMessages('me', 'sunset');
       const [whereSql] = qb.where.mock.calls[0] as [string, unknown];
-      expect(whereSql).toEqual(expect.stringMatching(/^translate\(lower\(/));
+      const collapse = (sql: string) => sql.replace(/\s+/g, ' ');
+      expect(collapse(whereSql)).toContain(
+        collapse(`m.kind NOT IN (:...captionOnlySearchKinds) AND ${bodyMatch}`),
+      );
+      expect(collapse(whereSql)).toContain(collapse(`OR ${captionMatch}`));
     });
 
     it('escapes LIKE metacharacters in the query before folding, so % and _ stay literal', async () => {
       await service.searchMessages('me', '50%_off');
-      expect(qb.where).toHaveBeenCalledWith(
-        `${foldedHaystack('m', ['body'])} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
-        { pattern: `%${escapeLikeTerm('50%_off')}%` },
-      );
+      const [, params] = qb.where.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params).toMatchObject({
+        pattern: `%${escapeLikeTerm('50%_off')}%`,
+      });
+    });
+
+    it('cuts a photo hit snippet from its caption (ENG-405)', async () => {
+      qb.getMany.mockResolvedValueOnce([
+        buildMessageRow({
+          kind: MessageKind.Image,
+          body: 'Photo',
+          attachment: {
+            url: 'message-image/u2/photo.jpg',
+            previewUrl: 'message-image/u2/photo.jpg',
+            width: 800,
+            height: 600,
+            provider: 'upload',
+            caption: 'Sunset at the pier',
+          },
+        }),
+      ]);
+      conversations.find.mockResolvedValueOnce([
+        buildConversation({ kind: ConversationKind.Group, title: 'Pier' }),
+      ]);
+      participants.find.mockResolvedValueOnce([
+        { conversationId: 'c1', userId: 'u3' },
+      ]);
+      profiles.find.mockResolvedValueOnce([buildProfile('u2')]);
+
+      const result = await service.searchMessages('me', 'sunset');
+      expect(result.hits[0]!.snippet).toBe('Sunset at the pier');
+    });
+
+    it('cuts a GIF hit snippet from its caption, leaving the GIF body fallback out (ENG-405)', async () => {
+      qb.getMany.mockResolvedValueOnce([
+        buildMessageRow({
+          kind: MessageKind.Gif,
+          body: 'GIF',
+          attachment: {
+            url: 'https://media.example.test/wave.gif',
+            previewUrl: 'https://media.example.test/wave-preview.gif',
+            width: 200,
+            height: 200,
+            provider: 'klipy',
+            caption: 'For the pier crew',
+          },
+        }),
+      ]);
+      conversations.find.mockResolvedValueOnce([
+        buildConversation({ kind: ConversationKind.Group, title: 'Pier' }),
+      ]);
+      participants.find.mockResolvedValueOnce([
+        { conversationId: 'c1', userId: 'u3' },
+      ]);
+      profiles.find.mockResolvedValueOnce([buildProfile('u2')]);
+
+      const result = await service.searchMessages('me', 'crew');
+      expect(result.hits[0]!.snippet).toBe('For the pier crew');
     });
 
     it('is the one and only `.where()` call, so every remaining predicate chains as `.andWhere()`', async () => {

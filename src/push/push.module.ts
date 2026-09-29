@@ -67,7 +67,10 @@ import { PushSubscription } from './entities/push-subscription.entity';
     // Cron-only; registering it starts the daily stale-subscription purge.
     PushSubscriptionRetentionService,
   ],
-  // Exported so other domains can deliver a push (e.g. `EventRemindersService`).
-  exports: [PushService],
+  // Exported so other domains can deliver a push. `PushPreviewPrivacyService`
+  // is the one a content-bearing push should use (`EventRemindersService` sends
+  // its reminders through it, ENG-410), so the lock-screen split applies
+  // outside this module too.
+  exports: [PushService, PushPreviewPrivacyService],
 })
 export class PushModule {}

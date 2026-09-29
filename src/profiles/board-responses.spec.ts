@@ -59,7 +59,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // `BoardPostResponse` repository.
 describe('ProfilesService board responses', () => {
   let service: ProfilesService;
-  let profiles: { findOne: jest.Mock };
+  let profiles: { findOne: jest.Mock; exists: jest.Mock };
   let boardPosts: { find: jest.Mock; findOne: jest.Mock; save: jest.Mock };
   let boardResponses: {
     findOne: jest.Mock;
@@ -164,6 +164,9 @@ describe('ProfilesService board responses', () => {
         slug: 'ines',
         visibility: 'open',
       }),
+      // The account-status gate `findBySlugOrThrow` runs for a non-owner
+      // viewer (ENG-435). The post owner is an active member.
+      exists: jest.fn().mockResolvedValue(true),
     };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),

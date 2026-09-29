@@ -11,10 +11,12 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { visibleThroughMailboxSeatRules } from './notification-mailbox-block';
+import { visibleThroughActorBlocks } from './notification-actor-block';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
   NOTIFICATION_BATCH_CREATED,
   NOTIFICATION_CREATED,
+  NOTIFICATION_STATE_CHANGED,
 } from './notification.events';
 import { NotificationsService } from './notifications.service';
 
@@ -461,9 +463,11 @@ describe('NotificationsService', () => {
     await service.list('u1', { unread: true });
     expect(repo.find).toHaveBeenCalledWith(
       // Task 13g: plus the mailbox block visibility condition on `payload`.
+      // PRD-403: plus the actor block condition, keyed on `id`.
       expect.objectContaining({
         where: {
           userId: 'u1',
+          id: expect.any(FindOperator),
           read: false,
           payload: expect.any(FindOperator),
         },
@@ -515,6 +519,38 @@ describe('NotificationsService', () => {
     );
   });
 
+  it('serves no actor avatar when the actor hid their photo (ENG-412)', async () => {
+    repo.find.mockResolvedValue([
+      {
+        id: 'n1',
+        userId: 'u1',
+        type: NotificationType.ConnectionAccepted,
+        payload: { byUserId: 'u2', connectionId: 'c1' },
+        read: false,
+        createdAt: new Date('2026-07-20T00:00:00.000Z'),
+      },
+    ]);
+    profileRepo.find.mockResolvedValue([
+      {
+        userId: 'u2',
+        slug: 'ines',
+        firstName: 'Inês',
+        lastName: 'Tavares',
+        avatarUrl: 'https://lh3.googleusercontent.com/a/ines.png',
+        photoVisible: false,
+      },
+    ]);
+
+    const page = await service.list('u1');
+
+    expect(page.items[0]!.actor).toEqual({
+      slug: 'ines',
+      firstName: 'Inês',
+      lastName: 'Tavares',
+      avatarUrl: null,
+    });
+  });
+
   it('leaves system notifications with a null actor and skips the profile lookup', async () => {
     repo.find.mockResolvedValue([
       {
@@ -539,9 +575,98 @@ describe('NotificationsService', () => {
     expect(repo.count).toHaveBeenCalledWith({
       where: {
         userId: 'u1',
+        id: expect.any(FindOperator),
         read: false,
         payload: expect.any(FindOperator),
       },
+    });
+  });
+
+  // PRD-403: a row written before a block stays out of the bell and the
+  // badge while the block stands, whichever member placed it.
+  describe('read-time actor block filter', () => {
+    type IdCondition = { id: FindOperator<unknown> };
+    const expectedCondition = visibleThroughActorBlocks('u1');
+    const expectActorBlockCondition = (condition: FindOperator<unknown>) => {
+      expect(condition).toBeInstanceOf(FindOperator);
+      expect(condition.getSql?.('Notification.id')).toBe(
+        expectedCondition.getSql?.('Notification.id'),
+      );
+      expect(condition.objectLiteralParameters).toEqual(
+        expectedCondition.objectLiteralParameters,
+      );
+    };
+
+    it('filters the list and its total through the actor block condition', async () => {
+      await service.list('u1');
+
+      const [findOptions] = repo.find.mock.calls[0] as [{ where: IdCondition }];
+      const [countOptions] = repo.count.mock.calls[0] as [
+        { where: IdCondition },
+      ];
+      expectActorBlockCondition(findOptions.where.id);
+      expectActorBlockCondition(countOptions.where.id);
+    });
+
+    it('applies the identical condition to the unread badge, so it never counts a row the list hides', async () => {
+      await service.list('u1', { unread: true });
+      await service.unreadCount('u1');
+
+      const [listOptions] = repo.find.mock.calls[0] as [
+        { where: Record<string, unknown> & IdCondition },
+      ];
+      const [badgeOptions] = repo.count.mock.calls[1] as [
+        { where: Record<string, unknown> & IdCondition },
+      ];
+      expectActorBlockCondition(badgeOptions.where.id);
+      expect(badgeOptions.where.id.getSql?.('Notification.id')).toBe(
+        listOptions.where.id.getSql?.('Notification.id'),
+      );
+    });
+
+    it('checks the block in both directions: the reader blocked the actor, or the actor blocked the reader', async () => {
+      await service.unreadCount('u1');
+
+      const [badgeOptions] = repo.count.mock.calls[0] as [
+        { where: IdCondition },
+      ];
+      const sql = badgeOptions.where.id.getSql?.('Notification.id') ?? '';
+      expect(sql).toMatch(
+        /SELECT "__actor_block"\."blocked_id"::text FROM "blocks" "__actor_block"\s+WHERE "__actor_block"\."blocker_id" = :actorBlockReaderUserId/,
+      );
+      expect(sql).toMatch(
+        /SELECT "__actor_block"\."blocker_id"::text FROM "blocks" "__actor_block"\s+WHERE "__actor_block"\."blocked_id" = :actorBlockReaderUserId/,
+      );
+      expect(badgeOptions.where.id.objectLiteralParameters).toEqual({
+        actorBlockReaderUserId: 'u1',
+      });
+    });
+
+    it('marks all read through the same condition, so rows an unblock brings back are still unread', async () => {
+      await service.markAllRead('u1');
+
+      const [criteria] = repo.update.mock.calls[0] as [IdCondition];
+      expectActorBlockCondition(criteria.id);
+    });
+
+    it('hides rows without deleting them, so they come back once the block is lifted', async () => {
+      // The condition reads the live `blocks` table on every query and the
+      // reads never write, so removing the block row is all it takes for the
+      // next read to return the rows again.
+      await service.list('u1');
+      await service.unreadCount('u1');
+      await service.list('u1');
+
+      expect(repo.delete).not.toHaveBeenCalled();
+      expect(repo.update).not.toHaveBeenCalled();
+      const [firstRead] = repo.find.mock.calls[0] as [{ where: IdCondition }];
+      const [laterRead] = repo.find.mock.calls[1] as [{ where: IdCondition }];
+      expect(laterRead.where.id.getSql?.('Notification.id')).toBe(
+        firstRead.where.id.getSql?.('Notification.id'),
+      );
+      expect(firstRead.where.id.getSql?.('Notification.id')).toContain(
+        'FROM "blocks"',
+      );
     });
   });
 
@@ -607,5 +732,54 @@ describe('NotificationsService', () => {
     await expect(service.dismiss('n1', 'someone-else')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  // The member's other tabs and devices learn about a read or dismiss only
+  // through this event, which the chat gateway relays as
+  // `notification:changed`. It fires after a write that touched a row, and
+  // stays silent when nothing changed.
+  describe('NOTIFICATION_STATE_CHANGED announcements', () => {
+    it('markRead announces the change to the owner', async () => {
+      await service.markRead('n1', 'u1');
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_STATE_CHANGED, {
+        userId: 'u1',
+      });
+    });
+
+    it('markRead stays silent on the 404 path', async () => {
+      repo.update.mockResolvedValue({ affected: 0 });
+      await expect(service.markRead('n1', 'u1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('markAllRead announces the change when rows were marked', async () => {
+      await service.markAllRead('u1');
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_STATE_CHANGED, {
+        userId: 'u1',
+      });
+    });
+
+    it('markAllRead stays silent when there was nothing unread', async () => {
+      repo.update.mockResolvedValue({ affected: 0 });
+      await expect(service.markAllRead('u1')).resolves.toEqual({ ok: true });
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('dismiss announces the change to the owner', async () => {
+      await service.dismiss('n1', 'u1');
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_STATE_CHANGED, {
+        userId: 'u1',
+      });
+    });
+
+    it('dismiss stays silent on the 404 path', async () => {
+      repo.delete.mockResolvedValue({ affected: 0 });
+      await expect(service.dismiss('n1', 'u1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(emit).not.toHaveBeenCalled();
+    });
   });
 });

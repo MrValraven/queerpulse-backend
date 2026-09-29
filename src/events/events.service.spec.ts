@@ -3,8 +3,10 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In, LessThanOrEqual, Repository } from 'typeorm';
@@ -29,6 +31,7 @@ import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventSeries } from './entities/event-series.entity';
+import { EVENT_DELETING } from './event.events';
 import {
   Event,
   EventStatus,
@@ -102,6 +105,8 @@ describe('EventsService', () => {
     assertViewable: jest.Mock;
     scopedVisibilityWhere: jest.Mock;
   };
+  // `remove()` announces a hard delete through `emitAsync` and waits for it.
+  let eventEmitter: { emitAsync: jest.Mock };
 
   // A chainable query-builder stub for the RSVP queries: `attendees`'
   // paginated page (`.skip().take().getManyAndCount()`, matching
@@ -137,6 +142,18 @@ describe('EventsService', () => {
     });
     return qb;
   };
+
+  // The `andWhere` calls carrying the attendees' "Who can see you're going?"
+  // predicate (`restrictToAttendeesVisibleTo`), as `[clause, parameters]`.
+  const rosterVisibilityCalls = (
+    qb: Record<string, jest.Mock>,
+  ): Array<[string, Record<string, unknown>]> =>
+    (qb.andWhere!.mock.calls as Array<[unknown, Record<string, unknown>]>)
+      .filter(
+        (call): call is [string, Record<string, unknown>] =>
+          typeof call[0] === 'string' && call[0].includes('"r"."visibility"'),
+      )
+      .map(([clause, parameters]) => [clause, parameters]);
 
   // One recorded `where` / `andWhere` call: the SQL string AND the parameters
   // bound to it. Both halves matter. A clause naming `:discoveryFrom` proves
@@ -283,6 +300,7 @@ describe('EventsService', () => {
         params: { vis: [EventVisibility.Public, EventVisibility.Members] },
       }),
     };
+    eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -334,6 +352,7 @@ describe('EventsService', () => {
             findLinkable: jest.fn().mockResolvedValue(null),
           },
         },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
     service = module.get(EventsService);
@@ -369,6 +388,9 @@ describe('EventsService', () => {
       // retention window, so every fixture that reaches it needs a real date.
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
+      // The host left "Show attendee count" on, so a member who is not an
+      // organiser reaches the roster query at all.
+      showAttendeeCount: true,
     };
 
     it('filters going attendees by status, in-query and block-excluded', async () => {
@@ -430,10 +452,202 @@ describe('EventsService', () => {
       expect(page.total).toBe(1);
       expect(page.capacity).toBe(20);
     });
+
+    // PRD-414: each attendee's "Who can see you're going?" answer, applied
+    // in-query for every viewer who is not an organiser.
+    describe('who can see an attendee is going', () => {
+      const justMeRow = {
+        eventId: 'e1',
+        userId: 'quiet-1',
+        status: 'going',
+        waitlistPosition: null,
+        guestCount: 1,
+        checkedInAt: null,
+        visibility: 'justMe',
+        accessNeeds: 'step-free entry',
+        dietaryNeeds: 'vegan',
+        pronouns: 'they/them',
+        customAnswer: 'bringing bread',
+      };
+      const quietProfile = {
+        userId: 'quiet-1',
+        slug: 'rui',
+        firstName: 'Rui',
+        lastName: 'Silva',
+        pronouns: null,
+        photoVisible: false,
+        avatarUrl: null,
+      };
+
+      it('restricts a non-organiser to rows whose visibility admits them, including connections', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', 'stranger-1', 'going');
+
+        const visibilityCalls = rosterVisibilityCalls(qb);
+        expect(visibilityCalls).toHaveLength(1);
+        const [clause, parameters] = visibilityCalls[0]!;
+        // Own row, unset, `everyone`, and `connections` only through an
+        // accepted connection in either request direction. `justMe` matches
+        // none of these, so it never reaches a stranger or a connection.
+        expect(clause).toContain('"r"."user_id" = :attendeeVisibilityViewerId');
+        expect(clause).toContain('"r"."visibility" IS NULL');
+        expect(clause).toContain(
+          '"r"."visibility" = :attendeeVisibilityEveryone',
+        );
+        expect(clause).toContain(
+          '"r"."visibility" = :attendeeVisibilityConnections',
+        );
+        expect(clause).toContain('FROM "connections"');
+        expect(clause).toContain(
+          '"__attendee_connection"."requester_id" = :attendeeVisibilityViewerId AND "__attendee_connection"."addressee_id" = "r"."user_id"',
+        );
+        expect(clause).toContain(
+          '"__attendee_connection"."addressee_id" = :attendeeVisibilityViewerId AND "__attendee_connection"."requester_id" = "r"."user_id"',
+        );
+        expect(clause).not.toContain('justMe');
+        expect(parameters).toEqual({
+          attendeeVisibilityViewerId: 'stranger-1',
+          attendeeVisibilityEveryone: 'everyone',
+          attendeeVisibilityConnections: 'connections',
+          attendeeVisibilityAccepted: 'accepted',
+        });
+      });
+
+      it('shows a justMe attendee to the organiser with every note filled', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        qb.getManyAndCount!.mockResolvedValue([[justMeRow], 1]);
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+        profiles.find.mockResolvedValue([quietProfile]);
+
+        const page = await service.attendees('party', 'host-1', 'going');
+
+        expect(rosterVisibilityCalls(qb)).toHaveLength(0);
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0]).toEqual(
+          expect.objectContaining({
+            slug: 'rui',
+            guestCount: 1,
+            accessNeeds: 'step-free entry',
+            dietaryNeeds: 'vegan',
+            pronouns: 'they/them',
+            customAnswer: 'bringing bread',
+            detailsVisibility: 'justMe',
+          }),
+        );
+      });
+
+      it('keeps the going count and seats counting every attendee for a non-organiser', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        // One row visible to this viewer; the roster holds four members.
+        qb.getManyAndCount!.mockResolvedValue([
+          [{ ...justMeRow, userId: 'open-1', visibility: 'everyone' }],
+          1,
+        ]);
+        qb.getRawOne!.mockResolvedValue({
+          goingCount: '4',
+          seatsTaken: '5',
+          waitlistCount: '0',
+          checkedInCount: '0',
+        });
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+        profiles.find.mockResolvedValue([
+          { ...quietProfile, userId: 'open-1' },
+        ]);
+
+        const page = await service.attendees('party', 'stranger-1', 'going');
+
+        expect(page.items).toHaveLength(1);
+        expect(page.goingCount).toBe(4);
+        expect(page.seatsTaken).toBe(5);
+        // A non-organiser never receives the notes, whatever the setting.
+        expect(page.items[0]!.accessNeeds).toBeUndefined();
+      });
+    });
   });
 
-  // The door list CSV carries what attendees typed into their RSVP details,
-  // so it follows the same `justMe` rule the organiser's dashboard view does.
+  // `EventDetail.goingAttendeesPreview`: faces follow each attendee's
+  // "Who can see you're going?" answer, and the total counts everyone.
+  describe('going attendees preview', () => {
+    const previewEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      cost: null,
+      visibility: EventVisibility.Public,
+      capacity: null,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
+      showAttendeeCount: true,
+    };
+    const openRow = {
+      eventId: 'e1',
+      userId: 'open-1',
+      status: 'going',
+      visibility: 'everyone',
+    };
+
+    it('counts hidden attendees in the total and filters faces for a non-organiser', async () => {
+      events.findOne.mockResolvedValue(previewEvent);
+      const qb = attendeesQbStub();
+      // Three going, one of whom this viewer may see.
+      qb.getCount!.mockResolvedValue(3);
+      qb.getMany!.mockResolvedValue([openRow]);
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'open-1',
+          slug: 'ana',
+          firstName: 'Ana',
+          lastName: 'Silva',
+          photoVisible: false,
+          avatarUrl: null,
+        },
+      ]);
+
+      const detail = await service.getBySlug('party', 'stranger-1');
+
+      expect(detail.goingAttendeesPreviewTotal).toBe(3);
+      expect(detail.goingAttendeesPreview).toHaveLength(1);
+      const visibilityCalls = rosterVisibilityCalls(qb);
+      expect(visibilityCalls).toHaveLength(1);
+      expect(visibilityCalls[0]![1]).toEqual(
+        expect.objectContaining({ attendeeVisibilityViewerId: 'stranger-1' }),
+      );
+      // The total is read before the visibility filter joins the query.
+      const visibilityCallOrder =
+        qb.andWhere!.mock.invocationCallOrder[
+          qb.andWhere!.mock.calls.findIndex(
+            ([clause]) =>
+              typeof clause === 'string' && clause.includes('"r"."visibility"'),
+          )
+        ]!;
+      expect(qb.getCount!.mock.invocationCallOrder[0]).toBeLessThan(
+        visibilityCallOrder,
+      );
+    });
+
+    it('shows the organiser every going attendee', async () => {
+      events.findOne.mockResolvedValue(previewEvent);
+      const qb = attendeesQbStub();
+      qb.getCount!.mockResolvedValue(1);
+      qb.getMany!.mockResolvedValue([{ ...openRow, visibility: 'justMe' }]);
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getBySlug('party', 'host-1');
+
+      expect(rosterVisibilityCalls(qb)).toHaveLength(0);
+    });
+  });
+
+  // The door list CSV carries what attendees typed into their RSVP details.
+  // It follows the organiser's dashboard view, so every answer is filled
+  // whatever the attendee picked for "Who can see you're going?".
   describe('attendeesCsv', () => {
     const hostedEvent = {
       id: 'e1',
@@ -464,7 +678,7 @@ describe('EventsService', () => {
       avatarUrl: null,
     });
 
-    it('leaves every free-text answer out for an attendee who chose justMe', async () => {
+    it('fills every free-text answer, for a justMe attendee too', async () => {
       events.findOne.mockResolvedValue(hostedEvent);
       rsvps.find.mockResolvedValue([
         rsvpRow('shared-1', null),
@@ -484,7 +698,181 @@ describe('EventsService', () => {
       expect(sharedLine).toContain('"shared-1 they/them"');
       expect(sharedLine).toContain('"shared-1 bringing bread"');
       expect(privateLine).toContain('"Rui Silva"');
-      expect(privateLine).not.toContain('private-1');
+      expect(privateLine).toContain('"private-1 step-free entry"');
+      expect(privateLine).toContain('"private-1 vegan"');
+      expect(privateLine).toContain('"private-1 they/them"');
+      expect(privateLine).toContain('"private-1 bringing bread"');
+    });
+  });
+
+  // Section 7, M1: the named attendee lists leave out members whose account
+  // is suspended, deactivated or pending deletion, for every viewer,
+  // organisers included, because by-name check-in answers "Member not found"
+  // for them. Counts and totals keep counting everybody.
+  describe('named attendee lists hold active accounts only', () => {
+    const rosterEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      cost: null,
+      visibility: EventVisibility.Public,
+      capacity: 20,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
+      showAttendeeCount: true,
+    };
+
+    // The `andWhere` calls carrying the active-account predicate, as
+    // `[clause, parameters]`.
+    const activeAccountCalls = (
+      qb: Record<string, jest.Mock>,
+    ): Array<[string, Record<string, unknown>]> =>
+      (qb.andWhere!.mock.calls as Array<[unknown, Record<string, unknown>]>)
+        .filter(
+          (call): call is [string, Record<string, unknown>] =>
+            typeof call[0] === 'string' &&
+            call[0].includes('"__attendee_account"'),
+        )
+        .map(([clause, parameters]) => [clause, parameters]);
+
+    const expectActiveAccountClause = (
+      clause: string,
+      userIdColumn: string,
+    ) => {
+      expect(clause).toContain('FROM "users" "__attendee_account"');
+      expect(clause).toContain(
+        `"__attendee_account"."id" = ${userIdColumn} AND "__attendee_account"."status" = :attendeeAccountActive`,
+      );
+    };
+
+    it.each([
+      ['an organiser', 'host-1'],
+      ['a member', 'stranger-1'],
+    ])(
+      'joins the active-account predicate into the paged roster for %s',
+      async (_viewerLabel, viewerId) => {
+        events.findOne.mockResolvedValue(rosterEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', viewerId, 'going');
+
+        const calls = activeAccountCalls(qb);
+        expect(calls).toHaveLength(1);
+        const [clause, parameters] = calls[0]!;
+        expectActiveAccountClause(clause, '"r"."user_id"');
+        expect(parameters).toEqual({ attendeeAccountActive: 'active' });
+        // In-query, ahead of the page read, so a page comes back full.
+        const clauseOrder =
+          qb.andWhere!.mock.invocationCallOrder[
+            qb.andWhere!.mock.calls.findIndex(
+              ([candidate]) =>
+                typeof candidate === 'string' &&
+                candidate.includes('"__attendee_account"'),
+            )
+          ]!;
+        expect(clauseOrder).toBeLessThan(
+          qb.getManyAndCount!.mock.invocationCallOrder[0]!,
+        );
+      },
+    );
+
+    it('keeps the organiser roster counts counting every attendee', async () => {
+      events.findOne.mockResolvedValue(rosterEvent);
+      const qb = attendeesQbStub();
+      qb.getRawOne!.mockResolvedValue({
+        goingCount: '3',
+        seatsTaken: '3',
+        waitlistCount: '0',
+        checkedInCount: '1',
+      });
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.attendees('party', 'host-1', 'going');
+
+      expect(page.goingCount).toBe(3);
+      expect(page.seatsTaken).toBe(3);
+      expect(page.checkedInCount).toBe(1);
+    });
+
+    it.each([
+      ['an organiser', 'host-1'],
+      ['a member', 'stranger-1'],
+    ])(
+      'filters preview faces after the total is counted for %s',
+      async (_viewerLabel, viewerId) => {
+        events.findOne.mockResolvedValue(rosterEvent);
+        const qb = attendeesQbStub();
+        qb.getCount!.mockResolvedValue(3);
+        qb.getMany!.mockResolvedValue([
+          {
+            eventId: 'e1',
+            userId: 'open-1',
+            status: 'going',
+            visibility: 'everyone',
+          },
+        ]);
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+        profiles.find.mockResolvedValue([
+          {
+            userId: 'open-1',
+            slug: 'ana',
+            firstName: 'Ana',
+            lastName: 'Silva',
+            photoVisible: false,
+            avatarUrl: null,
+          },
+        ]);
+
+        const detail = await service.getBySlug('party', viewerId);
+
+        expect(detail.goingAttendeesPreviewTotal).toBe(3);
+        expect(detail.goingAttendeesPreview).toHaveLength(1);
+        const calls = activeAccountCalls(qb);
+        expect(calls).toHaveLength(1);
+        expectActiveAccountClause(calls[0]![0], '"r"."user_id"');
+        const clauseOrder =
+          qb.andWhere!.mock.invocationCallOrder[
+            qb.andWhere!.mock.calls.findIndex(
+              ([candidate]) =>
+                typeof candidate === 'string' &&
+                candidate.includes('"__attendee_account"'),
+            )
+          ]!;
+        expect(qb.getCount!.mock.invocationCallOrder[0]).toBeLessThan(
+          clauseOrder,
+        );
+        expect(clauseOrder).toBeLessThan(
+          qb.getMany!.mock.invocationCallOrder[0]!,
+        );
+      },
+    );
+
+    it('reads the CSV door list through the active-account predicate', async () => {
+      events.findOne.mockResolvedValue(rosterEvent);
+
+      await service.attendeesCsv('party', 'host-1');
+
+      const [{ where }] = rsvps.find.mock.calls[0] as [
+        {
+          where: {
+            userId: {
+              type: string;
+              getSql?: (column: string) => string;
+              objectLiteralParameters?: Record<string, unknown>;
+            };
+          };
+        },
+      ];
+      expect(where.userId.type).toBe('raw');
+      expectActiveAccountClause(
+        where.userId.getSql!('EventRsvp.userId'),
+        'EventRsvp.userId',
+      );
+      expect(where.userId.objectLiteralParameters).toEqual({
+        attendeeAccountActive: 'active',
+      });
     });
   });
 
@@ -1169,6 +1557,58 @@ describe('EventsService', () => {
       );
       expect(events.delete).not.toHaveBeenCalled();
     });
+
+    // ENG-433: the cascade removes the Go together groups, so their matched
+    // chats are dissolved (by the listener on `EVENT_DELETING`) before the row
+    // goes, and a failure there keeps the gathering.
+    it('winds down matched chats before the row is deleted', async () => {
+      events.findOne.mockResolvedValue(cancelledEvent);
+      await service.remove('party', 'host');
+      expect(eventEmitter.emitAsync).toHaveBeenCalledWith(EVENT_DELETING, {
+        eventId: 'e1',
+      });
+      expect(eventEmitter.emitAsync.mock.invocationCallOrder[0]).toBeLessThan(
+        events.delete.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('waits for the wind-down to finish before deleting', async () => {
+      events.findOne.mockResolvedValue(cancelledEvent);
+      let hasWoundDown = false;
+      eventEmitter.emitAsync.mockImplementation(async () => {
+        await Promise.resolve();
+        hasWoundDown = true;
+        return [];
+      });
+      events.delete.mockImplementation(async () => {
+        expect(hasWoundDown).toBe(true);
+        return { affected: 1 };
+      });
+      await expect(service.remove('party', 'host')).resolves.toEqual({
+        ok: true,
+      });
+      expect(events.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the gathering with a 503 when a matched chat could not be dissolved', async () => {
+      events.findOne.mockResolvedValue(cancelledEvent);
+      eventEmitter.emitAsync.mockRejectedValue(
+        new Error('chat service is down'),
+      );
+      await expect(service.remove('party', 'host')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(events.delete).not.toHaveBeenCalled();
+    });
+
+    it('announces nothing when the stake check refuses the delete', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.count.mockResolvedValue(1);
+      await expect(service.remove('party', 'host')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(eventEmitter.emitAsync).not.toHaveBeenCalled();
+    });
   });
 
   // A family decides WHICH of the six detail keys a gathering may carry, and
@@ -1660,6 +2100,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as EventAudienceGateService,
       {} as unknown as MediaCropService,
       {} as unknown as ListingLookupService,
+      {} as unknown as EventEmitter2,
     );
   });
 

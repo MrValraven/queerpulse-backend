@@ -202,19 +202,30 @@ export class AuthService {
    * gated endpoint, so the reason has to ride on `me`.
    *
    * The reason text comes from the member's latest `moderation_outcome`
-   * notification: the one store that already ties the moderator's note +
-   * reasonCode to this user (the mod audit log is keyed to the report, not the
-   * member). Returns nulls for a member who isn't suspended, and a null
-   * `suspension` when no such notification exists (a suspension predating that
-   * feature) — the page then falls back to its generic copy.
+   * notification whose `action` is `suspend` or `ban`: it already carries the
+   * moderator's note and reasonCode in the exact wording the member was shown,
+   * a single read by `userId` and `type` with no separate lookup against
+   * `mod_audit_logs` needed. Returns nulls for a member who isn't suspended,
+   * and a null `suspension` when no such notification exists (a suspension
+   * predating that feature) — the page then falls back to its generic copy.
    */
   async suspensionInfoFor(user: User): Promise<SuspensionInfo> {
     if (user.status !== UserStatus.Suspended) {
       return { suspendedUntil: null, suspension: null };
     }
-    const latest = await this.notifications.findOne({
+    // The newest outcome is not always the suspension's: a later
+    // `hide_content` / `remove_content` (PRD-458), a `restriction_lifted` or a
+    // safe-space outcome shares the type and would put its note on the
+    // suspended page. So read a short recent window and take the newest row
+    // whose `action` is the one that locked the account out.
+    const recentOutcomes = await this.notifications.find({
       where: { userId: user.id, type: NotificationType.ModerationOutcome },
       order: { createdAt: 'DESC' },
+      take: 20,
+    });
+    const latest = recentOutcomes.find((outcome) => {
+      const outcomeAction = outcome.payload?.action;
+      return outcomeAction === 'suspend' || outcomeAction === 'ban';
     });
     const payload = (latest?.payload ?? {}) as {
       note?: unknown;

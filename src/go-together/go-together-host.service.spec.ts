@@ -6,15 +6,49 @@ import {
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { IsNull } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { EventsService } from '../events/events.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { HostConfigDto } from './dto/host-config.dto';
 import { EventMatchConfig } from './entities/event-match-config.entity';
 import { EventMatchEntry } from './entities/event-match-entry.entity';
 import { EventMatchGroup } from './entities/event-match-group.entity';
-import { GoTogetherHostService } from './go-together-host.service';
+import {
+  GoTogetherHostService,
+  HOST_SWITCHED_OFF_REASON,
+} from './go-together-host.service';
 import { GoTogetherHouseService } from './go-together-house.service';
+
+/** One UPDATE built through `createQueryBuilder()`, recorded for asserts. */
+interface UpdateQueryMock {
+  update: jest.Mock;
+  set: jest.Mock;
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  returning: jest.Mock;
+  execute: jest.Mock;
+}
+
+function updateQueryMock(returnedRows: () => unknown[]): UpdateQueryMock {
+  const query = {} as UpdateQueryMock;
+  for (const step of [
+    'update',
+    'set',
+    'where',
+    'andWhere',
+    'returning',
+  ] as const) {
+    query[step] = jest.fn(() => query);
+  }
+  query.execute = jest.fn(() =>
+    Promise.resolve({
+      raw: query.returning.mock.calls.length > 0 ? returnedRows() : [],
+    }),
+  );
+  return query;
+}
 
 async function expectRejection(
   pending: Promise<unknown>,
@@ -46,23 +80,68 @@ describe('GoTogetherHostService', () => {
 
   let service: GoTogetherHostService;
   let events: { findOne: jest.Mock };
-  let configs: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock };
-  let entries: { count: jest.Mock };
+  let configs: {
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let configInsert: {
+    insert: jest.Mock;
+    into: jest.Mock;
+    values: jest.Mock;
+    orIgnore: jest.Mock;
+    execute: jest.Mock;
+  };
+  let entries: { count: jest.Mock; createQueryBuilder: jest.Mock };
   let groups: { count: jest.Mock };
   let eventsService: { isOrganizer: jest.Mock };
   let house: { houseUserId: jest.Mock };
+  let notifications: { createForRecipients: jest.Mock };
+  let builtQueries: UpdateQueryMock[];
+  let closedRows: { user_id: string }[];
 
   beforeEach(async () => {
     events = { findOne: jest.fn().mockResolvedValue(event) };
+    configInsert = {
+      insert: jest.fn(),
+      into: jest.fn(),
+      values: jest.fn(),
+      orIgnore: jest.fn(),
+      execute: jest.fn().mockResolvedValue({ raw: [] }),
+    };
+    for (const step of ['insert', 'into', 'values', 'orIgnore'] as const) {
+      configInsert[step].mockReturnValue(configInsert);
+    }
     configs = {
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((row: Partial<EventMatchConfig>) => ({ ...row })),
       save: jest.fn((row: EventMatchConfig) => Promise.resolve(row)),
+      createQueryBuilder: jest.fn(() => configInsert),
     };
-    entries = { count: jest.fn() };
+    builtQueries = [];
+    closedRows = [];
+    entries = {
+      count: jest.fn(),
+      createQueryBuilder: jest.fn(() => {
+        const query = updateQueryMock(() => closedRows);
+        builtQueries.push(query);
+        return query;
+      }),
+    };
     groups = { count: jest.fn() };
     eventsService = { isOrganizer: jest.fn().mockResolvedValue(true) };
     house = { houseUserId: jest.fn().mockResolvedValue('house-account') };
+    notifications = { createForRecipients: jest.fn().mockResolvedValue([]) };
+    const manager = {
+      getRepository: (entity: unknown) =>
+        entity === EventMatchConfig ? configs : entries,
+    };
+    const dataSource = {
+      transaction: jest.fn((work: (inner: typeof manager) => unknown) =>
+        work(manager),
+      ),
+    };
     const moduleRef = await Test.createTestingModule({
       providers: [
         GoTogetherHostService,
@@ -72,6 +151,8 @@ describe('GoTogetherHostService', () => {
         { provide: getRepositoryToken(EventMatchGroup), useValue: groups },
         { provide: EventsService, useValue: eventsService },
         { provide: GoTogetherHouseService, useValue: house },
+        { provide: DataSource, useValue: dataSource },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = moduleRef.get(GoTogetherHostService);
@@ -385,6 +466,256 @@ describe('GoTogetherHostService', () => {
     ]);
     expect(groups.count).toHaveBeenCalledWith({
       where: { eventId: 'event-1', dissolvedAt: IsNull() },
+    });
+  });
+
+  describe('switching Go together off', () => {
+    const savedConfig = (enabled: boolean) => ({
+      eventId: 'event-1',
+      enabled,
+      cutoffAt: new Date('2026-10-08T20:00:00Z'),
+      hostQuestions: [],
+      meetingPointNote: null,
+      matchedAt: null,
+    });
+
+    it('closes every waiting entry and pending invite and tells those members why', async () => {
+      configs.findOne.mockResolvedValue(savedConfig(true));
+      closedRows = [{ user_id: 'member-1' }, { user_id: 'member-2' }];
+      await service.putConfig(
+        'picnic',
+        'host-1',
+        { ...baseDto, enabled: false },
+        now,
+      );
+
+      expect(configs.save).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: false }),
+      );
+      expect(builtQueries).toHaveLength(1);
+      const [closing] = builtQueries as [UpdateQueryMock];
+      expect(closing.set).toHaveBeenCalledWith({
+        status: 'withdrawn',
+        pairStatus: 'none',
+        pairPartnerId: null,
+        mergeOfferGroupId: null,
+        lens: null,
+        lensConsentedAt: null,
+      });
+      expect(closing.where).toHaveBeenCalledWith('event_id = :eventId', {
+        eventId: 'event-1',
+      });
+      expect(closing.andWhere).toHaveBeenCalledWith("status = 'waiting'");
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['member-1', 'member-2'],
+        NotificationType.GoTogetherUnmatched,
+        expect.objectContaining({
+          eventId: 'event-1',
+          eventSlug: 'picnic',
+          isFinal: true,
+          reason: HOST_SWITCHED_OFF_REASON,
+        }),
+      );
+    });
+
+    it('sweeps waiting entries left behind when the host saves while already off', async () => {
+      configs.findOne.mockResolvedValue(savedConfig(false));
+      closedRows = [{ user_id: 'member-3' }];
+      await service.putConfig(
+        'picnic',
+        'host-1',
+        { ...baseDto, enabled: false },
+        now,
+      );
+      expect(builtQueries).toHaveLength(1);
+      expect(builtQueries[0]?.andWhere).toHaveBeenCalledWith(
+        "status = 'waiting'",
+      );
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['member-3'],
+        NotificationType.GoTogetherUnmatched,
+        expect.objectContaining({ reason: HOST_SWITCHED_OFF_REASON }),
+      );
+    });
+
+    it('sends no notice when nobody was waiting', async () => {
+      configs.findOne.mockResolvedValue(savedConfig(true));
+      await service.putConfig(
+        'picnic',
+        'host-1',
+        { ...baseDto, enabled: false },
+        now,
+      );
+      expect(builtQueries).toHaveLength(1);
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+
+    it('revives nobody when the host switches it back on', async () => {
+      configs.findOne.mockResolvedValue(savedConfig(false));
+      await service.putConfig('picnic', 'host-1', baseDto, now);
+      expect(configs.save).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: true }),
+      );
+      expect(entries.createQueryBuilder).not.toHaveBeenCalled();
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+
+    it('refuses the save when a cutoff run claimed the config meanwhile', async () => {
+      configs.findOne
+        .mockResolvedValueOnce(savedConfig(true))
+        .mockResolvedValueOnce({
+          ...savedConfig(true),
+          matchedAt: new Date('2026-10-01T11:59:00Z'),
+        });
+      await expectRejection(
+        service.putConfig(
+          'picnic',
+          'host-1',
+          { ...baseDto, enabled: false },
+          now,
+        ),
+        ConflictException,
+        { code: 'GO_TOGETHER_LOCKED' },
+      );
+      expect(configs.findOne).toHaveBeenLastCalledWith({
+        where: { eventId: 'event-1' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(configs.save).not.toHaveBeenCalled();
+      expect(entries.createQueryBuilder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('editing host questions', () => {
+    const coffeeQuestion = {
+      id: 'q1',
+      prompt: 'Coffee or tea?',
+      options: [
+        { id: 'o1', label: 'Coffee' },
+        { id: 'o2', label: 'Tea' },
+      ],
+    };
+    const walkQuestion = {
+      id: 'q2',
+      prompt: 'Walk there together?',
+      options: [
+        { id: 'o1', label: 'Yes' },
+        { id: 'o2', label: 'No' },
+      ],
+    };
+
+    beforeEach(() => {
+      configs.findOne.mockResolvedValue({
+        eventId: 'event-1',
+        enabled: true,
+        cutoffAt: new Date('2026-10-08T20:00:00Z'),
+        hostQuestions: [coffeeQuestion, walkQuestion],
+        meetingPointNote: null,
+        matchedAt: null,
+      });
+    });
+
+    it('clears the saved answers to a question whose options changed', async () => {
+      await service.putConfig(
+        'picnic',
+        'host-1',
+        {
+          ...baseDto,
+          hostQuestions: [
+            { prompt: 'Coffee or tea?', options: ['Tea', 'Coffee'] },
+            { prompt: 'Walk there together?', options: ['Yes', 'No'] },
+          ],
+        },
+        now,
+      );
+      expect(builtQueries).toHaveLength(1);
+      const [clearing] = builtQueries as [UpdateQueryMock];
+      expect(clearing.andWhere).toHaveBeenCalledWith(
+        'host_answers - CAST(:questionIds AS text[]) <> host_answers',
+        { questionIds: ['q1'] },
+      );
+      expect(clearing.where).toHaveBeenCalledWith('event_id = :eventId', {
+        eventId: 'event-1',
+      });
+    });
+
+    it('clears the answers to a removed question', async () => {
+      await service.putConfig(
+        'picnic',
+        'host-1',
+        {
+          ...baseDto,
+          hostQuestions: [
+            { prompt: 'Coffee or tea?', options: ['Coffee', 'Tea'] },
+          ],
+        },
+        now,
+      );
+      expect(builtQueries[0]?.andWhere).toHaveBeenCalledWith(
+        expect.any(String),
+        { questionIds: ['q2'] },
+      );
+    });
+
+    it('clears nothing when the host saves the same questions again', async () => {
+      await service.putConfig(
+        'picnic',
+        'host-1',
+        {
+          ...baseDto,
+          hostQuestions: [
+            { prompt: 'Coffee or tea?', options: ['Coffee', 'Tea'] },
+            { prompt: 'Walk there together?', options: ['Yes', 'No'] },
+          ],
+          meetingPointNote: 'By the fountain',
+        },
+        now,
+      );
+      expect(entries.createQueryBuilder).not.toHaveBeenCalled();
+      expect(configs.save).toHaveBeenCalledWith(
+        expect.objectContaining({ meetingPointNote: 'By the fountain' }),
+      );
+    });
+  });
+
+  describe('ensureConfigRow', () => {
+    const officialEvent = { ...event, hostId: 'house-account' } as Event;
+
+    it('returns a saved row as it is and never writes it back', async () => {
+      const savedRow = {
+        eventId: 'event-1',
+        enabled: false,
+        matchedAt: new Date('2026-10-01T11:59:00Z'),
+      };
+      configs.findOne.mockResolvedValue(savedRow);
+      expect(await service.ensureConfigRow(officialEvent, now)).toBe(savedRow);
+      expect(configs.save).not.toHaveBeenCalled();
+      expect(configs.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('inserts an official event virtual config, skipping on conflict, then re-reads it', async () => {
+      const insertedRow = { eventId: 'event-1', enabled: true };
+      configs.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(insertedRow);
+      expect(await service.ensureConfigRow(officialEvent, now)).toBe(
+        insertedRow,
+      );
+      expect(configInsert.into).toHaveBeenCalledWith(EventMatchConfig);
+      expect(configInsert.values).toHaveBeenCalledWith(
+        expect.objectContaining({ eventId: 'event-1', enabled: true }),
+      );
+      expect(configInsert.orIgnore).toHaveBeenCalled();
+      expect(configs.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a gathering whose host never turned Go together on', async () => {
+      await expectRejection(
+        service.ensureConfigRow(event, now),
+        ConflictException,
+        { code: 'GO_TOGETHER_UNAVAILABLE', reason: 'notEnabled' },
+      );
+      expect(configs.createQueryBuilder).not.toHaveBeenCalled();
     });
   });
 });

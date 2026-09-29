@@ -179,6 +179,39 @@ describe('PublicEligibilityService', () => {
     return moduleRef.get(PublicEligibilityService);
   }
 
+  // ENG-494: a thread whose starter erased their account has a NULL author.
+  // `<>` against NULL is NULL, which would drop the member's replies there
+  // from part 2; `IS DISTINCT FROM` keeps them, as part 4 already does.
+  it('counts replies on a thread whose author was erased toward engagement', async () => {
+    const forumPostPredicates: string[] = [];
+    const recordingBuilder = (): Record<string, unknown> => {
+      const queryBuilder = qbStub({ count: 1 });
+      queryBuilder.andWhere = (predicate: string) => {
+        forumPostPredicates.push(predicate);
+        return queryBuilder;
+      };
+      return queryBuilder;
+    };
+    const service = await build([
+      {
+        provide: getRepositoryToken(ForumPost),
+        useValue: {
+          count: async () => 3,
+          find: async () => [],
+          findOne: async () => null,
+          createQueryBuilder: recordingBuilder,
+        },
+      },
+    ]);
+
+    await service.countEngagedCommunityPosts('u1');
+
+    expect(forumPostPredicates).toContain(
+      'thread.authorId IS DISTINCT FROM :userId',
+    );
+    expect(forumPostPredicates).not.toContain('thread.authorId <> :userId');
+  });
+
   it('composes the full signal set from all sources', async () => {
     const service = await build();
     const dto = await service.getSignals(user);

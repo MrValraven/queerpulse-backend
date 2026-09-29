@@ -1,5 +1,12 @@
 import { Transform } from 'class-transformer';
-import { ArrayMaxSize, ArrayNotEmpty, IsArray, Matches } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
+  IsOptional,
+  IsUUID,
+  Matches,
+} from 'class-validator';
 
 /** The entity kinds a mention can name. Mirrors the frontend's `MentionSegment`
  *  kinds minus `topic`: a `#tag` mention always renders as its own tag, so a
@@ -54,4 +61,11 @@ export class ResolveMentionNamesQuery {
     message: 'each ref must be "kind:slug" for a known mention kind',
   })
   refs!: string[];
+
+  /** PRD-423: the conversation the text is rendered in. In a matched Go
+   *  together chat whose roster holds the caller, that chat's members
+   *  resolve to their first names, as every other name in the chat does. */
+  @IsOptional()
+  @IsUUID()
+  conversationId?: string;
 }

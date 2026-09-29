@@ -6,6 +6,7 @@ import {
   IsBoolean,
   IsEmail,
   IsEnum,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -13,12 +14,22 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
 import { CreateCompanyDto } from '../../companies/dto/create-company.dto';
+import {
+  DISCIPLINE_BY_PROFESSION,
+  JOB_FIELD_IDS,
+} from '../../profiles/professions';
 import { JobFormat } from '../entities/job.entity';
+import { JOB_COMMITMENT_IDS, JOB_SENIORITY_IDS } from '../job-vocabulary';
 import { IsNotBelowRateMin } from './rate-range.validator';
+
+// Every known profession id. Whether it sits inside the job's chosen field is
+// checked in `JobsService`, since that needs both values at once.
+const ALL_PROFESSION_IDS = Object.keys(DISCIPLINE_BY_PROFESSION);
 
 // A ceiling, not a policy: high enough for an annual salary in any currency the
 // board realistically carries, low enough that a typo cannot produce scientific
@@ -55,9 +66,18 @@ export class JobDetailBodyDto {
 
 export class CreateJobDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
-  @IsString() @MinLength(1) @MaxLength(100) category!: string;
-  @IsString() @MinLength(1) @MaxLength(100) commitment!: string;
-  @IsString() @MinLength(1) @MaxLength(100) seniority!: string;
+  // A job field id from `JOB_FIELD_IDS` (profile-only and unlisted fields are
+  // left out of that list, so they 400 here).
+  @IsString() @IsIn(JOB_FIELD_IDS) category!: string;
+  // Optional profession id inside `category`. `null` clears it on update
+  // (`UpdateJobDto` inherits these decorators through `PartialType`).
+  @ValidateIf((_, value) => value !== null)
+  @IsOptional()
+  @IsString()
+  @IsIn(ALL_PROFESSION_IDS)
+  profession?: string | null;
+  @IsString() @IsIn(JOB_COMMITMENT_IDS) commitment!: string;
+  @IsString() @IsIn(JOB_SENIORITY_IDS) seniority!: string;
   @IsEnum(JobFormat) format!: JobFormat;
   @IsString() @MinLength(1) @MaxLength(200) location!: string;
   @IsOptional() @IsString() @MaxLength(200) city?: string;

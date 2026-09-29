@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { CompanyReview } from '../companies/entities/company-review.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
@@ -22,8 +22,13 @@ import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineStorySubmission } from '../magazine/entities/magazine-story-submission.entity';
 import { MyCardsService } from '../membership-cards/my-cards.service';
-import { Notification } from '../notifications/entities/notification.entity';
+import { staleMentionExcerptIds } from '../mentions/mention-stale-excerpts';
+import {
+  Notification,
+  NotificationType,
+} from '../notifications/entities/notification.entity';
 import { visibleThroughMailboxSeatRules } from '../notifications/notification-mailbox-block';
+import { ACTOR_PAYLOAD_KEY } from '../notifications/notification-response';
 import { ProfileNowHistory } from '../profiles/entities/profile-now-history.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -166,6 +171,107 @@ export class SavedExportContributor implements DataExportContribution {
   }
 }
 
+/** The payload with its `excerpt` emptied, when it carries one. */
+function withBlankExcerpt(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return payload && 'excerpt' in payload
+    ? { ...payload, excerpt: '' }
+    : payload;
+}
+
+/**
+ * The export keeps the member's own record and leaves out frozen copies of
+ * other people's words that no in-app surface ever showed the member. Each
+ * entry names the payload keys of one notification type that hold free text
+ * written by somebody else, copied at send time, which the bell drops
+ * (`PAYLOAD_ALLOWLIST` in `notification-response.ts`) and no other screen
+ * serves from the row:
+ *  - `excerpt` on the reply and new-post types: 140 characters of the reply
+ *    or post body (`mention-notification.service.ts` `notifyParentReply`,
+ *    `notifyThreadReply`, `notifyPostReply`, fed by `ForumPostsService.reply`
+ *    and `CommunityPostsService`; `CommunityPostsService.notifyRosterOfPost`
+ *    for the roster fan-out). The post itself stays readable where it lives.
+ *  - `body` on `EventAnnouncement`: the host's announcement
+ *    (`EventAnnouncementsService`), shown in full on the event page.
+ *
+ * `Mention` is left off on purpose: the mentions inbox shows its excerpt
+ * while the source is fresh, so the export keeps it and blanks it when stale,
+ * as the inbox does. Text a moderator, reviewer or staff member wrote TO the
+ * member (a decline reason, a decision reason, a review note, a moderation
+ * note) is the member's own record and is never listed here. A new type that
+ * copies someone else's text into its payload adds one line.
+ */
+export const EXPORT_WITHHELD_TEXT_KEYS: Partial<
+  Record<NotificationType, readonly string[]>
+> = {
+  [NotificationType.CommunityReply]: ['excerpt'],
+  [NotificationType.ForumReply]: ['excerpt'],
+  [NotificationType.ForumThreadReply]: ['excerpt'],
+  [NotificationType.CommunityNewPost]: ['excerpt'],
+  [NotificationType.CommunityAnnouncement]: ['excerpt'],
+  [NotificationType.EventAnnouncement]: ['body'],
+};
+
+/**
+ * Types whose `actorId` the export keeps although the bell row never names
+ * the actor. `ACTOR_PAYLOAD_KEY` describes what the bell displays; the member
+ * can be shown a person elsewhere, and on these types the actor is part of
+ * the member's own record:
+ *  - `CommunityInviteReceived`: the invite is addressed to the member, the
+ *    My invites page names the inviter (`CommunityInvitesService`, the
+ *    `invitedByUserId` it resolves for each listed invite), and no other
+ *    export section records received invites.
+ *  - `CommunityOwnershipTransferred`: the member is a party to the transfer,
+ *    so the person who made it is part of their own record, as is the other
+ *    party in `counterpartId`, which the export keeps on the same ground as
+ *    `IntroductionMade.addresseeId`.
+ */
+export const EXPORT_KEPT_ACTOR_TYPES: ReadonlySet<NotificationType> = new Set([
+  NotificationType.CommunityInviteReceived,
+  NotificationType.CommunityOwnershipTransferred,
+]);
+
+/**
+ * Every payload key the export leaves out for a type. `actorId` goes on
+ * every type whose bell row never names its actor (`ACTOR_PAYLOAD_KEY` holds
+ * no `actorId` entry for it), so the archive names nobody the bell keeps
+ * unnamed, such as the platform admin behind a `CommunityRoleChanged`. A type
+ * that does name its actor keeps the id, which is who the member was shown,
+ * and so does a type in `EXPORT_KEPT_ACTOR_TYPES`.
+ */
+export function exportWithheldKeysOf(type: NotificationType): string[] {
+  const isActorKept =
+    ACTOR_PAYLOAD_KEY[type] === 'actorId' || EXPORT_KEPT_ACTOR_TYPES.has(type);
+  return [
+    ...(EXPORT_WITHHELD_TEXT_KEYS[type] ?? []),
+    ...(isActorKept ? [] : ['actorId']),
+  ];
+}
+
+/**
+ * The payload as exported: the stale-excerpt blank applied, then every
+ * withheld key removed. Keys are only ever removed, so a masked or anonymous
+ * row that was written without an identifier never gains one. A payload with
+ * nothing to change travels as stored.
+ */
+function exportedPayloadOf(
+  notification: Notification,
+  isExcerptStale: boolean,
+): Record<string, unknown> {
+  const payload = isExcerptStale
+    ? withBlankExcerpt(notification.payload)
+    : notification.payload;
+  if (!payload) return payload;
+  const presentWithheldKeys = exportWithheldKeysOf(notification.type).filter(
+    (key) => key in payload,
+  );
+  if (!presentWithheldKeys.length) return payload;
+  const exportedPayload = { ...payload };
+  for (const key of presentWithheldKeys) delete exportedPayload[key];
+  return exportedPayload;
+}
+
 @Injectable()
 export class NotificationsExportContributor implements DataExportContribution {
   readonly category = 'notifications';
@@ -174,6 +280,7 @@ export class NotificationsExportContributor implements DataExportContribution {
   constructor(
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
+    private readonly dataSource: DataSource,
   ) {}
 
   async buildContribution(userId: string): Promise<unknown> {
@@ -186,10 +293,27 @@ export class NotificationsExportContributor implements DataExportContribution {
       where: { userId, payload: visibleThroughMailboxSeatRules(userId) },
       order: { createdAt: 'ASC' },
     });
+    // ENG-411: a mention's `excerpt` is a copy of someone else's words taken
+    // at mention time. Once the source is deleted, deleted for everyone,
+    // edited, taken down or in a thread the member can no longer read, the
+    // export blanks it exactly as the mentions inbox does, through the same
+    // check. Every other type leaves out the keys `exportWithheldKeysOf`
+    // names: other people's words the member was never shown, and the
+    // `actorId` of types whose bell never names the actor (outside
+    // `EXPORT_KEPT_ACTOR_TYPES`). The rest of the payload travels as stored.
+    //
+    // PRD-403: the bell also hides a row whose actor is blocked either way
+    // (`visibleThroughActorBlocks`). The export leaves that filter off on
+    // purpose, because the archive is the member's own record of what they
+    // were sent.
+    const staleExcerptIds = await staleMentionExcerptIds(rows, this.dataSource);
     return rows.map((notification) => ({
       id: notification.id,
       type: notification.type,
-      payload: notification.payload,
+      payload: exportedPayloadOf(
+        notification,
+        staleExcerptIds.has(notification.id),
+      ),
       read: notification.read,
       createdAt: notification.createdAt.toISOString(),
     }));

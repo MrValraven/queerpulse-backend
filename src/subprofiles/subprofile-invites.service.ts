@@ -9,7 +9,10 @@ import { DataSource, In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { isUniqueViolation } from '../common/db-errors';
 import { IdentityKind } from '../identities/entities/identity.entity';
-import { IdentityMailboxSyncService } from '../identities/identity-mailbox-sync.service';
+import {
+  IdentityMailboxSyncService,
+  MailboxSeatChanges,
+} from '../identities/identity-mailbox-sync.service';
 import { IdentitiesService } from '../identities/identities.service';
 import { Profile } from '../users/entities/profile.entity';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -31,6 +34,21 @@ import {
   toInviteView,
   toMyInviteView,
 } from './subprofile-invite-response';
+
+/** ENG-450: machine-readable code for a co-owner invite refused, at send OR
+ *  accept time, because of a block between the invitee and one of the
+ *  persona's current owners (or, at accept time, its inviter). Neither
+ *  endpoint says which side blocked which (see `blockedAgainstAnyOf`'s
+ *  callers below), so the frontend shows one neutral copy for both. */
+export const SUBPROFILE_INVITE_BLOCKED_CODE = 'SUBPROFILE_INVITE_BLOCKED';
+
+/** M5 (fix round 1): internal signal thrown inside `accept()`'s locked
+ *  transaction when the in-transaction block re-check hits, so the
+ *  transaction rolls back (no member row is ever inserted) before anything
+ *  else runs. Caught right outside the transaction, once the rollback is
+ *  guaranteed, so the invite-closing save and the coded exception run there,
+ *  clear of the transaction's own writes. Never surfaced to a caller. */
+class InviteBlockedAtAcceptError extends Error {}
 
 // Co-owner invite lifecycle: an existing member invites another member onto a
 // persona's `subprofile_members` roster (membership itself, and the
@@ -95,11 +113,26 @@ export class SubprofileInvitesService {
     if (invitedUserId === inviterUserId) {
       throw new BadRequestException('You already co-own this persona.');
     }
-    // Cannot invite someone blocked either way.
-    if (
-      await this.blockFilter.isBlockedEitherWay(inviterUserId, invitedUserId)
-    ) {
-      throw new BadRequestException('You cannot invite this member.');
+    // ENG-450: refuse when the invitee is blocked, either way, with ANY
+    // current owner. One batched query covers every owner, including the
+    // inviter (`assertMember` above already required they be one), so this
+    // subsumes the previous inviter-only check. The message stays neutral
+    // either way, naming neither which side blocked which nor which owner.
+    const ownerUserIds = (
+      await this.members.find({
+        where: { subprofileId },
+        select: { userId: true },
+      })
+    ).map((row) => row.userId);
+    const blockedInvitee = await this.blockFilter.blockedAgainstAnyOf(
+      [invitedUserId],
+      ownerUserIds,
+    );
+    if (blockedInvitee.size > 0) {
+      throw new BadRequestException({
+        code: SUBPROFILE_INVITE_BLOCKED_CODE,
+        message: 'You cannot invite this member.',
+      });
     }
     const alreadyMember = await this.members.findOne({
       where: { subprofileId, userId: invitedUserId },
@@ -265,57 +298,105 @@ export class SubprofileInvitesService {
       invite.subprofileId,
     );
 
-    const seatChanges = await this.dataSource.transaction(async (manager) => {
-      // Lock the persona row FIRST — same lock `invite()` takes, so the two
-      // operations never interleave on the same subprofile.
-      await manager.findOne(Subprofile, {
-        where: { id: invite.subprofileId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      const existing = await manager.findOne(SubprofileMember, {
-        where: { subprofileId: invite.subprofileId, userId },
-        select: { id: true },
-      });
-      if (!existing) {
-        const count = await manager.count(SubprofileMember, {
-          where: { subprofileId: invite.subprofileId },
+    let seatChanges: MailboxSeatChanges;
+    try {
+      seatChanges = await this.dataSource.transaction(async (manager) => {
+        // Lock the persona row FIRST — same lock `invite()` takes, so the two
+        // operations never interleave on the same subprofile.
+        await manager.findOne(Subprofile, {
+          where: { id: invite.subprofileId },
+          lock: { mode: 'pessimistic_write' },
         });
-        if (count >= MAX_SUBPROFILE_CO_OWNERS) {
-          throw new BadRequestException('This persona is already full.');
+        // ENG-450 / M5 (fix round 1): a block formed any time between the
+        // invite and this accept, by either the accepter or a current owner
+        // in either direction, must still stop the seat, so this re-checks
+        // fresh right here. Read AFTER the row lock above (not before the
+        // transaction opens), so two invitees who blocked each other cannot
+        // both pass a stale pre-lock read and both get seated. Guards
+        // against ANY current owner (the roster may have changed since the
+        // invite was sent) AND the original inviter specifically: a departed
+        // inviter is no longer in `ownerUserIds`, yet a block with them
+        // still means the two should never end up co-owning the same
+        // persona. A hit aborts the whole transaction (no member row is
+        // ever inserted); the invite is closed and the coded error thrown
+        // in the `catch` below, once the rollback is guaranteed.
+        const ownerUserIds = (
+          await manager.find(SubprofileMember, {
+            where: { subprofileId: invite.subprofileId },
+            select: { userId: true },
+          })
+        ).map((row) => row.userId);
+        const guardianIds = [
+          ...new Set([...ownerUserIds, invite.invitedByUserId]),
+        ];
+        const blockedAccepter = await this.blockFilter.blockedAgainstAnyOf(
+          [userId],
+          guardianIds,
+        );
+        if (blockedAccepter.size > 0) {
+          throw new InviteBlockedAtAcceptError();
         }
-        try {
-          await manager.save(
-            manager.create(SubprofileMember, {
-              subprofileId: invite.subprofileId,
-              userId,
-            }),
-          );
-        } catch (err) {
-          // A second, concurrent accept for the SAME invitee can still slip
-          // past the `existing` check above (it's not itself locked) and
-          // insert first — the row now genuinely exists, so this is the
-          // idempotent "already a member" success the pre-check already
-          // promises, not a server error. Anything else re-throws.
-          if (!isUniqueViolation(err)) {
-            throw err;
+        const existing = await manager.findOne(SubprofileMember, {
+          where: { subprofileId: invite.subprofileId, userId },
+          select: { id: true },
+        });
+        if (!existing) {
+          const count = await manager.count(SubprofileMember, {
+            where: { subprofileId: invite.subprofileId },
+          });
+          if (count >= MAX_SUBPROFILE_CO_OWNERS) {
+            throw new BadRequestException('This persona is already full.');
+          }
+          try {
+            await manager.save(
+              manager.create(SubprofileMember, {
+                subprofileId: invite.subprofileId,
+                userId,
+              }),
+            );
+          } catch (err) {
+            // A second, concurrent accept for the SAME invitee can still
+            // slip past the `existing` check above (it's not itself locked)
+            // and insert first — the row now genuinely exists, so this is
+            // the idempotent "already a member" success the pre-check
+            // already promises, not a server error. Anything else re-throws.
+            if (!isUniqueViolation(err)) {
+              throw err;
+            }
           }
         }
+        invite.status = SubprofileInviteStatus.Accepted;
+        invite.respondedAt = new Date();
+        await manager.save(invite);
+        // Seat the new co-owner into every thread of the persona's mailbox,
+        // in this same transaction, so a failed sync rolls the acceptance
+        // back with it. Safe to call even on the idempotent "already a
+        // member" branch above: a member already seated is skipped. The
+        // staffing frame waits for the commit (below).
+        return this.identityMailboxSync.onStaffAdded(
+          identity.id,
+          userId,
+          manager,
+          { shouldDeferEmission: true },
+        );
+      });
+    } catch (err) {
+      // M5 (fix round 1): the transaction above has already rolled back by
+      // the time this runs, so the invite-closing save below cannot race the
+      // (never-committed) seat insert. Mirrors `revoke`'s shape, so a stale
+      // pending row never lingers offering an accept that would only fail
+      // again.
+      if (err instanceof InviteBlockedAtAcceptError) {
+        invite.status = SubprofileInviteStatus.Revoked;
+        invite.respondedAt = new Date();
+        await this.invites.save(invite);
+        throw new BadRequestException({
+          code: SUBPROFILE_INVITE_BLOCKED_CODE,
+          message: 'This invite is no longer available.',
+        });
       }
-      invite.status = SubprofileInviteStatus.Accepted;
-      invite.respondedAt = new Date();
-      await manager.save(invite);
-      // Seat the new co-owner into every thread of the persona's mailbox, in
-      // this same transaction, so a failed sync rolls the acceptance back
-      // with it. Safe to call even on the idempotent "already a member"
-      // branch above: a member already seated is skipped. The staffing frame
-      // waits for the commit (below).
-      return this.identityMailboxSync.onStaffAdded(
-        identity.id,
-        userId,
-        manager,
-        { shouldDeferEmission: true },
-      );
-    });
+      throw err;
+    }
     // Task 25: the new co-owner hears their new mailbox only once the
     // acceptance has committed, so a rollback never announces a seat.
     this.identityMailboxSync.emitSeatChanges(seatChanges);

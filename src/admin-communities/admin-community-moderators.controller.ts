@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -32,6 +33,7 @@ import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
 import { AddModeratorDto } from './dto/add-moderator.dto';
+import { ListModeratorCandidatesQuery } from './dto/list-moderator-candidates.query';
 
 /**
  * Moderator management for the admin communities panel
@@ -77,10 +79,16 @@ export class AdminCommunityModeratorsController {
   @ApiOperation({
     summary: 'List the roster members eligible to be promoted to moderator.',
   })
-  @ApiOkResponse({ description: 'The promotable plain members.' })
+  @ApiOkResponse({
+    description:
+      'Up to 25 promotable plain members, by name, optionally narrowed by `q`.',
+  })
   @Get('candidates')
-  listCandidates(@Param('slug') slug: string) {
-    return this.moderators.listCandidates(slug);
+  listCandidates(
+    @Param('slug') slug: string,
+    @Query() query: ListModeratorCandidatesQuery,
+  ) {
+    return this.moderators.listCandidates(slug, query.q);
   }
 
   @ApiOperation({ summary: 'Promote a roster member to moderator.' })

@@ -25,6 +25,7 @@ import {
   DECK_CONVERT_PUBLISHED_CODE,
   MagazinePieceService,
 } from './magazine-piece.service';
+import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
 
 type RepositoryMock = {
   find: jest.Mock;
@@ -32,6 +33,8 @@ type RepositoryMock = {
   create: jest.Mock;
   save: jest.Mock;
   delete: jest.Mock;
+  /** The commission's conditional pitch claim. Defaults to "claimed". */
+  update: jest.Mock;
 };
 
 function makeRepositoryMock(): RepositoryMock {
@@ -41,6 +44,7 @@ function makeRepositoryMock(): RepositoryMock {
     create: jest.fn((entity: unknown) => entity),
     save: jest.fn((entity: unknown) => Promise.resolve(entity)),
     delete: jest.fn().mockResolvedValue({ affected: 1 }),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
   };
 }
 
@@ -128,6 +132,10 @@ describe('MagazinePieceService deck drafts', () => {
         {
           provide: NotificationsService,
           useValue: { create: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: MagazineIssueAnnouncerService,
+          useValue: { announceIssueIfDue: jest.fn().mockResolvedValue(false) },
         },
       ],
     }).compile();

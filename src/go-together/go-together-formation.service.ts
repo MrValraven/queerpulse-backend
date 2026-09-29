@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -7,6 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository } from 'typeorm';
 import { Event } from '../events/entities/event.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { GroupsService } from '../messaging/groups.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -20,6 +23,9 @@ import {
   buildPairComponents,
   groupMinimumAffinity,
   groupUnitLists,
+  hasGatheringStarted,
+  isGatheringUpcoming,
+  isPastBlockMoveGrace,
   orderHardestFirst,
   personIndexesOf,
   planPlacements,
@@ -30,9 +36,11 @@ import {
 import {
   confirmChanged,
   guardedMoveIntoGroup,
+  guardedMoveIntoOpenGroup,
 } from './go-together-formation.writes';
 import { formGroups, seedFrom } from './go-together-grouping';
 import { GoTogetherHouseService } from './go-together-house.service';
+import { isGoTogetherLaunched } from './go-together-launch.guard';
 import { GoTogetherPoolService, MatchPool } from './go-together-pool.service';
 import { buildGroupReasons, groupBand } from './go-together-reasons';
 import { MIN_AFFINITY, SCORING_VERSION } from './go-together-scoring';
@@ -49,6 +57,10 @@ const PLACEMENT_LIMITS = {
 
 type EventSummary = Pick<Event, 'id' | 'slug' | 'title' | 'startAt'>;
 
+/** What a member's leave ended: their place in the group, or only their
+ *  seat in its chat (from the gathering's start onward). */
+export type GoTogetherLeaveScope = 'group' | 'chat';
+
 export interface FormationCounts {
   groupsFormed: number;
   unmatched: number;
@@ -60,6 +72,25 @@ interface PlacementPool {
   groupLists: number[][];
   /** Units made only of the candidates being placed. */
   candidateUnits: number[];
+}
+
+interface PlacementPoolOptions {
+  /** Pending entries kept in the pool answerless when their questionnaire
+   *  is gone (`GoTogetherPoolService.buildPool`). */
+  keepAnswerlessEntryIds?: ReadonlySet<string>;
+}
+
+/**
+ * A refusal from `GroupsService.dissolveMatchedGroup` that a retry cannot
+ * change: the chat is missing or is no matched group (400 or 404), or the
+ * house has no owner seat in it (403).
+ */
+function isPermanentChatRefusal(error: unknown): boolean {
+  return (
+    error instanceof BadRequestException ||
+    error instanceof ForbiddenException ||
+    error instanceof NotFoundException
+  );
 }
 
 function describeError(error: unknown): string {
@@ -87,6 +118,8 @@ export class GoTogetherFormationService {
     @InjectRepository(EventMatchConfig)
     private readonly configs: Repository<EventMatchConfig>,
     @InjectRepository(Event) private readonly events: Repository<Event>,
+    @InjectRepository(ConversationParticipant)
+    private readonly chatSeats: Repository<ConversationParticipant>,
     private readonly pool: GoTogetherPoolService,
     private readonly groupsService: GroupsService,
     private readonly house: GoTogetherHouseService,
@@ -179,6 +212,46 @@ export class GoTogetherFormationService {
   }
 
   /**
+   * PRD-418: the one rule for a member leaving their group, shared by the
+   * group sheet's Leave and the chat-leave listener (spec 3.6) so the two
+   * keep one behaviour. Before the gathering starts, leaving takes the
+   * member out of Go together for it (`removeMember`). From the start
+   * onward only the chat seat ends: the entry stays `grouped`, so the member
+   * stays on the meet-again page for the others and keeps their own reveal
+   * and feedback. A member with no active seat in the chat (already left,
+   * or never seated) is left alone, so a repeat leave is a quiet no-op.
+   */
+  async leaveGroup(
+    entry: EventMatchEntry,
+    now: Date = new Date(),
+  ): Promise<GoTogetherLeaveScope> {
+    const gathering = await this.loadEvent(entry.eventId);
+    if (!hasGatheringStarted(gathering, now)) {
+      await this.removeMember(entry);
+      return 'group';
+    }
+    const group = entry.groupId
+      ? await this.groups.findOne({ where: { id: entry.groupId } })
+      : null;
+    if (
+      group?.conversationId &&
+      !(await this.hasLeftChat(group.conversationId, entry.userId))
+    ) {
+      await this.leaveChat(group.conversationId, entry.userId);
+    }
+    return 'chat';
+  }
+
+  /** Whether the member holds no active seat in the group's chat: they left
+   *  it, or were never seated in it (a failed chat call). */
+  async hasLeftChat(conversationId: string, userId: string): Promise<boolean> {
+    const hasActiveSeat = await this.chatSeats.exists({
+      where: { conversationId, userId, leftAt: IsNull() },
+    });
+    return !hasActiveSeat;
+  }
+
+  /**
    * A member leaves Go together for this gathering: out of the chat, entry
    * withdrawn (its lens goes too, it has no further purpose), an accepted
    * partner turned solo (the partner keeps their seat), then the group they
@@ -218,10 +291,13 @@ export class GoTogetherFormationService {
 
   /**
    * Moves the member (and an accepted partner in the same group) into the
-   * group they were offered, after checking it still has room and still fits.
-   * Throws 409 `GO_TOGETHER_MERGE_EXPIRED` and clears the offer otherwise.
-   * The passed entry object is left as it was, so a caller can still read
-   * `mergeOfferGroupId` from it afterwards.
+   * group they were offered, after checking it still fits them. The seat
+   * count and the move are one locked write (`guardedMoveIntoOpenGroup`), so
+   * a concurrent accept or late-joiner pass can never take the group past
+   * `LATE_JOIN_MAX_SIZE` (ENG-432). The old chat is left only once the move
+   * has landed. Throws 409 `GO_TOGETHER_MERGE_EXPIRED` and clears the offer
+   * when nobody could move. The passed entry object is left as it was, so a
+   * caller can still read `mergeOfferGroupId` from it afterwards.
    */
   async acceptMerge(entry: EventMatchEntry): Promise<void> {
     const targetGroupId = entry.mergeOfferGroupId;
@@ -234,16 +310,21 @@ export class GoTogetherFormationService {
         dissolvedAt: IsNull(),
       },
     });
-    const seatedCount = targetGroup
-      ? await this.entries.count({
-          where: { groupId: targetGroupId, status: 'grouped' },
-        })
-      : LATE_JOIN_MAX_SIZE;
+    const oldGroup = entry.groupId
+      ? await this.groups.findOne({ where: { id: entry.groupId } })
+      : null;
     const isStillOpen =
-      targetGroup !== null &&
-      seatedCount + moving.length <= LATE_JOIN_MAX_SIZE &&
-      (await this.fitsWhole(moving, targetGroup));
-    if (!targetGroup || !isStillOpen) {
+      targetGroup !== null && (await this.fitsWhole(moving, targetGroup));
+    const moved =
+      targetGroup && isStillOpen
+        ? await this.moveIntoGroup(
+            targetGroup,
+            moving,
+            ['grouped'],
+            oldGroup?.conversationId ?? null,
+          )
+        : [];
+    if (moved.length === 0) {
       await this.entries.update(
         { id: In(moving.map((member) => member.id)) },
         { mergeOfferGroupId: null },
@@ -254,15 +335,6 @@ export class GoTogetherFormationService {
         code: MERGE_EXPIRED_CODE,
       });
     }
-    const oldGroup = entry.groupId
-      ? await this.groups.findOne({ where: { id: entry.groupId } })
-      : null;
-    if (oldGroup?.conversationId) {
-      for (const member of moving) {
-        await this.leaveChat(oldGroup.conversationId, member.userId);
-      }
-    }
-    await this.moveIntoGroup(targetGroup, moving, ['grouped']);
     if (oldGroup) {
       const leftBehind = await this.entries.count({
         where: { groupId: oldGroup.id, status: 'grouped' },
@@ -286,13 +358,37 @@ export class GoTogetherFormationService {
    * An accepted partner who blocked nobody stays grouped in the same chat;
    * the pair link between them and the blocker is simply cleared.
    *
-   * Returns whether the pair was actually separated, so a caller only logs
+   * A block more than `BLOCK_MOVE_GRACE_MS` after the start moves nobody.
+   *
+   * Safe to run twice for one block, even at the same time: the group route
+   * awaits it and the `MEMBER_BLOCKED` listener runs it too. Before any chat
+   * or seat work, guarded writes (`claimOutOfGroup`) take the moving unit
+   * out of the shared group to `unmatched`, the blocker first. Only the run
+   * that took the blocker goes on, so the old chat is left once per member,
+   * the merge offer goes out once, and the other run returns false having
+   * sent nothing. Before the start, the claimed members are then seated from
+   * `unmatched` into another group; whoever does not fit stays `unmatched`.
+   * The seat plan keeps every claimed member in the pool, answerless when
+   * their questionnaire is gone (they deleted it while seated), so the pair
+   * stays one unit and either moves whole or stays `unmatched` whole
+   * (spec 5.3), and such a blocker is still reseated where a group has room
+   * (spec 3.6). A failed seat is logged: the claimed members stay
+   * `unmatched` for the late-joiner pass, and the old group still gets its
+   * one merge offer from this run.
+   *
+   * While Go together is held dark (PRD-422) the claim still runs, so the
+   * blocker leaves the shared group and its chat, but nobody is reseated and
+   * no merge offer goes out: the group routes those would lead to answer 404
+   * until launch. The claimed members stay `unmatched`.
+   *
+   * Returns whether this run separated the pair, so a caller only logs
    * when something happened.
    */
   async moveAfterBlock(
     eventId: string,
     blockerUserId: string,
     blockedUserId: string,
+    now: Date = new Date(),
   ): Promise<boolean> {
     const pairEntries = await this.entries.find({
       where: { eventId, userId: In([blockerUserId, blockedUserId]) },
@@ -314,6 +410,8 @@ export class GoTogetherFormationService {
       where: { id: sharedGroupId },
     });
     if (!oldGroup || oldGroup.dissolvedAt) return false;
+    const event = await this.loadEvent(eventId);
+    if (isPastBlockMoveGrace(event, now)) return false;
     if (blockerEntry.pairPartnerId === blockedUserId) {
       await this.entries.update(
         { id: In([blockerEntry.id, blockedEntry.id]) },
@@ -321,8 +419,9 @@ export class GoTogetherFormationService {
       );
     }
 
-    const event = await this.loadEvent(eventId);
-    if (!event || event.startAt.getTime() <= Date.now()) {
+    if (!isGatheringUpcoming(event, now)) {
+      const claimed = await this.claimOutOfGroup([blockerEntry], oldGroup.id);
+      if (claimed.length === 0) return false;
       const uninvolvedPartnerId =
         blockerEntry.pairStatus === 'accepted' &&
         blockerEntry.pairPartnerId !== null &&
@@ -346,45 +445,88 @@ export class GoTogetherFormationService {
       if (oldGroup.conversationId) {
         await this.leaveChat(oldGroup.conversationId, blockerUserId);
       }
-      await this.entries.update(
-        { id: blockerEntry.id },
-        { status: 'unmatched', groupId: null, mergeOfferGroupId: null },
-      );
       await this.offerMergeIfSmall(oldGroup);
       return true;
     }
 
     const moving = await this.movingUnit(blockerEntry, blockedUserId);
+    const claimed = await this.claimOutOfGroup(moving, oldGroup.id);
+    if (claimed.length === 0) return false;
     if (oldGroup.conversationId) {
-      for (const member of moving) {
+      for (const member of claimed) {
         await this.leaveChat(oldGroup.conversationId, member.userId);
       }
     }
-    const otherGroups = (await this.activeGroupsOf(eventId)).filter(
-      (group) => group.id !== oldGroup.id,
-    );
-    const placed =
-      otherGroups.length > 0
-        ? await this.seatCandidates(event, moving, otherGroups, ['grouped'])
+    try {
+      const otherGroups = isGoTogetherLaunched()
+        ? (await this.activeGroupsOf(eventId)).filter(
+            (group) => group.id !== oldGroup.id,
+          )
         : [];
-    const placedIds = new Set(placed.map((member) => member.id));
-    const unplacedIds = moving
-      .map((member) => member.id)
-      .filter((entryId) => !placedIds.has(entryId));
-    if (unplacedIds.length > 0) {
-      await this.entries.update(
-        { id: In(unplacedIds), status: 'grouped', groupId: oldGroup.id },
-        { status: 'unmatched', groupId: null, mergeOfferGroupId: null },
+      if (otherGroups.length > 0) {
+        await this.seatCandidates(event, claimed, otherGroups, ['unmatched'], {
+          keepAnswerlessEntryIds: new Set(claimed.map((member) => member.id)),
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Go together could not reseat the members it took out of group ${oldGroup.id}; they stay unmatched for the late-joiner pass: ${describeError(error)}`,
       );
     }
     await this.offerMergeIfSmall(oldGroup);
     return true;
   }
 
-  /** Event cancelled or otherwise gone: every chat ends and every entry is withdrawn. */
-  async dissolveEventGroups(eventId: string): Promise<void> {
+  /**
+   * Takes `members` out of `groupId` to `unmatched` with one guarded
+   * single-row write each, the first member (the blocker) first. Each write
+   * only matches a row still seated in that group, and Postgres re-checks
+   * the WHERE of a waiting UPDATE against the committed row, so of two runs
+   * racing for the same block exactly one takes the blocker; the other gets
+   * nothing back and stops there. Returns the entries this run changed, as
+   * they now are, ready to be seated from `unmatched`.
+   */
+  private async claimOutOfGroup(
+    members: EventMatchEntry[],
+    groupId: string,
+  ): Promise<EventMatchEntry[]> {
+    const claimed: EventMatchEntry[] = [];
+    for (const member of members) {
+      const result = await this.entries.update(
+        { id: member.id, status: 'grouped', groupId },
+        { status: 'unmatched', groupId: null, mergeOfferGroupId: null },
+      );
+      if ((result.affected ?? 0) > 0) {
+        claimed.push({
+          ...member,
+          status: 'unmatched',
+          groupId: null,
+          mergeOfferGroupId: null,
+        });
+      } else if (claimed.length === 0) {
+        return [];
+      }
+    }
+    return claimed;
+  }
+
+  /**
+   * Event cancelled or otherwise gone: every chat ends and every entry is withdrawn.
+   *
+   * `shouldFailWhenChatStaysOpen` is for a gathering about to be hard-deleted
+   * (ENG-433): the delete cascade removes the group rows, so a chat left open
+   * now would outlive its group for good. The first chat that cannot be ended
+   * throws, before its group is marked dissolved and before any entry moves,
+   * so the caller can abort and a retry picks up the same groups. The
+   * reconcile pass leaves it off: a chat that fails to end is logged, its
+   * group stays open, and the pass retries it on its next tick.
+   */
+  async dissolveEventGroups(
+    eventId: string,
+    options: { shouldFailWhenChatStaysOpen?: boolean } = {},
+  ): Promise<void> {
     for (const group of await this.activeGroupsOf(eventId)) {
-      await this.dissolveGroup(group);
+      await this.dissolveGroup(group, options);
     }
     await this.entries.update(
       { eventId },
@@ -582,7 +724,9 @@ export class GoTogetherFormationService {
    * After someone leaves: an empty group is dissolved; a group of one or two
    * before the gathering starts gets a merge offer per remaining unit (or a
    * null offer when nothing fits), sent with `GoTogetherMemberLeft`. Offers
-   * reserve no seat, so `acceptMerge` checks again.
+   * reserve no seat, so `acceptMerge` checks again. While Go together is held
+   * dark (PRD-422) the empty group is still dissolved, and no offer or notice
+   * goes out: the merge and group routes answer 404 until launch.
    */
   private async offerMergeIfSmall(group: EventMatchGroup): Promise<void> {
     if (group.dissolvedAt) return;
@@ -590,9 +734,9 @@ export class GoTogetherFormationService {
       where: { groupId: group.id, status: 'grouped' },
     });
     if (remaining.length === 0) return this.dissolveGroup(group);
-    if (remaining.length >= 3) return;
+    if (remaining.length >= 3 || !isGoTogetherLaunched()) return;
     const event = await this.loadEvent(group.eventId);
-    if (!event || event.startAt.getTime() <= Date.now()) return;
+    if (!isGatheringUpcoming(event, new Date())) return;
     const otherGroups = (await this.activeGroupsOf(group.eventId)).filter(
       (other) => other.id !== group.id,
     );
@@ -628,17 +772,20 @@ export class GoTogetherFormationService {
   /**
    * Places `candidates` into `targetGroups` unit by unit, reserving each seat,
    * then moves them in, seats them in the chat and sends `GoTogetherGroupReady`.
-   * Returns the entries that were placed.
+   * `poolOptions` goes to `placementPool`. Returns the entries that were
+   * placed.
    */
   private async seatCandidates(
     event: EventSummary,
     candidates: EventMatchEntry[],
     targetGroups: EventMatchGroup[],
     fromStatuses: EntryStatus[],
+    poolOptions: PlacementPoolOptions = {},
   ): Promise<EventMatchEntry[]> {
     const { pool, groupLists, candidateUnits } = await this.placementPool(
       candidates,
       targetGroups,
+      poolOptions,
     );
     const placements = planPlacements(
       pool,
@@ -684,6 +831,7 @@ export class GoTogetherFormationService {
   private async placementPool(
     candidates: EventMatchEntry[],
     targetGroups: EventMatchGroup[],
+    { keepAnswerlessEntryIds }: PlacementPoolOptions = {},
   ): Promise<PlacementPool> {
     const seated = await this.entries.find({
       where: {
@@ -693,6 +841,7 @@ export class GoTogetherFormationService {
     });
     const { pool } = await this.pool.buildPool([...seated, ...candidates], {
       includeAnchors: false,
+      ...(keepAnswerlessEntryIds ? { keepAnswerlessEntryIds } : {}),
     });
     const candidateIds = new Set(candidates.map((entry) => entry.id));
     const groupLists = groupUnitLists(
@@ -756,21 +905,31 @@ export class GoTogetherFormationService {
   }
 
   /**
-   * Moves `members` into `group` (guarded on their expected status and, for
-   * seated members, their current group) and seats in the chat only those the
-   * update actually moved. Returns the moved entries.
+   * Moves `members` into the existing `group` (guarded on their expected
+   * status, for seated members their current group, and on the group's seat
+   * count under a row lock), then takes only those the write actually moved
+   * out of `previousConversationId` and seats them in the group's chat. The
+   * chat seat is an `addMatchedMembers` seat, which carries the join history
+   * floor. Returns the moved entries.
    */
   private async moveIntoGroup(
     group: EventMatchGroup,
     members: EventMatchEntry[],
     fromStatuses: EntryStatus[],
+    previousConversationId: string | null = null,
   ): Promise<EventMatchEntry[]> {
-    const moved = await guardedMoveIntoGroup(
+    const moved = await guardedMoveIntoOpenGroup(
       this.entries,
       members,
       group.id,
       fromStatuses,
+      LATE_JOIN_MAX_SIZE,
     );
+    if (previousConversationId) {
+      for (const member of moved) {
+        await this.leaveChat(previousConversationId, member.userId);
+      }
+    }
     if (moved.length === 0 || !group.conversationId) return moved;
     try {
       await this.groupsService.addMatchedMembers(
@@ -786,7 +945,20 @@ export class GoTogetherFormationService {
     return moved;
   }
 
-  private async dissolveGroup(group: EventMatchGroup): Promise<void> {
+  /**
+   * Ends the group's chat, then marks the group dissolved. When the chat
+   * call fails, the group stays open, so a cancelled gathering's reconcile
+   * pass (and a hard delete's strict pass) finds it again and retries; with
+   * `shouldFailWhenChatStaysOpen` the error is rethrown as well. A refusal
+   * that no retry can change (`isPermanentChatRefusal`: the chat is gone, is
+   * no matched chat, or the house holds no owner seat in it) is logged and
+   * the group is marked dissolved all the same, since the house has nothing
+   * left it can close there.
+   */
+  private async dissolveGroup(
+    group: EventMatchGroup,
+    { shouldFailWhenChatStaysOpen = false } = {},
+  ): Promise<void> {
     if (group.conversationId) {
       try {
         await this.groupsService.dissolveMatchedGroup(
@@ -794,8 +966,15 @@ export class GoTogetherFormationService {
           await this.house.houseUserId(),
         );
       } catch (error) {
+        if (!isPermanentChatRefusal(error)) {
+          this.logger.error(
+            `Go together could not end the chat of group ${group.id}; the group stays open for a retry: ${describeError(error)}`,
+          );
+          if (shouldFailWhenChatStaysOpen) throw error;
+          return;
+        }
         this.logger.error(
-          `Go together could not end the chat of group ${group.id}: ${describeError(error)}`,
+          `Go together cannot end the chat of group ${group.id} as the house; the group is closed without it: ${describeError(error)}`,
         );
       }
     }

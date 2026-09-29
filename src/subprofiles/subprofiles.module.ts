@@ -80,7 +80,8 @@ import { SubprofilesService } from './subprofiles.service';
     // one-directional.
     IdentitiesModule,
     // Read-only: public persona reads (profile-nested / by-handle / directory /
-    // search / sitemap) withhold a moderator-taken-down persona (keyed by slug).
+    // search / sitemap) withhold a moderator-taken-down persona (keyed by the
+    // persona uuid).
     ContentModerationModule,
     // Batched crop lookup (`MediaCropService.getMany`) for `avatarUrl`/
     // `coverUrl`/item `imageUrl` surfaced on every subprofile response DTO.

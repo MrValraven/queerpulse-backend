@@ -431,6 +431,7 @@ export class ListingClaimsService {
         result.claimantId,
         result.dto.status,
         result.listingSlug,
+        result.listingName,
       );
     }
     // BE-HSG-05: the person who just lost the listing is told too. They used to
@@ -455,6 +456,7 @@ export class ListingClaimsService {
     claimantId: string,
     status: ListingClaimStatus,
     listingSlug: string,
+    listingName: string,
   ): Promise<void> {
     try {
       await this.notifications.create(
@@ -462,7 +464,9 @@ export class ListingClaimsService {
         status === ListingClaimStatus.Approved
           ? NotificationType.ListingClaimApproved
           : NotificationType.ListingClaimDeclined,
-        { source: 'listing', listingSlug },
+        // `listingName` is the business's own public name, so the row can say
+        // which claim was answered.
+        { source: 'listing', listingSlug, listingName },
       );
     } catch {
       // Intentionally ignored — the review already committed.

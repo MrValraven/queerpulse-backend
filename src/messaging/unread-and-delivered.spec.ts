@@ -174,8 +174,10 @@ describe('MessagingCoreService.unreadConversationCount (nav DM badge, PRD-341)',
   it('drops a direct thread blocked in either direction, and never a group or the official thread', async () => {
     await core.unreadConversationCount(VIEWER_ID);
 
+    // ENG-402: the unread fragment reads `"blocks"` too (the group block
+    // filter below), so the person-block gate is found by its own alias.
     const blockCall = query.andWhere.mock.calls.find((call: unknown[]) =>
-      String(call[0]).includes('"blocks"'),
+      String(call[0]).includes('"__unread_block"'),
     ) as [string, Record<string, unknown>] | undefined;
     expect(blockCall).toBeDefined();
     const [blockSql, blockParameters] = blockCall as [
@@ -195,6 +197,25 @@ describe('MessagingCoreService.unreadConversationCount (nav DM badge, PRD-341)',
     expect(blockParameters).toEqual({
       unreadGroupKind: ConversationKind.Group,
     });
+  });
+
+  // ENG-402: the thread hides a group message from someone blocked either
+  // way with the caller (PRD-354), so the badge must never count it, or
+  // reading the thread could never clear the badge.
+  it('never counts a group message from a member blocked either way with the caller, and keeps system pills', async () => {
+    await core.unreadConversationCount(VIEWER_ID);
+
+    const fragment = unreadFragment();
+    expect(fragment).toContain('"blocked_by_viewer"."blocker_id" = :userId');
+    expect(fragment).toContain('"blocker_of_viewer"."blocked_id" = :userId');
+    expect(fragment).toContain('m.sender_id <> ALL (ARRAY(');
+    expect(fragment).toContain(
+      '"group_block_conversation"."id" = m.conversation_id',
+    );
+    expect(fragment).toContain(
+      `"group_block_conversation"."kind" = '${ConversationKind.Group}'`,
+    );
+    expect(fragment).toContain("m.kind = 'system' OR m.sender_id IS NULL OR");
   });
 
   // The unread EXISTS subquery is raw SQL over `"messages" m`, and the

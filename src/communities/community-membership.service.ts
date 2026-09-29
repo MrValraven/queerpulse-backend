@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { assertCommunityInteriorReadable } from './community-read-gate';
 import {
   CommunityMember,
   RosterRole,
@@ -61,6 +63,7 @@ export class CommunityMembershipService {
     private readonly posts: Repository<CommunityPost>,
     @InjectRepository(CommunityPostReply)
     private readonly replies: Repository<CommunityPostReply>,
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /**
@@ -79,6 +82,46 @@ export class CommunityMembershipService {
       throw new NotFoundException('Community not found');
     }
     const role = await this.effectiveRole(community, userId);
+    this.assert404IfPrivateOutsiderOfCommunity(community, role);
+    if (role === null) {
+      throw new ForbiddenException('Only roster members can do that');
+    }
+    return community.id;
+  }
+
+  /**
+   * Resolve a community by slug and assert the given user is on its roster,
+   * the same shape as `assertMemberBySlug` minus the `archivedAt: IsNull()`
+   * filter (PRD-412). READ-ONLY callers only: a member of a community that
+   * gets archived keeps reading material that was already theirs (the
+   * community pulse's gatherings/threads/opportunities lanes are the first
+   * caller). Every WRITE-side caller keeps `assertMemberBySlug`, which still
+   * 404s an archived community.
+   *
+   * ENG-426 follow-up: also runs the takedown closure
+   * `assertCommunityInteriorReadable` applies to posts, replies and the
+   * roster, so a plain member of a community a moderator has hidden or
+   * removed gets the same 404 here that `getBySlug` and the community's own
+   * board already answer with; the community's own staff keep reading it.
+   * Archived-member access stays unaffected: the archive branch inside
+   * `assertCommunityInteriorReadable` only fires for `viewerRole === null`,
+   * and a member always resolves a role.
+   */
+  async assertMemberForReadBySlug(
+    slug: string,
+    userId: string,
+  ): Promise<string> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    const role = await this.effectiveRole(community, userId);
+    await assertCommunityInteriorReadable({
+      community,
+      viewerRole: role,
+      communities: this.communities,
+      contentModeration: this.contentModeration,
+    });
     this.assert404IfPrivateOutsiderOfCommunity(community, role);
     if (role === null) {
       throw new ForbiddenException('Only roster members can do that');

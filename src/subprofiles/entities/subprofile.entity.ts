@@ -538,6 +538,14 @@ export class Subprofile {
   @Column({ type: 'timestamptz', nullable: true })
   removedAt!: Date | null;
 
+  // ENG-451: the persona editor's save precondition. Raised by exactly 1 by
+  // each of the four editor writes (PATCH, section PUT, social-links PUT,
+  // affiliations PUT) under the persona row lock, and by nothing else. A write
+  // carrying an `expectedEditVersion` that differs gets a 409
+  // `PERSONA_EDIT_CONFLICT`. Owner view only.
+  @Column({ type: 'int', default: 0 })
+  editVersion!: number;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

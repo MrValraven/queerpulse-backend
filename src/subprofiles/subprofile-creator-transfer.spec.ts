@@ -4,6 +4,7 @@ import { User, UserStatus } from '../users/entities/user.entity';
 import {
   Subprofile,
   SubprofileLinkVisibility,
+  SubprofileStatus,
 } from './entities/subprofile.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import {
@@ -11,12 +12,32 @@ import {
   transferCreatorWithin,
 } from './subprofile-creator-transfer';
 import { MAX_SUBPROFILES } from './subprofile-validation';
+import {
+  claimHandleWithin,
+  isHandleTakenWithin,
+  releaseHandleWithin,
+} from '../handles/handles.service';
+import { ConflictException } from '@nestjs/common';
+import { HandleOwnerKind } from '../handles/entities/handle.entity';
+import { HandleHistory } from '../handles/entities/handle-history.entity';
+import { Profile } from '../users/entities/profile.entity';
+import { linkedPersonaHandleCandidate } from './persona-handle';
+
+// The registry writes a creator-named handle re-issue makes (PRD-431). Only
+// that path reaches them; their own behaviour is covered in
+// `handles.service.spec.ts`.
+jest.mock('../handles/handles.service', () => ({
+  ...jest.requireActual<Record<string, unknown>>('../handles/handles.service'),
+  claimHandleWithin: jest.fn(),
+  isHandleTakenWithin: jest.fn(),
+  releaseHandleWithin: jest.fn(),
+}));
 
 /**
  * `transferCreatorWithin` against a mocked transaction manager: who succeeds
  * the creator, which slug the persona lands on, and which writes ride the
- * caller's transaction. The Postgres-level behaviour (the upsert, the
- * takedown copy) is asserted through the SQL and parameters it sends.
+ * caller's transaction. The Postgres-level behaviour (the address-history
+ * upsert) is asserted through the SQL and parameters it sends.
  */
 
 const SUBPROFILE_ID = 'sp-1';
@@ -230,7 +251,7 @@ describe('transferCreatorWithin', () => {
     });
   });
 
-  it('keeps the slug and copies no takedown when the successor has no clash', async () => {
+  it('keeps the slug and writes no takedown row when the successor has no clash', async () => {
     const result = await transfer(makeSubprofile());
 
     expect(result?.slug).toBe('night-shift');
@@ -259,26 +280,13 @@ describe('transferCreatorWithin', () => {
     expect(result?.slug).toBe('night-shift-3');
   });
 
-  it('copies a takedown from the old slug to the new one when the slug changes', async () => {
+  it('writes no takedown row when the slug changes, since takedowns are keyed on the persona uuid', async () => {
     successorPersonas = [{ slug: 'night-shift' }];
 
-    await transfer(makeSubprofile());
+    const result = await transfer(makeSubprofile());
 
-    const moderationQueries = queriesMatching('content_moderation');
-    expect(moderationQueries).toHaveLength(1);
-    const [sql, parameters] = moderationQueries[0] ?? ['', []];
-    expect(parameters).toEqual(['night-shift', 'night-shift-2', 'subprofile']);
-    // Only a row that still withholds the persona is copied, and a merge
-    // onto an existing row keeps every timestamp already set there.
-    expect(sql).toContain(
-      '"hidden_at" IS NOT NULL OR "removed_at" IS NOT NULL',
-    );
-    expect(sql).toContain(
-      'COALESCE("content_moderation"."hidden_at", EXCLUDED."hidden_at")',
-    );
-    expect(sql).toContain(
-      'COALESCE("content_moderation"."removed_at", EXCLUDED."removed_at")',
-    );
+    expect(result?.slug).toBe('night-shift-2');
+    expect(queriesMatching('content_moderation')).toHaveLength(0);
   });
 
   it('transfers without error when the successor is already at the persona cap', async () => {
@@ -399,5 +407,377 @@ describe('transferCreatorWithin', () => {
     await expect(transfer(makeSubprofile())).rejects.toThrow('db down');
 
     expect(identityMailboxSync.resyncMailbox).not.toHaveBeenCalled();
+  });
+});
+
+// PRD-431: a linked handle that carries the departing creator's slug is
+// re-issued from the successor's slug and released without forwarding; any
+// other handle stays.
+describe('transferCreatorWithin: creator-named handle', () => {
+  const SUCCESSOR_ID = 'successor-1';
+  const personaOwner = { kind: 'subprofile', subprofileId: SUBPROFILE_ID };
+  const profileSlugs: Record<string, string> = {
+    [DEPARTING_ID]: 'robin',
+    [SUCCESSOR_ID]: 'sam',
+  };
+  let manager: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    exists: jest.Mock;
+    query: jest.Mock;
+    update: jest.Mock;
+    transaction: jest.Mock;
+  };
+  // `handle_history` rows: the departing member's former usernames, and the
+  // reservations this persona left that still forward.
+  let formerUsernames: string[];
+  let forwardingPersonaReservations: string[];
+  const claimHandle = claimHandleWithin as jest.Mock;
+  const releaseHandle = releaseHandleWithin as jest.Mock;
+  const isHandleTaken = isHandleTakenWithin as jest.Mock;
+
+  const transfer = (subprofile: Subprofile) =>
+    transferCreatorWithin(
+      manager as unknown as EntityManager,
+      subprofile,
+      DEPARTING_ID,
+      {
+        identityId: IDENTITY_ID,
+        identityMailboxSync: {
+          resyncMailbox: jest.fn().mockResolvedValue(emptyChanges()),
+        } as unknown as IdentityMailboxSyncService,
+      },
+    );
+
+  const handleUpdates = () =>
+    (manager.update.mock.calls as [unknown, unknown, object][]).filter(
+      ([, , values]) => 'handle' in values,
+    );
+
+  beforeEach(() => {
+    claimHandle.mockReset().mockResolvedValue(undefined);
+    releaseHandle.mockReset().mockResolvedValue(undefined);
+    isHandleTaken.mockReset().mockResolvedValue(false);
+    formerUsernames = [];
+    forwardingPersonaReservations = [];
+    manager = {
+      find: jest.fn(
+        (
+          entity: unknown,
+          options?: { where?: { previousOwnerKind?: HandleOwnerKind } },
+        ) => {
+          if (entity === HandleHistory) {
+            const names =
+              options?.where?.previousOwnerKind === HandleOwnerKind.Profile
+                ? formerUsernames
+                : forwardingPersonaReservations;
+            return Promise.resolve(names.map((name) => ({ name })));
+          }
+          if (entity === SubprofileMember) {
+            return Promise.resolve([
+              makeMember('member-2', SUCCESSOR_ID, '2026-01-02T00:00:00Z'),
+            ]);
+          }
+          if (entity === User) {
+            return Promise.resolve([{ id: SUCCESSOR_ID }]);
+          }
+          return Promise.resolve([]);
+        },
+      ),
+      findOne: jest.fn(
+        (entity: unknown, options: { where: { userId: string } }) => {
+          const slug =
+            entity === Profile ? profileSlugs[options.where.userId] : undefined;
+          return Promise.resolve(
+            slug ? { userId: options.where.userId, slug } : null,
+          );
+        },
+      ),
+      exists: jest.fn().mockResolvedValue(false),
+      query: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      // A nested transaction on the caller's manager (a SAVEPOINT).
+      transaction: jest.fn(
+        (runInSavepoint: (savepointManager: unknown) => Promise<unknown>) =>
+          runInSavepoint(manager),
+      ),
+    };
+  });
+
+  it('re-issues a published creator-named handle, releasing the old one without forwarding', async () => {
+    const subprofile = makeSubprofile({
+      status: SubprofileStatus.Published,
+      handle: 'robin-night-shift',
+    });
+
+    await transfer(subprofile);
+
+    expect(releaseHandle).toHaveBeenCalledWith(
+      manager,
+      'robin-night-shift',
+      personaOwner,
+      { isForwarding: false },
+    );
+    expect(claimHandle).toHaveBeenCalledWith(
+      manager,
+      'sam-night-shift',
+      personaOwner,
+    );
+    const releaseOrder = releaseHandle.mock.invocationCallOrder[0] ?? 0;
+    const claimOrder = claimHandle.mock.invocationCallOrder[0] ?? 0;
+    expect(releaseOrder).toBeLessThan(claimOrder);
+    expect(manager.update).toHaveBeenCalledWith(
+      Subprofile,
+      { id: SUBPROFILE_ID },
+      { handle: 'sam-night-shift' },
+    );
+    expect(subprofile.handle).toBe('sam-night-shift');
+  });
+
+  it('suffixes the re-issued handle when the default is taken', async () => {
+    isHandleTaken.mockImplementation((_manager: unknown, candidate: string) =>
+      Promise.resolve(candidate === 'sam-night-shift'),
+    );
+
+    await transfer(
+      makeSubprofile({
+        status: SubprofileStatus.Published,
+        handle: 'robin-night-shift',
+      }),
+    );
+
+    expect(claimHandle).toHaveBeenCalledWith(
+      manager,
+      'sam-night-shift-2',
+      personaOwner,
+    );
+  });
+
+  it('skips a name another persona row already stores', async () => {
+    manager.exists.mockImplementation(
+      (_entity: unknown, options: { where: { handle: string } }) =>
+        Promise.resolve(options.where.handle === 'sam-night-shift'),
+    );
+
+    await transfer(
+      makeSubprofile({
+        status: SubprofileStatus.Published,
+        handle: 'robin-night-shift',
+      }),
+    );
+
+    expect(claimHandle).toHaveBeenCalledWith(
+      manager,
+      'sam-night-shift-2',
+      personaOwner,
+    );
+  });
+
+  it('re-issues a default the 30-char cut shortened', async () => {
+    profileSlugs[DEPARTING_ID] = 'a-very-long-departing-creator';
+    const shortenedHandle = linkedPersonaHandleCandidate(
+      'a-very-long-departing-creator',
+      'night-shift',
+    );
+
+    try {
+      await transfer(
+        makeSubprofile({
+          status: SubprofileStatus.Published,
+          handle: shortenedHandle,
+        }),
+      );
+    } finally {
+      profileSlugs[DEPARTING_ID] = 'robin';
+    }
+
+    expect(releaseHandle).toHaveBeenCalledWith(
+      manager,
+      shortenedHandle,
+      personaOwner,
+      { isForwarding: false },
+    );
+    expect(claimHandle).toHaveBeenCalledWith(
+      manager,
+      'sam-night-shift',
+      personaOwner,
+    );
+  });
+
+  it('keeps a custom linked handle that does not carry the departing slug', async () => {
+    const subprofile = makeSubprofile({
+      status: SubprofileStatus.Published,
+      handle: 'night-owl',
+    });
+
+    await transfer(subprofile);
+
+    expect(releaseHandle).not.toHaveBeenCalled();
+    expect(claimHandle).not.toHaveBeenCalled();
+    expect(handleUpdates()).toHaveLength(0);
+    expect(subprofile.handle).toBe('night-owl');
+  });
+
+  it('stores the re-issued handle on a linked draft and claims nothing', async () => {
+    const subprofile = makeSubprofile({
+      status: SubprofileStatus.Draft,
+      handle: 'robin-night-shift',
+    });
+
+    await transfer(subprofile);
+
+    expect(releaseHandle).not.toHaveBeenCalled();
+    expect(claimHandle).not.toHaveBeenCalled();
+    expect(manager.update).toHaveBeenCalledWith(
+      Subprofile,
+      { id: SUBPROFILE_ID },
+      { handle: 'sam-night-shift' },
+    );
+  });
+
+  it('leaves an unlinked persona handle alone', async () => {
+    await transfer(
+      makeSubprofile({
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+        status: SubprofileStatus.Published,
+        handle: 'after-dark',
+      }),
+    );
+
+    expect(manager.findOne).not.toHaveBeenCalled();
+    expect(releaseHandle).not.toHaveBeenCalled();
+    expect(claimHandle).not.toHaveBeenCalled();
+    expect(handleUpdates()).toHaveLength(0);
+  });
+
+  it('keeps the handle when the successor has no profile to build one from', async () => {
+    delete profileSlugs[SUCCESSOR_ID];
+
+    try {
+      await transfer(
+        makeSubprofile({
+          status: SubprofileStatus.Published,
+          handle: 'robin-night-shift',
+        }),
+      );
+    } finally {
+      profileSlugs[SUCCESSOR_ID] = 'sam';
+    }
+
+    expect(releaseHandle).not.toHaveBeenCalled();
+    expect(claimHandle).not.toHaveBeenCalled();
+    expect(handleUpdates()).toHaveLength(0);
+  });
+
+  it('propagates a failed registry write that is not a lost race', async () => {
+    claimHandle.mockRejectedValue(new Error('db down'));
+
+    await expect(
+      transfer(
+        makeSubprofile({
+          status: SubprofileStatus.Published,
+          handle: 'robin-night-shift',
+        }),
+      ),
+    ).rejects.toThrow('db down');
+  });
+
+  it('claims inside a savepoint and tries the next suffix after a lost race', async () => {
+    claimHandle.mockImplementation(
+      (_manager: unknown, name: string): Promise<void> =>
+        name === 'sam-night-shift'
+          ? Promise.reject(
+              new ConflictException('That handle is already taken'),
+            )
+          : Promise.resolve(),
+    );
+    const subprofile = makeSubprofile({
+      status: SubprofileStatus.Published,
+      handle: 'robin-night-shift',
+    });
+
+    await transfer(subprofile);
+
+    expect(manager.transaction).toHaveBeenCalledTimes(2);
+    expect(claimHandle).toHaveBeenLastCalledWith(
+      manager,
+      'sam-night-shift-2',
+      personaOwner,
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      Subprofile,
+      { id: SUBPROFILE_ID },
+      { handle: 'sam-night-shift-2' },
+    );
+    expect(subprofile.handle).toBe('sam-night-shift-2');
+  });
+
+  it('keeps the old handle and completes the transfer when every attempt loses its race', async () => {
+    claimHandle.mockRejectedValue(
+      new ConflictException('That handle is already taken'),
+    );
+    const subprofile = makeSubprofile({
+      status: SubprofileStatus.Published,
+      handle: 'robin-night-shift',
+    });
+
+    const result = await transfer(subprofile);
+
+    expect(result?.newCreatorUserId).toBe(SUCCESSOR_ID);
+    expect(claimHandle).toHaveBeenCalledTimes(3);
+    expect(handleUpdates()).toHaveLength(0);
+    expect(subprofile.handle).toBe('robin-night-shift');
+  });
+
+  // A creator who renamed their profile keeps the old slug in the persona
+  // handle (profile renames leave persona handles alone).
+  it("re-issues a handle carrying the departing creator's former username", async () => {
+    formerUsernames = ['kit-marlowe'];
+
+    await transfer(
+      makeSubprofile({
+        status: SubprofileStatus.Published,
+        handle: 'kit-marlowe-night-shift',
+      }),
+    );
+
+    expect(releaseHandle).toHaveBeenCalledWith(
+      manager,
+      'kit-marlowe-night-shift',
+      personaOwner,
+      { isForwarding: false },
+    );
+    expect(claimHandle).toHaveBeenCalledWith(
+      manager,
+      'sam-night-shift',
+      personaOwner,
+    );
+  });
+
+  it('stops forwarding older reservations of this persona that carry the departing slug', async () => {
+    forwardingPersonaReservations = ['robin-nightshift-old', 'night-owl'];
+
+    await transfer(
+      makeSubprofile({
+        status: SubprofileStatus.Published,
+        handle: 'night-shift-custom',
+      }),
+    );
+
+    expect(manager.find).toHaveBeenCalledWith(HandleHistory, {
+      where: {
+        previousOwnerKind: HandleOwnerKind.Subprofile,
+        previousOwnerSubprofileId: SUBPROFILE_ID,
+        isForwarding: true,
+      },
+      select: { name: true },
+    });
+    expect(manager.update).toHaveBeenCalledWith(
+      HandleHistory,
+      { name: In(['robin-nightshift-old']) },
+      { isForwarding: false },
+    );
+    // The custom current handle stays.
+    expect(handleUpdates()).toHaveLength(0);
   });
 });

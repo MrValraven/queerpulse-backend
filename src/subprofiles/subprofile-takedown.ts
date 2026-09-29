@@ -2,8 +2,13 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 
 /**
  * The `content_moderation.subject_type` a persona takedown is recorded under.
- * A persona is keyed by its `slug` (never its uuid) in that table, so every
- * read of this state passes `subprofile.slug`.
+ * A persona is keyed by its uuid (`subprofile.id`) in that table, so every
+ * read of this state passes `subprofile.id`. The uuid is what the persona page
+ * reports with and what `ModerationService` stores from `report.subjectId`,
+ * and it survives every slug change and creator transfer. A persona slug is
+ * unique only per creator, so a slug key could also hide another member's
+ * persona that happens to share it. Migration
+ * `1824700000000-RekeyPersonaTakedownsToId` moved the older slug-keyed rows.
  *
  * This is the ONE spelling of the persona takedown subject type. Anything that
  * needs to know "is this persona under a moderator takedown?" should read it
@@ -26,14 +31,16 @@ export const SUBPROFILE_MODERATION_SUBJECT_TYPE = 'subprofile';
  * Takes the caller's own injected {@link ContentModerationService} instead of
  * being a method on it, so this stays a subprofiles-domain rule and the
  * dependency arrow keeps pointing one way (subprofiles -> content-moderation).
+ *
+ * `subprofileId` is the persona's uuid (`subprofile.id`).
  */
 export async function isSubprofileUnderTakedown(
   contentModeration: ContentModerationService,
-  slug: string,
+  subprofileId: string,
 ): Promise<boolean> {
   const state = await contentModeration.stateFor(
     SUBPROFILE_MODERATION_SUBJECT_TYPE,
-    slug,
+    subprofileId,
   );
   return state.hidden || state.removed;
 }

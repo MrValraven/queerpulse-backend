@@ -19,7 +19,9 @@ import { ModAuditService } from './mod-audit.service';
 import { parseDuration } from './parse-duration';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
+  ACCOUNT_REINSTATED,
   ACCOUNT_REMOVED,
+  AccountReinstatedEvent,
   AccountRemovedEvent,
 } from '../ban-evasion/ban-evasion.events';
 import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
@@ -163,8 +165,22 @@ export class AccountEnforcementService {
         dto.note,
         undefined,
         manager,
+        user.id,
       );
     });
+
+    // ENG-486. A lifted ban means this account is no longer removed, so the
+    // ban-evasion signal recorded when it was removed is now false. Post-commit
+    // and best effort, like the `ACCOUNT_REMOVED` emit: the listener deletes
+    // on its own, and a failure there must never undo the lift. A lifted timed
+    // suspension recorded no signal, so the delete simply matches nothing.
+    const reinstated: AccountReinstatedEvent = {
+      userId: user.id,
+      removalKind: RemovalKind.PlatformBan,
+      communityId: null,
+      reinstatedAt: new Date(),
+    };
+    this.eventEmitter.emit(ACCOUNT_REINSTATED, reinstated);
 
     return { userId: user.id, status: UserStatus.Active };
   }
@@ -246,6 +262,7 @@ export class AccountEnforcementService {
         dto.note,
         undefined,
         manager,
+        userId,
       );
     });
 
@@ -276,6 +293,27 @@ export class AccountEnforcementService {
     const { userId } = await this.resolveEnforcementTarget(report);
     if (!userId) return;
 
+    const user = await manager.findOne(User, { where: { id: userId } });
+    if (!user || user.status !== UserStatus.Suspended) return;
+
+    await this.restoreUser(manager, user.id);
+  }
+
+  /**
+   * Restores one member by id after an overturned appeal, when they are
+   * actually suspended (ENG-480).
+   *
+   * The report-less sibling of {@link restoreSuspensionForAppeal}: a sanction
+   * taken straight from the admin member drawer, or any audit row that names
+   * its member in `targetUserId` with no report behind it, has no report to
+   * resolve a member from, so the overturn used to restore nobody. Silent
+   * when the account is gone or not suspended, for the same reason that
+   * method is: the overturn still records its decision.
+   */
+  async restoreSuspendedUser(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
     const user = await manager.findOne(User, { where: { id: userId } });
     if (!user || user.status !== UserStatus.Suspended) return;
 
@@ -686,6 +724,8 @@ export class AccountEnforcementService {
     userId: string;
     suspendedUntil: Date | null;
     status: UserStatus;
+    /** The audit row this restriction wrote, for the appeal deep link. */
+    auditLogId: string;
   }> {
     const now = new Date();
     // `ban` is permanent (NULL never expires); `suspend` is time-boxed.
@@ -729,7 +769,7 @@ export class AccountEnforcementService {
     // have made the whole control theatre: a compromised staff account would
     // simply use this door instead. So a `ban` here opens the same hold, and
     // the member is suspended for its length rather than removed.
-    const { holdExpiresAt, isNewHold, ratificationId } =
+    const { holdExpiresAt, isNewHold, ratificationId, auditLogId } =
       await this.dataSource.transaction(
         async (
           manager,
@@ -737,6 +777,7 @@ export class AccountEnforcementService {
           holdExpiresAt: Date | null;
           isNewHold: boolean;
           ratificationId: string | null;
+          auditLogId: string;
         }> => {
           const openedHold =
             dto.action === 'ban'
@@ -771,7 +812,11 @@ export class AccountEnforcementService {
           // is recorded as pending, carrying the hold's expiry, for the same
           // reason the report path records it that way: the trail must not say
           // someone was removed while a second moderator has yet to agree.
-          await this.audit.writeAuditLog(
+          //
+          // The member rides on the row as `targetUserId` (ENG-480): with no
+          // report to resolve them from, that is the only thing that lets their
+          // appeal find this decision, and the member drawer list it.
+          const auditLogId = await this.audit.writeAuditLog(
             null,
             actorId,
             hold ? BAN_PENDING_AUDIT_ACTION : dto.action,
@@ -779,11 +824,13 @@ export class AccountEnforcementService {
             dto.note,
             hold ? hold.expiresAt.toISOString() : dto.duration,
             manager,
+            userId,
           );
           return {
             holdExpiresAt: hold ? hold.expiresAt : null,
             isNewHold: openedHold?.isNewHold ?? false,
             ratificationId: hold ? hold.id : null,
+            auditLogId,
           };
         },
       );
@@ -833,6 +880,7 @@ export class AccountEnforcementService {
       status: preserveDeactivation
         ? UserStatus.Deactivated
         : UserStatus.Suspended,
+      auditLogId,
     };
   }
 

@@ -59,7 +59,10 @@ import {
   toCardTableSummary,
   type CardTableSummary,
 } from './subprofile-table-summary';
-import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
+import {
+  isSubprofileUnderTakedown,
+  SUBPROFILE_MODERATION_SUBJECT_TYPE,
+} from './subprofile-takedown';
 import {
   AffiliationView,
   CollaboratorView,
@@ -153,7 +156,7 @@ export class SubprofilePublicReadService {
   ) {}
 
   // A persona is reported (and taken down) under the `subprofile` subject code,
-  // keyed by its slug. A hidden OR removed persona vanishes from every public
+  // keyed by its uuid (`sp.id`). A hidden OR removed persona vanishes from every public
   // read (profile-nested, by-handle, directory, search, sitemap) for everyone —
   // a public surface with no per-viewer staff role, so (like the directory) a
   // takedown withholds it entirely. Owner-facing reads (`listMine`/`getOwned`)
@@ -166,7 +169,7 @@ export class SubprofilePublicReadService {
   // (hidden OR removed) from a persona query builder (alias `sp`), in-query so
   // the capped result stays consistent. Mirrors
   // `DirectoryService.excludeModeratedListings`. `content_moderation.subject_id`
-  // is varchar and `sp.slug` is varchar, so no cast is needed.
+  // is varchar while `sp.id` is uuid, so the id is cast to text.
   private excludeModeratedSubprofiles(
     qb: SelectQueryBuilder<Subprofile>,
   ): void {
@@ -174,7 +177,7 @@ export class SubprofilePublicReadService {
       `NOT EXISTS (
         SELECT 1 FROM "content_moderation" "cm"
         WHERE "cm"."subject_type" = :subprofileSubjectType
-          AND "cm"."subject_id" = sp.slug
+          AND "cm"."subject_id" = "sp"."id"::text
           AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
       )`,
       { subprofileSubjectType: SubprofilePublicReadService.SUBJECT_TYPE },
@@ -183,19 +186,42 @@ export class SubprofilePublicReadService {
 
   // Post-fetch variant for the `find`-based public reads (`listForProfile`,
   // `listPublicHandles`) that hold rows rather than a query builder. Returns
-  // the subset whose slug carries no takedown.
-  private async dropModeratedSubprofiles<Row extends { slug: string }>(
+  // the subset whose id carries no takedown.
+  private async dropModeratedSubprofiles<Row extends { id: string }>(
     rows: Row[],
   ): Promise<Row[]> {
     if (!rows.length) return rows;
     const states = await this.contentModeration.statesFor(
       SubprofilePublicReadService.SUBJECT_TYPE,
-      rows.map((row) => row.slug),
+      rows.map((row) => row.id),
     );
     return rows.filter((row) => {
-      const state = states.get(row.slug);
+      const state = states.get(row.id);
       return !state || (!state.hidden && !state.removed);
     });
+  }
+
+  // Batched `private` gate for a list read: keeps every non-private row, and a
+  // private one only when `viewerId` holds a `subprofile_members` row for it
+  // (creator or co-owner), the owner rule `assertPublicViewVisible` applies to
+  // a single persona. One roster query, and only when a private row is present.
+  private async dropPrivateUnlessViewerOwns<
+    Row extends { id: string; visibility: SubprofileVisibility },
+  >(rows: Row[], viewerId: string): Promise<Row[]> {
+    const privateIds = rows
+      .filter((row) => row.visibility === SubprofileVisibility.Private)
+      .map((row) => row.id);
+    if (!privateIds.length) return rows;
+    const ownedRows = await this.members.find({
+      where: { subprofileId: In(privateIds), userId: viewerId },
+      select: { subprofileId: true },
+    });
+    const ownedPrivateIds = new Set(ownedRows.map((row) => row.subprofileId));
+    return rows.filter(
+      (row) =>
+        row.visibility !== SubprofileVisibility.Private ||
+        ownedPrivateIds.has(row.id),
+    );
   }
 
   // Linked + published personas nested under a member's main profile.
@@ -246,9 +272,18 @@ export class SubprofilePublicReadService {
           order: { position: 'ASC', createdAt: 'ASC' },
         })
       : [];
+    // The visibility rule the single-persona read applies
+    // (`assertPublicViewVisible`), batched. This route sits behind
+    // `ActiveMemberGuard`, so every caller already clears the members-only
+    // wall a `network` persona (and every linked one) sets. A `private`
+    // persona lists for its own owners alone.
+    const viewableSps = await this.dropPrivateUnlessViewerOwns(
+      linkedSps,
+      viewerId,
+    );
     // Drop any persona under a moderator takedown before it renders nested on
     // the profile.
-    const visibleSps = await this.dropModeratedSubprofiles(linkedSps);
+    const visibleSps = await this.dropModeratedSubprofiles(viewableSps);
     // A block by the persona's CREATOR severs it here too, and the check above
     // only covers the profile being viewed. A co-owned persona lists on every
     // co-owner's profile, so a creator who blocked this viewer still reached
@@ -403,9 +438,14 @@ export class SubprofilePublicReadService {
   // `buildPublicView` below decides, per the Shared Contract rule order,
   // whether this viewer may see it at all.
   async getByHandle(
-    handle: string,
+    requestedHandle: string,
     viewer: CurrentUserData | undefined,
   ): Promise<SubprofilePublicView> {
+    // The handle namespace is case-folded (`normalizeHandle`: trimmed and
+    // lowercased), and every stored persona handle is in that form. The route
+    // param arrives as typed, so `/p/MsVelvet` is folded here before any
+    // lookup, including the reclaim-ledger lookup behind PERSONA_MOVED.
+    const handle = normalizeHandle(requestedHandle);
     // The unique index on `handle` covers published rows only, so a draft may
     // hold the same name as a published persona; the published row wins. Two
     // explicit lookups say so directly, where an `ORDER BY status` would lean
@@ -863,11 +903,7 @@ export class SubprofilePublicReadService {
     // share. Owner-facing reads don't re-check this state (mirrors
     // `listMine`/`getOwned`), so the owner still sees + manages their
     // persona even under a takedown.
-    const moderation = await this.contentModeration.stateFor(
-      SubprofilePublicReadService.SUBJECT_TYPE,
-      sp.slug,
-    );
-    if (moderation.hidden || moderation.removed) {
+    if (await isSubprofileUnderTakedown(this.contentModeration, sp.id)) {
       throw new NotFoundException('Subprofile not found');
     }
     // Never surface the persona of someone the viewer has blocked (either
@@ -1219,9 +1255,9 @@ export class SubprofilePublicReadService {
         // (Personas redesign Phase 1b).
         removedAt: IsNull(),
       },
-      // `slug` is selected purely so the takedown filter below can key on it —
-      // it is not emitted in the sitemap payload.
-      select: { handle: true, updatedAt: true, slug: true },
+      // `id` is selected purely so the takedown filter below can key on it. It
+      // is not emitted in the sitemap payload.
+      select: { handle: true, updatedAt: true, id: true },
       order: { updatedAt: 'DESC' },
       take: 5000,
     });
@@ -1486,7 +1522,7 @@ export class SubprofilePublicReadService {
       ),
     ];
 
-    const [profileRows, subprofileRows] = await Promise.all([
+    const [profileRows, fetchedSubprofileRows] = await Promise.all([
       profileUserIds.length
         ? this.profiles.find({ where: { userId: In(profileUserIds) } })
         : Promise.resolve([]),
@@ -1494,6 +1530,11 @@ export class SubprofilePublicReadService {
         ? this.subprofiles.find({ where: { id: In(subprofileIds) } })
         : Promise.resolve([]),
     ]);
+    // A persona under a moderator takedown is withheld here like on every
+    // other public read, so it is never credited by name. One batched lookup.
+    const subprofileRows = await this.dropModeratedSubprofiles(
+      fetchedSubprofileRows,
+    );
 
     const profileByUserId = new Map(
       profileRows.map((profile) => [profile.userId, profile]),

@@ -244,6 +244,11 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.Magazine,
   [NotificationType.MagazinePiecePublished]:
     NotificationPreferenceCategory.Magazine,
+  // ENG-462, the pitch verdict. Same category as the desk's other writer
+  // signals beside it: a writer who silences "the magazine" means the pitch
+  // outcome too.
+  [NotificationType.MagazinePitchPassed]:
+    NotificationPreferenceCategory.Magazine,
 };
 
 /**
@@ -399,6 +404,15 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.ListingReview,
     NotificationType.ListingClaimApproved,
     NotificationType.ListingClaimDeclined,
+    // PRD-433. The fate of a business listing the member suggested, the
+    // suggester's twin of `ListingApproved`. It replaced a DM the member could
+    // not have turned off either, it arrives once per moderator decision, and
+    // with no email the bell is the whole channel. Bell-only, like
+    // `ListingApproved`: none of the four is in the push switch.
+    NotificationType.ListingSuggestionLive,
+    NotificationType.ListingSuggestionNeedsInfo,
+    NotificationType.ListingSuggestionSentBack,
+    NotificationType.ListingSuggestionRemoved,
     NotificationType.WriterApplicationApproved,
     NotificationType.WriterApplicationDeclined,
     NotificationType.VolunteerApplicationDecided,

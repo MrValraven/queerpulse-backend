@@ -15,7 +15,10 @@ import {
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
-import {} from '../auth/decorators/current-user.decorator';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { HousingService } from '../housing/housing.service';
 import { CreateCoopDto } from '../housing/dto/create-coop.dto';
@@ -81,8 +84,11 @@ export class AdminHousingController {
   @ApiNotFoundResponse({ description: 'Co-op not found.' })
   @Delete('coops/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deleteCoop(@Param('id', ParseUUIDPipe) id: string) {
-    return this.housing.deleteCoop(id);
+  deleteCoop(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.housing.deleteCoop(id, user.userId);
   }
 
   @ApiOperation({
@@ -115,8 +121,9 @@ export class AdminHousingController {
   triageJoinRequest(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: TriageHousingJoinRequestDto,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.housing.triageJoinRequest(id, dto.action);
+    return this.housing.triageJoinRequest(id, dto.action, user.userId);
   }
 
   // Operator-identity-verified marker: set through the existing PATCH coops/:id

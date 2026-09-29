@@ -6,9 +6,11 @@ import { EventBan } from '../events/entities/event-ban.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
 import { EventsModule } from '../events/events.module';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { MessagingModule } from '../messaging/messaging.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { OfficialMessagesModule } from '../official-messages/official-messages.module';
+import { ReportsModule } from '../reports/reports.module';
 import { Block } from '../social/entities/block.entity';
 import { SocialModule } from '../social/social.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -62,6 +64,8 @@ import { GoTogetherMatchingService } from './go-together-matching.service';
       User,
       Block,
       Connection,
+      // Read-only: whether a member still holds a seat in their group's chat.
+      ConversationParticipant,
     ]),
     UsersModule,
     EventsModule,
@@ -70,6 +74,8 @@ import { GoTogetherMatchingService } from './go-together-matching.service';
     ConnectionsModule,
     MessagingModule,
     OfficialMessagesModule,
+    // `ReportsService` for the per-member report on the group sheet (PRD-421).
+    ReportsModule,
     VerificationModule,
   ],
   controllers: [

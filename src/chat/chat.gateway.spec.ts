@@ -19,10 +19,8 @@ import { ConnectionsService } from '../connections/connections.service';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { IdentitiesService } from '../identities/identities.service';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
-import {
-  Conversation,
-  ConversationKind,
-} from '../messaging/entities/conversation.entity';
+import { ConversationKind } from '../messaging/entities/conversation.entity';
+import { Message } from '../messaging/entities/message.entity';
 import { MessagingService } from '../messaging/messaging.service';
 import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -115,6 +113,10 @@ describe('ChatGateway', () => {
     manager: { findOne: jest.Mock };
   };
   let blockFilter: { blockedUserIds: jest.Mock };
+  let messagingCore: {
+    toMessageResponses: jest.Mock;
+    loadGroupJoinFlooredUserIds: jest.Mock;
+  };
   let platformSettings: { get: jest.Mock };
   let configService: { getOrThrow: jest.Mock };
   let metrics: {
@@ -184,17 +186,15 @@ describe('ChatGateway', () => {
     refreshTokens = {
       exists: (jest.fn() as SessionExistsMock).mockResolvedValue(true),
     };
-    // Empty by default — most tests never trigger MESSAGE_CREATED's
+    // Empty by default: most tests never trigger MESSAGE_CREATED's
     // per-recipient fan-out, and the ones that do set this explicitly.
-    // `manager.findOne` backs the PRD-354 conversation-kind lookup
-    // `fanOutConversationMessage` runs off the SAME repository's manager
-    // (no separate `Conversation` repository injected). Default `null`
-    // (unresolvable conversation) so it's always treated as non-GROUP,
-    // matching the exact pre-PRD-354 fan-out behaviour for every existing
-    // test below that doesn't care about the block filter.
-    //
-    // Task 13e: that `null` default is now an ordinary direct thread, which
-    // the fan-out reads as non-GROUP all the same. The relay refuses to
+    // `manager.findOne` backs `loadLiveThreadAudience`, the conversation
+    // lookup (kind and `isOfficial`) that typing and every relay run off the
+    // SAME repository's manager (no separate `Conversation` repository
+    // injected), and the edited-message lookups of the `message:updated`
+    // relays. The default resolves an ordinary direct thread, which reads as
+    // personal and non-GROUP, so every test below that does not care about
+    // the block filter gets a plain one-to-one relay. The relay refuses to
     // broadcast for a conversation it cannot resolve.
     conversationParticipants = {
       find: jest.fn().mockResolvedValue([]),
@@ -207,6 +207,12 @@ describe('ChatGateway', () => {
     };
     // PRD-354: nobody blocked by default.
     blockFilter = { blockedUserIds: jest.fn().mockResolvedValue(new Set()) };
+    // PRD-400: no member's join floor covers anything by default, so a group
+    // relay broadcasts to the whole room unless a test seats a new joiner.
+    messagingCore = {
+      toMessageResponses: jest.fn(),
+      loadGroupJoinFlooredUserIds: jest.fn().mockResolvedValue(new Set()),
+    };
     platformSettings = {
       get: jest.fn().mockResolvedValue({
         lockdownEnabled: false,
@@ -226,10 +232,7 @@ describe('ChatGateway', () => {
         ChatGateway,
         PresenceService,
         // Task 13e: renders a mailbox thread's message frames per viewer.
-        {
-          provide: MessagingCoreService,
-          useValue: { toMessageResponses: jest.fn() },
-        },
+        { provide: MessagingCoreService, useValue: messagingCore },
         { provide: JwtService, useValue: { verifyAsync } },
         { provide: ConfigService, useValue: configService },
         { provide: MessagingService, useValue: messaging },
@@ -942,6 +945,104 @@ describe('ChatGateway', () => {
         isTyping: true,
       });
     });
+
+    // ENG-402: PRD-354 hides a blocked group member's messages from the
+    // thread, so their typing must stay hidden as well, in both directions.
+    it('keeps group typing between two members blocked either way from reaching each other', async () => {
+      conversationParticipants.manager.findOne.mockResolvedValue({
+        kind: ConversationKind.Group,
+        isOfficial: false,
+      });
+      conversationParticipants.find.mockResolvedValue([
+        { userId: 'blocker', identityId: 'identity-blocker', leftAt: null },
+        { userId: 'blocked', identityId: 'identity-blocked', leftAt: null },
+        { userId: 'bystander', identityId: 'identity-bystander', leftAt: null },
+      ]);
+      const blockPairs: Array<[string, string]> = [['blocker', 'blocked']];
+      blockFilter.blockedUserIds.mockImplementation(
+        (actorId: string, candidateIds: string[]) =>
+          Promise.resolve(
+            new Set(
+              candidateIds.filter((candidateId) =>
+                blockPairs.some(
+                  ([blockerId, blockedId]) =>
+                    (blockerId === actorId && blockedId === candidateId) ||
+                    (blockerId === candidateId && blockedId === actorId),
+                ),
+              ),
+            ),
+          ),
+      );
+      const typeAs = async (typistId: string) => {
+        const typingEmit = jest.fn();
+        const except = jest.fn().mockReturnValue({ emit: typingEmit });
+        const client = makeClient({
+          data: { userId: typistId },
+          rooms: new Set(['c1']),
+          to: jest.fn().mockReturnValue({ except }),
+        });
+        await gateway.handleTyping(client as never, {
+          conversationId: 'c1',
+          isTyping: true,
+        });
+        return { except, typingEmit };
+      };
+
+      const blockedTyping = await typeAs('blocked');
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('blocked', [
+        'blocker',
+        'blocked',
+        'bystander',
+      ]);
+      expect(blockedTyping.except).toHaveBeenCalledWith([
+        'user:blocked',
+        'user:blocker',
+      ]);
+      expect(blockedTyping.typingEmit).toHaveBeenCalledWith('typing', {
+        conversationId: 'c1',
+        userId: 'blocked',
+        isTyping: true,
+      });
+
+      const blockerTyping = await typeAs('blocker');
+      expect(blockerTyping.except).toHaveBeenCalledWith([
+        'user:blocker',
+        'user:blocked',
+      ]);
+
+      // A member with no block on either side still reaches everyone.
+      const bystanderTyping = await typeAs('bystander');
+      expect(bystanderTyping.except).toHaveBeenCalledWith(['user:bystander']);
+    });
+
+    // Fix round 1: the typing block lookup has the message fan-out's scope,
+    // groups alone, so a direct thread's typing frame costs no extra query.
+    it('never runs the block filter for typing in a direct thread', async () => {
+      conversationParticipants.find.mockResolvedValue([
+        { userId: 'u1', identityId: 'identity-u1', leftAt: null },
+        { userId: 'u2', identityId: 'identity-u2', leftAt: null },
+      ]);
+      const typingEmit = jest.fn();
+      const except = jest.fn().mockReturnValue({ emit: typingEmit });
+      const client = makeClient({
+        data: { userId: 'u1' },
+        rooms: new Set(['c1']),
+        to: jest.fn().mockReturnValue({ except }),
+      });
+
+      await gateway.handleTyping(client as never, {
+        conversationId: 'c1',
+        isTyping: true,
+      });
+
+      expect(blockFilter.blockedUserIds).not.toHaveBeenCalled();
+      expect(except).toHaveBeenCalledWith(['user:u1']);
+      expect(typingEmit).toHaveBeenCalledWith('typing', {
+        conversationId: 'c1',
+        userId: 'u1',
+        isTyping: true,
+      });
+    });
   });
 
   describe('handleRead', () => {
@@ -1231,12 +1332,14 @@ describe('ChatGateway', () => {
     // per-recipient fan-out they got no badge bump, no inbox row, and no
     // in-app signal until a remount/reload.
     describe('ENG-160 conversation:message fan-out', () => {
-      // The fan-out is fire-and-forget off the sync `handleMessageCreated`
-      // handler and now chains up to three internal `await`s (participants,
-      // the PRD-354 conversation-kind lookup, and, for a GROUP, the block
-      // filter), so a fixed count of `await Promise.resolve()` ticks is
-      // fragile; a macrotask flush reliably drains every pending microtask
-      // ahead of it regardless of how many internal awaits it has.
+      // The fan-out runs behind the conversation's relay queue that
+      // `handleMessageCreated` hands back, after several internal `await`s
+      // (the `loadLiveThreadAudience` conversation lookup, the room emit,
+      // and then the join floor and block filter reads for a GROUP or its
+      // own seat read for a direct thread), so a fixed count of
+      // `await Promise.resolve()` ticks is fragile; a macrotask flush
+      // reliably drains every pending microtask ahead of it regardless of
+      // how many internal awaits it has.
       const flushFanOut = () => new Promise((resolve) => setImmediate(resolve));
 
       it('signals every other active participant on their user room, not the sender', async () => {
@@ -1314,6 +1417,10 @@ describe('ChatGateway', () => {
         blockFilter.blockedUserIds.mockResolvedValue(
           new Set(['blocked-member']),
         );
+        // ENG-402: the group room emit now withholds the frame as well, so
+        // the room broadcast chains `.except(...)`.
+        const roomExcept = jest.fn().mockReturnValue({ emit: roomEmit });
+        namespaceTo.mockReturnValue({ emit: roomEmit, except: roomExcept });
 
         await gateway.handleMessageCreated({
           conversationId: 'g1',
@@ -1322,15 +1429,16 @@ describe('ChatGateway', () => {
         });
         await flushFanOut();
 
-        expect(conversationParticipants.manager.findOne).toHaveBeenCalledWith(
-          Conversation,
-          { where: { id: 'g1' }, select: { kind: true } },
-        );
+        // One seat read and one blocked-set lookup serve the room emit and
+        // the fan-out alike.
+        expect(conversationParticipants.find).toHaveBeenCalledTimes(1);
+        expect(blockFilter.blockedUserIds).toHaveBeenCalledTimes(1);
         expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('sender', [
           'sender',
           'blocked-member',
           'ordinary-member',
         ]);
+        expect(roomExcept).toHaveBeenCalledWith(['user:blocked-member']);
         expect(namespaceTo).not.toHaveBeenCalledWith('user:blocked-member');
         expect(namespaceTo).toHaveBeenCalledWith('user:ordinary-member');
       });
@@ -1367,6 +1475,354 @@ describe('ChatGateway', () => {
           }),
         ).not.toThrow();
         await flushFanOut();
+      });
+    });
+
+    // PRD-400 (T10) and ENG-402: a group's live message frames are withheld
+    // per member. A member whose join floor covers the quoted parent gets the
+    // unavailable quote on their own joined sockets, a member whose floor
+    // covers the edited message gets no edit, and a member blocked either
+    // way with the sender (PRD-354) gets no frame at all.
+    describe('group frames withheld per member', () => {
+      interface RecordedBroadcast {
+        room: string;
+        exceptedRooms: string[];
+        event: string;
+        frame: unknown;
+      }
+      interface FakeJoinedSocket {
+        data: { userId: string };
+        emit: jest.Mock;
+      }
+      const quotedParentId = 'parent-before-join';
+      const replyResponse = {
+        id: 'm1',
+        conversationId: 'g1',
+        body: 'Count me in for Saturday',
+        replyTo: {
+          id: quotedParentId,
+          snippet: 'Posted before the newest member arrived',
+          senderName: 'Alex Rivera',
+          senderIsFormerMember: false,
+          deleted: false,
+          kind: 'image',
+          thumbnailUrl: 'https://cdn.example/parent-thumb.jpg',
+          fileName: null,
+        },
+      };
+      // The missing-parent quote `withJoinFlooredReplyQuote` renders, the
+      // same one the REST read serves a join-floored member.
+      const withheldQuote = {
+        id: quotedParentId,
+        snippet: '',
+        senderName: 'Someone',
+        senderIsFormerMember: false,
+        deleted: true,
+        kind: 'user',
+        thumbnailUrl: null,
+        fileName: null,
+      };
+      const withheldReplyResponse = {
+        ...replyResponse,
+        replyTo: withheldQuote,
+      };
+      const seatUserIds = ['sender', 'joiner', 'blocker', 'bystander'];
+      const flushRelay = () => new Promise((resolve) => setImmediate(resolve));
+      let broadcasts: RecordedBroadcast[];
+      let socketByUserId: Map<string, FakeJoinedSocket>;
+      let blockPairs: Array<[string, string]>;
+
+      // The one broadcast of `event` to the group room, asserted unique.
+      const roomBroadcastOf = (event: string): RecordedBroadcast => {
+        const roomBroadcasts = broadcasts.filter(
+          (broadcast) => broadcast.room === 'g1' && broadcast.event === event,
+        );
+        expect(roomBroadcasts).toHaveLength(1);
+        return roomBroadcasts[0]!;
+      };
+      const userRoomFrameOf = (userId: string, event: string) =>
+        broadcasts.find(
+          (broadcast) =>
+            broadcast.room === `user:${userId}` && broadcast.event === event,
+        )?.frame;
+      const sendReply = async () => {
+        await gateway.handleMessageCreated({
+          conversationId: 'g1',
+          message: { senderId: 'sender', replyToId: quotedParentId } as never,
+          response: replyResponse as never,
+        });
+        await flushRelay();
+      };
+      const editReply = async () => {
+        await gateway.handleMessageUpdated({
+          conversationId: 'g1',
+          message: replyResponse as never,
+        });
+        await flushRelay();
+      };
+
+      beforeEach(() => {
+        broadcasts = [];
+        namespaceTo.mockImplementation((room: string) => {
+          const emitWith =
+            (exceptedRooms: string[]) => (event: string, frame: unknown) => {
+              broadcasts.push({ room, exceptedRooms, event, frame });
+            };
+          return {
+            emit: emitWith([]),
+            except: (exceptedRooms: string[]) => ({
+              emit: emitWith(exceptedRooms),
+            }),
+          };
+        });
+        conversationParticipants.manager.findOne.mockImplementation(
+          (entity: unknown) =>
+            Promise.resolve(
+              entity === Message
+                ? { id: 'm1', senderId: 'sender' }
+                : { id: 'g1', kind: ConversationKind.Group, isOfficial: false },
+            ),
+        );
+        conversationParticipants.find.mockResolvedValue(
+          seatUserIds.map((userId) => ({ userId, leftAt: null })),
+        );
+        socketByUserId = new Map(
+          seatUserIds.map((userId): [string, FakeJoinedSocket] => [
+            userId,
+            { data: { userId }, emit: jest.fn() },
+          ]),
+        );
+        fetchSockets.mockResolvedValue([...socketByUserId.values()]);
+        blockPairs = [];
+        blockFilter.blockedUserIds.mockImplementation(
+          (actorId: string, candidateIds: string[]) =>
+            Promise.resolve(
+              new Set(
+                candidateIds.filter((candidateId) =>
+                  blockPairs.some(
+                    ([blockerId, blockedId]) =>
+                      (blockerId === actorId && blockedId === candidateId) ||
+                      (blockerId === candidateId && blockedId === actorId),
+                  ),
+                ),
+              ),
+            ),
+        );
+      });
+
+      describe('join floor (PRD-400)', () => {
+        beforeEach(() => {
+          messagingCore.loadGroupJoinFlooredUserIds.mockResolvedValue(
+            new Set(['joiner']),
+          );
+        });
+
+        it('sends a new joiner message:new with the withheld quote on their joined sockets alone', async () => {
+          await sendReply();
+
+          expect(
+            messagingCore.loadGroupJoinFlooredUserIds,
+          ).toHaveBeenCalledWith('g1', quotedParentId);
+          const roomBroadcast = roomBroadcastOf('message:new');
+          expect(roomBroadcast.exceptedRooms).toEqual(['user:joiner']);
+          expect(roomBroadcast.frame).toEqual({
+            conversationId: 'g1',
+            message: replyResponse,
+          });
+          expect(socketByUserId.get('joiner')!.emit).toHaveBeenCalledWith(
+            'message:new',
+            { conversationId: 'g1', message: withheldReplyResponse },
+          );
+          for (const userId of ['sender', 'blocker', 'bystander']) {
+            expect(socketByUserId.get(userId)!.emit).not.toHaveBeenCalled();
+          }
+        });
+
+        it('sends a new joiner conversation:message with the withheld quote', async () => {
+          await sendReply();
+
+          expect(userRoomFrameOf('joiner', 'conversation:message')).toEqual({
+            conversationId: 'g1',
+            message: withheldReplyResponse,
+          });
+          expect(userRoomFrameOf('bystander', 'conversation:message')).toEqual({
+            conversationId: 'g1',
+            message: replyResponse,
+          });
+          expect(
+            userRoomFrameOf('sender', 'conversation:message'),
+          ).toBeUndefined();
+        });
+
+        it('withholds message:updated from a member whose floor covers the edited message, and sends the withheld quote to one whose floor covers the parent alone', async () => {
+          // `blocker` joined after the edited reply was posted, so its floor
+          // covers both messages. `joiner` joined between the two.
+          messagingCore.loadGroupJoinFlooredUserIds.mockImplementation(
+            (_conversationId: string, messageId: string) =>
+              Promise.resolve(
+                messageId === 'm1'
+                  ? new Set(['blocker'])
+                  : new Set(['joiner', 'blocker']),
+              ),
+          );
+
+          await editReply();
+
+          const roomBroadcast = roomBroadcastOf('message:updated');
+          expect([...roomBroadcast.exceptedRooms].sort()).toEqual([
+            'user:blocker',
+            'user:joiner',
+          ]);
+          expect(roomBroadcast.frame).toEqual({
+            conversationId: 'g1',
+            message: replyResponse,
+          });
+          expect(socketByUserId.get('joiner')!.emit).toHaveBeenCalledWith(
+            'message:updated',
+            { conversationId: 'g1', message: withheldReplyResponse },
+          );
+          expect(socketByUserId.get('blocker')!.emit).not.toHaveBeenCalled();
+          expect(socketByUserId.get('bystander')!.emit).not.toHaveBeenCalled();
+        });
+      });
+
+      describe('blocks (ENG-402, PRD-354)', () => {
+        it.each<[string, Array<[string, string]>]>([
+          ['the member blocked the sender', [['blocker', 'sender']]],
+          ['the sender blocked the member', [['sender', 'blocker']]],
+        ])(
+          'withholds message:new and conversation:message when %s',
+          async (_direction, pairs) => {
+            blockPairs = pairs;
+
+            await sendReply();
+
+            expect(blockFilter.blockedUserIds).toHaveBeenCalledTimes(1);
+            expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(
+              'sender',
+              seatUserIds,
+            );
+            const roomBroadcast = roomBroadcastOf('message:new');
+            expect(roomBroadcast.exceptedRooms).toEqual(['user:blocker']);
+            expect(
+              userRoomFrameOf('blocker', 'conversation:message'),
+            ).toBeUndefined();
+            expect(
+              userRoomFrameOf('bystander', 'conversation:message'),
+            ).toEqual({ conversationId: 'g1', message: replyResponse });
+          },
+        );
+
+        it('sends a blocked member who is also join-floored no frame at all', async () => {
+          blockPairs = [['blocker', 'sender']];
+          messagingCore.loadGroupJoinFlooredUserIds.mockResolvedValue(
+            new Set(['joiner', 'blocker']),
+          );
+
+          await sendReply();
+
+          const roomBroadcast = roomBroadcastOf('message:new');
+          expect([...roomBroadcast.exceptedRooms].sort()).toEqual([
+            'user:blocker',
+            'user:joiner',
+          ]);
+          expect(socketByUserId.get('blocker')!.emit).not.toHaveBeenCalled();
+          expect(socketByUserId.get('joiner')!.emit).toHaveBeenCalledWith(
+            'message:new',
+            { conversationId: 'g1', message: withheldReplyResponse },
+          );
+          expect(
+            userRoomFrameOf('blocker', 'conversation:message'),
+          ).toBeUndefined();
+        });
+
+        it('withholds message:updated from a member blocked either way with the author', async () => {
+          blockPairs = [['blocker', 'sender']];
+          messagingCore.loadGroupJoinFlooredUserIds.mockImplementation(
+            (_conversationId: string, messageId: string) =>
+              Promise.resolve(
+                messageId === 'm1' ? new Set() : new Set(['blocker']),
+              ),
+          );
+
+          await editReply();
+
+          expect(conversationParticipants.manager.findOne).toHaveBeenCalledWith(
+            Message,
+            { where: { id: 'm1' }, select: { id: true, senderId: true } },
+          );
+          expect(blockFilter.blockedUserIds).toHaveBeenCalledTimes(1);
+          expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(
+            'sender',
+            seatUserIds,
+          );
+          const roomBroadcast = roomBroadcastOf('message:updated');
+          expect(roomBroadcast.exceptedRooms).toEqual(['user:blocker']);
+          expect(socketByUserId.get('blocker')!.emit).not.toHaveBeenCalled();
+        });
+
+        it('broadcasts to the whole room when nobody is blocked', async () => {
+          await sendReply();
+          await editReply();
+
+          const newBroadcast = roomBroadcastOf('message:new');
+          const updatedBroadcast = roomBroadcastOf('message:updated');
+          expect(newBroadcast.exceptedRooms).toEqual([]);
+          expect(updatedBroadcast.exceptedRooms).toEqual([]);
+        });
+
+        it('skips the block lookup for a sender erased mid-flight', async () => {
+          await gateway.handleMessageCreated({
+            conversationId: 'g1',
+            message: { senderId: null } as never,
+            response: { id: 'm1', conversationId: 'g1' } as never,
+          });
+          await flushRelay();
+
+          expect(blockFilter.blockedUserIds).not.toHaveBeenCalled();
+          expect(roomBroadcastOf('message:new').exceptedRooms).toEqual([]);
+        });
+
+        it('delivers no message:new when the block lookup fails', async () => {
+          blockFilter.blockedUserIds.mockRejectedValue(new Error('db down'));
+
+          await sendReply();
+
+          expect(broadcasts).toEqual([]);
+          for (const socket of socketByUserId.values()) {
+            expect(socket.emit).not.toHaveBeenCalled();
+          }
+        });
+
+        it('keeps a direct thread free of the block lookup on message:updated', async () => {
+          conversationParticipants.manager.findOne.mockResolvedValue({
+            id: 'c1',
+            kind: ConversationKind.Direct,
+            isOfficial: false,
+          });
+          conversationParticipants.find.mockResolvedValue([
+            { userId: 'sender', identityId: 'identity-sender', leftAt: null },
+            { userId: 'friend', identityId: 'identity-friend', leftAt: null },
+          ]);
+
+          await gateway.handleMessageUpdated({
+            conversationId: 'c1',
+            message: { id: 'm1', conversationId: 'c1', replyTo: null } as never,
+          });
+          await flushRelay();
+
+          expect(blockFilter.blockedUserIds).not.toHaveBeenCalled();
+          expect(
+            conversationParticipants.manager.findOne,
+          ).not.toHaveBeenCalledWith(Message, expect.anything());
+          expect(
+            broadcasts.filter(
+              (broadcast) => broadcast.event === 'message:updated',
+            ),
+          ).toEqual([
+            expect.objectContaining({ room: 'c1', exceptedRooms: [] }),
+          ]);
+        });
       });
     });
 
@@ -1449,6 +1905,14 @@ describe('ChatGateway', () => {
           notification: { id: 'n1' },
         } as never),
       ).not.toThrow();
+    });
+
+    it('pushes an empty notification:changed to the member user room on NOTIFICATION_STATE_CHANGED', () => {
+      gateway.handleNotificationStateChanged({ userId: 'u9' });
+      // Every tab and device the member has open refetches its own bell, so
+      // the frame carries nothing beyond its name.
+      expect(namespaceTo).toHaveBeenCalledWith('user:u9');
+      expect(roomEmit).toHaveBeenCalledWith('notification:changed', {});
     });
 
     // ENG-207: a refusal returns as an ACK instead of a thrown exception; see

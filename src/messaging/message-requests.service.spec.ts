@@ -27,6 +27,7 @@ describe('MessageRequestsService.handleConnectionAccepted (PRD-340)', () => {
       {} as never, // BlockFilterService, unused by this listener
       {} as never, // IdentityMailboxSyncService, unused by this listener
       {} as never, // users repository, unused by this listener
+      {} as never, // MessagesService, unused by this listener
     );
   });
 
@@ -114,5 +115,128 @@ describe('MessageRequestsService.handleConnectionAccepted (PRD-340)', () => {
       replyBody: '',
     });
     expect(core.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * ENG-407: the connected branch of `messageRequest` ("Say hello" to a member
+ * you are already connected with) posts through the ordinary member send path,
+ * `MessagesService.sendMessageWithOutcome`, carrying the caller's
+ * `clientMessageId`. That path dedups on `(conversationId, clientMessageId)`
+ * and runs the `@`-mention fan-out, so a timed-out request the member retries
+ * lands one message in the DM, and a mention in it notifies.
+ */
+describe('MessageRequestsService.messageRequest connected branch (ENG-407)', () => {
+  const clientMessageId = '5f0c2a8e-3b1d-4c6f-9a7e-2d4b6c8e0f12';
+  const storedMessage = { id: 'm-stored', conversationId: 'conv1', body: 'hi' };
+  let service: MessageRequestsService;
+  let core: {
+    getOrCreateConversation: jest.Mock;
+    postMessage: jest.Mock;
+  };
+  let connections: { areConnected: jest.Mock; requestConnection: jest.Mock };
+  let messagesService: { sendMessageWithOutcome: jest.Mock };
+
+  beforeEach(() => {
+    core = {
+      getOrCreateConversation: jest.fn().mockResolvedValue({
+        conversation: { id: 'conv1' },
+        created: false,
+      }),
+      postMessage: jest.fn(),
+    };
+    connections = {
+      areConnected: jest.fn().mockResolvedValue(true),
+      requestConnection: jest.fn(),
+    };
+    // The real send path stores the first write and answers every replay of
+    // the same key with that stored row, flagged `isNew: false`.
+    messagesService = {
+      sendMessageWithOutcome: jest
+        .fn()
+        .mockResolvedValueOnce({ response: storedMessage, isNew: true })
+        .mockResolvedValue({ response: storedMessage, isNew: false }),
+    };
+    service = new MessageRequestsService(
+      {
+        findOne: jest.fn().mockResolvedValue({ userId: 'them', slug: 'them' }),
+      } as never,
+      core as never,
+      connections as never,
+      { isBlockedEitherWay: jest.fn().mockResolvedValue(false) } as never,
+      {} as never, // IdentityMailboxSyncService, unused by this branch
+      {} as never, // users repository, unused by this branch
+      messagesService as never,
+    );
+  });
+
+  it('sends through the member send path with the caller clientMessageId', async () => {
+    const result = await service.messageRequest(
+      'me',
+      'them',
+      'hi',
+      clientMessageId,
+    );
+
+    expect(messagesService.sendMessageWithOutcome).toHaveBeenCalledWith(
+      'conv1',
+      'me',
+      'hi',
+      undefined,
+      clientMessageId,
+    );
+    // The bare core write skips the mention fan-out and the send gates.
+    expect(core.postMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      conversationId: 'conv1',
+      message: storedMessage,
+      connectionRequestId: null,
+    });
+  });
+
+  it('a retried request with the same clientMessageId returns the stored message', async () => {
+    const first = await service.messageRequest(
+      'me',
+      'them',
+      'hi',
+      clientMessageId,
+    );
+    const replay = await service.messageRequest(
+      'me',
+      'them',
+      'hi',
+      clientMessageId,
+    );
+
+    expect(replay.message?.id).toBe(first.message?.id);
+    expect(replay.conversationId).toBe(first.conversationId);
+    expect(messagesService.sendMessageWithOutcome).toHaveBeenCalledTimes(2);
+    for (const callNumber of [1, 2]) {
+      expect(messagesService.sendMessageWithOutcome).toHaveBeenNthCalledWith(
+        callNumber,
+        'conv1',
+        'me',
+        'hi',
+        undefined,
+        clientMessageId,
+      );
+    }
+    expect(core.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('the unconnected branch seeds a connection request and sends no message', async () => {
+    connections.areConnected.mockResolvedValue(false);
+    connections.requestConnection.mockResolvedValue({ id: 'conn-1' });
+
+    const result = await service.messageRequest(
+      'me',
+      'them',
+      'hi',
+      clientMessageId,
+    );
+
+    expect(result.connectionRequestId).toBe('conn-1');
+    expect(result.message).toBeNull();
+    expect(messagesService.sendMessageWithOutcome).not.toHaveBeenCalled();
   });
 });

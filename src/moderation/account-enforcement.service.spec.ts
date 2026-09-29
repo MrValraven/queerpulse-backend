@@ -2,6 +2,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { ACCOUNT_REINSTATED } from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { ModAuditService } from './mod-audit.service';
 import { ReportSubjectResolverService } from './report-subject-resolver.service';
@@ -38,6 +40,7 @@ describe('AccountEnforcementService', () => {
     getRepository: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
+  let emit: jest.Mock;
 
   const PROPOSING_MODERATOR_ID = 'mod-1';
   const TARGET_MEMBER_ID = 'member-1';
@@ -71,6 +74,7 @@ describe('AccountEnforcementService', () => {
       ),
     };
     writeAuditLog = jest.fn().mockResolvedValue(undefined);
+    emit = jest.fn();
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
@@ -107,7 +111,7 @@ describe('AccountEnforcementService', () => {
           provide: ReportSubjectResolverService,
           useValue: { resolve: jest.fn() },
         },
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: EventEmitter2, useValue: { emit } },
         {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
@@ -237,6 +241,131 @@ describe('AccountEnforcementService', () => {
       ).rejects.toThrow();
 
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+  });
+
+  // ENG-480: every row these writers leave names the member it landed on, so
+  // an appeal can find it and the admin member drawer lists it.
+  describe('audit rows carry the target member', () => {
+    it('restrictMember writes the member as the target and returns the row id', async () => {
+      writeAuditLog.mockResolvedValue('audit-restrict-1');
+
+      const result = await service.restrictMember(
+        TARGET_MEMBER_ID,
+        PROPOSING_MODERATOR_ID,
+        {
+          action: 'suspend',
+          duration: '7d',
+          reasonCode: 'harassment',
+          note: 'Repeat targeted harassment across several threads.',
+        },
+      );
+
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        null,
+        PROPOSING_MODERATOR_ID,
+        'suspend',
+        'harassment',
+        'Repeat targeted harassment across several threads.',
+        '7d',
+        manager,
+        TARGET_MEMBER_ID,
+      );
+      expect(result.auditLogId).toBe('audit-restrict-1');
+    });
+
+    it('liftSuspension writes the member as the target and retires the ban signal', async () => {
+      users.findOne.mockResolvedValue({
+        id: TARGET_MEMBER_ID,
+        role: UserRole.Member,
+        isSystem: false,
+        status: UserStatus.Suspended,
+      });
+
+      await service.liftSuspension(TARGET_MEMBER_ID, PROPOSING_MODERATOR_ID, {
+        reasonCode: 'other',
+        note: 'Lifted after review.',
+      } as never);
+
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        null,
+        PROPOSING_MODERATOR_ID,
+        'suspension_lifted',
+        'other',
+        'Lifted after review.',
+        undefined,
+        manager,
+        TARGET_MEMBER_ID,
+      );
+      // ENG-486: post-commit, so the ban-evasion listener deletes the signal
+      // that said this account was removed.
+      expect(emit).toHaveBeenCalledWith(
+        ACCOUNT_REINSTATED,
+        expect.objectContaining({
+          userId: TARGET_MEMBER_ID,
+          removalKind: RemovalKind.PlatformBan,
+          communityId: null,
+        }),
+      );
+    });
+
+    it('liftSuspension on a member who is not suspended writes nothing and emits nothing', async () => {
+      await service.liftSuspension(TARGET_MEMBER_ID, PROPOSING_MODERATOR_ID, {
+        reasonCode: 'other',
+      } as never);
+
+      expect(writeAuditLog).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('liftRestriction writes the member as the target', async () => {
+      users.findOne.mockResolvedValue({
+        id: TARGET_MEMBER_ID,
+        restricted: true,
+        restrictedUntil: null,
+      });
+
+      await service.liftRestriction(TARGET_MEMBER_ID, PROPOSING_MODERATOR_ID, {
+        reasonCode: 'other',
+        note: 'Restriction no longer needed.',
+      } as never);
+
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        null,
+        PROPOSING_MODERATOR_ID,
+        'restriction_lifted',
+        'other',
+        'Restriction no longer needed.',
+        undefined,
+        manager,
+        TARGET_MEMBER_ID,
+      );
+    });
+  });
+
+  describe('restoreSuspendedUser', () => {
+    it('restores a suspended member', async () => {
+      users.findOne.mockResolvedValue({
+        id: TARGET_MEMBER_ID,
+        status: UserStatus.Suspended,
+      });
+
+      await service.restoreSuspendedUser(manager as never, TARGET_MEMBER_ID);
+
+      expect(manager.update).toHaveBeenCalledWith(
+        User,
+        { id: TARGET_MEMBER_ID },
+        expect.objectContaining({
+          status: UserStatus.Active,
+          suspendedUntil: null,
+        }),
+      );
+    });
+
+    it('leaves a member who is not suspended alone', async () => {
+      await service.restoreSuspendedUser(manager as never, TARGET_MEMBER_ID);
+
+      expect(manager.update).not.toHaveBeenCalled();
     });
   });
 });

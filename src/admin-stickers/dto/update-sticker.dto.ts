@@ -36,6 +36,14 @@ export class StickerArtworkDto {
 export class UpdateStickerDto {
   @IsOptional() @IsString() @MinLength(1) @MaxLength(80) label?: string;
 
+  /** The Portuguese name. An explicit `null` clears it, so Portuguese
+   *  readers see `label` again; a missing field leaves it as it is. */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  labelPt?: string | null;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => StickerKeywordsDto)

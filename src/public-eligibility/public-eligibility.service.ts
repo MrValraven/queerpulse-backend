@@ -432,7 +432,9 @@ export class PublicEligibilityService {
    *   2. A forum POST of theirs on a thread somebody else started, excluding
    *      the opening post (`is_op`, which part 1 already accounts for, and
    *      which the old count double-paid: a thread row plus its OP row are
-   *      two units for one act).
+   *      two units for one act). `IS DISTINCT FROM` here too, as in part 4:
+   *      a thread whose starter erased their account has a NULL author
+   *      (ENG-494), and a reply there still went to another person.
    *   3. A community post of theirs in a community with a real audience
    *      (`COMMUNITY_AUDIENCE_FLOOR`). Communities do have a roster, so here
    *      the audience is a thing that can be counted directly.
@@ -468,7 +470,7 @@ export class PublicEligibilityService {
         .where('post.authorId = :userId', { userId })
         .andWhere('post.deletedAt IS NULL')
         .andWhere('post.isOp = false')
-        .andWhere('thread.authorId <> :userId', { userId })
+        .andWhere('thread.authorId IS DISTINCT FROM :userId', { userId })
         .getCount(),
       this.communityPosts
         .createQueryBuilder('post')

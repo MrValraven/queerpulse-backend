@@ -22,7 +22,7 @@ import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CreateArticleCommentDto } from './dto/create-article-comment.dto';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
@@ -72,7 +72,10 @@ import {
 } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
-import { DEFAULT_MAGAZINE_CURRENCY } from './magazine-money';
+import {
+  DEFAULT_MAGAZINE_CURRENCY,
+  splitCommissionFee,
+} from './magazine-money';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
 import { MagazinePiece, PieceStage } from './entities/magazine-piece.entity';
@@ -148,23 +151,20 @@ import { validateArticleBlocks } from './magazine-article-blocks.validation';
 import { sanitizeArticleBlocks } from './article-html-sanitizer';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import {
+  briefWithCommission,
   briefWithFiledWords,
   validatePieceBrief,
   validatePieceCare,
 } from './piece-jsonb.validation';
 import { mapDeckSlidesToArticleBlocks } from './deck-to-article.mapper';
+import {
+  isLiveInstant,
+  magazineTodayIsoDate,
+  resolveIssuePublishInstant,
+} from './magazine-clock';
+import { notifyPieceWriter } from './magazine-writer-notifier';
+import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
 
-/** Today as a `date`-column-shaped ISO string (`YYYY-MM-DD`), UTC. */
-function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-/**
- * The magazine's editorial clock. Every issue is made in Lisbon and every
- * date the desk types (`MagazineIssue.publishedOn`, a bare `YYYY-MM-DD`) is
- * meant in Lisbon time, so the hour a scheduled issue goes live has to be
- * resolved in this zone rather than in UTC.
- */
 /**
  * The 409 `code` `convertDeckToArticle` answers for a live or scheduled deck.
  * The deck editor reads it to name the step that unblocks the conversion.
@@ -177,123 +177,6 @@ function deckConvertPublishedConflict(): ConflictException {
       'This deck is published. Unpublish it before converting it to an article.',
     code: DECK_CONVERT_PUBLISHED_CODE,
   });
-}
-
-const MAGAZINE_TIMEZONE = 'Europe/Lisbon';
-
-/**
- * The hour a scheduled issue goes live, in `MAGAZINE_TIMEZONE`. The ship copy
- * has always promised "everything publishes together at 09:00 on the issue
- * date" (PRD-126); this is that promise as a number.
- */
-const ISSUE_PUBLISH_HOUR = 9;
-
-/**
- * How far `instant` is ahead of UTC in `timeZone`, in milliseconds.
- *
- * Renders the instant in the target zone and reads the wall-clock fields back
- * as if they were UTC: the difference IS the offset. Same technique (and same
- * reason) as `localMinuteOfDay` in `notification-quiet-hours.ts` — the zone
- * database inside `Intl` already knows about DST, so this stays correct across
- * the changeover without a date library.
- */
-function zoneOffsetMs(instant: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).formatToParts(instant);
-  const partValue = (type: Intl.DateTimeFormatPartTypes): number =>
-    Number(parts.find((part) => part.type === type)?.value ?? '0');
-  const wallClockAsUtc = Date.UTC(
-    partValue('year'),
-    partValue('month') - 1,
-    partValue('day'),
-    // `hour12: false` renders midnight as `24` in some ICU versions; fold it
-    // back, exactly as `localMinuteOfDay` does.
-    partValue('hour') % 24,
-    partValue('minute'),
-    partValue('second'),
-  );
-  return wallClockAsUtc - instant.getTime();
-}
-
-/**
- * Whether a `publishedAt` means "live to readers RIGHT NOW". A `null` is a
- * draft and a FUTURE instant is a schedule; both are invisible to every public
- * read path, so neither counts as published.
- */
-function isLiveInstant(publishedAt: Date | null): boolean {
-  return publishedAt !== null && publishedAt.getTime() <= Date.now();
-}
-
-/**
- * Today as a `YYYY-MM-DD` calendar date in `MAGAZINE_TIMEZONE`, so an issue
- * date typed by the desk is compared against the desk's own day. `en-CA`
- * renders exactly `YYYY-MM-DD`, which is also how `MagazineIssue.publishedOn`
- * comes back off its Postgres `date` column, so the two compare as strings.
- */
-function magazineTodayIsoDate(now: Date): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: MAGAZINE_TIMEZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(now);
-}
-
-/**
- * PRD-126 — when a ship's pieces should actually go live.
- *
- * Ship copy promises the issue lands together at 09:00 on the issue date, but
- * `shipIssue` used to publish at the instant of the click: an editor who
- * shipped on Friday for a Monday issue put every article live on Friday while
- * the issue page itself stayed hidden until Monday.
- *
- * So: an issue dated today or in the past goes live NOW (the desk is catching
- * up, and holding it back would be a surprise), and a FUTURE issue date
- * resolves to 09:00 Europe/Lisbon on that date. A future `publishedAt` already
- * hides an article or deck from every public read path, so scheduling costs
- * nothing beyond this arithmetic: no cron, no second column.
- *
- * The offset is measured twice because 09:00 can sit on the far side of a DST
- * changeover from the first guess. Lisbon changes at 01:00, so one correction
- * pass is always enough.
- */
-function resolveIssuePublishInstant(
-  publishedOn: string,
-  shippedAt: Date,
-): Date {
-  // Compared as calendar dates in the magazine's own zone, never as instants:
-  // an issue dated TODAY ships now even when the click lands at 07:00, because
-  // an editor shipping today's issue means today, and holding it two hours for
-  // a clock they never chose would be the surprise this fix exists to remove.
-  if (publishedOn <= magazineTodayIsoDate(shippedAt)) {
-    return shippedAt;
-  }
-
-  const wallClockAsUtc = new Date(
-    `${publishedOn}T${String(ISSUE_PUBLISH_HOUR).padStart(2, '0')}:00:00Z`,
-  );
-  if (Number.isNaN(wallClockAsUtc.getTime())) {
-    return shippedAt;
-  }
-
-  const firstGuessOffsetMs = zoneOffsetMs(wallClockAsUtc, MAGAZINE_TIMEZONE);
-  let publishAt = new Date(wallClockAsUtc.getTime() - firstGuessOffsetMs);
-  const settledOffsetMs = zoneOffsetMs(publishAt, MAGAZINE_TIMEZONE);
-  if (settledOffsetMs !== firstGuessOffsetMs) {
-    publishAt = new Date(wallClockAsUtc.getTime() - settledOffsetMs);
-  }
-
-  // A future issue date's 09:00 is always ahead of the click, so this is a
-  // belt-and-braces floor: a ship may bring a piece forward, never backward.
-  return publishAt.getTime() > shippedAt.getTime() ? publishAt : shippedAt;
 }
 
 /**
@@ -313,15 +196,6 @@ const RECENT_ACTIVITY_LIMIT = 20;
 const ARCHIVE_SEARCH_LIMIT = 20;
 
 /**
- * How many members one `createForRecipients` call announces a shipped issue to
- * (CON-05). Matches the community post fan-out's chunk size: each call is
- * already batched internally into one multi-row INSERT plus two filter
- * queries, and chunking keeps a membership-wide announcement off a single
- * enormous statement.
- */
-const ISSUE_ANNOUNCE_CHUNK_SIZE = 500;
-
-/**
  * The human actors in an event trail, ready for `resolveActorDisplayNames`.
  * A `null` `actorId` is the entity's documented "System" sentinel (see
  * `MagazinePieceEvent.actorId`), which resolves to a label without a lookup.
@@ -330,6 +204,42 @@ function auditActorIds(events: MagazinePieceEvent[]): string[] {
   return events
     .map((event) => event.actorId)
     .filter((actorId): actorId is string => actorId !== null);
+}
+
+/**
+ * PRD-439: the brief a commission starts from when the desk typed an angle,
+ * stamped with today's desk date. `null` when the angle is blank, so the
+ * piece keeps its empty brief.
+ */
+function commissionBriefFor(
+  rawAngle: string | undefined,
+): MagazinePiece['brief'] {
+  const angle = rawAngle?.trim();
+  if (!angle) {
+    return null;
+  }
+  return briefWithCommission(null, {
+    angle,
+    commissionedOn: magazineTodayIsoDate(),
+  });
+}
+
+/**
+ * PRD-439: the commission fee split into the payment row's amount and text.
+ * `null` when the desk typed nothing that fills either, so no payment row is
+ * written.
+ */
+function commissionFeeParts(
+  rawFee: string | undefined,
+): { feeAmount: string | null; feeText: string | null } | null {
+  const fee = rawFee?.trim();
+  if (!fee) {
+    return null;
+  }
+  const feeParts = splitCommissionFee(fee);
+  return feeParts.feeAmount === null && feeParts.feeText === null
+    ? null
+    : feeParts;
 }
 
 /**
@@ -348,12 +258,13 @@ function auditActorIds(events: MagazinePieceEvent[]): string[] {
  *
  * `v-late` is the only non-trivial one:
  *   deriveLate         -> due_on IS NOT NULL AND stage <> 'ready'
- *                         AND due_on < today (UTC)
+ *                         AND due_on < today (Europe/Lisbon)
  *   waitingOn='writer' -> stage IN ('commissioned','drafting')
  *                         AND writer_id IS NOT NULL
- * The date compare is pinned to UTC (`(now() AT TIME ZONE 'UTC')::date`)
- * rather than `CURRENT_DATE`, which would follow the DB session's timezone
- * and could disagree with `deriveLate`'s `Date.UTC` arithmetic by a day.
+ * The date compare is pinned to the magazine's own zone
+ * (`(now() AT TIME ZONE 'Europe/Lisbon')::date`), the same calendar day
+ * `magazineTodayIsoDate` answers, so a due date typed by the desk turns late
+ * at Lisbon midnight whatever timezone the DB session runs in.
  */
 const SAVED_VIEW_SQL: Record<SavedViewId, string> = {
   // The `NOT IN ('ready', 'published')` half mirrors `deriveLate`, which
@@ -361,7 +272,7 @@ const SAVED_VIEW_SQL: Record<SavedViewId, string> = {
   // (PRD-120).
   'v-late':
     "((piece.dueOn IS NOT NULL AND piece.stage NOT IN ('ready', 'published') " +
-    "AND piece.dueOn < (now() AT TIME ZONE 'UTC')::date) " +
+    "AND piece.dueOn < (now() AT TIME ZONE 'Europe/Lisbon')::date) " +
     "OR (piece.stage IN ('commissioned', 'drafting') " +
     'AND piece.writerId IS NOT NULL))',
   // Real art state (Magazine Desk Phase 7, Task A3): a piece still needs
@@ -424,6 +335,7 @@ export class MagazinePieceService {
     private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
+    private readonly issueAnnouncer: MagazineIssueAnnouncerService,
   ) {}
 
   /**
@@ -782,8 +694,9 @@ export class MagazinePieceService {
    * string -> publish/schedule at exactly that instant (past or future);
    * `null` -> unpublish, back to draft.
    *
-   * A transition INTO a published/scheduled state (`publishedAt` was `null`,
-   * now isn't) is gated TWICE, in this order (PRD-119):
+   * Any publish or schedule of an article that is not live yet (a draft, or
+   * a scheduled article moved to now or to another instant) is gated TWICE,
+   * in this order (PRD-119, ENG-460):
    *
    *   1. the piece's CARE GATE (`computePublishGate` over `piece.care`:
    *      consent settled for every named subject, the sensitivity read
@@ -798,6 +711,9 @@ export class MagazinePieceService {
    * there was. The gate card promises that cannot be overridden by one person,
    * so the promise is now enforced where it is made rather than only drawn.
    *
+   * Re-saving an article that is already live is not re-gated: readers can
+   * see it, and the gate guards the moment content first reaches them.
+   *
    * Reverting to draft (`publishedAt: null`) is never gated — an editor must
    * always be able to pull a live piece back down regardless of its current
    * shape, and a gate that blocked TAKEDOWNS would be a safety hazard of its
@@ -811,20 +727,26 @@ export class MagazinePieceService {
     const piece = await this.loadPieceOr404(pieceId);
     const article = await this.ensureArticleForPiece(piece, actorId);
 
-    const wasPublished = article.publishedAt !== null;
-    // Distinct from `wasPublished`: an article SCHEDULED for next Tuesday has
-    // a `publishedAt` and is still invisible, so bringing it forward to now is
-    // the moment it actually goes live and the moment its writer should hear
-    // about it.
+    // An article SCHEDULED for next Tuesday has a `publishedAt` and is still
+    // invisible, so bringing it forward to now is the moment it actually goes
+    // live and the moment its writer should hear about it.
     const wasLive = isLiveInstant(article.publishedAt);
+    // With no instant asked for, an article that is already live keeps the
+    // instant it went live at, exactly as `publishPiece` settles it (PRD-437).
+    // `null` stays the unpublish it has always been on this rail.
     const nextPublishedAt =
       dto.publishedAt === null
         ? null
         : dto.publishedAt !== undefined
           ? new Date(dto.publishedAt)
-          : new Date();
+          : wasLive && article.publishedAt !== null
+            ? article.publishedAt
+            : new Date();
 
-    if (nextPublishedAt !== null && !wasPublished) {
+    // ENG-460: gated on "was it live", so a scheduled article re-timed (to
+    // now or to another instant) passes the gate again; only a re-save of a
+    // piece readers can already see goes through ungated.
+    if (nextPublishedAt !== null && !wasLive) {
       this.assertCareGateClear(piece);
       this.assertFormatReady(articlePublishBlockers(article));
     }
@@ -866,15 +788,26 @@ export class MagazinePieceService {
     // An explicit `null` means the same as omitting the field: publish now.
     // Taking a piece back down is `unpublishPiece`, never a null here, so the
     // gated act and the ungated one can never be confused for one another.
-    const nextPublishedAt =
+    const requestedPublishedAt =
       dto.publishedAt === undefined || dto.publishedAt === null
-        ? new Date()
+        ? null
         : new Date(dto.publishedAt);
+    // PRD-437: with no instant asked for, content that is already live keeps
+    // the instant it went live at. There is no scheduled job, so this is how
+    // an editor settles a scheduled piece whose instant has passed: the stage
+    // advances to `published` and the writer hears, and readers keep the date
+    // they have already seen.
+    const resolvePublishedAt = (currentPublishedAt: Date | null): Date =>
+      requestedPublishedAt ??
+      (currentPublishedAt !== null && isLiveInstant(currentPublishedAt)
+        ? currentPublishedAt
+        : new Date());
 
     this.assertCareGateClear(piece);
 
     let slug: string;
     let wasLive: boolean;
+    let nextPublishedAt: Date;
 
     if (piece.format === 'deck') {
       const deck =
@@ -889,6 +822,7 @@ export class MagazinePieceService {
       }
       this.assertFormatReady(deckPublishBlockers(deck));
       wasLive = isLiveInstant(deck.publishedAt);
+      nextPublishedAt = resolvePublishedAt(deck.publishedAt);
       deck.publishedAt = nextPublishedAt;
       await this.decks.save(deck);
       slug = deck.slug;
@@ -896,6 +830,7 @@ export class MagazinePieceService {
       const article = await this.ensureArticleForPiece(piece, actorId);
       this.assertFormatReady(articlePublishBlockers(article));
       wasLive = isLiveInstant(article.publishedAt);
+      nextPublishedAt = resolvePublishedAt(article.publishedAt);
       article.publishedAt = nextPublishedAt;
       await this.articles.save(article);
       slug = article.slug;
@@ -996,10 +931,14 @@ export class MagazinePieceService {
    * `stage`, and the writer's notification. One helper so the article rail and
    * the piece record's Publish button behave identically.
    *
-   * A FUTURE instant is a schedule: the piece stays at `ready` and the writer
-   * is not told, because nothing has gone live yet. `wasLive` keeps a re-save
+   * A FUTURE instant is a schedule: the piece moves to (or stays at) `ready`
+   * and the writer is not told, because nothing has gone live yet. `wasLive`
+   * keeps a re-save
    * of an already-published piece from ringing the writer's bell a second
-   * time.
+   * time. A piece whose content went live on its own (a scheduled instant that
+   * has since passed) is still short of `published`, so settling it advances
+   * the stage and rings the writer even though `wasLive` is true: the stage is
+   * the record of whether the writer has heard (PRD-437).
    */
   private async applyPublishSideEffects(
     piece: MagazinePiece,
@@ -1025,9 +964,13 @@ export class MagazinePieceService {
     await this.recordEvent(piece.id, change.actorId, publishEvent);
 
     const isLiveNow = change.publishedAt !== null && !isScheduledForFuture;
+    const isAlreadyAtPublishedStage = piece.stage === 'published';
+    // A schedule lands the piece at `ready` from any earlier stage: the
+    // article rail and the deck publish can date a piece still at drafting,
+    // edit or layout, and the go-live lock would otherwise strand it there.
     const nextStage: PieceStage | null = isLiveNow
       ? 'published'
-      : piece.stage === 'published'
+      : change.publishedAt !== null || piece.stage === 'published'
         ? 'ready'
         : null;
     if (nextStage !== null && nextStage !== piece.stage) {
@@ -1035,7 +978,7 @@ export class MagazinePieceService {
       await this.pieces.save(piece);
     }
 
-    if (isLiveNow && !change.wasLive) {
+    if (isLiveNow && (!change.wasLive || !isAlreadyAtPublishedStage)) {
       await this.notifyWriterOfPiece(
         piece,
         change.actorId,
@@ -1046,26 +989,10 @@ export class MagazinePieceService {
   }
 
   /**
-   * PRD-121 — the single emit point for every writer-facing piece
-   * notification (commissioned, stage changed, published).
-   *
-   * Before this the desk was silent: commissioning, assigning, stage changes
-   * and publishing all wrote nothing, and the only writer-facing piece
-   * notification in the whole module was `MagazinePieceMessage`. A writer
-   * found out they had been given a piece by opening `/magazine/writer` on a
-   * hunch.
-   *
-   * Three rules, all enforced here so no caller can forget one:
-   *   - No writer, no notification.
-   *   - Never notify someone about their OWN action. The desk's "I write this
-   *     one" makes an editor their own writer (`writerId === editorId`), and a
-   *     bell that tells you what you just did is noise.
-   *   - The acting editor rides along as the `actorId` argument, exactly like
-   *     `MagazinePieceMessage`, so block/mute filtering applies.
-   *
-   * Emission NEVER fails the mutation it hangs off. A commission that rolled
-   * back because a bell could not ring would be a far worse bug than a missing
-   * bell, so this swallows and logs like `announceIssueIfScheduled`.
+   * PRD-121: the writer bell for every piece notification (commissioned, stage
+   * changed, published). The rules (no writer, no self-notification, the actor
+   * rides along for block/mute, emission never fails the mutation) live in
+   * `notifyPieceWriter` in `magazine-writer-notifier.ts`.
    */
   private async notifyWriterOfPiece(
     piece: MagazinePiece,
@@ -1073,36 +1000,14 @@ export class MagazinePieceService {
     type: NotificationType,
     extraPayload: Record<string, unknown> = {},
   ): Promise<void> {
-    const writerId = piece.writerId;
-    if (writerId === null || writerId === actorId) {
-      return;
-    }
-
-    try {
-      await this.notifications.create(
-        writerId,
-        type,
-        {
-          source: 'magazine',
-          pieceId: piece.id,
-          title: piece.title,
-          // `actorId` rides in the payload as well as in the argument below:
-          // the argument is the block/mute gate, and the payload key is what
-          // `ACTOR_PAYLOAD_KEY` resolves into the bell row's `actor` (the
-          // response mapper strips the raw id on the way out). Without it the
-          // row would read as the platform speaking rather than the editor.
-          actorId,
-          ...extraPayload,
-        },
-        actorId,
-      );
-    } catch (error) {
-      this.logger.warn(
-        `Failed to notify writer ${writerId} of piece ${piece.id} (${type}): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
+    await notifyPieceWriter({
+      notifications: this.notifications,
+      logger: this.logger,
+      piece,
+      actorId,
+      type,
+      extraPayload,
+    });
   }
 
   /**
@@ -1152,7 +1057,7 @@ export class MagazinePieceService {
     });
 
     if (dto.status === 'paid' && !payment.paidOn) {
-      payment.paidOn = todayIsoDate();
+      payment.paidOn = magazineTodayIsoDate();
     }
 
     await this.payments.save(payment);
@@ -1217,7 +1122,7 @@ export class MagazinePieceService {
     const correction = this.corrections.create({
       pieceId,
       text: dto.text,
-      publishedOn: dto.publishedOn ?? todayIsoDate(),
+      publishedOn: dto.publishedOn ?? magazineTodayIsoDate(),
     });
     await this.corrections.save(correction);
     await this.recordEvent(pieceId, actorId, 'correction_published');
@@ -1263,6 +1168,10 @@ export class MagazinePieceService {
       art: dto.art ?? 'none',
       contentsBlurb: dto.contentsBlurb ?? '',
     });
+    const commissionedBrief = commissionBriefFor(dto.angle);
+    if (commissionedBrief !== null) {
+      piece.brief = commissionedBrief;
+    }
     if (piece.format === 'deck') {
       await this.savePieceWithDraftDeck(piece);
     } else {
@@ -1280,6 +1189,21 @@ export class MagazinePieceService {
       actorId,
       isSelfWritten ? 'started_writing' : 'commissioned',
     );
+
+    // PRD-439: the fee typed in the commission modal lands on the Money tab
+    // as the piece's payment row, split into an amount and the desk's words.
+    const commissionFee = commissionFeeParts(dto.fee);
+    if (commissionFee !== null) {
+      await this.payments.save(
+        this.payments.create({
+          pieceId: piece.id,
+          currency: DEFAULT_MAGAZINE_CURRENCY,
+          feeAmount: commissionFee.feeAmount,
+          feeText: commissionFee.feeText,
+        }),
+      );
+      await this.recordEvent(piece.id, actorId, 'payment_updated');
+    }
 
     // PRD-121. `notifyWriterOfPiece` no-ops on a self-written piece
     // (`writerId === actorId`), so the self-written branch needs no special
@@ -1385,6 +1309,31 @@ export class MagazinePieceService {
       );
     }
 
+    // ENG-460: a piece whose article or deck carries a publish date is
+    // either scheduled (a future instant, which goes live on its own with no
+    // job to stop it) or already live while the desk has not settled it at
+    // `published`. Both put content in front of readers on the strength of
+    // the PRD-119 gate, so a stage move or a care patch that reopens the gate
+    // is refused until the piece is unpublished. A piece settled at
+    // `published` is covered by the guard above, and its care stays editable.
+    const isStageChange = dto.stage !== undefined && dto.stage !== piece.stage;
+    let hasPublishDate = false;
+    if (isStageChange || dto.care !== undefined) {
+      const content = await this.loadPieceContent(piece);
+      const contentPublishedAt = content?.publishedAt ?? null;
+      hasPublishDate =
+        contentPublishedAt !== null &&
+        (piece.stage !== 'published' ||
+          contentPublishedAt.getTime() > Date.now());
+    }
+    if (hasPublishDate && isStageChange) {
+      throw new ConflictException({
+        message:
+          'This piece has a publish date. Unpublish it from the piece record to change its stage.',
+        code: 'magazine_piece_scheduled',
+      });
+    }
+
     // A piece's format and its content row travel together: a deck piece owns
     // a deck, an article piece owns an article. Once content exists, a format
     // PATCH would leave the piece holding the wrong kind (an article piece
@@ -1405,6 +1354,17 @@ export class MagazinePieceService {
       dto.brief !== undefined ? validatePieceBrief(dto.brief) : undefined;
     const care =
       dto.care !== undefined ? validatePieceCare(dto.care) : undefined;
+    if (
+      hasPublishDate &&
+      care !== undefined &&
+      computePublishGate(care).some((item) => !item.done)
+    ) {
+      throw new ConflictException({
+        message:
+          'This piece has a publish date. Unpublish it from the piece record before reopening its care record.',
+        code: 'magazine_piece_scheduled',
+      });
+    }
 
     const previousStage = piece.stage;
     const previousEditorId = piece.editorId;
@@ -1647,17 +1607,44 @@ export class MagazinePieceService {
       return this.commissionPitch(id, dto, actorId);
     }
 
-    const pitch = await this.loadPitchOr404(id);
+    await this.loadPitchOr404(id);
 
-    if (dto.verdict === 'pass') {
-      pitch.status = 'passed';
-      pitch.passTemplate = dto.passTemplate ?? null;
-      pitch.passNote = dto.passNote ?? null;
-    } else {
-      pitch.status = 'maybe';
+    // ENG-462: a conditional update, so a pitch another editor commissioned or
+    // passed a moment ago is never flipped back. Only a pitch still open
+    // (`waiting` or `maybe`) takes the verdict; anything else answers 409.
+    const patch: Partial<
+      Pick<MagazinePitch, 'status' | 'passTemplate' | 'passNote'>
+    > =
+      dto.verdict === 'pass'
+        ? {
+            status: 'passed',
+            passTemplate: dto.passTemplate ?? null,
+            passNote: dto.passNote ?? null,
+          }
+        : { status: 'maybe' };
+    const updateResult = await this.pitches.update(
+      { id, status: In(['waiting', 'maybe']) },
+      patch,
+    );
+    if (!updateResult.affected) {
+      throw new ConflictException({
+        message: 'This pitch has already been triaged.',
+        code: 'magazine_pitch_already_triaged',
+      });
     }
 
-    await this.pitches.save(pitch);
+    const pitch = await this.loadPitchOr404(id);
+    // A story submission's author hears through the submission's own
+    // `StorySubmissionDecided` bell, so only a workspace pitch rings its
+    // submitter here.
+    if (
+      dto.verdict === 'pass' &&
+      pitch.submitterId !== null &&
+      pitch.storySubmissionId === null
+    ) {
+      await this.notifyPitchPassed(pitch);
+    }
+
     const submitterNameById = await this.resolvePitchSubmitterNames([pitch]);
     return toPitchResponse(
       pitch,
@@ -1665,6 +1652,30 @@ export class MagazinePieceService {
         ? null
         : (submitterNameById.get(pitch.submitterId) ?? null),
     );
+  }
+
+  /**
+   * ENG-462: tells a writer their workspace pitch was passed on. No actor, so
+   * the bell reads as the magazine speaking. Never fails the triage it hangs
+   * off: the verdict is already saved.
+   */
+  private async notifyPitchPassed(pitch: MagazinePitch): Promise<void> {
+    if (pitch.submitterId === null) {
+      return;
+    }
+    try {
+      await this.notifications.create(
+        pitch.submitterId,
+        NotificationType.MagazinePitchPassed,
+        { source: 'magazine', pitchId: pitch.id, title: pitch.title },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to notify submitter ${pitch.submitterId} of passed pitch ${
+          pitch.id
+        }: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async deskSummary(): Promise<DeskSummary> {
@@ -2598,7 +2609,7 @@ export class MagazinePieceService {
       }
 
       if (!issue.publishedOn) {
-        issue.publishedOn = todayIsoDate();
+        issue.publishedOn = magazineTodayIsoDate();
       }
 
       const pieces = await pieceRepository.find({
@@ -2742,87 +2753,18 @@ export class MagazinePieceService {
 
     // Outside the transaction, deliberately: the announcement is best-effort
     // fan-out across the whole membership and must never hold the
-    // piece-publishing transaction open (or roll it back).
-    // `announceIssueIfScheduled` re-checks `digestSentAt` itself, so this is
-    // safe to call on every ship — it only ever announces once.
-    await this.announceIssueIfScheduled(shippedIssue);
+    // piece-publishing transaction open (or roll it back). It announces only
+    // once the ship is live and the issue page is visible to readers, and
+    // `digestSentAt` keeps it to one announcement per issue. A ship dated in
+    // the future is never announced: there is no scheduled job to ring the
+    // bell when its date arrives (PRD-438).
+    await this.issueAnnouncer.announceIssueIfDue(shippedIssue);
 
     return toIssueProduction(
       shippedIssue,
       shippedPieces,
       await this.loadListContext(shippedPieces),
     );
-  }
-
-  /**
-   * CON-05. The real dispatch behind the issue panel's "announce with the
-   * issue" toggle. Fires from `shipIssue` right after a ship actually
-   * publishes pieces — there is no cron in this module, so shipping IS the
-   * scheduled moment.
-   *
-   * THIS USED TO SEND EMAIL. Shipping emitted `newsletter.digest_due`, which
-   * wrote one ledger row per confirmed newsletter subscriber, and a
-   * once-a-minute cron in the newsletter module drained that queue out through
-   * an outbound mail transport. QueerPulse delivers no email and never will, so
-   * shipping an issue would have started mailing members. The queue, the cron,
-   * the `digest`/`digest_test` templates and the transport itself are all
-   * deleted; this is the replacement, and it is in-app only.
-   *
-   * The desk's curation work survives untouched: the `digest` jsonb (the
-   * curated order and the per-piece blurbs) is what
-   * `MagazineIssueContentsService` renders on the issue's public page, which
-   * is where this notification deep-links.
-   *
-   * ONE announcement per issue, ever. `digestSentAt === null` is the guard —
-   * the issue's publish gate can be hit more than once as later pieces clear
-   * it, and a re-ship must not re-ring every member's bell. Failures are
-   * swallowed: the issue has already shipped and its pieces are already
-   * published by the time this runs, and a bell that did not ring is never
-   * worth failing a ship over.
-   */
-  private async announceIssueIfScheduled(issue: MagazineIssue): Promise<void> {
-    if (!issue.digestSendOnPublish || issue.digestSentAt !== null) {
-      return;
-    }
-
-    try {
-      // Everyone who can read the magazine. `isSystem` accounts (the
-      // QueerPulse house account) are excluded — nobody reads their bell.
-      const recipientRows = await this.users.find({
-        where: { status: UserStatus.Active, isSystem: false },
-        select: { id: true },
-      });
-      const recipientIds = recipientRows.map((row) => row.id);
-      const payload = {
-        source: 'magazine',
-        issueNumber: issue.number,
-        issueTitle: issue.title,
-      };
-      // Chunked, like every other membership-wide fan-out: one multi-row
-      // INSERT per chunk rather than a create per member.
-      for (
-        let offset = 0;
-        offset < recipientIds.length;
-        offset += ISSUE_ANNOUNCE_CHUNK_SIZE
-      ) {
-        await this.notifications.createForRecipients(
-          recipientIds.slice(offset, offset + ISSUE_ANNOUNCE_CHUNK_SIZE),
-          NotificationType.MagazineIssuePublished,
-          payload,
-        );
-      }
-      // Stamped only after the fan-out completed, so a crash mid-announce
-      // leaves the issue re-announceable rather than silently half-announced.
-      issue.digestSentAt = new Date();
-      await this.issues.save(issue);
-      this.logger.log(
-        `Announced issue ${issue.number} to ${recipientIds.length} member(s)`,
-      );
-    } catch (error) {
-      this.logger.warn(
-        `Issue ${issue.number} announcement fan-out failed: ${String(error)}`,
-      );
-    }
   }
 
   /**
@@ -3610,6 +3552,15 @@ export class MagazinePieceService {
         : ((await this.resolveActorDisplayNames([submitterId])).get(
             submitterId,
           ) ?? null);
+    // An external pitch has no submitterId. When the editor also picked a
+    // writer in the Commission modal (`dto.writerId`), this resolves that
+    // writer's display name, so the byline below can use it.
+    const pickedWriterName =
+      submitterId === null && dto.writerId
+        ? ((await this.resolveActorDisplayNames([dto.writerId])).get(
+            dto.writerId,
+          ) ?? null)
+        : null;
 
     const commissionInTransaction = () =>
       this.dataSource.transaction(async (manager) => {
@@ -3625,11 +3576,27 @@ export class MagazinePieceService {
         // already been triaged — without this, a duplicate MagazinePiece would
         // get created against the same pitchId.
         if (pitch.status !== 'waiting' && pitch.status !== 'maybe') {
-          throw new ConflictException('This pitch has already been triaged.');
+          throw new ConflictException({
+            message: 'This pitch has already been triaged.',
+            code: 'magazine_pitch_already_triaged',
+          });
         }
 
+        // The read above is a snapshot: a pass or a second commission can land
+        // between it and this write. Claiming the pitch with a conditional
+        // update means only one of them wins, and the loser answers the same
+        // 409 (ENG-462).
+        const claimResult = await pitchRepository.update(
+          { id, status: In(['waiting', 'maybe']) },
+          { status: 'commissioned' },
+        );
+        if (!claimResult.affected) {
+          throw new ConflictException({
+            message: 'This pitch has already been triaged.',
+            code: 'magazine_pitch_already_triaged',
+          });
+        }
         pitch.status = 'commissioned';
-        await pitchRepository.save(pitch);
 
         const piece = pieceRepository.create({
           format: dto.format ?? pitch.suggestFormat ?? 'article',
@@ -3642,19 +3609,24 @@ export class MagazinePieceService {
           // commissioned from it. `null` here is what dropped them: the piece
           // never reached their assignments tab and `deriveWaitingOn` read the
           // commission as still owing an assignment. An external pitch has no
-          // account, so it keeps `null` and the desk assigns a writer later,
-          // exactly as before.
-          writerId: pitch.submitterId,
-          // The stored `from` still wins for an external pitch (free text the
-          // editor typed). An internal one stores `from: ''`, so without the
-          // resolved name the piece shipped with a blank byline.
-          byline: submitterName ?? pitch.from,
+          // account, so it takes the writer the commission modal picked
+          // (`dto.writerId`), or `null` and the desk assigns one later.
+          writerId: pitch.submitterId ?? dto.writerId ?? null,
+          // The stored `from` still wins for an external pitch when the
+          // Commission modal left the writer unset (free text the editor
+          // typed). When the editor picked a writer there, the byline
+          // becomes that writer's display name. An internal pitch stores
+          // `from: ''`, so without the resolved submitter name the piece
+          // shipped with a blank byline.
+          byline: submitterName ?? pickedWriterName ?? pitch.from,
           dueOn: dto.dueOn ?? null,
           issueId: pitch.issueId,
           wordTarget: dto.wordTarget ?? null,
           slideTarget: null,
           fresh: pitch.fresh,
           pitchId: pitch.id,
+          // PRD-439: the angle typed in the commission modal opens the brief.
+          brief: commissionBriefFor(dto.angle),
         });
         // A deck commission is born with its empty draft deck, exactly like
         // `createPiece`, so the desk's Edit opens the deck editor on a real
@@ -3672,6 +3644,30 @@ export class MagazinePieceService {
           detail: 'from pitch',
         });
         await eventRepository.save(event);
+
+        // PRD-439: the fee typed in the commission modal becomes the piece's
+        // payment row in the same transaction, so a rolled-back commission
+        // leaves no orphan payment behind.
+        const commissionFee = commissionFeeParts(dto.fee);
+        if (commissionFee !== null) {
+          const paymentRepository = manager.getRepository(MagazinePayment);
+          await paymentRepository.save(
+            paymentRepository.create({
+              pieceId: piece.id,
+              currency: DEFAULT_MAGAZINE_CURRENCY,
+              feeAmount: commissionFee.feeAmount,
+              feeText: commissionFee.feeText,
+            }),
+          );
+          await eventRepository.save(
+            eventRepository.create({
+              pieceId: piece.id,
+              actorId,
+              action: 'payment_updated',
+              detail: null,
+            }),
+          );
+        }
 
         const events = await eventRepository.find({
           where: { pieceId: piece.id },
@@ -3694,10 +3690,10 @@ export class MagazinePieceService {
     const { piece, events } = commissioned;
 
     // PRD-121/PRD-123 — now that a commission from an internal pitch carries a
-    // real `writerId`, tell that person. `notifyWriterOfPiece` no-ops on an
-    // external pitch (no writer) and on an editor commissioning their own
-    // pitch, and it swallows its own failures, so a bell that cannot ring
-    // never rolls back the commission.
+    // real `writerId`, tell that person (and the writer picked for an
+    // external pitch). `notifyWriterOfPiece` no-ops when no writer was picked
+    // and on an editor commissioning their own pitch, and it swallows its own
+    // failures, so a bell that cannot ring never rolls back the commission.
     await this.notifyWriterOfPiece(
       piece,
       actorId,
@@ -3744,8 +3740,10 @@ export class MagazinePieceService {
 
   /**
    * Everything a page of list rows needs beyond the piece columns, keyed by
-   * piece id: the newest stage-entry event and the payment row's status. Two
-   * batched queries per page, run side by side, whatever the page size.
+   * piece id: the newest stage-entry event, the payment row's status, and the
+   * linked article's or deck's `publishedAt` (PRD-437), so the board can tell
+   * a scheduled piece from one merely ready. Up to four batched queries per
+   * page, run side by side, whatever the page size.
    */
   private async loadListContext(
     pieces: MagazinePiece[],
@@ -3753,22 +3751,62 @@ export class MagazinePieceService {
     if (pieces.length === 0) {
       return new Map();
     }
-    const [stageEntryAtByPieceId, payments] = await Promise.all([
-      this.loadStageEnteredAt(pieces),
-      this.payments.find({
-        where: { pieceId: In(pieces.map((piece) => piece.id)) },
-        select: { pieceId: true, status: true },
-      }),
-    ]);
+    const articleIds = pieces
+      .filter((piece) => piece.format === 'article')
+      .map((piece) => piece.articleId)
+      .filter((articleId): articleId is string => articleId !== null);
+    const deckIds = pieces
+      .filter((piece) => piece.format === 'deck')
+      .map((piece) => piece.deckId)
+      .filter((deckId): deckId is string => deckId !== null);
+    const [stageEntryAtByPieceId, payments, articleRows, deckRows] =
+      await Promise.all([
+        this.loadStageEnteredAt(pieces),
+        this.payments.find({
+          where: { pieceId: In(pieces.map((piece) => piece.id)) },
+          select: { pieceId: true, status: true },
+        }),
+        articleIds.length === 0
+          ? Promise.resolve<MagazineArticle[]>([])
+          : this.articles.find({
+              where: { id: In(articleIds) },
+              select: { id: true, publishedAt: true },
+            }),
+        deckIds.length === 0
+          ? Promise.resolve<MagazineDeck[]>([])
+          : this.decks.find({
+              where: { id: In(deckIds) },
+              select: { id: true, publishedAt: true },
+            }),
+      ]);
     const paymentByPieceId = new Map(
       payments.map((payment) => [payment.pieceId, payment]),
     );
+    const articlePublishedAtById = new Map(
+      articleRows.map((article) => [article.id, article.publishedAt]),
+    );
+    const deckPublishedAtById = new Map(
+      deckRows.map((deck) => [deck.id, deck.publishedAt]),
+    );
+    // The format decides which content row counts, exactly as
+    // `loadPieceContent` does for a single piece.
+    const contentPublishedAtFor = (piece: MagazinePiece): Date | null => {
+      if (piece.format === 'deck') {
+        return piece.deckId === null
+          ? null
+          : (deckPublishedAtById.get(piece.deckId) ?? null);
+      }
+      return piece.articleId === null
+        ? null
+        : (articlePublishedAtById.get(piece.articleId) ?? null);
+    };
     return new Map(
       pieces.map((piece) => [
         piece.id,
         {
           latestStageEntryAt: stageEntryAtByPieceId.get(piece.id) ?? null,
           payment: paymentByPieceId.get(piece.id) ?? null,
+          contentPublishedAt: contentPublishedAtFor(piece),
         },
       ]),
     );

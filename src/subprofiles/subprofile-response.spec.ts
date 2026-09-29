@@ -1,9 +1,16 @@
-import { toCardDTO, toItemView } from './subprofile-response';
+import {
+  toCardDTO,
+  toItemView,
+  toPublicDTO,
+  toSubprofileDTO,
+} from './subprofile-response';
 import { SubprofileItem } from './entities/subprofile-item.entity';
 import {
   Subprofile,
   SubprofileKind,
   SubprofileLinkVisibility,
+  SubprofileStatus,
+  SubprofileVisibility,
 } from './entities/subprofile.entity';
 
 describe('toItemView', () => {
@@ -45,5 +52,77 @@ describe('toCardDTO table summary', () => {
     });
     expect(card.table).toEqual({ format: 'online', vibe: ['queer_led'] });
     expect(toCardDTO(questRow).table).toBeUndefined();
+  });
+});
+
+describe('toPublicDTO visibility', () => {
+  // Only the fields `toPublicDTO` reads, built the way this file builds its
+  // other entity fixtures.
+  const publicRow = (visibility: SubprofileVisibility): Subprofile =>
+    Object.assign(new Subprofile(), {
+      id: 'sp-public-1',
+      kind: SubprofileKind.Developer,
+      slug: 'nightform',
+      handle: 'nightform',
+      displayName: 'Nightform',
+      avatarUrl: null,
+      tagline: null,
+      bio: null,
+      coverUrl: null,
+      accent: null,
+      availability: null,
+      ctaLabel: null,
+      ctaUrl: null,
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+      visibility,
+      status: SubprofileStatus.Published,
+      skinData: null,
+    });
+
+  it('carries an open persona as open', () => {
+    const view = toPublicDTO(publicRow(SubprofileVisibility.Open), []);
+    expect(view.visibility).toBe(SubprofileVisibility.Open);
+  });
+
+  it('carries a members-only persona as network, so the page can hide Follow and Endorse', () => {
+    const view = toPublicDTO(publicRow(SubprofileVisibility.Network), []);
+    expect(view.visibility).toBe(SubprofileVisibility.Network);
+  });
+});
+
+describe('editVersion (ENG-451)', () => {
+  const editedRow = (editVersion?: number): Subprofile =>
+    Object.assign(new Subprofile(), {
+      id: 'sp-edited-1',
+      kind: SubprofileKind.Developer,
+      slug: 'nightform',
+      handle: 'nightform',
+      displayName: 'Nightform',
+      avatarUrl: null,
+      tagline: null,
+      bio: null,
+      coverUrl: null,
+      accent: null,
+      availability: null,
+      ctaLabel: null,
+      ctaUrl: null,
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+      visibility: SubprofileVisibility.Open,
+      status: SubprofileStatus.Published,
+      position: 0,
+      skinData: null,
+      editVersion,
+    });
+
+  it('carries the stored edit version on the owner view', () => {
+    expect(toSubprofileDTO(editedRow(7), []).editVersion).toBe(7);
+  });
+
+  it('reads a row with no stored value yet as version 0 on the owner view', () => {
+    expect(toSubprofileDTO(editedRow(), []).editVersion).toBe(0);
+  });
+
+  it('keeps the edit version off the public view', () => {
+    expect(toPublicDTO(editedRow(7), [])).not.toHaveProperty('editVersion');
   });
 });

@@ -114,6 +114,27 @@ function ownerAvatarFor(
 }
 
 /**
+ * What global search's Business branch shows for a listing: the same `slug`,
+ * `name`, `cat` and `hood` a directory card carries, derived the same way
+ * (`cat` is the first category). See `DirectoryService.searchByText`.
+ */
+export type BusinessSearchRow = Pick<
+  DirectoryCardDTO,
+  'slug' | 'name' | 'cat' | 'hood'
+>;
+
+function toBusinessSearchRow(
+  listing: Pick<Listing, 'slug' | 'name' | 'cats' | 'hood'>,
+): BusinessSearchRow {
+  return {
+    slug: listing.slug,
+    name: listing.name,
+    cat: listing.cats[0] ?? '',
+    hood: listing.hood,
+  };
+}
+
+/**
  * Public, read-only views over the `listings` (businesses) table for the
  * marketing surfaces — the host page's partner spaces here, and the
  * `/local/directory` grid + detail in later sub-projects. Kept separate from
@@ -368,6 +389,16 @@ export class DirectoryService {
           AND "ssbs"."lifted_at" IS NULL
       )`;
 
+  // The directory's leading sort key: verified safe spaces whose badge is not
+  // under suspension first. Declared after `OPEN_BADGE_SUSPENSION_EXISTS`,
+  // which it reads during static initialisation. Shared by the grid
+  // (`buildDirectoryQuery`) and global search (`searchByText`), which puts text
+  // relevance ahead of it. See `buildDirectoryQuery` for why a suspended badge
+  // earns no boost.
+  private static readonly VERIFIED_BADGE_FIRST = `CASE WHEN listing.safeSpaceStatus = '${SafeSpaceStatus.Verified}'
+                AND NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}
+              THEN 0 ELSE 1 END`;
+
   /**
    * Which of these listings currently have their safe-space badge suspended,
    * as ONE query for the whole page.
@@ -510,12 +541,7 @@ export class DirectoryService {
     // The suspension probe sits after the cheap column test in the same `AND`,
     // so the planner only runs it for rows that actually carry a badge.
     return qb
-      .orderBy(
-        `CASE WHEN listing.safeSpaceStatus = '${SafeSpaceStatus.Verified}'
-                AND NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}
-              THEN 0 ELSE 1 END`,
-        'ASC',
-      )
+      .orderBy(DirectoryService.VERIFIED_BADGE_FIRST, 'ASC')
       .addOrderBy('listing.name', 'ASC');
   }
 
@@ -524,8 +550,8 @@ export class DirectoryService {
    * filtered by category and free-text search. Returns the full result set
    * capped at `DEFAULT_LIST_LIMIT` (never a `Paginated` envelope) — kept for
    * the frontend's whole-catalog callers (venue picker, @mention suggestions,
-   * "related places", and `SearchService`'s cross-domain search) that need
-   * the working set client-side rather than a browsable page. The
+   * "related places") that need the whole working set client-side. Global
+   * search reads `searchByText` (below). The
    * `/local/directory` grid itself instead calls `listDirectoryPage` (below)
    * when it wants real pagination — see `ListListingDirectoryQuery.page`'s doc
    * comment for why the two coexist.
@@ -536,9 +562,74 @@ export class DirectoryService {
     const rows = await this.buildDirectoryQuery(query)
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
-    // ONE batched crop lookup for every card's cover photo on the page, never
-    // a per-row query. `toDirectoryCard` is deliberately not passed straight to
-    // `map`: the array index would arrive as its crop Map.
+    return this.toDirectoryCards(rows);
+  }
+
+  /**
+   * The Business branch of global search (ENG-445): the directory's own
+   * filters with `q` as the only one, bounded to the `limit` rows the caller
+   * shows and ordered by how well the NAME matches before the grid's badge
+   * and name order.
+   *
+   * `listDirectory` reads up to `DEFAULT_LIST_LIMIT` (200) rows and resolves
+   * crops, owner avatars and suspensions for all of them, which search then
+   * cut to six, alphabetically, so a business named exactly what was typed
+   * could sit below the cut. Every visibility rule (live, moderation
+   * takedown, closed or paused) is in the SQL, so reading exactly `limit`
+   * rows never comes back short.
+   *
+   * Relevance tiers, over the same case-insensitive fields the filter
+   * matches: the name equals the term, the name starts with it, the name
+   * contains it, then a blurb or neighbourhood hit.
+   *
+   * A search result shows a name, a category and a neighbourhood, so only
+   * those columns are read and none of the card lookups (crops, owner
+   * avatars, badge suspensions) run: each only decorates a card, and search
+   * shows no card. The suspension lookup never drops a row (it only changes
+   * how a badge reads), and the badge order already accounts for suspensions
+   * in SQL.
+   */
+  async searchByText(
+    term: string,
+    limit: number,
+  ): Promise<BusinessSearchRow[]> {
+    const loweredTerm = term.trim().toLowerCase();
+    const escapedTerm = escapeLikeTerm(loweredTerm);
+    const rows = await this.buildDirectoryQuery({ q: term })
+      .select([
+        'listing.id',
+        'listing.slug',
+        'listing.name',
+        'listing.cats',
+        'listing.hood',
+      ])
+      .orderBy(
+        `CASE WHEN LOWER(listing.name) = :directoryRankExact THEN 0
+              WHEN LOWER(listing.name) LIKE :directoryRankPrefix THEN 1
+              WHEN LOWER(listing.name) LIKE :directoryRankContains THEN 2
+              ELSE 3 END`,
+        'ASC',
+      )
+      .addOrderBy(DirectoryService.VERIFIED_BADGE_FIRST, 'ASC')
+      .addOrderBy('listing.name', 'ASC')
+      .setParameters({
+        directoryRankExact: loweredTerm,
+        directoryRankPrefix: `${escapedTerm}%`,
+        directoryRankContains: `%${escapedTerm}%`,
+      })
+      .take(limit)
+      .getMany();
+    return rows.map(toBusinessSearchRow);
+  }
+
+  /**
+   * Maps a fetched set of listings to public directory cards with ONE batched
+   * lookup each for crops, owner avatars and badge suspensions, so the cost
+   * stays flat per page with no per-row query. `toDirectoryCard` is
+   * deliberately not passed straight to `map`: the array index would arrive
+   * as its crop Map.
+   */
+  private async toDirectoryCards(rows: Listing[]): Promise<DirectoryCardDTO[]> {
     const crops = await this.mediaCropService.getMany(
       rows.flatMap((row) => listingPhotoKeys(row)),
     );
@@ -567,25 +658,9 @@ export class DirectoryService {
     query: ListListingDirectoryQuery,
   ): Promise<Paginated<DirectoryCardDTO>> {
     const qb = this.buildDirectoryQuery(query);
-    return paginate(qb, normalizePage(query.page), async (rows) => {
-      // ONE batched crop lookup for the page's cover photos (see
-      // `listDirectory`), never a per-row query.
-      const crops = await this.mediaCropService.getMany(
-        rows.flatMap((row) => listingPhotoKeys(row)),
-      );
-      const ownerAvatars = await this.resolveOwnerAvatars(rows);
-      // ONE query for this page's suspensions, never one per card.
-      const suspendedBadges = await this.suspendedBadgeListingIds(rows);
-      return rows.map((row) =>
-        toDirectoryCard(
-          row,
-          crops,
-          undefined,
-          ownerAvatarFor(row, ownerAvatars),
-          suspendedBadges.has(row.id),
-        ),
-      );
-    });
+    return paginate(qb, normalizePage(query.page), (rows) =>
+      this.toDirectoryCards(rows),
+    );
   }
 
   /**

@@ -63,3 +63,30 @@ export function moneyDisplay(
 ): string {
   return formatMoney(currency, amount) ?? text ?? '';
 }
+
+/**
+ * Splits the free-text fee an editor typed into a commission form into the
+ * two payment columns: a clean amount when the text reads as one ("150",
+ * "€150", "150 €", "150,50", "EUR 1200.5"), otherwise the trimmed text itself
+ * (at most 200 characters) so the desk's wording is kept for a later pricing
+ * pass. An empty fee clears both.
+ */
+export function splitCommissionFee(rawFee: string): {
+  feeAmount: string | null;
+  feeText: string | null;
+} {
+  const trimmed = rawFee.trim();
+  if (trimmed === '') {
+    return { feeAmount: null, feeText: null };
+  }
+
+  let normalized = trimmed.replace(/€|eur/gi, '').replace(/\s+/g, '');
+  // A European decimal comma ("150,50") becomes the dot the wire format uses.
+  if (/^\d{1,10},\d{1,2}$/.test(normalized)) {
+    normalized = normalized.replace(',', '.');
+  }
+  if (normalized !== '' && MONEY_AMOUNT_PATTERN.test(normalized)) {
+    return { feeAmount: normalized, feeText: null };
+  }
+  return { feeAmount: null, feeText: trimmed.slice(0, 200) };
+}

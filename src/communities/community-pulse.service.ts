@@ -61,17 +61,24 @@ export class CommunityPulseService {
 
   /**
    * Resolves the community by slug and asserts the caller is a roster
-   * member (via `CommunityMembershipService.assertMemberBySlug` — 404 for an
-   * unknown/archived community, 403 for a resolved-but-non-member caller,
-   * same posture every other cross-feature `communitySlug` write already
-   * uses), then fans out to the three lanes in parallel — one round trip's
-   * worth of parallelism, not three sequential awaits.
+   * member (via `CommunityMembershipService.assertMemberForReadBySlug`,
+   * which answers 404 for an unknown community and 403 for a
+   * resolved-but-non-member caller), then fans out to the three lanes with
+   * one `Promise.all`, so the wait costs one round trip's worth of time.
+   *
+   * This read admits an archived community (PRD-412), unlike the write-side
+   * callers of this membership service: a member's Library shelf and pulse
+   * lanes stay material that was already theirs, because archiving stops new
+   * activity and keeps what a member can already see.
    */
   async getPulseBySlug(
     slug: string,
     userId: string,
   ): Promise<CommunityPulseResponse> {
-    const communityId = await this.membership.assertMemberBySlug(slug, userId);
+    const communityId = await this.membership.assertMemberForReadBySlug(
+      slug,
+      userId,
+    );
 
     const [upcomingEvents, recentThreads, openOpportunities] =
       await Promise.all([

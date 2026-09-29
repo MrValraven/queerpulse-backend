@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -749,6 +749,77 @@ describe('CommunityBanEvasionService', () => {
       ]) {
         expect(serialized).not.toContain(forbidden);
       }
+    });
+  });
+
+  describe('isMatchingCommunityBan', () => {
+    it('answers false with no bans here and skips the correlation read', async () => {
+      const isMatch = await service.isMatchingCommunityBan(
+        COMMUNITY_ID,
+        APPLICANT_ID,
+      );
+
+      expect(isMatch).toBe(false);
+      expect(banEvasion.correlationMaterialForUsers).not.toHaveBeenCalled();
+    });
+
+    it("answers true for a review-worthy match against this community's ban", async () => {
+      signalStore = [
+        signalRow({
+          communityId: COMMUNITY_ID,
+          removalKind: RemovalKind.CommunityBan,
+          signInEmailHash: APPLICANT_EMAIL_HASH,
+        }),
+      ];
+
+      const isMatch = await service.isMatchingCommunityBan(
+        COMMUNITY_ID,
+        APPLICANT_ID,
+      );
+
+      expect(isMatch).toBe(true);
+    });
+
+    it("ignores a ban row about the joiner's own account", async () => {
+      signalStore = [
+        signalRow({
+          removedUserId: APPLICANT_ID,
+          communityId: COMMUNITY_ID,
+          removalKind: RemovalKind.CommunityBan,
+          signInEmailHash: APPLICANT_EMAIL_HASH,
+        }),
+      ];
+
+      const isMatch = await service.isMatchingCommunityBan(
+        COMMUNITY_ID,
+        APPLICANT_ID,
+      );
+
+      expect(isMatch).toBe(false);
+    });
+
+    it('answers false and logs when the correlation read throws', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      signalStore = [
+        signalRow({
+          communityId: COMMUNITY_ID,
+          removalKind: RemovalKind.CommunityBan,
+          signInEmailHash: APPLICANT_EMAIL_HASH,
+        }),
+      ];
+      banEvasion.correlationMaterialForUsers.mockRejectedValueOnce(
+        new Error('correlation store unreachable'),
+      );
+
+      const isMatch = await service.isMatchingCommunityBan(
+        COMMUNITY_ID,
+        APPLICANT_ID,
+      );
+
+      expect(isMatch).toBe(false);
+      expect(warn).toHaveBeenCalled();
+
+      warn.mockRestore();
     });
   });
 });

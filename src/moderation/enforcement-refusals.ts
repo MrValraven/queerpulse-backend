@@ -1,4 +1,8 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 
 /**
  * The typed refusals an account-level moderator action can answer with, in one
@@ -190,5 +194,71 @@ export function appealWindowClosed(input: {
       `Appeals are open for ${input.windowDays} days after a decision, and the window for this one closed on ` +
       `${closedOn}. If something has changed since, or you could not reach this form in time, ` +
       'write to the moderation team and ask them to look again.',
+  });
+}
+
+/**
+ * A 400 on a `hide_content` / `remove_content` action (ENG-484): the report's
+ * subject type has nothing of its own a takedown could hide.
+ *
+ * A group conversation is moderated message by message, a business mailbox
+ * through the listing, business or company behind it, and a venue report
+ * describes a place in prose. Writing a `content_moderation` row for one of
+ * those would record a takedown that no page ever reads, so the moderator
+ * would see "hidden" while the thing stayed exactly where it was.
+ *
+ * `subjectType` is the report's own subject type, carried additively so a
+ * client can say which kind of report this was. `code` is the contract.
+ */
+export const CONTENT_ACTION_UNSUPPORTED_CODE = 'CONTENT_ACTION_UNSUPPORTED';
+
+const CONTENT_ACTION_UNSUPPORTED_MESSAGE =
+  'This kind of report has nothing to hide or remove. Dismiss it, escalate it, or act on the account.';
+
+/**
+ * The 400 a content takedown answers when the report's subject type has no
+ * reader that honours `content_moderation`.
+ */
+export function contentActionUnsupported(
+  subjectType: string,
+): BadRequestException {
+  return new BadRequestException({
+    statusCode: 400,
+    error: 'Bad Request',
+    code: CONTENT_ACTION_UNSUPPORTED_CODE,
+    // Additive detail, safe to ignore: `code` alone is the contract.
+    subjectType,
+    message: CONTENT_ACTION_UNSUPPORTED_MESSAGE,
+  });
+}
+
+/**
+ * A 409 on `POST /appeals` (PRD-459): this member has already appealed this
+ * decision, and that appeal has been decided.
+ *
+ * Each moderation decision (one `mod_audit_logs` row) can be appealed once,
+ * and the outcome of that appeal is final, whether it upheld or overturned the
+ * decision. The published copy says so, and this is where the server holds to
+ * it. A cold appeal (no resolvable action) has no decision to count against,
+ * so it only ever meets the one-open-appeal-at-a-time rule.
+ *
+ * The body carries the code and the fallback sentence only. `code` is the
+ * contract; branch on it and never on the message text.
+ */
+export const APPEAL_ALREADY_DECIDED_CODE = 'APPEAL_ALREADY_DECIDED';
+
+const APPEAL_ALREADY_DECIDED_MESSAGE =
+  'This decision has already been appealed. The appeal decision is final.';
+
+/**
+ * The 409 `POST /appeals` answers when the same member already has a decided
+ * appeal on the same action.
+ */
+export function appealAlreadyDecided(): ConflictException {
+  return new ConflictException({
+    statusCode: 409,
+    error: 'Conflict',
+    code: APPEAL_ALREADY_DECIDED_CODE,
+    message: APPEAL_ALREADY_DECIDED_MESSAGE,
   });
 }

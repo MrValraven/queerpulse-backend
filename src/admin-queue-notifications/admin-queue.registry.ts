@@ -17,7 +17,7 @@ import { StaffRoleId } from '../users/staff-roles.registry';
  * unbidden: /admin/media, /admin/topics, /admin/settings, /admin/governance,
  * /admin/press-kit, /admin/landing, /admin/status-incidents, /admin/org-tiers,
  * /admin/staff, /admin/invites, /admin/mod-response-templates, /admin/bots,
- * /admin/communities, /admin/housing-groups, /admin/resource-listings,
+ * /admin/communities, /admin/resource-listings,
  * /admin/changemakers. Also absent for the same
  * reason, though each looks like a queue at a glance, are
  * /admin/volunteer-hours and /admin/guide-feedback: an attested hours total
@@ -71,6 +71,12 @@ export enum AdminQueueKey {
    */
   GuideReviews = 'guide_reviews',
   CommunitySpaceRequests = 'community_space_requests',
+  /**
+   * PRD-462. A request to join an access-gated housing group. The co-op
+   * sibling (`HousingCoopJoinRequests`) always had a queue; this one reached
+   * nobody until a steward happened to open the console.
+   */
+  HousingGroupJoinRequests = 'housing_group_join_requests',
 }
 
 /** The lowest account tier that may work a queue. */
@@ -267,6 +273,14 @@ export const ADMIN_QUEUE_REGISTRY: Record<AdminQueueKey, AdminQueueMeta> = {
     route: '/admin/resource-guides',
     tier: UserRole.Admin,
     capabilities: ['resource_curator'],
+  },
+  [AdminQueueKey.HousingGroupJoinRequests]: {
+    // Same reach as the group-listing queue: `AdminHousingGroupsController`
+    // answers a moderator, an admin, or a `housing_moderator` grant holder
+    // (`HousingModerationGuard`).
+    route: '/admin/housing-groups',
+    tier: UserRole.Moderator,
+    capabilities: ['housing_moderator'],
   },
 };
 

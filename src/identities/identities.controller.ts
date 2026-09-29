@@ -95,7 +95,9 @@ export class IdentitiesController {
   @ApiForbiddenResponse({
     description:
       'IDENTITY_NOT_OWNER: the caller staffs this identity but is not its ' +
-      'owner, including while an ownerless listing has none. ' +
+      'owner (an ownerless listing lets any of its staff through). ' +
+      'IDENTITY_STAFF_NAMES_LOCKED: an unlinked persona, which never names ' +
+      'its staff. ' +
       'IDENTITY_NOT_STAFF: the caller does not staff this identity, or it ' +
       'does not exist. IDENTITY_REMOVED: this persona was removed by ' +
       'moderation.',

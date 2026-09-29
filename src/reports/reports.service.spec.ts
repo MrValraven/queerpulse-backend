@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -42,7 +43,12 @@ import {
   REPORT_PER_SUBJECT_WINDOW_MS,
 } from './report-flood-limits';
 import { REASON_CODES, type ReasonCode } from './reason-catalogue';
-import { ReportsService } from './reports.service';
+import {
+  REPORT_REASON_NOT_OFFERED_CODE,
+  REPORT_UNLINKED_SUBJECT_INVALID_CODE,
+  ReportsService,
+} from './reports.service';
+import { UNLINKED_SUBJECT_RE } from './unlinked-subject';
 
 describe('ReportsService', () => {
   let service: ReportsService;
@@ -201,9 +207,10 @@ describe('ReportsService', () => {
     });
 
     it('normalizes an omitted detail to null and defaults optional fields', async () => {
+      // A `post`, because `spam` is offered there and on no `member` (ENG-488).
       const res = await service.create('reporter-1', {
-        subjectType: ReportSubjectType.Member,
-        subjectId: 'user-2',
+        subjectType: ReportSubjectType.Post,
+        subjectId: 'post-2',
         reasonCode: 'spam',
       });
 
@@ -216,6 +223,199 @@ describe('ReportsService', () => {
           evidence: null,
         }),
       );
+    });
+
+    // ENG-483. The public safety form names no record, so each incident carries
+    // its own `unlinked:<uuid>` id. One shared id pooled every public filing
+    // into one subject for the dedupe, the per-subject caps and the queue.
+    describe('unlinked subject ids', () => {
+      const UNLINKED_ID = 'unlinked:0b6f3c1e-8a2d-4c7e-9f10-2a3b4c5d6e7f';
+
+      function savedSubjectIds(): string[] {
+        const savedCalls = reports.save.mock.calls as Array<
+          [{ subjectId: string }]
+        >;
+        return savedCalls.map(([saved]) => saved.subjectId);
+      }
+
+      async function expectBadRequestWithCode(
+        promise: Promise<unknown>,
+        code: string,
+      ): Promise<void> {
+        let thrown: unknown;
+        try {
+          await promise;
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(BadRequestException);
+        expect((thrown as BadRequestException).getResponse()).toEqual(
+          expect.objectContaining({ code }),
+        );
+        expect(reports.save).not.toHaveBeenCalled();
+      }
+
+      it('mints a distinct id for each legacy "unspecified" filing, so two incidents never dedupe', async () => {
+        for (let filing = 0; filing < 2; filing += 1) {
+          await service.create('reporter-1', {
+            subjectType: ReportSubjectType.Member,
+            subjectId: 'unspecified',
+            reasonCode: 'harassment',
+          });
+        }
+
+        const [firstId, secondId] = savedSubjectIds();
+        expect(firstId).toMatch(UNLINKED_SUBJECT_RE);
+        expect(secondId).toMatch(UNLINKED_SUBJECT_RE);
+        expect(firstId).not.toBe(secondId);
+        // The dedupe lookup keyed on the minted id.
+        expect(reports.findOne).toHaveBeenCalledWith({
+          where: expect.objectContaining({ subjectId: firstId }) as unknown,
+        });
+        expect(reports.findOne).not.toHaveBeenCalledWith({
+          where: expect.objectContaining({
+            subjectId: 'unspecified',
+          }) as unknown,
+        });
+      });
+
+      it('mints a distinct id for a signed-out legacy filing and caps on it', async () => {
+        await service.create(
+          null,
+          {
+            subjectType: ReportSubjectType.Venue,
+            subjectId: 'unspecified',
+            reasonCode: 'venue_safety',
+          },
+          '203.0.113.9',
+        );
+
+        const [savedId] = savedSubjectIds();
+        expect(savedId).toMatch(UNLINKED_SUBJECT_RE);
+        // The anonymous per-subject count keyed on the minted id.
+        expect(reports.count).toHaveBeenCalledWith({
+          where: expect.objectContaining({ subjectId: savedId }) as unknown,
+        });
+      });
+
+      it('leaves "unspecified" untouched on a subject type the public form never files', async () => {
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.Post,
+          subjectId: 'unspecified',
+          reasonCode: 'harassment',
+        });
+
+        expect(savedSubjectIds()).toEqual(['unspecified']);
+      });
+
+      it.each([ReportSubjectType.Member, ReportSubjectType.Venue])(
+        'accepts a well-formed unlinked id on a %s report',
+        async (subjectType) => {
+          await service.create('reporter-1', {
+            subjectType,
+            subjectId: UNLINKED_ID,
+            reasonCode: 'discrimination',
+          });
+
+          expect(savedSubjectIds()).toEqual([UNLINKED_ID]);
+        },
+      );
+
+      it('lowercases an unlinked id so two spellings of one incident dedupe together', async () => {
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.Member,
+          subjectId: UNLINKED_ID.toUpperCase(),
+          reasonCode: 'harassment',
+        });
+
+        expect(savedSubjectIds()).toEqual([UNLINKED_ID]);
+      });
+
+      it('hands back the open report when the same draft is retried', async () => {
+        reports.findOne.mockResolvedValue({
+          id: 'report-earlier',
+          subjectType: ReportSubjectType.Member,
+          subjectId: UNLINKED_ID,
+          reasonCode: 'harassment',
+          severity: ReportSeverity.High,
+          status: ReportStatus.Open,
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          slaDueAt: new Date('2026-01-02T00:00:00.000Z'),
+        });
+
+        const res = await service.create('reporter-1', {
+          subjectType: ReportSubjectType.Member,
+          subjectId: UNLINKED_ID,
+          reasonCode: 'harassment',
+        });
+
+        expect(res.id).toBe('report-earlier');
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it.each(['unlinked:not-a-uuid', 'unlinked:', 'UNLINKED:x'])(
+        'refuses the malformed unlinked id %s with a 400',
+        async (subjectId) => {
+          await expectBadRequestWithCode(
+            service.create('reporter-1', {
+              subjectType: ReportSubjectType.Member,
+              subjectId,
+              reasonCode: 'harassment',
+            }),
+            REPORT_UNLINKED_SUBJECT_INVALID_CODE,
+          );
+        },
+      );
+
+      it('refuses a well-formed unlinked id on a post with a 400', async () => {
+        await expectBadRequestWithCode(
+          service.create('reporter-1', {
+            subjectType: ReportSubjectType.Post,
+            subjectId: UNLINKED_ID,
+            reasonCode: 'harassment',
+          }),
+          REPORT_UNLINKED_SUBJECT_INVALID_CODE,
+        );
+      });
+    });
+
+    // ENG-488. The DTO checks the code against the whole taxonomy only, so the
+    // service refuses a code the subject type does not offer.
+    describe('reason offered for the subject type', () => {
+      it('refuses outing on a venue with a 400 before any lookup', async () => {
+        let thrown: unknown;
+        try {
+          await service.create('reporter-1', {
+            subjectType: ReportSubjectType.Venue,
+            subjectId: 'unspecified',
+            reasonCode: 'outing',
+          });
+        } catch (error) {
+          thrown = error;
+        }
+
+        expect(thrown).toBeInstanceOf(BadRequestException);
+        expect((thrown as BadRequestException).getResponse()).toEqual({
+          code: REPORT_REASON_NOT_OFFERED_CODE,
+          message: 'That reason does not apply to this kind of report.',
+        });
+        expect(reports.findOne).not.toHaveBeenCalled();
+        expect(reports.count).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('still files a system listing_dispute through the service', async () => {
+        const res = await service.create('reporter-1', {
+          subjectType: ReportSubjectType.Listing,
+          subjectId: 'listing-1',
+          reasonCode: 'listing_dispute',
+        });
+
+        expect(res.id).toBe('report-1');
+        expect(reports.save).toHaveBeenCalledWith(
+          expect.objectContaining({ reasonCode: 'listing_dispute' }),
+        );
+      });
     });
 
     it('persists anonymity and evidence when provided', async () => {

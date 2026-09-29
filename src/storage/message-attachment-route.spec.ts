@@ -309,6 +309,10 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
     expect(clauses).toContain(
       `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
     );
+    // ENG-401: a member who left reaches only what was posted before they left.
+    expect(clauses).toContain(
+      '(participant.left_at IS NULL OR message.created_at <= participant.left_at)',
+    );
     // Fix round N1: a taken-down message and a personal message are refused.
     expect(messageQuery.andWhere).toHaveBeenCalledWith(
       notModeratedMessagePredicate('message'),

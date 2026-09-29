@@ -3,12 +3,20 @@
  * and `open-to.ts`, and here for the same reason: these ids are the wire
  * contract between `profiles.discipline`/`profiles.profession` (what a member
  * sets about themselves) and `GET /members?disciplines=&professions=` (what
- * other members search on) — the SAME ids must drive both, or the filter goes
+ * other members search on): the SAME ids must drive both, or the filter goes
  * quietly dark the way the identity filter once did (see
  * AddDiscoverableIdentities1782800770000). Mirrors `DISCIPLINES` /
- * `PROFESSIONS_BY_FIELD` in the frontend's `memberDirectoryFilter.data.ts` —
+ * `PROFESSIONS_BY_FIELD` in the frontend's `memberDirectoryFilter.data.ts`:
  * keep the two in lockstep; this list is the authority and the DTO rejects
  * anything outside it.
+ *
+ * The field and profession list is grounded in ISCO-08 (the International
+ * Standard Classification of Occupations): every job-facing field maps to at
+ * least one ISCO-08 minor group, and every listed profession sits under the
+ * field ISCO would place its occupation in. `isco-by-discipline.ts` holds the
+ * ISCO-08 codes behind each job field; see
+ * QUEERPULSE-WORK-TAXONOMY-RESEARCH-2026-09-29.md for the full mapping this
+ * list was built from.
  *
  * Unlike identities, there is no private/published split for most of this
  * taxonomy: a listed discipline/profession is a professional-identity fact in
@@ -31,6 +39,7 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'animator',
     'comicArtist',
     'uxResearcher',
+    'industrialDesigner',
   ],
   fashion: [
     'fashionDesigner',
@@ -41,18 +50,100 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'patternCutter',
     'fashionBuyer',
     'vintageReseller',
+    'shoemaker',
   ],
   editorial: [
     'editor',
     'journalist',
     'copywriter',
-    'translator',
     'poet',
     'podcaster',
     'author',
     'contentCreator',
     'zinester',
     'publisher',
+  ],
+  languages: [
+    'translator',
+    'interpreter',
+    'signLanguageInterpreter',
+    'subtitler',
+    'localisationSpecialist',
+  ],
+  marketing: [
+    'marketingManager',
+    'brandStrategist',
+    'socialMediaManager',
+    'contentStrategist',
+    'prCommunications',
+    'growthMarketer',
+    'communityManager',
+    'mediaPlanner',
+    'marketResearcher',
+  ],
+  tech: [
+    'softwareEngineer',
+    'backendEngineer',
+    'dataScientist',
+    'productManager',
+    'frontendEngineer',
+    'fullStackEngineer',
+    'mobileEngineer',
+    'devOpsEngineer',
+    'qaEngineer',
+    'securityEngineer',
+    'dataAnalyst',
+    'machineLearningEngineer',
+    'itSupport',
+    'technicalWriter',
+    'engineeringManager',
+    'dataEngineer',
+    'sysAdmin',
+    'databaseAdministrator',
+    'erpConsultant',
+    'gameDeveloper',
+    'hardwareTechnician',
+  ],
+  engineering: [
+    'civilEngineer',
+    'mechanicalEngineer',
+    'electricalEngineer',
+    'environmentalEngineer',
+    'aerospaceEngineer',
+    'biomedicalEngineer',
+    'industrialEngineer',
+    'chemicalEngineer',
+    'telecomsEngineer',
+    'energyEngineer',
+    'qualityEngineer',
+    'engineeringTechnician',
+  ],
+  science: [
+    'biologist',
+    'ecologist',
+    'labResearcher',
+    'chemist',
+    'physicist',
+    'environmentalScientist',
+    'mathematician',
+    'researcher',
+    'statistician',
+    'geologist',
+    'marineScientist',
+    'socialScientist',
+    'economist',
+    'labTechnician',
+    'clinicalResearchAssociate',
+  ],
+  architecture: [
+    'architect',
+    'urbanDesigner',
+    'interiorArchitect',
+    'landscapeArchitect',
+    'landSurveyor',
+    'draughtsperson',
+    'quantitySurveyor',
+    'interiorDesigner',
   ],
   healthcare: [
     'therapist',
@@ -75,6 +166,37 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'sexualHealthWorker',
     'harmReductionWorker',
     'paramedic',
+    'healthcareAssistant',
+    'radiographer',
+    'clinicalLabTechnician',
+    'pharmacyTechnician',
+    'dentalHygienist',
+    'optometrist',
+    'audiologist',
+    'osteopath',
+    'acupuncturist',
+  ],
+  care: [
+    'homeCareWorker',
+    'childcareWorker',
+    'disabilitySupportWorker',
+    'funeralDirector',
+    'careHomeAssistant',
+    'nanny',
+  ],
+  education: [
+    'teacher',
+    'workshopFacilitator',
+    'tutor',
+    'lecturer',
+    'sexEducator',
+    'languageTeacher',
+    'earlyYearsEducator',
+    'specialNeedsTeacher',
+    'vocationalTrainer',
+    'teachingAssistant',
+    'schoolLeader',
+    'careersAdviser',
   ],
   legal: [
     'immigrationLawyer',
@@ -86,59 +208,26 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'criminalLawyer',
     'notary',
     'mediator',
+    'solicitor',
+    'judge',
+    'corporateLawyer',
+    'complianceOfficer',
+    'legalSecretary',
   ],
-  education: [
-    'teacher',
-    'workshopFacilitator',
-    'researcher',
-    'tutor',
-    'lecturer',
-    'sexEducator',
-    'languageTeacher',
-    'earlyYearsEducator',
-    'specialNeedsTeacher',
-  ],
-  tech: [
-    'softwareEngineer',
-    'backendEngineer',
-    'dataScientist',
-    'productManager',
-    'frontendEngineer',
-    'fullStackEngineer',
-    'mobileEngineer',
-    'devOpsEngineer',
-    'qaEngineer',
-    'securityEngineer',
-    'dataAnalyst',
-    'machineLearningEngineer',
-    'itSupport',
-    'technicalWriter',
-  ],
-  engineering: [
-    'civilEngineer',
-    'mechanicalEngineer',
-    'electricalEngineer',
-    'environmentalEngineer',
-    'aerospaceEngineer',
-    'biomedicalEngineer',
-  ],
-  marketing: [
-    'marketingManager',
-    'brandStrategist',
-    'socialMediaManager',
-    'contentStrategist',
-    'prCommunications',
-    'growthMarketer',
-    'communityManager',
-  ],
-  operations: [
-    'operationsManager',
-    'projectManager',
-    'programmeCoordinator',
-    'officeManager',
-    'executiveAssistant',
-    'eventOperations',
-    'logisticsCoordinator',
+  finance: [
+    'accountant',
+    'bookkeeper',
+    'financialAnalyst',
+    'financialAdviser',
+    'taxAdviser',
+    'auditor',
+    'bankClerk',
+    'bankRelationshipManager',
+    'creditAnalyst',
+    'insuranceAgent',
+    'claimsHandler',
+    'actuary',
+    'financialController',
   ],
   people: [
     'hrGeneralist',
@@ -147,29 +236,96 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'learningDevelopment',
     'deiLead',
     'payrollBenefits',
+    'hrAdministrator',
   ],
-  finance: [
-    'accountant',
-    'bookkeeper',
-    'financialAnalyst',
-    'fundraiser',
-    'financialAdviser',
-    'taxAdviser',
-    'auditor',
+  operations: [
+    'operationsManager',
+    'projectManager',
+    'programmeCoordinator',
+    'officeManager',
+    'executiveAssistant',
+    'receptionist',
+    'adminAssistant',
+    'dataEntryClerk',
+    'procurementSpecialist',
+    'qualityManager',
+    'healthSafetyOfficer',
+  ],
+  management: [
+    'consultant',
+    'managingDirector',
+    'businessAnalyst',
+    'strategyLead',
   ],
   sales: [
     'accountExecutive',
     'businessDevelopment',
-    'customerSuccessManager',
     'salesRepresentative',
-    'estateAgent',
+    'salesManager',
+    'keyAccountManager',
+    'medicalRep',
   ],
-  ownBusiness: [
-    'founder',
-    'smallBusinessOwner',
-    'freelancer',
-    'consultant',
-    'coopMember',
+  customerService: [
+    'customerSupport',
+    'customerSuccessManager',
+    'callCentreAgent',
+    'contactCentreTeamLead',
+    'technicalSupportAgent',
+  ],
+  realEstate: [
+    'estateAgent',
+    'propertyManager',
+    'propertyValuer',
+    'condominiumManager',
+  ],
+  retail: [
+    'shopAssistant',
+    'florist',
+    'bookseller',
+    'storeManager',
+    'visualMerchandiser',
+    'cashier',
+    'marketTrader',
+    'ecommerceManager',
+  ],
+  food: [
+    'chef',
+    'barista',
+    'baker',
+    'supperClubHost',
+    'bartender',
+    'waiter',
+    'cook',
+    'sommelier',
+    'brewer',
+    'caterer',
+    'restaurantManager',
+    'kitchenAssistant',
+    'pastryChef',
+    'butcher',
+    'counterAssistant',
+  ],
+  hospitality: [
+    'hotelManager',
+    'frontDeskAgent',
+    'housekeeper',
+    'tourGuide',
+    'travelAgent',
+    'guesthouseHost',
+    'concierge',
+    'reservationsAgent',
+    'tourismAnimator',
+  ],
+  nightlife: [
+    'promoter',
+    'eventProducer',
+    'eventPlanner',
+    'venueManager',
+    'doorHost',
+    'stageTechnician',
+    'celebrant',
+    'eventOperations',
+    'eventStaff',
   ],
   photo: [
     'portraitPhotographer',
@@ -186,6 +342,8 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'screenwriter',
     'filmProducer',
     'videographer',
+    'radioPresenter',
+    'cameraOperator',
   ],
   performance: [
     'choreographer',
@@ -203,6 +361,7 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'poleDancer',
     'spokenWordArtist',
     'danceTeacher',
+    'stageManager',
   ],
   music: [
     'musicProducer',
@@ -216,43 +375,6 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'musicTeacher',
     'soundEngineer',
   ],
-  nightlife: [
-    'promoter',
-    'eventProducer',
-    'eventPlanner',
-    'venueManager',
-    'doorHost',
-    'stageTechnician',
-    'celebrant',
-  ],
-  architecture: [
-    'architect',
-    'urbanDesigner',
-    'interiorArchitect',
-    'landscapeArchitect',
-  ],
-  community: [
-    'communityOrganiser',
-    'housingOrganiser',
-    'housingAdvocate',
-    'supportCoordinator',
-    'accessibilityAdvocate',
-    'activist',
-    'communityCentreCoordinator',
-  ],
-  publicSector: [
-    'socialWorker',
-    'youthWorker',
-    'policyAdvisor',
-    'civilServant',
-    'nonprofitDirector',
-    'ngoProgrammeLead',
-    'volunteerCoordinator',
-    'electedOfficial',
-    'diplomat',
-    'firefighter',
-    'policeOfficer',
-  ],
   curation: [
     'curator',
     'archivist',
@@ -263,27 +385,8 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'artCritic',
     'exhibitionDesigner',
     'museumEducator',
-  ],
-  food: [
-    'chef',
-    'barista',
-    'baker',
-    'supperClubHost',
-    'bartender',
-    'waiter',
-    'cook',
-    'sommelier',
-    'brewer',
-    'caterer',
-    'restaurantManager',
-  ],
-  hospitality: [
-    'hotelManager',
-    'frontDeskAgent',
-    'housekeeper',
-    'tourGuide',
-    'travelAgent',
-    'guesthouseHost',
+    'archaeologist',
+    'culturalProgrammer',
   ],
   craft: [
     'ceramicist',
@@ -292,6 +395,11 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'jeweller',
     'printmaker',
     'leatherworker',
+    'visualArtist',
+    'tilePainter',
+    'furnitureRestorer',
+    'bookbinder',
+    'luthier',
   ],
   beauty: [
     'barber',
@@ -303,33 +411,6 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'piercer',
     'wigMaker',
     'lashBrowTechnician',
-  ],
-  trades: [
-    'electrician',
-    'plumber',
-    'carpenter',
-    'mechanic',
-    'painterDecorator',
-    'constructionWorker',
-    'gardener',
-    'welder',
-    'tiler',
-    'handyperson',
-  ],
-  farming: ['farmer', 'winemaker', 'permacultureDesigner', 'beekeeper'],
-  care: [
-    'homeCareWorker',
-    'childcareWorker',
-    'disabilitySupportWorker',
-    'funeralDirector',
-  ],
-  animals: [
-    'vet',
-    'vetNurse',
-    'dogWalker',
-    'petGroomer',
-    'dogTrainer',
-    'animalShelterWorker',
   ],
   wellness: [
     'personalTrainer',
@@ -346,17 +427,46 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'referee',
     'surfInstructor',
     'climbingInstructor',
+    'swimmingInstructor',
   ],
-  retail: [
-    'shopAssistant',
-    'receptionist',
-    'cleaner',
-    'securityGuard',
-    'customerSupport',
-    'florist',
-    'bookseller',
-    'storeManager',
-    'visualMerchandiser',
+  animals: [
+    'vet',
+    'vetNurse',
+    'dogWalker',
+    'petGroomer',
+    'dogTrainer',
+    'animalShelterWorker',
+  ],
+  trades: [
+    'electrician',
+    'plumber',
+    'carpenter',
+    'mechanic',
+    'painterDecorator',
+    'constructionWorker',
+    'gardener',
+    'welder',
+    'tiler',
+    'handyperson',
+    'mason',
+    'metalworker',
+    'hvacTechnician',
+    'maintenanceTechnician',
+    'siteManager',
+    'telecomsInstaller',
+    'solarInstaller',
+  ],
+  manufacturing: [
+    'productionOperator',
+    'cncOperator',
+    'assembler',
+    'productionSupervisor',
+    'productionManager',
+    'qualityInspector',
+    'sewingMachinist',
+    'foodProductionOperator',
+    'plantOperator',
+    'mouldMaker',
   ],
   transport: [
     'driver',
@@ -364,16 +474,73 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'warehouseWorker',
     'pilot',
     'flightAttendant',
+    'logisticsCoordinator',
+    'truckDriver',
+    'busDriver',
+    'trainDriver',
+    'forkliftOperator',
+    'postalWorker',
+    'stockController',
+    'supplyChainManager',
+    'freightForwarder',
+    'seafarer',
+    'drivingInstructor',
   ],
-  science: [
-    'biologist',
-    'ecologist',
-    'labResearcher',
-    'chemist',
-    'physicist',
-    'environmentalScientist',
-    'mathematician',
+  farming: [
+    'farmer',
+    'winemaker',
+    'permacultureDesigner',
+    'beekeeper',
+    'fisher',
+    'forestryWorker',
+    'agronomist',
+    'farmWorker',
   ],
+  facilities: [
+    'cleaner',
+    'domesticWorker',
+    'laundryWorker',
+    'buildingCaretaker',
+    'facilitiesManager',
+    'wasteWorker',
+  ],
+  security: [
+    'securityGuard',
+    'firefighter',
+    'policeOfficer',
+    'militaryPersonnel',
+    'prisonOfficer',
+    'lifeguard',
+    'emergencyDispatcher',
+  ],
+  community: [
+    'communityOrganiser',
+    'housingOrganiser',
+    'housingAdvocate',
+    'supportCoordinator',
+    'accessibilityAdvocate',
+    'activist',
+    'communityCentreCoordinator',
+    'socialWorker',
+    'youthWorker',
+    'nonprofitDirector',
+    'ngoProgrammeLead',
+    'volunteerCoordinator',
+    'fundraiser',
+    'socioculturalAnimator',
+    'interculturalMediator',
+    'socialCareTechnician',
+  ],
+  publicSector: [
+    'policyAdvisor',
+    'civilServant',
+    'electedOfficial',
+    'diplomat',
+    'taxCustomsOfficer',
+    'publicInspector',
+  ],
+  faith: ['clergy', 'chaplain', 'pastoralWorker'],
+  ownBusiness: ['founder', 'smallBusinessOwner', 'freelancer', 'coopMember'],
   games: [
     'gameMaster',
     'ttrpgWriter',
@@ -441,8 +608,8 @@ export function isProfessionId(value: string): boolean {
   return PROFESSION_SET.has(value);
 }
 
-/** Keep only the ids that are actually in the taxonomy — an unrecognised id
- *  submitted by a stale/malicious client is dropped, not stored. */
+/** Keep only the ids that are actually in the taxonomy. An unrecognised id
+ *  submitted by a stale/malicious client gets dropped before storage. */
 export function knownDisciplines(ids: readonly string[]): string[] {
   return [...new Set(ids.filter(isDisciplineId))];
 }
@@ -455,10 +622,9 @@ export function knownProfessions(ids: readonly string[]): string[] {
  * A profession implies its parent discipline. Mirrors the frontend's
  * `reconcileProfessions`/`toggleProfession` invariant so the same rule holds
  * whether a member is picking their OWN discipline/profession in Settings or
- * filtering the directory by one: keeps `profession ⊆ discipline` coherent
- * without rejecting the write — auto-adds the missing parent rather than
- * erroring, since forgetting to also tick the parent field is a normal slip,
- * not a hostile input.
+ * filtering the directory by one: keeps `profession ⊆ discipline` coherent by
+ * letting the write succeed and auto-adding the missing parent, since
+ * forgetting to also tick the parent field is usually a normal slip.
  */
 export function reconcileDisciplineProfession(
   disciplines: readonly string[],
@@ -504,6 +670,39 @@ const UNLISTED_DISCIPLINE_SET: ReadonlySet<string> = new Set(
 export const LISTED_DISCIPLINE_IDS: readonly string[] = DISCIPLINE_IDS.filter(
   (id) => !UNLISTED_DISCIPLINE_SET.has(id),
 );
+
+/**
+ * Fields a member can hold on a profile that are not occupations a job can be
+ * posted for: `ownBusiness` is how someone works, `games` is mostly hobby and
+ * fandom, `lifeStage` is a labour-force status. Job posts and the job board
+ * read `JOB_FIELD_IDS`, which also leaves out every unlisted field.
+ */
+export const PROFILE_ONLY_DISCIPLINE_IDS: readonly string[] = [
+  'ownBusiness',
+  'games',
+  'lifeStage',
+];
+
+const PROFILE_ONLY_DISCIPLINE_SET: ReadonlySet<string> = new Set(
+  PROFILE_ONLY_DISCIPLINE_IDS,
+);
+
+export const JOB_FIELD_IDS: readonly string[] = LISTED_DISCIPLINE_IDS.filter(
+  (id) => !PROFILE_ONLY_DISCIPLINE_SET.has(id),
+);
+
+const JOB_FIELD_SET: ReadonlySet<string> = new Set(JOB_FIELD_IDS);
+
+export function isJobFieldId(value: string): boolean {
+  return JOB_FIELD_SET.has(value);
+}
+
+export function professionBelongsToField(
+  professionId: string,
+  fieldId: string,
+): boolean {
+  return DISCIPLINE_BY_PROFESSION[professionId] === fieldId;
+}
 
 export const LISTED_PROFESSION_IDS: readonly string[] = Object.keys(
   DISCIPLINE_BY_PROFESSION,

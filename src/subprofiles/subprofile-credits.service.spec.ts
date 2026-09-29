@@ -47,6 +47,7 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     position: 0,
     skinData: null,
     removedAt: null,
+    editVersion: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,

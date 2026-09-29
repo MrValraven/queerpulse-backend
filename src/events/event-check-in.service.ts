@@ -13,6 +13,14 @@ import { CardTokenService } from '../membership-cards/card-token.service';
 import { CommunityCard } from '../membership-cards/entities/community-card.entity';
 import { MembershipCard } from '../membership-cards/entities/membership-card.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
+import {
+  CHECK_IN_CARD_UNREADABLE,
+  CHECK_IN_MAYBE,
+  CHECK_IN_MEMBER_NOT_FOUND,
+  CHECK_IN_NOT_ON_GUEST_LIST,
+  CHECK_IN_WAITLISTED,
+} from './event-check-in-codes';
 import {
   EVENT_ATTENDANCE_WINDOW_CLOSED_CODE,
   isAttendanceCleared,
@@ -113,14 +121,19 @@ export class EventCheckInService {
     }
 
     const targetUserId = input.memberSlug
-      ? await this.resolveByMemberSlug(input.memberSlug)
+      ? await this.resolveByMemberSlugForCheckIn(input.memberSlug)
       : await this.resolveByCardToken(input.cardToken as string);
 
     const rsvp = await this.rsvps.findOne({
       where: { eventId: event.id, userId: targetUserId },
     });
     if (!rsvp || rsvp.status === RsvpStatus.Cancelled) {
-      throw new NotFoundException('That member is not on the guest list');
+      throw new NotFoundException({
+        statusCode: 404,
+        error: 'Not Found',
+        code: CHECK_IN_NOT_ON_GUEST_LIST,
+        message: 'That member is not on the guest list',
+      });
     }
     if (rsvp.status !== RsvpStatus.Going) {
       // Waitlisted or 'maybe'. Named plainly rather than checked in silently,
@@ -128,8 +141,19 @@ export class EventCheckInService {
       // them, or turn them away) and the desk should not make it for them.
       throw new BadRequestException(
         rsvp.status === RsvpStatus.Waitlisted
-          ? 'That member is on the waitlist. Promote them first, then check them in.'
-          : 'That member answered maybe and has no seat yet',
+          ? {
+              statusCode: 400,
+              error: 'Bad Request',
+              code: CHECK_IN_WAITLISTED,
+              message:
+                'That member is on the waitlist. Promote them first, then check them in.',
+            }
+          : {
+              statusCode: 400,
+              error: 'Bad Request',
+              code: CHECK_IN_MAYBE,
+              message: 'That member answered maybe and has no seat yet',
+            },
       );
     }
 
@@ -157,7 +181,12 @@ export class EventCheckInService {
       where: { eventId: event.id, userId: targetUserId },
     });
     if (!rsvp) {
-      throw new NotFoundException('That member is not on the guest list');
+      throw new NotFoundException({
+        statusCode: 404,
+        error: 'Not Found',
+        code: CHECK_IN_NOT_ON_GUEST_LIST,
+        message: 'That member is not on the guest list',
+      });
     }
     // DELIBERATELY NOT GUARDED by `assertAttendanceStillRecorded`. Undo clears
     // a `checked_in_at`, so it REMOVES the personal data the retention window
@@ -238,7 +267,52 @@ export class EventCheckInService {
       where: { slug: memberSlug },
     });
     if (!profile) {
-      throw new NotFoundException('Member not found');
+      throw new NotFoundException({
+        statusCode: 404,
+        error: 'Not Found',
+        code: CHECK_IN_MEMBER_NOT_FOUND,
+        message: 'Member not found',
+      });
+    }
+    return profile.userId;
+  }
+
+  /**
+   * The by-name branch of `checkIn`. A tapped guest-list row resolves to a
+   * member the same way `resolveByMemberSlug` does, then applies the same
+   * account-status predicate `resolveByCardToken` applies to a scanned card:
+   * a member suspended by moderation, or one who has paused or is deleting
+   * their account, does not get let in by either door.
+   *
+   * A separate method from `resolveByMemberSlug` because `undoCheckIn` calls
+   * that one too, and an undo must stay available whatever the member's
+   * account now says: it only clears a timestamp a host already recorded, and
+   * refusing that leaves a stray arrival stamp nobody can remove.
+   *
+   * A non-active account throws the SAME `notFound` an unmatched slug does,
+   * the same generic-refusal shape `resolveByCardToken` uses below: one
+   * message covers every reason this method can fail. An event host is
+   * another member, and whether someone was suspended or is deactivating
+   * their own account is exactly the kind of status the platform keeps
+   * private from other members everywhere else, so this door does not spell
+   * it out either.
+   */
+  private async resolveByMemberSlugForCheckIn(
+    memberSlug: string,
+  ): Promise<string> {
+    const notFound = new NotFoundException({
+      statusCode: 404,
+      error: 'Not Found',
+      code: CHECK_IN_MEMBER_NOT_FOUND,
+      message: 'Member not found',
+    });
+    const profile = await this.profiles.findOne({
+      where: { slug: memberSlug },
+      relations: { user: true },
+    });
+    if (!profile) throw notFound;
+    if (profile.user && profile.user.status !== UserStatus.Active) {
+      throw notFound;
     }
     return profile.userId;
   }
@@ -253,9 +327,12 @@ export class EventCheckInService {
    * the platform's card population they just probed.
    */
   private async resolveByCardToken(cardToken: string): Promise<string> {
-    const unreadable = new BadRequestException(
-      'That card could not be read. Check them in by name instead.',
-    );
+    const unreadable = new BadRequestException({
+      statusCode: 400,
+      error: 'Bad Request',
+      code: CHECK_IN_CARD_UNREADABLE,
+      message: 'That card could not be read. Check them in by name instead.',
+    });
     const payload = this.cardTokens.verify(cardToken);
     if (!payload) throw unreadable;
 
@@ -274,12 +351,21 @@ export class EventCheckInService {
     });
     if (!community) throw unreadable;
 
+    // The holder's account is part of the card's status, as at
+    // `/cards/verify`: a member suspended by moderation, or one who has paused
+    // or is deleting their account, holds a card that opens no door.
+    const holder = await this.profiles.findOne({
+      where: { userId: card.userId },
+      relations: { user: true },
+    });
+
     const status = effectiveCardStatus({
       status: card.status,
       expiresAt: card.expiresAt,
       programEnabled: program.isEnabled,
       communityFrozenAt: community.frozenAt,
       communityArchivedAt: community.archivedAt,
+      holderStatus: holder?.user?.status ?? null,
     });
     if (status !== 'active') throw unreadable;
 

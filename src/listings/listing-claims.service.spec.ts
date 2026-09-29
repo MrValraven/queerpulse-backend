@@ -4,6 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MessagingService } from '../messaging/messaging.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -74,6 +75,7 @@ describe('ListingClaimsService', () => {
     update: jest.Mock;
   };
   let adminQueueNotifications: { announce: jest.Mock };
+  let notifications: { create: jest.Mock };
   let ownership: {
     transferOwnership: jest.Mock;
     emitTransferChanges: jest.Mock;
@@ -128,6 +130,7 @@ describe('ListingClaimsService', () => {
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
+    notifications = { create: jest.fn().mockResolvedValue(undefined) };
     ownership = {
       transferOwnership: jest.fn().mockResolvedValue(transferResult()),
       emitTransferChanges: jest.fn(),
@@ -147,7 +150,7 @@ describe('ListingClaimsService', () => {
         { provide: getRepositoryToken(Profile), useValue: {} },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
-        { provide: NotificationsService, useValue: { create: jest.fn() } },
+        { provide: NotificationsService, useValue: notifications },
         { provide: MessagingService, useValue: { deliverEnquiry: jest.fn() } },
         // `review` hands the whole transfer to this service, so the suite
         // only needs a stand-in that the module can resolve.
@@ -415,6 +418,29 @@ describe('ListingClaimsService', () => {
       expect(ownership.transferOwnership).toHaveBeenCalledTimes(1);
       expect(ownership.emitTransferChanges).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['approved', NotificationType.ListingClaimApproved],
+      ['declined', NotificationType.ListingClaimDeclined],
+    ] as const)(
+      'tells the claimant the %s outcome with the listing name',
+      async (decision, expectedType) => {
+        listings.findOne.mockResolvedValue(listingForReview());
+        claims.findOne.mockResolvedValue(claimFixture());
+
+        await service.review('claim-1', 'reviewer-1', decision);
+
+        expect(notifications.create).toHaveBeenCalledWith(
+          'claimant-1',
+          expectedType,
+          {
+            source: 'listing',
+            listingSlug: 'lux-cafe',
+            listingName: 'Lux Café',
+          },
+        );
+      },
+    );
 
     it('emits nothing when a concurrent reviewer wins and the transfer rolls back', async () => {
       listings.findOne.mockResolvedValue(listingForReview());

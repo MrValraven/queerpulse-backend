@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
@@ -138,6 +139,7 @@ describe('EventsService — event lineup (Personas Phase 5, Moment 5)', () => {
             findLinkable: jest.fn().mockResolvedValue(null),
           },
         },
+        { provide: EventEmitter2, useValue: { emitAsync: jest.fn() } },
       ],
     }).compile();
     service = module.get(EventsService);

@@ -10,6 +10,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThanOrEqual, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -22,7 +23,7 @@ import { toStoredPlainText } from './community-plain-text';
 import {
   loadActiveCommunityOr404,
   loadMembershipOr403,
-  resolveMemberCommunity,
+  resolveMemberCommunityInterior,
 } from './community-staff-access';
 import { CreateCommunityOwnerReviewDto } from './dto/create-community-owner-review.dto';
 import {
@@ -141,6 +142,7 @@ export class CommunityOwnerReviewService {
     @InjectRepository(User)
     private readonly users: Repository<User>,
     private readonly notifications: NotificationsService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /**
@@ -154,17 +156,25 @@ export class CommunityOwnerReviewService {
    * The owner is included as a reader on purpose: a request filed about them
    * is not a secret, and seeing it is what prompts the "I am still here"
    * withdrawal below.
+   *
+   * Resolved through `resolveMemberCommunityInterior` (ENG-426 follow-up), so
+   * a plain member of a community a moderator has hidden or removed gets the
+   * same 404 the community's own page, posts and roster already answer with.
+   * Staff keep reading it. A member of a merely archived community keeps
+   * reading its owner-review state, unchanged.
    */
   async getState(
     slug: string,
     userId: string,
   ): Promise<CommunityOwnerReviewStateDTO> {
-    const { community, membership, role } = await resolveMemberCommunity(
-      this.communities,
-      this.members,
-      slug,
-      userId,
-    );
+    const { community, membership, role } =
+      await resolveMemberCommunityInterior(
+        this.communities,
+        this.members,
+        this.contentModeration,
+        slug,
+        userId,
+      );
     // Parent staff reach a space through an inherited role with no roster
     // row, and `open` requires one, so the file control must stay off for
     // them.
@@ -377,6 +387,13 @@ export class CommunityOwnerReviewService {
     const isOpen = request?.status === CommunityOwnerReviewRequestStatus.Open;
     const isViewerTheOwner =
       community.ownerId === viewerUserId || viewerRole === RosterRole.Owner;
+    // `getState` reads through `resolveMemberCommunityInterior` (PRD-412),
+    // which admits an archived community for its member roster; `open` and
+    // `withdraw` both still resolve through `loadActiveCommunityOr404` and
+    // 404 an archived slug outright. Both controls have to read as
+    // unavailable here too, or a member of an archived community sees a
+    // button that 404s the moment it is pressed.
+    const isCommunityArchived = community.archivedAt !== null;
 
     return {
       request: request
@@ -391,8 +408,10 @@ export class CommunityOwnerReviewService {
       // NOT folded in here: it would cost an extra count query on every read
       // of this surface to hide a control the member is usually entitled to,
       // and a member who does hit it gets a 429 that explains itself.
-      canOpen: hasOwnRosterRow && !isViewerTheOwner && !isOpen,
+      canOpen:
+        !isCommunityArchived && hasOwnRosterRow && !isViewerTheOwner && !isOpen,
       canWithdraw:
+        !isCommunityArchived &&
         isOpen &&
         (isViewerTheOwner || request?.requestedByUserId === viewerUserId),
     };

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
+import { BanEvasionModule } from '../ban-evasion/ban-evasion.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { EventsModule } from '../events/events.module';
@@ -202,6 +203,13 @@ import { SubcommunitiesService } from './subcommunities.service';
     // `AdminQueueNotificationsService`: tells the community-tag-request
     // queue's reviewers when `createTagRequest` lands a new suggestion.
     AdminQueueNotificationsModule,
+    // ENG-428. `CommunityBanEvasionService`, so `CommunitiesService.join` can
+    // ask `isMatchingCommunityBan` before an instant admission and route a
+    // joiner who correlates with one of this community's bans to review.
+    // Plain import, no `forwardRef`: `BanEvasionModule` imports only
+    // `ConfigModule` and `NotificationsModule` (its community entities are
+    // read-only `forFeature` registrations), and neither reaches this module.
+    BanEvasionModule,
   ],
   controllers: [
     CommunitiesController,

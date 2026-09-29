@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Topic } from '../content/entities/topic.entity';
+import { ModerationModule } from '../moderation/moderation.module';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { AdminTopicsController } from './admin-topics.controller';
 import { AdminTopicsService } from './admin-topics.service';
@@ -29,6 +30,10 @@ import { AdminTopicsService } from './admin-topics.service';
       Topic,
       TopicFollow,
     ]),
+    // `ModAuditService`, for the actor trail `AdminTopicsService.remove`
+    // writes in the same transaction as its hard delete (ENG-490). Plain
+    // import: the `ModerationModule` graph contains no admin-topics module.
+    ModerationModule,
   ],
   controllers: [AdminTopicsController],
   providers: [AdminTopicsService],

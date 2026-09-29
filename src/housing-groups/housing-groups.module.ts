@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { Connection } from '../connections/entities/connection.entity';
+import { ModerationModule } from '../moderation/moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { VerificationModule } from '../verification/verification.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -43,8 +44,14 @@ import { HousingGroupsService } from './housing-groups.service';
     // in-app plus push. No cycle — NotificationsModule does not import this one.
     NotificationsModule,
     // `AdminQueueNotificationsService`: tells the housing-group-listing
-    // queue's reviewers when `createListing` lands a new listing in review.
+    // queue's reviewers when `createListing` lands a new listing in review,
+    // and the join-request queue's when `createJoinRequest` lands (PRD-462).
     AdminQueueNotificationsModule,
+    // `ModAuditService` (ENG-490): group delete, listing hide/unhide and
+    // join-request triage record the acting staff member. Plain import: the
+    // `ModerationModule` graph contains no housing module, the same reasoning
+    // `ForumModule` gives.
+    ModerationModule,
   ],
   controllers: [HousingGroupsController, AdminHousingGroupListingsController],
   providers: [HousingGroupsService],

@@ -1,5 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { MarkThreadReadDto } from './dto/mark-thread-read.dto';
 import { ForumController } from './forum.controller';
 import { ForumPollsService } from './forum-polls.service';
 import { ForumPostsService } from './forum-posts.service';
@@ -25,6 +28,7 @@ describe('ForumController', () => {
     updateThread: jest.Mock;
     deleteThread: jest.Mock;
     markRead: jest.Mock;
+    removeCoAuthor: jest.Mock;
   };
   let postsService: {
     listPosts: jest.Mock;
@@ -46,6 +50,7 @@ describe('ForumController', () => {
       updateThread: jest.fn().mockResolvedValue({}),
       deleteThread: jest.fn().mockResolvedValue({}),
       markRead: jest.fn().mockResolvedValue({ ok: true }),
+      removeCoAuthor: jest.fn().mockResolvedValue({}),
     };
     postsService = {
       listPosts: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
@@ -319,9 +324,55 @@ describe('ForumController', () => {
     // Reading is not following (C7/PRD-170): the two are separate routes
     // writing separate fields of the same row.
     await expect(
-      controller.markThreadRead(user, 'hello-world'),
+      controller.markThreadRead(user, 'hello-world', {}),
     ).resolves.toEqual({ ok: true });
 
-    expect(threadsService.markRead).toHaveBeenCalledWith('hello-world', user);
+    expect(threadsService.markRead).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      undefined,
+    );
+  });
+
+  it('passes the read watermark upTo through to the service (PRD-409)', async () => {
+    await controller.markThreadRead(user, 'hello-world', {
+      upTo: '2026-09-01T10:00:00.000Z',
+    });
+
+    expect(threadsService.markRead).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      '2026-09-01T10:00:00.000Z',
+    );
+  });
+
+  it('controller accepts an empty body', async () => {
+    // The DTO validates an empty body: `upTo` is optional.
+    const emptyBody = plainToInstance(MarkThreadReadDto, {});
+    await expect(validate(emptyBody)).resolves.toEqual([]);
+    // A malformed timestamp is still refused.
+    const malformedBody = plainToInstance(MarkThreadReadDto, {
+      upTo: 'yesterday',
+    });
+    expect(await validate(malformedBody)).toHaveLength(1);
+
+    // A request with no body at all reaches the handler as `undefined`.
+    await expect(
+      controller.markThreadRead(user, 'hello-world', undefined),
+    ).resolves.toEqual({ ok: true });
+    expect(threadsService.markRead).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      undefined,
+    );
+  });
+
+  it('delegates co-author removal with the caller (PRD-408)', async () => {
+    await controller.removeCoAuthor(user, 'hello-world');
+
+    expect(threadsService.removeCoAuthor).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+    );
   });
 });

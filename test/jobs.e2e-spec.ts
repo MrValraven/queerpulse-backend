@@ -175,9 +175,9 @@ describe('Jobs (e2e)', () => {
   function createJobPayload(companySlug: string) {
     return {
       title: 'Backend Engineer',
-      category: 'Engineering',
-      commitment: 'Full-time',
-      seniority: 'Mid',
+      category: 'engineering',
+      commitment: 'fullTime',
+      seniority: 'mid',
       format: 'remote',
       location: 'Remote',
       description: 'Build the platform with us.',

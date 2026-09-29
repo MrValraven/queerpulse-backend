@@ -134,8 +134,8 @@ export class CommunityGovernanceLogService {
    * `targetName` is a write-time snapshot of the member's display name, so the
    * row still says who it is about after their account is erased (the FK is
    * `ON DELETE SET NULL`) or after they change their name. Written directly
-   * rather than through `ModAuditService.writeAuditLog`, which carries no
-   * target-member parameter, exactly as
+   * here, since `ModAuditService.writeAuditLog` takes an optional trailing
+   * `targetUserId` now but still carries no `targetName`, exactly as
    * `AdminMemberModerationService.citeMember` already does and documents.
    *
    * Best effort with its own try/catch, the contract every logging helper in

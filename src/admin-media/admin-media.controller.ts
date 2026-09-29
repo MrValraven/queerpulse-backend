@@ -11,6 +11,7 @@ import {
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiNoContentResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiServiceUnavailableResponse,
@@ -20,6 +21,10 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminMediaService } from './admin-media.service';
 import { AdminMediaListQueryDto } from './dto/admin-media-list-query.dto';
@@ -82,9 +87,15 @@ export class AdminMediaController {
       'irreversible and the rows pointing at the key keep pointing at it. ' +
       'Pass `force=true` to override, e.g. for an abuse takedown of an image ' +
       'that IS still live; every forced delete is logged with the references ' +
-      'it overrode.',
+      'it overrode and written to the moderation audit trail with the acting ' +
+      'admin. Private message attachments are outside this console and 404.',
   })
   @ApiNoContentResponse({ description: 'The object was deleted.' })
+  @ApiNotFoundResponse({
+    description:
+      'No such object in this console: a malformed key, an unknown kind, or ' +
+      'a private message attachment.',
+  })
   @ApiConflictResponse({
     description:
       'The object is still referenced. The body carries `references` — every ' +
@@ -97,7 +108,14 @@ export class AdminMediaController {
   })
   @Delete()
   @HttpCode(204)
-  delete(@Query() query: AdminMediaDeleteQueryDto): Promise<void> {
-    return this.adminMedia.delete(query.key, query.force === true);
+  delete(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Query() query: AdminMediaDeleteQueryDto,
+  ): Promise<void> {
+    return this.adminMedia.delete(
+      query.key,
+      currentUser.userId,
+      query.force === true,
+    );
   }
 }

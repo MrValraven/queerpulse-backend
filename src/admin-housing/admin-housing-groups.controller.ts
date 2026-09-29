@@ -25,6 +25,10 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { HousingModerationGuard } from '../auth/guards/housing-moderation.guard';
 import { HousingGroupsService } from '../housing-groups/housing-groups.service';
@@ -87,8 +91,11 @@ export class AdminHousingGroupsController {
   @ApiNotFoundResponse({ description: 'Group not found.' })
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deleteGroup(@Param('id', ParseUUIDPipe) id: string) {
-    return this.groups.deleteGroup(id);
+  deleteGroup(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.groups.deleteGroup(id, user.userId);
   }
 
   @ApiOperation({
@@ -118,8 +125,9 @@ export class AdminHousingGroupsController {
   triageJoinRequest(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: TriageGroupJoinRequestDto,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.groups.triageJoinRequest(id, dto.action);
+    return this.groups.triageJoinRequest(id, dto.action, user.userId);
   }
 
   @ApiOperation({
@@ -135,12 +143,16 @@ export class AdminHousingGroupsController {
     summary: 'Hide or un-hide a group listing for a norm violation.',
   })
   @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiBadRequestResponse({
+    description: 'Hiding a listing needs a reason the poster can read.',
+  })
   @ApiNotFoundResponse({ description: 'Listing not found.' })
   @Patch('listings/:id/hidden')
   setListingHidden(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: HideGroupListingDto,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.groups.setListingHidden(id, dto);
+    return this.groups.setListingHidden(id, dto, user.userId);
   }
 }

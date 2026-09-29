@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import {
@@ -106,6 +107,7 @@ describe('HousingService', () => {
   let affirmingPledge: { requireAccepted: jest.Mock };
   let notifications: { create: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
+  let modAudit: { writeAuditLog: jest.Mock };
 
   beforeEach(async () => {
     coops = {
@@ -131,6 +133,7 @@ describe('HousingService', () => {
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
+    modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -146,6 +149,7 @@ describe('HousingService', () => {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
         },
+        { provide: ModAuditService, useValue: modAudit },
       ],
     }).compile();
 
@@ -346,18 +350,49 @@ describe('HousingService', () => {
   });
 
   describe('deleteCoop', () => {
+    it('404s on an unknown co-op, and audits nothing', async () => {
+      coops.findOne.mockResolvedValue(null);
+
+      await expect(service.deleteCoop('coop-x', 'admin-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(coops.delete).not.toHaveBeenCalled();
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+
     it('404s when nothing was deleted', async () => {
+      coops.findOne.mockResolvedValue(makeCoop());
       coops.delete.mockResolvedValue({ affected: 0 });
 
-      await expect(service.deleteCoop('coop-x')).rejects.toThrow(
+      await expect(service.deleteCoop('coop-x', 'admin-1')).rejects.toThrow(
         NotFoundException,
+      );
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('resolves when a row was removed, and records the acting admin', async () => {
+      coops.findOne.mockResolvedValue(makeCoop());
+      coops.delete.mockResolvedValue({ affected: 1 });
+
+      await expect(
+        service.deleteCoop('coop-1', 'admin-1'),
+      ).resolves.toBeUndefined();
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'admin-1',
+        'housing_coop_delete',
+        undefined,
+        expect.stringContaining('coop-1'),
       );
     });
 
-    it('resolves when a row was removed', async () => {
-      coops.delete.mockResolvedValue({ affected: 1 });
+    it('still resolves when the audit write fails, because the delete committed', async () => {
+      coops.findOne.mockResolvedValue(makeCoop());
+      modAudit.writeAuditLog.mockRejectedValue(new Error('db down'));
 
-      await expect(service.deleteCoop('coop-1')).resolves.toBeUndefined();
+      await expect(
+        service.deleteCoop('coop-1', 'admin-1'),
+      ).resolves.toBeUndefined();
     });
   });
 
@@ -469,8 +504,9 @@ describe('HousingService', () => {
       joinRequests.findOne.mockResolvedValue(null);
 
       await expect(
-        service.triageJoinRequest('request-x', 'accepted'),
+        service.triageJoinRequest('request-x', 'accepted', 'admin-1'),
       ).rejects.toThrow(NotFoundException);
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
     });
 
     it('accepts a request, persists the Accepted status, and re-reads with the coop relation', async () => {
@@ -490,7 +526,11 @@ describe('HousingService', () => {
           coop: { slug: 'rainbow-commons', name: 'Rainbow Commons' },
         });
 
-      const result = await service.triageJoinRequest('request-1', 'accepted');
+      const result = await service.triageJoinRequest(
+        'request-1',
+        'accepted',
+        'admin-1',
+      );
 
       expect(joinRequests.save).toHaveBeenCalledWith(
         expect.objectContaining({ status: JoinRequestStatus.Accepted }),
@@ -501,6 +541,13 @@ describe('HousingService', () => {
         relations: { coop: true },
       });
       expect(result.status).toBe(JoinRequestStatus.Accepted);
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'admin-1',
+        'housing_coop_join_request_triage',
+        undefined,
+        expect.stringMatching(/request-1.*accepted/),
+      );
     });
 
     it('maps the "declined" action onto the Declined status', async () => {
@@ -520,7 +567,7 @@ describe('HousingService', () => {
           coop: { slug: 'rainbow-commons', name: 'Rainbow Commons' },
         });
 
-      await service.triageJoinRequest('request-2', 'declined');
+      await service.triageJoinRequest('request-2', 'declined', 'admin-1');
 
       expect(joinRequests.save).toHaveBeenCalledWith(
         expect.objectContaining({ status: JoinRequestStatus.Declined }),

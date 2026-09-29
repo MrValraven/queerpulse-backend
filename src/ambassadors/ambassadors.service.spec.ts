@@ -15,7 +15,8 @@ import { Community } from '../communities/entities/community.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { AmbassadorCircleService } from './ambassador-circle.service';
 import { AmbassadorsService } from './ambassadors.service';
 import { Ambassador } from './entities/ambassador.entity';
@@ -127,6 +128,7 @@ describe('AmbassadorsService', () => {
         ),
       ),
       find: jest.fn().mockResolvedValue([buildGrantRow()]),
+      findAndCount: jest.fn().mockResolvedValue([[buildGrantRow()], 1]),
     };
     const profilesRepository = {
       findOne: jest
@@ -152,9 +154,14 @@ describe('AmbassadorsService', () => {
     const communityMembersRepository = {
       count: jest.fn().mockResolvedValue(4),
       exists: jest.fn().mockResolvedValue(true),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const staffRolesRepository = {
+      exists: jest.fn().mockResolvedValue(false),
     };
     const circleService = {
       resolveCircle: jest.fn().mockResolvedValue(circle),
+      findCircle: jest.fn().mockResolvedValue(circle),
     };
     const systemMembership = {
       addMember: options.addMemberError
@@ -172,6 +179,7 @@ describe('AmbassadorsService', () => {
       profilesRepository as unknown as Repository<Profile>,
       usersRepository as unknown as Repository<User>,
       communityMembersRepository as unknown as Repository<CommunityMember>,
+      staffRolesRepository as unknown as Repository<UserStaffRole>,
       circleService as unknown as AmbassadorCircleService,
       systemMembership as unknown as CommunitySystemMembershipService,
       notifications as unknown as NotificationsService,
@@ -182,6 +190,7 @@ describe('AmbassadorsService', () => {
       profilesRepository,
       usersRepository,
       communityMembersRepository,
+      staffRolesRepository,
       circleService,
       systemMembership,
       notifications,
@@ -479,41 +488,199 @@ describe('AmbassadorsService', () => {
     });
   });
 
+  describe('releaseStaffSeat (ENG-457)', () => {
+    function buildReleaseService(options: {
+      role?: UserRole;
+      holdsStaffGrant?: boolean;
+      hasActiveGrant?: boolean;
+    }) {
+      const built = buildService({
+        user: { id: 'staff-1', role: options.role ?? UserRole.Member },
+        hasActiveGrant: options.hasActiveGrant ?? false,
+      });
+      built.staffRolesRepository.exists.mockResolvedValue(
+        options.holdsStaffGrant ?? false,
+      );
+      return built;
+    }
+
+    it('removes the mod seat of a former partnerships holder who is not an ambassador', async () => {
+      const { service, systemMembership, communityMembersRepository } =
+        buildReleaseService({});
+
+      await service.releaseStaffSeat('staff-1');
+
+      expect(systemMembership.removeMemberIfRole).toHaveBeenCalledWith(
+        'circle-1',
+        'staff-1',
+        RosterRole.Mod,
+      );
+      expect(communityMembersRepository.update).not.toHaveBeenCalled();
+    });
+
+    it('demotes an active ambassador to a plain member seat, keeping them in the circle', async () => {
+      const {
+        service,
+        systemMembership,
+        communityMembersRepository,
+        ambassadorsRepository,
+      } = buildReleaseService({ hasActiveGrant: true });
+
+      await service.releaseStaffSeat('staff-1');
+
+      expect(ambassadorsRepository.exists).toHaveBeenCalledWith({
+        where: { userId: 'staff-1', revokedAt: IsNull() },
+      });
+      expect(communityMembersRepository.update).toHaveBeenCalledWith(
+        { communityId: 'circle-1', userId: 'staff-1', role: RosterRole.Mod },
+        { role: RosterRole.Member },
+      );
+      expect(systemMembership.removeMemberIfRole).not.toHaveBeenCalled();
+    });
+
+    it('leaves an admin seated, since the admin tier still qualifies', async () => {
+      const { service, systemMembership, communityMembersRepository } =
+        buildReleaseService({ role: UserRole.Admin });
+
+      await service.releaseStaffSeat('staff-1');
+
+      expect(systemMembership.removeMemberIfRole).not.toHaveBeenCalled();
+      expect(communityMembersRepository.update).not.toHaveBeenCalled();
+    });
+
+    it('leaves a member seated who still holds the partnerships grant', async () => {
+      const {
+        service,
+        staffRolesRepository,
+        systemMembership,
+        communityMembersRepository,
+      } = buildReleaseService({ holdsStaffGrant: true });
+
+      await service.releaseStaffSeat('staff-1');
+
+      expect(staffRolesRepository.exists).toHaveBeenCalledWith({
+        where: { userId: 'staff-1', role: 'partnerships' },
+      });
+      expect(systemMembership.removeMemberIfRole).not.toHaveBeenCalled();
+      expect(communityMembersRepository.update).not.toHaveBeenCalled();
+    });
+
+    it('does nothing, and founds nothing, before the circle exists', async () => {
+      const { service, circleService, systemMembership, usersRepository } =
+        buildReleaseService({});
+      circleService.findCircle.mockResolvedValue(null);
+
+      await service.releaseStaffSeat('staff-1');
+
+      expect(circleService.resolveCircle).not.toHaveBeenCalled();
+      expect(usersRepository.findOne).not.toHaveBeenCalled();
+      expect(systemMembership.removeMemberIfRole).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getCircleSummary', () => {
     it('reports the slug, the head count and whether the viewer holds a seat', async () => {
       const { service } = buildService();
 
       await expect(service.getCircleSummary('staff-1')).resolves.toEqual({
+        isFounded: true,
         slug: 'queerpulse-ambassadors',
         memberCount: 4,
         isViewerMember: true,
       });
+    });
+
+    it('answers the not-founded state before the first grant and creates nothing (ENG-459)', async () => {
+      const { service, circleService, communityMembersRepository } =
+        buildService();
+      circleService.findCircle.mockResolvedValue(null);
+
+      await expect(service.getCircleSummary('staff-1')).resolves.toEqual({
+        isFounded: false,
+        slug: null,
+        memberCount: 0,
+        isViewerMember: false,
+      });
+      expect(circleService.resolveCircle).not.toHaveBeenCalled();
+      expect(communityMembersRepository.count).not.toHaveBeenCalled();
     });
   });
 
   describe('list', () => {
     it('maps rows with the override and the granting staff member', async () => {
       const { service, ambassadorsRepository } = buildService();
-      ambassadorsRepository.find.mockResolvedValue([
-        buildGrantRow({
-          user: {
-            id: 'member-1',
-            inviteMonthlyQuota: 3,
-            profile: memberProfile,
-          } as unknown as User,
-        }),
+      ambassadorsRepository.findAndCount.mockResolvedValue([
+        [
+          buildGrantRow({
+            user: {
+              id: 'member-1',
+              inviteMonthlyQuota: 3,
+              profile: memberProfile,
+            } as unknown as User,
+          }),
+        ],
+        1,
       ]);
 
-      const rows = await service.list('active');
+      const result = await service.list('active');
 
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]).toMatchObject({
         id: 'grant-1',
+        member: { userId: 'member-1', slug: 'rui' },
         focusArea: 'housing',
         isTagVisible: true,
         inviteQuotaOverride: 3,
         grantedBy: { slug: 'ana', name: 'Ana Silva' },
         revokedBy: null,
+      });
+    });
+
+    it('pages with the shared envelope, past grants most recently revoked first (ENG-458)', async () => {
+      const { service, ambassadorsRepository } = buildService();
+      ambassadorsRepository.findAndCount.mockResolvedValue([
+        [buildGrantRow()],
+        45,
+      ]);
+
+      const result = await service.list('past', 3);
+
+      expect(ambassadorsRepository.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          order: { revokedAt: 'DESC', id: 'ASC' },
+          skip: 40,
+          take: 20,
+        }),
+      );
+      expect(result).toMatchObject({ total: 45, page: 3, pageSize: 20 });
+    });
+  });
+
+  describe('historyFor', () => {
+    it("lists every one of the member's grants, newest first (ENG-458)", async () => {
+      const { service, ambassadorsRepository } = buildService();
+      ambassadorsRepository.find.mockResolvedValue([
+        buildGrantRow({ id: 'grant-2' }),
+        buildGrantRow({
+          id: 'grant-1',
+          revokedAt: new Date('2026-05-01T10:00:00Z'),
+          revokedById: 'staff-1',
+          revokeReason: 'Stepped back',
+        }),
+      ]);
+
+      const rows = await service.historyFor('member-1');
+
+      expect(ambassadorsRepository.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'member-1' },
+          order: { grantedAt: 'DESC', id: 'ASC' },
+        }),
+      );
+      expect(rows.map((row) => row.id)).toEqual(['grant-2', 'grant-1']);
+      expect(rows[1]).toMatchObject({
+        revokeReason: 'Stepped back',
+        revokedBy: { slug: 'ana', name: 'Ana Silva' },
       });
     });
   });

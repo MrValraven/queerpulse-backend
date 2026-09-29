@@ -55,7 +55,7 @@ export interface HandleWriteOptions {
  * `handleFormatError` in `common/handles.ts` answers for the namespace's rules
  * in the abstract. This wraps it with the one exception a write may carry, so
  * what `isSystemOwnedClaim` actually waives is written down in exactly one
- * place. `assertWritable` below turns the verdict into the 422 that a
+ * place. `assertHandleWritable` below turns the verdict into the 422 that a
  * member-facing request needs, and `UsersService.nextAvailableSlug` reads the
  * same verdict to route a Google sign-up AROUND a withheld name rather than
  * failing on it. Sign-up cannot afford a throw here: the person arriving with a
@@ -233,39 +233,7 @@ export class HandlesService {
     owner: HandleOwner,
     options?: HandleWriteOptions,
   ): Promise<void> {
-    this.assertWritable(name, options);
-    const normalized = normalizeHandle(name);
-    const reservation = await m.findOne(HandleHistory, {
-      where: { name: normalized },
-    });
-    if (reservation) {
-      const withinCooldown = reservation.reclaimableAt > new Date();
-      if (withinCooldown && !this.isReclaimableBy(reservation, owner)) {
-        throw new ConflictException(
-          'That handle was recently released and is reserved for a short while',
-        );
-      }
-      // Previous owner reclaiming, or the cooldown has lapsed: drop the
-      // reservation so the fresh claim below owns the name outright.
-      await m.delete(HandleHistory, { name: normalized });
-    }
-    const row = m.create(Handle, {
-      name: normalized,
-      ownerKind:
-        owner.kind === 'profile'
-          ? HandleOwnerKind.Profile
-          : HandleOwnerKind.Subprofile,
-      userId: owner.kind === 'profile' ? owner.userId : null,
-      subprofileId: owner.kind === 'subprofile' ? owner.subprofileId : null,
-    });
-    try {
-      await m.insert(Handle, row);
-    } catch (err) {
-      if (isUniqueViolation(err)) {
-        throw new ConflictException('That handle is already taken');
-      }
-      throw err;
-    }
+    await claimHandleWithin(m, name, owner, options);
   }
 
   // Moves `owner` from `oldName` to `newName` within one transaction: release
@@ -292,7 +260,7 @@ export class HandlesService {
     // a transaction, so a late failure would roll back correctly, but refusing
     // an unusable name before writing anything keeps that correctness from
     // depending on the caller's transaction.
-    this.assertWritable(normalizedNew, options);
+    assertHandleWritable(normalizedNew, options);
     if (normalizedOld) {
       // Owner-scoped: `oldName` is the caller's own slug, but it may normalize
       // onto a row someone else owns (see below).
@@ -337,45 +305,9 @@ export class HandlesService {
     m: EntityManager,
     name: string,
     owner?: HandleOwner,
-    options?: { isForwarding?: boolean },
+    options?: HandleReleaseOptions,
   ): Promise<void> {
-    const normalized = normalizeHandle(name);
-    const where = {
-      name: normalized,
-      ...(owner
-        ? owner.kind === 'profile'
-          ? { ownerKind: HandleOwnerKind.Profile, userId: owner.userId }
-          : {
-              ownerKind: HandleOwnerKind.Subprofile,
-              subprofileId: owner.subprofileId,
-            }
-        : {}),
-    };
-    // Read the exact row being freed so the reservation records its TRUE owner
-    // (never the passed `owner`, which may differ under the case-fold caveat
-    // above). No matching row → nothing was held → nothing to reserve.
-    const freed = await m.findOne(Handle, { where });
-    if (!freed) {
-      return;
-    }
-    await m.delete(Handle, where);
-    const releasedAt = new Date();
-    const reclaimableAt = new Date(
-      releasedAt.getTime() + HANDLE_RECLAIM_COOLDOWN_MS,
-    );
-    await m.upsert(
-      HandleHistory,
-      {
-        name: normalized,
-        previousOwnerKind: freed.ownerKind,
-        previousOwnerUserId: freed.userId,
-        previousOwnerSubprofileId: freed.subprofileId,
-        releasedAt,
-        reclaimableAt,
-        isForwarding: options?.isForwarding ?? true,
-      },
-      ['name'],
-    );
+    await releaseHandleWithin(m, name, owner, options);
   }
 
   /**
@@ -422,102 +354,219 @@ export class HandlesService {
     name: string,
     exceptOwner?: HandleOwner,
   ): Promise<boolean> {
-    const normalized = normalizeHandle(name);
-    const row = await m.findOne(Handle, { where: { name: normalized } });
-    if (row) {
-      if (exceptOwner) {
-        if (
-          exceptOwner.kind === 'profile' &&
-          row.ownerKind === HandleOwnerKind.Profile &&
-          row.userId === exceptOwner.userId
-        ) {
-          return false;
-        }
-        if (
-          exceptOwner.kind === 'subprofile' &&
-          row.ownerKind === HandleOwnerKind.Subprofile &&
-          row.subprofileId === exceptOwner.subprofileId
-        ) {
-          return false;
-        }
-      }
-      return true;
-    }
-    // No live claim: is it still cooling down under a reservation?
-    const reservation = await m.findOne(HandleHistory, {
-      where: { name: normalized },
-    });
-    if (!reservation || reservation.reclaimableAt <= new Date()) {
-      return false;
-    }
-    // Reserved and still cooling: taken for all but a previous owner who may
-    // reclaim it.
-    return !(exceptOwner && this.isReclaimableBy(reservation, exceptOwner));
+    return isHandleTakenWithin(m, name, exceptOwner);
   }
+}
 
-  /**
-   * The namespace's own format/reserved gate, applied at the WRITE boundary.
-   *
-   * `check` has always run `handleFormatError`, so the read side answered
-   * honestly while the write side trusted whichever caller happened to be
-   * asking. That put the strength of a global rule in the hands of every future
-   * caller remembering to apply it, and a caller that forgot would land a
-   * malformed or reserved name in the registry with nothing to catch it.
-   * Enforcing it here makes the registry refuse a name it would never have
-   * offered, whoever is writing.
-   *
-   * Callers keep their own validation where it produces a better member-facing
-   * message (`ProfilesService.updateUsername` names the username field;
-   * `validatePublish` returns the persona checklist codes). This is the
-   * backstop underneath them, and it uses the same 422 body those callers
-   * already return so a caller that skipped its own check still produces an
-   * error shape the frontend recognises.
-   */
-  private assertWritable(name: string, options?: HandleWriteOptions): void {
-    const writeError = handleWriteError(name, options);
-    if (writeError === 'invalid') {
-      throw new UnprocessableEntityException({
-        code: 'HANDLE_INVALID',
-        message: 'That name contains characters that are not allowed.',
-        reason: 'invalid',
-      });
-    }
-    if (writeError === 'reserved') {
-      throw new UnprocessableEntityException({
-        code: 'HANDLE_RESERVED',
-        message: 'That name is reserved.',
-        reason: 'reserved',
-      });
-    }
-  }
+/** Options for a namespace RELEASE (`release` / `releaseHandleWithin`). */
+export interface HandleReleaseOptions {
+  /** Default `true`. Pass `false` for a release that must never forward
+   * (`PERSONA_MOVED` / `PROFILE_MOVED`), such as a persona link switch, a
+   * creator-named handle re-issued on a creator transfer, or a persona
+   * delete. */
+  isForwarding?: boolean;
+}
 
-  // Whether `owner` may reclaim a reservation still inside its cooldown: it
-  // must be the previous owner, and the reservation must be a forwarding one.
-  // A non-forwarding reservation stays out of reach until it lapses.
-  private isReclaimableBy(
-    reservation: HandleHistory,
-    owner: HandleOwner,
-  ): boolean {
-    return (
-      reservation.isForwarding && this.reservationHeldBy(reservation, owner)
-    );
-  }
+// The write half of the registry, as plain functions over a transaction
+// manager. `HandlesService.claim`/`release`/`isTaken` delegate here, and code
+// that runs inside a caller's transaction without the service injected (the
+// persona creator transfer, `subprofile-creator-transfer.ts`) calls them
+// directly, so both paths share one implementation of the cooldown rules.
 
-  // Whether a reclaim reservation belongs to `owner`: the name's previous
-  // owner.
-  private reservationHeldBy(
-    reservation: HandleHistory,
-    owner: HandleOwner,
-  ): boolean {
-    if (owner.kind === 'profile') {
-      return (
-        reservation.previousOwnerKind === HandleOwnerKind.Profile &&
-        reservation.previousOwnerUserId === owner.userId
+/** See `HandlesService.claim`. */
+export async function claimHandleWithin(
+  m: EntityManager,
+  name: string,
+  owner: HandleOwner,
+  options?: HandleWriteOptions,
+): Promise<void> {
+  assertHandleWritable(name, options);
+  const normalized = normalizeHandle(name);
+  const reservation = await m.findOne(HandleHistory, {
+    where: { name: normalized },
+  });
+  if (reservation) {
+    const withinCooldown = reservation.reclaimableAt > new Date();
+    if (withinCooldown && !isReclaimableBy(reservation, owner)) {
+      throw new ConflictException(
+        'That handle was recently released and is reserved for a short while',
       );
     }
+    // Previous owner reclaiming, or the cooldown has lapsed: drop the
+    // reservation so the fresh claim below owns the name outright.
+    await m.delete(HandleHistory, { name: normalized });
+  }
+  const row = m.create(Handle, {
+    name: normalized,
+    ownerKind:
+      owner.kind === 'profile'
+        ? HandleOwnerKind.Profile
+        : HandleOwnerKind.Subprofile,
+    userId: owner.kind === 'profile' ? owner.userId : null,
+    subprofileId: owner.kind === 'subprofile' ? owner.subprofileId : null,
+  });
+  try {
+    await m.insert(Handle, row);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw new ConflictException('That handle is already taken');
+    }
+    throw err;
+  }
+}
+
+/** See `HandlesService.release`. */
+export async function releaseHandleWithin(
+  m: EntityManager,
+  name: string,
+  owner?: HandleOwner,
+  options?: HandleReleaseOptions,
+): Promise<void> {
+  const normalized = normalizeHandle(name);
+  const where = {
+    name: normalized,
+    ...(owner
+      ? owner.kind === 'profile'
+        ? { ownerKind: HandleOwnerKind.Profile, userId: owner.userId }
+        : {
+            ownerKind: HandleOwnerKind.Subprofile,
+            subprofileId: owner.subprofileId,
+          }
+      : {}),
+  };
+  // Read the exact row being freed so the reservation records its TRUE owner
+  // (never the passed `owner`, which may differ under the case-fold caveat
+  // on `HandlesService.release`). No matching row: nothing was held, so
+  // nothing is reserved.
+  const freed = await m.findOne(Handle, { where });
+  if (!freed) {
+    return;
+  }
+  await m.delete(Handle, where);
+  const releasedAt = new Date();
+  const reclaimableAt = new Date(
+    releasedAt.getTime() + HANDLE_RECLAIM_COOLDOWN_MS,
+  );
+  await m.upsert(
+    HandleHistory,
+    {
+      name: normalized,
+      previousOwnerKind: freed.ownerKind,
+      previousOwnerUserId: freed.userId,
+      previousOwnerSubprofileId: freed.subprofileId,
+      releasedAt,
+      reclaimableAt,
+      isForwarding: options?.isForwarding ?? true,
+    },
+    ['name'],
+  );
+}
+
+/** See `HandlesService.isTaken`. */
+export async function isHandleTakenWithin(
+  m: EntityManager,
+  name: string,
+  exceptOwner?: HandleOwner,
+): Promise<boolean> {
+  const normalized = normalizeHandle(name);
+  const row = await m.findOne(Handle, { where: { name: normalized } });
+  if (row) {
+    if (exceptOwner) {
+      if (
+        exceptOwner.kind === 'profile' &&
+        row.ownerKind === HandleOwnerKind.Profile &&
+        row.userId === exceptOwner.userId
+      ) {
+        return false;
+      }
+      if (
+        exceptOwner.kind === 'subprofile' &&
+        row.ownerKind === HandleOwnerKind.Subprofile &&
+        row.subprofileId === exceptOwner.subprofileId
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // No live claim: is it still cooling down under a reservation?
+  const reservation = await m.findOne(HandleHistory, {
+    where: { name: normalized },
+  });
+  if (!reservation || reservation.reclaimableAt <= new Date()) {
+    return false;
+  }
+  // Reserved and still cooling: taken for all but a previous owner who may
+  // reclaim it.
+  return !(exceptOwner && isReclaimableBy(reservation, exceptOwner));
+}
+
+/**
+ * The namespace's own format/reserved gate, applied at the WRITE boundary.
+ *
+ * `check` has always run `handleFormatError`, so the read side answered
+ * honestly while the write side trusted whichever caller happened to be
+ * asking. That put the strength of a global rule in the hands of every future
+ * caller remembering to apply it, and a caller that forgot would land a
+ * malformed or reserved name in the registry with nothing to catch it.
+ * Enforcing it here makes the registry refuse a name it would never have
+ * offered, whoever is writing.
+ *
+ * Callers keep their own validation where it produces a better member-facing
+ * message (`ProfilesService.updateUsername` names the username field;
+ * `validatePublish` returns the persona checklist codes). This is the
+ * backstop underneath them, and it uses the same 422 body those callers
+ * already return so a caller that skipped its own check still produces an
+ * error shape the frontend recognises.
+ */
+function assertHandleWritable(
+  name: string,
+  options?: HandleWriteOptions,
+): void {
+  const writeError = handleWriteError(name, options);
+  if (writeError === 'invalid') {
+    throw new UnprocessableEntityException({
+      code: 'HANDLE_INVALID',
+      message: 'That name contains characters that are not allowed.',
+      reason: 'invalid',
+    });
+  }
+  if (writeError === 'reserved') {
+    throw new UnprocessableEntityException({
+      code: 'HANDLE_RESERVED',
+      message: 'That name is reserved.',
+      reason: 'reserved',
+    });
+  }
+}
+
+// Whether `owner` may reclaim a reservation still inside its cooldown: it
+// must be the previous owner, and the reservation must be a forwarding one.
+// A non-forwarding reservation stays out of reach until it lapses.
+function isReclaimableBy(
+  reservation: HandleHistory,
+  owner: HandleOwner,
+): boolean {
+  return reservation.isForwarding && reservationHeldBy(reservation, owner);
+}
+
+// Whether a reclaim reservation belongs to `owner`: the name's previous
+// owner. A persona reservation whose persona was deleted keeps its row with a
+// null `previousOwnerSubprofileId` (ENG-449), which matches no owner, so the
+// name stays taken for everyone until its cooldown lapses.
+function reservationHeldBy(
+  reservation: HandleHistory,
+  owner: HandleOwner,
+): boolean {
+  if (owner.kind === 'profile') {
     return (
-      reservation.previousOwnerKind === HandleOwnerKind.Subprofile &&
-      reservation.previousOwnerSubprofileId === owner.subprofileId
+      reservation.previousOwnerKind === HandleOwnerKind.Profile &&
+      reservation.previousOwnerUserId === owner.userId
     );
   }
+  return (
+    reservation.previousOwnerKind === HandleOwnerKind.Subprofile &&
+    reservation.previousOwnerSubprofileId !== null &&
+    reservation.previousOwnerSubprofileId === owner.subprofileId
+  );
 }

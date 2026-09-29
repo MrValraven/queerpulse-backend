@@ -12,13 +12,24 @@ import { actorIdOf } from '../notifications/notification-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
+import { Conversation } from '../messaging/entities/conversation.entity';
+import {
+  displayNameFor,
+  memberNameOptionsFor,
+} from '../messaging/message-response';
 import { GATHERINGS_BOARD_PATH, gatheringPath } from '../events/event-paths';
+import { HOST_SWITCHED_OFF_REASON } from '../go-together/go-together-notice-reasons';
 import { isStorageKey } from '../storage/storage-key';
 import { Profile } from '../users/entities/profile.entity';
 import { GENERIC_PUSH_COPY } from './generic-push-copy';
 import { PushMessageListener } from './push.listener';
 import { PushPreviewPrivacyService } from './push-preview-privacy.service';
 import { PushService } from './push.service';
+
+/** The Go together meet-again page for one group. Mirrors
+ *  `routes.goTogetherFeedback` in the frontend's `routeMap.ts`, the same
+ *  link the bell row opens (`notifications.adapters.ts`). */
+const GO_TOGETHER_FEEDBACK_PATH = '/go-together/feedback';
 
 /**
  * Turns persisted in-app notifications into phone pushes for a curated WHITELIST
@@ -81,6 +92,10 @@ export class PushNotificationListener {
     // recipients `PushMessageListener` is already covering with a merged
     // push for the identical message (see `pushMention`'s own doc).
     private readonly pushMessageListener: PushMessageListener,
+    // PRD-423: tells `pushMention` whether a message mention comes from a
+    // matched Go together chat, where members see first names only.
+    @InjectRepository(Conversation)
+    private readonly conversations: Repository<Conversation>,
   ) {}
 
   @OnEvent(NOTIFICATION_BATCH_CREATED)
@@ -231,6 +246,20 @@ export class PushNotificationListener {
         case NotificationType.GoTogetherMutual:
           await this.pushGoTogetherMutual(userIds, notification);
           return;
+        // Go together (PRD-420): someone left this member's group, which may
+        // carry a merge offer that expires; the run could not place them; or
+        // the gathering is over and the meet-again questions are open. All
+        // three are gated by `EventReminders`, the category
+        // `notification-preferences.ts` already gives them in the bell.
+        case NotificationType.GoTogetherMemberLeft:
+          await this.pushGoTogetherMemberLeft(userIds, notification);
+          return;
+        case NotificationType.GoTogetherUnmatched:
+          await this.pushGoTogetherUnmatched(userIds, notification);
+          return;
+        case NotificationType.GoTogetherMeetAgain:
+          await this.pushGoTogetherMeetAgain(userIds, notification);
+          return;
         // Whitelist: every other type — CRITICALLY `NewMessage` and
         // `EventReminder`, which already push elsewhere — falls through here and
         // produces no push. Do NOT add them; doing so double-sends.
@@ -312,7 +341,7 @@ export class PushNotificationListener {
         : recipientUserIds;
     if (recipientUserIdsAfterMessagePushFold.length === 0) return;
     const actor = await this.resolveActor(notification);
-    const name = this.displayName(actor);
+    const name = await this.mentionActorName(notification, actor);
     await this.previewPrivacy.sendSplitByPreviewPreference(
       recipientUserIdsAfterMessagePushFold,
       {
@@ -329,6 +358,34 @@ export class PushNotificationListener {
         timestamp: notification.createdAt.getTime(),
       },
     );
+  }
+
+  /**
+   * PRD-423: the mentioning member's name as the chat itself spells it. A
+   * mention inside a matched Go together group chat (the conversation has
+   * `isGoTogetherChat`) names the member by first name only, the way the
+   * chat introduces strangers; every other mention uses the full name. A
+   * conversation that cannot be read falls back to the full name, as before.
+   */
+  private async mentionActorName(
+    notification: Notification,
+    actor: Profile | null,
+  ): Promise<string> {
+    const conversationId = this.payloadString(notification, 'conversationId');
+    if (
+      !actor ||
+      this.payloadString(notification, 'source') !== 'message' ||
+      !conversationId
+    ) {
+      return this.displayName(actor);
+    }
+    const conversation = await this.conversations.findOne({
+      where: { id: conversationId },
+      select: { id: true, isGoTogetherChat: true, eventMatchGroupId: true },
+    });
+    const nameOptions = memberNameOptionsFor(conversation);
+    if (!nameOptions.isMatchedGroup) return this.displayName(actor);
+    return displayNameFor(actor, nameOptions) || 'Someone';
   }
 
   /**
@@ -499,7 +556,7 @@ export class PushNotificationListener {
       title: isCancelled ? 'Event cancelled' : 'Event updated',
       body: isCancelled
         ? cancelledBody
-        : `${title} has new details — tap to see what changed.`,
+        : `${title} has new details. Tap to see what changed.`,
       tag: `notification:${notification.id}`,
       data: { url },
       l10n: {
@@ -812,6 +869,9 @@ export class PushNotificationListener {
         : '/notifications';
     const isLive = decision === 'live';
     const isQuestion = decision === 'question';
+    // PRD-463: a moderator took an already-published listing down. "Was not
+    // published" would misdescribe it, so it gets its own sentence.
+    const isHidden = decision === 'hidden';
     await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
       title: isLive
         ? 'Your listing is live'
@@ -822,7 +882,9 @@ export class PushNotificationListener {
         ? `${title} is now on the group's board.`
         : isQuestion
           ? `Moderators need one thing cleared up about ${title}.`
-          : `${title} was not published. Tap to read why.`,
+          : isHidden
+            ? `${title} was taken off the group's board. Tap to read why.`
+            : `${title} was not published. Tap to read why.`,
       tag: `notification:${notification.id}`,
       data: { url },
       l10n: {
@@ -830,12 +892,16 @@ export class PushNotificationListener {
           ? 'push:groupListing.live.title'
           : isQuestion
             ? 'push:groupListing.question.title'
-            : 'push:groupListing.declined.title',
+            : isHidden
+              ? 'push:groupListing.hidden.title'
+              : 'push:groupListing.declined.title',
         bodyKey: isLive
           ? 'push:groupListing.live.body'
           : isQuestion
             ? 'push:groupListing.question.body'
-            : 'push:groupListing.declined.body',
+            : isHidden
+              ? 'push:groupListing.hidden.body'
+              : 'push:groupListing.declined.body',
         params: { title },
       },
       timestamp: notification.createdAt.getTime(),
@@ -1243,6 +1309,163 @@ export class PushNotificationListener {
   }
 
   /**
+   * "Someone left your group" (Go together, PRD-420). When the group got
+   * small before the gathering, the row carries `mergeOfferGroupId`, an offer
+   * to move into another group that stops being open as soon as that group
+   * fills, so it is worth a buzz; the body then says there is a group with
+   * room.
+   *
+   * Gated by `EventReminders` and sent through the preview split with the
+   * generic NOTIFICATION copy, like `pushGoTogetherGroupReady`. There is no
+   * actor: the copy never says who left, and never names the gathering
+   * (spec 7). Opens the gathering's own page, where the group card shows the
+   * offer, the same link the bell row opens; falls back to `/notifications`.
+   */
+  private async pushGoTogetherMemberLeft(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.EventReminders,
+    );
+    if (recipientUserIds.length === 0) return;
+    const eventSlug = this.payloadString(notification, 'eventSlug');
+    const hasMergeOffer =
+      this.payloadString(notification, 'mergeOfferGroupId') !== undefined;
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Go together',
+        body: hasMergeOffer
+          ? 'Someone left your group. Another group has room for you'
+          : 'Someone left your group for a gathering',
+        tag: `notification:${notification.id}`,
+        data: { url: eventSlug ? gatheringPath(eventSlug) : '/notifications' },
+        l10n: {
+          titleKey: 'push:goTogether.memberLeft.title',
+          bodyKey: hasMergeOffer
+            ? 'push:goTogether.memberLeft.bodyMergeOffer'
+            : 'push:goTogether.memberLeft.body',
+          params: {},
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "We couldn't find a group for you yet" (Go together, PRD-420). A run
+   * could not place this member. `isFinal: true` is the last pass before the
+   * gathering, and its body says so; otherwise a later pass may still seat
+   * them. `reason: HOST_SWITCHED_OFF_REASON` (sent with `isFinal: true`) means the
+   * host switched Go together off for the gathering, and gets a body of its
+   * own.
+   *
+   * Gated by `EventReminders` and sent through the preview split with the
+   * generic NOTIFICATION copy. No actor and no gathering name (spec 7).
+   * Opens the gathering's own page, the same link the bell row opens; falls
+   * back to `/notifications`.
+   */
+  private async pushGoTogetherUnmatched(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.EventReminders,
+    );
+    if (recipientUserIds.length === 0) return;
+    const eventSlug = this.payloadString(notification, 'eventSlug');
+    const copy = this.goTogetherUnmatchedCopy(notification);
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Go together',
+        body: copy.body,
+        tag: `notification:${notification.id}`,
+        data: { url: eventSlug ? gatheringPath(eventSlug) : '/notifications' },
+        l10n: {
+          titleKey: 'push:goTogether.unmatched.title',
+          bodyKey: copy.bodyKey,
+          params: {},
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /** The English body and its catalog key for one unmatched notice: the
+   *  host switched Go together off, the final pass, or a pass that may still
+   *  be followed by another. */
+  private goTogetherUnmatchedCopy(notification: Notification): {
+    body: string;
+    bodyKey: string;
+  } {
+    if (
+      this.payloadString(notification, 'reason') === HOST_SWITCHED_OFF_REASON
+    ) {
+      return {
+        body: 'The host switched Go together off for this gathering',
+        bodyKey: 'push:goTogether.unmatched.bodyHostSwitchedOff',
+      };
+    }
+    if (notification.payload?.isFinal === true) {
+      return {
+        body: "We weren't able to place you in a group this time",
+        bodyKey: 'push:goTogether.unmatched.bodyFinal',
+      };
+    }
+    return {
+      body: "We couldn't find a group for you yet. We'll keep looking",
+      bodyKey: 'push:goTogether.unmatched.body',
+    };
+  }
+
+  /**
+   * "Want to meet your group again?" (Go together, PRD-420): the gathering
+   * is over and the meet-again questions are open for a week.
+   *
+   * Gated by `EventReminders` and sent through the preview split with the
+   * generic NOTIFICATION copy. No actor and no gathering name (spec 7).
+   * Opens the feedback page for that one group, the same link the bell row
+   * opens; falls back to `/notifications` when the payload has no group.
+   */
+  private async pushGoTogetherMeetAgain(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.EventReminders,
+    );
+    if (recipientUserIds.length === 0) return;
+    const groupId = this.payloadString(notification, 'groupId');
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Go together',
+        body: 'Want to meet your group again?',
+        tag: `notification:${notification.id}`,
+        data: {
+          url: groupId
+            ? `${GO_TOGETHER_FEEDBACK_PATH}/${encodeURIComponent(groupId)}`
+            : '/notifications',
+        },
+        l10n: {
+          titleKey: 'push:goTogether.meetAgain.title',
+          bodyKey: 'push:goTogether.meetAgain.body',
+          params: {},
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
    * "A new device signed in to your account" (ID-06).
    *
    * THE ONE SENDER IN THIS FILE THAT DOES NOT SPLIT BY PREVIEW PREFERENCE, and
@@ -1328,16 +1551,22 @@ export class PushNotificationListener {
   }
 
   /**
-   * A conditional `{ icon }` spread — the actor's avatar, but ONLY when it is an
+   * A conditional `{ icon }` spread: the actor's avatar, but ONLY when it is an
    * absolute public https URL a push client can fetch without our session cookie
    * (the same public-https-only rule as `push.listener.ts`). A storage-key
-   * avatar resolves to our auth-gated `/files/*` route, so we omit `icon`
-   * entirely rather than ship a URL that renders as a broken image.
+   * avatar resolves to our auth-gated `/files/*` route, which would render as a
+   * broken image, so such an avatar leaves `icon` off entirely.
+   *
+   * ENG-412: an actor who hid their photo (`photoVisible` false) sends no icon
+   * at all, the same switch feed, messaging and listings honour. A face on a
+   * recipient's lock screen is the most visible place that photo could leak.
+   * `resolveActor` loads the whole profile row, so the flag is always present.
    */
   private iconOf(
     profile: Profile | null,
   ): { icon: string } | Record<string, never> {
-    const raw = profile?.avatarUrl;
+    if (!profile?.photoVisible) return {};
+    const raw = profile.avatarUrl;
     return raw && !isStorageKey(raw) && raw.startsWith('https://')
       ? { icon: raw }
       : {};

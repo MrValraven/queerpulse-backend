@@ -36,7 +36,10 @@ export interface JobCardDTO {
   slug: string;
   title: string;
   company: JobCompanyRef | null;
-  category: string;
+  // Job field id; null only for a listing that predates the work taxonomy.
+  category: string | null;
+  // Optional profession id inside `category`.
+  profession: string | null;
   commitment: string;
   seniority: string;
   format: JobFormat;
@@ -100,6 +103,7 @@ export function toJobCard(job: Job, company: JobCompanyRef | null): JobCardDTO {
     title: job.title,
     company,
     category: job.category,
+    profession: job.profession,
     commitment: job.commitment,
     seniority: job.seniority,
     format: job.format,
@@ -148,7 +152,7 @@ export function toJobDetail(
 export interface JobSearchRow {
   slug: string;
   title: string;
-  category: string;
+  category: string | null;
   location: string;
 }
 

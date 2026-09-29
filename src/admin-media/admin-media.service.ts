@@ -11,12 +11,22 @@ import { In, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { StorageService, StoredObject } from '../storage/storage.service';
-import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
+import {
+  isPrivateMessageKey,
+  PRIVATE_MESSAGE_PREFIXES,
+  UPLOAD_KIND_SPECS,
+} from '../storage/upload-kinds';
 import { IMAGE_UPLOAD_TYPES } from '../storage/upload-content-types';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
+import { ModAuditService } from '../moderation/mod-audit.service';
+import {
+  AdminMediaBrowseCursor,
+  decodeBrowseCursor,
+  encodeBrowseCursor,
+} from './admin-media-browse-cursor';
 import type {
   AdminMediaHeadResponse,
   AdminMediaListQuery,
@@ -55,10 +65,19 @@ const DEFAULT_LIMIT = 100;
 // single-file change.
 const MAX_LIMIT = 200;
 
-/** The set of valid upload-kind prefixes, e.g. { avatars, work, ... }. */
-const KNOWN_PREFIXES = new Set(
-  Object.values(UPLOAD_KIND_SPECS).map((spec) => spec.prefix),
+/** The upload-kind prefixes the console may browse, e.g. { avatars, work, ... }.
+ *  Private message prefixes are left out: DM attachments are served only to
+ *  conversation participants (`PRIVATE_MESSAGE_PREFIXES`), so the console never
+ *  lists, signs, inspects or deletes them. */
+const KNOWN_PREFIXES: ReadonlySet<string> = new Set(
+  Object.values(UPLOAD_KIND_SPECS)
+    .map((spec) => spec.prefix)
+    .filter((prefix) => !PRIVATE_MESSAGE_PREFIXES.has(prefix)),
 );
+
+/** `KNOWN_PREFIXES` in lexical order: the order the "All" browse walks them,
+ *  which matches the order a whole-bucket listing would have shown them. */
+const BROWSE_PREFIX_ORDER: readonly string[] = [...KNOWN_PREFIXES].sort();
 
 /** Extension → content type, built as the reverse of `IMAGE_UPLOAD_TYPES` (the
  *  single source of truth for accepted upload content types — see
@@ -80,6 +99,7 @@ export class AdminMediaService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly references: MediaReferenceResolver,
+    private readonly modAudit: ModAuditService,
   ) {}
 
   /** Resolve a kind name to its storage prefix (with trailing slash), or
@@ -97,9 +117,11 @@ export class AdminMediaService {
 
   /** A key the console may inspect must be a well-formed key for a known kind
    *  (same authority as `GET /files/*`). 404 (not 403) on a malformed/unknown
-   *  key, matching the don't-leak posture of the file route. */
+   *  key, matching the don't-leak posture of the file route. A private
+   *  message key 404s the same way, so the console cannot probe whether a DM
+   *  attachment exists. */
   assertKnownKey(key: string): void {
-    if (!parseStorageKey(key)) {
+    if (!parseStorageKey(key) || isPrivateMessageKey(key)) {
       throw new NotFoundException();
     }
   }
@@ -108,9 +130,14 @@ export class AdminMediaService {
     // The "filter by uploader" view overrides kind + pagination: a member's
     // uploads span every kind prefix and are a bounded set, so they come back
     // in one page (no continuation token) sourced from a per-kind fan-out.
-    const { objects, nextContinuationToken } = query.uploaderId
+    const { objects: listedObjects, nextContinuationToken } = query.uploaderId
       ? await this.listByUploader(query.uploaderId)
       : await this.listByPrefixPage(query);
+    // The one chokepoint before anything is resolved or signed: no private
+    // message key reaches the response, and none gets a presigned GET.
+    const objects = listedObjects.filter(
+      (object) => !isPrivateMessageKey(object.key),
+    );
 
     const uploaderById = await this.resolveUploaders(
       objects.map((object) => object.key),
@@ -139,8 +166,10 @@ export class AdminMediaService {
     return { objects: mapped, nextContinuationToken, degraded };
   }
 
-  /** One `ListObjectsV2` page for the kind-tab / all-kinds browse, paginated on
-   *  the S3 continuation token — the console's original list path. */
+  /** One page for the kind tab or the "All" browse. A kind tab is a single
+   *  `ListObjectsV2` page paginated on the raw S3 continuation token. "All"
+   *  walks the public prefixes in order (`listAcrossBrowsePrefixes`) and
+   *  paginates on an opaque composite cursor. */
   private async listByPrefixPage(query: AdminMediaListQuery): Promise<{
     objects: StoredObject[];
     nextContinuationToken: string | null;
@@ -155,18 +184,77 @@ export class AdminMediaService {
       ? (query.limit as number)
       : DEFAULT_LIMIT;
     const maxKeys = Math.min(Math.max(requestedLimit, 1), MAX_LIMIT);
-    return this.storage.listObjects({
-      prefix,
-      continuationToken: query.continuationToken,
-      maxKeys,
-    });
+    if (prefix !== undefined) {
+      // A kind tab is already scoped to one browsable prefix.
+      return this.storage.listObjects({
+        prefix,
+        continuationToken: query.continuationToken,
+        maxKeys,
+      });
+    }
+
+    return this.listAcrossBrowsePrefixes(query.continuationToken, maxKeys);
+  }
+
+  /**
+   * The "All" browse: walks `BROWSE_PREFIX_ORDER` one prefix at a time, so the
+   * private message prefixes are never requested from the bucket. A page fills
+   * across prefix boundaries: when one prefix runs out, the walk moves to the
+   * next and asks only for the rows still missing, so the response never
+   * exceeds `maxKeys` and S3 work stays proportional to the rows returned.
+   *
+   * The cursor names the prefix and the S3 token inside it; it is null once
+   * the last prefix is exhausted. A cursor that fails validation is a 400.
+   */
+  private async listAcrossBrowsePrefixes(
+    continuationToken: string | undefined,
+    maxKeys: number,
+  ): Promise<{
+    objects: StoredObject[];
+    nextContinuationToken: string | null;
+  }> {
+    const start: AdminMediaBrowseCursor = continuationToken
+      ? decodeBrowseCursor(continuationToken, KNOWN_PREFIXES)
+      : { prefix: BROWSE_PREFIX_ORDER[0] ?? '', token: null };
+    let prefixIndex = BROWSE_PREFIX_ORDER.indexOf(start.prefix);
+    let prefixToken = start.token;
+    const objects: StoredObject[] = [];
+
+    while (prefixIndex !== -1 && prefixIndex < BROWSE_PREFIX_ORDER.length) {
+      const page = await this.storage.listObjects({
+        prefix: `${BROWSE_PREFIX_ORDER[prefixIndex]}/`,
+        continuationToken: prefixToken ?? undefined,
+        maxKeys: maxKeys - objects.length,
+      });
+      objects.push(...page.objects);
+      if (page.nextContinuationToken !== null) {
+        prefixToken = page.nextContinuationToken;
+      } else {
+        prefixIndex += 1;
+        prefixToken = null;
+      }
+      if (objects.length >= maxKeys) {
+        break;
+      }
+    }
+
+    const nextPrefix =
+      prefixIndex === -1 ? undefined : BROWSE_PREFIX_ORDER[prefixIndex];
+    return {
+      objects,
+      nextContinuationToken:
+        nextPrefix === undefined
+          ? null
+          : encodeBrowseCursor({ prefix: nextPrefix, token: prefixToken }),
+    };
   }
 
   /** Every object owned by one member, across all kinds, newest-first — the
    *  "filter by uploader" view. One page, no continuation token (the set is
    *  bounded). Sorted by `lastModified` descending with nulls last, since the
    *  per-kind fan-out returns each kind's objects concatenated, not interleaved
-   *  by date. */
+   *  by date. The fan-out covers the private message prefixes too; `list()`
+   *  drops those keys before anything is returned or signed. */
   private async listByUploader(uploaderId: string): Promise<{
     objects: StoredObject[];
     nextContinuationToken: string | null;
@@ -258,8 +346,14 @@ export class AdminMediaService {
    * Refusing outright would turn a safety tool into a dead end. It is
    * opt-in per request, never the default, and every use is logged with the
    * references it overrode so the action is auditable after the fact.
+   *
+   * A forced delete also writes a `media_force_delete` row to the moderation
+   * audit trail naming the acting admin, BEFORE the object is removed: if the
+   * audit write fails, the irreversible delete does not happen. Private
+   * message keys 404 in `assertKnownKey`, forced or not; moderating a DM
+   * attachment goes through its report.
    */
-  async delete(key: string, force = false): Promise<void> {
+  async delete(key: string, actorId: string, force = false): Promise<void> {
     this.assertKnownKey(key);
 
     const { references, degraded } = await this.references.resolve([key]);
@@ -267,10 +361,17 @@ export class AdminMediaService {
 
     if (force) {
       this.logger.warn(
-        `Admin force-deleted stored object ${key} with ` +
+        `Admin ${actorId} force-deleted stored object ${key} with ` +
           `${referencingPlaces.length} live reference(s)` +
           `${degraded ? ' (reference check degraded)' : ''}: ` +
           JSON.stringify(referencingPlaces),
+      );
+      await this.modAudit.writeAuditLog(
+        null,
+        actorId,
+        'media_force_delete',
+        undefined,
+        key,
       );
       await this.storage.deleteObjectByKey(key);
       return;

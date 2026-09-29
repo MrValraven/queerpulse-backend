@@ -1,5 +1,7 @@
+import { ConflictException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { In, IsNull } from 'typeorm';
 import {
   AccessTier,
   CommunityType,
@@ -40,7 +42,7 @@ function makeProposal(
 
 describe('AdminReadingGroupProposalsService', () => {
   let service: AdminReadingGroupProposalsService;
-  let proposals: { findOne: jest.Mock; save: jest.Mock };
+  let proposals: { findOne: jest.Mock; save: jest.Mock; update: jest.Mock };
   let profiles: { find: jest.Mock };
   let communities: { create: jest.Mock };
   let notifications: { create: jest.Mock };
@@ -49,6 +51,7 @@ describe('AdminReadingGroupProposalsService', () => {
     proposals = {
       findOne: jest.fn(),
       save: jest.fn((value: ReadingGroupProposal) => Promise.resolve(value)),
+      update: jest.fn(),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     communities = {
@@ -199,6 +202,96 @@ describe('AdminReadingGroupProposalsService', () => {
 
       expect(communities.create).not.toHaveBeenCalled();
       expect(proposals.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('decline', () => {
+    it.each([
+      ReadingGroupProposalStatus.Approved,
+      ReadingGroupProposalStatus.Declined,
+      ReadingGroupProposalStatus.Archived,
+    ])(
+      'answers 409 and sends no notification when the proposal is already %s',
+      async (status) => {
+        proposals.update.mockResolvedValue({ affected: 0 });
+        proposals.findOne.mockResolvedValue(makeProposal({ status }));
+
+        await expect(
+          service.decline('proposal-1', 'admin-1', 'Off topic for the club.'),
+        ).rejects.toThrow(ConflictException);
+
+        expect(proposals.update).toHaveBeenCalledWith(
+          {
+            id: 'proposal-1',
+            status: ReadingGroupProposalStatus.Pending,
+            createdCommunitySlug: IsNull(),
+          },
+          expect.anything(),
+        );
+        expect(notifications.create).not.toHaveBeenCalled();
+      },
+    );
+
+    it('notifies the proposer when a pending proposal is declined', async () => {
+      proposals.update.mockResolvedValue({ affected: 1 });
+      proposals.findOne.mockResolvedValue(
+        makeProposal({
+          status: ReadingGroupProposalStatus.Declined,
+          decidedAt: new Date('2026-09-02T00:00:00.000Z'),
+          decidedBy: 'admin-1',
+          decisionNote: 'Off topic for the club.',
+        }),
+      );
+
+      const result = await service.decline(
+        'proposal-1',
+        'admin-1',
+        'Off topic for the club.',
+      );
+
+      expect(result.status).toBe(ReadingGroupProposalStatus.Declined);
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('archive', () => {
+    it('answers 409 when the proposal is already approved', async () => {
+      proposals.update.mockResolvedValue({ affected: 0 });
+      proposals.findOne.mockResolvedValue(
+        makeProposal({ status: ReadingGroupProposalStatus.Approved }),
+      );
+
+      await expect(service.archive('proposal-1', 'admin-1')).rejects.toThrow(
+        ConflictException,
+      );
+
+      expect(proposals.update).toHaveBeenCalledWith(
+        {
+          id: 'proposal-1',
+          status: In([
+            ReadingGroupProposalStatus.Pending,
+            ReadingGroupProposalStatus.Declined,
+          ]),
+          createdCommunitySlug: IsNull(),
+        },
+        expect.anything(),
+      );
+    });
+
+    it('succeeds when a declined proposal is archived', async () => {
+      proposals.update.mockResolvedValue({ affected: 1 });
+      proposals.findOne.mockResolvedValue(
+        makeProposal({
+          status: ReadingGroupProposalStatus.Archived,
+          decidedAt: new Date('2026-09-02T00:00:00.000Z'),
+          decidedBy: 'admin-1',
+        }),
+      );
+
+      const result = await service.archive('proposal-1', 'admin-1');
+
+      expect(result.status).toBe(ReadingGroupProposalStatus.Archived);
       expect(notifications.create).not.toHaveBeenCalled();
     });
   });

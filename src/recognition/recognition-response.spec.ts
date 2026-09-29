@@ -11,6 +11,7 @@ import {
   buildXpLedger,
   computeLevel,
 } from './recognition-response';
+import { resolveMonthlyInviteLimit } from '../membership/monthly-invite-limit';
 
 // `founding-member` is the only `BADGE_CATALOG` entry with no
 // `BADGE_REQUIREMENTS` wiring, so it's excluded from `locked`/`discoverCount`
@@ -301,6 +302,20 @@ describe('buildPerks', () => {
       (perk) => perk.key === 'invite-quota-level-4',
     );
     expect(inviteQuotaPerk?.inviteQuota).toEqual({ base: 5, total: 7 });
+
+    // PRD-436: the numbers come from the member's own limit rule, so an
+    // ambassador's +10 shows in both, as the invite page enforces it.
+    const ambassadorPerk = buildPerks(4, 1000, [], (levelBonus) =>
+      resolveMonthlyInviteLimit({
+        inviteQuotaOverride: null,
+        base: 5,
+        levelBonus,
+        ambassadorBonus: 10,
+      }),
+    )
+      .groups.find((group) => group.kind === 'available')
+      ?.perks.find((perk) => perk.key === 'invite-quota-level-4');
+    expect(ambassadorPerk?.inviteQuota).toEqual({ base: 15, total: 17 });
 
     const row1 = result.ladder.find((row) => row.num === 1)!;
     expect(row1.perks[0]).toEqual({

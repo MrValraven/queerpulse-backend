@@ -30,10 +30,11 @@
  * index `UQ_community_invites_pending` in
  * `1799000000000-CreateCommunityInvites`, the same idiom as
  * `UQ_community_join_requests_pending` and `UQ_ban_evasion_escalations_open`.
- * Re-inviting somebody who already holds a pending invite is answered with the
- * existing one rather than a second bell. The index is partial so a declined
- * or revoked invite does not bar the community from ever inviting that person
- * again.
+ * Re-inviting somebody who holds a LIVE invitation is answered with that one
+ * and sends no second bell; a dead pending row (expired, inviter off staff,
+ * or a block) is retired first so the fresh row can take its place (ENG-429).
+ * The index is partial so a declined or revoked invite does not bar the
+ * community from ever inviting that person again.
  */
 import {
   Column,
@@ -95,9 +96,18 @@ export class CommunityInvite {
   @Column({ type: 'timestamptz', nullable: true })
   respondedAt!: Date | null;
 
+  // When the invitation stops being spendable (ENG-429). Set by the column
+  // default, 30 days after insert. A pending row past this instant is dead:
+  // every reader goes through `community-invite-liveness.ts`, and a re-invite
+  // retires it before writing a fresh row.
+  @Column({ type: 'timestamptz', default: () => "now() + interval '30 days'" })
+  expiresAt!: Date;
+
   // Set only on a `revoked` invite: the moderator who withdrew it. NULL on
   // every other status, and NULL on a revocation whose actor has since erased
-  // their account.
+  // their account. NULL on a `revoked` row also marks one the system retired
+  // during a re-invite (expired, inviter lost staff standing, or a block
+  // between the two people).
   @Column({ type: 'uuid', nullable: true })
   revokedByUserId!: string | null;
 

@@ -11,6 +11,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { EventReminderPreferencesService } from './event-reminder-preferences.service';
 import { UpdateReminderPreferencesDto } from './dto/update-reminder-preferences.dto';
 import { UpdateEventSettingsDto } from './dto/update-event-settings.dto';
@@ -24,6 +25,7 @@ import { UpdateEventSettingsDto } from './dto/update-event-settings.dto';
  * `ActiveMemberGuard` is appropriate here (this is a feature preference, not a
  * safety control), matching the other `/me/*` feature routes.
  */
+@Feature('events')
 @ApiTags('Preferences')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({

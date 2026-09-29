@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { AdminLegalRequestsController } from './admin-legal-requests.controller';
+import { LegalRequestAmendment } from './entities/legal-request-amendment.entity';
 import { LegalRequest } from './entities/legal-request.entity';
 import { LegalRequestsService } from './legal-requests.service';
 
@@ -12,7 +13,7 @@ import { LegalRequestsService } from './legal-requests.service';
  * (TypeORM permits overlapping registrations) rather than importing
  * `UsersModule`, the self-contained pattern `AdminDsarModule` follows. The
  * profiles repository is here for one thing only: the write-time snapshot of
- * the recording admin's display name.
+ * the recording or amending admin's display name.
  *
  * `LegalRequestsService` is deliberately NOT exported. The public aggregate is
  * counted by `TransparencyService` straight off the table, so no other module
@@ -21,7 +22,9 @@ import { LegalRequestsService } from './legal-requests.service';
  * register.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([LegalRequest, Profile])],
+  imports: [
+    TypeOrmModule.forFeature([LegalRequest, LegalRequestAmendment, Profile]),
+  ],
   controllers: [AdminLegalRequestsController],
   providers: [LegalRequestsService],
 })

@@ -67,6 +67,11 @@ export type FeedItemReason = 'membership' | 'connection' | 'topic' | 'recent';
  * card and the number the server returns are counting the same thing. Carried
  * for `community_post`; `replyCount` is also carried for `forum_thread`,
  * which already stores it on the row.
+ *
+ * FEED-LIKE: `reactionCount` and `myReaction` are also carried on
+ * `forum_thread`, where they mirror the opening post's `vote_count` and the
+ * viewer's own upvote on it (`'like'` or null). See `opPostId` on `FeedItem`
+ * for the id the card upvotes through.
  */
 /** A source a member can turn down in their own feed (SOC-18). `name` is
  *  carried so the card's menu and the managed list can say what is being
@@ -144,6 +149,23 @@ export interface FeedItem extends FeedItemSignals {
    *  reader served the English original can be told so. */
   locale?: string;
   byline?: MagazineByline | null;
+  /**
+   * `forum_thread` only (ENG-417): which mask hides the thread's author, or
+   * null for a thread that shows its author. When set, `actor` is null and the
+   * card renders the mask's own label with no profile link.
+   */
+  bylineMask?: 'anonymous' | 'official' | null;
+  /** `forum_thread` only (DES-404): the thread's content warnings, so the card
+   *  can cover its excerpt until the reader chooses to reveal it. */
+  contentWarnings?: string[];
+  /** `forum_thread` only (ENG-420): the raw category key. The frontend
+   *  translates it; `summary` keeps the English text for older clients. */
+  category?: string;
+  /** `forum_thread` only (FEED-LIKE): the opening post's id, which the card
+   *  upvotes through the same `POST /forum/posts/:id/vote` the thread page
+   *  uses. Null when the OP is tombstoned, in which case the card shows no
+   *  like affordance at all. */
+  opPostId?: string | null;
 }
 
 /**
@@ -190,7 +212,7 @@ function truncate(text: string, max = SUMMARY_MAX): string {
  * the post they clicked somewhere below.
  *
  * A flat/global post (see `CommunityPost.communityId`, nullable since Task
- * 3.2) has no community to link into, so it falls back to a generic label and
+ * 3.2) has no community to link into, so it carries an empty title and
  * `/feed`: the permalink route is community-scoped, and a community-less post
  * has no other surface in the frontend to open.
  */
@@ -203,7 +225,9 @@ export function communityPostToFeedItem(
     id: post.id,
     type: 'community_post',
     createdAt: post.createdAt.toISOString(),
-    title: community ? community.name : 'Community feed',
+    // A flat post has no community to name, so the title is empty and the
+    // frontend supplies its own translated label.
+    title: community ? community.name : '',
     summary: truncate(post.body),
     link: community ? `/community/${community.slug}/post/${post.id}` : '/feed',
     actor: toAuthorSummary(author),
@@ -229,6 +253,16 @@ export interface ForumThreadCard {
   /** Live count of the thread's non-deleted replies (the OP is not a reply,
    *  matching `ForumThread.replyCount`'s own definition). */
   replyCount: number;
+  /** FEED-LIKE: the opening post's id, the same one `opPostId` on `FeedItem`
+   *  carries. Null when the thread has no readable OP row (every post
+   *  tombstoned, OP included). */
+  opPostId: string | null;
+  /** FEED-LIKE: the opening post's live `vote_count`, mirrored into
+   *  `FeedItem.reactionCount` on a `forum_thread` item. */
+  opVoteCount: number;
+  /** FEED-LIKE: whether the viewer has already upvoted the opening post,
+   *  mirrored into `FeedItem.myReaction` (`'like'` or null). */
+  hasViewerVoted: boolean;
 }
 
 /**
@@ -261,6 +295,22 @@ export function toForumExcerpt(body: string | null | undefined): string | null {
  * `card` is optional so a caller with no `forum_post` read to hand still gets
  * a correct card: it falls back to the thread's stored count and no excerpt,
  * which is exactly the behaviour that shipped before.
+ *
+ * ENG-417: an official or anonymous thread gets a null `actor` and a
+ * `bylineMask`, with the same precedence as `toThreadBylineAuthor` (official
+ * wins over anonymous). The feed masks for every viewer, moderators included,
+ * because the feed is a reading surface with no moderation role; a moderator
+ * who needs the real author opens the thread in the forum, which unmasks it
+ * for staff.
+ *
+ * FEED-LIKE: `opPostId`/`reactionCount`/`myReaction` let the card like the
+ * thread the same way the thread page does (an upvote on the OP). With
+ * `card`, they read the OP's live `vote_count` and the viewer's own vote off
+ * `forum_post`/`forum_post_vote`. Without `card`, there is no `forum_post`
+ * read to hand: `opPostId` is null (no card affordance) and `reactionCount`
+ * falls back to the denormalized `ForumThread.opVoteCount` mirror so the
+ * number still renders, with `myReaction` null since the viewer's own vote
+ * was never read.
  */
 export function forumThreadToFeedItem(
   thread: ForumThread,
@@ -269,19 +319,31 @@ export function forumThreadToFeedItem(
 ): FeedItem {
   const replyCount = card ? card.replyCount : thread.replyCount;
   const replyWord = replyCount === 1 ? 'reply' : 'replies';
+  const bylineMask: 'anonymous' | 'official' | null = thread.isOfficial
+    ? 'official'
+    : thread.isAnonymous
+      ? 'anonymous'
+      : null;
   return {
     id: thread.id,
     type: 'forum_thread',
     createdAt: thread.createdAt.toISOString(),
     title: thread.title,
+    // Kept for older clients; current clients build the line from `category`.
     summary: `${thread.category} · ${replyCount} ${replyWord}`,
     link: `/thread/${thread.slug}`,
-    actor: toAuthorSummary(author),
+    actor: bylineMask ? null : toAuthorSummary(author),
+    bylineMask,
+    contentWarnings: thread.contentWarnings ?? [],
+    category: thread.category,
     excerpt: card ? card.excerpt : null,
     // The feed card shows the count as context; replying still happens in the
     // thread itself, since a forum reply is a threaded post rather than a
     // one-line note.
     replyCount,
+    opPostId: card ? card.opPostId : null,
+    reactionCount: card ? card.opVoteCount : thread.opVoteCount,
+    myReaction: card ? (card.hasViewerVoted ? 'like' : null) : null,
   };
 }
 

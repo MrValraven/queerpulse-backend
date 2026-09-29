@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Not, Repository } from 'typeorm';
+import { EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -18,6 +18,8 @@ import {
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
+import { SubprofileMembershipService } from './subprofile-membership.service';
+import { lockEngageablePersonaWithin } from './subprofile-engagement-lock';
 import { EndorserView } from './subprofile-response';
 import { isSubprofileUnderTakedown } from './subprofile-takedown';
 import {
@@ -57,6 +59,10 @@ export class SubprofileEndorsementsService {
     // applies. `ContentModerationModule` is already imported by
     // `SubprofilesModule` for `SubprofilePublicReadService`.
     private readonly contentModeration: ContentModerationService,
+    // Read-only: the self-endorse guard in `endorse` asks whether the endorser
+    // co-owns the persona, through the same `isMember` predicate every owner
+    // gate uses.
+    private readonly membership: SubprofileMembershipService,
   ) {}
 
   async endorse(
@@ -65,7 +71,14 @@ export class SubprofileEndorsementsService {
     note?: string,
   ): Promise<{ endorsementCount: number; viewerEndorsed: boolean }> {
     const persona = await this.resolveEndorsablePersona(endorserId, id);
-    if (persona.userId === endorserId) {
+    // Every owner is refused: the creator (`persona.userId`) and each co-owner
+    // holding a `subprofile_members` row. A co-owner endorsing their own
+    // persona would inflate its count from inside and send the creator an
+    // endorsement bell from a fellow owner.
+    if (
+      persona.userId === endorserId ||
+      (await this.membership.isMember(endorserId, persona.id))
+    ) {
       throw new BadRequestException('You cannot endorse your own persona');
     }
 
@@ -74,49 +87,35 @@ export class SubprofileEndorsementsService {
     const trimmedNote = note?.trim();
     const cleanNote = trimmedNote ? trimmedNote : null;
 
-    const existing = await this.endorsements.findOne({
-      where: { subprofileId: id, endorserId },
-    });
-
-    // Upsert mirroring `VouchService.createVouch`, EXCEPT for the
-    // already-active case: a vouch 409s on a duplicate, but endorsing is a
-    // one-tap UX action, so re-tapping an already-endorsed persona is treated
-    // as idempotent success (current count, viewerEndorsed: true) rather than
-    // an error. `justActivated` tracks whether a real active→inactive
-    // transition happened, so the notification event fires once per genuine
-    // endorse (not on every repeat tap).
+    // Upsert mirroring `VouchService.createVouch`, except for the
+    // already-active case: a vouch 409s on a duplicate, while endorsing is a
+    // one-tap action, so re-tapping an already-endorsed persona is idempotent
+    // success (current count, viewerEndorsed: true). `justActivated` records
+    // whether a real inactive-to-active transition happened, so the
+    // notification event fires once per genuine endorse.
+    //
+    // The write runs in a transaction that first re-reads the persona under a
+    // share lock (`lockEngageablePersonaWithin`), so it cannot land after a
+    // concurrent linked-to-unlinked switch has deleted every endorsement. A
+    // unique violation (a concurrent endorse for the same pair won the insert)
+    // aborts that transaction and is caught out here, after the rollback: the
+    // row exists and is active, which is idempotent success.
     let justActivated = false;
-    if (existing && existing.withdrawnAt === null) {
-      // Already active — this is a note EDIT, not a fresh endorse: update the
-      // note in place and DON'T set `justActivated` (no new SUBPROFILE_ENDORSED
-      // event fires for a note edit). Idempotent when the note is unchanged —
-      // re-writing the same value is a harmless no-op.
-      await this.endorsements.update({ id: existing.id }, { note: cleanNote });
-    } else if (existing) {
-      // Withdrawn → reactivate in place (keeps id/createdAt). Conditional on
-      // the row still being withdrawn so two concurrent re-endorses can't both
-      // emit: only the update that actually flips a `withdrawnAt IS NOT NULL`
-      // row reports `affected === 1` and fires the notification below.
-      const reactivateResult = await this.endorsements.update(
-        { id: existing.id, withdrawnAt: Not(IsNull()) },
-        { withdrawnAt: null, note: cleanNote },
+    try {
+      justActivated = await this.endorsements.manager.transaction(
+        async (manager) => {
+          await lockEngageablePersonaWithin(manager, persona);
+          return this.writeEndorsementWithin(
+            manager,
+            id,
+            endorserId,
+            cleanNote,
+          );
+        },
       );
-      justActivated = reactivateResult.affected === 1;
-    } else {
-      try {
-        await this.endorsements.insert({
-          subprofileId: id,
-          endorserId,
-          note: cleanNote,
-        });
-        justActivated = true;
-      } catch (err) {
-        if (!isUniqueViolation(err)) {
-          throw err;
-        }
-        // Lost a race to a concurrent endorse for the same (persona, endorser)
-        // pair — the row now exists and is active; treat as idempotent
-        // success rather than surfacing a 409.
+    } catch (err) {
+      if (!isUniqueViolation(err)) {
+        throw err;
       }
     }
 
@@ -132,6 +131,41 @@ export class SubprofileEndorsementsService {
     }
 
     return { endorsementCount, viewerEndorsed: true };
+  }
+
+  /**
+   * The endorse write on `manager`, returning whether it activated an
+   * endorsement (the signal for the notification event).
+   * - Already active: a note edit. The note is updated in place and nothing
+   *   is activated, so no new event fires.
+   * - Withdrawn: reactivated in place (keeps id and createdAt), conditional on
+   *   the row still being withdrawn, so of two concurrent re-endorses only the
+   *   one whose update reports `affected === 1` activates it.
+   * - None: inserted. A unique violation propagates to `endorse`.
+   */
+  private async writeEndorsementWithin(
+    manager: EntityManager,
+    subprofileId: string,
+    endorserId: string,
+    cleanNote: string | null,
+  ): Promise<boolean> {
+    const endorsementRows = manager.getRepository(SubprofileEndorsement);
+    const existing = await endorsementRows.findOne({
+      where: { subprofileId, endorserId },
+    });
+    if (existing && existing.withdrawnAt === null) {
+      await endorsementRows.update({ id: existing.id }, { note: cleanNote });
+      return false;
+    }
+    if (existing) {
+      const reactivateResult = await endorsementRows.update(
+        { id: existing.id, withdrawnAt: Not(IsNull()) },
+        { withdrawnAt: null, note: cleanNote },
+      );
+      return reactivateResult.affected === 1;
+    }
+    await endorsementRows.insert({ subprofileId, endorserId, note: cleanNote });
+    return true;
   }
 
   async withdrawEndorsement(
@@ -315,7 +349,7 @@ export class SubprofileEndorsementsService {
     // A moderator takedown withholds the persona from every public read path
     // (`dropModeratedSubprofiles` / `excludeModeratedSubprofiles`), so it has
     // to close the write path too. Same predicate, one shared spelling.
-    if (await isSubprofileUnderTakedown(this.contentModeration, persona.slug)) {
+    if (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) {
       throw new NotFoundException('Subprofile not found');
     }
     if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {

@@ -123,6 +123,20 @@ export enum NotificationType {
    * live, never on the transition to "pending".
    */
   MagazinePiecePublished = 'magazine_piece_published',
+  /**
+   * ENG-462. Sent to the WRITER who submitted a pitch from the writer
+   * workspace when an editor passes on it, so they learn the desk's answer
+   * without opening `/magazine/writer` on a hunch.
+   *
+   * System-driven, no actor: a verdict on the member's own submission is the
+   * platform's word, the same posture as `StorySubmissionDecided`.
+   *
+   * Payload carries `{ source: 'magazine', pitchId, title }`; the pass note
+   * itself stays on the pitch's tracker card, off the bell payload.
+   *
+   * See migration `AddMagazinePitchPassedNotificationType1826000100000`.
+   */
+  MagazinePitchPassed = 'magazine_pitch_passed',
   // Sent to a safe space's listing OWNER when a member vouches for their space
   // (`SafeSpaceVouchesService.createVouch`) — before this, a safe-space vouch
   // notified no one. Carries the voucher (`voucherId`) as the actor so
@@ -749,9 +763,11 @@ export enum NotificationType {
    * until someone approved it, with no word to the poster either way.
    *
    * Payload: `{ source: 'housing_group', decision: 'live' | 'question' |
-   * 'declined', groupSlug, groupName, listingTitle, reason? }`. The listing's
-   * description, price and accessibility text never ride along: they live on
-   * the page the deep link opens.
+   * 'declined' | 'hidden', groupSlug, groupName, listingTitle, reason? }`.
+   * `hidden` is a moderator taking a published listing down for a norm
+   * violation (PRD-463) and always carries `reason`; un-hiding a live listing
+   * sends `live` again. The listing's description, price and accessibility
+   * text never ride along: they live on the page the deep link opens.
    */
   GroupListingDecided = 'group_listing_decided',
 
@@ -784,11 +800,11 @@ export enum NotificationType {
    * Moniz".
    *
    * Carries the sending organiser as `payload.actorId`, so block/mute
-   * filtering applies like any member-driven type. The payload also carries
-   * the announcement's own `body`: every recipient is somebody the host
-   * addressed on purpose, and every one of them can read the same text on the
-   * event page, so withholding it from the bell would only turn "the door
-   * code is 4471" into "a host said something".
+   * filtering applies like any member-driven type. The payload also stores
+   * the announcement's own `body` for the record. The bell omits it by
+   * allowlist decision (`notification-response.ts` forwards the gathering's
+   * `title` only): the row names the gathering and opens its page, where the
+   * announcement is shown in full.
    *
    * No `NotificationPreferenceCategory` gates it: the member's RSVP is the
    * consent, the same shape `HousingListingMatch`'s `alertsEnabled` and
@@ -1480,6 +1496,42 @@ export enum NotificationType {
   GoTogetherMemberLeft = 'go_together_member_left',
   GoTogetherMeetAgain = 'go_together_meet_again',
   GoTogetherMutual = 'go_together_mutual',
+  /**
+   * PRD-433. The platform's word to a member about a business listing they
+   * SUGGESTED, the kind the platform holds (`owner_id IS NULL`,
+   * `suggested_by_user_id` set). Written by `ListingsService` from the single
+   * and bulk status paths and the single and bulk removal paths, once the
+   * moderator's change has committed, and by `askQuestion`, where the row IS
+   * the moderator's question. Before these, the acting moderator's
+   * personal account sent the suggester a plain-English DM, which reached a
+   * Portuguese-speaking member in English, from a stranger, with no link.
+   *
+   * `ListingSuggestionLive`: it went live. Payload
+   * `{ source: 'listing', listingSlug, listingName }`, so the row opens the
+   * public directory page. `ListingApproved` stays owner-only, because its copy
+   * says "your listing" and a suggester holds nothing.
+   *
+   * `ListingSuggestionNeedsInfo`, `ListingSuggestionSentBack`,
+   * `ListingSuggestionRemoved`: a moderator moved it to `question`, moved it
+   * back to `review`, or deleted it. Payload
+   * `{ source: 'listing', listingRef, listingName, reason? }`. No slug: none of
+   * the three has a public page to open, so the row opens the contact form
+   * prefilled for a correction to `listingRef`, which is also how a suggester
+   * answers "needs more information". `reason` is the moderator's optional
+   * word to the member, the same text the DM used to append; on a
+   * `ListingSuggestionNeedsInfo` written by `askQuestion` it is the question.
+   *
+   * NO ACTOR, matching `ListingApproved` and every other staff decision: the
+   * bell never names which moderator acted. Always delivered (group 4, a
+   * decision on something you sent in) and bell-only, like `ListingApproved`.
+   * Owners keep their existing DM path unchanged.
+   *
+   * See migration `AddListingSuggestionNotificationTypes1824100000000`.
+   */
+  ListingSuggestionLive = 'listing_suggestion_live',
+  ListingSuggestionNeedsInfo = 'listing_suggestion_needs_info',
+  ListingSuggestionSentBack = 'listing_suggestion_sent_back',
+  ListingSuggestionRemoved = 'listing_suggestion_removed',
 }
 
 @Entity('notifications')

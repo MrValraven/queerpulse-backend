@@ -134,6 +134,7 @@ function makeChain(
     blockFilter as never,
     mailboxSync as never,
     users as never,
+    {} as never, // MessagesService, used only by `messageRequest`
   );
   return {
     service,

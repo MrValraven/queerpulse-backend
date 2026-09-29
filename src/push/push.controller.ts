@@ -133,7 +133,7 @@ export class PushController {
   async test(@CurrentUser() user: CurrentUserData): Promise<{ ok: true }> {
     await this.pushService.sendToUser(user.userId, {
       title: 'Test notification',
-      body: 'This is a test — your notifications are working.',
+      body: 'This is a test. Your notifications are working.',
       tag: 'push-test',
       data: { url: '/account/settings' },
       // English strings above are the fallback (iOS, and when the SW lacks the

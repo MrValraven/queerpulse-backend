@@ -260,6 +260,44 @@ describe('MessagingCoreService.postMessage — document attachment ownership (PR
     expect(buildPostResult).toHaveBeenCalledTimes(1);
   });
 
+  it('stores the English File label when a document body arrives as the raw catalog key', async () => {
+    const { service, messages } = build(0);
+
+    await service.postMessage(
+      'conversation-1',
+      SENDER,
+      'messages:attachments.documentFallbackText',
+      undefined,
+      undefined,
+      true,
+      'document',
+      documentAttachment(OWN_DOCUMENT_KEY),
+    );
+
+    expect(messages.create).toHaveBeenCalledWith(
+      expect.objectContaining({ body: 'File' }),
+    );
+  });
+
+  it('stores the English Photo label when an image body arrives as the raw catalog key', async () => {
+    const { service, messages } = build(0);
+
+    await service.postMessage(
+      'conversation-1',
+      SENDER,
+      'messages:attachments.fallbackText',
+      undefined,
+      undefined,
+      false,
+      'image',
+      imageAttachment(OWN_KEY),
+    );
+
+    expect(messages.create).toHaveBeenCalledWith(
+      expect.objectContaining({ body: 'Photo' }),
+    );
+  });
+
   it('rejects a document attachment missing fileName/byteSize/contentType', async () => {
     const { service, buildPostResult } = build(0);
 

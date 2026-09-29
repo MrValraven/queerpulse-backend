@@ -59,7 +59,7 @@ import { UpdateStickerPackDto } from './dto/update-sticker-pack.dto';
  *   DELETE /admin/sticker-packs/:packId                       -> 204  (draft packs only)
  *   POST   /admin/sticker-packs/:packId/stickers               -> StickerResponse
  *   PATCH  /admin/sticker-packs/:packId/stickers/:stickerId    -> AdminStickerResponse
- *   DELETE /admin/sticker-packs/:packId/stickers/:stickerId    -> 204
+ *   DELETE /admin/sticker-packs/:packId/stickers/:stickerId    -> 204  (400 for a published pack's last sticker)
  *   POST   /admin/sticker-packs/:packId/stickers/reorder        -> AdminStickerPackResponse
  */
 @ApiTags('Admin Stickers')
@@ -146,14 +146,15 @@ export class AdminStickersController {
 
   @Patch(':packId/stickers/:stickerId')
   @ApiOperation({
-    summary: "Update a sticker's label, keywords or artwork.",
+    summary:
+      "Update a sticker's English or Portuguese label, keywords or artwork.",
   })
   @ApiOkResponse({
     description: 'The updated sticker, with its admin-only fields.',
   })
   @ApiBadRequestResponse({
     description:
-      "Malformed body, a body with none of label, keywords or artwork, or an artwork storage key that is not this admin's own sticker upload.",
+      "Malformed body, a body with none of label, labelPt, keywords or artwork, or an artwork storage key that is not this admin's own sticker upload.",
   })
   @ApiNotFoundResponse({ description: 'No sticker with that id in that pack.' })
   updateSticker(
@@ -174,6 +175,10 @@ export class AdminStickersController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Remove a sticker from a pack.' })
   @ApiNoContentResponse({ description: 'The sticker is gone.' })
+  @ApiBadRequestResponse({
+    description:
+      'The sticker is the last one in a published pack (code LAST_STICKER_IN_PUBLISHED_PACK).',
+  })
   @ApiNotFoundResponse({ description: 'No sticker with that id in that pack.' })
   removeSticker(
     @Param('packId', ParseUUIDPipe) packId: string,

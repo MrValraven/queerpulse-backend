@@ -1,5 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
+import { LessThanOrEqual } from 'typeorm';
 import { MagazineIssueContentsService } from './magazine-issue-contents.service';
+import { magazineIssueVisibleThroughDate } from './magazine-clock';
 
 const NEXT_WEEK = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 const LAST_WEEK = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -190,5 +192,35 @@ describe('MagazineIssueContentsService.getContents', () => {
     const contents = await service.getContents('26');
 
     expect(contents.entries).toEqual([]);
+  });
+
+  // CON-18: the issue lookup gate shifted from the calendar day to
+  // `magazineIssueVisibleThroughDate()`: an issue's contents go visible at
+  // 09:00 Lisbon on its ship date, the same instant every other public
+  // issue read uses.
+  describe('embargo threshold (09:00 Lisbon)', () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('shifts the visible-through date it gates the lookup on across 09:00 Lisbon', async () => {
+      const { service, issues } = build();
+      issues.findOne.mockResolvedValue(null);
+
+      jest.useFakeTimers().setSystemTime(new Date('2026-01-15T08:59:00.000Z'));
+      const beforeNine = magazineIssueVisibleThroughDate();
+      await service.getContents('26').catch(() => undefined);
+      expect(issues.findOne).toHaveBeenLastCalledWith({
+        where: { number: '26', publishedOn: LessThanOrEqual(beforeNine) },
+      });
+
+      jest.setSystemTime(new Date('2026-01-15T09:00:00.000Z'));
+      const atNine = magazineIssueVisibleThroughDate();
+      expect(atNine).not.toEqual(beforeNine);
+      await service.getContents('26').catch(() => undefined);
+      expect(issues.findOne).toHaveBeenLastCalledWith({
+        where: { number: '26', publishedOn: LessThanOrEqual(atNine) },
+      });
+    });
   });
 });

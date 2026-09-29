@@ -10,9 +10,16 @@ import { MemberLookup, MemberRef } from '../common/member-ref';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { CommunitiesService } from './communities.service';
+import {
+  liveInvitedUserIds,
+  livePendingInvitesForInvitee,
+  retireDeadPendingInvites,
+  whereInviteIsLive,
+} from './community-invite-liveness';
 import {
   CommunityInviteSkipDTO,
   CommunityInviteSkipReason,
@@ -97,6 +104,9 @@ export class CommunityInvitesService {
     // list (`cardsByCommunityId`). No cycle: `CommunitiesService` injects
     // repositories and leaf services only, never this one.
     private readonly communitiesService: CommunitiesService,
+    // A block either way between inviter and invitee passes the invitee over
+    // (ENG-425), answered as `unknown_member` so neither side learns of it.
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   /**
@@ -128,10 +138,12 @@ export class CommunityInvitesService {
    *
    * `ON CONFLICT DO NOTHING` + `RETURNING` means the notification goes to
    * exactly the people who got a NEW invitation. Somebody who already held a
-   * pending one is reported back as `already_invited` and hears nothing: a
+   * live one is reported back as `already_invited` and hears nothing: a
    * second bell every time a moderator re-opens the invite panel is a nudge
-   * nobody agreed to. That covers the race between two moderators inviting the
-   * same person at once, as well as the ordinary re-invite.
+   * nobody agreed to. Two moderators inviting the same person within one
+   * request's latency can each retire the other's fresh row and both send,
+   * so that person may hear two bells for one live invitation; the ordinary
+   * re-invite is covered.
    */
   async invite(
     slug: string,
@@ -168,18 +180,23 @@ export class CommunityInvitesService {
       invitedAlreadyUserIds,
       parentRosterUserIds,
       parentBannedUserIds,
+      blockedUserIds,
     ] = await Promise.all([
       this.systemUserIds(resolvedUserIds),
       this.rosterUserIds(community.id, resolvedUserIds),
       this.pendingRequestUserIds(community.id, resolvedUserIds),
       this.bannedUserIds(community.id, resolvedUserIds),
-      this.pendingInviteUserIds(community.id, resolvedUserIds),
+      // Live invitations only (`community-invite-liveness.ts`): a pending row
+      // that expired, lost its inviter's standing or sits across a block is
+      // dead, and is retired below so a fresh one can take its place.
+      liveInvitedUserIds(this.invites, community.id, resolvedUserIds),
       parentId
         ? this.rosterUserIds(parentId, resolvedUserIds)
         : Promise.resolve(null),
       parentId
         ? this.bannedUserIds(parentId, resolvedUserIds)
         : Promise.resolve(new Set<string>()),
+      this.blockFilter.blockedUserIds(inviterUserId, resolvedUserIds),
     ]);
     // A ban in the parent bars every space of that parent as well.
     const bannedUserIds = new Set([
@@ -203,6 +220,7 @@ export class CommunityInvitesService {
         bannedUserIds,
         invitedAlreadyUserIds,
         parentRosterUserIds,
+        blockedUserIds,
       );
       if (reason || !userId) {
         skipReasonBySlug.set(
@@ -212,6 +230,17 @@ export class CommunityInvitesService {
         continue;
       }
       candidateUserIds.push(userId);
+    }
+
+    // Every candidate holds no live invitation, so any pending row they still
+    // carry is dead. Retiring it frees the partial unique index
+    // (`UQ_community_invites_pending`) for the fresh row written next.
+    if (candidateUserIds.length) {
+      await retireDeadPendingInvites(
+        this.invites,
+        community.id,
+        candidateUserIds,
+      );
     }
 
     const insertedUserIds = await this.recordInvites(
@@ -284,9 +313,16 @@ export class CommunityInvitesService {
     invitedAlreadyUserIds: Set<string>,
     // The parent's roster when inviting to a space; null at top level.
     parentRosterUserIds: Set<string> | null,
+    // Members blocked with the inviter in either direction.
+    blockedUserIds: Set<string>,
   ): CommunityInviteSkipReason | null {
     if (!userId) return CommunityInviteSkipReason.UnknownMember;
     if (userId === inviterUserId) return CommunityInviteSkipReason.Self;
+    // Reported as unknown so the inviter never learns about a block; the same
+    // answer a lookup for someone who blocked you gives elsewhere.
+    if (blockedUserIds.has(userId)) {
+      return CommunityInviteSkipReason.UnknownMember;
+    }
     if (systemUserIds.has(userId)) {
       return CommunityInviteSkipReason.SystemAccount;
     }
@@ -374,28 +410,6 @@ export class CommunityInvitesService {
   }
 
   /**
-   * Members who already hold a pending invitation to this community. Read
-   * against the same partial index the insert conflicts on
-   * (`UQ_community_invites_pending`), so the pre-check and the race guard
-   * agree by construction.
-   */
-  private async pendingInviteUserIds(
-    communityId: string,
-    userIds: string[],
-  ): Promise<Set<string>> {
-    if (!userIds.length) return new Set<string>();
-    const rows = await this.invites.find({
-      where: {
-        communityId,
-        invitedUserId: In(userIds),
-        status: CommunityInviteStatus.Pending,
-      },
-      select: { invitedUserId: true },
-    });
-    return new Set(rows.map((row) => row.invitedUserId));
-  }
-
-  /**
    * Write one pending invitation per named member and report back WHOSE was
    * actually written. `ON CONFLICT DO NOTHING` + `RETURNING` gives Postgres
    * the last word: the rows that come back are exactly the new invitations,
@@ -431,21 +445,21 @@ export class CommunityInvitesService {
    * `GET /me/community-invites` — the caller's own standing invitations,
    * newest first.
    *
-   * A stale invitation is the bug this endpoint exists to avoid, so four
-   * kinds are filtered out rather than listed as decisions somebody still has
-   * to make: a community that has since been ARCHIVED or TAKEN DOWN (both
-   * 404 the detail, so the card would lead nowhere), one the caller has since
-   * JOINED by another door, and one they have since been BANNED from (a ban
-   * outlives the invitation on purpose). The rows are left alone in every
-   * case: a community that is unarchived or restored has its invitations back
-   * exactly as they were, and nothing here quietly answers on the member's
-   * behalf.
+   * A stale invitation is the bug this endpoint exists to avoid, so only
+   * decisions somebody still has to make are listed. The liveness predicate
+   * (`livePendingInvitesForInvitee`) drops an invitation that has EXPIRED,
+   * one whose inviter is NO LONGER STAFF in the community or its parent, and
+   * one sitting across a BLOCK between the two people in either direction.
+   * On top of that this drops a community that has since been ARCHIVED or
+   * TAKEN DOWN (both 404 the detail, so the card would lead nowhere), one the
+   * caller has since JOINED by another door, and one they have since been
+   * BANNED from (a ban outlives the invitation on purpose). The rows are left
+   * alone in every case: a community that is unarchived or restored has its
+   * invitations back exactly as they were, and nothing here quietly answers
+   * on the member's behalf.
    */
   async listMine(userId: string): Promise<{ items: MyCommunityInviteDTO[] }> {
-    const invites = await this.invites.find({
-      where: { invitedUserId: userId, status: CommunityInviteStatus.Pending },
-      order: { createdAt: 'DESC' },
-    });
+    const invites = await livePendingInvitesForInvitee(this.invites, userId);
     if (!invites.length) return { items: [] };
 
     const communityIds = [...new Set(invites.map((row) => row.communityId))];
@@ -509,8 +523,8 @@ export class CommunityInvitesService {
    * Nobody is told. `declined` is the member's own answer and the one status
    * this module never surfaces to a community's moderators as anything but
    * "no longer pending" (see `CommunityInviteStatus`): saying no to a
-   * survivors' or coming-out group must not become a notification the room
-   * can read. The row stays for the partial unique index's sake, so the
+   * survivors' or coming-out group must not become a notification the
+   * community can read. The row stays for the partial unique index's sake, so the
    * community can invite again later if it chooses.
    */
   async declineMine(inviteId: string, userId: string): Promise<void> {
@@ -535,9 +549,16 @@ export class CommunityInvitesService {
    * `GET /communities/:slug/invites` — the community's own PENDING
    * invitations (owner, co-owner or moderator).
    *
-   * Pending only, and an invitee who has since landed on the roster by
-   * another door is dropped: what a moderator needs from this list is who is
-   * still standing outside with a door held open for them.
+   * Live invitations only (`whereInviteIsLive`), and an invitee who has
+   * since landed on the roster by another door is dropped: what a moderator
+   * needs from this list is who is still standing outside with a door held
+   * open for them.
+   *
+   * Blocks are honoured here exactly as in `invite()` and `listMine`. The
+   * list and the re-invite check then agree: a row that a re-invite would
+   * treat as absent is also absent here, so a co-moderator cannot infer a
+   * block between two other people. A row dropped for a block reads like any
+   * other invitation that stopped pending (declined, expired or revoked).
    */
   async listPending(
     slug: string,
@@ -549,13 +570,16 @@ export class CommunityInvitesService {
       slug,
       actorUserId,
     );
-    const invites = await this.invites.find({
-      where: {
-        communityId: community.id,
-        status: CommunityInviteStatus.Pending,
-      },
-      order: { createdAt: 'DESC' },
-    });
+    const invites = await whereInviteIsLive(
+      this.invites
+        .createQueryBuilder('ci')
+        .where('"ci"."community_id" = :communityId', {
+          communityId: community.id,
+        }),
+      'ci',
+    )
+      .orderBy('"ci"."created_at"', 'DESC')
+      .getMany();
     if (!invites.length) return { items: [] };
 
     const invitedUserIds = invites.map((invite) => invite.invitedUserId);

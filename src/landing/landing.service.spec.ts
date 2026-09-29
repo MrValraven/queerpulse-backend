@@ -13,6 +13,7 @@ import {
   ChangemakerStatus,
 } from '../changemakers/entities/changemaker.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import {
   LandingFeature,
   LandingSection,
@@ -20,7 +21,7 @@ import {
 import { LandingService } from './landing.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
-// results by default — mirrors `companies.service.spec.ts`'s `qbStub`.
+// results by default, mirroring `companies.service.spec.ts`'s `qbStub`.
 function qbStub() {
   const qb: Record<string, jest.Mock> = {};
   for (const method of [
@@ -28,6 +29,7 @@ function qbStub() {
     'addSelect',
     'where',
     'andWhere',
+    'innerJoin',
     'groupBy',
     'orderBy',
     'take',
@@ -41,6 +43,14 @@ function qbStub() {
   return qb;
 }
 
+function makeUser(overrides: Partial<User> = {}): User {
+  return {
+    id: 'user-id',
+    status: UserStatus.Active,
+    ...overrides,
+  } as User;
+}
+
 function makeProfile(overrides: Partial<Profile>): Profile {
   return {
     userId: 'profile-id',
@@ -49,8 +59,11 @@ function makeProfile(overrides: Partial<Profile>): Profile {
     lastName: 'One',
     tagline: null,
     avatarUrl: null,
+    photoVisible: true,
+    hiddenUntil: null,
     visibility: ProfileVisibility.Open,
     featuredConsent: true,
+    user: makeUser({ id: 'profile-id' }),
     ...overrides,
   } as Profile;
 }
@@ -66,8 +79,8 @@ function makeCommunity(overrides: Partial<Community>): Community {
     // Top-level by default; a test that wants a space passes `parentId`.
     parentId: null,
     // The card renders a category badge, a "since ‹year›" line and the
-    // "what you get" chips, so a fixture missing these blows up in the mapper
-    // rather than in the assertion.
+    // "what you get" chips, so a fixture missing these blows up right here in
+    // the mapper, early and clearly.
     type: CommunityType.Social,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     features: [],
@@ -130,8 +143,8 @@ describe('LandingService', () => {
   };
   let communityMembers: { createQueryBuilder: jest.Mock };
   // The transactional `EntityManager` seen inside `dataSource.transaction`'s
-  // callback — `createFeature` and `reorderFeatures` both now do their
-  // section-row-locking + writes through this, not through the outer
+  // callback. `createFeature` and `reorderFeatures` both now do their
+  // section-row-locking + writes through this, distinct from the outer
   // `landingFeatures` repo mock.
   let manager: {
     createQueryBuilder: jest.Mock;
@@ -144,7 +157,7 @@ describe('LandingService', () => {
     landingFeatures = {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
-      // Pass-through, like `companies.service.spec.ts`'s repo mocks — the
+      // Pass-through, like `companies.service.spec.ts`'s repo mocks: the
       // entity is whatever fields were given.
       create: jest.fn((value: object) => value),
       save: jest.fn((value: unknown) => Promise.resolve(value)),
@@ -178,7 +191,7 @@ describe('LandingService', () => {
           callback(manager),
       ),
       // The community roster strip picks its faces with one window-function
-      // query rather than a per-community fetch. Default: no faces.
+      // query across the whole batch. Default: no faces.
       query: jest.fn().mockResolvedValue([]),
     };
 
@@ -203,7 +216,7 @@ describe('LandingService', () => {
   });
 
   describe('getPublicFeatures', () => {
-    it('drops a featured member whose profile is Network (not Open)', async () => {
+    it('drops a featured member whose profile visibility is Network', async () => {
       landingFeatures.find.mockImplementation(
         ({ where }: { where: { section: LandingSection } }) => {
           if (where.section !== LandingSection.Member) return [];
@@ -369,8 +382,9 @@ describe('LandingService', () => {
 
     it('orders survivors by position ascending within each section', async () => {
       // Simulates what `IDX_landing_feature_section_active_position` already
-      // guarantees at the DB layer (`ORDER BY position ASC`) — the service
-      // must preserve that order through filtering, never re-sort or shuffle.
+      // guarantees at the DB layer (`ORDER BY position ASC`): the service
+      // must preserve that order through filtering, with no re-sorting or
+      // shuffling afterward.
       landingFeatures.find.mockImplementation(
         ({ where }: { where: { section: LandingSection } }) => {
           if (where.section !== LandingSection.Member) return [];
@@ -394,6 +408,200 @@ describe('LandingService', () => {
         'member-b',
         'member-c',
       ]);
+    });
+
+    it('roster faces skip private, hidden and suspended members', async () => {
+      // The ranked subquery itself does the skipping in Postgres; this spec
+      // runs against a mocked `dataSource.query`, so the assertion checks the
+      // generated SQL text carries the join and every filter, mirroring how
+      // `isPublicFace`'s SQL twin is meant to read.
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Community) return [];
+          return [
+            makeFeature({
+              id: 'f-c',
+              section: LandingSection.Community,
+              targetId: 'c-1',
+              position: 0,
+              copy: { blurb: 'a community' },
+            }),
+          ];
+        },
+      );
+      communities.find.mockResolvedValue([makeCommunity({ id: 'c-1' })]);
+
+      await service.getPublicFeatures();
+
+      expect(dataSource.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = dataSource.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(sql).toContain('JOIN users u ON u.id = m.user_id');
+      expect(sql).toContain('u.status = $3');
+      expect(sql).toContain(`p.visibility = 'open'`);
+      expect(sql).toContain(
+        '(p.hidden_until IS NULL OR p.hidden_until <= now())',
+      );
+      expect(params[0]).toEqual(['c-1']);
+      expect(params[2]).toBe(UserStatus.Active);
+    });
+
+    it('a member who hid their photo appears with a null avatar', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Community) return [];
+          return [
+            makeFeature({
+              id: 'f-c',
+              section: LandingSection.Community,
+              targetId: 'c-1',
+              position: 0,
+              copy: { blurb: 'a community' },
+            }),
+          ];
+        },
+      );
+      communities.find.mockResolvedValue([
+        makeCommunity({ id: 'c-1', rosterVisible: true }),
+      ]);
+      dataSource.query.mockResolvedValue([
+        {
+          communityId: 'c-1',
+          firstName: 'Hidden',
+          lastName: 'Photo',
+          avatarUrl: 'avatar-key.jpg',
+          photoVisible: false,
+        },
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      const community = result.communities[0];
+      if (!community) throw new Error('expected a featured community');
+      expect(community.faces).toEqual([
+        { name: 'Hidden Photo', avatarUrl: null },
+      ]);
+    });
+
+    it('owner face is null when the owner profile is private', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Community) return [];
+          return [
+            makeFeature({
+              id: 'f-c',
+              section: LandingSection.Community,
+              targetId: 'c-1',
+              position: 0,
+              copy: { blurb: 'a community' },
+            }),
+          ];
+        },
+      );
+      communities.find.mockResolvedValue([
+        makeCommunity({ id: 'c-1', ownerId: 'owner-1' }),
+      ]);
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'owner-1',
+          slug: 'the-owner',
+          visibility: ProfileVisibility.Network,
+        }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      const community = result.communities[0];
+      if (!community) throw new Error('expected a featured community');
+      expect(community.owner).toBeNull();
+    });
+
+    it('a public, active owner with their photo visible renders name and avatar', async () => {
+      // Guards the positive path against a regression in `isPublicFace` (or
+      // its wiring in `getPublicFeatures`) that would drop every owner
+      // indiscriminately, well past the ones the gate is meant to catch.
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Community) return [];
+          return [
+            makeFeature({
+              id: 'f-c',
+              section: LandingSection.Community,
+              targetId: 'c-1',
+              position: 0,
+              copy: { blurb: 'a community' },
+            }),
+          ];
+        },
+      );
+      communities.find.mockResolvedValue([
+        makeCommunity({ id: 'c-1', ownerId: 'owner-1' }),
+      ]);
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'owner-1',
+          slug: 'the-owner',
+          firstName: 'Open',
+          lastName: 'Owner',
+          avatarUrl: 'https://example.com/owner-avatar.jpg',
+          photoVisible: true,
+        }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      const community = result.communities[0];
+      if (!community) throw new Error('expected a featured community');
+      expect(community.owner).toEqual({
+        name: 'Open Owner',
+        avatarUrl: 'https://example.com/owner-avatar.jpg',
+      });
+    });
+
+    it('a featured member with the photo off ships a null avatar', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Member) return [];
+          return [makeFeature({ id: 'f-1', targetId: 'p-1', position: 0 })];
+        },
+      );
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'p-1',
+          slug: 'photo-off-member',
+          avatarUrl: 'avatar-key.jpg',
+          photoVisible: false,
+        }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.members).toHaveLength(1);
+      const member = result.members[0];
+      if (!member) throw new Error('expected a featured member');
+      expect(member.avatarUrl).toBeNull();
+    });
+
+    it('a suspended featured member is dropped', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Member) return [];
+          return [makeFeature({ id: 'f-1', targetId: 'p-1', position: 0 })];
+        },
+      );
+      profiles.find.mockResolvedValue([
+        makeProfile({
+          userId: 'p-1',
+          slug: 'suspended-member',
+          user: makeUser({ id: 'p-1', status: UserStatus.Suspended }),
+        }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.members).toEqual([]);
     });
   });
 
@@ -436,9 +644,9 @@ describe('LandingService', () => {
 
     it('assigns position = current max + 1 within the section', async () => {
       profiles.findOne.mockResolvedValue(makeProfile({ userId: 'p-1' }));
-      // The transactional manager issues two `createQueryBuilder` calls — the
+      // The transactional manager issues two `createQueryBuilder` calls: the
       // section-row lock (`getMany`, irrelevant here, defaults to `[]`) and
-      // the `MAX(position)` read — both served by fresh stubs off the same
+      // the `MAX(position)` read, both served by fresh stubs off the same
       // implementation, so both see the same `maxPosition`.
       manager.createQueryBuilder.mockImplementation(() => {
         const qb = qbStub();
@@ -482,7 +690,7 @@ describe('LandingService', () => {
         }),
       ];
       // `listAdminFeatures` re-reads the section via the outer `landingFeatures`
-      // repo AFTER the transaction commits — kept in sync with the same
+      // repo AFTER the transaction commits, kept in sync with the same
       // `featuresStore` the transactional lock/update below mutate.
       landingFeatures.find.mockImplementation(
         ({
@@ -550,8 +758,8 @@ describe('LandingService', () => {
 
     it("rejects when orderedIds does not match the section's current feature ids", async () => {
       // Validation now happens INSIDE the transaction (under the row lock),
-      // so the read it validates against comes from `manager`, not the outer
-      // `landingFeatures` repo.
+      // so the read it validates against comes from `manager`, the
+      // transactional handle used throughout this test.
       manager.createQueryBuilder.mockImplementation(() => {
         const qb = qbStub();
         qb.getMany = jest

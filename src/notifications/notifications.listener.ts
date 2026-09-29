@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -23,6 +23,7 @@ import {
   InviteAcceptedEvent,
 } from '../membership/membership.events';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
   SUBPROFILE_CREATOR_CHANGED,
   SUBPROFILE_DELETED,
@@ -51,6 +52,8 @@ import { NotificationsService } from './notifications.service';
 
 @Injectable()
 export class NotificationsListener {
+  private readonly logger = new Logger(NotificationsListener.name);
+
   constructor(
     private readonly notifications: NotificationsService,
     // Read-only — only used to resolve a persona's CURRENT co-owner roster on
@@ -194,22 +197,32 @@ export class NotificationsListener {
     );
   }
 
+  // The endorser and the follower stay out of the payload: the row names the
+  // persona only, so the bell reads "someone endorsed <persona>".
   @OnEvent(SUBPROFILE_ENDORSED)
   async onSubprofileEndorsed(e: SubprofileEndorsedEvent): Promise<void> {
+    const subprofileName = await this.subprofileNameOf(e.subprofileId);
     await this.notifications.create(
       e.ownerId,
       NotificationType.PersonaEndorsed,
-      { subprofileId: e.subprofileId },
+      {
+        subprofileId: e.subprofileId,
+        ...(subprofileName ? { subprofileName } : {}),
+      },
       e.endorserId,
     );
   }
 
   @OnEvent(SUBPROFILE_FOLLOWED)
   async onSubprofileFollowed(e: SubprofileFollowedEvent): Promise<void> {
+    const subprofileName = await this.subprofileNameOf(e.subprofileId);
     await this.notifications.create(
       e.ownerId,
       NotificationType.PersonaFollowed,
-      { subprofileId: e.subprofileId },
+      {
+        subprofileId: e.subprofileId,
+        ...(subprofileName ? { subprofileName } : {}),
+      },
       e.followerId,
     );
   }
@@ -221,7 +234,9 @@ export class NotificationsListener {
       NotificationType.SubprofileInvite,
       {
         subprofileId: e.subprofileId,
-        displayName: e.displayName,
+        // Written under the key the allowlist forwards and the bell copy
+        // interpolates.
+        subprofileName: e.displayName,
         invitedByUserId: e.invitedByUserId,
       },
       e.invitedByUserId,
@@ -245,10 +260,16 @@ export class NotificationsListener {
     if (!recipientIds.length) {
       return;
     }
+    // One name lookup for the whole fan-out, however many co-owners it has.
+    const subprofileName = await this.subprofileNameOf(e.subprofileId);
     await this.notifications.createForRecipients(
       recipientIds,
       NotificationType.SubprofileCoOwnerJoined,
-      { subprofileId: e.subprofileId, joinedUserId: e.joinedUserId },
+      {
+        subprofileId: e.subprofileId,
+        joinedUserId: e.joinedUserId,
+        ...(subprofileName ? { subprofileName } : {}),
+      },
       e.joinedUserId,
     );
   }
@@ -367,6 +388,37 @@ export class NotificationsListener {
           isYou: false,
         },
       );
+    }
+  }
+
+  /**
+   * The persona's current display name, for the copy of the persona rows whose
+   * domain events carry only an id. Read through the injected repository's
+   * entity manager, so `NotificationsModule` needs no new registration.
+   *
+   * Every recipient of these rows owns or co-owns the persona, so its name is
+   * already theirs to read. Best-effort: a persona gone by the time the event
+   * lands, or a failed read (logged as a warning), yields `null`, the payload
+   * omits the field, and
+   * the row falls back to its generic wording while still being delivered.
+   */
+  private async subprofileNameOf(subprofileId: string): Promise<string | null> {
+    try {
+      const subprofile = await this.subprofileMembers.manager.findOne(
+        Subprofile,
+        {
+          where: { id: subprofileId },
+          select: { id: true, displayName: true },
+        },
+      );
+      return subprofile?.displayName ?? null;
+    } catch (error) {
+      this.logger.warn(
+        `Could not read the name of persona ${subprofileId} for its notification: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
     }
   }
 }

@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { ACCOUNT_REMOVED, AccountRemovedEvent } from './ban-evasion.events';
+import {
+  ACCOUNT_REINSTATED,
+  ACCOUNT_REMOVED,
+  AccountReinstatedEvent,
+  AccountRemovedEvent,
+} from './ban-evasion.events';
 import { BanEvasionService } from './ban-evasion.service';
 
 /**
@@ -37,6 +42,29 @@ export class BanEvasionListener {
     } catch (error) {
       this.logger.error(
         `Could not record a ban-evasion signal for a removed account (${event.removalKind}).`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+  }
+
+  /**
+   * ENG-486. A ban was lifted or overturned: retire the signal row it wrote,
+   * the same best-effort contract as the write side above. A failed retire
+   * leaves one stale signal row for a reviewer to see and judge on its
+   * merits, which is far cheaper than a failure here rolling back the lift
+   * itself.
+   */
+  @OnEvent(ACCOUNT_REINSTATED, { async: true })
+  async onAccountReinstated(event: AccountReinstatedEvent): Promise<void> {
+    try {
+      await this.banEvasion.retireRemovedAccount({
+        userId: event.userId,
+        removalKind: event.removalKind,
+        communityId: event.communityId,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Could not retire a ban-evasion signal for a reinstated account (${event.removalKind}).`,
         error instanceof Error ? error.stack : undefined,
       );
     }

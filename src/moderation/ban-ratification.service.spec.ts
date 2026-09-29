@@ -36,6 +36,7 @@ describe('BanRatificationService', () => {
   let writeAuditLog: jest.Mock;
   let revokeAllForUser: jest.Mock;
   let emit: jest.Mock;
+  let notificationsCreate: jest.Mock;
 
   const pendingHold = (
     overrides: Partial<BanRatification> = {},
@@ -69,6 +70,7 @@ describe('BanRatificationService', () => {
     writeAuditLog = jest.fn().mockResolvedValue(undefined);
     revokeAllForUser = jest.fn().mockResolvedValue(undefined);
     emit = jest.fn();
+    notificationsCreate = jest.fn().mockResolvedValue(null);
 
     const module = await Test.createTestingModule({
       providers: [
@@ -103,7 +105,7 @@ describe('BanRatificationService', () => {
         { provide: AuthService, useValue: { revokeAllForUser } },
         {
           provide: NotificationsService,
-          useValue: { create: jest.fn().mockResolvedValue(null) },
+          useValue: { create: notificationsCreate },
         },
         { provide: EventEmitter2, useValue: { emit } },
       ],
@@ -153,12 +155,53 @@ describe('BanRatificationService', () => {
       'Third account traced to the same person.',
       undefined,
       expect.anything(),
+      'member-1',
     );
     expect(revokeAllForUser).toHaveBeenCalledWith('member-1');
     expect(emit).toHaveBeenCalledWith(
       ACCOUNT_REMOVED,
       expect.objectContaining({ userId: 'member-1' }),
     );
+  });
+
+  // ENG-480: the ban notification deep-links the appeal form to the exact
+  // `ban` row the ratifier wrote.
+  it('carries the ratified ban row id on the member notification', async () => {
+    ratifications.findOne.mockResolvedValue(pendingHold());
+    writeAuditLog.mockResolvedValue('audit-ban-1');
+    await service.decide('hold-1', 'mod-2', UserRole.Moderator, {
+      decision: 'ratify',
+    });
+    expect(notificationsCreate).toHaveBeenCalledWith(
+      'member-1',
+      expect.anything(),
+      expect.objectContaining({ action: 'ban', actionId: 'audit-ban-1' }),
+    );
+  });
+
+  it('writes the declined row against the member and sends no action id', async () => {
+    ratifications.findOne.mockResolvedValue(pendingHold());
+    writeAuditLog.mockResolvedValue('audit-declined-1');
+    await service.decide('hold-1', 'mod-2', UserRole.Moderator, {
+      decision: 'decline',
+    });
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      'report-1',
+      'mod-2',
+      'ban_declined',
+      'harassment',
+      undefined,
+      undefined,
+      expect.anything(),
+      'member-1',
+    );
+    const [, , payload] = notificationsCreate.mock.calls[0] as [
+      string,
+      unknown,
+      Record<string, unknown>,
+    ];
+    expect(payload.action).toBe('suspension_lifted');
+    expect(payload).not.toHaveProperty('actionId');
   });
 
   it('restores the member and removes nobody when a second moderator refuses', async () => {
@@ -206,6 +249,8 @@ describe('BanRatificationService', () => {
       'harassment',
       'Third account traced to the same person.',
       lapsed.expiresAt.toISOString(),
+      undefined,
+      'member-1',
     );
   });
 

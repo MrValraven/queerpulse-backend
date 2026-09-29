@@ -5,6 +5,7 @@ import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazinePiece } from './entities/magazine-piece.entity';
+import { magazineIssueVisibleThroughDate } from './magazine-clock';
 
 /** What kind of page an entry opens. */
 export type IssueContentsEntryKind = 'article' | 'deck';
@@ -78,11 +79,12 @@ export class MagazineIssueContentsService {
       // (`MagazineService.listIssues`/`getIssueByNumber`). Dropping the
       // unpublished ENTRIES was never enough on its own: the response still
       // named an unshipped issue and dated it, so guessing the next number
-      // read back the desk's working title. NULL and future `published_on`
-      // both fail `<= today` and 404.
+      // read back the desk's working title. An issue becomes visible at
+      // 09:00 Lisbon on its `published_on` date; NULL and a date whose
+      // 09:00 hasn't arrived yet both 404.
       where: {
         number: issueNumber,
-        publishedOn: LessThanOrEqual(new Date().toISOString().slice(0, 10)),
+        publishedOn: LessThanOrEqual(magazineIssueVisibleThroughDate()),
       },
     });
     if (!issue) {

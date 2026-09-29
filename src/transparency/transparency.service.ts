@@ -100,13 +100,16 @@ interface LegalRequestAccountSumsRow {
  * omitted or published as null with the page saying why, rather than filled in:
  *
  *  - Appeal outcomes are attributed to the period the appeal was FILED in,
- *    not the period it was decided in. `appeals` records no decision
- *    timestamp, so a decided-in-period count would have to be reconstructed
- *    from `mod_audit_logs`, which only carries an `appeal_upheld` /
- *    `appeal_overturned` row when the appeal is linked to a report. Cold
- *    appeals would vanish from the denominator and quietly inflate the
- *    overturn rate. Filing date is recorded for every appeal without
- *    exception, so it is the axis that counts all of them.
+ *    using filing date as the axis that counts every appeal. `appeals.decidedAt`
+ *    exists but was deliberately left NULL for every appeal decided before the
+ *    column was added (see `appeal.entity.ts`), so a decided-in-period count
+ *    would still have to be reconstructed from `mod_audit_logs` for those older
+ *    rows, which carries an `appeal_upheld` / `appeal_overturned` row whenever
+ *    the appeal has a `reportId` or an `appellantId`. An appeal with neither
+ *    would still be invisible to that reconstruction and vanish from the
+ *    denominator, quietly inflating the overturn rate. Filing date is recorded
+ *    for every appeal without exception, so it is the axis that counts all of
+ *    them.
  *  - Community-level moderation (a community's own owners removing or barring
  *    a member) is not in `actions.byType`. Those rows live in
  *    `community_governance_log`, not `mod_audit_logs`, and merging the two

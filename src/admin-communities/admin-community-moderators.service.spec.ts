@@ -10,7 +10,10 @@ import { Community } from '../communities/entities/community.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
+import {
+  AdminCommunityModeratorsService,
+  MODERATOR_CANDIDATE_LIMIT,
+} from './admin-community-moderators.service';
 
 function makeCommunity(overrides: Partial<Community> = {}): Community {
   return {
@@ -55,6 +58,7 @@ describe('AdminCommunityModeratorsService', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let profiles: { find: jest.Mock };
   let governanceLog: { log: jest.Mock };
@@ -62,7 +66,12 @@ describe('AdminCommunityModeratorsService', () => {
 
   beforeEach(async () => {
     communities = { findOne: jest.fn() };
-    communityMembers = { find: jest.fn(), findOne: jest.fn(), save: jest.fn() };
+    communityMembers = {
+      find: jest.fn(),
+      findOne: jest.fn(),
+      save: jest.fn(),
+      createQueryBuilder: jest.fn(),
+    };
     profiles = { find: jest.fn() };
     governanceLog = { log: jest.fn() };
     notifications = { create: jest.fn() };
@@ -205,17 +214,36 @@ describe('AdminCommunityModeratorsService', () => {
   });
 
   describe('listCandidates', () => {
+    /** A chainable stand-in for the candidates query builder, recording every
+     *  clause so the specs can assert the cap, the order and the search. */
+    function mockCandidateQuery(rows: CommunityMember[]) {
+      const candidateQuery = {
+        innerJoin: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        addOrderBy: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue(rows),
+      };
+      communityMembers.createQueryBuilder.mockReturnValue(candidateQuery);
+      return candidateQuery;
+    }
+
     it('returns the promotable plain members', async () => {
       communities.findOne.mockResolvedValue(makeCommunity());
-      communityMembers.find.mockResolvedValue([makeMember()]);
+      const candidateQuery = mockCandidateQuery([makeMember()]);
       profiles.find.mockResolvedValue([makeProfile()]);
 
       const result = await service.listCandidates('circle-of-care');
 
-      expect(communityMembers.find).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { communityId: 'community-1', role: RosterRole.Member },
-        }),
+      expect(candidateQuery.where).toHaveBeenCalledWith(
+        expect.stringContaining('community_id'),
+        { communityId: 'community-1' },
+      );
+      expect(candidateQuery.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('role'),
+        { memberRole: RosterRole.Member },
       );
       expect(result).toEqual([
         {
@@ -225,6 +253,79 @@ describe('AdminCommunityModeratorsService', () => {
           initials: 'PP',
         },
       ]);
+    });
+
+    it('caps the answer in SQL and orders it by name', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      const candidateQuery = mockCandidateQuery([]);
+
+      await service.listCandidates('circle-of-care');
+
+      expect(candidateQuery.limit).toHaveBeenCalledWith(
+        MODERATOR_CANDIDATE_LIMIT,
+      );
+      expect(MODERATOR_CANDIDATE_LIMIT).toBe(25);
+      expect(candidateQuery.orderBy).toHaveBeenCalledWith(
+        '"profile"."first_name"',
+        'ASC',
+      );
+    });
+
+    it('looks up profiles only for the capped page', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      const cappedPage = Array.from(
+        { length: MODERATOR_CANDIDATE_LIMIT },
+        (_unused, index) => makeMember({ userId: `user-${index}` }),
+      );
+      mockCandidateQuery(cappedPage);
+      profiles.find.mockResolvedValue([]);
+
+      await service.listCandidates('circle-of-care');
+
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+      const [lookupOptions] = profiles.find.mock.calls[0] as [
+        { where: { userId: { value: string[] } } },
+      ];
+      const lookupWhere = lookupOptions.where;
+      expect(lookupWhere.userId.value).toHaveLength(MODERATOR_CANDIDATE_LIMIT);
+    });
+
+    it('skips the search clause when q is absent or blank', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      const candidateQuery = mockCandidateQuery([]);
+
+      await service.listCandidates('circle-of-care', '   ');
+
+      // Only the role clause: no LIKE was added for a blank search.
+      expect(candidateQuery.andWhere).toHaveBeenCalledTimes(1);
+    });
+
+    it('matches q through the accent-folded haystack, escaped and trimmed', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      const candidateQuery = mockCandidateQuery([]);
+
+      await service.listCandidates('circle-of-care', '  Jo%ao ');
+
+      const searchCall = candidateQuery.andWhere.mock.calls.find(
+        ([clause]: [string]) => clause.includes('LIKE'),
+      ) as [string, { searchTerm: string }];
+      expect(searchCall).toBeDefined();
+      // `translate(lower(...))` is the shared folding, on both sides of LIKE.
+      expect(searchCall[0]).toContain('translate(lower(');
+      expect(searchCall[0]).toContain('"profile"."first_name"');
+      expect(searchCall[0]).toContain('"profile"."slug"');
+      expect(searchCall[0]).toContain(':searchTerm');
+      expect(searchCall[1]).toEqual({ searchTerm: '%Jo\\%ao%' });
+    });
+
+    it('returns an empty list without a profile lookup when nobody matches', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      mockCandidateQuery([]);
+
+      const result = await service.listCandidates('circle-of-care', 'zzz');
+
+      expect(result).toEqual([]);
+      expect(profiles.find).not.toHaveBeenCalled();
     });
   });
 });

@@ -15,8 +15,10 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { UpsertFriendMatchProfileDto } from './dto/upsert-friend-match-profile.dto';
+import { GoTogetherLaunchGuard } from './go-together-launch.guard';
 import { GoTogetherProfileService } from './go-together-profile.service';
 
+// Stays on `events` so members can read and delete their answers while Go together is dark.
 @Feature('events')
 @ApiTags('Go together')
 @ApiCookieAuth('access_token')
@@ -38,7 +40,8 @@ export class GoTogetherProfileController {
   }
 
   @Put('profile')
-  @UseGuards(NotRestrictedGuard)
+  // Saving answers starts a Go together profile, so it 404s while dark.
+  @UseGuards(GoTogetherLaunchGuard, NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
     summary: "Create or replace the caller's answers. Requires consent: true.",

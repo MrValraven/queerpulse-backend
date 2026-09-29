@@ -83,6 +83,8 @@ describe('ContentOwnerErasureService gatherings', () => {
       noOpUpdate as never,
       noOpUpdate as never,
       notifications as never,
+      // The forum and topic steps (ENG-494); nothing to find here.
+      { query: jest.fn().mockResolvedValue([[], 0]) } as never,
     );
     return { service, events, cohosts, eventSeries, notifications };
   };
@@ -258,5 +260,175 @@ describe('ContentOwnerErasureService gatherings', () => {
       await service.eraseFor(ERASED_USER_ID);
       expect(eventSeries.update).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * ENG-494: `forum_thread.author_id` is `SET NULL`, so a thread outlives its
+ * author's erasure. It should only when other members' replies live in it.
+ * These steps are set-based SQL, so the cases below pin the statement each
+ * category depends on.
+ */
+describe('ContentOwnerErasureService forum threads', () => {
+  const build = () => {
+    const emptyFind = { find: jest.fn().mockResolvedValue([]) };
+    const noOpUpdate = { update: jest.fn().mockResolvedValue({ affected: 0 }) };
+    const dataSource = {
+      query: jest.fn().mockResolvedValue([[{ id: 'thread-1' }], 1]),
+    };
+    const service = new ContentOwnerErasureService(
+      emptyFind as never,
+      emptyFind as never,
+      emptyFind as never,
+      emptyFind as never,
+      emptyFind as never,
+      noOpUpdate as never,
+      noOpUpdate as never,
+      noOpUpdate as never,
+      { createForRecipients: jest.fn() } as never,
+      dataSource as never,
+    );
+    return { service, dataSource };
+  };
+
+  const statements = (dataSource: { query: jest.Mock }) =>
+    (dataSource.query.mock.calls as Array<[string, unknown[]]>).map(
+      ([sql, parameters]) => ({
+        sql: sql.replace(/\s+/g, ' '),
+        parameters,
+      }),
+    );
+
+  const threadDeletion = async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const deletion = statements(dataSource).find(({ sql }) =>
+      sql.startsWith('DELETE FROM "forum_thread"'),
+    );
+    if (!deletion) throw new Error('expected the forum thread deletion');
+    return deletion;
+  };
+
+  it('scopes the thread deletion to the erased member', async () => {
+    const deletion = await threadDeletion();
+    expect(deletion.sql).toContain('"t"."author_id" = $1');
+    expect(deletion.parameters).toEqual([ERASED_USER_ID]);
+  });
+
+  it('deletes a scheduled thread', async () => {
+    const deletion = await threadDeletion();
+    expect(deletion.sql).toContain('NOT ("t".published_at <= now()');
+  });
+
+  it('deletes a thread pending review or rejected', async () => {
+    const deletion = await threadDeletion();
+    expect(deletion.sql).toContain(
+      `("t".review_state IS NULL OR "t".review_state = 'approved')`,
+    );
+  });
+
+  it('deletes a withdrawn thread', async () => {
+    const deletion = await threadDeletion();
+    expect(deletion.sql).toContain('OR "t"."deleted_at" IS NOT NULL');
+  });
+
+  it('deletes a thread with no live reply from another member', async () => {
+    const deletion = await threadDeletion();
+    expect(deletion.sql).toContain('AND NOT EXISTS');
+    expect(deletion.sql).toContain('"p"."author_id" <> $1');
+    expect(deletion.sql).toContain('"p"."deleted_at" IS NULL');
+  });
+
+  // The ruling on shared work: a thread that credits a co-author who still
+  // has an account survives with its author NULLed, replies or not.
+  it('keeps a co-authored live thread with no replies, with its author NULLed', async () => {
+    const deletion = await threadDeletion();
+    // The no-reply arm only fires for a thread with no co-author, so a live,
+    // published, co-authored thread matches no arm and is left standing for
+    // the `SET NULL` FK to orphan.
+    expect(deletion.sql).toContain(
+      'OR ( "t"."co_author_id" IS NULL AND NOT EXISTS (',
+    );
+  });
+
+  it('still deletes a co-authored thread that is scheduled', async () => {
+    const deletion = await threadDeletion();
+    // The visibility and withdrawn arms stand on their own, ahead of the
+    // co-author group, so a co-author does not save a thread that never went
+    // live or was withdrawn.
+    const coAuthorGroupAt = deletion.sql.indexOf('"t"."co_author_id"');
+    const scheduledArmAt = deletion.sql.indexOf(
+      'NOT ("t".published_at <= now()',
+    );
+    const withdrawnArmAt = deletion.sql.indexOf(
+      'OR "t"."deleted_at" IS NOT NULL',
+    );
+    expect(scheduledArmAt).toBeGreaterThan(-1);
+    expect(withdrawnArmAt).toBeGreaterThan(scheduledArmAt);
+    expect(coAuthorGroupAt).toBeGreaterThan(withdrawnArmAt);
+    expect(deletion.sql.match(/"t"\."co_author_id"/g)).toHaveLength(1);
+  });
+
+  it('keeps a live thread other members replied in', async () => {
+    // Every arm is an OR under the author scope, so a thread that is
+    // published, through review, not withdrawn and has another member's live
+    // reply matches none of them and survives with its author NULLed.
+    const deletion = await threadDeletion();
+    const arms = deletion.sql.split(' OR ');
+    expect(arms[0]).toContain('"t"."author_id" = $1 AND ( NOT (');
+    // Survival reads the replies themselves. The denormalized counter can be
+    // stale, so it must not decide what gets deleted.
+    expect(deletion.sql).not.toContain('"t"."reply_count"');
+  });
+
+  it('recounts replies on threads the member replied in, without their replies', async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const recount = statements(dataSource).find(({ sql }) =>
+      sql.includes('SET "reply_count"'),
+    );
+    if (!recount) throw new Error('expected the reply count recount');
+    expect(recount.sql).toContain('"p"."author_id" <> $1');
+    expect(recount.sql).toContain('"p"."is_op" = false');
+    expect(recount.sql).toContain('"own"."author_id" = $1');
+    expect(recount.parameters).toEqual([ERASED_USER_ID]);
+  });
+
+  it("scrubs the member's name from the topic posts that copied it", async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const scrub = statements(dataSource).find(({ sql }) =>
+      sql.startsWith('UPDATE "topic_post"'),
+    );
+    if (!scrub) throw new Error('expected the topic post byline scrub');
+    expect(scrub.sql).toContain('WHERE "author_id" = $1');
+    expect(scrub.parameters).toEqual([
+      ERASED_USER_ID,
+      'Member',
+      'M',
+      'default',
+    ]);
+  });
+
+  it('runs the deletion before the recount and the scrub', async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const order = statements(dataSource).map(({ sql }) => sql.slice(0, 22));
+    expect(order).toEqual([
+      'DELETE FROM "forum_thr',
+      'UPDATE "forum_thread" ',
+      'UPDATE "topic_post" SE',
+    ]);
+  });
+
+  it('still scrubs the topic bylines when the thread deletion fails', async () => {
+    const { service, dataSource } = build();
+    dataSource.query.mockRejectedValueOnce(new Error('deadlock'));
+    await service.eraseFor(ERASED_USER_ID);
+    expect(
+      statements(dataSource).some(({ sql }) =>
+        sql.startsWith('UPDATE "topic_post"'),
+      ),
+    ).toBe(true);
   });
 });

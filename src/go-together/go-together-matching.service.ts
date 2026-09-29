@@ -1,16 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import {
-  DataSource,
-  FindOptionsWhere,
-  In,
-  IsNull,
-  LessThanOrEqual,
-  MoreThan,
-  Not,
-  Repository,
-} from 'typeorm';
+import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -36,6 +27,7 @@ import {
   PENDING_STATUSES,
 } from './go-together-formation.service';
 import { FEEDBACK_WINDOW_MS } from './go-together-group.service';
+import { isGoTogetherLaunched } from './go-together-launch.guard';
 
 /**
  * Postgres advisory-lock keys for the two Go together sweeps. Advisory locks
@@ -54,6 +46,15 @@ const RECONCILE_LOOKBACK_MS = 12 * HOUR_MS;
 const FEEDBACK_AFTER_END_MS = 12 * HOUR_MS;
 const FEEDBACK_AFTER_START_MS = 24 * HOUR_MS;
 const EVENT_RETENTION_MS = 90 * DAY_MS;
+/**
+ * How long after a gathering ends (or starts, when it has no end time) a tick
+ * still loads its config by date. The "meet again?" prompt goes out at most
+ * 24 hours after the gathering; the rest is catch-up room for ticks missed
+ * during an outage or while Go together was held dark. The feedback close has
+ * its own condition in `ACTIVE_MATCH_CONDITION`, so it runs whenever it is
+ * due. Keep this well inside `EVENT_RETENTION_MS`.
+ */
+const ACTIVE_AFTER_END_MS = 14 * DAY_MS;
 const PROFILE_RETENTION_MS = 365 * DAY_MS;
 
 /**
@@ -69,6 +70,34 @@ const EFFECTIVE_CUTOFF_REACHED = `EXISTS (
       "scheduled_event"."start_at" - interval '6 hours'
     ) <= :now
 )`;
+
+/**
+ * The active-match filter. A config is loaded while its gathering is not over
+ * or ended under `ACTIVE_AFTER_END_MS` ago. Whatever the date, it is also
+ * loaded while its prompt went out and one of its groups still holds per-pair
+ * scores: that feedback window is still open, so the close has to run once it
+ * is due. The close nulls those scores, which keeps this set small.
+ *
+ * Every column is written as quoted snake_case with its quoted alias. TypeORM's
+ * property-path rewrite (`config.eventId` to `"config"."event_id"`) stops at a
+ * space, comma or bracket and runs on through a line break, so a path that
+ * ends a line would reach Postgres unrewritten and fail every tick.
+ */
+export const ACTIVE_MATCH_CONDITION = `(
+  COALESCE("event"."end_at", "event"."start_at") > :activeSince
+  OR (
+    "config"."feedback_prompted_at" IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM "event_match_groups" "open_group"
+      WHERE "open_group"."event_id" = "config"."event_id"
+        AND "open_group"."training_written_at" IS NULL
+        AND "open_group"."pair_components" IS NOT NULL
+    )
+  )
+)`;
+
+/** The active-match join, in the same quoted snake_case form. */
+export const ACTIVE_MATCH_JOIN = '"event"."id" = "config"."event_id"';
 
 /** Entries the reconcile pass re-checks: everyone still taking part. */
 const LIVE_STATUSES: EntryStatus[] = ['waiting', 'grouped', 'unmatched'];
@@ -86,6 +115,33 @@ const SCHEDULED_EVENT_FIELDS = {
   startAt: true,
   endAt: true,
 } as const;
+
+/**
+ * One gathering a tick may still act on: the claim state of its config and
+ * the event fields the passes read. Loaded once per tick and shared by every
+ * pass that used to query matched configs on its own.
+ */
+interface ActiveMatch {
+  event: ScheduledEvent;
+  enabled: boolean;
+  matchedAt: Date | null;
+  lateGroupAt: Date | null;
+  feedbackPromptedAt: Date | null;
+}
+
+/** Raw row of the active-match query, one per config (snake_case aliases). */
+interface ActiveMatchRow {
+  event_id: string;
+  enabled: boolean;
+  matched_at: Date | null;
+  late_group_at: Date | null;
+  feedback_prompted_at: Date | null;
+  slug: string;
+  title: string;
+  status: EventStatus;
+  start_at: Date;
+  end_at: Date | null;
+}
 
 /** Raw rows from a claim's RETURNING clause (snake_case database columns). */
 interface ClaimedConfigRow {
@@ -174,14 +230,34 @@ export class GoTogetherMatchingService {
   }
 
   async runPasses(now: Date): Promise<void> {
+    // One shared read per tick. When it fails there is nothing reliable to
+    // act on, so the tick logs once and ends; the next tick retries.
+    let activeMatches: ActiveMatch[];
+    try {
+      activeMatches = await this.loadActiveMatches(now);
+    } catch (error) {
+      this.logger.error(
+        `Go together tick skipped, the active-match read failed: ${describeError(error)}`,
+      );
+      return;
+    }
+    // Reconcile is a safety pass: members who were banned, removed or are no
+    // longer going leave their groups even while Go together is held dark
+    // (PRD-422). Every other pass forms, prompts or writes training rows, so
+    // those wait for the launch key.
     const passes: [string, () => Promise<void>][] = [
-      ['reconcile', () => this.reconcile(now)],
-      ['cutoff', () => this.cutoffPass(now)],
-      ['late joiners', () => this.lateJoinerPass(now)],
-      ['late group', () => this.lateGroupPass(now)],
-      ['feedback prompt', () => this.feedbackPromptPass(now)],
-      ['feedback close', () => this.feedbackClosePass(now)],
+      ['reconcile', () => this.reconcile(now, activeMatches)],
     ];
+    if (isGoTogetherLaunched()) {
+      passes.push(
+        ['cutoff', () => this.cutoffPass(now, activeMatches)],
+        ['late joiners', () => this.lateJoinerPass(now, activeMatches)],
+        ['late group', () => this.lateGroupPass(now, activeMatches)],
+        ['feedback prompt', () => this.feedbackPromptPass(now, activeMatches)],
+        ['feedback close', () => this.feedbackClosePass(now, activeMatches)],
+      );
+    }
+    // Each pass is caught on its own, so one failure never skips the rest.
     for (const [passName, pass] of passes) {
       try {
         await pass();
@@ -224,19 +300,17 @@ export class GoTogetherMatchingService {
   // Reconcile: RSVP changes, host removals, bans, cancellations, suspensions
   // and restrictions emit no event today, so every live entry is re-checked.
 
-  private async reconcile(now: Date): Promise<void> {
-    const enabledConfigs = await this.configs.find({
-      where: { enabled: true },
-      select: { eventId: true },
-    });
-    if (enabledConfigs.length === 0) return;
-    const recentEvents = await this.events.find({
-      where: {
-        id: In(enabledConfigs.map((config) => config.eventId)),
-        startAt: MoreThan(new Date(now.getTime() - RECONCILE_LOOKBACK_MS)),
-      },
-      select: SCHEDULED_EVENT_FIELDS,
-    });
+  private async reconcile(
+    now: Date,
+    activeMatches: ActiveMatch[],
+  ): Promise<void> {
+    const lookbackStartMs = now.getTime() - RECONCILE_LOOKBACK_MS;
+    const recentEvents = activeMatches
+      .filter(
+        (match) =>
+          match.enabled && match.event.startAt.getTime() > lookbackStartMs,
+      )
+      .map((match) => match.event);
     for (const event of recentEvents) {
       try {
         await this.reconcileEvent(event, now);
@@ -423,7 +497,10 @@ export class GoTogetherMatchingService {
 
   // Cutoff: the main formation run, once per gathering.
 
-  private async cutoffPass(now: Date): Promise<void> {
+  private async cutoffPass(
+    now: Date,
+    activeMatches: ActiveMatch[],
+  ): Promise<void> {
     const claim = await this.configs
       .createQueryBuilder()
       .update(EventMatchConfig)
@@ -438,10 +515,12 @@ export class GoTogetherMatchingService {
     const claimedEventIds = claimedEventIdsOf(claim.raw);
     if (claimedEventIds.length === 0) return;
     const eventsById = await this.loadEventsById(claimedEventIds);
+    const releasedEventIds = new Set<string>();
     for (const eventId of claimedEventIds) {
       const event = eventsById.get(eventId);
       if (this.isUpcomingDraft(event, now)) {
         await this.releaseClaim(eventId, { matchedAt: null });
+        releasedEventIds.add(eventId);
         continue;
       }
       if (!this.isUpcoming(event, now)) continue;
@@ -455,20 +534,35 @@ export class GoTogetherMatchingService {
           `Go together formation failed for event ${eventId}: ${describeError(error)}`,
         );
         await this.releaseClaim(eventId, { matchedAt: null });
+        releasedEventIds.add(eventId);
       }
+    }
+    // The later passes of this tick read the shared list, so the claims this
+    // pass kept show there as matched, as a fresh read would.
+    const keptEventIds = new Set(
+      claimedEventIds.filter((eventId) => !releasedEventIds.has(eventId)),
+    );
+    for (const match of activeMatches) {
+      if (keptEventIds.has(match.event.id)) match.matchedAt = now;
     }
   }
 
   // Late joiners: members who opted in after the cutoff fill open seats.
 
-  private async lateJoinerPass(now: Date): Promise<void> {
-    const openEvents = await this.matchedEvents(
-      { lateGroupAt: IsNull() },
-      {
-        status: EventStatus.Published,
-        startAt: MoreThan(new Date(now.getTime() + OPT_IN_CLOSE_MS)),
-      },
-    );
+  private async lateJoinerPass(
+    now: Date,
+    activeMatches: ActiveMatch[],
+  ): Promise<void> {
+    const optInClosesMs = now.getTime() + OPT_IN_CLOSE_MS;
+    const openEvents = activeMatches
+      .filter(
+        (match) =>
+          match.matchedAt !== null &&
+          match.lateGroupAt === null &&
+          match.event.status === EventStatus.Published &&
+          match.event.startAt.getTime() > optInClosesMs,
+      )
+      .map((match) => match.event);
     if (openEvents.length === 0) return;
     const pendingRows = await this.entries.find({
       where: {
@@ -498,11 +592,19 @@ export class GoTogetherMatchingService {
   // Late group: when opt-in closes, the last seats fill and whoever is left
   // gets one more chance at a group of their own.
 
-  private async lateGroupPass(now: Date): Promise<void> {
-    const closingEvents = await this.matchedEvents(
-      { lateGroupAt: IsNull() },
-      { startAt: LessThanOrEqual(new Date(now.getTime() + OPT_IN_CLOSE_MS)) },
-    );
+  private async lateGroupPass(
+    now: Date,
+    activeMatches: ActiveMatch[],
+  ): Promise<void> {
+    const optInClosesMs = now.getTime() + OPT_IN_CLOSE_MS;
+    const closingEvents = activeMatches
+      .filter(
+        (match) =>
+          match.matchedAt !== null &&
+          match.lateGroupAt === null &&
+          match.event.startAt.getTime() <= optInClosesMs,
+      )
+      .map((match) => match.event);
     const claimedEventIds = await this.claimConfigs(
       'lateGroupAt',
       closingEvents.map((event) => event.id),
@@ -530,14 +632,19 @@ export class GoTogetherMatchingService {
 
   // Feedback prompt: "meet again?" after the gathering, and the lens goes.
 
-  private async feedbackPromptPass(now: Date): Promise<void> {
-    const pastEvents = await this.matchedEvents(
-      { feedbackPromptedAt: IsNull() },
-      { startAt: LessThanOrEqual(now) },
-    );
-    const dueEvents = pastEvents.filter(
-      (event) => feedbackDueAt(event).getTime() <= now.getTime(),
-    );
+  private async feedbackPromptPass(
+    now: Date,
+    activeMatches: ActiveMatch[],
+  ): Promise<void> {
+    const dueEvents = activeMatches
+      .filter(
+        (match) =>
+          match.matchedAt !== null &&
+          match.feedbackPromptedAt === null &&
+          match.event.startAt.getTime() <= now.getTime() &&
+          feedbackDueAt(match.event).getTime() <= now.getTime(),
+      )
+      .map((match) => match.event);
     const claimedEventIds = await this.claimConfigs(
       'feedbackPromptedAt',
       dueEvents.map((event) => event.id),
@@ -611,30 +718,25 @@ export class GoTogetherMatchingService {
   // Feedback close: a week after the prompt, rated pairs become
   // de-identified training rows and the per-pair scores are dropped.
 
-  private async feedbackClosePass(now: Date): Promise<void> {
-    const openGroups = await this.groups.find({
-      where: { trainingWrittenAt: IsNull(), pairComponents: Not(IsNull()) },
-      select: { id: true, eventId: true },
-    });
-    if (openGroups.length === 0) return;
-    const closedConfigs = await this.configs.find({
-      where: {
-        eventId: In([...new Set(openGroups.map((group) => group.eventId))]),
-        feedbackPromptedAt: LessThanOrEqual(
-          new Date(now.getTime() - FEEDBACK_WINDOW_MS),
-        ),
-      },
-      select: { eventId: true },
-    });
-    const closedEventIds = new Set(
-      closedConfigs.map((config) => config.eventId),
-    );
-    const closedGroupIds = openGroups
-      .filter((group) => closedEventIds.has(group.eventId))
-      .map((group) => group.id);
-    if (closedGroupIds.length === 0) return;
+  private async feedbackClosePass(
+    now: Date,
+    activeMatches: ActiveMatch[],
+  ): Promise<void> {
+    const windowClosedBeforeMs = now.getTime() - FEEDBACK_WINDOW_MS;
+    const closedEventIds = activeMatches
+      .filter(
+        (match) =>
+          match.feedbackPromptedAt !== null &&
+          match.feedbackPromptedAt.getTime() <= windowClosedBeforeMs,
+      )
+      .map((match) => match.event.id);
+    if (closedEventIds.length === 0) return;
     const closedGroups = await this.groups.find({
-      where: { id: In(closedGroupIds) },
+      where: {
+        eventId: In(closedEventIds),
+        trainingWrittenAt: IsNull(),
+        pairComponents: Not(IsNull()),
+      },
     });
     for (const group of closedGroups) {
       try {
@@ -700,11 +802,12 @@ export class GoTogetherMatchingService {
     await this.groups.update(group.id, { pairComponents: null });
   }
 
-  // Retention: entries, groups (and their feedback) 90 days after the
-  // gathering, questionnaires 12 months after their last use, and every lens
-  // once its gathering has ended. A deleted group leaves its chat in place
-  // for the members; the chat's link to the group is nulled by the foreign
-  // key.
+  // Retention: groups (and their feedback), entries and the host's config 90
+  // days after the gathering, questionnaires 12 months after their last use,
+  // and every lens once its gathering has ended. A deleted group leaves its
+  // chat in place for the members; the chat's link to the group is nulled by
+  // the foreign key. The retention sweep runs whether or not Go together is
+  // launched, so data still expires while the feature is held dark.
 
   private async deleteExpired(now: Date): Promise<void> {
     const eventsBefore = new Date(now.getTime() - EVENT_RETENTION_MS);
@@ -720,6 +823,15 @@ export class GoTogetherMatchingService {
       .createQueryBuilder()
       .delete()
       .from(EventMatchEntry)
+      .where(`event_id IN (${expiredEventIds})`, { eventsBefore })
+      .execute();
+    // Last: nothing references a config, and with it gone no tick loads the
+    // gathering again, so the active-match query stays the size of the
+    // retention window.
+    const deletedConfigs = await this.configs
+      .createQueryBuilder()
+      .delete()
+      .from(EventMatchConfig)
       .where(`event_id IN (${expiredEventIds})`, { eventsBefore })
       .execute();
     // The feedback prompt nulls the lens for matched gatherings; this also
@@ -747,6 +859,7 @@ export class GoTogetherMatchingService {
     this.logger.log(
       `Go together retention: ${deletedGroups.affected ?? 0} group(s), ` +
         `${deletedEntries.affected ?? 0} entr(ies), ` +
+        `${deletedConfigs.affected ?? 0} config(s), ` +
         `${deletedProfiles.affected ?? 0} questionnaire(s) deleted, ` +
         `${clearedLenses.affected ?? 0} lens(es) cleared`,
     );
@@ -754,23 +867,43 @@ export class GoTogetherMatchingService {
 
   // Shared helpers.
 
-  /** Events of matched configs, narrowed by config and event conditions. */
-  private async matchedEvents(
-    configWhere: FindOptionsWhere<EventMatchConfig>,
-    eventWhere: FindOptionsWhere<Event>,
-  ): Promise<ScheduledEvent[]> {
-    const matchedConfigs = await this.configs.find({
-      where: { ...configWhere, matchedAt: Not(IsNull()) },
-      select: { eventId: true },
-    });
-    if (matchedConfigs.length === 0) return [];
-    return this.events.find({
-      where: {
-        ...eventWhere,
-        id: In(matchedConfigs.map((config) => config.eventId)),
+  /**
+   * Every config whose gathering can still need a pass (see
+   * `ACTIVE_MATCH_CONDITION`). One query joined on the event's primary key;
+   * retention deletes configs 90 days after the gathering, so the scan stays
+   * bounded by that window plus the upcoming gatherings.
+   */
+  private async loadActiveMatches(now: Date): Promise<ActiveMatch[]> {
+    const activeSince = new Date(now.getTime() - ACTIVE_AFTER_END_MS);
+    const rows = await this.configs
+      .createQueryBuilder('config')
+      .innerJoin(Event, 'event', ACTIVE_MATCH_JOIN)
+      .select('"config"."event_id"', 'event_id')
+      .addSelect('"config"."enabled"', 'enabled')
+      .addSelect('"config"."matched_at"', 'matched_at')
+      .addSelect('"config"."late_group_at"', 'late_group_at')
+      .addSelect('"config"."feedback_prompted_at"', 'feedback_prompted_at')
+      .addSelect('"event"."slug"', 'slug')
+      .addSelect('"event"."title"', 'title')
+      .addSelect('"event"."status"', 'status')
+      .addSelect('"event"."start_at"', 'start_at')
+      .addSelect('"event"."end_at"', 'end_at')
+      .where(ACTIVE_MATCH_CONDITION, { activeSince })
+      .getRawMany<ActiveMatchRow>();
+    return rows.map((row) => ({
+      event: {
+        id: row.event_id,
+        slug: row.slug,
+        title: row.title,
+        status: row.status,
+        startAt: row.start_at,
+        endAt: row.end_at,
       },
-      select: SCHEDULED_EVENT_FIELDS,
-    });
+      enabled: row.enabled,
+      matchedAt: row.matched_at,
+      lateGroupAt: row.late_group_at,
+      feedbackPromptedAt: row.feedback_prompted_at,
+    }));
   }
 
   /** Stamps the claim column on the candidates still unclaimed and returns

@@ -45,8 +45,8 @@ import {
 /**
  * The event name a persona publish will be announced under.
  *
- * Declared here as a string rather than imported from
- * `subprofiles/subprofile.events.ts` because that file belongs to the
+ * Declared here as a string literal, with no import from
+ * `subprofiles/subprofile.events.ts`, because that file belongs to the
  * subprofiles feature and this build does not modify it. The emit is a
  * one-line addition at the end of `SubprofilesService.publish` and is raised
  * as a coordination item; until it lands this handler simply never fires and
@@ -66,13 +66,14 @@ export interface SubprofilePublishedEvent {
  * rows by listening to the domain events those actions already emit.
  *
  * PRIVACY IS ENFORCED AT BOTH ENDS. At the WRITE, here: a single activity row
- * is served to every audience — the member themselves, another signed-in
- * member, and (once published) the open web via the public-profile endpoint —
+ * is served to every audience (the member themselves, another signed-in
+ * member, and, once published, the open web via the public-profile endpoint),
  * so a row is only ever recorded for an action that is already publicly
  * visible on the platform:
  *   - RSVPs to `public`-visibility events (members-only / invite-only events
- *     are dropped — attending them is not a public fact),
- *   - forum threads (the forum is a members-wide public square),
+ *     are dropped: attending them is not a public fact),
+ *   - forum threads the whole forum can read, under the member's own byline
+ *     (`ForumThreadsService` emits `FORUM_THREAD_CREATED` for no other kind),
  *   - posts in `public`-tier communities (request/invite/private are dropped),
  *   - joining a `public`-tier community (same gate: being IN a private space
  *     is exactly the fact a private space exists to keep),
@@ -111,7 +112,7 @@ export class ActivityListener {
   async onEventRsvped(event: EventRsvpedEvent): Promise<void> {
     // Only a public event's attendance is a public fact. A members-only or
     // invite-only event is a space the member may not want advertised, and its
-    // very existence could out them — never record it.
+    // very existence could out them, so it is never recorded.
     if (event.eventVisibility !== EventVisibility.Public) {
       return;
     }
@@ -134,10 +135,11 @@ export class ActivityListener {
       title: `Started a thread: ${event.title}`,
       sub: 'In the forum',
       toLink: threadPath(event.threadSlug),
-      // No subject reference on purpose: a forum thread has no visibility
-      // dimension to re-check (see the class doc and `ForumThreadCreatedEvent`).
-      subjectKind: null,
-      subjectId: null,
+      // The thread is re-checked on every read: it can be withdrawn, sit
+      // behind a schedule or review, or live in a community that turns
+      // private after this row is written (`ActivityVisibilityService`).
+      subjectKind: ActivitySubjectKind.ForumThread,
+      subjectId: event.threadSlug,
     });
   }
 
@@ -171,9 +173,9 @@ export class ActivityListener {
       title: `Posted in ${event.communityName}`,
       sub: event.excerpt || null,
       toLink: communityPostPath(event.communitySlug, event.postId),
-      // The COMMUNITY is the subject to re-check, not the post: the post's
-      // readability is entirely a function of the community's access tier, and
-      // a community turning private must take every post row with it.
+      // The COMMUNITY is the subject to re-check: the post's readability is
+      // entirely a function of the community's access tier, and a community
+      // turning private must take every post row with it.
       subjectKind: ActivitySubjectKind.Community,
       subjectId: event.communitySlug,
     });
@@ -213,8 +215,8 @@ export class ActivityListener {
   }
 
   /**
-   * Leaving a community retracts the join row immediately, rather than waiting
-   * for the read-time gate: the community may well still be public, so nothing
+   * Leaving a community retracts the join row immediately, with no wait for
+   * the read-time gate: the community may well still be public, so nothing
    * would drop it, and "Joined X" is false the moment the member is off the
    * roster. Only the join row is removed; posts the member made while a member
    * are still things that happened in a public space.
@@ -236,7 +238,7 @@ export class ActivityListener {
   }
 
   /**
-   * Publishing a persona. Re-reads the persona rather than trusting the event
+   * Publishing a persona. Re-reads the persona and trusts nothing in the event
    * payload, because "published" alone is not enough: a `network`- or
    * `private`-visibility persona is published and still not a public fact, and
    * this row is served to audiences as wide as the open web.

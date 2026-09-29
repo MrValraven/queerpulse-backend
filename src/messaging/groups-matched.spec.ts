@@ -69,6 +69,7 @@ describe('GroupsService matched groups', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     count: jest.Mock;
+    query: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
@@ -153,6 +154,12 @@ describe('GroupsService matched groups', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue({ id: CONVERSATION_ID }),
       count: jest.fn().mockResolvedValue(0),
+      // PRD-400: `readGroupJoinHistoryFloor`'s clock reading for a new seat.
+      query: jest
+        .fn()
+        .mockResolvedValue([
+          { floorInstant: new Date('2026-01-31T23:59:59.999Z') },
+        ]),
     };
     dataSource = {
       transaction: jest.fn(
@@ -281,6 +288,8 @@ describe('GroupsService matched groups', () => {
       createdBy: HOUSE_ID,
       description: 'Meet at the kiosk',
       eventMatchGroupId: EVENT_MATCH_GROUP_ID,
+      // PRD-423: the durable marker that outlives the group row.
+      isGoTogetherChat: true,
     });
 
     const seats = (
@@ -476,6 +485,44 @@ describe('GroupsService matched groups', () => {
     expect(preferencesService.getGroupAddPolicyForUsers).not.toHaveBeenCalled();
   });
 
+  // PRD-400: a late joiner reads the matched group from their join onward;
+  // a returning member keeps the resume floor the re-add path always used.
+  it('floors a late joiner seat at its join and leaves a revived seat on its resume floor', async () => {
+    const departedAt = new Date('2026-01-15T00:00:00.000Z');
+    const joinFloor = new Date('2026-01-31T23:59:59.999Z');
+    participants.find.mockResolvedValue([
+      participantRow({ userId: MEMBER_B_ID, leftAt: departedAt }),
+    ]);
+
+    await service.addMatchedMembers(CONVERSATION_ID, HOUSE_ID, [
+      MEMBER_B_ID,
+      MEMBER_C_ID,
+    ]);
+
+    const newSeats = (
+      manager.create.mock.calls as [
+        unknown,
+        { userId: string; clearedAt?: Date; historyFloorAt?: Date },
+      ][]
+    )
+      .filter(([entity]) => entity === ConversationParticipant)
+      .map(([, seat]) => seat);
+    expect(newSeats).toEqual([
+      expect.objectContaining({
+        userId: MEMBER_C_ID,
+        clearedAt: joinFloor,
+        historyFloorAt: joinFloor,
+      }),
+    ]);
+    const revivedWrite = (
+      manager.update.mock.calls as [unknown, unknown, Record<string, unknown>][]
+    ).find(([entity]) => entity === ConversationParticipant);
+    expect(revivedWrite?.[2]).toEqual(
+      expect.objectContaining({ clearedAt: departedAt }),
+    );
+    expect(revivedWrite?.[2]).not.toHaveProperty('historyFloorAt');
+  });
+
   it('refuses addMatchedMembers from anyone but the Owner seat', async () => {
     core.requireParticipant.mockResolvedValue(
       participantRow({ userId: MEMBER_A_ID, role: ConversationRole.Member }),
@@ -525,7 +572,11 @@ describe('GroupsService matched groups', () => {
     expect(manager.update).toHaveBeenCalledWith(
       Conversation,
       { id: CONVERSATION_ID },
-      { dissolvedAt: expect.any(Date), inviteToken: null },
+      {
+        dissolvedAt: expect.any(Date),
+        inviteToken: null,
+        inviteTokenExpiresAt: null,
+      },
     );
     expect(eventEmitter.emit).toHaveBeenCalledWith(
       CONVERSATION_MEMBERSHIP_REVOKED,

@@ -36,6 +36,12 @@ export class StickerPack {
   @Column({ length: 80 })
   name!: string;
 
+  /** The Portuguese pack name, or `null` when nobody wrote one. `name` holds
+   *  the English name, and a reader in Portuguese falls back to it while this
+   *  is `null`. */
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  namePt!: string | null;
+
   @Column({ type: 'text', nullable: true })
   description!: string | null;
 

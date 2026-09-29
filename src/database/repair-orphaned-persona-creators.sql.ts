@@ -42,9 +42,13 @@ import { QueryRunner } from 'typeorm';
  *   history row for it would reveal who created it once it is linked later;
  * - `user_id`, `slug` and `updated_at` move to the successor;
  * - when the slug changes, a takedown that is still in force (hidden or
- *   removed) is copied to the new slug, merged into any row already there
- *   (the same statement as `copyTakedownToSlug` in
- *   `subprofile-creator-transfer.ts`).
+ *   removed) is copied to the new slug, merged into any row already there.
+ *   This mirrored the creator transfer of its day, when persona takedowns
+ *   were keyed by slug. Since `1824700000000-RekeyPersonaTakedownsToId` they
+ *   are keyed by the persona uuid, which a handoff keeps, and the live
+ *   transfer (`subprofile-creator-transfer.ts`) copies nothing. The frozen
+ *   copy here then finds no slug-keyed row and writes nothing; if it runs
+ *   before that migration, the rows it copies are rekeyed along with the rest.
  *
  * The persona rows are locked FOR UPDATE for the whole statement. It is
  * idempotent: a healthy database has no orphaned persona, so it changes

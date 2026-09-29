@@ -5,6 +5,7 @@ import { AdminQueueNotificationsService } from '../admin-queue-notifications/adm
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { Connection } from '../connections/entities/connection.entity';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -22,23 +23,30 @@ import { HousingGroup } from './entities/housing-group.entity';
 import { HousingGroupsService } from './housing-groups.service';
 
 /**
- * Covers `createListing` only, the surface this spec was written for
- * (the admin-queue-notifications announce call, ENG queue
- * `housing_group_listings`). The service's roster/join-request/triage
- * surfaces are exercised by `housing-groups-listing-review.service.spec.ts`
- * and its siblings.
+ * Covers `createListing` (the admin-queue-notifications announce call, ENG
+ * queue `housing_group_listings`), plus the PRD-462 announce on
+ * `createJoinRequest` and the ENG-490 audit rows on `deleteGroup` and
+ * `triageJoinRequest`. The listing-review surfaces, including the hide
+ * toggle, are exercised by `housing-groups-listing-review.service.spec.ts`.
  */
 describe('HousingGroupsService', () => {
   let service: HousingGroupsService;
-  let groups: { findOne: jest.Mock };
+  let groups: { findOne: jest.Mock; delete: jest.Mock; update: jest.Mock };
   let listings: { create: jest.Mock; save: jest.Mock };
-  let joinRequests: { count: jest.Mock; find: jest.Mock };
+  let joinRequests: {
+    count: jest.Mock;
+    find: jest.Mock;
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+  };
   let connections: Record<string, jest.Mock>;
   let profiles: Record<string, jest.Mock>;
   let affirmingPledge: { requireAccepted: jest.Mock };
   let verification: { requireLevel: jest.Mock; levelForUser: jest.Mock };
   let notifications: { create: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
+  let modAudit: { writeAuditLog: jest.Mock };
 
   // An OPEN group: `isAccessGated` false means "an open reading room", so every
   // active member may share a room in it and gate 0 stands down (ENG-171).
@@ -47,6 +55,7 @@ describe('HousingGroupsService', () => {
     slug: 'sunset-house',
     name: 'Sunset House',
     isAccessGated: false,
+    screeningQuestions: [],
   };
 
   const gatedGroup = { ...publishedGroup, isAccessGated: true };
@@ -60,7 +69,11 @@ describe('HousingGroupsService', () => {
   };
 
   beforeEach(async () => {
-    groups = { findOne: jest.fn().mockResolvedValue(publishedGroup) };
+    groups = {
+      findOne: jest.fn().mockResolvedValue(publishedGroup),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
     listings = {
       create: jest.fn((row: object) => row),
       save: jest.fn((row: unknown) =>
@@ -82,6 +95,11 @@ describe('HousingGroupsService', () => {
       // The caller's own join requests for this group (ENG-171). Empty is the
       // honest default; the access-gated cases below set it per test.
       find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((row: object) => row),
+      save: jest.fn((row: object) =>
+        Promise.resolve({ id: 'join-request-1', ...row }),
+      ),
     };
     connections = { find: jest.fn().mockResolvedValue([]) };
     profiles = { find: jest.fn().mockResolvedValue([]) };
@@ -96,6 +114,7 @@ describe('HousingGroupsService', () => {
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
+    modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -115,6 +134,7 @@ describe('HousingGroupsService', () => {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
         },
+        { provide: ModAuditService, useValue: modAudit },
       ],
     }).compile();
 
@@ -212,6 +232,136 @@ describe('HousingGroupsService', () => {
 
       expect(listings.save).not.toHaveBeenCalled();
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createJoinRequest', () => {
+    it('tells the group join-request queue that an application landed', async () => {
+      const result = await service.createJoinRequest(
+        'sunset-house',
+        { name: 'Alex', relationship: 'Friend of a member', answers: [] },
+        'member-1',
+      );
+
+      expect(result).toEqual({ id: 'join-request-1' });
+      expect(joinRequests.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: GroupJoinRequestStatus.Pending }),
+      );
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.HousingGroupJoinRequests,
+        'join-request-1',
+      );
+    });
+
+    it('announces an anonymous application too', async () => {
+      await service.createJoinRequest(
+        'sunset-house',
+        { name: 'Sam', relationship: 'Neighbour', answers: [] },
+        null,
+      );
+
+      expect(affirmingPledge.requireAccepted).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.HousingGroupJoinRequests,
+        'join-request-1',
+      );
+    });
+
+    it('tells nobody when the group does not exist', async () => {
+      groups.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.createJoinRequest(
+          'missing-group',
+          { name: 'Alex', relationship: 'Friend', answers: [] },
+          'member-1',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deleteGroup', () => {
+    it('records the acting staff member in the audit trail', async () => {
+      await service.deleteGroup('group-1', 'moderator-1');
+
+      expect(groups.delete).toHaveBeenCalledWith({ id: 'group-1' });
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-1',
+        'housing_group_delete',
+        undefined,
+        expect.stringContaining('group-1'),
+      );
+    });
+
+    it('writes no audit row for a group that does not exist', async () => {
+      groups.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.deleteGroup('missing', 'moderator-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(groups.delete).not.toHaveBeenCalled();
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('still answers when the audit write fails, because the delete committed', async () => {
+      modAudit.writeAuditLog.mockRejectedValue(new Error('db down'));
+
+      await expect(
+        service.deleteGroup('group-1', 'moderator-1'),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('triageJoinRequest', () => {
+    const pendingRequest = {
+      id: 'join-request-7',
+      groupId: 'group-1',
+      userId: null,
+      name: 'Sam',
+      relationship: 'Neighbour',
+      answers: [],
+      note: null,
+      status: GroupJoinRequestStatus.Pending,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    it('records the acting staff member and the decision', async () => {
+      joinRequests.findOne
+        .mockResolvedValueOnce({ ...pendingRequest })
+        .mockResolvedValueOnce({
+          ...pendingRequest,
+          status: GroupJoinRequestStatus.Approved,
+          group: publishedGroup,
+        });
+
+      await service.triageJoinRequest(
+        'join-request-7',
+        'approved',
+        'moderator-1',
+      );
+
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-1',
+        'housing_group_join_request_triage',
+        undefined,
+        expect.stringMatching(/join-request-7.*approved/),
+      );
+    });
+
+    it('writes no audit row for a request that does not exist', async () => {
+      joinRequests.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.triageJoinRequest('missing', 'declined', 'moderator-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
     });
   });
 });

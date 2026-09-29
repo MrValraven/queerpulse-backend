@@ -38,7 +38,7 @@ function makeVote(optionId: string): ForumPollVote {
  * Minimal fakes for the three repositories/managers `vote` touches. The
  * transaction manager runs its callback synchronously and records every write,
  * so the specs can assert on exactly which options were incremented and which
- * ballots were deleted — which is the whole `vote_count`-in-step contract.
+ * ballots were deleted, which is the whole `vote_count`-in-step contract.
  */
 function build(
   options: {
@@ -67,9 +67,16 @@ function build(
   const managerDelete = jest.fn().mockResolvedValue({ affected: 1 });
   const managerIncrement = jest.fn().mockResolvedValue(undefined);
   const managerDecrement = jest.fn().mockResolvedValue(undefined);
+  const managerQuery = jest.fn().mockResolvedValue(undefined);
   const insertedValues: unknown[] = [];
+  const callOrder: string[] = [];
   const manager = {
+    query: jest.fn().mockImplementation((sql: string, params: unknown[]) => {
+      callOrder.push('query');
+      return managerQuery(sql, params) as Promise<undefined>;
+    }),
     find: jest.fn().mockImplementation((entity: unknown) => {
+      callOrder.push('find');
       if (entity === ForumPollVote) return Promise.resolve(existingVotes);
       return Promise.resolve(pollOptions);
     }),
@@ -122,12 +129,14 @@ function build(
     managerDelete,
     managerIncrement,
     managerDecrement,
+    managerQuery,
     insertedValues,
+    callOrder,
   };
 }
 
-describe('ForumPollsService.vote — the ballot rules', () => {
-  it('reuses the thread visibility gate rather than restating it', async () => {
+describe('ForumPollsService.vote: the ballot rules', () => {
+  it('reuses the thread visibility gate as its only check', async () => {
     const { service, threadsService } = build();
     await service.vote('hello-world', voter, ['a']);
     expect(threadsService.loadOr404).toHaveBeenCalledWith(
@@ -211,7 +220,28 @@ describe('ForumPollsService.vote — the ballot rules', () => {
   });
 });
 
-describe('ForumPollsService.vote — re-voting replaces the previous selection', () => {
+describe('ForumPollsService.vote: the advisory lock closes the per-member race', () => {
+  it('takes the per-member advisory lock before reading existing ballots', async () => {
+    const { service, manager, callOrder } = build();
+    await service.vote('hello-world', voter, ['a']);
+    expect(manager.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext($1))',
+      expect.any(Array),
+    );
+    expect(callOrder[0]).toBe('query');
+    expect(callOrder.indexOf('query')).toBeLessThan(callOrder.indexOf('find'));
+  });
+
+  it('lock key names the poll and the member', async () => {
+    const { service, manager } = build();
+    await service.vote('hello-world', voter, ['a']);
+    expect(manager.query).toHaveBeenCalledWith(expect.any(String), [
+      `forum_poll_vote:poll-1:${voter.userId}`,
+    ]);
+  });
+});
+
+describe('ForumPollsService.vote: re-voting replaces the previous selection', () => {
   it('a single-choice re-vote drops the old ballot and its count', async () => {
     const { service, managerDelete, managerDecrement, managerIncrement } =
       build({ existingVotes: [makeVote('a')] });
@@ -233,7 +263,7 @@ describe('ForumPollsService.vote — re-voting replaces the previous selection',
       'voteCount',
       1,
     );
-    // One out, one in — never two rows for a single-choice poll.
+    // One out, one in: a single-choice poll always ends with exactly one row.
     expect(managerDelete).toHaveBeenCalledTimes(1);
     expect(managerIncrement).toHaveBeenCalledTimes(1);
   });
@@ -299,7 +329,7 @@ describe('ForumPollsService.vote — re-voting replaces the previous selection',
   });
 });
 
-describe('ForumPollsService.vote — what the ballot returns', () => {
+describe('ForumPollsService.vote: what the ballot returns', () => {
   it('releases the counts to the member who just voted', async () => {
     const { service } = build({
       pollOptions: [makeOption('a', 0, 4), makeOption('b', 1, 2)],

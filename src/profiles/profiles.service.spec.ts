@@ -83,8 +83,20 @@ const LONG_BIO =
 
 describe('ProfilesService.getBySlug visibility', () => {
   let service: ProfilesService;
-  let profiles: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
-  let connections: { areConnected: jest.Mock };
+  let profiles: {
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    exists: jest.Mock;
+  };
+  let connections: {
+    areConnected: jest.Mock;
+    acceptedConnectionsAmong: jest.Mock;
+  };
+  let vouchService: {
+    getVouchCount: jest.Mock;
+    getVouchCounts: jest.Mock;
+    getNamedVoucherIds: jest.Mock;
+  };
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
   let handles: { rename: jest.Mock; previousProfileOwnerOf: jest.Mock };
   let nowHistory: { create: jest.Mock };
@@ -124,8 +136,22 @@ describe('ProfilesService.getBySlug visibility', () => {
     profiles = {
       findOne: jest.fn(),
       createQueryBuilder: jest.fn(() => qbStub()),
+      // The account-status gate (ENG-435). Every member is active by default.
+      exists: jest.fn().mockResolvedValue(true),
     };
-    connections = { areConnected: jest.fn().mockResolvedValue(false) };
+    connections = {
+      areConnected: jest.fn().mockResolvedValue(false),
+      acceptedConnectionsAmong: jest.fn().mockResolvedValue(new Set()),
+    };
+    vouchService = {
+      getVouchCount: jest.fn().mockResolvedValue(0),
+      getVouchCounts: jest.fn().mockResolvedValue(new Map()),
+      // Empty by default: `loadMutualVoucherCount` short-circuits on an empty
+      // batch before ever calling `visibleMemberIds` or
+      // `acceptedConnectionsAmong`, so every OTHER test in this describe
+      // (which never sets `vouchersVisible: true`) is unaffected.
+      getNamedVoucherIds: jest.fn().mockResolvedValue([]),
+    };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       excludeBlocked: jest.fn((qb: unknown) => qb),
@@ -196,13 +222,7 @@ describe('ProfilesService.getBySlug visibility', () => {
           useValue: nowHistory,
         },
         { provide: DataSource, useValue: dataSource },
-        {
-          provide: VouchService,
-          useValue: {
-            getVouchCount: jest.fn().mockResolvedValue(0),
-            getVouchCounts: jest.fn().mockResolvedValue(new Map()),
-          },
-        },
+        { provide: VouchService, useValue: vouchService },
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
         {
@@ -559,6 +579,72 @@ describe('ProfilesService.getBySlug visibility', () => {
     });
   });
 
+  describe('account-status gate (ENG-435)', () => {
+    it('asks whether the owner account is active with the shared status predicate', async () => {
+      profiles.findOne.mockResolvedValue(profile());
+      await service.getBySlug('jo', 'someone-else');
+      expect(profiles.exists).toHaveBeenCalledWith({
+        where: { userId: 'owner-1', user: { status: 'active' } },
+      });
+    });
+
+    it('404s a deactivated, pending-deletion or suspended member for another viewer, same as the other gates', async () => {
+      profiles.findOne.mockResolvedValue(profile());
+      profiles.exists.mockResolvedValue(false);
+      await expect(
+        service.getBySlug('jo', 'someone-else'),
+      ).rejects.toMatchObject({
+        response: { message: 'Profile not found' },
+      });
+    });
+
+    it('lets platform staff open an inactive member, same exemption as the takedown gate', async () => {
+      profiles.findOne.mockResolvedValue(profile());
+      profiles.exists.mockResolvedValue(false);
+      for (const role of ['moderator', 'admin']) {
+        const res = await service.getBySlug('jo', 'staff-1', role);
+        expect(res.limited).toBe(false);
+      }
+      // Staff short-circuit the gate before any status read.
+      expect(profiles.exists).not.toHaveBeenCalled();
+    });
+
+    it('still 404s a regular member on an inactive profile', async () => {
+      profiles.findOne.mockResolvedValue(profile());
+      profiles.exists.mockResolvedValue(false);
+      await expect(
+        service.getBySlug('jo', 'member-1', 'member'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s findBySlugOrThrow, so the mutuals and vouchers routes inherit the gate', async () => {
+      profiles.findOne.mockResolvedValue(profile());
+      profiles.exists.mockResolvedValue(false);
+      await expect(
+        service.findBySlugOrThrow('jo', 'someone-else'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('still returns the full profile to the owner and skips the status read', async () => {
+      profiles.findOne.mockResolvedValue(profile());
+      profiles.exists.mockResolvedValue(false);
+      const res = await service.getBySlug('jo', 'owner-1');
+      expect(res.limited).toBe(false);
+      expect(profiles.exists).not.toHaveBeenCalled();
+    });
+
+    it('never reveals a move for a former owner who has since deactivated', async () => {
+      profiles.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(profile({ slug: 'jo-new' }));
+      handles.previousProfileOwnerOf.mockResolvedValue('owner-1');
+      profiles.exists.mockResolvedValue(false);
+      await expect(service.getBySlug('jo', 'viewer')).rejects.toMatchObject({
+        response: { message: 'Profile not found' },
+      });
+    });
+  });
+
   describe('hiddenUntil self-hide gate (member profile v2 Task 6)', () => {
     it('404s a non-owner viewer while hiddenUntil is still in the future', async () => {
       profiles.findOne.mockResolvedValue(
@@ -895,7 +981,176 @@ describe('ProfilesService.getBySlug visibility', () => {
     ]);
   });
 
+  describe('visibleMemberIds (ENG-436 vouchers roster)', () => {
+    it('answers a whole batch in one query with every directory gate', async () => {
+      const qb = qbStub();
+      qb.getRawMany.mockResolvedValue([{ user_id: 'v2' }]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      const visible = await service.visibleMemberIds('viewer-1', [
+        'v1',
+        'v2',
+        'v1',
+      ]);
+
+      expect(visible).toEqual(new Set(['v2']));
+      expect(profiles.createQueryBuilder).toHaveBeenCalledTimes(1);
+      // Active accounts only.
+      expect(qb.innerJoin).toHaveBeenCalledWith(
+        'p.user',
+        'u',
+        'u.status = :active',
+        { active: 'active' },
+      );
+      // The batch, de-duplicated.
+      expect(qb.where).toHaveBeenCalledWith(
+        'p.user_id IN (:...visibleCandidateIds)',
+        { visibleCandidateIds: ['v1', 'v2'] },
+      );
+      // Block either way, scoped to the viewer.
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"p"."user_id"',
+      );
+      const predicates = (
+        qb.andWhere as jest.Mock<unknown, unknown[]>
+      ).mock.calls.map((call: unknown[]) => String(call[0]));
+      // The 24h hide and the moderator takedown.
+      expect(
+        predicates.some((predicate) => predicate.includes('hidden_until')),
+      ).toBe(true);
+      expect(
+        predicates.some((predicate) =>
+          predicate.includes('content_moderation'),
+        ),
+      ).toBe(true);
+    });
+
+    it('skips the query for an empty batch', async () => {
+      const visible = await service.visibleMemberIds('viewer-1', []);
+      expect(visible.size).toBe(0);
+      expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('loadMutualVoucherCount vouchers-roster boundary (M2)', () => {
+    it('does not count a named voucher the vouchers roster would hide from this viewer', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({
+          visibility: ProfileVisibility.Private,
+          vouchersVisible: true,
+        }),
+      );
+      vouchService.getNamedVoucherIds.mockResolvedValue([
+        'hidden-1',
+        'visible-1',
+      ]);
+      const qb = qbStub();
+      // Only `visible-1` clears the vouchers-roster gates (account status,
+      // block, hidden-from, 24h hide, takedown) for this viewer.
+      qb.getRawMany.mockResolvedValue([{ user_id: 'visible-1' }]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      // Both read as accepted connections, so the roster gate alone must
+      // drop `hidden-1` from the count.
+      connections.acceptedConnectionsAmong.mockResolvedValue(
+        new Set(['hidden-1', 'visible-1']),
+      );
+
+      const res = await service.getBySlug('jo', 'viewer-1');
+
+      expect((res as { mutualVoucherCount: number }).mutualVoucherCount).toBe(
+        1,
+      );
+      expect(connections.acceptedConnectionsAmong).toHaveBeenCalledWith(
+        'viewer-1',
+        ['visible-1'],
+      );
+    });
+
+    it('returns 0 without a connections lookup when every named voucher is hidden from this viewer', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({
+          visibility: ProfileVisibility.Private,
+          vouchersVisible: true,
+        }),
+      );
+      vouchService.getNamedVoucherIds.mockResolvedValue([
+        'hidden-1',
+        'hidden-2',
+      ]);
+      const qb = qbStub();
+      qb.getRawMany.mockResolvedValue([]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      connections.acceptedConnectionsAmong.mockResolvedValue(
+        new Set(['hidden-1', 'hidden-2']),
+      );
+
+      const res = await service.getBySlug('jo', 'viewer-1');
+
+      expect((res as { mutualVoucherCount: number }).mutualVoucherCount).toBe(
+        0,
+      );
+      expect(connections.acceptedConnectionsAmong).not.toHaveBeenCalled();
+    });
+  });
+
   describe('searchMembers', () => {
+    it('drops moderator-taken-down members in SQL, keyed by slug or user id (ENG-437)', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({}, 'viewer-1');
+
+      const andWhereCalls: unknown[][] = (
+        qb.andWhere as jest.Mock<unknown, unknown[]>
+      ).mock.calls;
+      const takedownCall = andWhereCalls.find(
+        (call: unknown[]) =>
+          typeof call[0] === 'string' && call[0].includes('content_moderation'),
+      );
+      expect(takedownCall).toBeDefined();
+      const [predicate, parameters] = takedownCall as [
+        string,
+        Record<string, string>,
+      ];
+      expect(predicate).toContain('NOT EXISTS');
+      expect(predicate).toContain('("p"."slug", "p"."user_id"::text)');
+      // A removal withholds the member as well as a hide.
+      expect(predicate).toContain('"hidden_at" IS NOT NULL');
+      expect(predicate).toContain('"removed_at" IS NOT NULL');
+      expect(parameters).toEqual({ memberTakedownSubjectType: 'member' });
+      // Filtered in the query, so the page, the total and the facet counts
+      // all agree, and no post-fetch lookup runs.
+      expect(contentModeration.statesForAnyType).not.toHaveBeenCalled();
+    });
+
+    it('applies the takedown gate to every facet count query as well', async () => {
+      const builders: ReturnType<typeof qbStub>[] = [];
+      profiles.createQueryBuilder.mockImplementation(() => {
+        const qb = qbStub();
+        builders.push(qb);
+        return qb;
+      });
+
+      await service.searchMembers({}, 'viewer-1');
+
+      // The page query plus one per facet group, each built by
+      // `directoryBaseQuery`.
+      expect(builders.length).toBeGreaterThan(1);
+      for (const qb of builders) {
+        const hasTakedownGate = (
+          qb.andWhere as jest.Mock<unknown, unknown[]>
+        ).mock.calls.some(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('content_moderation'),
+        );
+        expect(hasTakedownGate).toBe(true);
+      }
+    });
+
     it('applies excludeBlocked scoped to the viewer and the p.user_id column', async () => {
       const qb = qbStub();
       qb.getManyAndCount.mockResolvedValue([[], 0]);
@@ -1085,9 +1340,9 @@ describe('ProfilesService.getBySlug visibility', () => {
       expect(list.items[0]?.avatarUrl).toBeNull();
       expect(list.items[0]?.location).toBeNull();
       expect(list.items[0]?.hood).toBeNull();
-      // The toggle itself is still the true stored value on the card, same as
-      // toFullProfile's gating.
-      expect(list.items[0]?.photoVisible).toBe(false);
+      // The toggle itself is owner-only (ENG-444): another member's card
+      // carries the gated photo and hood, and no flag saying they hid them.
+      expect(list.items[0]).not.toHaveProperty('photoVisible');
     });
 
     // Directory search never excludes the viewer's own profile from their own

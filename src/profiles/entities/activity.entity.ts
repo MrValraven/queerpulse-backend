@@ -27,23 +27,27 @@ export enum ActivityKind {
  * `ActivityVisibilityService` reads this pair, batches one lookup per kind, and
  * drops (and purges) any row whose subject has stopped being public.
  *
- * Only kinds with a real visibility dimension appear here. A forum thread has
- * none (the forum is a members-wide public square, see
- * `ForumThreadCreatedEvent`), so its rows carry `null` and are never
- * re-checked. `null` is also what every row written before this column
- * existed carries, and those rows keep their original behaviour exactly:
- * shown, never linked.
+ * A forum thread is one of those subjects: it can be withdrawn, sit behind a
+ * schedule or a review, live in a community that turns private, or be posted
+ * anonymously or under the QueerPulse byline, and each of those must take the
+ * "started a thread" row with it. Its subject id is the thread slug.
+ *
+ * `null` is what every row written before this column existed carries, and
+ * those rows keep their original behaviour exactly: shown and left unchecked.
+ * Forum rows written before `forum_thread` joined this enum are moved onto it
+ * by `1823800200000-BackfillForumThreadActivitySubjects`.
  */
 export enum ActivitySubjectKind {
   Event = 'event',
   Community = 'community',
   Persona = 'persona',
+  ForumThread = 'forum_thread',
 }
 
 @Entity('activities')
 // The purge path (`ActivityVisibilityService`) deletes every row pointing at
 // one subject that has stopped being public, across all members at once, so
-// the lookup is by (kind, id) rather than by user.
+// the lookup is keyed by (kind, id).
 @Index('IDX_activities_subject', ['subjectKind', 'subjectId'])
 export class Activity {
   @PrimaryGeneratedColumn('uuid')
@@ -69,8 +73,8 @@ export class Activity {
   @Column({ type: 'varchar', nullable: true })
   toLink!: string | null;
 
-  // See ActivitySubjectKind. Null = nothing to re-check (a forum thread, or a
-  // row written before these columns existed).
+  // See ActivitySubjectKind. Null = nothing to re-check (a row written before
+  // these columns existed).
   @Column({
     type: 'enum',
     enum: ActivitySubjectKind,
@@ -80,8 +84,8 @@ export class Activity {
   subjectKind!: ActivitySubjectKind | null;
 
   // The subject's stable public identifier: an event slug, a community slug,
-  // or a persona's uuid. Deliberately a varchar rather than a uuid so slugs and
-  // ids share one column.
+  // a forum thread slug, or a persona's uuid. Deliberately a varchar so slugs
+  // and uuids share one column.
   @Column({ type: 'varchar', nullable: true })
   subjectId!: string | null;
 

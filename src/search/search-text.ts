@@ -33,10 +33,12 @@
  * simply replaced. Ranking then puts the full-text hits first.
  *
  * ⚠️ The expression strings produced here are frozen by the indexes in
- * `1795100000000-AddSearchTextIndexes`. Changing a field list, a weight, or
- * the folding means a NEW migration rebuilding those indexes: the old ones
- * would silently stop being used. `search-text.spec.ts` pins the exact output
- * against the SQL that migration wrote, so an accidental change fails there.
+ * `1795100000000-AddSearchTextIndexes` and, for the profile fields minus the
+ * bios, `1824900000000-AddProfilePublicSearchIndexes`. Changing a field list,
+ * a weight, or the folding means a NEW migration rebuilding those indexes: the
+ * old ones would silently stop being used. `search-text.spec.ts` pins the
+ * exact output against the SQL those migrations wrote, so an accidental change
+ * fails there.
  */
 import { foldedTextExpression } from '../connections/connection-search';
 
@@ -162,6 +164,32 @@ export const PROFILE_SEARCH_COLUMNS = [
   'bio',
   'bio_pt',
 ];
+
+/**
+ * The profile columns only a viewer allowed to read the bio may be matched on
+ * (ENG-438). A `network`/`private` member's bio sits behind the limited card,
+ * so a search that matched it would confirm which hidden members wrote a word.
+ * See `memberSearchTextMatch` in `profiles/member-directory.query.ts`.
+ */
+export const PROFILE_BIO_COLUMNS: readonly string[] = ['bio', 'bio_pt'];
+
+/**
+ * The same profile fields minus the bios: what member search may match on for
+ * a member whose bio the viewer cannot read. Derived from the lists above, so
+ * a column added there reaches this one too. Index-backed for the non-open
+ * rows by the partial indexes in `1824900000000-AddProfilePublicSearchIndexes`,
+ * so these lists are frozen exactly like the ones above: `search-text.spec.ts`
+ * pins the expressions they generate against that migration.
+ */
+export const PROFILE_PUBLIC_SEARCH_FIELDS: WeightedSearchField[] =
+  PROFILE_SEARCH_FIELDS.filter(
+    (field) => !PROFILE_BIO_COLUMNS.includes(field.column),
+  );
+
+export const PROFILE_PUBLIC_SEARCH_COLUMNS: string[] =
+  PROFILE_SEARCH_COLUMNS.filter(
+    (column) => !PROFILE_BIO_COLUMNS.includes(column),
+  );
 
 /** `forum_thread` — title, plus the tags that describe what it is about. */
 export const FORUM_THREAD_SEARCH_FIELDS: WeightedSearchField[] = [

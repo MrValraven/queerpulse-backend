@@ -1,5 +1,10 @@
+import { UserStatus } from '../users/entities/user.entity';
 import { CardVerificationService } from './card-verification.service';
 import { MembershipCardStatus } from './entities/membership-card.entity';
+
+// An external https avatar, which `toImageUrl` passes through untouched, so
+// these specs need no image base URL wired up.
+const HOLDER_AVATAR = 'https://images.test/rita.jpg';
 
 function makeService() {
   const tokens = {
@@ -43,7 +48,9 @@ function makeService() {
     findOne: jest.fn().mockResolvedValue({
       firstName: 'Rita',
       lastName: 'V',
-      avatarUrl: 'media/rita.jpg',
+      avatarUrl: HOLDER_AVATAR,
+      photoVisible: true,
+      user: { status: UserStatus.Active },
     }),
   };
   // Records a resolved verification. Stubbed as a plain spy because the real
@@ -176,10 +183,68 @@ describe('CardVerificationService.verify', () => {
     expect(result?.status).toBe('revoked');
   });
 
-  it('falls back to a placeholder name when the holder is erased', async () => {
+  // The fallback is the verifier's page to print, in the verifier's language.
+  it('sends a null name when the holder has no profile row', async () => {
     const { service, users } = makeService();
     users.findOne.mockResolvedValue(null);
-    expect((await service.verify('good.token'))?.holderName).toBe('A member');
+    expect((await service.verify('good.token'))?.holderName).toBeNull();
+  });
+
+  it('sends a null name when the profile carries no name', async () => {
+    const { service, users } = makeService();
+    users.findOne.mockResolvedValue({
+      firstName: '',
+      lastName: '',
+      avatarUrl: null,
+      photoVisible: true,
+      user: { status: UserStatus.Active },
+    });
+    expect((await service.verify('good.token'))?.holderName).toBeNull();
+  });
+
+  it('joins the holder account when reading the profile', async () => {
+    const { service, users } = makeService();
+    await service.verify('good.token');
+    expect(users.findOne).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      relations: { user: true },
+    });
+  });
+
+  it.each([UserStatus.Suspended, UserStatus.Deactivated])(
+    'reports suspended when the holder account is %s',
+    async (holderStatus) => {
+      const { service, users, scanLog } = makeService();
+      users.findOne.mockResolvedValue({
+        firstName: 'Rita',
+        lastName: 'V',
+        avatarUrl: HOLDER_AVATAR,
+        photoVisible: true,
+        user: { status: holderStatus },
+      });
+      const result = await service.verify('good.token');
+      expect(result?.status).toBe('suspended');
+      expect(scanLog.record).toHaveBeenCalledWith('card-1', 'suspended');
+    },
+  );
+
+  it('hands a door no face for a holder whose account is suspended', async () => {
+    const { service, programs, users } = makeService();
+    programs.findOne.mockResolvedValue({
+      id: 'prog-1',
+      issuerId: 'com-1',
+      isEnabled: true,
+      allowsMemberPhoto: true,
+      photoStyle: 'color',
+    });
+    users.findOne.mockResolvedValue({
+      firstName: 'Rita',
+      lastName: 'V',
+      avatarUrl: HOLDER_AVATAR,
+      photoVisible: true,
+      user: { status: UserStatus.Suspended },
+    });
+    expect((await service.verify('good.token'))?.holderPhotoUrl).toBeNull();
   });
 
   // The generation check behind "replace a lost card". The row is untouched;
@@ -235,6 +300,43 @@ describe('CardVerificationService.verify', () => {
     expect((await service.verify('good.token'))?.hasPhoto).toBe(false);
   });
 
+  it('sends the visible face on an active card that prints photos', async () => {
+    const { service, programs } = makeService();
+    programs.findOne.mockResolvedValue({
+      id: 'prog-1',
+      issuerId: 'com-1',
+      isEnabled: true,
+      allowsMemberPhoto: true,
+      photoStyle: 'color',
+    });
+    const result = await service.verify('good.token');
+    expect(result?.hasPhoto).toBe(true);
+    expect(result?.holderPhotoUrl).toBe(HOLDER_AVATAR);
+  });
+
+  // The profile-wide "Show your photo" switch, the same gate the issuer
+  // roster applies through `toVisibleAvatarUrl`.
+  it('hands a door no face when the holder turned their photo off', async () => {
+    const { service, programs, users } = makeService();
+    programs.findOne.mockResolvedValue({
+      id: 'prog-1',
+      issuerId: 'com-1',
+      isEnabled: true,
+      allowsMemberPhoto: true,
+      photoStyle: 'color',
+    });
+    users.findOne.mockResolvedValue({
+      firstName: 'Rita',
+      lastName: 'V',
+      avatarUrl: HOLDER_AVATAR,
+      photoVisible: false,
+      user: { status: UserStatus.Active },
+    });
+    const result = await service.verify('good.token');
+    expect(result?.hasPhoto).toBe(false);
+    expect(result?.holderPhotoUrl).toBeNull();
+  });
+
   it('reports hasPhoto false when the holder has no avatar at all', async () => {
     const { service, programs, users } = makeService();
     programs.findOne.mockResolvedValue({
@@ -247,6 +349,8 @@ describe('CardVerificationService.verify', () => {
       firstName: 'Rita',
       lastName: 'V',
       avatarUrl: null,
+      photoVisible: true,
+      user: { status: UserStatus.Active },
     });
     expect((await service.verify('good.token'))?.hasPhoto).toBe(false);
   });

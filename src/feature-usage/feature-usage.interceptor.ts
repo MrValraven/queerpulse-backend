@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
 import { FEATURE_KEY } from '../common/feature.decorator';
 import { FeatureKey } from '../launchedFeatures';
+import { isTrackedFeature } from './feature-depth';
 import { FeatureUsageTallyService } from './feature-usage-tally.service';
 
 /**
@@ -26,6 +27,9 @@ import { FeatureUsageTallyService } from './feature-usage-tally.service';
  * repo's convention is that guarded admin CRUD gets its own `Admin*Controller`
  * (see CLAUDE.md), which makes the controller class name a reliable signal for
  * "this is a staff surface" without reading anything from the request.
+ *
+ * Keys in `UNTRACKED_FEATURES` (`feature-depth.ts`) are never counted: Go
+ * together allows no analytics of any of its actions.
  *
  * Nest runs guards BEFORE interceptors, so arriving here means every guard
  * passed. `record()` runs before `next.handle()`, so a request whose handler
@@ -52,7 +56,7 @@ export class FeatureUsageInterceptor implements NestInterceptor {
 
     const isStaffSurface = context.getClass().name.startsWith('Admin');
 
-    if (featureKey && !isStaffSurface) {
+    if (featureKey && !isStaffSurface && isTrackedFeature(featureKey)) {
       this.tally.record(featureKey);
     }
 

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -65,9 +66,9 @@ describe('JobsService', () => {
 
   const baseJobDto = {
     title: 'Backend Engineer',
-    category: 'Engineering',
-    commitment: 'Full-time',
-    seniority: 'Mid',
+    category: 'engineering',
+    commitment: 'fullTime',
+    seniority: 'mid',
     format: JobFormat.Remote,
     location: 'Remote',
     description: 'Build things.',
@@ -203,6 +204,22 @@ describe('JobsService', () => {
       ).rejects.toThrow();
       expect(companiesService.getCompanyForJobPosting).not.toHaveBeenCalled();
     });
+
+    it('rejects a profession outside the chosen field (400)', async () => {
+      const creation = service.create('owner-1', {
+        ...baseJobDto,
+        category: 'tech',
+        profession: 'nurse',
+        companySlug: 'atelier-pulso',
+      });
+
+      await expect(creation).rejects.toBeInstanceOf(BadRequestException);
+      await expect(creation).rejects.toThrow(
+        'That profession is not in the chosen field',
+      );
+      expect(companiesService.getCompanyForJobPosting).not.toHaveBeenCalled();
+      expect(jobs.save).not.toHaveBeenCalled();
+    });
   });
 
   describe('getBySlug', () => {
@@ -224,6 +241,39 @@ describe('JobsService', () => {
       await expect(
         service.update('x', 'intruder', { title: 'Hijacked title' }),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('asks a legacy listing with no field to choose one (400)', async () => {
+      jobs.findOne.mockResolvedValue({
+        id: 'job-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        category: null,
+        profession: null,
+      });
+
+      const update = service.update('x', 'poster-1', { title: 'New title' });
+
+      await expect(update).rejects.toBeInstanceOf(BadRequestException);
+      await expect(update).rejects.toThrow('Choose a field for this job');
+      expect(jobs.save).not.toHaveBeenCalled();
+    });
+
+    it('clears a profession the new field no longer holds', async () => {
+      jobs.findOne.mockResolvedValue({
+        id: 'job-1',
+        slug: 'x',
+        companyId: 'co-1',
+        posterId: 'poster-1',
+        category: 'healthcare',
+        profession: 'nurse',
+      });
+
+      await service.update('x', 'poster-1', { category: 'tech' });
+
+      expect(jobs.save).toHaveBeenCalledWith(
+        expect.objectContaining({ category: 'tech', profession: null }),
+      );
     });
   });
 
@@ -352,9 +402,10 @@ describe('JobsService', () => {
             slug: 'a',
             companyId: 'co-1',
             title: 'A',
-            category: 'c',
-            commitment: 'ft',
-            seniority: 's',
+            category: 'tech',
+            profession: null,
+            commitment: 'fullTime',
+            seniority: 'anyLevel',
             format: JobFormat.Remote,
             location: 'l',
             city: null,
@@ -411,6 +462,29 @@ describe('JobsService', () => {
 
       expect(qb.andWhere).not.toHaveBeenCalledWith(
         'j.poster_id = :posterId',
+        expect.anything(),
+      );
+    });
+
+    it('filters by every known field id in `cat` and drops unknown ones', async () => {
+      const qb = qbStub();
+      jobs.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({ cat: 'design,fashion,notAField' });
+
+      expect(qb.andWhere).toHaveBeenCalledWith('j.category IN (:...cats)', {
+        cats: ['design', 'fashion'],
+      });
+    });
+
+    it('adds no category clause when no id in `cat` is a known field', async () => {
+      const qb = qbStub();
+      jobs.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({ cat: 'notAField' });
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        'j.category IN (:...cats)',
         expect.anything(),
       );
     });

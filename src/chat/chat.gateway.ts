@@ -75,6 +75,7 @@ import {
   partitionMailboxThreadSeats,
 } from '../messaging/mailbox-seats';
 import type { MessageResponse } from '../messaging/message-response';
+import { withJoinFlooredReplyQuote } from '../messaging/group-join-history-floor';
 import {
   MessageLike,
   MessagingCoreService,
@@ -88,7 +89,9 @@ import {
 } from '../social/social.events';
 import {
   NOTIFICATION_CREATED,
+  NOTIFICATION_STATE_CHANGED,
   NotificationCreatedEvent,
+  NotificationStateChangedEvent,
 } from '../notifications/notification.events';
 import { toNotificationResponse } from '../notifications/notification-response';
 import {
@@ -262,7 +265,9 @@ type ChatSocket = Socket<
  * business mailbox thread, whose frames are rendered per viewer.
  */
 type LiveThreadAudience =
-  | { shape: 'personal' }
+  /** `isGroup` lets a relay scope PRD-354's group block filter to groups
+   *  from the kind this loader already read, with no second lookup. */
+  | { shape: 'personal'; isGroup: boolean }
   | { shape: 'closed' }
   | {
       shape: 'mailbox';
@@ -282,6 +287,18 @@ type MailboxLiveThreadAudience = Extract<
   LiveThreadAudience,
   { shape: 'mailbox' }
 >;
+
+/**
+ * ENG-402: a group's seats, read once per relay, and the members blocked
+ * either way with the message's sender (PRD-354). The group relays of
+ * `message:new`, `conversation:message` and `message:updated` withhold their
+ * frames from `blockedUserIds`, the same members the history read hides the
+ * message from.
+ */
+interface GroupSenderAudience {
+  seats: ReadonlyArray<Pick<ConversationParticipant, 'userId' | 'leftAt'>>;
+  blockedUserIds: ReadonlySet<string>;
+}
 
 /**
  * Enforce the frontend allowlist on the handshake itself.
@@ -540,8 +557,9 @@ export class ChatGateway
     // facade for a one-query need.
     @InjectRepository(ConversationParticipant)
     private readonly conversationParticipants: Repository<ConversationParticipant>,
-    // PRD-354: `fanOutConversationMessage` skips a GROUP participant blocked
-    // either way with the sender, one batched query per send.
+    // PRD-354: the group relays of a new or edited message (room emit and
+    // `fanOutConversationMessage` alike) skip a participant blocked either
+    // way with the sender, one batched query per relay.
     private readonly blockFilter: BlockFilterService,
     // PRD-364: reciprocal read-receipt/typing/presence sharing — gates
     // `handleTyping`'s relay, `handleMessageRead`'s relay, and every presence
@@ -1048,9 +1066,28 @@ export class ChatGateway
       );
       return;
     }
+    // ENG-402: PRD-354 hides a group message from someone blocked either way
+    // with the viewer, so their typing stays hidden too. Blocks are
+    // symmetric: the blocked member never sees the blocker typing, and the
+    // blocker never sees the blocked member typing. One indexed lookup over
+    // the seats this frame already loaded, run for a group alone, the same
+    // scope as the PRD-354 message fan-out: a block already refuses a direct
+    // thread, and nobody is blocked out of the official thread.
+    const blockedTypingUserIds = audience.isGroup
+      ? await this.blockFilter.blockedUserIds(
+          userId,
+          typingSeats.map((seat) => seat.userId),
+        )
+      : new Set<string>();
     client
       .to(data.conversationId)
-      .except([`user:${userId}`, ...excludedUserRooms])
+      .except([
+        `user:${userId}`,
+        ...excludedUserRooms,
+        ...[...blockedTypingUserIds].map(
+          (blockedUserId) => `user:${blockedUserId}`,
+        ),
+      ])
       .emit('typing', {
         conversationId: data.conversationId,
         userId,
@@ -1252,6 +1289,15 @@ export class ChatGateway
     // takes the room emit below. A lookup failure delivers nothing: the
     // message is committed, and every client reconciles it on its next
     // fetch.
+    // PRD-400: group members whose join floor covers this message's reply
+    // parent. They get the reply with the unavailable quote their REST read
+    // renders, so a pre-join snippet or thumbnail key never reaches them.
+    let joinFlooredUserIds = new Set<string>();
+    // ENG-402: in a group, PRD-354 hides this message from every member
+    // blocked either way with its sender. One seat read and one blocked-set
+    // lookup serve the room emit and the fan-out below alike. A direct or
+    // official thread leaves it unset: a block already refuses a send there.
+    let groupSenderAudience: GroupSenderAudience | undefined;
     try {
       const audience = await this.loadLiveThreadAudience(
         payload.conversationId,
@@ -1269,6 +1315,21 @@ export class ChatGateway
         );
         return;
       }
+      if (audience.isGroup) {
+        const replyParentId = payload.message.replyToId;
+        [joinFlooredUserIds, groupSenderAudience] = await Promise.all([
+          replyParentId
+            ? this.messagingCore.loadGroupJoinFlooredUserIds(
+                payload.conversationId,
+                replyParentId,
+              )
+            : Promise.resolve(new Set<string>()),
+          this.loadGroupSenderAudience(
+            payload.conversationId,
+            payload.message.senderId,
+          ),
+        ]);
+      }
     } catch (err) {
       this.logger.error(
         `Failed to resolve the live audience for message:new: ${
@@ -1280,10 +1341,38 @@ export class ChatGateway
     // Broadcast the frontend-contract `response` (not the internal `MessageView`)
     // so live clients patch it straight into the thread cache and reconcile the
     // sender's optimistic bubble by `clientMessageId` — no refetch.
-    this.namespace?.to(payload.conversationId).emit('message:new', {
+    // ENG-402: the room emit skips the join-floored members, who get their
+    // own rendering below, and every member blocked either way with the
+    // sender, who gets nothing.
+    const blockedUserIds =
+      groupSenderAudience?.blockedUserIds ?? new Set<string>();
+    const skippedUserRooms = [
+      ...new Set([...joinFlooredUserIds, ...blockedUserIds]),
+    ].map((userId) => `user:${userId}`);
+    const roomBroadcast = this.namespace?.to(payload.conversationId);
+    (skippedUserRooms.length > 0
+      ? roomBroadcast?.except(skippedUserRooms)
+      : roomBroadcast
+    )?.emit('message:new', {
       conversationId: payload.conversationId,
       message: payload.response,
     });
+    const joinFlooredResponse = withJoinFlooredReplyQuote(payload.response);
+    await this.emitToJoinedSockets(
+      payload.conversationId,
+      'message:new',
+      new Map(
+        [...joinFlooredUserIds]
+          .filter((userId) => !blockedUserIds.has(userId))
+          .map((userId) => [
+            userId,
+            {
+              conversationId: payload.conversationId,
+              message: joinFlooredResponse,
+            },
+          ]),
+      ),
+    );
     // ENG-160: the room emit above reaches only sockets that have JOINED this
     // conversation (via `conversation:join`) — a member browsing another page,
     // or with a DIFFERENT thread open, is connected but not in this room, so
@@ -1292,7 +1381,11 @@ export class ChatGateway
     // conversation's relay queue (`enqueueRelay`), so a later frame for the
     // same conversation never overtakes it. It catches its own failures, so
     // the message write, already committed, is unaffected.
-    await this.fanOutConversationMessage(payload);
+    await this.fanOutConversationMessage(
+      payload,
+      { joinFlooredUserIds, joinFlooredResponse },
+      groupSenderAudience,
+    );
   }
 
   /**
@@ -1322,36 +1415,31 @@ export class ChatGateway
    * getting a live "new message" signal for everything the blocked sender
    * posted, forever. A DM/official thread is exempt: a block already
    * prevents sending there in the first place (`requireActiveParticipant`),
-   * mirroring that method's own exemption shape.
+   * mirroring that method's own exemption shape. ENG-402: a group's seats
+   * and blocked set arrive preloaded from `relayMessageCreated`, which
+   * already read them for its room emit.
    */
   private async fanOutConversationMessage(
     payload: MessageCreatedEvent,
+    // PRD-400: the members whose group join floor covers the reply parent,
+    // and the rendering they receive in place of `payload.response`.
+    joinFloor: {
+      joinFlooredUserIds: ReadonlySet<string>;
+      joinFlooredResponse: MessageResponse;
+    } = {
+      joinFlooredUserIds: new Set<string>(),
+      joinFlooredResponse: payload.response,
+    },
+    // ENG-402: set for a group alone, see `loadGroupSenderAudience`. A
+    // direct or official thread reads its own seats and filters no block.
+    groupSenderAudience?: GroupSenderAudience,
   ): Promise<void> {
     try {
-      const participants = await this.conversationParticipants.find({
-        where: { conversationId: payload.conversationId },
-        // ENG-239: only the two columns this fan-out actually reads. The
-        // default full-row `find` pulled every participant column
-        // (including each member's own possibly-5000-char `draft`) for
-        // every participant of every single message sent.
-        select: { userId: true, leftAt: true },
-      });
-      // One extra lightweight lookup, shared by every participant below
-      // rather than re-queried per recipient.
-      const conversation = await this.conversationParticipants.manager.findOne(
-        Conversation,
-        { where: { id: payload.conversationId }, select: { kind: true } },
-      );
-      // A sender erased mid-flight (ENG-243 makes senderId nullable) has no
-      // block relations left to honour, so the filter is skipped for them.
-      const senderId = payload.message.senderId;
-      const blockedSenderUserIds =
-        conversation?.kind === ConversationKind.Group && senderId
-          ? await this.blockFilter.blockedUserIds(
-              senderId,
-              participants.map((participant) => participant.userId),
-            )
-          : new Set<string>();
+      const { seats: participants, blockedUserIds: blockedSenderUserIds } =
+        groupSenderAudience ?? {
+          seats: await this.loadSenderAudienceSeats(payload.conversationId),
+          blockedUserIds: new Set<string>(),
+        };
       for (const participant of participants) {
         // Never signal the sender about their own send, never a member who
         // left/was removed (mirrors `PushMessageListener`'s identical filter
@@ -1368,7 +1456,9 @@ export class ChatGateway
           ?.to(`user:${participant.userId}`)
           .emit('conversation:message', {
             conversationId: payload.conversationId,
-            message: payload.response,
+            message: joinFloor.joinFlooredUserIds.has(participant.userId)
+              ? joinFloor.joinFlooredResponse
+              : payload.response,
           });
       }
     } catch (err) {
@@ -1378,6 +1468,66 @@ export class ChatGateway
         }`,
       );
     }
+  }
+
+  /** The seats a new message's live relay reads: each member's user id and
+   *  whether they left. */
+  private loadSenderAudienceSeats(
+    conversationId: string,
+  ): Promise<ConversationParticipant[]> {
+    return this.conversationParticipants.find({
+      where: { conversationId },
+      // ENG-239: only the two columns the relays actually read. The default
+      // full-row `find` pulled every participant column (including each
+      // member's own possibly-5000-char `draft`) for every participant of
+      // every single message sent.
+      select: { userId: true, leftAt: true },
+    });
+  }
+
+  /**
+   * ENG-402: a group's seats and, in one batched query, the members blocked
+   * either way with `senderId` (PRD-354). A sender erased mid-flight
+   * (ENG-243 makes `senderId` nullable) has no block relations left to
+   * honour, so the lookup is skipped for them.
+   */
+  private async loadGroupSenderAudience(
+    conversationId: string,
+    senderId: string | null,
+  ): Promise<GroupSenderAudience> {
+    const seats = await this.loadSenderAudienceSeats(conversationId);
+    const blockedUserIds = senderId
+      ? await this.blockFilter.blockedUserIds(
+          senderId,
+          seats.map((seat) => seat.userId),
+        )
+      : new Set<string>();
+    return { seats, blockedUserIds };
+  }
+
+  /**
+   * ENG-402: the group members blocked either way with the author of the
+   * edited message `messageId`. `MessageUpdatedEvent` carries the hydrated
+   * response, which names no author user id, so the row's `senderId` is read
+   * by primary key first. A missing row or an erased author yields an empty
+   * set.
+   */
+  private async loadGroupEditorBlockedUserIds(
+    conversationId: string,
+    messageId: string,
+  ): Promise<ReadonlySet<string>> {
+    const editedMessage = await this.conversationParticipants.manager.findOne(
+      Message,
+      { where: { id: messageId }, select: { id: true, senderId: true } },
+    );
+    if (!editedMessage?.senderId) {
+      return new Set<string>();
+    }
+    const editorAudience = await this.loadGroupSenderAudience(
+      conversationId,
+      editedMessage.senderId,
+    );
+    return editorAudience.blockedUserIds;
   }
 
   @OnEvent(MESSAGE_UPDATED)
@@ -1393,6 +1543,14 @@ export class ChatGateway
     // Task 13e: `payload.message` is rendered for the EDITOR, so a mailbox
     // thread gets one payload per viewer, exactly as `handleMessageCreated`
     // does. Only a thread confirmed personal takes the room emit.
+    // PRD-400: in a group, a member whose join floor covers the edited
+    // message never had it, so the edit skips them; one whose floor covers
+    // only its reply parent gets the unavailable quote.
+    let messageJoinFlooredUserIds = new Set<string>();
+    let parentJoinFlooredUserIds = new Set<string>();
+    // ENG-402: PRD-354 hides the edited group message from every member
+    // blocked either way with its author, so the edit skips them too.
+    let blockedEditorUserIds: ReadonlySet<string> = new Set<string>();
     try {
       const audience = await this.loadLiveThreadAudience(
         payload.conversationId,
@@ -1400,6 +1558,29 @@ export class ChatGateway
       if (audience.shape !== 'personal') {
         await this.relayMailboxMessageUpdated(payload, audience);
         return;
+      }
+      if (audience.isGroup) {
+        const replyParentId = payload.message.replyTo?.id;
+        [
+          messageJoinFlooredUserIds,
+          parentJoinFlooredUserIds,
+          blockedEditorUserIds,
+        ] = await Promise.all([
+          this.messagingCore.loadGroupJoinFlooredUserIds(
+            payload.conversationId,
+            payload.message.id,
+          ),
+          replyParentId
+            ? this.messagingCore.loadGroupJoinFlooredUserIds(
+                payload.conversationId,
+                replyParentId,
+              )
+            : Promise.resolve(new Set<string>()),
+          this.loadGroupEditorBlockedUserIds(
+            payload.conversationId,
+            payload.message.id,
+          ),
+        ]);
       }
     } catch (err) {
       this.logger.error(
@@ -1409,7 +1590,37 @@ export class ChatGateway
       );
       return;
     }
-    this.namespace?.to(payload.conversationId).emit('message:updated', payload);
+    const parentOnlyFlooredUserIds = [...parentJoinFlooredUserIds].filter(
+      (userId) =>
+        !messageJoinFlooredUserIds.has(userId) &&
+        !blockedEditorUserIds.has(userId),
+    );
+    const skippedUserRooms = [
+      ...new Set([
+        ...messageJoinFlooredUserIds,
+        ...parentJoinFlooredUserIds,
+        ...blockedEditorUserIds,
+      ]),
+    ].map((userId) => `user:${userId}`);
+    const roomBroadcast = this.namespace?.to(payload.conversationId);
+    (skippedUserRooms.length > 0
+      ? roomBroadcast?.except(skippedUserRooms)
+      : roomBroadcast
+    )?.emit('message:updated', payload);
+    const parentFlooredPayload: MessageUpdatedEvent = {
+      ...payload,
+      message: withJoinFlooredReplyQuote(payload.message),
+    };
+    await this.emitToJoinedSockets(
+      payload.conversationId,
+      'message:updated',
+      new Map(
+        parentOnlyFlooredUserIds.map((userId) => [
+          userId,
+          parentFlooredPayload,
+        ]),
+      ),
+    );
   }
 
   /**
@@ -1876,6 +2087,28 @@ export class ChatGateway
   }
 
   /**
+   * Tell every one of a member's live sockets that their own notification
+   * rows changed read state or were deleted (mark one read, mark all read,
+   * the mentions inbox's mark all read, dismiss), so their other tabs and
+   * devices refetch the bell list and unread badge.
+   *
+   * The frame carries no data on purpose: the client refetches its own feed
+   * and count, which keeps this handler query-free. It reaches every tab in
+   * the `user:${userId}` room, the acting one included, where the refetch is
+   * a harmless re-affirmation of what that tab already shows.
+   *
+   * The socket event is `notification:changed`; the internal event-emitter
+   * topic it listens to is `notification.state_changed`. Separate namespaces,
+   * same as `NOTIFICATION_CREATED` above.
+   */
+  @OnEvent(NOTIFICATION_STATE_CHANGED)
+  handleNotificationStateChanged(payload: NotificationStateChangedEvent): void {
+    this.namespace
+      ?.to(`user:${payload.userId}`)
+      .emit('notification:changed', {});
+  }
+
+  /**
    * Force-drop a member's live sockets (logout / "sign out this device" /
    * "log out other devices" / suspension / token reuse / the 60s liveness
    * sweep). Auth emits {@link USER_SESSION_REVOKED}.
@@ -2323,7 +2556,7 @@ export class ChatGateway
    * relay of someone else's typing/read signal, since PRD-364 makes each of
    * those reciprocal (opting out also means never SEEING the same signal from
    * anyone else). One extra query per relay, same cost class as
-   * `fanOutConversationMessage`'s identical per-send participant read.
+   * `loadSenderAudienceSeats`'s identical per-send participant read.
    *
    * CW-09: `handleTyping` also calls `resolveTypingSenderIdentity` for the
    * same `conversationId` on the same frame, which used to issue its own,
@@ -2342,7 +2575,7 @@ export class ChatGateway
       preloadedSeats ??
       (await this.conversationParticipants.find({
         where: { conversationId },
-        // ENG-239, same regression as `fanOutConversationMessage`'s own `select`
+        // ENG-239, same regression as `loadSenderAudienceSeats`'s own `select`
         // above: the default full-row `find` pulled every participant column,
         // including each member's possibly-5000-char `draft` free text, and this
         // helper runs on EVERY typing frame and every read relay. Only the id is
@@ -2508,7 +2741,10 @@ export class ChatGateway
       conversation.kind === ConversationKind.Group ||
       conversation.isOfficial
     ) {
-      return { shape: 'personal' };
+      return {
+        shape: 'personal',
+        isGroup: conversation.kind === ConversationKind.Group,
+      };
     }
     const seats = await this.conversationParticipants.find({
       where: { conversationId },
@@ -2527,7 +2763,7 @@ export class ChatGateway
       seatIdentities.map((identity) => [identity.id, identity.kind]),
     );
     if (isEverySeatPersonal(seats, identityKindById)) {
-      return { shape: 'personal' };
+      return { shape: 'personal', isGroup: false };
     }
     const partition = partitionMailboxThreadSeats(seats, identityKindById, {
       shouldIncludeDepartedSeats: false,

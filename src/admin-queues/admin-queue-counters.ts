@@ -26,6 +26,10 @@ import {
 } from '../communities/entities/community-tag-request.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import {
+  GroupJoinRequest,
+  GroupJoinRequestStatus,
+} from '../housing-groups/entities/group-join-request.entity';
+import {
   GroupListing,
   GroupListingStatus,
 } from '../housing-groups/entities/group-listing.entity';
@@ -382,6 +386,15 @@ export const ADMIN_REGISTRY_QUEUE_COUNTERS: Record<
     waiting: (column) => ({
       sql: `${column('status')} = :coopJoinRequestStatus`,
       parameters: { coopJoinRequestStatus: JoinRequestStatus.Pending },
+    }),
+  }),
+
+  [AdminQueueKey.HousingGroupJoinRequests]: queueCounter({
+    entity: GroupJoinRequest,
+    waitingSince: 'createdAt',
+    waiting: (column) => ({
+      sql: `${column('status')} = :groupJoinRequestStatus`,
+      parameters: { groupJoinRequestStatus: GroupJoinRequestStatus.Pending },
     }),
   }),
 

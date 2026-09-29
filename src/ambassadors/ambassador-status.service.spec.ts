@@ -1,6 +1,5 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { BADGED_STAFF_ROLE_IDS } from '../users/staff-roles.registry';
@@ -170,7 +169,18 @@ describe('AmbassadorStatusService', () => {
     expect(queryBuilder.andWhere).toHaveBeenCalledWith(
       'profile.isAmbassadorTagVisible = true',
     );
-    expect(queryBuilder.limit).toHaveBeenCalledWith(DEFAULT_LIST_LIMIT);
+  });
+
+  it('returns every visible ambassador, newest grant first, with no cap (ENG-458)', async () => {
+    const { service, queryBuilder } = await buildService({ rosterRows: [] });
+
+    await service.listVisibleRoster();
+
+    expect(queryBuilder.orderBy).toHaveBeenCalledWith(
+      'ambassador.grantedAt',
+      'DESC',
+    );
+    expect(queryBuilder.limit).not.toHaveBeenCalled();
   });
 
   it('keeps staff members off the roster', async () => {

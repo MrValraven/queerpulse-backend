@@ -8,7 +8,7 @@
 // dash. Must stay identical to the frontend mirror and the migration's regex.
 export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{2,29}$/;
 
-// Names that can never be claimed, in two sorted groups.
+// Names that can never be claimed, in three sorted groups.
 //
 // ROUTE COLLISIONS are names that shadow a top-level path in the app, so a
 // member holding one would make `/settings` ambiguous between the screen and
@@ -86,6 +86,12 @@ export const RESERVED_HANDLES = [
   'team',
   'trust',
   'verified',
+  // Internal sentinels: strings the platform itself has used as an id.
+  // `unspecified` is the subject id the public safety form filed every report
+  // under before ENG-483 (`reports/unlinked-subject.ts`). Old clients may still
+  // send it, and a member holding it would resolve as the subject of every one
+  // of those reports, so nobody may claim it.
+  'unspecified',
 ];
 
 // How long a just-released handle stays reserved to its previous owner before

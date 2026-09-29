@@ -10,7 +10,7 @@ function build() {
   const profiles = {
     searchMembers: jest.fn().mockResolvedValue({ items: [] }),
   };
-  const directory = { listDirectory: jest.fn().mockResolvedValue([]) };
+  const directory = { searchByText: jest.fn().mockResolvedValue([]) };
   const communities = { searchByText: jest.fn().mockResolvedValue([]) };
   const events = { searchByText: jest.fn().mockResolvedValue([]) };
   const forumThreads = { searchByText: jest.fn().mockResolvedValue([]) };
@@ -91,7 +91,7 @@ describe('SearchService.search', () => {
     expect(result).toEqual({ query: '', results: [], hasMore: false });
     expect(bag.profiles.searchMembers).not.toHaveBeenCalled();
     expect(bag.communities.searchByText).not.toHaveBeenCalled();
-    expect(bag.directory.listDirectory).not.toHaveBeenCalled();
+    expect(bag.directory.searchByText).not.toHaveBeenCalled();
   });
 
   it('with no type filter queries every resource, threading the viewer id', async () => {
@@ -111,7 +111,8 @@ describe('SearchService.search', () => {
     );
     // Text-only resources (no viewer scoping) still get the query + per-type cap.
     expect(bag.magazine.searchByText).toHaveBeenCalledWith('pride', 6);
-    expect(bag.directory.listDirectory).toHaveBeenCalledWith({ q: 'pride' });
+    // ENG-445: a bounded business read sized to the per-type cap.
+    expect(bag.directory.searchByText).toHaveBeenCalledWith('pride', 6);
     expect(bag.subprofiles.searchByText).toHaveBeenCalled();
   });
 
@@ -315,6 +316,39 @@ describe('SearchService.search', () => {
       expect(result.results[0]?.name).toBe('Article 20');
     });
 
+    it('asks the business directory for only the rows the page needs, in its own order (ENG-445)', async () => {
+      const bag = build();
+      bag.directory.searchByText.mockResolvedValue(
+        Array.from({ length: 12 }, (_, index) => ({
+          slug: `place-${index}`,
+          name: `Place ${index}`,
+          cat: 'cafe',
+          hood: 'Alfama',
+        })),
+      );
+
+      const result = await bag.service.search(
+        'viewer-1',
+        'place',
+        SearchResultType.Business,
+        5,
+        6,
+      );
+
+      // offset (6) + page (5) + one probe row: never the old 200-row read.
+      expect(bag.directory.searchByText).toHaveBeenCalledWith('place', 12);
+      // The relevance order the directory returned is kept; only the head
+      // before the offset is dropped.
+      expect(result.results.map((row) => row.slug)).toEqual([
+        'place-6',
+        'place-7',
+        'place-8',
+        'place-9',
+        'place-10',
+      ]);
+      expect(result.hasMore).toBe(true);
+    });
+
     it('ignores an offset on the unfiltered, all-types view', async () => {
       const bag = build();
 
@@ -361,7 +395,7 @@ describe('SearchService.search', () => {
       [SearchResultType.Event]: (bag) => bag.events.searchByText,
       [SearchResultType.Forum]: (bag) => bag.forumThreads.searchByText,
       [SearchResultType.ForumPost]: (bag) => bag.forumPosts.searchByText,
-      [SearchResultType.Business]: (bag) => bag.directory.listDirectory,
+      [SearchResultType.Business]: (bag) => bag.directory.searchByText,
       [SearchResultType.Magazine]: (bag) => bag.magazine.searchByText,
       [SearchResultType.Job]: (bag) => bag.jobs.searchByText,
       [SearchResultType.Housing]: (bag) => bag.housing.searchByText,

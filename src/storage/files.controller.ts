@@ -45,6 +45,7 @@ import {
   mailboxStaffHistoryFloorCoversPredicate,
   seatExcludedFromMailboxPredicate,
 } from '../messaging/mailbox-seats';
+import { withinLeftAtCeilingPredicate } from '../messaging/message-visibility-predicates';
 import {
   ApiNotFoundResponse,
   ApiOperation,
@@ -123,8 +124,9 @@ export class FilesController {
   // their attachment key under the SAME `message.attachment ->> 'url'` jsonb
   // path — a document is not merely as protected as an image here, it goes
   // through the IDENTICAL query. A left member keeps a participant row (see
-  // `ConversationParticipant.leftAt`) and retains read access to history, so
-  // mere row existence is the correct grant (Task 14a: except for a departed
+  // `ConversationParticipant.leftAt`) and retains read access to the history
+  // posted up to the moment they left, so the grant is row existence plus
+  // that `leftAt` ceiling (ENG-401, below) (Task 14a: except for a departed
   // staff seat of a business mailbox thread, see below); a soft-deleted message is
   // excluded (its attachment is gone from the timeline). The stored
   // `attachment.url` is the BARE key (the send path normalises it via
@@ -159,6 +161,14 @@ export class FilesController {
         })
         .andWhere('message.deletedAt IS NULL')
         .andWhere('message.attachment IS NOT NULL')
+        // ENG-401: a member who left or was removed from a group reads only
+        // what was posted up to that moment, so the bytes of a later photo or
+        // document stay out of reach too, the same ceiling their history,
+        // inbox preview and unread count apply. A later message referencing
+        // the same key is no grant; an earlier one still is.
+        .andWhere(
+          withinLeftAtCeilingPredicate('message.created_at', 'participant'),
+        )
         // Tasks 13f, 14a and 14: attachment downloads apply the mailbox seat
         // rules exactly as every other read of a business mailbox thread
         // does, through `seatExcludedFromMailboxPredicate`, the tested

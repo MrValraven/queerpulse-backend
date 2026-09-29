@@ -358,6 +358,10 @@ export class MembershipCardsService {
       programEnabled: program.isEnabled,
       communityFrozenAt: community.frozenAt,
       communityArchivedAt: community.archivedAt,
+      // This is the holder's own view, through their own token route
+      // (`MembershipCardsController.token()`), so it does not gate on their
+      // own account, the same as the wallet.
+      holderStatus: null,
     });
   }
 
@@ -551,6 +555,10 @@ export class MembershipCardsService {
         programEnabled: program.isEnabled,
         communityFrozenAt: community.frozenAt,
         communityArchivedAt: community.archivedAt,
+        // This is the holder renewing their own card (`renewOwnCard` already
+        // confirmed `card.userId === userId` above), so it does not gate on
+        // their own account, the same as the wallet.
+        holderStatus: null,
       }),
     };
   }

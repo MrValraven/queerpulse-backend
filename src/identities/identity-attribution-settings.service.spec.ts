@@ -102,13 +102,14 @@ function makePreferencesTable(rows: Row[]) {
   };
 }
 
-/** A stubbed `IdentitiesService`, only the four methods this service consumes. */
+/** A stubbed `IdentitiesService`, only the five methods this service consumes. */
 function makeIdentities(
   overrides: Partial<{
     getById: jest.Mock;
     isAllowedToActAs: jest.Mock;
     assertMayActAs: jest.Mock;
     ownerUserIdOf: jest.Mock;
+    isUnlinkedPersona: jest.Mock;
   }> = {},
 ) {
   return {
@@ -116,6 +117,7 @@ function makeIdentities(
     isAllowedToActAs: jest.fn(),
     assertMayActAs: jest.fn().mockResolvedValue(undefined),
     ownerUserIdOf: jest.fn(),
+    isUnlinkedPersona: jest.fn().mockResolvedValue(false),
     ...overrides,
   };
 }
@@ -151,6 +153,8 @@ describe('IdentityAttributionSettingsService.getAttribution', () => {
       shouldShowStaffNames: true,
       shouldAllowMyName: true,
       isOwner: false,
+      isAllowedToChangeStaffNames: false,
+      staffNamesLockedReason: null,
     });
     await expect(
       service.getAttribution('owner-user', 'cafe-identity'),
@@ -158,6 +162,69 @@ describe('IdentityAttributionSettingsService.getAttribution', () => {
       shouldShowStaffNames: true,
       shouldAllowMyName: true,
       isOwner: true,
+      isAllowedToChangeStaffNames: true,
+      staffNamesLockedReason: null,
+    });
+    // A listing never asks whether it is an unlinked persona.
+    expect(identities.isUnlinkedPersona).not.toHaveBeenCalled();
+  });
+
+  it('lets a co-manager of an ownerless listing change the switch, with no owner to defer to', async () => {
+    const identityRow: Row = {
+      id: 'cafe-identity',
+      kind: IdentityKind.Listing,
+      listingId: 'cafe',
+      shouldShowStaffNames: true,
+    };
+    const identities = makeIdentities({
+      isAllowedToActAs: jest.fn().mockResolvedValue(true),
+      getById: jest.fn().mockResolvedValue(identityRow),
+      ownerUserIdOf: jest.fn().mockResolvedValue(null),
+    });
+    const service = new IdentityAttributionSettingsService(
+      identities as never,
+      makeSimpleTable([identityRow]) as never,
+      makePreferencesTable([]) as never,
+    );
+
+    await expect(
+      service.getAttribution('co-manager-user', 'cafe-identity'),
+    ).resolves.toEqual({
+      shouldShowStaffNames: true,
+      shouldAllowMyName: true,
+      isOwner: false,
+      isAllowedToChangeStaffNames: true,
+      staffNamesLockedReason: null,
+    });
+  });
+
+  it('locks the switch on an unlinked persona for everyone, its owner included, and says why', async () => {
+    const personaRow: Row = {
+      id: 'persona-identity',
+      kind: IdentityKind.Subprofile,
+      subprofileId: 'persona-1',
+      shouldShowStaffNames: true,
+    };
+    const identities = makeIdentities({
+      isAllowedToActAs: jest.fn().mockResolvedValue(true),
+      getById: jest.fn().mockResolvedValue(personaRow),
+      ownerUserIdOf: jest.fn().mockResolvedValue('persona-owner-user'),
+      isUnlinkedPersona: jest.fn().mockResolvedValue(true),
+    });
+    const service = new IdentityAttributionSettingsService(
+      identities as never,
+      makeSimpleTable([personaRow]) as never,
+      makePreferencesTable([]) as never,
+    );
+
+    await expect(
+      service.getAttribution('persona-owner-user', 'persona-identity'),
+    ).resolves.toEqual({
+      shouldShowStaffNames: true,
+      shouldAllowMyName: true,
+      isOwner: true,
+      isAllowedToChangeStaffNames: false,
+      staffNamesLockedReason: 'unlinkedPersona',
     });
   });
 
@@ -243,7 +310,7 @@ describe('IdentityAttributionSettingsService.updateOwnerSwitch', () => {
     expect(identityRow.shouldShowStaffNames).toBe(true);
   });
 
-  it('refuses every staff member on an ownerless listing', async () => {
+  it('lets any staff member change the switch on an ownerless listing (PRD-432)', async () => {
     const identityRow: Row = {
       id: 'cafe-identity',
       kind: IdentityKind.Listing,
@@ -264,8 +331,75 @@ describe('IdentityAttributionSettingsService.updateOwnerSwitch', () => {
 
     await expect(
       service.updateOwnerSwitch('co-manager-user', 'cafe-identity', false),
-    ).rejects.toMatchObject({ response: { code: 'IDENTITY_NOT_OWNER' } });
+    ).resolves.toEqual({
+      shouldShowStaffNames: false,
+      shouldAllowMyName: true,
+      isOwner: false,
+      isAllowedToChangeStaffNames: true,
+      staffNamesLockedReason: null,
+    });
+    expect(identityRow.shouldShowStaffNames).toBe(false);
+  });
+
+  it('still refuses a stranger on an ownerless listing, before ownership is asked', async () => {
+    const identityRow: Row = {
+      id: 'cafe-identity',
+      kind: IdentityKind.Listing,
+      listingId: 'cafe',
+      shouldShowStaffNames: true,
+    };
+    const identities = makeIdentities({
+      assertMayActAs: jest.fn().mockRejectedValue(
+        new ForbiddenException({
+          code: 'IDENTITY_NOT_STAFF',
+          message: 'You cannot send as this identity',
+        }),
+      ),
+      getById: jest.fn().mockResolvedValue(identityRow),
+      ownerUserIdOf: jest.fn().mockResolvedValue(null),
+    });
+    const service = new IdentityAttributionSettingsService(
+      identities as never,
+      makeSimpleTable([identityRow]) as never,
+      makePreferencesTable([]) as never,
+    );
+
+    await expect(
+      service.updateOwnerSwitch('stranger-user', 'cafe-identity', false),
+    ).rejects.toMatchObject({ response: { code: 'IDENTITY_NOT_STAFF' } });
+    expect(identities.ownerUserIdOf).not.toHaveBeenCalled();
     expect(identityRow.shouldShowStaffNames).toBe(true);
+  });
+
+  it('refuses the owner of an unlinked persona with IDENTITY_STAFF_NAMES_LOCKED and changes nothing', async () => {
+    const personaRow: Row = {
+      id: 'persona-identity',
+      kind: IdentityKind.Subprofile,
+      subprofileId: 'persona-1',
+      shouldShowStaffNames: true,
+    };
+    const identities = makeIdentities({
+      assertMayActAs: jest.fn().mockResolvedValue(undefined),
+      getById: jest.fn().mockResolvedValue(personaRow),
+      ownerUserIdOf: jest.fn().mockResolvedValue('persona-owner-user'),
+      isUnlinkedPersona: jest.fn().mockResolvedValue(true),
+    });
+    const service = new IdentityAttributionSettingsService(
+      identities as never,
+      makeSimpleTable([personaRow]) as never,
+      makePreferencesTable([]) as never,
+    );
+
+    await expect(
+      service.updateOwnerSwitch(
+        'persona-owner-user',
+        'persona-identity',
+        false,
+      ),
+    ).rejects.toMatchObject({
+      response: { code: 'IDENTITY_STAFF_NAMES_LOCKED' },
+    });
+    expect(personaRow.shouldShowStaffNames).toBe(true);
   });
 });
 
@@ -339,6 +473,8 @@ describe('a persona moderation removed', () => {
       shouldShowStaffNames: true,
       shouldAllowMyName: true,
       isOwner: false,
+      isAllowedToChangeStaffNames: false,
+      staffNamesLockedReason: null,
     });
     await expect(
       service.updateOwnerSwitch(

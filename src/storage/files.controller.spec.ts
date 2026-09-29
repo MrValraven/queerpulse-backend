@@ -32,6 +32,9 @@ const MESSAGE_DOCUMENT_KEY = `message-documents/${USER_SEGMENT}/${FILE_SEGMENT}.
 
 const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
 const EXPECTED_HISTORY_FLOOR_CLAUSE = `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
+// ENG-401: the requester's `leftAt` read ceiling, pinned as literal SQL.
+const EXPECTED_LEFT_AT_CEILING_CLAUSE =
+  '(participant.left_at IS NULL OR message.created_at <= participant.left_at)';
 // A logged-in member who did NOT upload the gathering photo (their id differs
 // from the `<ownerUserId>` segment embedded in GATHERING_KEY).
 const OTHER_MEMBER = {
@@ -238,9 +241,24 @@ describe('FilesController', () => {
       [`${COLLEAGUE}-identity`, IdentityKind.Profile],
     ]);
     const groupThreadIds = new Set([GROUP_THREAD]);
+    // ENG-401: a group photo posted after the leaver's `leftAt`.
+    const POST_LEAVE_GROUP_IMAGE_KEY = `message-images/${USER_SEGMENT}/bbbbbbbb-0000-4000-8000-000000000001.jpg`;
     const attachments = [
-      { conversationId: MAILBOX_THREAD, url: MESSAGE_IMAGE_KEY },
-      { conversationId: GROUP_THREAD, url: GROUP_IMAGE_KEY },
+      {
+        conversationId: MAILBOX_THREAD,
+        url: MESSAGE_IMAGE_KEY,
+        createdAt: new Date('2026-09-20T11:00:00.000Z'),
+      },
+      {
+        conversationId: GROUP_THREAD,
+        url: GROUP_IMAGE_KEY,
+        createdAt: new Date('2026-09-20T11:00:00.000Z'),
+      },
+      {
+        conversationId: GROUP_THREAD,
+        url: POST_LEAVE_GROUP_IMAGE_KEY,
+        createdAt: new Date('2026-09-20T13:00:00.000Z'),
+      },
     ];
     let seats: ConversationParticipant[];
 
@@ -337,6 +355,11 @@ describe('FilesController', () => {
             continue;
           } else if (clause === EXPECTED_EXCLUSION_CLAUSE) {
             rows = rows.filter(({ seat }) => !isExcluded(seat));
+          } else if (clause === EXPECTED_LEFT_AT_CEILING_CLAUSE) {
+            rows = rows.filter(
+              ({ attachment, seat }) =>
+                seat.leftAt == null || attachment.createdAt <= seat.leftAt,
+            );
           } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {
             // Task 13h: no seat in this fixture holds a history floor.
             rows = rows.filter(({ seat }) => seat.historyFloorAt == null);
@@ -362,10 +385,28 @@ describe('FilesController', () => {
       expect(response.redirect).toHaveBeenCalledTimes(2);
     });
 
-    it('still serves a member who left a group what was posted there (unchanged behaviour)', async () => {
+    it('still serves a member who left a group what was posted there before they left', async () => {
       await serve(GROUP_IMAGE_KEY, { userId: GROUP_LEAVER });
 
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    // ENG-401: history, the inbox preview and unread counts all stop at the
+    // moment a member left, so the bytes of a later post stay out of reach.
+    it('refuses a member who left a group a photo posted after they left, and serves it to a current member', async () => {
+      await expect(
+        serve(POST_LEAVE_GROUP_IMAGE_KEY, { userId: GROUP_LEAVER }),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+
+      await serve(POST_LEAVE_GROUP_IMAGE_KEY, { userId: COLLEAGUE });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+      expect(
+        messageQueryBuilder.andWhere.mock.calls.map(
+          (call: unknown[]) => call[0] as string,
+        ),
+      ).toContain(EXPECTED_LEFT_AT_CEILING_CLAUSE);
     });
 
     it('serves the staff member again once they are seated again', async () => {
@@ -536,7 +577,9 @@ describe('FilesController', () => {
             clause === 'message.attachment IS NOT NULL' ||
             // No block or departure in this fixture.
             clause ===
-              `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}`
+              `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}` ||
+            // No seat in this fixture has left its conversation.
+            clause === EXPECTED_LEFT_AT_CEILING_CLAUSE
           ) {
             continue;
           } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {

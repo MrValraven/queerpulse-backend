@@ -286,13 +286,65 @@ function submitterIdOf(
 
 /**
  * True when `submitterIdOf` resolves to the suggester: the platform holds the
- * listing and a member suggested it. Moderation DMs to that member speak of
- * "the place you suggested", because the listing is not theirs.
+ * listing and a member suggested it. That member hears about a moderator's
+ * decision through a `listing_suggestion_*` bell notification (PRD-433), whose
+ * copy speaks of "the place you suggested", because the listing is not theirs.
+ * An owner keeps the moderator DM.
  */
 function isSubmitterTheSuggester(
   listing: Pick<Listing, 'ownerId' | 'suggestedByUserId'>,
 ): boolean {
   return listing.ownerId === null && listing.suggestedByUserId !== null;
+}
+
+/**
+ * PRD-433. The bell notification a suggester receives when a moderator moves
+ * their suggestion to each status: live, a question for them, or back to
+ * review. A `Record` so a new `ListingStatus` cannot compile without one.
+ */
+const SUGGESTER_NOTIFICATION_FOR_STATUS: Record<
+  ListingStatus,
+  NotificationType
+> = {
+  [ListingStatus.Live]: NotificationType.ListingSuggestionLive,
+  [ListingStatus.Question]: NotificationType.ListingSuggestionNeedsInfo,
+  [ListingStatus.Review]: NotificationType.ListingSuggestionSentBack,
+};
+
+/** The suggestion a `listing_suggestion_*` row is about, and who gets it. */
+type SuggesterNotificationTarget = {
+  ref: string;
+  recipientId: string;
+  name: string;
+  slug: string;
+};
+
+/**
+ * PRD-433. The payload of a `listing_suggestion_*` row. The live row carries
+ * `listingSlug` so it opens the public directory page; the other three carry
+ * `listingRef` for the prefilled correction link, plus the moderator's
+ * trimmed `reason` when there is one (on `listing_suggestion_needs_info`
+ * from `askQuestion`, the question itself).
+ */
+function suggesterNotificationPayload(
+  type: NotificationType,
+  target: SuggesterNotificationTarget,
+  reason?: string,
+): Record<string, unknown> {
+  if (type === NotificationType.ListingSuggestionLive) {
+    return {
+      source: 'listing',
+      listingSlug: target.slug,
+      listingName: target.name,
+    };
+  }
+  const trimmedReason = reason?.trim();
+  return {
+    source: 'listing',
+    listingRef: target.ref,
+    listingName: target.name,
+    ...(trimmedReason ? { reason: trimmedReason } : {}),
+  };
 }
 
 /** Bridges `CreateListingDto`'s optional fields to `Listing`'s
@@ -1374,11 +1426,16 @@ export class ListingsService {
     const [paginated, counts] = await Promise.all([
       paginate(qb, page, async (rows) => {
         if (!rows.length) return [];
-        // Owners and suggesters resolve in the one batch: a suggestion has
-        // no owner, and the queue credits the member who sent it.
+        // Owners, suggesters and staff authors resolve in the one batch: a
+        // suggestion has no owner, so the queue credits the member who sent
+        // it, and an admin-added listing credits the staff member who wrote it.
         const refs = await new MemberLookup(this.profiles).byUserIds(
           presentActorIds(
-            rows.flatMap((row) => [row.ownerId, row.suggestedByUserId]),
+            rows.flatMap((row) => [
+              row.ownerId,
+              row.suggestedByUserId,
+              row.createdByStaffId,
+            ]),
           ),
         );
         // ONE batched crop lookup for every row's gallery photos on the
@@ -1392,6 +1449,7 @@ export class ListingsService {
             actorFromLookup(refs, row.ownerId) ?? null,
             crops,
             actorFromLookup(refs, row.suggestedByUserId) ?? null,
+            actorFromLookup(refs, row.createdByStaffId) ?? null,
           ),
         );
       }),
@@ -1971,7 +2029,8 @@ export class ListingsService {
    * from `remove(ref, userId)` above, which is owner-gated via `loadOwnedOr404`;
    * this path is reached only through the role-guarded moderation route.
    * `actorId`/`reason` back the audit event (item #16) and the best-effort
-   * submitter DM (item #15).
+   * word to the submitter: a DM to an owner (item #15), or the
+   * `listing_suggestion_removed` bell notification to a suggester (PRD-433).
    */
   async removeByModerator(
     ref: string,
@@ -1987,6 +2046,7 @@ export class ListingsService {
     const listingId = listing.id;
     const listingRef = listing.ref;
     const listingName = listing.name;
+    const listingSlug = listing.slug;
     const recipientId = submitterIdOf(listing);
     const isForSuggester = isSubmitterTheSuggester(listing);
     const previousStatus = listing.status;
@@ -2008,11 +2068,17 @@ export class ListingsService {
       `moderated listing ${listingRef}`,
     );
 
-    if (recipientId) {
+    if (recipientId && isForSuggester) {
+      await this.notifySuggesterBestEffort(
+        NotificationType.ListingSuggestionRemoved,
+        { ref: listingRef, recipientId, name: listingName, slug: listingSlug },
+        reason,
+      );
+    } else if (recipientId) {
       await this.notifySubmitterBestEffort(
         actorId,
         { ref: listingRef, recipientId },
-        this.removalMessage(listingName, reason, isForSuggester),
+        this.removalMessage(listingName, reason),
       );
     }
   }
@@ -2034,11 +2100,12 @@ export class ListingsService {
    * per listing whose status actually changed, once the transaction has
    * committed: a transition INTO Live creates the same best-effort
    * `ListingApproved` persisted notification `setStatus` creates
-   * (`notifyApprovedBestEffort`), or on a suggestion the platform holds the
-   * same `suggestionLiveMessage` DM to its suggester; every OTHER real
-   * transition instead best-effort DMs the submitter
-   * (`notifySubmitterBestEffort`, item #15, mirrors `bulkRemove`'s notify
-   * pass). Never both for the same listing.
+   * (`notifyApprovedBestEffort`); every OTHER real transition of an owned
+   * listing instead best-effort DMs its owner (`notifySubmitterBestEffort`,
+   * item #15, mirrors `bulkRemove`'s notify pass). On a suggestion the
+   * platform holds, every real transition instead writes the suggester the
+   * matching `listing_suggestion_*` bell notification
+   * (`notifySuggesterBestEffort`, PRD-433). Never two for the same listing.
    */
   async bulkSetStatus(
     refs: string[],
@@ -2048,12 +2115,13 @@ export class ListingsService {
   ): Promise<BulkListingResultDTO> {
     const updated: string[] = [];
     const failed: string[] = [];
-    // A listing whose submitter gets a DM once the transaction commits.
+    // A listing whose submitter is told once the transaction commits.
     type SubmitterTarget = { ref: string; recipientId: string; name: string };
     const approvedTargets: { recipientId: string; slug: string }[] = [];
-    const suggestionLiveTargets: SubmitterTarget[] = [];
-    const sentBackTargets: (SubmitterTarget & { isForSuggester: boolean })[] =
-      [];
+    // A suggestion the platform holds: its suggester gets a bell notification.
+    const suggesterTargets: (SubmitterTarget & { slug: string })[] = [];
+    // An owned listing sent away from Live: its owner gets the moderator DM.
+    const ownerSentBackTargets: SubmitterTarget[] = [];
 
     await this.dataSource.transaction(async (manager) => {
       const listingsRepo = manager.getRepository(Listing);
@@ -2085,20 +2153,20 @@ export class ListingsService {
           });
           const recipientId = submitterIdOf(listing);
           if (recipientId) {
-            if (status === ListingStatus.Live && listing.ownerId) {
-              approvedTargets.push({ recipientId, slug: listing.slug });
-            } else if (status === ListingStatus.Live) {
-              suggestionLiveTargets.push({
+            if (isSubmitterTheSuggester(listing)) {
+              suggesterTargets.push({
                 ref: listing.ref,
                 recipientId,
                 name: listing.name,
+                slug: listing.slug,
               });
+            } else if (status === ListingStatus.Live) {
+              approvedTargets.push({ recipientId, slug: listing.slug });
             } else {
-              sentBackTargets.push({
+              ownerSentBackTargets.push({
                 ref: listing.ref,
                 recipientId,
                 name: listing.name,
-                isForSuggester: isSubmitterTheSuggester(listing),
               });
             }
           }
@@ -2110,23 +2178,18 @@ export class ListingsService {
     for (const target of approvedTargets) {
       await this.notifyApprovedBestEffort(target.recipientId, target.slug);
     }
-    for (const target of suggestionLiveTargets) {
-      await this.notifySubmitterBestEffort(
-        actorId,
+    for (const target of suggesterTargets) {
+      await this.notifySuggesterBestEffort(
+        SUGGESTER_NOTIFICATION_FOR_STATUS[status],
         target,
-        this.suggestionLiveMessage(target.name),
+        reason,
       );
     }
-    for (const target of sentBackTargets) {
+    for (const target of ownerSentBackTargets) {
       await this.notifySubmitterBestEffort(
         actorId,
         target,
-        this.statusChangeMessage(
-          target.name,
-          status,
-          reason,
-          target.isForSuggester,
-        ),
+        this.statusChangeMessage(target.name, status, reason),
       );
     }
 
@@ -2136,8 +2199,9 @@ export class ListingsService {
   /**
    * Moderator/admin-only: hard-deletes many listings in a single
    * transaction, one `removed` moderation event per listing (item #16), then
-   * best-effort DMs each removed listing's submitter (item #15) once the
-   * transaction has committed. Mirrors `bulkSetStatus`'s
+   * best-effort tells each removed listing's submitter once the transaction
+   * has committed: an owner by DM (item #15), a suggester through the
+   * `listing_suggestion_removed` bell notification (PRD-433). Mirrors `bulkSetStatus`'s
    * skip-unknown-refs/report-failed semantics and its batched `find(...
    * In(refs))` prefetch (capped at 200 refs by `BulkRemoveDto`) instead of
    * one `findOne` per ref inside the loop.
@@ -2153,6 +2217,7 @@ export class ListingsService {
     const notifyTargets: {
       ref: string;
       name: string;
+      slug: string;
       recipientId: string;
       isForSuggester: boolean;
     }[] = [];
@@ -2179,6 +2244,7 @@ export class ListingsService {
           notifyTargets.push({
             ref: listing.ref,
             name: listing.name,
+            slug: listing.slug,
             recipientId,
             isForSuggester: isSubmitterTheSuggester(listing),
           });
@@ -2203,11 +2269,19 @@ export class ListingsService {
     );
 
     for (const target of notifyTargets) {
-      await this.notifySubmitterBestEffort(
-        actorId,
-        target,
-        this.removalMessage(target.name, reason, target.isForSuggester),
-      );
+      if (target.isForSuggester) {
+        await this.notifySuggesterBestEffort(
+          NotificationType.ListingSuggestionRemoved,
+          target,
+          reason,
+        );
+      } else {
+        await this.notifySubmitterBestEffort(
+          actorId,
+          target,
+          this.removalMessage(target.name, reason),
+        );
+      }
     }
 
     return { updated, failed };
@@ -2404,8 +2478,9 @@ export class ListingsService {
   // gate) — any of the three statuses is directly settable; there's no
   // narrower transition graph in the spec's contract. `actorId` is the
   // acting moderator (recorded on the moderation event, item #16, and used
-  // as the DM sender when notifying the submitter, item #15); `reason` is
-  // optional free text from the moderator, also recorded on the event.
+  // as the DM sender when notifying an owner, item #15); `reason` is
+  // optional free text from the moderator, also recorded on the event and
+  // passed on to the owner or suggester.
   async setStatus(
     ref: string,
     status: ListingStatus,
@@ -2439,36 +2514,39 @@ export class ListingsService {
 
     // Approval = a submitted listing going Live. Notify the submitter once, on
     // the transition into Live (never on a re-save of an already-live listing).
-    // An owner gets the `ListingApproved` notification, with no actor: the
-    // platform is telling the owner about their own listing, deep-linked to
-    // the public detail page via `slug`. A suggestion the platform holds gets
-    // a DM to its suggester, because that notification says "your listing".
-    // Best-effort; a house-authored row has nobody to tell.
+    // "Send back" (item #15) = any other real transition. An owner gets the
+    // `ListingApproved` notification on approval, with no actor: the platform
+    // is telling the owner about their own listing, deep-linked to the public
+    // detail page via `slug`; a send-back reaches the owner as a best-effort DM
+    // through the same cold-contact path `askQuestion` uses. A suggestion the
+    // platform holds gets the matching `listing_suggestion_*` bell notification
+    // for either (PRD-433), because `ListingApproved` says "your listing" and a
+    // suggester holds nothing. Best-effort; a house-authored row has nobody to
+    // tell.
     const recipientId = submitterIdOf(saved);
-    if (status === ListingStatus.Live && !wasLive && recipientId) {
-      if (saved.ownerId) {
+    const isGoingLive = status === ListingStatus.Live && !wasLive;
+    const isSentBack = statusChanged && status !== ListingStatus.Live;
+    if (recipientId && (isGoingLive || isSentBack)) {
+      if (isSubmitterTheSuggester(saved)) {
+        await this.notifySuggesterBestEffort(
+          SUGGESTER_NOTIFICATION_FOR_STATUS[status],
+          {
+            ref: saved.ref,
+            recipientId,
+            name: saved.name,
+            slug: saved.slug,
+          },
+          reason,
+        );
+      } else if (isGoingLive) {
         await this.notifyApprovedBestEffort(recipientId, saved.slug);
       } else {
         await this.notifySubmitterBestEffort(
           actorId,
           { ref: saved.ref, recipientId },
-          this.suggestionLiveMessage(saved.name),
+          this.statusChangeMessage(saved.name, status, reason),
         );
       }
-    } else if (statusChanged && status !== ListingStatus.Live && recipientId) {
-      // "Send back" (item #15) — any real transition away from an
-      // in-flight review that ISN'T the Live approval above. Best-effort DM
-      // through the same cold-contact path `askQuestion` uses.
-      await this.notifySubmitterBestEffort(
-        actorId,
-        { ref: saved.ref, recipientId },
-        this.statusChangeMessage(
-          saved.name,
-          status,
-          reason,
-          isSubmitterTheSuggester(saved),
-        ),
-      );
     }
     return this.buildDTO(saved);
   }
@@ -2477,18 +2555,14 @@ export class ListingsService {
    * change (item #15). Kept tiny and file-local — there's no i18n layer on
    * the backend (copy lives in the frontend), so this is a plain functional
    * English sentence, mirroring `enqueueOwnerNotifyIfNeeded`'s inline
-   * `detail` string precedent. `isForSuggester` switches to the wording a
-   * suggester reads (see `isSubmitterTheSuggester`), in the same tone as
-   * `suggestionLiveMessage`. */
+   * `detail` string precedent. Owners only: a suggester hears through
+   * `notifySuggesterBestEffort` in their own language (PRD-433). */
   private statusChangeMessage(
     listingName: string,
     status: ListingStatus,
     reason: string | undefined,
-    isForSuggester: boolean,
   ): string {
-    const subject = isForSuggester
-      ? `The place you suggested, "${listingName}",`
-      : `Your listing "${listingName}"`;
+    const subject = `Your listing "${listingName}"`;
     const base =
       status === ListingStatus.Question
         ? `${subject} needs more information before it can go live.`
@@ -2498,30 +2572,21 @@ export class ListingsService {
 
   /** The DM a submitter receives when a moderator removes a listing, shared
    * by `removeByModerator` and `bulkRemove`. The reason is appended the same
-   * way `statusChangeMessage` appends it. */
+   * way `statusChangeMessage` appends it. Owners only, like
+   * `statusChangeMessage`. */
   private removalMessage(
     listingName: string,
     reason: string | undefined,
-    isForSuggester: boolean,
   ): string {
-    const base = isForSuggester
-      ? `The place you suggested, "${listingName}", was removed from the directory.`
-      : `Your listing "${listingName}" was removed from QueerPulse.`;
+    const base = `Your listing "${listingName}" was removed from QueerPulse.`;
     return reason ? `${base} Reason: ${reason}` : base;
   }
 
-  /** The approval message a suggester receives. A DM, because the
-   *  `ListingApproved` notification says "your listing" and a suggester does
-   *  not hold the listing. Plain English, like `statusChangeMessage`. */
-  private suggestionLiveMessage(listingName: string): string {
-    return `The place you suggested, "${listingName}", is now live in the directory.`;
-  }
-
-  /** Best-effort DM to a listing's submitter (item #15) — never blocks or
-   * fails the caller's already-committed mutation. Shared by `setStatus`,
-   * `bulkSetStatus`, `removeByModerator`, and `bulkRemove`. `recipientId` is
-   * the owner, or on a suggestion the platform holds, the suggester
-   * (`submitterIdOf`). */
+  /** Best-effort DM to a listing's OWNER (item #15). It cannot block or
+   * fail the caller's already-committed mutation. Shared by `setStatus`,
+   * `bulkSetStatus`, `removeByModerator`, and `bulkRemove`. A suggestion the
+   * platform holds never reaches here: its suggester gets
+   * `notifySuggesterBestEffort` instead. */
   private async notifySubmitterBestEffort(
     actorId: string,
     target: { ref: string; recipientId: string },
@@ -2532,6 +2597,45 @@ export class ListingsService {
     } catch (error) {
       this.logger.warn(
         `Failed to notify submitter for listing ${target.ref}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * PRD-433. Best-effort bell notification to the member who SUGGESTED a
+   * listing the platform holds, in place of the DM the acting moderator's
+   * personal account used to send. The copy lives in the frontend catalogs,
+   * so the member reads it in their own language, and no moderator is named
+   * (no actor, like `ListingApproved`). Shared by `setStatus`,
+   * `bulkSetStatus`, `removeByModerator` and `bulkRemove`.
+   *
+   * The live row carries `listingSlug`, so it opens the public directory page.
+   * The other three carry `listingRef` instead: none has a public page, and the
+   * row opens the contact form prefilled for a correction to that ref, which is
+   * also how a suggester answers "needs more information". The moderator's
+   * `reason` rides along on those three, as the DM used to append it.
+   *
+   * `target.slug` is required on every call, so a live row can never be
+   * written without its link.
+   *
+   * Never throws: the moderator's change has already committed by the time
+   * this runs, and a failed write only logs. `askQuestion` writes the same
+   * payload through `suggesterNotificationPayload` WITHOUT this guard,
+   * because there the notification is the question itself.
+   */
+  private async notifySuggesterBestEffort(
+    type: NotificationType,
+    target: SuggesterNotificationTarget,
+    reason?: string,
+  ): Promise<void> {
+    const payload = suggesterNotificationPayload(type, target, reason);
+    try {
+      await this.notifications.create(target.recipientId, type, payload);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to notify suggester for listing ${target.ref}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -2561,11 +2665,16 @@ export class ListingsService {
   }
 
   // Moderator/admin-only (`ListingsController.askQuestion`'s `RolesGuard`
-  // gate). Delivers the moderator's question to the listing's submitter as a
-  // DM (reusing `deliverEnquiry`, the cold-contact path that does NOT require
-  // an accepted connection), then moves the listing to `question` status. The
-  // DM itself raises the standard new-message notification + push, so no
-  // separate notification is emitted here.
+  // gate). Delivers the moderator's question to the listing's submitter, then
+  // moves the listing to `question` status. An OWNER gets it as a DM (reusing
+  // `deliverEnquiry`, the cold-contact path that does NOT require an accepted
+  // connection); the DM itself raises the standard new-message notification +
+  // push. A SUGGESTER on a listing the platform holds gets it as a
+  // `listing_suggestion_needs_info` bell notification with the question on its
+  // `reason` field (PRD-433), in their own language and from no staff account;
+  // the row opens the contact form prefilled for that listing, which is how
+  // they answer. That write is the question itself, so it is NOT best-effort:
+  // it reverts and throws exactly as a failed DM does.
   //
   // The DM and the status transition can't share one DB transaction (the DM is
   // written through `MessagingService`'s own repositories, and a posted message
@@ -2591,24 +2700,43 @@ export class ListingsService {
     const saved = await this.listings.save(listing);
 
     try {
-      // Throws ForbiddenException on a block either way, or BadRequest if the
-      // moderator somehow owns the listing — surfaced to the FE as a specific
-      // reason. Sent last so nothing can fail after it and strand a duplicate.
-      await this.messaging.deliverEnquiry(moderatorUserId, submitterId, body);
+      if (isSubmitterTheSuggester(saved)) {
+        await this.notifications.create(
+          submitterId,
+          NotificationType.ListingSuggestionNeedsInfo,
+          suggesterNotificationPayload(
+            NotificationType.ListingSuggestionNeedsInfo,
+            {
+              ref: saved.ref,
+              recipientId: submitterId,
+              name: saved.name,
+              slug: saved.slug,
+            },
+            body,
+          ),
+        );
+      } else {
+        // Throws ForbiddenException on a block either way, or BadRequest if
+        // the moderator somehow owns the listing, surfaced to the FE as a
+        // specific reason. Sent last so nothing can fail after it and strand a
+        // duplicate.
+        await this.messaging.deliverEnquiry(moderatorUserId, submitterId, body);
+      }
     } catch (error) {
-      // DM failed — undo the status change so the state stays consistent and a
-      // retry starts clean.
+      // Delivery failed: undo the status change so the state stays
+      // consistent and a retry starts clean.
       saved.status = previousStatus;
       await this.listings.save(saved);
       throw error;
     }
 
     // Q&A thread row (item #17) + audit event (item #16). Written AFTER the
-    // DM succeeds, same ordering rationale as the DM itself: nothing below
-    // can fail and strand a duplicate question. A DM that succeeds followed
-    // by a failure here would leave the DM sent without its queryable
-    // record — a narrow, accepted window (mirrors the best-effort posture
-    // every other secondary write in this service takes).
+    // DM or suggester notification succeeds, same ordering rationale as the
+    // delivery itself: nothing below can fail and strand a duplicate
+    // question. A delivery that succeeds followed by a failure here would
+    // leave the question sent without its queryable record: a narrow,
+    // accepted window (mirrors the best-effort posture every other secondary
+    // write in this service takes).
     await this.questions.save(
       this.questions.create({
         listingId: saved.id,

@@ -141,7 +141,11 @@ export class VolunteeringController {
     @CurrentUser() user: CurrentUserData | undefined,
     @Param('slug') slug: string,
   ) {
-    return this.volunteeringService.getBySlug(slug, user?.userId ?? null);
+    return this.volunteeringService.getBySlug(
+      slug,
+      user?.userId ?? null,
+      user?.role,
+    );
   }
 
   @Post()

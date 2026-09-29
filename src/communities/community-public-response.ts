@@ -1,3 +1,4 @@
+import { JoinRequestStatus } from './entities/community-join-request.entity';
 import { AccessTier, CommunityType } from './entities/community.entity';
 
 /**
@@ -50,6 +51,11 @@ export interface PublicCommunityGathering {
  * itself is opt-in via `communities.is_publicly_listed`. Add it to the
  * member-facing `CommunityDetailDTO` instead.
  * ==========================================================
+ *
+ * The signed-in gate (`CommunityGateCardResponse` below) extends this type
+ * with the caller's OWN applicant state only, and the rules live on their own
+ * signed-in route (`GET /communities/:slug/rules`, `CommunityRulesResponse`),
+ * so the anonymous teaser stays exactly this list.
  */
 export interface PublicCommunityResponse {
   slug: string;
@@ -83,4 +89,27 @@ export interface PublicCommunityResponse {
   avatarImageUrl: string | null;
   coverImageUrl: string | null;
   nextGathering: PublicCommunityGathering | null;
+}
+
+/**
+ * `GET /communities/:slug/gate`: the teaser's closed field list plus one fact
+ * about the CALLER alone. It lets the card say "your
+ * request is with the moderators" and offer the withdraw button.
+ */
+export interface CommunityGateCardResponse extends PublicCommunityResponse {
+  /** The CALLER'S own newest join request to this community, any status, or
+   *  null. Same value `CommunityDetailDTO.myJoinRequestStatus` carries. */
+  myJoinRequestStatus: JoinRequestStatus | null;
+}
+
+/**
+ * `GET /communities/:slug/rules`: the house rules the join wizard asks the
+ * caller to agree to, signed in and per caller.
+ */
+export interface CommunityRulesResponse {
+  /** Preset rule KEYS or member-written text, as stored. */
+  rules: string[];
+  rulesVersion: number;
+  /** The caller's roster row value; null for a non-member. */
+  rulesAcceptedVersion: number | null;
 }

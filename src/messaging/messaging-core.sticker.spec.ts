@@ -34,6 +34,7 @@ const publishedSticker: Sticker = {
     id: PACK_ID,
     slug: 'bi-pride',
     name: 'Bi pride',
+    namePt: null,
     description: null,
     status: StickerPackStatus.Published,
     sortOrder: 0,
@@ -45,6 +46,7 @@ const publishedSticker: Sticker = {
   },
   slug: 'bi-reverse',
   label: 'Bi reverse',
+  labelPt: null,
   storageKey: 'stickers/bi-pride/bi-reverse.png',
   width: 512,
   height: 512,
@@ -201,6 +203,38 @@ describe('MessagingCoreService.postMessage: sticker send path (Task 8)', () => {
           stickerId: publishedSticker.id,
           label: publishedSticker.label,
         },
+      }),
+    );
+  });
+
+  it('bakes the Portuguese name beside the English one when the sticker has one', async () => {
+    const { service, messagesRepository } = build({
+      ...publishedSticker,
+      labelPt: 'Bi invertido',
+    });
+
+    await sendSticker(service, publishedSticker.id);
+
+    expect(messagesRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachment: expect.objectContaining({
+          label: publishedSticker.label,
+          labelPt: 'Bi invertido',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('leaves labelPt off the baked attachment when the sticker has no Portuguese name', async () => {
+    const { service, messagesRepository } = build(publishedSticker);
+
+    await sendSticker(service, publishedSticker.id);
+
+    expect(messagesRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachment: expect.not.objectContaining({
+          labelPt: expect.anything() as unknown,
+        }) as unknown,
       }),
     );
   });

@@ -41,3 +41,14 @@ export class OptInDto extends PairAnswersDto {
   @MaxLength(80)
   partnerSlug?: string;
 }
+
+/** A waiting member answering host questions the host changed. Only the
+ *  questions being answered need to be present; saved answers to the others
+ *  stay. */
+export class UpdateHostAnswersDto {
+  @ApiProperty({
+    description: 'questionId -> optionId for the questions being answered.',
+  })
+  @IsObject()
+  hostAnswers!: Record<string, unknown>;
+}

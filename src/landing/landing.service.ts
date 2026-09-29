@@ -10,6 +10,7 @@ import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import {
   AccessTier,
   Community,
@@ -21,6 +22,7 @@ import {
   ChangemakerStatus,
 } from '../changemakers/entities/changemaker.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { CreateLandingFeatureDto } from './dto/create-landing-feature.dto';
 import { ReorderLandingFeaturesDto } from './dto/reorder-landing-features.dto';
 import { UpdateLandingFeatureDto } from './dto/update-landing-feature.dto';
@@ -47,13 +49,13 @@ import {
  *  the rest into a "+N" count. Matches the demo card's face strip. */
 const LANDING_COMMUNITY_FACE_LIMIT = 5;
 
-/** Cap on `listEligible` results. This backs an admin type-ahead picker (the
- *  admin types a search term to narrow down), not a paginated list, so a
- *  silent cap is acceptable here the way it would not be for a primary listing
- *  page — but it is still a REAL cap, not unlimited: callers relying on this
- *  method to enumerate every eligible entity will not see more than this many
- *  without narrowing `search` first. Mirrors the logger-only truncation
- *  precedent in `AdminCommunitiesService` (`MAX_LISTED_COMMUNITIES`). */
+/** Cap on `listEligible` results. This backs an admin type-ahead picker,
+ *  where the admin types a search term to narrow down: a silent cap is
+ *  acceptable here in a way a primary listing page would not tolerate. It is
+ *  still a REAL cap: callers relying on this method to enumerate every
+ *  eligible entity will not see more than this many without narrowing
+ *  `search` first. Mirrors the logger-only truncation precedent in
+ *  `AdminCommunitiesService` (`MAX_LISTED_COMMUNITIES`). */
 const MAX_ELIGIBLE_RESULTS = 30;
 
 /** Result of resolving a single `(section, targetId)` pair against its source
@@ -66,23 +68,34 @@ interface TargetState {
   summary: AdminTargetSummary | null;
 }
 
-// ---- Canonical eligibility (Global Constraints) — the ONLY place these
+// ---- Canonical eligibility (Global Constraints): the ONLY place these
 // rules are expressed. `getPublicFeatures`, `listEligible`, `createFeature`,
 // and `listAdminFeatures` all route through these, so eligibility can never
 // drift between the read-time honesty filter and the admin picker/CRUD.
 
-// Each predicate below has a SQL twin — `LandingService#memberEligibilityQuery`
-// / `#communityEligibilityQuery` / `#changemakerEligibilityQuery` — used by
-// `listEligible`'s anti-join query, where the same rule has to be expressed as
-// a WHERE clause instead of an in-memory check. Both forms of a rule MUST stay
-// in sync; a change here needs the matching change there, and vice versa.
+// Each predicate below has a SQL twin (`LandingService#memberEligibilityQuery`
+// / `#communityEligibilityQuery` / `#changemakerEligibilityQuery`), used by
+// `listEligible`'s anti-join query, where the same rule has to be expressed
+// as a WHERE clause, since that query filters in Postgres. Both forms of a
+// rule MUST stay in sync; a change here needs the matching change there, and
+// vice versa.
+
+/** Mirrors the "is hidden now" test used throughout the codebase (see
+ *  `ProfilesService`, `feed.service.ts`, `member-suggestions.service.ts`):
+ *  a profile is hidden only while `hiddenUntil` is set AND still in the
+ *  future. */
+function isProfileHiddenNow(profile: Profile): boolean {
+  return profile.hiddenUntil !== null && profile.hiddenUntil > new Date();
+}
 
 /** JS form of the member eligibility rule. Keep in sync with
  *  `memberEligibilityQuery`'s SQL. */
 function isMemberEligible(profile: Profile): boolean {
   return (
     profile.visibility === ProfileVisibility.Open &&
-    profile.featuredConsent === true
+    profile.featuredConsent === true &&
+    !isProfileHiddenNow(profile) &&
+    profile.user?.status === UserStatus.Active
   );
 }
 
@@ -102,8 +115,24 @@ function isChangemakerEligible(changemaker: Changemaker): boolean {
   return changemaker.status === ChangemakerStatus.Published;
 }
 
+/** Whether a resolved profile may appear as a "face" riding along on someone
+ *  else's card (a featured community's owner, or a roster-strip member):
+ *  open visibility, currently active account, and not hidden. Distinct from
+ *  `isMemberEligible`: a face is not itself the featured target, so it skips
+ *  the `featuredConsent` check that gates being spotlighted in the Member
+ *  section. Used for the owner face in `getPublicFeatures`; the roster-strip
+ *  equivalent is enforced directly in `getCommunityRosterFaces`'s SQL, kept in
+ *  sync with this predicate by hand. */
+function isPublicFace(profile: Profile): boolean {
+  return (
+    profile.visibility === ProfileVisibility.Open &&
+    !isProfileHiddenNow(profile) &&
+    profile.user?.status === UserStatus.Active
+  );
+}
+
 /** Consent is the member's own explicit action, distinct from visibility
- *  (which can change for unrelated reasons) — checked first so a
+ *  (which can change for unrelated reasons), checked first so a
  *  consent-revoked member always reads as "consent_revoked" even if they also
  *  happen to have gone private. */
 function memberHiddenReason(profile: Profile): LandingHiddenReason {
@@ -112,7 +141,7 @@ function memberHiddenReason(profile: Profile): LandingHiddenReason {
   return null;
 }
 
-/** `AdminLandingFeatureDTO.hiddenReason` has no dedicated "archived" value —
+/** `AdminLandingFeatureDTO.hiddenReason` has no dedicated "archived" value:
  *  an archived community is, like a non-public one, simply no longer visible
  *  to the public, so both map to `not_public`. */
 function communityHiddenReason(community: Community): LandingHiddenReason {
@@ -160,9 +189,8 @@ function changemakerSummary(changemaker: Changemaker): AdminTargetSummary {
  * Service behind the admin-curated live landing page: eligibility rules,
  * admin CRUD + reorder over `landing_feature`, and the public read-time
  * honesty filter (`getPublicFeatures`) that re-checks eligibility on every
- * read rather than trusting it was true when a feature was created — a
- * member revoking `featuredConsent` or a community going private must stop
- * appearing immediately, with no separate cleanup job.
+ * read, so a member revoking `featuredConsent` or a community going private
+ * stops appearing immediately, with no separate cleanup job.
  */
 @Injectable()
 export class LandingService {
@@ -184,10 +212,10 @@ export class LandingService {
 
   /**
    * The public landing page payload. Loads active features per section
-   * ordered by position, batch-loads their target entities (one query per
-   * entity type — never per feature), drops anything that fails the
-   * canonical eligibility check at read time, and maps survivors to the
-   * public DTOs.
+   * ordered by position, batch-loads their target entities (a fixed one
+   * query per entity type, however many features are on the page), drops
+   * anything that fails the canonical eligibility check at read time, and
+   * maps survivors to the public DTOs.
    */
   async getPublicFeatures(): Promise<LandingFeaturesResponseDTO> {
     const [memberFeatures, communityFeatures, changemakerFeatures] =
@@ -206,10 +234,10 @@ export class LandingService {
         }),
       ]);
 
-    // The community target ids are known immediately from `communityFeatures`
-    // — no need to wait for `communitiesById` to resolve before starting the
-    // member-count query, so it joins the same `Promise.all` as the three
-    // batch entity loads instead of paying its own serial round trip after.
+    // The community target ids are known immediately from `communityFeatures`,
+    // with no need to wait for `communitiesById` to resolve before starting
+    // the member-count query, so it joins the same `Promise.all` as the three
+    // batch entity loads and avoids paying its own serial round trip after.
     const communityTargetIds = communityFeatures.map(
       (feature) => feature.targetId,
     );
@@ -232,8 +260,8 @@ export class LandingService {
     // The featured communities' owners, resolved in one query. `ownerId` is a
     // `User.id`, which is exactly the key `getProfilesByIds` maps on
     // (`Profile.userId`). Depends on `communitiesById`, so it can't join the
-    // batch wave above — but it's a single extra round trip for the whole
-    // section, not one per community.
+    // batch wave above. It stays a single extra round trip for the whole
+    // section.
     const ownerProfilesByUserId = await this.getProfilesByIds(
       [...communitiesById.values()]
         .map((community) => community.ownerId)
@@ -250,18 +278,24 @@ export class LandingService {
       const community = communitiesById.get(feature.targetId);
       if (!community || !isCommunityEligible(community)) return [];
       // A community that hides its roster leaks no member faces on the public
-      // card — it leans on the count alone.
+      // card: it leans on the count alone.
       const faces = community.rosterVisible
         ? (rosterFacesByCommunityId.get(community.id) ?? [])
         : [];
+      // The owner face honours the same privacy, hiding and suspension rules
+      // as every other face: a private, hidden or suspended owner drops off
+      // the card entirely, with no stale name or avatar left behind.
+      const ownerProfile = community.ownerId
+        ? (ownerProfilesByUserId.get(community.ownerId) ?? null)
+        : null;
+      const owner =
+        ownerProfile && isPublicFace(ownerProfile) ? ownerProfile : null;
       return [
         toLandingCommunityFeatureDTO(
           feature,
           community,
           memberCountsByCommunityId.get(community.id) ?? 0,
-          (community.ownerId
-            ? ownerProfilesByUserId.get(community.ownerId)
-            : undefined) ?? null,
+          owner,
           faces,
         ),
       ];
@@ -279,7 +313,7 @@ export class LandingService {
   /**
    * Every feature in `section` (active AND inactive), with a target summary,
    * a live `eligible` flag, and a `hiddenReason` so the admin UI can show
-   * e.g. "Hidden — consent revoked" even while the row itself stays active.
+   * e.g. "Hidden: consent revoked" even while the row itself stays active.
    */
   async listAdminFeatures(
     section: LandingSection,
@@ -339,7 +373,7 @@ export class LandingService {
   /**
    * Entities eligible to be featured in `section` that are NOT already
    * featured there (anti-join on `landing_feature`), optionally narrowed by
-   * an ILIKE `search` over name/slug. Capped at `MAX_ELIGIBLE_RESULTS` — see
+   * an ILIKE `search` over name/slug. Capped at `MAX_ELIGIBLE_RESULTS`; see
    * the constant's comment.
    */
   async listEligible(
@@ -376,7 +410,7 @@ export class LandingService {
         .getMany();
       if (profiles.length === MAX_ELIGIBLE_RESULTS) {
         this.logger.warn(
-          `listEligible(member) truncated at ${MAX_ELIGIBLE_RESULTS} results — narrow the search term to see more.`,
+          `listEligible(member) truncated at ${MAX_ELIGIBLE_RESULTS} results. Narrow the search term to see more.`,
         );
       }
       return profiles.map((profile) =>
@@ -408,7 +442,7 @@ export class LandingService {
         .getMany();
       if (communities.length === MAX_ELIGIBLE_RESULTS) {
         this.logger.warn(
-          `listEligible(community) truncated at ${MAX_ELIGIBLE_RESULTS} results — narrow the search term to see more.`,
+          `listEligible(community) truncated at ${MAX_ELIGIBLE_RESULTS} results. Narrow the search term to see more.`,
         );
       }
       return communities.map((community) =>
@@ -439,7 +473,7 @@ export class LandingService {
       .getMany();
     if (changemakers.length === MAX_ELIGIBLE_RESULTS) {
       this.logger.warn(
-        `listEligible(changemaker) truncated at ${MAX_ELIGIBLE_RESULTS} results — narrow the search term to see more.`,
+        `listEligible(changemaker) truncated at ${MAX_ELIGIBLE_RESULTS} results. Narrow the search term to see more.`,
       );
     }
     return changemakers.map((changemaker) =>
@@ -452,16 +486,22 @@ export class LandingService {
     );
   }
 
-  /** SQL form of `isMemberEligible` (Open visibility + featuredConsent),
-   *  used by `listEligible`'s anti-join query where filtering must happen in
-   *  Postgres, not in memory. Keep in sync with `isMemberEligible`. */
+  /** SQL form of `isMemberEligible` (Open visibility + featuredConsent + not
+   *  hidden now + active account), used by `listEligible`'s anti-join query,
+   *  which filters in Postgres. Keep in sync with `isMemberEligible`. */
   private memberEligibilityQuery(): SelectQueryBuilder<Profile> {
     return this.profiles
       .createQueryBuilder('profile')
+      .innerJoin('profile.user', 'user', 'user.status = :status', {
+        status: UserStatus.Active,
+      })
       .where('profile.visibility = :visibility', {
         visibility: ProfileVisibility.Open,
       })
-      .andWhere('profile.featuredConsent = true');
+      .andWhere('profile.featuredConsent = true')
+      .andWhere(
+        '(profile.hiddenUntil IS NULL OR profile.hiddenUntil <= now())',
+      );
   }
 
   /** SQL form of `isCommunityEligible` (Public accessTier + not archived + not
@@ -491,8 +531,8 @@ export class LandingService {
   /**
    * Creates a feature. Rejects a copy payload that doesn't match the
    * section's required shape, a target that doesn't exist or isn't
-   * currently eligible, and — via the unique index on
-   * `(section, targetId)` — a duplicate feature for the same target.
+   * currently eligible, and, via the unique index on `(section, targetId)`,
+   * a duplicate feature for the same target.
    */
   async createFeature(
     adminUserId: string,
@@ -512,10 +552,10 @@ export class LandingService {
       const saved = await this.dataSource.transaction(async (manager) => {
         // Lock this section's existing rows before reading MAX(position), so
         // a concurrent create in the same section can't read the same max and
-        // collide on position — it blocks here until this transaction commits
+        // collide on position: it blocks here until this transaction commits
         // (or rolls back) and then re-reads the fresh max. A section with NO
         // existing rows has nothing to lock, so two concurrent FIRST creates
-        // in a brand-new section can still both compute position 0 — a
+        // in a brand-new section can still both compute position 0, a
         // narrower residual race than the one this closes, and one the
         // (section, targetId) unique index doesn't catch either since the two
         // creates are for different targets.
@@ -559,7 +599,7 @@ export class LandingService {
 
   /** Re-validates `copy` against the feature's own (immutable) section when
    *  present, and patches `active`. Neither `section` nor `targetId` can be
-   *  changed via update — delete and recreate instead. */
+   *  changed via update: delete and recreate to change either. */
   async updateFeature(
     id: string,
     dto: UpdateLandingFeatureDto,
@@ -592,16 +632,15 @@ export class LandingService {
   /**
    * Rewrites every feature's `position` in `dto.section` to the index of its
    * id within `dto.orderedIds`, inside one transaction. `orderedIds` must be
-   * exactly the current set of feature ids for that section — anything
-   * missing or extra is rejected up front rather than silently dropping or
-   * ignoring a row.
+   * exactly the current set of feature ids for that section: any missing or
+   * extra id is rejected up front, with no row silently dropped or ignored.
    */
   async reorderFeatures(
     dto: ReorderLandingFeaturesDto,
   ): Promise<AdminLandingFeatureDTO[]> {
     await this.dataSource.transaction(async (manager) => {
       // The id-set read and its validation happen INSIDE the transaction,
-      // under a row lock on this section — so the set this validates against
+      // under a row lock on this section, so the set this validates against
       // can't change (another create/delete/reorder in the same section)
       // between the read and the position rewrite below. Locking + validating
       // outside the transaction (the previous shape) left a TOCTOU window: a
@@ -626,9 +665,8 @@ export class LandingService {
         );
       }
 
-      // Sequential, not Promise.all — these updates share one transactional
-      // connection, and TypeORM does not support concurrent queries on a
-      // single QueryRunner.
+      // Sequential: these updates share one transactional connection, and
+      // TypeORM does not support concurrent queries on a single QueryRunner.
       for (const [index, featureId] of dto.orderedIds.entries()) {
         await manager.update(
           LandingFeature,
@@ -648,7 +686,7 @@ export class LandingService {
     }
   }
 
-  // ---- batch loaders (one query per entity type, never per feature) -------
+  // ---- batch loaders (a fixed one query per entity type) -------------------
 
   private async getProfilesByIds(
     userIds: string[],
@@ -656,6 +694,9 @@ export class LandingService {
     if (!userIds.length) return new Map();
     const profiles = await this.profiles.find({
       where: { userId: In(userIds) },
+      // `isMemberEligible` and `isPublicFace` both read `profile.user?.status`,
+      // so every caller of this batch loader needs the relation loaded.
+      relations: { user: true },
     });
     return new Map(profiles.map((profile) => [profile.userId, profile]));
   }
@@ -697,14 +738,21 @@ export class LandingService {
   }
 
   /**
-   * The first N members (by join date) of each community, joined to their
-   * profile, as public roster faces for the featured-community cards. One
-   * query for the whole section: a `ROW_NUMBER() OVER (PARTITION BY
+   * The first N eligible members (by join date) of each community, joined to
+   * their profile, as public roster faces for the featured-community cards.
+   * One query for the whole section: a `ROW_NUMBER() OVER (PARTITION BY
    * community_id ...)` window ranks each community's members independently, and
-   * the outer filter keeps only the top N per community — so a 5000-member
-   * community ships 5 rows here, not 5000. Ordered by `joined_at ASC` so the
-   * owner and longest-standing members lead the strip. Roster-visibility gating
-   * is applied by the caller (`getPublicFeatures`), not here.
+   * the outer filter keeps only the top N per community, so a 5000-member
+   * community ships only its top 5 rows here. Ordered by `joined_at ASC` so
+   * the owner and longest-standing members lead the strip. Roster-visibility
+   * gating stays the caller's own job (`getPublicFeatures`).
+   *
+   * The inner query joins `users` and requires an open, active, currently
+   * unhidden profile before `ROW_NUMBER` ranks the rows, so a private, hidden
+   * or suspended member never takes a strip slot: the window function only
+   * ever sees eligible rows, so the strip fills with the next eligible member
+   * and never leaves a gap. This is the SQL twin of `isPublicFace`; keep both
+   * in sync by hand.
    */
   private async getCommunityRosterFaces(
     communityIds: string[],
@@ -716,27 +764,34 @@ export class LandingService {
         firstName: string;
         lastName: string;
         avatarUrl: string | null;
+        photoVisible: boolean;
       }[]
     >(
       `SELECT ranked.community_id AS "communityId",
               ranked.first_name AS "firstName",
               ranked.last_name AS "lastName",
-              ranked.avatar_url AS "avatarUrl"
+              ranked.avatar_url AS "avatarUrl",
+              ranked.photo_visible AS "photoVisible"
          FROM (
            SELECT m.community_id,
                   p.first_name,
                   p.last_name,
                   p.avatar_url,
+                  p.photo_visible,
                   ROW_NUMBER() OVER (
                     PARTITION BY m.community_id ORDER BY m.joined_at ASC
                   ) AS rn
              FROM community_members m
              JOIN profiles p ON p.user_id = m.user_id
+             JOIN users u ON u.id = m.user_id
             WHERE m.community_id = ANY($1::uuid[])
+              AND u.status = $3
+              AND p.visibility = 'open'
+              AND (p.hidden_until IS NULL OR p.hidden_until <= now())
          ) ranked
         WHERE ranked.rn <= $2
         ORDER BY ranked.community_id, ranked.rn`,
-      [communityIds, LANDING_COMMUNITY_FACE_LIMIT],
+      [communityIds, LANDING_COMMUNITY_FACE_LIMIT, UserStatus.Active],
     );
 
     const facesByCommunity = new Map<string, LandingCommunityFaceDTO[]>();
@@ -744,7 +799,10 @@ export class LandingService {
       const faces = facesByCommunity.get(row.communityId) ?? [];
       faces.push({
         name: `${row.firstName} ${row.lastName}`,
-        avatarUrl: toImageUrl(row.avatarUrl),
+        avatarUrl: toVisibleAvatarUrl({
+          avatarUrl: row.avatarUrl,
+          photoVisible: row.photoVisible,
+        }),
       });
       facesByCommunity.set(row.communityId, faces);
     }
@@ -752,7 +810,7 @@ export class LandingService {
   }
 
   /** Single-target resolution used by `createFeature`/`updateFeature`, where
-   *  only one target is ever looked up per call — batching would add
+   *  only one target is ever looked up per call: batching would add
    *  complexity for no benefit here (contrast the batch loaders above, used
    *  by the list endpoints where N features would otherwise mean N queries). */
   private async loadTargetState(
@@ -762,6 +820,8 @@ export class LandingService {
     if (section === LandingSection.Member) {
       const profile = await this.profiles.findOne({
         where: { userId: targetId },
+        // `isMemberEligible` reads `profile.user?.status`.
+        relations: { user: true },
       });
       if (!profile)
         return { eligible: false, hiddenReason: 'deleted', summary: null };

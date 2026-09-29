@@ -20,6 +20,7 @@ import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { truncateCharacters } from '../common/text-characters';
 import {
   DEFAULT_LIST_LIMIT,
   PAGE_SIZE,
@@ -42,6 +43,10 @@ import { isGatedTier, membersOnlyException } from './community-gate';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityMembershipService } from './community-membership.service';
 import { toStoredPlainTextOrNull } from './community-plain-text';
+import {
+  assertCommunityInteriorReadable,
+  COMMUNITY_MODERATION_SUBJECT_TYPE,
+} from './community-read-gate';
 import {
   CommunityReportDTO,
   toCommunityReportDTO,
@@ -349,7 +354,7 @@ export class CommunityPostsService {
     dto: CreatePostInput,
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
-    const membership = await this.assertMember(community, authorId);
+    const membership = await this.assertMemberForWrite(community, authorId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
     CommunityPostsService.assertKindAllowed(dto.kind, membership.role);
@@ -379,7 +384,7 @@ export class CommunityPostsService {
       source: 'community',
       communitySlug: slug,
       postId: saved.id,
-      excerpt: dto.body.slice(0, 140),
+      excerpt: truncateCharacters(dto.body, 140),
     });
     // Record the post as public profile activity — but only for PUBLIC
     // communities; the listener drops request/invite/private ones (the
@@ -392,7 +397,7 @@ export class CommunityPostsService {
       communityName: community.name,
       accessTier: community.accessTier,
       postId: saved.id,
-      excerpt: dto.body.slice(0, 80),
+      excerpt: truncateCharacters(dto.body, 80),
     } satisfies CommunityPostCreatedEvent);
     return this.buildPostDTO(saved, authorId, membership.role);
   }
@@ -405,7 +410,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community, actorId);
+    const membership = await this.assertMemberForWrite(community, actorId);
     this.assertNotArchived(community);
 
     if (dto.pinned !== undefined) {
@@ -426,8 +431,9 @@ export class CommunityPostsService {
    * `PATCH /community-posts/:id` — the flat alias's own update: author-only,
    * body/kind/image only (see `UpdateFlatPostInput`'s doc comment for why
    * `pinned` isn't part of this shape). Shares `applyPostFieldEdit` with the
-   * nested route above; the only difference is there's no community/pin
-   * authorization step here — `applyPostFieldEdit` itself enforces the
+   * nested route above. The difference is there's no roster or pin
+   * authorization step here, only `assertPostCommunityOpenForEdit`'s archive
+   * and takedown check. `applyPostFieldEdit` itself still enforces the
    * author-only check on any actual field change.
    */
   async updateFlatPost(
@@ -436,16 +442,15 @@ export class CommunityPostsService {
     dto: UpdateFlatPostInput,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
-    await this.assertPostCommunityNotArchived(post.communityId);
+    const viewerRole = await this.assertPostCommunityOpenForEdit(
+      post.communityId,
+      actorId,
+    );
     // Same announcement gate as the nested route (BE-COM-16). A GLOBAL post
     // (`communityId: null`) has no community to speak for, so there is no
-    // staff voice to impersonate and `viewerRoleInCommunityId` is not
-    // consulted.
+    // staff voice to impersonate and the kind is left unchecked.
     if (dto.kind !== undefined && post.communityId) {
-      CommunityPostsService.assertKindAllowed(
-        dto.kind,
-        await this.viewerRoleInCommunityId(post.communityId, actorId),
-      );
+      CommunityPostsService.assertKindAllowed(dto.kind, viewerRole);
     }
     const saved = await this.applyPostFieldEdit(post, actorId, dto);
     return this.buildPostDTO(
@@ -616,7 +621,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
-    const membership = await this.assertMember(community, actorId);
+    const membership = await this.assertMemberForWrite(community, actorId);
     this.assertNotArchived(community);
 
     const saved = await this.applyReplyTextEdit(reply, actorId, text);
@@ -634,7 +639,7 @@ export class CommunityPostsService {
     text: string,
   ): Promise<CommunityReplyDTO> {
     const post = await this.loadPostByIdOr404(postId);
-    await this.assertPostCommunityNotArchived(post.communityId);
+    await this.assertPostCommunityOpenForEdit(post.communityId, actorId);
     const reply = await this.loadReplyOr404(post.id, replyId);
     const saved = await this.applyReplyTextEdit(reply, actorId, text);
     return this.mapReply(
@@ -1033,7 +1038,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community, userId);
+    const membership = await this.assertMemberForWrite(community, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
 
@@ -1081,7 +1086,7 @@ export class CommunityPostsService {
   ): Promise<CommunityReplyDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    const membership = await this.assertMember(community, userId);
+    const membership = await this.assertMemberForWrite(community, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
 
@@ -1094,7 +1099,7 @@ export class CommunityPostsService {
       communitySlug: slug,
       postId: post.id,
       replyId: saved.id,
-      excerpt: text.slice(0, 140),
+      excerpt: truncateCharacters(text, 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // Tell the post's author their post got a reply — unless the reply already
@@ -1209,7 +1214,7 @@ export class CommunityPostsService {
     let communityId: string | null = null;
     if (dto.communitySlug) {
       const community = await this.loadCommunityOr404(dto.communitySlug);
-      const membership = await this.assertMember(community, authorId);
+      const membership = await this.assertMemberForWrite(community, authorId);
       // Same archive/freeze gate as `createPost`'s slug-scoped path — see
       // `assertFlatWriteAllowed` (the community is already resolved here, so
       // the two checks are applied directly rather than re-resolving it).
@@ -1233,7 +1238,7 @@ export class CommunityPostsService {
       source: 'community',
       postId: saved.id,
       communitySlug: dto.communitySlug,
-      excerpt: dto.body.slice(0, 140),
+      excerpt: truncateCharacters(dto.body, 140),
     });
     return { id: saved.id };
   }
@@ -1311,7 +1316,7 @@ export class CommunityPostsService {
       postId: post.id,
       replyId: saved.id,
       ...(community ? { communitySlug: community.slug } : {}),
-      excerpt: text.slice(0, 140),
+      excerpt: truncateCharacters(text, 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // A `null` post.authorId (erased author) has no one to notify — see the
@@ -1611,9 +1616,76 @@ export class CommunityPostsService {
   }
 
   /**
+   * `assertMember` for every write that adds to or edits a community's board:
+   * posts, replies, reactions, likes and edits. A community a moderator has
+   * taken down 404s here first, before the roster refusal, so a non-staff
+   * caller hears exactly what the board's reads answer (`assertViewable`) and
+   * learns nothing about whether the community exists. The community's own
+   * staff are exempt, the same posture the read gate and the freeze take.
+   *
+   * Deletes, restores and taking back your own reaction keep `assertMember`:
+   * a member may still retract what they said in a community that was taken
+   * down.
+   */
+  private async assertMemberForWrite(
+    community: Pick<Community, 'id' | 'parentId' | 'slug'>,
+    userId: string,
+  ): Promise<ActingMember> {
+    const role = await this.viewerRoleIn(community, userId);
+    await this.assertNotTakenDown(community, role);
+    if (role === null) {
+      throw new ForbiddenException('Only roster members can do that');
+    }
+    return { userId, role };
+  }
+
+  /**
+   * 404 when a moderator has hidden or removed the community itself, unless
+   * the caller is its staff. This is the takedown half of
+   * `assertCommunityInteriorReadable` on its own: the write side has its own
+   * archive gate (`assertNotArchived`), and the read gate's parent closure is
+   * about who may read a space, which the roster checks already settle here.
+   */
+  private async assertNotTakenDown(
+    community: Pick<Community, 'slug'>,
+    viewerRole: RosterRole | null,
+  ): Promise<void> {
+    if (CommunityPostsService.isStaffRole(viewerRole)) return;
+    const moderation = await this.contentModeration.stateFor(
+      COMMUNITY_MODERATION_SUBJECT_TYPE,
+      community.slug,
+    );
+    if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Community not found');
+    }
+  }
+
+  /**
+   * The gate for the flat (`/community-posts*`) post and reply EDITS, which
+   * are author-scoped and so carry no roster check: the archive check plus
+   * the takedown check. Returns the author's effective role in the post's
+   * community (null off the roster) so the caller needs no second lookup.
+   *
+   * A GLOBAL post (`communityId: null`) belongs to no community, so this is a
+   * no-op returning null for one.
+   */
+  private async assertPostCommunityOpenForEdit(
+    communityId: string | null,
+    actorId: string,
+  ): Promise<RosterRole | null> {
+    if (!communityId) return null;
+    const community = await this.loadCommunityByIdOr404(communityId);
+    this.assertNotArchived(community);
+    const viewerRole = await this.viewerRoleIn(community, actorId);
+    await this.assertNotTakenDown(community, viewerRole);
+    return viewerRole;
+  }
+
+  /**
    * The community gate every flat (`/community-posts*`) WRITE runs, for a post
-   * that belongs to a community: roster membership, the archive check, and the
-   * freeze check — the same three the slug-scoped routes apply. The flat
+   * that belongs to a community: the takedown check, roster membership, the
+   * archive check and the freeze check, the same four the slug-scoped routes
+   * apply (`assertMemberForWrite` carries the first two). The flat
    * aliases previously ran `assertMember` only, so a frozen community
    * (including one auto-frozen over an outing/doxxing report) still took new
    * posts, replies and reactions through `POST /community-posts*`, which is
@@ -1628,7 +1700,7 @@ export class CommunityPostsService {
   ): Promise<{ community: Community; membership: ActingMember } | null> {
     if (!communityId) return null;
     const community = await this.loadCommunityByIdOr404(communityId);
-    const membership = await this.assertMember(community, userId);
+    const membership = await this.assertMemberForWrite(community, userId);
     this.assertNotArchived(community);
     this.assertNotFrozen(community, membership);
     return { community, membership };
@@ -1857,7 +1929,7 @@ export class CommunityPostsService {
         communitySlug: community.slug,
         communityName: community.name,
         postId: post.id,
-        excerpt: post.body.slice(0, 140),
+        excerpt: truncateCharacters(post.body, 140),
       };
 
       for (
@@ -2049,23 +2121,36 @@ export class CommunityPostsService {
     }
   }
 
-  // THE TIER GATE for reading a board, drawn exactly where
-  // `CommunitiesService.getBySlug` draws it so there is one rule and not a
-  // second weaker copy of it. Every tier but `public` closes its board to
-  // anyone off the roster: post bodies, images, author `MemberRef`s,
-  // reactions and replies are all interior, and a gated community's interior
-  // is what the gate is for.
+  // THE GATE for reading a board, drawn exactly where
+  // `CommunitiesService.getBySlug` draws all four of its own gates, so both
+  // paths enforce one and the same rule:
   //
-  // The refusal differs by tier because the secret differs. `private` answers
-  // 404 `Community not found`, since there its very existence is the secret.
-  // `request` and `invite` answer 403 `membersOnlyException()`, since both are
-  // listed in discover and already carry their tier on their card: existence
-  // is no secret there, contents are, and pretending the community is absent
-  // would be a pretence the client already knows through. The client turns
-  // that 403 into the gate card (`GET /communities/:slug/gate`).
+  // 1. A moderator takedown (hidden or removed) closes the board to everyone
+  //    but the community's own staff.
+  // 2. An archive closes it to everyone off the roster (PRD-143): the
+  //    archive notification every member receives deep-links straight back
+  //    into a board that promises to stay readable, post history and all.
+  // 3. A space whose parent is gone, archived or itself taken down closes to
+  //    everyone with no effective role in the space.
+  // 4. THE TIER GATE. Every tier but `public` closes its board to anyone off
+  //    the roster: post bodies, images, author `MemberRef`s, reactions and
+  //    replies are all interior, and a gated community's interior is what
+  //    the gate is for. The refusal differs by tier because the secret
+  //    differs. `private` answers 404 `Community not found`, since there its
+  //    very existence is the secret. `request` and `invite` answer 403
+  //    `membersOnlyException()`, since both are listed in discover and
+  //    already carry their tier on their card: the card already shows that
+  //    they exist, so the contents are what stay closed, and pretending the
+  //    community is absent would be a pretence the client already knows
+  //    through. The client turns that 403
+  //    into the gate card (`GET /communities/:slug/gate`). `public` needs no
+  //    roster row, deliberately: an open community's board is readable by
+  //    any signed-in viewer.
   //
-  // `public` needs no roster row, deliberately: an open community's board is
-  // readable by any signed-in viewer. Mutating actions
+  // Gates 1-3 live in `assertCommunityInteriorReadable` (ENG-426), shared
+  // with the roster read in `CommunitiesService.roster`, so
+  // takedown/archive/parent closures never drift from `getBySlug`'s own.
+  // Mutating actions
   // (`createPost`/`addReaction`/`addReply`/pin) still require a roster row on
   // every tier, this tier included, and are gated on their own paths.
   //
@@ -2078,6 +2163,12 @@ export class CommunityPostsService {
     viewerId: string,
   ): Promise<RosterRole | null> {
     const viewerRole = await this.viewerRoleIn(community, viewerId);
+    await assertCommunityInteriorReadable({
+      community,
+      viewerRole,
+      communities: this.communities,
+      contentModeration: this.contentModeration,
+    });
     if (!isGatedTier(community.accessTier)) return viewerRole;
     if (viewerRole !== null) return viewerRole;
     if (community.accessTier === AccessTier.Private) {

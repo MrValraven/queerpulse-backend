@@ -27,9 +27,11 @@ import {
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { SUBCOMMUNITY_FEATURE_UNAVAILABLE_CODE } from '../communities/subcommunity-rules';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
+import { UserRole } from '../users/entities/user.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityRef,
@@ -194,6 +196,22 @@ function normalizeDetail(dto: {
   };
 }
 
+// An opportunity is reported (and taken down) under the `volunteering`
+// subject, keyed by the opportunity slug, matching the report control on the
+// opportunity detail page (`subjectType="volunteering"`, `subjectId={opportunity.slug}`)
+// and what the shared `content_moderation` row therefore stores. Mirrors
+// `JobsService`'s identical `JOB_SUBJECT_TYPE` precedent.
+const VOLUNTEERING_SUBJECT_TYPE = 'volunteering';
+
+// Platform staff (moderator/admin) still see a moderator-taken-down
+// opportunity on the read paths; ordinary members don't. Mirrors
+// `JobsService`'s identical `STAFF_ROLES`/`isStaffRole`.
+const STAFF_ROLES: readonly string[] = [UserRole.Moderator, UserRole.Admin];
+
+function isStaffRole(role: string | undefined): boolean {
+  return role != null && STAFF_ROLES.includes(role);
+}
+
 @Injectable()
 export class VolunteeringService {
   constructor(
@@ -213,7 +231,34 @@ export class VolunteeringService {
     // fire-and-forget, post-commit `emit` idiom as `EVENT_RSVPED` in
     // `RsvpService`; one-way, nothing in recognition calls back into here.
     private readonly eventEmitter: EventEmitter2,
+    // Reads the shared `content_moderation` state so a moderator takedown on a
+    // `volunteering` subject withholds the opportunity from ordinary members'
+    // read paths. Mirrors `JobsService`'s identical injection.
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // Drops any opportunity under a `volunteering` takedown (hidden OR removed)
+  // from an opportunity query builder, in-query so pagination/counts stay
+  // consistent, the same reason `JobsService.excludeModeratedJobs` filters
+  // in-query, before the page is fetched at a fixed size. An opportunity is
+  // NOT rendered as a tombstone the way a forum post is, so BOTH hidden and
+  // removed are excluded here. The `o.slug` reference is spliced verbatim
+  // into raw SQL (never user input); no cast is needed, since both
+  // `content_moderation.subject_id` and `volunteer_opportunities.slug` are
+  // varchar, keyed on the unique `(subject_type, subject_id)` index.
+  private excludeModeratedOpportunities(
+    qb: SelectQueryBuilder<VolunteerOpportunity>,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cm"
+        WHERE "cm"."subject_type" = :volunteeringSubjectType
+          AND "cm"."subject_id" = o.slug
+          AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+      )`,
+      { volunteeringSubjectType: VOLUNTEERING_SUBJECT_TYPE },
+    );
+  }
 
   async create(
     posterId: string,
@@ -329,6 +374,7 @@ export class VolunteeringService {
     if (query.commit) {
       qb.andWhere('o.commit = :commit', { commit: query.commit });
     }
+    this.excludeModeratedOpportunities(qb);
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
@@ -361,8 +407,27 @@ export class VolunteeringService {
   async getBySlug(
     slug: string,
     viewerId: string | null,
+    viewerRole?: string,
   ): Promise<OpportunityDetailDTO> {
     const opportunity = await this.loadOr404(slug);
+    // A moderator takedown (hidden OR removed) withholds the opportunity's
+    // detail from ordinary members: it 404s exactly as an unknown slug does,
+    // so the takedown isn't even confirmable. Platform staff and the
+    // opportunity's own poster are exempt: staff act on it, the poster still
+    // manages it (and still sees it in `listMine`). `viewerId !== null` guards
+    // the poster comparison the same way `buildDetail`'s `isPoster` does: an
+    // anonymous viewer's absent id always fails to equal a null `posterId` on
+    // an orphaned opportunity. Mirrors `JobsService.getBySlug`.
+    const isPoster = viewerId !== null && opportunity.posterId === viewerId;
+    if (!isStaffRole(viewerRole) && !isPoster) {
+      const state = await this.contentModeration.stateFor(
+        VOLUNTEERING_SUBJECT_TYPE,
+        opportunity.slug,
+      );
+      if (state.hidden || state.removed) {
+        throw new NotFoundException('Opportunity not found');
+      }
+    }
     return this.buildDetail(opportunity, viewerId);
   }
 
@@ -493,6 +558,18 @@ export class VolunteeringService {
         throw new ForbiddenException(
           'You cannot apply to your own opportunity',
         );
+      }
+
+      // A moderator takedown withholds a taken-down opportunity from new
+      // signups the same way `getBySlug` withholds its detail page, refusing
+      // with the same 404 an unknown slug gets so the takedown isn't
+      // confirmable this way either.
+      const state = await this.contentModeration.stateFor(
+        VOLUNTEERING_SUBJECT_TYPE,
+        opportunity.slug,
+      );
+      if (state.hidden || state.removed) {
+        throw new NotFoundException('Opportunity not found');
       }
 
       const signupRepo = manager.getRepository(VolunteerSignup);
@@ -1031,7 +1108,7 @@ export class VolunteeringService {
     communityId: string,
     limit = 5,
   ): Promise<OpportunityCardDTO[]> {
-    const rows = await this.opportunities
+    const qb = this.opportunities
       .createQueryBuilder('o')
       .where('o.community_id = :communityId', { communityId })
       .andWhere('o.status = :status', { status: OpportunityStatus.Open })
@@ -1039,8 +1116,9 @@ export class VolunteeringService {
         `(SELECT COUNT(*) FROM "volunteer_signups" "s" WHERE "s"."opportunity_id" = "o"."id" AND "s"."status" = 'accepted') < "o"."spots_total"`,
       )
       .orderBy('o.created_at', 'DESC')
-      .take(limit)
-      .getMany();
+      .take(limit);
+    this.excludeModeratedOpportunities(qb);
+    const rows = await qb.getMany();
     if (!rows.length) return [];
 
     const [filled, partnerRefs, communityRefs] = await Promise.all([

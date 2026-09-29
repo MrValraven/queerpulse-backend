@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AmbassadorStatusModule } from '../ambassadors/ambassador-status.module';
 import { UsersModule } from '../users/users.module';
 import { ProfilesModule } from '../profiles/profiles.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
@@ -56,6 +57,9 @@ import { RecognitionListener } from './recognition.listener';
     // Re-exported so a consumer that already imports RecognitionModule gets
     // the entitlement reads too, without a second import.
     RecognitionEntitlementsModule,
+    // The ambassador invite bonus for the invite-quota perk copy (PRD-436).
+    // A leaf module with no imports beyond TypeORM, so no cycle.
+    AmbassadorStatusModule,
   ],
   controllers: [MyRecognitionController, MemberRecognitionController],
   providers: [

@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -17,9 +16,11 @@ import { MagazineSection } from './entities/magazine-section.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
+  DECK_PUBLISH_UNLINKED_CODE,
   DECK_PUBLISH_VIA_PIECE_CODE,
   MagazineService,
 } from './magazine.service';
+import { magazineIssueVisibleThroughDate } from './magazine-clock';
 
 type QueryBuilderMock = {
   select: jest.Mock;
@@ -296,11 +297,12 @@ describe('MagazineService', () => {
       // The perf change projects only the columns `toIssueResponse` reads
       // (never the issue-production `runOrder`/`digest`/`coverlines` jsonb),
       // still ordered newest-issue-first. CON-18 added the embargo gate:
-      // `published_on <= today`, so an unshipped or scheduled issue never
-      // reaches the public archive.
+      // `published_on <= magazineIssueVisibleThroughDate()` (09:00 Lisbon on
+      // the ship date), so an unshipped or scheduled issue never reaches the
+      // public archive.
       expect(issues.find).toHaveBeenCalledWith({
         where: {
-          publishedOn: LessThanOrEqual(new Date().toISOString().slice(0, 10)),
+          publishedOn: LessThanOrEqual(magazineIssueVisibleThroughDate()),
         },
         select: {
           number: true,
@@ -324,13 +326,13 @@ describe('MagazineService', () => {
 
     // CON-18: an embargoed issue is unreachable by number, not merely absent
     // from the archive list.
-    it('gates the lookup on published_on <= today', async () => {
+    it('gates the lookup on the issue being visible from 09:00 Lisbon on its date', async () => {
       issues.findOne.mockResolvedValue(ISSUE);
       await service.getIssueByNumber('09');
       expect(issues.findOne).toHaveBeenCalledWith({
         where: {
           number: '09',
-          publishedOn: LessThanOrEqual(new Date().toISOString().slice(0, 10)),
+          publishedOn: LessThanOrEqual(magazineIssueVisibleThroughDate()),
         },
       });
     });
@@ -340,6 +342,42 @@ describe('MagazineService', () => {
       await expect(service.getIssueByNumber('09')).resolves.toMatchObject({
         number: '09',
         title: 'On health.',
+      });
+    });
+
+    // CON-18: the embargo ceiling shifted from the calendar day to
+    // `magazineIssueVisibleThroughDate()`, which the desk clock moves
+    // forward at 09:00 Lisbon on the ship date.
+    describe('embargo threshold (09:00 Lisbon)', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('shifts the ceiling it gates the lookup on across 09:00 Lisbon', async () => {
+        issues.findOne.mockResolvedValue(null);
+
+        // Lisbon runs UTC+0 in January, so 08:59 UTC is 08:59 Lisbon: before
+        // the 09:00 threshold, the newest visible date is still yesterday.
+        jest
+          .useFakeTimers()
+          .setSystemTime(new Date('2026-01-15T08:59:00.000Z'));
+        await service.getIssueByNumber('30').catch(() => undefined);
+        expect(issues.findOne).toHaveBeenLastCalledWith({
+          where: {
+            number: '30',
+            publishedOn: LessThanOrEqual('2026-01-14'),
+          },
+        });
+
+        // At 09:00 Lisbon exactly, today's date becomes visible.
+        jest.setSystemTime(new Date('2026-01-15T09:00:00.000Z'));
+        await service.getIssueByNumber('30').catch(() => undefined);
+        expect(issues.findOne).toHaveBeenLastCalledWith({
+          where: {
+            number: '30',
+            publishedOn: LessThanOrEqual('2026-01-15'),
+          },
+        });
       });
     });
   });
@@ -796,57 +834,14 @@ describe('MagazineService', () => {
       };
     }
 
+    // PRD-131's readiness bar (`isDeckPublishReady`) used to be reachable
+    // right here, for a standalone deck going live directly through this
+    // endpoint. ENG-463 closes that path: every draft-to-live transition on
+    // this endpoint now needs a linked desk piece (see
+    // 'updateDeck publish gate on a deck with no desk piece' below), so a
+    // deck's readiness is enforced where it actually goes live,
+    // `MagazinePieceService.publishPiece`'s `deckPublishBlockers`.
     describe('updateDeck publish readiness', () => {
-      it('refuses to publish a deck with no slides', async () => {
-        decks.findOne.mockResolvedValue(makeDeck({ slides: [] }));
-        await expect(
-          service.updateDeck('deck-1', { published: true }, EDITOR_ID),
-        ).rejects.toBeInstanceOf(BadRequestException);
-        expect(decks.save).not.toHaveBeenCalled();
-      });
-
-      it('refuses to publish when an image slide has blank alt text', async () => {
-        // Reaches the readiness check only because the row is already stored
-        // this way: `validateDeckSlides` would reject the same slides on the
-        // way in, which is exactly the gap the second check closes.
-        decks.findOne.mockResolvedValue(
-          makeDeck({
-            slides: [
-              {
-                layout: 'image',
-                src: 'https://x/a.jpg',
-                alt: '  ',
-                tint: 'coral',
-              },
-            ],
-          }),
-        );
-        await expect(
-          service.updateDeck('deck-1', { published: true }, EDITOR_ID),
-        ).rejects.toBeInstanceOf(BadRequestException);
-        expect(decks.save).not.toHaveBeenCalled();
-      });
-
-      it('publishes a ready deck and stamps publishedAt', async () => {
-        decks.findOne.mockResolvedValue(makeDeck());
-        const response = await service.updateDeck(
-          'deck-1',
-          { published: true },
-          EDITOR_ID,
-        );
-        expect(response.publishedAt).not.toBeNull();
-      });
-
-      it('accepts a slides payload that fixes readiness in the same PATCH', async () => {
-        decks.findOne.mockResolvedValue(makeDeck({ slides: [] }));
-        const response = await service.updateDeck(
-          'deck-1',
-          { slides: [READY_SLIDE], published: true },
-          EDITOR_ID,
-        );
-        expect(response.publishedAt).not.toBeNull();
-      });
-
       it('never gates unpublishing, whatever shape the deck is in', async () => {
         decks.findOne.mockResolvedValue(
           makeDeck({ slides: [], publishedAt: new Date() }),
@@ -857,17 +852,6 @@ describe('MagazineService', () => {
           EDITOR_ID,
         );
         expect(response.publishedAt).toBeNull();
-      });
-
-      it('schedules at a future instant when publishedAt is sent', async () => {
-        decks.findOne.mockResolvedValue(makeDeck());
-        const scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
-        const response = await service.updateDeck(
-          'deck-1',
-          { publishedAt: scheduledAt },
-          EDITOR_ID,
-        );
-        expect(response.publishedAt).toEqual(scheduledAt);
       });
 
       it('lets publishedAt win over the boolean when both are sent', async () => {
@@ -892,8 +876,58 @@ describe('MagazineService', () => {
       });
     });
 
+    // ENG-463: the `AdoptStandaloneDecksAsPieces` migration's whole intent
+    // was that decks publish from their desk piece, so a deck this endpoint
+    // left unlinked is refused a publish or schedule with its own code, the
+    // same way a linked deck is refused one that bypasses its piece. A
+    // take-down stays allowed either way.
+    describe('updateDeck publish gate on a deck with no desk piece', () => {
+      it('refuses to publish an unlinked deck with a 409', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ slides: [] }));
+        pieces.findOne.mockResolvedValue(null);
+
+        const error: unknown = await service
+          .updateDeck('deck-1', { published: true }, EDITOR_ID)
+          .then(
+            () => null,
+            (rejection: unknown) => rejection,
+          );
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual(
+          expect.objectContaining({ code: DECK_PUBLISH_UNLINKED_CODE }),
+        );
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses to schedule an unlinked deck for a future instant the same way', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue(null);
+        const scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
+
+        await expect(
+          service.updateDeck('deck-1', { publishedAt: scheduledAt }, EDITOR_ID),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('still allows an unlinked deck to come back down', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ publishedAt: new Date() }));
+        pieces.findOne.mockResolvedValue(null);
+
+        const response = await service.updateDeck(
+          'deck-1',
+          { published: false },
+          EDITOR_ID,
+        );
+        expect(response.publishedAt).toBeNull();
+        expect(decks.save).toHaveBeenCalled();
+      });
+    });
+
     // A linked deck publishes through its piece, where the care gate,
-    // the stage move, the audit event and the writer's bell all live.
+    // the stage move, the audit event and the writer's bell all live. The
+    // refusal below is unchanged by ENG-463 (DECK_PUBLISH_VIA_PIECE_CODE
+    // still fires first for a linked deck).
     describe('updateDeck on a deck a piece links to', () => {
       async function expectPublishViaPieceRefusal(
         request: Promise<unknown>,
@@ -958,18 +992,9 @@ describe('MagazineService', () => {
         expect(response.publishedAt).toEqual(publishedAt.toISOString());
       });
 
-      it('publishes a standalone deck the way it always has', async () => {
-        decks.findOne.mockResolvedValue(makeDeck());
-        pieces.findOne.mockResolvedValue(null);
-
-        const response = await service.updateDeck(
-          'deck-1',
-          { published: true },
-          EDITOR_ID,
-        );
-
-        expect(response.publishedAt).not.toBeNull();
-      });
+      // ENG-463: a standalone deck no longer publishes this way; see
+      // 'updateDeck publish gate on a deck with no desk piece' above for the
+      // refusal this now hits.
     });
 
     // A deck built from the desk starts as "Untitled deck"; the desk reads the

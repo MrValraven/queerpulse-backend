@@ -144,6 +144,19 @@ export class Conversation {
   inviteToken!: string | null;
 
   /**
+   * PRD-400: when the live `inviteToken` stops working. Written together with
+   * the token by `GroupsService.createOrRotateInviteLink` (now plus
+   * `GROUP_INVITE_LINK_TTL_MS`) and cleared together with it when the link
+   * is disabled or the group dissolves. `GroupInvitesService.previewByToken`
+   * and `joinByToken` refuse a token at or past this instant with
+   * `INVITE_LINK_EXPIRED`. NULL whenever `inviteToken` is NULL. Migration
+   * `1823510000000-AddGroupInviteTokenExpiry` gave every token live at
+   * deploy time seven days from then.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  inviteTokenExpiresAt!: Date | null;
+
+  /**
    * PRD-357: when this group's owner ended it (or the last leaver did, with no
    * successor to hand it to). NULL means active. Once set the group is
    * read-only: every write route refuses with `GROUP_DISSOLVED`, enforced in
@@ -166,6 +179,18 @@ export class Conversation {
   })
   @Column({ type: 'uuid', nullable: true })
   eventMatchGroupId!: string | null;
+
+  /**
+   * PRD-423: this chat was formed by Go together matching. Set once by
+   * `GroupsService.createMatchedGroup` and never cleared, so it outlives the
+   * group row (`eventMatchGroupId` goes NULL when a gathering is deleted or
+   * retention removes the group) and the chat keeps naming its members by
+   * first name (`memberNameOptionsFor`). `eventMatchGroupId` answers whether
+   * the group still exists; this answers whether the chat ever was one.
+   * Migration `1824300000000-AddConversationIsGoTogetherChat`.
+   */
+  @Column({ type: 'boolean', default: false })
+  isGoTogetherChat!: boolean;
 
   /**
    * The one staff member currently answering a shared business mailbox

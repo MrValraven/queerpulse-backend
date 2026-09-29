@@ -1,7 +1,13 @@
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
+import { DataSource } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
+import { LegalRequestAmendment } from './entities/legal-request-amendment.entity';
 import { LegalRequest } from './entities/legal-request.entity';
 import { toAdminLegalRequestDTO } from './legal-request-response';
 import {
@@ -44,7 +50,12 @@ describe('LegalRequestsService', () => {
     create: jest.Mock;
     save: jest.Mock;
   };
+  let amendments: { find: jest.Mock };
   let profiles: { findOne: jest.Mock };
+  // The transaction's entity manager: `update` writes the record and its
+  // amendment row through it, together.
+  let transactionManager: { save: jest.Mock; insert: jest.Mock };
+  let dataSource: { transaction: jest.Mock };
 
   beforeEach(async () => {
     legalRequests = {
@@ -60,13 +71,31 @@ describe('LegalRequestsService', () => {
         updatedAt: record.updatedAt ?? new Date('2026-08-04T09:00:00.000Z'),
       })),
     };
+    amendments = { find: jest.fn() };
     profiles = { findOne: jest.fn() };
+    transactionManager = {
+      save: jest.fn((_target: unknown, record: Partial<LegalRequest>) => ({
+        ...record,
+      })),
+      insert: jest.fn(),
+    };
+    dataSource = {
+      transaction: jest.fn(
+        (work: (manager: typeof transactionManager) => Promise<unknown>) =>
+          work(transactionManager),
+      ),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LegalRequestsService,
         { provide: getRepositoryToken(LegalRequest), useValue: legalRequests },
+        {
+          provide: getRepositoryToken(LegalRequestAmendment),
+          useValue: amendments,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
     service = module.get(LegalRequestsService);
@@ -177,15 +206,86 @@ describe('LegalRequestsService', () => {
   });
 
   describe('update', () => {
+    beforeEach(() => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'admin-2',
+        firstName: 'Grace',
+        lastName: 'Hopper',
+      });
+    });
+
     it('writes only the keys present and leaves the rest on file', async () => {
       legalRequests.findOne.mockResolvedValue(buildRecord());
 
-      const result = await service.update('request-1', {
+      const result = await service.update('request-1', 'admin-2', {
         outcome: LegalRequestOutcome.Refused,
       });
 
       expect(result.outcome).toBe(LegalRequestOutcome.Refused);
       expect(result.requestingBody).toBe('District Court of Lisbon');
+    });
+
+    it('records the acting admin and only the fields that moved, in the same transaction as the record', async () => {
+      const record = buildRecord({ dataDisclosed: ['account_identifiers'] });
+      legalRequests.findOne.mockResolvedValue(record);
+
+      await service.update('request-1', 'admin-2', {
+        outcome: LegalRequestOutcome.Refused,
+        // Sent again unchanged: on file already, so it is no amendment.
+        jurisdiction: 'Portugal',
+        dataDisclosed: ['account_identifiers'],
+        internalNote: 'Refused on scope',
+      });
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(transactionManager.save).toHaveBeenCalledWith(
+        LegalRequest,
+        record,
+      );
+      expect(transactionManager.insert).toHaveBeenCalledWith(
+        LegalRequestAmendment,
+        {
+          legalRequestId: 'request-1',
+          actorUserId: 'admin-2',
+          actorName: 'Grace Hopper',
+          changes: {
+            outcome: {
+              from: LegalRequestOutcome.Pending,
+              to: LegalRequestOutcome.Refused,
+            },
+            internalNote: { from: null, to: 'Refused on scope' },
+          },
+        },
+      );
+    });
+
+    it('compares disclosed categories as a set, so a reordered list is no amendment', async () => {
+      legalRequests.findOne.mockResolvedValue(
+        buildRecord({
+          outcome: LegalRequestOutcome.CompliedInFull,
+          dataDisclosed: ['account_identifiers', 'private_messages'],
+        }),
+      );
+
+      await service.update('request-1', 'admin-2', {
+        dataDisclosed: ['private_messages', 'account_identifiers'],
+      });
+
+      expect(transactionManager.insert).not.toHaveBeenCalled();
+    });
+
+    it('writes no amendment row for a PATCH that changes nothing', async () => {
+      legalRequests.findOne.mockResolvedValue(buildRecord());
+
+      const result = await service.update('request-1', 'admin-2', {
+        jurisdiction: 'Portugal',
+        outcome: LegalRequestOutcome.Pending,
+      });
+
+      expect(result.jurisdiction).toBe('Portugal');
+      expect(transactionManager.insert).not.toHaveBeenCalled();
+      // No history row means no snapshot of the actor's name is needed.
+      expect(profiles.findOne).not.toHaveBeenCalled();
     });
 
     it('freezes a voided record rather than letting it be rewritten', async () => {
@@ -198,9 +298,10 @@ describe('LegalRequestsService', () => {
       );
 
       await expect(
-        service.update('request-1', { jurisdiction: 'Spain' }),
+        service.update('request-1', 'admin-2', { jurisdiction: 'Spain' }),
       ).rejects.toBeInstanceOf(ConflictException);
-      expect(legalRequests.save).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(transactionManager.insert).not.toHaveBeenCalled();
     });
 
     it('judges the invariants on the merged record rather than on the keys sent', async () => {
@@ -209,11 +310,53 @@ describe('LegalRequestsService', () => {
       );
 
       await expect(
-        service.update('request-1', {
+        service.update('request-1', 'admin-2', {
           accountsNotified: 5,
           memberNotifiedOn: '2026-08-05',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
+      expect(transactionManager.insert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listAmendments', () => {
+    it('returns the history newest first with no actor id on the wire', async () => {
+      legalRequests.findOne.mockResolvedValue(buildRecord());
+      amendments.find.mockResolvedValue([
+        {
+          id: 'amendment-1',
+          legalRequestId: 'request-1',
+          actorUserId: 'admin-2',
+          actorName: 'Grace Hopper',
+          changes: { outcome: { from: 'pending', to: 'refused' } },
+          createdAt: new Date('2026-08-05T09:00:00.000Z'),
+        },
+      ]);
+
+      const result = await service.listAmendments('request-1');
+
+      expect(amendments.find).toHaveBeenCalledWith({
+        where: { legalRequestId: 'request-1' },
+        order: { createdAt: 'DESC', id: 'DESC' },
+      });
+      expect(result).toEqual([
+        {
+          id: 'amendment-1',
+          actorName: 'Grace Hopper',
+          changes: { outcome: { from: 'pending', to: 'refused' } },
+          createdAt: '2026-08-05T09:00:00.000Z',
+        },
+      ]);
+      expect(JSON.stringify(result)).not.toContain('admin-2');
+    });
+
+    it('is a 404 for an unknown record', async () => {
+      legalRequests.findOne.mockResolvedValue(null);
+
+      await expect(service.listAmendments('missing')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(amendments.find).not.toHaveBeenCalled();
     });
   });
 

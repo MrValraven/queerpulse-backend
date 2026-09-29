@@ -102,13 +102,15 @@ export class AdminMagazineDecksController {
 
   @Patch(':id')
   @ApiOperation({
-    summary:
-      'Update a magazine deck, including publish state (publish now, schedule, or unpublish).',
+    summary: 'Update a draft magazine deck, or take a published deck down.',
   })
   @ApiOkResponse({ description: 'The updated deck.' })
   @ApiBadRequestResponse({
+    description: 'Malformed id or invalid payload.',
+  })
+  @ApiConflictResponse({
     description:
-      'Malformed id, invalid payload, or a publish/schedule of a deck that fails the readiness bar (at least one slide, alt text on every image slide).',
+      'A publish-state change on a deck a desk piece links to must go through the piece (code magazine_deck_publish_via_piece, with the piece id). A publish or schedule sent for a deck with no desk piece is refused too (code magazine_deck_publish_unlinked); a take-down still goes through on that deck.',
   })
   @ApiNotFoundResponse({ description: 'No deck exists for this id.' })
   update(

@@ -55,9 +55,13 @@ export class RsvpService {
     // `EventsModule`) exports `TypeOrmModule`, so this repository is already
     // in scope with no module change.
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
-    // Plain (non-transactional) repos for `updateRsvpDetails` below — that
-    // path never touches capacity/waitlist ordering, so it doesn't need the
-    // `pessimistic_write` event lock every other write in this service takes.
+    // Plain (non-transactional) repos for `updateRsvpDetails` below. Most of
+    // what it writes (every answer other than a guest-count raise, plus a
+    // lowered or unchanged guest count) never touches capacity/waitlist
+    // ordering, so it reads and saves through these with no lock. A RAISE is a
+    // capacity change (ENG-431) and takes the same `pessimistic_write` event
+    // lock every other capacity write in this service takes, via its own
+    // `dataSource.transaction`: see `raiseGuestCountAndSave` below.
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
     // LOC-08. A block was honoured when RENDERING an attendee list and never
@@ -523,24 +527,80 @@ export class RsvpService {
         'You do not have an active RSVP to this event',
       );
     }
+    const mightRaiseGuestCount =
+      dto.guestCount !== undefined && dto.guestCount > rsvp.guestCount;
+    // ENG-431: a raise is a capacity change, exactly like a fresh RSVP, so it
+    // has to run under the same `pessimistic_write` event lock `rsvp()`
+    // takes for its own capacity check. Without it, two concurrent raises, or
+    // a raise racing a fresh RSVP, can each read the same "seats free"
+    // snapshot outside any lock and both pass, pushing the gathering over
+    // capacity.
+    // These plain reads only decide whether a raise is even possible; the
+    // locked path below re-reads both rows fresh once it holds the lock,
+    // since either one can have moved between this read and that one.
+    // Lowering the count, leaving it unchanged, or editing any other field
+    // never adds a seat, so it stays on the plain repositories, unlocked,
+    // exactly as before.
+    if (mightRaiseGuestCount) {
+      return this.dataSource.transaction((manager) =>
+        this.raiseGuestCountAndSave(manager, slug, userId, dto),
+      );
+    }
+    // Only the edited columns are written. A `save` of the whole row would
+    // put back a `status`, `waitlistPosition` or `guestCount` that a
+    // promotion or a locked raise committed after the plain read above.
+    const patch = this.rsvpDetailsPatch(dto);
+    if (Object.keys(patch).length > 0) {
+      await this.rsvps.update({ id: rsvp.id }, patch);
+    }
+    return toRsvpDetailsView({ ...rsvp, ...patch });
+  }
+
+  // The locked half of `updateRsvpDetails`, taken only when the plain read
+  // above found a possible guest-count raise. Re-reads the event (under the
+  // same `pessimistic_write` lock `rsvp()` takes) and the caller's RSVP fresh
+  // through the transaction's manager, then re-derives whether this is really
+  // a raise against those fresh values before applying the same cutoff and
+  // capacity checks `updateRsvpDetails` always ran, so a lock never changes
+  // what gets refused or accepted, only what it's compared against.
+  private async raiseGuestCountAndSave(
+    manager: EntityManager,
+    slug: string,
+    userId: string,
+    dto: UpdateRsvpDetailsDto,
+  ): Promise<RsvpDetailsView> {
+    const event = await manager.findOne(Event, {
+      where: { slug },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+    const rsvpRepo = manager.getRepository(EventRsvp);
+    const rsvp = await rsvpRepo.findOne({
+      where: { eventId: event.id, userId },
+    });
+    if (!rsvp || rsvp.status === RsvpStatus.Cancelled) {
+      throw new NotFoundException(
+        'You do not have an active RSVP to this event',
+      );
+    }
     const isGuestCountRaise =
       dto.guestCount !== undefined && dto.guestCount > rsvp.guestCount;
     // A raise brings more people onto a roster the host may already have
     // closed, so past the RSVP cutoff it is refused like any other way on
     // (`assertRsvpsOpen`'s doc). Organisers are exempt, as they are in
-    // `rsvp()`. Lowering the count and every other answer stay editable after
-    // the cutoff: a member whose friend can no longer come frees that seat by
-    // saying so. The organiser lookup runs only on a raise.
+    // `rsvp()`. The organiser lookup runs only on a raise.
     if (
       isGuestCountRaise &&
-      !(await this.isOrganizerOf(this.dataSource.manager, event, userId))
+      !(await this.isOrganizerOf(manager, event, userId))
     ) {
       assertRsvpsOpen(event);
     }
     // Raising the guest count is a capacity change (LOC-07): every extra
     // guest occupies a seat, so an unchecked edit here would walk straight
-    // past the check `rsvp()` now performs. Only a RAISE is checked, and only
-    // for a 'going' row: lowering always fits, and a waitlisted member is not
+    // past the check `rsvp()` performs. Only a RAISE is checked, and only for
+    // a 'going' row: lowering always fits, and a waitlisted member is not
     // taking a seat yet.
     if (
       isGuestCountRaise &&
@@ -548,7 +608,7 @@ export class RsvpService {
       rsvp.status === RsvpStatus.Going &&
       event.capacity !== null
     ) {
-      const seatsTaken = await this.goingSeatCount(this.rsvps, event.id);
+      const seatsTaken = await this.goingSeatCount(rsvpRepo, event.id);
       const extraSeats = dto.guestCount - rsvp.guestCount;
       if (seatsTaken + extraSeats > event.capacity) {
         throw new BadRequestException(
@@ -556,7 +616,16 @@ export class RsvpService {
         );
       }
     }
-    Object.assign(rsvp, {
+    Object.assign(rsvp, this.rsvpDetailsPatch(dto));
+    const saved = await rsvpRepo.save(rsvp);
+    return toRsvpDetailsView(saved);
+  }
+
+  // Shared by both `updateRsvpDetails` and its locked raise path: every field
+  // actually present in `dto` is written, so a partial edit never clobbers
+  // the rest.
+  private rsvpDetailsPatch(dto: UpdateRsvpDetailsDto): Partial<EventRsvp> {
+    return {
       ...(dto.guestCount !== undefined ? { guestCount: dto.guestCount } : {}),
       ...(dto.accessNeeds !== undefined
         ? { accessNeeds: dto.accessNeeds }
@@ -573,9 +642,7 @@ export class RsvpService {
       ...(dto.customAnswer !== undefined
         ? { customAnswer: RsvpService.blankToNull(dto.customAnswer) }
         : {}),
-    });
-    const saved = await this.rsvps.save(rsvp);
-    return toRsvpDetailsView(saved);
+    };
   }
 
   // The same trim-then-blank-is-null rule `EventsService.blankToNull` applies

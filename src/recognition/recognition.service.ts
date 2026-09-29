@@ -6,8 +6,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { resolveMonthlyInviteLimit } from '../membership/monthly-invite-limit';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
@@ -16,6 +19,7 @@ import {
   buildPerks,
   buildRecognition,
   computeLevel,
+  InviteLimitResolver,
   PerksDTO,
   RecognitionDTO,
 } from './recognition-response';
@@ -60,9 +64,12 @@ export class RecognitionService {
     private readonly ledgerEntries: Repository<RecognitionLedgerEntry>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
     private readonly awarding: RecognitionAwardingService,
     private readonly profilesService: ProfilesService,
     private readonly config: ConfigService,
+    private readonly ambassadorStatus: AmbassadorStatusService,
   ) {}
 
   /** The monthly invite allowance this deployment enforces before any
@@ -74,6 +81,33 @@ export class RecognitionService {
       'app.inviteMonthlyQuota',
       DEFAULT_INVITE_MONTHLY_QUOTA,
     );
+  }
+
+  /**
+   * This member's invite limit rule for the perk copy (PRD-436): the same
+   * `resolveMonthlyInviteLimit` `InvitesService` enforces, with their staff
+   * override and ambassador bonus, so the perk's `{total}` is the number the
+   * invite page allows once the perk is claimed.
+   */
+  private async inviteLimitResolverFor(
+    userId: string,
+  ): Promise<InviteLimitResolver> {
+    const [user, ambassadorBonus] = await Promise.all([
+      this.users.findOne({
+        where: { id: userId },
+        select: { id: true, inviteMonthlyQuota: true },
+      }),
+      this.ambassadorStatus.getInviteBonus(userId),
+    ]);
+    const base = this.baseInviteQuota();
+    const inviteQuotaOverride = user?.inviteMonthlyQuota ?? null;
+    return (levelBonus) =>
+      resolveMonthlyInviteLimit({
+        inviteQuotaOverride,
+        base,
+        levelBonus,
+        ambassadorBonus,
+      });
   }
 
   /**
@@ -91,25 +125,32 @@ export class RecognitionService {
     userId: string,
     includePerks = true,
   ): Promise<RecognitionDTO> {
-    const [stat, earned, claimed, signals, ledgerRows] = await Promise.all([
-      this.stats.findOne({ where: { userId } }),
-      this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
-      includePerks
-        ? this.perkClaims.find({ where: { userId }, take: DEFAULT_LIST_LIMIT })
-        : Promise.resolve([]),
-      // The XP breakdown is owner-only, same as perks (I9) — skip the
-      // signal-gathering queries entirely for another member's view.
-      includePerks ? this.awarding.gatherSignalsForUser(userId) : null,
-      // The XP ledger is owner-only too (same reasoning as xpBreakdown) —
-      // skip the query for a non-owner view.
-      includePerks
-        ? this.ledgerEntries.find({
-            where: { userId },
-            order: { createdAt: 'DESC' },
-            take: DEFAULT_LIST_LIMIT,
-          })
-        : Promise.resolve([]),
-    ]);
+    const [stat, earned, claimed, signals, ledgerRows, resolveInviteLimit] =
+      await Promise.all([
+        this.stats.findOne({ where: { userId } }),
+        this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
+        includePerks
+          ? this.perkClaims.find({
+              where: { userId },
+              take: DEFAULT_LIST_LIMIT,
+            })
+          : Promise.resolve([]),
+        // The XP breakdown is owner-only, same as perks (I9): skip the
+        // signal-gathering queries entirely for another member's view.
+        includePerks ? this.awarding.gatherSignalsForUser(userId) : null,
+        // The XP ledger is owner-only too (same reasoning as xpBreakdown):
+        // skip the query for a non-owner view.
+        includePerks
+          ? this.ledgerEntries.find({
+              where: { userId },
+              order: { createdAt: 'DESC' },
+              take: DEFAULT_LIST_LIMIT,
+            })
+          : Promise.resolve([]),
+        // The perks are owner-only, so another member's view skips the quota
+        // reads too; its perks block is emptied below either way.
+        includePerks ? this.inviteLimitResolverFor(userId) : undefined,
+      ]);
     const dto = buildRecognition(
       stat?.xp ?? 0,
       earned.map((award) => ({
@@ -128,7 +169,7 @@ export class RecognitionService {
       // `includePerks` is the owner/non-owner switch everywhere else in this
       // method, so it is the switch for hidden badges too: a hidden badge is
       // returned (flagged) to its owner and omitted from anyone else's read.
-      { baseInviteQuota: this.baseInviteQuota(), isOwnerView: includePerks },
+      { resolveInviteLimit, isOwnerView: includePerks },
     );
     if (!includePerks) {
       dto.perks = { availableCount: 0, groups: [], ladder: [] };
@@ -221,10 +262,10 @@ export class RecognitionService {
       throw new NotFoundException('Perk claim could not be read back');
     }
 
-    const claims = await this.perkClaims.find({
-      where: { userId },
-      take: DEFAULT_LIST_LIMIT,
-    });
+    const [claims, resolveInviteLimit] = await Promise.all([
+      this.perkClaims.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
+      this.inviteLimitResolverFor(userId),
+    ]);
     return {
       key: perk.key,
       state: 'claimed',
@@ -236,7 +277,7 @@ export class RecognitionService {
           perkKey: row.perkKey,
           claimedAt: row.claimedAt,
         })),
-        this.baseInviteQuota(),
+        resolveInviteLimit,
       ),
     };
   }

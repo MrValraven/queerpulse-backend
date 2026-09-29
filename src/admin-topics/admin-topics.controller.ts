@@ -24,6 +24,10 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
@@ -120,7 +124,10 @@ export class AdminTopicsController {
   })
   @ApiNoContentResponse({ description: 'The topic is gone.' })
   @ApiNotFoundResponse({ description: 'No topic with that id.' })
-  async remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    await this.adminTopics.remove(id);
+  async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() currentUser: CurrentUserData,
+  ): Promise<void> {
+    await this.adminTopics.remove(id, currentUser.userId);
   }
 }

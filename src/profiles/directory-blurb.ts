@@ -13,6 +13,12 @@
  * `toMemberCard`). Profile endpoints must serve the member's raw, unresolved
  * tagline: the editor seeds its short-bio input from that field, so returning
  * borrowed bio text there would let a member save words they never wrote.
+ *
+ * The fallback may only borrow a bio the card's viewer is allowed to read
+ * (ENG-438). A `network`/`private` member's bio sits behind the limited card,
+ * so `toMemberCard` passes `bio` here only for an `open` profile and `null`
+ * otherwise; this function trusts its caller to have applied that gate. The
+ * frontend preview applies the same rule (`DirectoryCardPreview`).
  */
 
 /** Roughly the two lines the card's CSS clamps the blurb to at 13px. */
@@ -49,6 +55,9 @@ export function truncateAtWord(
  * Resolve the blurb for a member's directory card. Returns '' when the member has
  * written neither a short bio nor a bio — the card then shows an empty line, which
  * is honest.
+ *
+ * `bio` must already be gated to what the viewer may read: pass `null` for a
+ * member whose profile is not `open`. See the file header.
  */
 export function directoryBlurb(
   tagline: string | null | undefined,

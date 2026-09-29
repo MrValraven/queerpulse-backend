@@ -14,6 +14,12 @@ describe('launchedFeatures registry', () => {
     }
   });
 
+  // PRD-422: Go together has its own key and ships on. Flipping it off holds
+  // the feature dark; update this expectation in the same change.
+  it('ships Go together launched under its own key', () => {
+    expect(isFeatureLaunched('goTogether')).toBe(true);
+  });
+
   it('ships cinema disabled (its Mux env is not provisioned by default)', () => {
     expect(isFeatureLaunched('cinema')).toBe(false);
   });

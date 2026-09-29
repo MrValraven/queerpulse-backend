@@ -712,5 +712,47 @@ describe('ReportNotificationsListener', () => {
       // The post's author is the reported member, so they are left out.
       expect(communityRecipients()).toEqual(['user-owner', 'user-mod']);
     });
+
+    // ENG-481: a report about a community must not page that community's own
+    // staff, since they are the reported party. Before this fix `subjectType
+    // === 'community'` resolved to the reported community itself and its
+    // owner/co-owners/mods were paged on the `CommunityReportFiled` channel.
+    it("never pages a reported community's own staff, and still pages platform staff", async () => {
+      const communityReportEvent: ReportCreatedEvent = {
+        reportId: 'report-4',
+        subjectType: ReportSubjectType.Community,
+        subjectId: 'circle-of-care',
+        severity: ReportSeverity.High,
+        reasonCode: 'harassment',
+      };
+      reports.findOne.mockResolvedValue({
+        ...PHOTO_REPORT,
+        id: 'report-4',
+        subjectType: ReportSubjectType.Community,
+        subjectId: 'circle-of-care',
+        severity: ReportSeverity.High,
+        reasonCode: 'harassment',
+      });
+      users.find.mockResolvedValue([{ id: 'user-staff' }]);
+      notifications.createForRecipients.mockResolvedValue(['user-staff']);
+
+      await listener.onReportCreated(communityReportEvent);
+
+      // No community lookup at all: the community arm is gone from
+      // `resolveCommunity`, so this report is never treated as
+      // community-scoped.
+      expect(communities.findOne).not.toHaveBeenCalled();
+      expect(communityRecipients()).toBeNull();
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['user-staff'],
+        NotificationType.ReportFiled,
+        {
+          reportId: 'report-4',
+          severity: ReportSeverity.High,
+          reasonCode: 'harassment',
+          subjectType: ReportSubjectType.Community,
+        },
+      );
+    });
   });
 });

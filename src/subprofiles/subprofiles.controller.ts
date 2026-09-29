@@ -20,7 +20,10 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
+import {
+  assertNotRestricted,
+  NotRestrictedGuard,
+} from '../auth/guards/not-restricted.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { AnonymousPublicCacheInterceptor } from './anonymous-public-cache.interceptor';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
@@ -34,6 +37,7 @@ import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
+import { SubprofileVisibility } from './entities/subprofile.entity';
 import { SubprofileInvitesService } from './subprofile-invites.service';
 import { SubprofilesService } from './subprofiles.service';
 import {
@@ -53,6 +57,29 @@ import {
   PUBLIC_READ_CACHE,
   PUBLIC_READ_CDN_CACHE,
 } from '../common/public-read-cache';
+
+// M3 (fix round 2): `SubprofileVisibility`'s three levels, widest first.
+// Backs `SubprofilesController.isNarrowingVisibilityOnly`'s current-versus-
+// target comparison below: a target visibility narrows the persona's
+// audience only when its rank here is STRICTLY greater than the persona's
+// CURRENT stored rank. Fix round 1 instead compared the target alone against
+// `Open` ("not Open, so it must be narrowing"), which missed that a
+// currently-`private` persona set to `network` is a WIDENING: the exact
+// direction the guard exists to block. Narrowing can only be known by
+// reading the persona's current row, so the check now lives as a private
+// method on the controller, which can call
+// `subprofilesService.getOwnedDTO`.
+const VISIBILITY_RANK: Record<SubprofileVisibility, number> = {
+  [SubprofileVisibility.Open]: 0,
+  [SubprofileVisibility.Network]: 1,
+  [SubprofileVisibility.Private]: 2,
+};
+
+// ENG-451: the 409 the four editor writes answer when their
+// `expectedEditVersion` is stale, or when the persona's link state, status or
+// handle moved under the save. Nothing is written.
+const PERSONA_EDIT_CONFLICT_DESCRIPTION =
+  '`{ code: "PERSONA_EDIT_CONFLICT", currentEditVersion }`: someone else saved the persona after this editor loaded it (or its link, status or handle moved), so nothing was saved.';
 
 // `ActiveMemberGuard` is bound at the CLASS level so no handler can silently
 // miss it — previously `GET mine` and `GET :id` were only JWT-protected and
@@ -89,6 +116,11 @@ export class SubprofilesController {
   // `ActiveMemberGuard` (the service resolves the caller's own membership
   // rows and refuses any id outside them). A literal route, so it sits up
   // here with `mine`/`directory` and is never swallowed by `:id` below.
+  // M4 (fix round 1): NOT `NotRestrictedGuard`-gated. Reordering the caller's
+  // own, already-published personas reorders a list the caller already fully
+  // controls; it adds no reader-visible content of its own, so it reads
+  // closer to the guard contract's "own profile and account settings" (open)
+  // than to content another member or the public reads for the first time.
   @Put('order')
   @ApiOperation({
     summary: 'Reorder the current member’s own personas',
@@ -235,7 +267,13 @@ export class SubprofilesController {
     return this.subprofileInvitesService.listMine(user.userId);
   }
 
+  // M1 (fix round 1): accepting seats the caller on a shared roster and the
+  // persona's mailbox, and notifies the persona's other co-owners: the same
+  // "reaches other members" direction every other content-write route on
+  // this controller is gated for. Matches the group-invite-accept precedent
+  // (`messaging/messaging.controller.ts:290-291`), which is also guarded.
   @Post('invites/:inviteId/accept')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Accept a co-owner invite' })
   @ApiCreatedResponse({ description: '`{ ok: true }` once accepted.' })
   @ApiNotFoundResponse({
@@ -310,21 +348,81 @@ export class SubprofilesController {
   @ApiBadRequestResponse({
     description: 'Invalid field (e.g. unknown accent, CTA pairing).',
   })
-  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiForbiddenResponse({
+    description:
+      'The subprofile is not yours, or you are restricted and this body ' +
+      'changes more than a narrowing visibility switch.',
+  })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiConflictResponse({ description: 'Slug or handle already in use.' })
+  @ApiConflictResponse({
+    description: `Slug or handle already in use (\`HANDLE_TAKEN\` for a published rename), or ${PERSONA_EDIT_CONFLICT_DESCRIPTION}`,
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  update(
+  async update(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateSubprofileDTO,
   ) {
+    // M3 (fix round 1, revised fix round 2): every OTHER field on this PATCH
+    // reaches other co-owners and, once published, the public (avatar,
+    // cover, tagline, handle, skin, ...), so it keeps the same refusal
+    // `NotRestrictedGuard` gives the rest of this controller's content
+    // writes. A body that changes ONLY `visibility`, narrowing it (open ->
+    // network/private, network -> private) against the persona's CURRENT
+    // stored visibility, is the one exception: narrowing is a
+    // take-down-direction privacy change, the same direction the guard
+    // contract keeps open for unpublish/delete/leave
+    // (`not-restricted.guard.ts`). `isNarrowingVisibilityOnly` below reads
+    // that current row before deciding, so a same-value body and a widening
+    // body both still refuse, along with every other field. This lives
+    // inside the handler body, ENG-237-style (`messaging.controller.ts`'s
+    // conversation PATCH); the `user.restricted` short-circuit means a
+    // member who is not restricted never pays for the extra read.
+    if (
+      user.restricted &&
+      !(await this.isNarrowingVisibilityOnly(user.userId, id, dto))
+    ) {
+      assertNotRestricted(user);
+    }
     return this.subprofilesService.update(user.userId, id, dto);
   }
 
+  // M3 (fix round 2): true only when `dto`'s one substantive field is
+  // `visibility` AND the target is STRICTLY narrower than the persona's
+  // CURRENT stored visibility (`VISIBILITY_RANK` above). Loads the current
+  // row through `getOwnedDTO`, the same ownership/404 read `getOne` above
+  // already uses, so this carries the identical 403/404 semantics. It never
+  // rolls its own lookup. `expectedEditVersion` is the ENG-451 save
+  // precondition the editor sends on every PATCH (Task 4); it changes no
+  // field, so `{ visibility, expectedEditVersion }` still counts as
+  // visibility-only. Returns `false` without the extra read for every other
+  // body shape, so a restricted member editing any other field never pays
+  // for this lookup.
+  private async isNarrowingVisibilityOnly(
+    userId: string,
+    id: string,
+    dto: UpdateSubprofileDTO,
+  ): Promise<boolean> {
+    const setKeys = (Object.keys(dto) as (keyof UpdateSubprofileDTO)[]).filter(
+      (key) => key !== 'expectedEditVersion' && dto[key] !== undefined,
+    );
+    if (
+      setKeys.length !== 1 ||
+      setKeys[0] !== 'visibility' ||
+      !dto.visibility
+    ) {
+      return false;
+    }
+    const current = await this.subprofilesService.getOwnedDTO(userId, id);
+    return (
+      VISIBILITY_RANK[dto.visibility] > VISIBILITY_RANK[current.visibility]
+    );
+  }
+
   @Put(':id/sections/:section')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Replace all items in one section of a subprofile' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
   @ApiBadRequestResponse({
@@ -332,6 +430,7 @@ export class SubprofilesController {
   })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiConflictResponse({ description: PERSONA_EDIT_CONFLICT_DESCRIPTION })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -346,15 +445,18 @@ export class SubprofilesController {
       id,
       section,
       dto.items,
+      dto.expectedEditVersion,
     );
   }
 
   @Put(':id/social-links')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Replace a subprofile’s social links' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
   @ApiBadRequestResponse({ description: 'Invalid social links.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiConflictResponse({ description: PERSONA_EDIT_CONFLICT_DESCRIPTION })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -367,10 +469,12 @@ export class SubprofilesController {
       user.userId,
       id,
       dto.items,
+      dto.expectedEditVersion,
     );
   }
 
   @Put(':id/affiliations')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Replace a subprofile’s event/community affiliations',
   })
@@ -378,6 +482,7 @@ export class SubprofilesController {
   @ApiBadRequestResponse({ description: 'Invalid affiliations.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiConflictResponse({ description: PERSONA_EDIT_CONFLICT_DESCRIPTION })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -390,6 +495,7 @@ export class SubprofilesController {
       user.userId,
       id,
       dto.items,
+      dto.expectedEditVersion,
     );
   }
 

@@ -52,3 +52,17 @@ export interface EventCohostInvitedEvent {
   inviterId: string;
   inviteeId: string;
 }
+
+export const EVENT_DELETING = 'event.deleting';
+
+/**
+ * A gathering is about to be hard-deleted. Emitted with `emitAsync` BEFORE the
+ * row goes, and the delete waits for every listener: the cascade removes rows
+ * other modules own (Go together's config, groups and entries), so anything
+ * that must be wound down while those rows still exist happens here.
+ * A listener that throws aborts the delete. Listeners register with
+ * `suppressErrors: false` so the failure reaches the emitter.
+ */
+export interface EventDeletingEvent {
+  eventId: string;
+}

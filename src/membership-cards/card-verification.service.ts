@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import { CardScanLogService } from './card-scan-log.service';
 import { effectiveCardStatus } from './card-status';
@@ -14,8 +15,6 @@ import {
 } from './membership-card-response';
 import { MembershipCardsService } from './membership-cards.service';
 
-const ERASED_HOLDER_NAME = 'A member';
-
 /**
  * Resolves a scanned card token to the public verification payload.
  *
@@ -25,9 +24,10 @@ const ERASED_HOLDER_NAME = 'A member';
  * nothing about the platform's card population leaks through the
  * difference.
  *
- * Name fields (`firstName`/`lastName`) live on `Profile`, not `User` — the
- * `users` table carries no display name, only auth/status columns. This
- * reads `Profile` (primary key `user_id`) instead.
+ * Name fields (`firstName`/`lastName`) live on `Profile`, since the `users`
+ * table carries no display name, only auth/status columns. This
+ * reads `Profile` (primary key `user_id`) and joins its `user` for the one
+ * auth column the door needs, the holder's account status.
  */
 @Injectable()
 export class CardVerificationService {
@@ -67,12 +67,21 @@ export class CardVerificationService {
     });
     if (!community) return null;
 
+    // Read before the status, because the holder's account is part of it: a
+    // member suspended by moderation, or one who has paused or is deleting
+    // their account, must not present a card that reads "Valid" at a door.
+    const holder = await this.profiles.findOne({
+      where: { userId: card.userId },
+      relations: { user: true },
+    });
+
     const status = effectiveCardStatus({
       status: card.status,
       expiresAt: card.expiresAt,
       programEnabled: program.isEnabled,
       communityFrozenAt: community.frozenAt,
       communityArchivedAt: community.archivedAt,
+      holderStatus: holder?.user?.status ?? null,
     });
 
     // The one place a verification becomes a record. It sits AFTER the token
@@ -89,24 +98,28 @@ export class CardVerificationService {
     const membership = await this.members.findOne({
       where: { communityId: community.id, userId: card.userId },
     });
-    const holder = await this.profiles.findOne({
-      where: { userId: card.userId },
-    });
+
+    // The holder's profile-wide "Show your photo" switch, through the same
+    // gate the issuer roster applies, so the door and the roster agree: once
+    // the switch is off, neither shows the face.
+    const visibleAvatarUrl = toVisibleAvatarUrl(holder);
 
     return toCardVerification(card, status, {
       issuerName: community.name,
+      // Null for a holder with no profile row, or with no name on it. The
+      // client prints its own localized fallback for that case.
       holderName: holder
-        ? [holder.firstName, holder.lastName].filter(Boolean).join(' ')
-        : ERASED_HOLDER_NAME,
+        ? [holder.firstName, holder.lastName].filter(Boolean).join(' ') || null
+        : null,
       role: membership?.role ?? 'member',
-      // Three conditions, all of which must hold for a face to be on the card:
-      // the programme prints photos, the member has not vetoed theirs, and they
-      // actually have one.
+      // Four conditions, all of which must hold for a face to be on the card:
+      // the programme prints photos, the member has not vetoed theirs on this
+      // card, their profile photo is visible, and they actually have one.
       hasPhoto:
         program.allowsMemberPhoto &&
         !card.isPhotoHidden &&
-        Boolean(holder?.avatarUrl),
-      // The same three conditions applied to the other thing the card can say
+        Boolean(visibleAvatarUrl),
+      // Three matching conditions applied to the other thing the card can say
       // about its holder: the programme prints pronouns, the member has not
       // vetoed theirs, and they have any set. A stranger learns exactly what
       // the card in their hand says and nothing beyond it.
@@ -114,9 +127,10 @@ export class CardVerificationService {
         program.allowsPronouns && !card.isPronounsHidden
           ? holder?.pronouns?.trim() || null
           : null,
-      // Handed over raw; `toCardVerification` applies the photo gate and the
-      // status gate, so there is exactly one place a face can leave through.
-      holderAvatarUrl: holder?.avatarUrl ?? null,
+      // Already resolved and `photoVisible`-gated; `toCardVerification`
+      // applies the card's photo gate and the status gate on top, so there is
+      // exactly one place a face can leave through.
+      holderAvatarUrl: visibleAvatarUrl,
       photoStyle: program.photoStyle,
     });
   }

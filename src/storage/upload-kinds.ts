@@ -271,3 +271,31 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
 export const UPLOAD_KINDS: readonly UploadKind[] = Object.keys(
   UPLOAD_KIND_SPECS,
 ) as UploadKind[];
+
+/**
+ * Kinds whose files are served only through the participant-checked branch of
+ * `GET /files/*` (`FilesController.serve()`): members' private conversation
+ * attachments. Staff tooling that enumerates or signs raw bucket objects (the
+ * admin media console) leaves these out entirely, so a DM file stays readable
+ * by the people in that conversation and reaches staff only through a report.
+ */
+export const PARTICIPANT_SCOPED_UPLOAD_KINDS: readonly UploadKind[] = [
+  'message-image',
+  'message-document',
+];
+
+/** Storage-key prefixes of `PARTICIPANT_SCOPED_UPLOAD_KINDS`, e.g. `message-images`. */
+export const PRIVATE_MESSAGE_PREFIXES: ReadonlySet<string> = new Set(
+  PARTICIPANT_SCOPED_UPLOAD_KINDS.map((kind) => UPLOAD_KIND_SPECS[kind].prefix),
+);
+
+/** Whether a storage key sits under one of the `PRIVATE_MESSAGE_PREFIXES`.
+ *  Leading slashes are dropped and the first segment is compared lowercased,
+ *  so a stray object written out of band as `/message-images/...` or
+ *  `Message-Images/...` still counts as private. */
+export function isPrivateMessageKey(key: string): boolean {
+  const firstSegment = key.replace(/^\/+/, '').split('/')[0]?.toLowerCase();
+  return (
+    firstSegment !== undefined && PRIVATE_MESSAGE_PREFIXES.has(firstSegment)
+  );
+}

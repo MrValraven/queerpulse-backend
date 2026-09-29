@@ -9,6 +9,7 @@ import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazinePiece } from './entities/magazine-piece.entity';
+import { magazineIssueVisibleThroughDate } from './magazine-clock';
 import {
   AuthorSummary,
   IssueResponse,
@@ -122,7 +123,9 @@ export class MagazineFrontService {
    * The issue the masthead names and the front is arranged from: the most
    * recently published one. `published_on` is a Postgres `date`, so an issue
    * scheduled for a later day is not current yet, and an issue the desk has
-   * opened but never scheduled (`NULL`) is not current at all.
+   * opened but never scheduled (`NULL`) is not current at all. The ceiling is
+   * `magazineIssueVisibleThroughDate()` (CON-18): an issue becomes current at
+   * 09:00 Lisbon on its ship date.
    *
    * ONE definition of "current", shared by `getCurrentIssue` and `getFront`,
    * so the masthead can never name a different issue from the one whose run
@@ -132,7 +135,9 @@ export class MagazineFrontService {
     return this.issues
       .createQueryBuilder('issue')
       .where('issue.published_on IS NOT NULL')
-      .andWhere('issue.published_on <= CURRENT_DATE')
+      .andWhere('issue.published_on <= :visibleThrough', {
+        visibleThrough: magazineIssueVisibleThroughDate(),
+      })
       .orderBy('issue.published_on', 'DESC')
       .addOrderBy('issue.number', 'DESC')
       .getOne();

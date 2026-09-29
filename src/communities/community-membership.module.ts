@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { CommunityMembershipService } from './community-membership.service';
 import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
@@ -27,6 +28,12 @@ import { SubcommunityCascadeService } from './subcommunity-cascade.service';
       CommunityPost,
       CommunityPostReply,
     ]),
+    // `ContentModerationService`: `assertMemberForReadBySlug` (ENG-426
+    // follow-up) runs the same takedown closure posts/replies/the roster
+    // already do, so a taken-down community's Library/pulse reads 404 to a
+    // plain member the same way. Closes no cycle: `ContentModerationModule`
+    // imports nothing from this module or from `CommunitiesModule`.
+    ContentModerationModule,
   ],
   providers: [CommunityMembershipService, SubcommunityCascadeService],
   exports: [CommunityMembershipService, SubcommunityCascadeService],

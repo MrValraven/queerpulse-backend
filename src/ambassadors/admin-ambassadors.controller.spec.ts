@@ -2,6 +2,7 @@ import { ExecutionContext } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import { Repository } from 'typeorm';
+import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
@@ -18,6 +19,7 @@ import { AmbassadorsService } from './ambassadors.service';
 describe('AdminAmbassadorsController', () => {
   type HandlerName =
     | 'list'
+    | 'history'
     | 'getCircleSummary'
     | 'takeStaffSeat'
     | 'grant'
@@ -26,6 +28,7 @@ describe('AdminAmbassadorsController', () => {
 
   const handlerNames: HandlerName[] = [
     'list',
+    'history',
     'getCircleSummary',
     'takeStaffSeat',
     'grant',
@@ -119,16 +122,57 @@ describe('AdminAmbassadorsController', () => {
     ).resolves.toBe(false);
   });
 
-  it('reads the list status off the query and defaults to active', async () => {
-    const ambassadorsService = { list: jest.fn().mockResolvedValue([]) };
+  it('reads the list status and page off the query, defaulting to the first active page', async () => {
+    const ambassadorsService = {
+      list: jest
+        .fn()
+        .mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 }),
+    };
     const controller = new AdminAmbassadorsController(
       ambassadorsService as unknown as AmbassadorsService,
     );
 
     await controller.list({});
-    await controller.list({ status: 'past' });
+    await controller.list({ status: 'past', page: 3 });
 
-    expect(ambassadorsService.list).toHaveBeenNthCalledWith(1, 'active');
-    expect(ambassadorsService.list).toHaveBeenNthCalledWith(2, 'past');
+    expect(ambassadorsService.list).toHaveBeenNthCalledWith(1, 'active', 1);
+    expect(ambassadorsService.list).toHaveBeenNthCalledWith(2, 'past', 3);
+  });
+
+  it('hands the history query userId to the service (ENG-458)', async () => {
+    const ambassadorsService = { historyFor: jest.fn().mockResolvedValue([]) };
+    const controller = new AdminAmbassadorsController(
+      ambassadorsService as unknown as AmbassadorsService,
+    );
+
+    await controller.history({
+      userId: '3f0c8d1e-5a4b-4c2d-9e8f-1a2b3c4d5e6f',
+    });
+
+    expect(ambassadorsService.historyFor).toHaveBeenCalledWith(
+      '3f0c8d1e-5a4b-4c2d-9e8f-1a2b3c4d5e6f',
+    );
+  });
+
+  it('serves the circle summary through the pure read (ENG-459)', async () => {
+    const notFounded = {
+      isFounded: false,
+      slug: null,
+      memberCount: 0,
+      isViewerMember: false,
+    };
+    const ambassadorsService = {
+      getCircleSummary: jest.fn().mockResolvedValue(notFounded),
+      takeStaffSeat: jest.fn(),
+    };
+    const controller = new AdminAmbassadorsController(
+      ambassadorsService as unknown as AmbassadorsService,
+    );
+
+    await expect(
+      controller.getCircleSummary({ userId: 'staff-1' } as CurrentUserData),
+    ).resolves.toEqual(notFounded);
+    expect(ambassadorsService.getCircleSummary).toHaveBeenCalledWith('staff-1');
+    expect(ambassadorsService.takeStaffSeat).not.toHaveBeenCalled();
   });
 });

@@ -109,15 +109,38 @@ export class ForumSubscriptionsService {
    * INSERT and left completely alone on conflict. Opening a thread is not
    * asking to be notified about it, and a watermark that quietly subscribed
    * would turn reading five threads into five threads' worth of bell.
+   *
+   * THE WATERMARK ONLY MOVES FORWARD (PRD-409). `readAt` is the instant the
+   * client says the member read up to, already clamped to now by the caller.
+   * Two tabs, or a slow request landing after a faster one, can deliver an
+   * older stamp second; `GREATEST` keeps the later of the stored and the
+   * incoming value, so a late request leaves the watermark where it was. The
+   * `COALESCE` covers a row that exists for a follow but has never been read,
+   * whose NULL would otherwise make `GREATEST` skip it and still land on the
+   * incoming stamp, which is the right answer spelled explicitly.
+   *
+   * Raw SQL because a query-builder `orUpdate` can only overwrite a column with
+   * the incoming value; it has no way to express the comparison.
    */
-  async markRead(threadId: string, userId: string): Promise<void> {
-    await this.subscriptions
-      .createQueryBuilder()
-      .insert()
-      .into(ForumThreadSubscription)
-      .values({ threadId, userId, isFollowing: false, lastReadAt: new Date() })
-      .orUpdate(['last_read_at'], ['thread_id', 'user_id'])
-      .execute();
+  async markRead(
+    threadId: string,
+    userId: string,
+    readAt: Date = new Date(),
+  ): Promise<void> {
+    await this.subscriptions.query(
+      `INSERT INTO "forum_thread_subscription"
+         ("thread_id", "user_id", "is_following", "last_read_at")
+       VALUES ($1, $2, false, $3)
+       ON CONFLICT ("thread_id", "user_id") DO UPDATE
+         SET "last_read_at" = GREATEST(
+           COALESCE(
+             "forum_thread_subscription"."last_read_at",
+             EXCLUDED."last_read_at"
+           ),
+           EXCLUDED."last_read_at"
+         )`,
+      [threadId, userId, readAt],
+    );
   }
 
   /**

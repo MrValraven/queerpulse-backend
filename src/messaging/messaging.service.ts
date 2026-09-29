@@ -12,7 +12,6 @@ import {
   MessageReactorsResponse,
   MessageResponse,
   MessageSearchResponse,
-  MessageView,
   StarredMessagesResponse,
 } from './message-response';
 import { ConversationsService } from './conversations.service';
@@ -557,11 +556,12 @@ export class MessagingService {
     return this.groupsService.dissolveGroup(conversationId, actorUserId);
   }
 
-  /** PRD-358: `POST :id/invite-link` facade pass-through. */
+  /** PRD-358: `POST :id/invite-link` facade pass-through. PRD-400: the
+   *  response carries the new link's expiry too. */
   createOrRotateInviteLink(
     conversationId: string,
     actorUserId: string,
-  ): Promise<{ inviteToken: string }> {
+  ): Promise<{ inviteToken: string; inviteTokenExpiresAt: string }> {
     return this.groupsService.createOrRotateInviteLink(
       conversationId,
       actorUserId,
@@ -628,12 +628,18 @@ export class MessagingService {
     userId: string,
     toSlug: string,
     body: string,
+    clientMessageId?: string,
   ): Promise<{
     conversationId: string | null;
-    message: MessageView | null;
+    message: MessageResponse | null;
     connectionRequestId: string | null;
   }> {
-    return this.messageRequestsService.messageRequest(userId, toSlug, body);
+    return this.messageRequestsService.messageRequest(
+      userId,
+      toSlug,
+      body,
+      clientMessageId,
+    );
   }
 
   deliverEnquiry(

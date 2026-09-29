@@ -1,3 +1,4 @@
+import { currentHostAnswerOption } from './go-together-answers';
 import { HostQuestion } from './go-together-questionnaire.catalog';
 import { MatchCandidate, STRONG_FIT } from './go-together-scoring';
 
@@ -105,17 +106,16 @@ export function buildGroupReasons(
       total,
     });
 
+  // Each answer is read against the current question, so an option the
+  // host has since removed never becomes "you all picked" copy.
   for (const question of hostQuestions) {
-    const firstAnswer = members[0]?.hostAnswers[question.id];
-    const isUnanimous =
-      firstAnswer !== undefined &&
-      members.every(
-        (member) => member.hostAnswers[question.id] === firstAnswer,
-      );
-    const option = question.options.find(
-      (candidate) => candidate.id === firstAnswer,
+    const picks = members.map((member) =>
+      currentHostAnswerOption(question, member.hostAnswers),
     );
-    if (isUnanimous && option) {
+    const option = picks[0];
+    const isUnanimous =
+      option !== undefined && picks.every((pick) => pick?.id === option.id);
+    if (isUnanimous) {
       reasons.push({
         kind: 'hostQuestion',
         questionId: question.id,

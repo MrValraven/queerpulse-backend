@@ -42,6 +42,12 @@ export class Sticker {
   @Column({ length: 80 })
   label!: string;
 
+  /** The Portuguese name, or `null` when nobody wrote one. `label` holds the
+   *  English name; a reader in Portuguese sees this one and falls back to
+   *  `label` while it is `null`. Same 80-character cap as `label`. */
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  labelPt!: string | null;
+
   /** The 512px PNG's private storage key, resolved through `toImageUrl` to
    *  `GET /files/<key>` at every read path, exactly like every other image
    *  field in this app. */

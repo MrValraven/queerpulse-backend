@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import { effectiveCardStatus } from './card-status';
 import { CardTokenService } from './card-token.service';
@@ -61,14 +62,19 @@ export class MyCardsService {
     );
 
     // Display name lives on `Profile` (`firstName`/`lastName`), not `User`.
+    // Null when there is no profile row or no name on it: the client prints
+    // its own localized fallback.
     const profile = await this.profiles.findOne({ where: { userId } });
     const holderName = profile
-      ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-      : 'A member';
-    // One avatar per member, not one per card: whether it actually reaches
-    // the wire is decided per card in `toMyCard`, which applies the
-    // programme's switch and the member's veto together.
-    const holderAvatarUrl = profile?.avatarUrl ?? null;
+      ? [profile.firstName, profile.lastName].filter(Boolean).join(' ') || null
+      : null;
+    // One avatar for every card the member holds, already through their
+    // profile-wide "Show your photo" switch. The card is shown to other people
+    // at a door, so it follows the same gate as the door and the issuer
+    // roster, and the three always agree on whether the card carries a face.
+    // Whether it reaches the wire is then decided per card in `toMyCard`,
+    // which applies the programme's switch and the member's card veto.
+    const holderAvatarUrl = toVisibleAvatarUrl(profile);
     // Read from the profile rather than stored per card, so a member who
     // changes their pronouns changes every card they hold at once. Whether it
     // reaches the wire is decided per card in `toMyCard`.
@@ -88,6 +94,9 @@ export class MyCardsService {
         programEnabled: program.isEnabled,
         communityFrozenAt: community.frozenAt,
         communityArchivedAt: community.archivedAt,
+        // This is the holder's own wallet: it shows them their card as their
+        // community holds it, so it does not gate on their own account.
+        holderStatus: null,
       });
 
       return [

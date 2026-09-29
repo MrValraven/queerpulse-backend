@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, Repository } from 'typeorm';
+import { CAPTIONED_MESSAGE_KINDS } from '../common/mentions';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { IdentityAttributionService } from '../identities/identity-attribution.service';
 import { IdentitiesService } from '../identities/identities.service';
@@ -800,7 +801,10 @@ describe('MessageAnnotationsService.listStarredMessages (PRD-374)', () => {
       // parameter itself stays the plain LIKE-escaped pattern: escaping
       // survives the fold untouched since `\`, `%`, and `_` sit outside the
       // accented-letter/case pairs `translate`/`lower` ever touch.
-      expect(params).toEqual({ qPattern: '%50\\%off%' });
+      expect(params).toEqual({
+        qPattern: '%50\\%off%',
+        captionOnlySearchKinds: [...CAPTIONED_MESSAGE_KINDS],
+      });
       // Every branch runs through `foldedHaystack`/`foldedTextExpression`
       // (`translate(lower(...))`), so each of these stable substrings names
       // the column being matched without pinning the exact fold expression
@@ -818,6 +822,34 @@ describe('MessageAnnotationsService.listStarredMessages (PRD-374)', () => {
       expect(sql).toContain('"other_profile"."user_id" = "op"."user_id"');
       expect(sql).toContain('"other_profile"."first_name"');
       expect(sql).toContain('"other_profile"."last_name"');
+    });
+
+    it('matches a captioned kind on its caption and file name alone, so the "Photo" and "Document" fallback body never matches, as main search does', async () => {
+      await service.listStarredMessages(VIEWER_ID, { q: 'photo' });
+      const call = findAndWhereCall(starredQuery, (sql) =>
+        sql.includes('qPattern'),
+      );
+      expect(call).toBeDefined();
+      const [sql, params] = call!;
+      expect(params.captionOnlySearchKinds).toEqual([
+        ...CAPTIONED_MESSAGE_KINDS,
+      ]);
+      expect(params.captionOnlySearchKinds).toEqual(
+        expect.arrayContaining(['image', 'document']),
+      );
+      // A sticker edited before ENG-405 may still hold the edit's text in
+      // its body, so its body is skipped too.
+      expect(params.captionOnlySearchKinds).toEqual(
+        expect.arrayContaining([MessageKind.Sticker]),
+      );
+      // The body branch is the one guarded by the kind gate; every
+      // `"m"."body"` reference sits inside it.
+      const gatedBodyBranch =
+        /\(m\.kind NOT IN \(:\.\.\.captionOnlySearchKinds\)\s+AND [^\n]*"m"\."body"[^\n]*\)/;
+      expect(sql).toMatch(gatedBodyBranch);
+      expect(sql.split('"m"."body"')).toHaveLength(2);
+      expect(sql).toContain(`coalesce(m.attachment ->> 'caption', '')`);
+      expect(sql).toContain(`coalesce(m.attachment ->> 'fileName', '')`);
     });
 
     it('quotes every mixed-case alias reference across every andWhere/innerJoin/leftJoin clause the method builds, so Postgres resolves each one to the identical name declared in its FROM clause', async () => {
@@ -963,6 +995,31 @@ describe('MessageAnnotationsService.listStarredMessages (PRD-374)', () => {
       expect(result.nextCursor).toBe(
         encodeMessageHistoryCursor('2026-06-03T00:00:00.000000Z', 'm3'),
       );
+    });
+
+    it('reads a starred document whose body is the raw catalog key as File', async () => {
+      const rows = [
+        buildMessageRow({
+          id: 'm1',
+          kind: MessageKind.Document,
+          body: 'messages:attachments.documentFallbackText',
+          attachment: {
+            url: 'message-documents/u2/lease.pdf',
+            fileName: 'lease.pdf',
+            byteSize: 1024,
+            contentType: 'application/pdf',
+            provider: 'upload',
+          },
+        }),
+      ];
+      starredQuery.getRawAndEntities.mockResolvedValue({
+        entities: rows,
+        raw: [{ m_id: 'm1', cursor_starred_at: '2026-06-01T00:00:00.000000Z' }],
+      });
+
+      const result = await service.listStarredMessages(VIEWER_ID);
+
+      expect(result.items[0]?.snippet).toBe('File');
     });
 
     it('reports no more pages and a null nextCursor when the page is not full', async () => {

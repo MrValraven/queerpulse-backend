@@ -109,7 +109,7 @@ export class AdminMemberModerationService {
    * directly to their audit trail from the trust network graph inspector's
    * "Cite" action. Report-less, like `member_verified`, but writes
    * `targetUserId`/`targetName` directly (bypassing `ModAuditService.
-   * writeAuditLog`, which has no target-member parameter) — the same shape
+   * writeAuditLog`, which takes a target id and no target name). Same shape
    * `AdminMembersService.updateRole`/`grantStaffRole`/`revokeStaffRole` use
    * for their own report-less, member-directed rows, so this one resolves a
    * real subject in the global `GET /mod/audit` feed instead of falling back
@@ -264,7 +264,13 @@ export class AdminMemberModerationService {
    */
   private async notifyOutcome(
     actorId: string,
-    result: { userId: string; suspendedUntil: Date | null },
+    // `auditLogId` is the row `restrictMember` wrote (ENG-480). It rides on the
+    // payload as `actionId` so the bell opens the appeal form on this decision.
+    result: {
+      userId: string;
+      suspendedUntil: Date | null;
+      auditLogId?: string;
+    },
     dto: RestrictMemberDto,
     action: 'suspend' | 'ban',
   ): Promise<void> {
@@ -281,6 +287,7 @@ export class AdminMemberModerationService {
           ...(result.suspendedUntil
             ? { expiresAt: result.suspendedUntil.toISOString() }
             : {}),
+          ...(result.auditLogId ? { actionId: result.auditLogId } : {}),
         },
       );
     } catch {

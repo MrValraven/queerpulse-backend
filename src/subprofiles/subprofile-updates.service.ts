@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { runWithConcurrency } from '../common/run-with-concurrency';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { personaPath } from '../profiles/activity-links';
@@ -17,6 +18,7 @@ import {
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
+import { isSubprofileUnderTakedown } from './subprofile-takedown';
 
 /**
  * The most followers one publish will ever notify. Mirrors
@@ -123,6 +125,11 @@ export class SubprofileUpdatesService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly notifications: NotificationsService,
+    // Read-only: a moderator takedown withholds the persona from every
+    // public read path, so a follower is never told about work on a persona
+    // they can no longer see. `ContentModerationModule` is already imported
+    // by `SubprofilesModule` for `SubprofilePublicReadService`.
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /**
@@ -164,6 +171,15 @@ export class SubprofileUpdatesService {
         section,
       );
       if (newItemCount === 0) return;
+
+      // A moderator takedown withholds the persona from every public read
+      // path (`dropModeratedSubprofiles` / `excludeModeratedSubprofiles`), so
+      // a follower is never told about work on a persona they can no longer
+      // see. Checked before the follower lookup: a taken-down persona sends
+      // no notification and rings no bell.
+      if (await isSubprofileUnderTakedown(this.contentModeration, persona.id)) {
+        return;
+      }
 
       const recipientIds = await this.followerRecipientIds(persona);
       if (!recipientIds.length) return;

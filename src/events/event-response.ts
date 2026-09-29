@@ -251,13 +251,17 @@ export interface EventDetail extends EventSummary {
    * viewer: empty when the host has turned off `showAttendeeCount`
    * (`EventsService.buildGoingAttendeesPreview`); always block-filtered
    * (blocked/blocking members never appear, in either direction — same rule
-   * as `EventsService.attendees`). The organizer's own view is never gated by
-   * `showAttendeeCount` — that toggle only hides the signal from others. */
+   * as `EventsService.attendees`). Each attendee's own "Who can see you're
+   * going?" answer (PRD-414) also applies: a non-organizer sees a face only
+   * when that answer admits them. The organizer's own view is never gated by
+   * `showAttendeeCount` or by those answers: organisers see everyone. */
   goingAttendeesPreview: EventOrganizerView[];
   /** The block-filtered/privacy-gated total behind `goingAttendeesPreview` —
    *  NOT the same as `EventSummary.goingCount` (which is the raw, unfiltered
-   *  RSVP count used for the public "N going" spots copy). The FE derives its
-   *  own "+N more" from `goingAttendeesPreviewTotal - goingAttendeesPreview.length`. */
+   *  RSVP count used for the public "N going" spots copy). It still counts
+   *  members who hid their attendance (PRD-414): they are part of the
+   *  "+N more" number, with no face or name. The FE derives its own "+N more"
+   *  from `goingAttendeesPreviewTotal - goingAttendeesPreview.length`. */
   goingAttendeesPreviewTotal: number;
 
   // ── Where it actually is (LOC-04) ────────────────────────────────────────
@@ -494,32 +498,25 @@ export interface AttendeeView {
    * and the organiser's list carried name, avatar and status and nothing
    * else.
    *
-   * Two gates, both of which must pass:
-   *  1. The viewer is the host or a co-host. These fields are `undefined` for
-   *     every other reader, on every route, and the attendee list is never
-   *     `@Public()`.
-   *  2. The attendee's OWN `visibility` choice permits it. `justMe` withholds
-   *     the free-text needs from the organiser too (the guest count still
-   *     shows, because it is how many seats the host must lay); `everyone`
-   *     and `connections` disclose them to the organiser, who is the person
-   *     the answers were written for.
+   * One gate: the viewer is the host or a co-host. These fields are
+   * `undefined` for every other reader, on every route, and the attendee list
+   * is never `@Public()`. The organiser always receives every answer
+   * (PRD-415): the attendee's `visibility` choice decides which other members
+   * see that they are going, and the answers were written for the host.
    *
    * A row that has answered nothing simply carries a zero guest count and
-   * nulls, which is a different fact from "withheld" only in that there was
-   * nothing to withhold.
+   * nulls.
    */
   guestCount?: number;
   accessNeeds?: string | null;
   dietaryNeeds?: string | null;
-  /** The attendee's own "who can see this" choice, echoed so the organiser's
-   *  UI can say why a needs line is absent rather than implying nobody has
-   *  any. Organisers only, like the three fields above. */
+  /** The attendee's answer to "Who can see you're going?" (PRD-414), echoed
+   *  so the organiser's UI can mark a member who asked to be listed to the
+   *  organisers only. Organisers only, like the three fields above. */
   detailsVisibility?: string | null;
-  /** The attendee's answer to the pronouns question. Organisers only, and
-   *  withheld under `justMe` exactly like `accessNeeds`. */
+  /** The attendee's answer to the pronouns question. Organisers only. */
   pronouns?: string | null;
-  /** The attendee's answer to the host's own question. Organisers only, and
-   *  withheld under `justMe` exactly like `accessNeeds`. */
+  /** The attendee's answer to the host's own question. Organisers only. */
   customAnswer?: string | null;
 }
 
@@ -689,21 +686,19 @@ export function toAttendeeView(
     checkedInAt: forOrganizer ? rsvp.checkedInAt : null,
   };
   if (!forOrganizer) return base;
-  // The attendee's own visibility choice, honoured at last. `justMe` keeps
-  // the free-text needs private even from the organiser; the guest count is
-  // not covered by it, because it is a seat-planning fact the host has to
-  // have to run the room at all.
-  const disclosesNeeds = rsvp.visibility !== 'justMe';
+  // PRD-415: the organiser always gets every answer. `rsvp.visibility` is the
+  // attendee's answer to "Who can see you're going?", which decides which
+  // OTHER members see this row at all (`restrictToAttendeesVisibleTo`). The
+  // notes were written for the host, who needs them to run the gathering, so
+  // no setting withholds them here.
   return {
     ...base,
     guestCount: rsvp.guestCount,
-    accessNeeds: disclosesNeeds ? rsvp.accessNeeds : null,
-    dietaryNeeds: disclosesNeeds ? rsvp.dietaryNeeds : null,
+    accessNeeds: rsvp.accessNeeds,
+    dietaryNeeds: rsvp.dietaryNeeds,
     detailsVisibility: rsvp.visibility,
-    // The answers to the host's questions are free text the attendee typed
-    // into the same modal, so the same `justMe` choice covers them.
-    pronouns: disclosesNeeds ? (rsvp.pronouns ?? null) : null,
-    customAnswer: disclosesNeeds ? (rsvp.customAnswer ?? null) : null,
+    pronouns: rsvp.pronouns ?? null,
+    customAnswer: rsvp.customAnswer ?? null,
   };
 }
 

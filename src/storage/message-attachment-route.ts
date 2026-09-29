@@ -16,6 +16,7 @@ import {
 import {
   MESSAGE_SUBJECT_TYPE,
   notModeratedMessagePredicate,
+  withinLeftAtCeilingPredicate,
 } from '../messaging/message-visibility-predicates';
 import { messageAttachmentReference } from './message-attachment-reference';
 import { parseStorageKey } from './storage-key';
@@ -107,7 +108,8 @@ export function messageAttachmentRouteStorageKey(
  * The image or document message `messageId`, when `userId` may see it. The
  * rules are the ones every download of a message attachment applies
  * (`FilesController.isMessageAttachmentParticipant`): a seat in the
- * message's conversation (a left member keeps read access to history), the
+ * message's conversation (a left member keeps read access to the history
+ * posted up to their `leftAt`, ENG-401), the
  * mailbox seat rules through `seatExcludedFromMailboxPredicate` (a staff
  * seat blocked with the customer, a departed staff seat, and every seat of a
  * thread whose customer blocked the business), and the mailbox staff
@@ -132,6 +134,12 @@ export function viewableMessageAttachmentQuery(
   // `message.<property>` uses entity property names so TypeORM maps them to
   // the snake_case columns; `participant.*` references the raw joined
   // table's real column names (that alias names a raw table).
+  //
+  // ENG-401: the requester's `leftAt` ceiling, as every read applies it.
+  const leftAtCeiling = withinLeftAtCeilingPredicate(
+    'message.created_at',
+    'participant',
+  );
   return messages
     .createQueryBuilder('message')
     .innerJoin(
@@ -146,6 +154,7 @@ export function viewableMessageAttachmentQuery(
     })
     .andWhere('message.deletedAt IS NULL')
     .andWhere('message.attachment IS NOT NULL')
+    .andWhere(leftAtCeiling)
     .andWhere(
       `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}`,
     )

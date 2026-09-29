@@ -19,6 +19,7 @@ import {
 } from '../communities/entities/community.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
+import { magazineIssueVisibleThroughDate } from '../magazine/magazine-clock';
 import { SafeSpaceNomination } from '../safe-space-nominations/entities/safe-space-nomination.entity';
 import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { UsersService } from '../users/users.service';
@@ -86,10 +87,11 @@ export class PressKitService {
    */
   async getPressKit(): Promise<PressKitResponseDTO> {
     // A `date` column compares correctly against a `YYYY-MM-DD` string, so a
-    // future-dated (scheduled) issue is excluded — "issues published so far",
+    // future-dated (scheduled) issue is excluded: "issues published so far",
     // mirroring the `published_at <= now` honesty gate `MagazineService` uses
-    // for articles and decks.
-    const todayIsoDate = new Date().toISOString().slice(0, 10);
+    // for articles and decks. Issues go public at 09:00 Lisbon on their date,
+    // so the cutoff comes from the magazine clock's visible-through date.
+    const visibleThroughIsoDate = magazineIssueVisibleThroughDate();
 
     const [
       activeMembersCount,
@@ -118,9 +120,9 @@ export class PressKitService {
       // Only nominations a moderator has APPROVED count as real safe spaces;
       // pending/rejected are an intake queue, not a badge.
       this.safeSpaceNominations.count({ where: { status: 'approved' } }),
-      // Issues published on or before today.
+      // Issues published on or before the latest visible issue date.
       this.magazineIssues.count({
-        where: { publishedOn: LessThanOrEqual(todayIsoDate) },
+        where: { publishedOn: LessThanOrEqual(visibleThroughIsoDate) },
       }),
       this.pressCoverage.find({
         where: { active: true },

@@ -33,6 +33,7 @@ describe('RsvpService', () => {
     findOne: jest.Mock;
     find: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
     create: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
@@ -49,8 +50,11 @@ describe('RsvpService', () => {
   let goingSeats: number;
   let maxWaitlistPosition: number;
   let emitter: { emit: jest.Mock };
-  // `updateRsvpDetails` loads the event through the plain `Event` repository,
-  // outside any transaction.
+  // `updateRsvpDetails` loads the event through the plain `Event` repository
+  // to decide whether an edit could be a guest-count raise, outside any
+  // transaction. A raise re-reads the same event through `managerFindOne`
+  // under the `pessimistic_write` lock (ENG-431): see
+  // `raiseGuestCountAndSave`.
   let eventRepo: { findOne: jest.Mock };
 
   beforeEach(async () => {
@@ -87,6 +91,7 @@ describe('RsvpService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       save: jest.fn((rsvp: unknown) => rsvp),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       create: jest.fn((rsvp: unknown) => rsvp),
       createQueryBuilder: jest.fn(() => rsvpQueryBuilder),
     };
@@ -284,6 +289,31 @@ describe('RsvpService', () => {
       expect(view.pronouns).toBe('she/her');
       expect(view.customAnswer).toBe('Bringing a friend');
     });
+
+    // M4: the unlocked path writes the edited columns alone, so a status,
+    // waitlist position or guest count committed by a promotion or a locked
+    // raise after the plain read keeps its committed value.
+    it('writes only the edited columns on the unlocked path', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp());
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        pronouns: '  they/them  ',
+      });
+      expect(rsvpRepo.update).toHaveBeenCalledWith(
+        { id: 'r1' },
+        { pronouns: 'they/them' },
+      );
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+      expect(view.pronouns).toBe('they/them');
+      expect(view.customAnswer).toBe('Bringing a friend');
+    });
+
+    it('writes nothing for an edit that names no field', async () => {
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp());
+      const view = await service.updateRsvpDetails('e', 'u1', {});
+      expect(rsvpRepo.update).not.toHaveBeenCalled();
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+      expect(view.pronouns).toBe('she/her');
+    });
   });
 
   // Past the host's RSVP cutoff a member can still lower their guest count
@@ -319,6 +349,9 @@ describe('RsvpService', () => {
 
     beforeEach(() => {
       eventRepo.findOne.mockResolvedValue(closedEvent());
+      // A raise re-reads the event under lock via `manager.findOne`
+      // (ENG-431), same fixture, since these are not testing a race.
+      managerFindOne.mockResolvedValue(closedEvent());
     });
 
     it('refuses a member raising their guest count', async () => {
@@ -373,6 +406,115 @@ describe('RsvpService', () => {
       );
       // An unchanged count is no raise, so nobody is asked who organises.
       expect(managerExists).not.toHaveBeenCalled();
+    });
+  });
+
+  // ENG-431: a guest-count raise used to check capacity with plain reads
+  // outside any lock, so two concurrent raises, or a raise racing a fresh
+  // RSVP, could each read the same "seats free" snapshot and both pass. A
+  // raise now runs inside `dataSource.transaction` and re-reads the event
+  // through `manager.findOne` with the same `pessimistic_write` lock `rsvp()`
+  // takes, exactly like the create path's lock (asserted the same way the
+  // `rsvp()`/`cancelRsvp()` tests above check `managerFindOne`'s call shape).
+  describe('updateRsvpDetails guest-count raise takes the event lock (ENG-431)', () => {
+    const openEvent = (capacity: number | null) => ({
+      id: 'e1',
+      slug: 'e',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      capacity,
+      startAt: new Date(Date.now() + 72 * 60 * 60 * 1000),
+      endAt: null,
+      rsvpCutoff: 'day-before' as const,
+    });
+    const goingRsvp = (guestCount: number) => ({
+      id: 'r1',
+      eventId: 'e1',
+      userId: 'u1',
+      status: RsvpStatus.Going,
+      guestCount,
+      accessNeeds: null,
+      dietaryNeeds: null,
+      visibility: null,
+      pronouns: null,
+      customAnswer: null,
+    });
+
+    it('acquires the same pessimistic_write event lock the RSVP create path takes', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent(5));
+      managerFindOne.mockResolvedValue(openEvent(5));
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp(0));
+      goingSeats = 1; // just the caller's own current seat
+      await service.updateRsvpDetails('e', 'u1', { guestCount: 1 });
+      expect(managerFindOne).toHaveBeenCalledWith(
+        Event,
+        expect.objectContaining({
+          where: { slug: 'e' },
+          lock: { mode: 'pessimistic_write' },
+        }),
+      );
+    });
+
+    it('rejects a raise that would push the event over capacity', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent(2));
+      managerFindOne.mockResolvedValue(openEvent(2));
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp(0));
+      goingSeats = 2; // already full, including the caller's own single seat
+      const attempt = service.updateRsvpDetails('e', 'u1', { guestCount: 1 });
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(
+        'There is not enough room left for that many guests',
+      );
+      expect(rsvpRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('admits a raise that still fits under capacity', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent(5));
+      managerFindOne.mockResolvedValue(openEvent(5));
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp(0));
+      goingSeats = 2;
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        guestCount: 1,
+      });
+      expect(view.guestCount).toBe(1);
+    });
+
+    // Fix round 1: the test harness's `manager.getRepository()` returns the
+    // exact same mock the plain injected `EventRsvp` repo uses, so a test that
+    // sets one `rsvpRepo.findOne` answer for both reads cannot tell the
+    // locked path's fresh re-read apart from the caller's stale outer
+    // pre-check. `mockResolvedValueOnce` sequences two different rows onto
+    // the two calls the code actually makes (outer, unlocked, then the
+    // locked re-read inside `raiseGuestCountAndSave`), so the capacity math
+    // below can only come out right if it used the SECOND row.
+    it('bases the capacity decision on the fresh row read under the lock', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent(3));
+      managerFindOne.mockResolvedValue(openEvent(3));
+      // Outer pre-check: a stale guestCount of 0, as if this caller's own
+      // earlier read raced a concurrent raise that already committed.
+      // Locked re-read: the row as it actually stands now, guestCount 1.
+      rsvpRepo.findOne
+        .mockResolvedValueOnce(goingRsvp(0))
+        .mockResolvedValueOnce(goingRsvp(1));
+      goingSeats = 2;
+      // Raising to 2 guests: against the STALE row (0) extraSeats would be 2,
+      // and 2 + 2 = 4 > 3 would reject. Against the FRESH row (1) extraSeats
+      // is only 1, and 2 + 1 = 3 fits exactly. Succeeding here is only
+      // possible if the fresh, locked read drove the decision.
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        guestCount: 2,
+      });
+      expect(view.guestCount).toBe(2);
+    });
+
+    it('never locks or checks capacity for a lowered guest count', async () => {
+      eventRepo.findOne.mockResolvedValue(openEvent(1));
+      rsvpRepo.findOne.mockResolvedValue(goingRsvp(2));
+      const view = await service.updateRsvpDetails('e', 'u1', {
+        guestCount: 1,
+      });
+      expect(view.guestCount).toBe(1);
+      expect(managerFindOne).not.toHaveBeenCalled();
     });
   });
 

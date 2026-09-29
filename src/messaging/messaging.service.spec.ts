@@ -1844,6 +1844,49 @@ describe('MessagingService', () => {
       expect(excludeUserIds).toEqual([]);
     });
 
+    // PRD-423: the bell and the Mentions inbox read this key to name the
+    // mentioner by first name, with no profile link.
+    it('marks a mention written in a Go together chat on its payload', async () => {
+      participants.findOne.mockResolvedValueOnce({
+        conversationId: 'g1',
+        userId: 'me',
+      });
+      conversations.findOne.mockResolvedValue({
+        id: 'g1',
+        kind: ConversationKind.Group,
+        isOfficial: false,
+        isGoTogetherChat: true,
+        eventMatchGroupId: null,
+      });
+
+      await service.sendMessage('g1', 'me', '@teammate see you there');
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      const [, , payloadBase] = mentions.notify.mock.calls[0] as unknown[];
+      expect(payloadBase).toMatchObject({
+        source: 'message',
+        conversationId: 'g1',
+        isGoTogetherChat: true,
+      });
+    });
+
+    it('leaves the Go together key off a mention in an ordinary group', async () => {
+      participants.findOne.mockResolvedValueOnce({
+        conversationId: 'g1',
+        userId: 'me',
+      });
+      conversations.findOne.mockResolvedValue({
+        id: 'g1',
+        kind: ConversationKind.Group,
+        isOfficial: false,
+      });
+
+      await service.sendMessage('g1', 'me', '@teammate check this out');
+
+      const [, , payloadBase] = mentions.notify.mock.calls[0] as unknown[];
+      expect(payloadBase).not.toHaveProperty('isGoTogetherChat');
+    });
+
     // PRD-340 (one-tap reply): a non-connected 1:1 thread is no longer an
     // unconditional dead end for both sides.
     describe('the one-tap-reply gate (PRD-340)', () => {
@@ -1970,11 +2013,15 @@ describe('MessagingService', () => {
     it('when already connected: materializes a conversation and posts the message', async () => {
       profiles.findOne.mockResolvedValueOnce({ userId: 'them', slug: 'them' });
       connections.areConnected.mockResolvedValue(true);
-      // getOrCreateConversation finds an existing thread (no transaction).
-      conversations.findOne.mockResolvedValueOnce({
+      // getOrCreateConversation finds an existing thread (no transaction),
+      // and ENG-407's member send path reads the same thread for its gates.
+      conversations.findOne.mockResolvedValue({
         id: 'c9',
         isOfficial: false,
       });
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c9', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c9', userId: 'them' });
 
       const result = await service.messageRequest('me', 'them', 'hey');
 
@@ -1982,6 +2029,61 @@ describe('MessagingService', () => {
       expect(result.message?.body).toBe('hey');
       expect(result.connectionRequestId).toBeNull();
       expect(connections.requestConnection).not.toHaveBeenCalled();
+    });
+
+    // ENG-407: a timed-out "Say hello" the member retries carries the same
+    // `clientMessageId`, and the member send path answers it with the stored
+    // message: no second row, no second broadcast, no second mention.
+    it('when already connected: a retried request with the same clientMessageId returns the stored message', async () => {
+      const clientMessageId = '5f0c2a8e-3b1d-4c6f-9a7e-2d4b6c8e0f12';
+      profiles.findOne.mockResolvedValueOnce({ userId: 'them', slug: 'them' });
+      connections.areConnected.mockResolvedValue(true);
+      conversations.findOne.mockResolvedValue({
+        id: 'c9',
+        isOfficial: false,
+      });
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c9', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c9', userId: 'them' });
+      const storedMessage = {
+        id: 'm-stored',
+        conversationId: 'c9',
+        senderId: 'me',
+        body: 'hey @them',
+        replyToId: null,
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        editedAt: null,
+        deletedAt: null,
+        clientMessageId,
+        forwarded: false,
+        kind: MessageKind.User,
+        systemEvent: null,
+        attachment: null,
+      };
+      messages.findOne.mockImplementation(
+        (options: { where?: { clientMessageId?: string } }) =>
+          Promise.resolve(
+            options?.where?.clientMessageId === clientMessageId
+              ? storedMessage
+              : null,
+          ),
+      );
+
+      const result = await service.messageRequest(
+        'me',
+        'them',
+        'hey @them',
+        clientMessageId,
+      );
+
+      expect(result.conversationId).toBe('c9');
+      expect(result.message?.id).toBe('m-stored');
+      expect(messages.save).not.toHaveBeenCalled();
+      expect(emitter.emit).not.toHaveBeenCalledWith(
+        'message.created',
+        expect.anything(),
+      );
+      expect(mentions.notify).not.toHaveBeenCalled();
     });
 
     it('when a stranger: seeds a connection request instead of a message', async () => {
@@ -2597,6 +2699,34 @@ describe('buildReplyTo (DES-220 media quote)', () => {
     expect(quote).toMatchObject({
       kind: 'document',
       thumbnailUrl: null,
+      fileName: 'lease.pdf',
+      deleted: false,
+    });
+  });
+
+  it('quotes a document parent whose body is the raw catalog key as File', () => {
+    const quote = buildReplyTo(
+      'p5',
+      parentMap({
+        id: 'p5',
+        body: 'messages:attachments.documentFallbackText',
+        senderId: 'ana',
+        deletedAt: null,
+        kind: MessageKind.Document,
+        attachment: {
+          url: 'https://cdn.example/lease.pdf',
+          fileName: 'lease.pdf',
+          byteSize: 2048,
+          contentType: 'application/pdf',
+          provider: 'upload',
+        },
+      }),
+      profileByUser,
+    );
+
+    expect(quote).toMatchObject({
+      snippet: 'File',
+      kind: 'document',
       fileName: 'lease.pdf',
       deleted: false,
     });

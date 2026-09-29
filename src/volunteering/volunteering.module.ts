@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PartnersModule } from '../partners/partners.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -34,6 +35,10 @@ import { VolunteeringService } from './volunteering.service';
     // signup/decide — one-way import, `NotificationsModule` has no
     // dependency back on `VolunteeringModule` (mirrors `communities.module.ts`).
     NotificationsModule,
+    // Reads the shared `content_moderation` state so a moderator takedown on a
+    // `volunteering` subject withholds the opportunity from ordinary members'
+    // read paths (mirrors `JobsModule`'s identical import).
+    ContentModerationModule,
   ],
   // `AdminVolunteeringController` is the staff-side read of the same data
   // (SUS-05's funder report). It needs no extra imports: `VolunteeringService`

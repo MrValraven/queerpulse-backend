@@ -82,9 +82,12 @@ export class AdminForumController {
     summary:
       'Threads waiting on a review decision, newest first. Cursor-paginated.',
     description:
-      'Every thread whose author held it back for the editors or the council and that nobody has decided on yet, excluding any the author has since withdrawn. These threads are invisible to every member-facing read path until they are approved, which is why the queue is staff-only.',
+      'Every thread whose author held it back for the editors or the council and that nobody has decided on yet, excluding any the author has since withdrawn. These threads are invisible to every member-facing read path until they are approved, which is why the queue is staff-only. Each row carries the community the thread was posted in as `community` ({ slug, name }), or null for a thread outside any community.',
   })
-  @ApiOkResponse({ description: 'A cursor page of threads awaiting review.' })
+  @ApiOkResponse({
+    description:
+      'A cursor page of threads awaiting review. Each row carries `community`: { slug, name } of the community the thread was posted in, or null.',
+  })
   @Get('review')
   listReviewQueue(
     @CurrentUser() user: CurrentUserData,
@@ -96,7 +99,7 @@ export class AdminForumController {
   @ApiOperation({
     summary: 'Approve or reject a thread that is waiting on a review.',
     description:
-      "Approving publishes the thread and fires the announcement it has been holding since it was created (profile activity, the topics link and its follow notifications, and the @mentions in the opening post). Rejecting leaves it invisible to everyone but its author and staff. Either way the author is notified, with the reviewer's optional note. A thread that is not still pending answers 409.",
+      "Approving publishes the thread and fires the announcement it has been holding since it was created, scoped to who can read the thread and who is shown writing it. The @mentions in the opening post are notified. Profile activity is recorded only for a thread under its author's own byline (neither anonymous nor official) that every member can read. The topics link and its follow notifications, and the opening-post excerpt in each mention, go out only for a thread every member can read: outside any community, cross-posted, or in a public, top-level, unarchived community. Rejecting leaves it invisible to everyone but its author and staff. Either way the author is notified, with the reviewer's optional note. A thread that is not still pending answers 409.",
   })
   @ApiOkResponse({ description: 'The reviewed thread.' })
   @ApiNotFoundResponse({ description: 'Thread not found.' })

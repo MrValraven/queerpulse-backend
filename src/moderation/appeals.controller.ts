@@ -61,10 +61,21 @@ export class AppealsController {
   })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({
-    description: 'The referenced moderation action is not one you can appeal.',
+    description:
+      'The referenced moderation action is not one you can appeal: it does ' +
+      'not concern you, or it is not an appealable decision. The bookkeeping ' +
+      'rows an appeal decision writes (`appeal_upheld`, `suspension_lifted`, ' +
+      '`content_restored` and the like) name you and are refused here too.',
   })
   @ApiConflictResponse({
-    description: 'You already have an appeal awaiting review.',
+    description:
+      'One of two conflicts. Either you already have an appeal awaiting ' +
+      'review (a plain 409 with a message and no `code`), or ' +
+      'your appeal on this decision has already been decided and the outcome ' +
+      'is final, which answers `{ statusCode: 409, error: "Conflict", ' +
+      'code: "APPEAL_ALREADY_DECIDED", message: string }`. Each decision can ' +
+      'be appealed once. Branch on `code === "APPEAL_ALREADY_DECIDED"`; the ' +
+      'message is display text.',
   })
   submit(@CurrentUser() user: CurrentUserData, @Body() dto: CreateAppealDto) {
     return this.moderationService.submitAppeal(user.userId, dto);

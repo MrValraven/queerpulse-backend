@@ -53,12 +53,16 @@ export class ModAuditLog {
   action!: string;
 
   // The member a role-management action (`role_changed`, `staff_role_granted`,
-  // `staff_role_revoked`) was taken against — `AdminMembersService.updateRole`/
-  // `grantStaffRole`/`revokeStaffRole` are the only writers. Nullable because
-  // every other action logs against a `reportId` instead (or, for
-  // `suspension_lifted`, neither): a row without a report is not automatically
-  // about a member. `ON DELETE SET NULL` mirrors `actorId` — an audit row
-  // outlives the account it names when that account is erased.
+  // `staff_role_revoked`), a report-linked queue action, an appeal decision, a
+  // suspension/restriction lift, or a ban ratification was taken against.
+  // `ModAuditService.writeAuditLog`'s optional trailing `targetUserId` is the
+  // shared writer for all of those; `OfficialConversationsService.writeAudit`
+  // and `CommunityGovernanceLogService.logModerationAudit` also write it
+  // directly, for a recipient name `writeAuditLog` still has no parameter for.
+  // Still nullable: an action such as `member_verified`, or a housing
+  // takedown, logs with no report and no single member on the receiving end.
+  // `ON DELETE SET NULL` mirrors `actorId` — an audit row outlives the
+  // account it names when that account is erased.
   @Index('IDX_mod_audit_logs_target_user_id')
   @Column({ type: 'uuid', nullable: true })
   targetUserId!: string | null;

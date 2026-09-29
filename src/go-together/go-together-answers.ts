@@ -231,3 +231,112 @@ export function parseHostAnswers(
     ? { ok: false, errors }
     : { ok: true, value: answers };
 }
+
+/** The option a saved answer points at on the current question, or
+ *  `undefined` when the member has no answer or picked an option the
+ *  question no longer has. */
+export function currentHostAnswerOption(
+  question: HostQuestion,
+  answers: HostAnswers,
+): HostQuestion['options'][number] | undefined {
+  const optionId = answers[question.id];
+  if (optionId === undefined) return undefined;
+  return question.options.find((option) => option.id === optionId);
+}
+
+/** Only the saved answers that still point at a current question and one of
+ *  its current options. Scoring and reasons read answers through this, so an
+ *  answer to an edited question never counts. */
+export function currentHostAnswers(
+  questions: readonly HostQuestion[],
+  answers: HostAnswers,
+): HostAnswers {
+  const current: HostAnswers = {};
+  for (const question of questions) {
+    const option = currentHostAnswerOption(question, answers);
+    if (option) current[question.id] = option.id;
+  }
+  return current;
+}
+
+/** The answers without the given questions, for answers to questions the
+ *  host has since changed. */
+export function omitHostAnswers(
+  answers: HostAnswers,
+  questionIds: readonly string[],
+): HostAnswers {
+  return Object.fromEntries(
+    Object.entries(answers).filter(
+      ([questionId]) => !questionIds.includes(questionId),
+    ),
+  );
+}
+
+/** Ids of the current host questions a member has no usable answer to. */
+export function unansweredHostQuestionIds(
+  questions: readonly HostQuestion[],
+  answers: HostAnswers,
+): string[] {
+  return questions
+    .filter((question) => !currentHostAnswerOption(question, answers))
+    .map((question) => question.id);
+}
+
+function isSameQuestion(first: HostQuestion, second: HostQuestion): boolean {
+  return (
+    first.prompt === second.prompt &&
+    first.options.length === second.options.length &&
+    first.options.every(
+      (option, index) =>
+        option.id === second.options[index]?.id &&
+        option.label === second.options[index]?.label,
+    )
+  );
+}
+
+/**
+ * Ids of saved host questions whose answers no longer mean what the member
+ * picked: the question was removed, or its prompt, option labels or option
+ * order changed. Ids are positional, so an edit keeps the id and only the
+ * content tells. A save with identical questions returns an empty list.
+ */
+export function changedHostQuestionIds(
+  previous: readonly HostQuestion[],
+  next: readonly HostQuestion[],
+): string[] {
+  const nextById = new Map(next.map((question) => [question.id, question]));
+  return previous
+    .filter((question) => {
+      const replacement = nextById.get(question.id);
+      return !replacement || !isSameQuestion(question, replacement);
+    })
+    .map((question) => question.id);
+}
+
+/**
+ * A waiting member answering host questions again after the host edited
+ * them. The body may carry only the questions being answered; it is merged
+ * over the member's still-current answers, and the result must answer every
+ * current question. An unknown question id or option id is refused.
+ */
+export function mergeHostAnswers(
+  questions: readonly HostQuestion[],
+  saved: HostAnswers,
+  input: unknown,
+): ParseResult<HostAnswers> {
+  if (!isRecord(input))
+    return { ok: false, errors: ['hostAnswers must be an object'] };
+  const errors: string[] = [];
+  const merged = currentHostAnswers(questions, saved);
+  for (const [questionId, optionId] of Object.entries(input)) {
+    const question = questions.find((candidate) => candidate.id === questionId);
+    const isKnownOption =
+      question !== undefined &&
+      typeof optionId === 'string' &&
+      question.options.some((option) => option.id === optionId);
+    if (isKnownOption) merged[questionId] = optionId;
+    else errors.push(`host question ${questionId} has no such option`);
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return parseHostAnswers([...questions], merged);
+}

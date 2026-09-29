@@ -16,6 +16,7 @@ import {
 } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { Message } from './entities/message.entity';
+import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
 import {
   isCoveredByMailboxStaffFloor,
   mailboxStaffHistoryFloorCoversPredicate,
@@ -34,9 +35,14 @@ import { MessagingCoreService } from './messaging-core.service';
  * Mailbox decisions, task 1: the floor is the seat's `historyFloorAt`, so a
  * staff member's own "clear chat" (`clearedAt` alone) keeps every write too.
  *
+ * PRD-400: a member who took a seat in a group after it began holds a JOIN
+ * floor on that same `historyFloorAt`, and every write on a pre-join message
+ * gets the same 404.
+ *
  * The floor query runs against a fixture: the stand-in builder accepts only
- * the clauses it knows and answers the floor clause through its in-memory
- * twin, `isCoveredByMailboxStaffFloor`.
+ * the clauses it knows and answers the floor clause, the mailbox staff
+ * predicate OR'd with the group join predicate, through the in-memory twin
+ * `isCoveredByMailboxStaffFloor` and a plain join floor comparison.
  */
 
 const CONVERSATION_ID = 'c-thread';
@@ -68,24 +74,28 @@ const messageById = new Map<string, { id: string; createdAt: Date }>([
   ],
 ]);
 
-const EXPECTED_FLOOR_CLAUSE = mailboxStaffHistoryFloorCoversPredicate(
+const EXPECTED_FLOOR_CLAUSE = `(${mailboxStaffHistoryFloorCoversPredicate(
   'message.created_at',
   'seat',
-);
+)} OR ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'seat')})`;
 
 /** The caller's seat. By default it carries a history floor, as a seated
  *  staff member's does, with `clearedAt` at the same instant. `isFloored:
- *  false` models a personal "clear chat" alone: `clearedAt` set, no floor. */
+ *  false` models a personal "clear chat" alone: `clearedAt` set, no floor.
+ *  A group seat that pins needs an owner or admin `role`. */
 function callerSeat(
   identityId: string,
-  { isFloored = true }: { isFloored?: boolean } = {},
+  {
+    isFloored = true,
+    role = ConversationRole.Member,
+  }: { isFloored?: boolean; role?: ConversationRole } = {},
 ): ConversationParticipant {
   return {
     id: 'seat-caller',
     conversationId: CONVERSATION_ID,
     userId: 'caller',
     identityId,
-    role: ConversationRole.Member,
+    role,
     leftAt: null,
     clearedAt: HISTORY_FLOOR,
     historyFloorAt: isFloored ? HISTORY_FLOOR : null,
@@ -103,7 +113,11 @@ function insertChain() {
   return chain;
 }
 
-function build(seat: ConversationParticipant) {
+function build(
+  seat: ConversationParticipant,
+  conversationKind: ConversationKind = ConversationKind.Direct,
+) {
+  const isGroupConversation = conversationKind === ConversationKind.Group;
   const floorQuery = () => {
     const parameters: Record<string, unknown> = {};
     const clauses: string[] = [];
@@ -135,14 +149,19 @@ function build(seat: ConversationParticipant) {
           if (clause === 'message.id = :messageId') {
             continue;
           } else if (clause === EXPECTED_FLOOR_CLAUSE) {
+            const isCoveredByJoinFloor =
+              isGroupConversation &&
+              seat.historyFloorAt !== null &&
+              message!.createdAt.getTime() <= seat.historyFloorAt.getTime();
             isBelowFloor =
               isBelowFloor &&
-              isCoveredByMailboxStaffFloor(message!.createdAt, {
+              (isCoveredByMailboxStaffFloor(message!.createdAt, {
                 historyFloorAt: seat.historyFloorAt,
                 identityKind: identityKindById.get(seat.identityId),
-                isGroupConversation: false,
+                isGroupConversation,
                 isOfficialConversation: false,
-              });
+              }) ||
+                isCoveredByJoinFloor);
           } else {
             throw new Error(`Unrecognised floor clause: ${clause}`);
           }
@@ -179,7 +198,7 @@ function build(seat: ConversationParticipant) {
   };
   const service = new MessageAnnotationsService(
     {
-      findOne: jest.fn().mockResolvedValue({ kind: ConversationKind.Direct }),
+      findOne: jest.fn().mockResolvedValue({ kind: conversationKind }),
     } as unknown as Repository<Conversation>,
     {} as unknown as Repository<ConversationParticipant>,
     messages as unknown as Repository<Message>,
@@ -304,6 +323,65 @@ describe('Task 13h: reaction, pin and star writes honour a mailbox staff floor',
     async (_label, write) => {
       const { service, messages } = build(
         callerSeat(STAFF_IDENTITY_ID, { isFloored: false }),
+      );
+
+      await expect(write(service, PRE_FLOOR_MESSAGE_ID)).resolves.toEqual({
+        ok: true,
+      });
+      expect(messages.createQueryBuilder).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('PRD-400: reaction, pin and star writes honour a group join floor', () => {
+  // An admin seat, so the group pin role gate lets the pin and unpin writes
+  // reach the floor check.
+  const joinerSeat = (options: { isFloored?: boolean } = {}) =>
+    callerSeat(PROFILE_IDENTITY_ID, {
+      ...options,
+      role: ConversationRole.Admin,
+    });
+
+  it.each(WRITES)(
+    'refuses a member who joined after a message was sent when they try to %s it, as a message outside the group is refused',
+    async (_label, write) => {
+      const {
+        service,
+        reactionInsert,
+        pinInsert,
+        starInsert,
+        reactions,
+        pins,
+      } = build(joinerSeat(), ConversationKind.Group);
+
+      await expect(write(service, PRE_FLOOR_MESSAGE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(reactionInsert.execute).not.toHaveBeenCalled();
+      expect(pinInsert.execute).not.toHaveBeenCalled();
+      expect(starInsert.execute).not.toHaveBeenCalled();
+      expect(reactions.delete).not.toHaveBeenCalled();
+      expect(pins.delete).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(WRITES)(
+    'lets the same member %s a message sent after they joined',
+    async (_label, write) => {
+      const { service } = build(joinerSeat(), ConversationKind.Group);
+
+      await expect(write(service, POST_FLOOR_MESSAGE_ID)).resolves.toEqual({
+        ok: true,
+      });
+    },
+  );
+
+  it.each(WRITES)(
+    'lets a group seat with no join floor %s a message its own clear chat covers, with no floor query',
+    async (_label, write) => {
+      const { service, messages } = build(
+        joinerSeat({ isFloored: false }),
+        ConversationKind.Group,
       );
 
       await expect(write(service, PRE_FLOOR_MESSAGE_ID)).resolves.toEqual({

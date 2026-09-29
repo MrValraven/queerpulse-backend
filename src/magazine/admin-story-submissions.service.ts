@@ -30,6 +30,7 @@ import {
   MAX_BLOCK_HTML_LENGTH,
   validateArticleBlocks,
 } from './magazine-article-blocks.validation';
+import { magazineTodayIsoDate } from './magazine-clock';
 import { toActorDisplayName, toPlainText } from './magazine-piece-response';
 import {
   AdminStorySubmissionDTO,
@@ -692,7 +693,7 @@ export class AdminStorySubmissionsService {
       commissionedBy: deciderRef
         ? `${deciderRef.firstName} ${deciderRef.lastName}`.trim()
         : '',
-      commissionedOn: new Date().toISOString().slice(0, 10),
+      commissionedOn: magazineTodayIsoDate(),
       art: '',
     };
 

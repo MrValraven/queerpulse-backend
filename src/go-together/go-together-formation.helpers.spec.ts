@@ -1,4 +1,9 @@
-import { groupMinimumAffinity } from './go-together-formation.helpers';
+import {
+  groupMinimumAffinity,
+  hasGatheringStarted,
+  isGatheringUpcoming,
+  isPastBlockMoveGrace,
+} from './go-together-formation.helpers';
 import { MatchGraph, MatchUnit } from './go-together-grouping';
 
 /**
@@ -52,5 +57,56 @@ describe('groupMinimumAffinity', () => {
     const units: MatchUnit[] = [{ id: 'pair', members: [0, 1] }];
 
     expect(groupMinimumAffinity(graphWithClosePair(), units, [0, 1])).toBe(0);
+  });
+});
+
+describe('hasGatheringStarted', () => {
+  const startAt = new Date('2026-10-10T20:00:00Z');
+
+  it('is false before the start', () => {
+    expect(
+      hasGatheringStarted({ startAt }, new Date('2026-10-10T19:59:59Z')),
+    ).toBe(false);
+  });
+
+  it('is true from the start itself onward', () => {
+    expect(hasGatheringStarted({ startAt }, startAt)).toBe(true);
+    expect(
+      hasGatheringStarted({ startAt }, new Date('2026-10-10T21:00:00Z')),
+    ).toBe(true);
+  });
+
+  it('treats a gathering that can no longer be read as started', () => {
+    expect(hasGatheringStarted(null, startAt)).toBe(true);
+  });
+
+  it('is always the negation of isGatheringUpcoming', () => {
+    const before = new Date('2026-10-10T19:00:00Z');
+    expect(isGatheringUpcoming({ startAt }, before)).toBe(true);
+    expect(isGatheringUpcoming({ startAt }, startAt)).toBe(false);
+    expect(isGatheringUpcoming(null, before)).toBe(false);
+  });
+});
+
+describe('isPastBlockMoveGrace', () => {
+  const startAt = new Date('2026-10-10T20:00:00Z');
+
+  it('is false before the start and up to twelve hours after it', () => {
+    expect(
+      isPastBlockMoveGrace({ startAt }, new Date('2026-10-10T19:00:00Z')),
+    ).toBe(false);
+    expect(
+      isPastBlockMoveGrace({ startAt }, new Date('2026-10-11T07:59:59Z')),
+    ).toBe(false);
+  });
+
+  it('is true from twelve hours after the start', () => {
+    expect(
+      isPastBlockMoveGrace({ startAt }, new Date('2026-10-11T08:00:00Z')),
+    ).toBe(true);
+  });
+
+  it('is false for a gathering that can no longer be read', () => {
+    expect(isPastBlockMoveGrace(null, startAt)).toBe(false);
   });
 });

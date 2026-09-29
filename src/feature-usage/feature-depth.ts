@@ -44,12 +44,34 @@ export type DepthSpec =
   | { kind: 'reach-only'; reason: string };
 
 /**
- * Maps every launched feature key to the entities that measure its depth.
+ * Feature keys that are never measured: the interceptor records no reach for
+ * them, they have no depth entry, and the admin usage panel does not list
+ * them. Go together is here because its rows hold special-category
+ * questionnaire data and its design allows no behavioural analytics of any
+ * Go together action, aggregate counts included.
+ */
+export const UNTRACKED_FEATURES = [
+  'goTogether',
+] as const satisfies readonly FeatureKey[];
+
+export type UntrackedFeatureKey = (typeof UNTRACKED_FEATURES)[number];
+
+/** Every feature key the usage panel measures. */
+export type TrackedFeatureKey = Exclude<FeatureKey, UntrackedFeatureKey>;
+
+export function isTrackedFeature(
+  featureKey: FeatureKey,
+): featureKey is TrackedFeatureKey {
+  return !(UNTRACKED_FEATURES as readonly FeatureKey[]).includes(featureKey);
+}
+
+/**
+ * Maps every tracked feature key to the entities that measure its depth.
  *
- * Typed as a full `Record<FeatureKey, DepthSpec>` rather than a `Partial`, so
- * adding a key to `launchedFeatures` without a depth definition fails the
- * build. A `Partial` would compile and silently report zero, which reads
- * identically to a dead feature.
+ * Typed as a full `Record<TrackedFeatureKey, DepthSpec>`, so adding a key to
+ * `launchedFeatures` without either a depth definition or a place in
+ * `UNTRACKED_FEATURES` fails the build. A `Partial` would compile and
+ * silently report zero, which reads identically to a dead feature.
  *
  * THE TEST FOR EVERY ENTRY: can a member create this row. Depth exists to
  * answer "did a member arrive and deliberately create something", so an
@@ -65,7 +87,7 @@ export type DepthSpec =
  * instead. When a feature has no member-authored entity at all, mark it
  * `reach-only` with a reason, the same treatment `feed` gets.
  */
-export const FEATURE_DEPTH: Record<FeatureKey, DepthSpec> = {
+export const FEATURE_DEPTH: Record<TrackedFeatureKey, DepthSpec> = {
   communities: { kind: 'rows', entities: [Community] },
   community: {
     kind: 'rows',

@@ -60,6 +60,8 @@ export const launchedFeatures = {
   // on ProfilesController (PUT /profiles/me/board) and is unaffected.
   barter: { launched: false },
   events: { launched: true },
+  // Set to false to hold Go together dark until the DPIA its design names exists.
+  goTogether: { launched: true },
   connections: { launched: true },
   messaging: { launched: true },
   forum: { launched: true },

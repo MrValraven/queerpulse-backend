@@ -23,7 +23,9 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
+import { ForumPostVote } from '../forum/entities/forum-post-vote.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { FORUM_THREAD_VISIBLE_SQL } from '../forum/forum-threads.service';
 import {
   ArticleLocale,
   DEFAULT_ARTICLE_LOCALE,
@@ -266,6 +268,16 @@ function affinityFactsOf(
     // PRD-107: a piece carries its own editorial tags, so it can score on a
     // followed topic exactly the way a forum thread does.
     tags = (candidate.row as MagazineArticle).tags ?? [];
+  }
+  // ENG-417: an anonymous or official thread shows no author on its card, so
+  // it scores with no author at all. That keeps the `connection` reason (and
+  // the author's name it would print as the reason subject) off a masked
+  // thread. `dropBlocked` still reads `candidate.authorId`, the real author.
+  if (candidate.type === 'forum_thread') {
+    const thread = candidate.row as ForumThread;
+    if (thread.isAnonymous || thread.isOfficial) {
+      return { communityId, authorId: null, tags };
+    }
   }
   return { communityId, authorId: candidate.authorId, tags };
 }
@@ -1023,6 +1035,10 @@ export class FeedService {
         // `ForumThread`'s own mapping. The columns are `forum_thread.
         // deleted_at` and `forum_post.deleted_at`, both owned by the forum's
         // delete paths; `SnakeNamingStrategy` names them exactly this way.
+        //
+        // The feed now also applies the forum's read gate (ENG-416, below),
+        // so a thread reaches the feed on the same terms as the forum list,
+        // forum search and saved threads.
         qb.andWhere('"t"."deleted_at" IS NULL');
         qb.andWhere(
           `NOT EXISTS (
@@ -1032,6 +1048,11 @@ export class FeedService {
               AND "feed_deleted_op"."deleted_at" IS NOT NULL
           )`,
         );
+        // ENG-416: the forum's own read gate, the same frozen predicate the
+        // forum list, forum search and saved threads apply. A thread that is
+        // scheduled for later or still waiting on review stays off the feed
+        // on every tab until it would also show on the forum.
+        qb.andWhere(FORUM_THREAD_VISIBLE_SQL);
         if (membershipScoped) {
           // `communities` tab (Task 6): restrict to threads posted in
           // communities the viewer belongs to.
@@ -1060,9 +1081,15 @@ export class FeedService {
           // `community_post` branch above: a space's public tier alone never
           // opens this arm, only membership (above) or the parent's own public
           // standing does.
+          //
+          // PRD-407: `t.cross_posted = true` is the author's choice to share a
+          // community thread with the whole forum. The forum list already
+          // shows such a thread to every member, so the general feed admits it
+          // on the same terms, whatever the community's tier.
           qb.andWhere(
             `(
               t.community_id IS NULL
+              OR t.cross_posted = true
               OR EXISTS (
                 SELECT 1 FROM "communities" "com"
                 WHERE "com"."id" = t.community_id
@@ -1109,10 +1136,15 @@ export class FeedService {
         }
         if (connectionAuthorIds !== null) {
           // `connections` tab (DISC-2): see the matching branch in
-          // `community_post` above — same stacked-not-swapped rationale.
-          qb.andWhere('t.author_id IN (:...connectionAuthorIds)', {
-            connectionAuthorIds,
-          });
+          // `community_post` above, with the same stacked-not-swapped rationale.
+          //
+          // ENG-417: an anonymous or official thread hides its author, so it
+          // is never admitted because of who wrote it. Listing it here would
+          // tell the viewer that one of their connections wrote it.
+          qb.andWhere(
+            't.author_id IN (:...connectionAuthorIds) AND t.is_anonymous = false AND t.is_official = false',
+            { connectionAuthorIds },
+          );
         }
         // `true`: `ForumThread.createdAt` is migrated to `timestamptz(3)`
         // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so the
@@ -1752,9 +1784,19 @@ export class FeedService {
    * rather than the withheld text. The aggregate is keyed on `thread_id`,
    * which `IDX_forum_post_thread_id_created_at_id` leads on, and it runs once
    * per page rather than once per thread.
+   *
+   * FEED-LIKE adds the like state the card needs to upvote the OP through
+   * `POST /forum/posts/:id/vote`, riding the same grouped query: the OP's own
+   * id and live `vote_count`, and whether the viewer has already voted on it.
+   * The `forum_post_vote` join is scoped to the opening post (`is_op = true`)
+   * and to the viewer (`user_id = :viewerId`), bounding it to one probed row
+   * per thread, and the table's unique `(post_id, user_id)` index guarantees
+   * at most one joined row per post, so the existing `reply_count` COUNT is
+   * unaffected by the extra join.
    */
   private async forumThreadCards(
     threadIds: string[],
+    viewerId: string,
   ): Promise<Map<string, ForumThreadCard>> {
     const cards = new Map<string, ForumThreadCard>();
     if (!threadIds.length) return cards;
@@ -1764,6 +1806,24 @@ export class FeedService {
       .select('"fp"."thread_id"', 'thread_id')
       .addSelect('MAX(CASE WHEN "fp"."is_op" THEN "fp"."body" END)', 'op_body')
       .addSelect('COUNT(*) FILTER (WHERE NOT "fp"."is_op")', 'reply_count')
+      .addSelect(
+        'MAX(CASE WHEN "fp"."is_op" THEN "fp"."id"::text END)',
+        'op_post_id',
+      )
+      .addSelect(
+        'MAX(CASE WHEN "fp"."is_op" THEN "fp"."vote_count" END)',
+        'op_vote_count',
+      )
+      .addSelect(
+        'BOOL_OR("fp"."is_op" AND "fpv"."id" IS NOT NULL)',
+        'has_viewer_voted',
+      )
+      .leftJoin(
+        ForumPostVote,
+        'fpv',
+        '"fpv"."post_id" = "fp"."id" AND "fp"."is_op" = true AND "fpv"."user_id" = :viewerId',
+        { viewerId },
+      )
       .where('"fp"."thread_id" IN (:...threadIds)', { threadIds })
       .andWhere('"fp"."deleted_at" IS NULL')
       .groupBy('"fp"."thread_id"')
@@ -1771,6 +1831,9 @@ export class FeedService {
         thread_id: string;
         op_body: string | null;
         reply_count: string;
+        op_post_id: string | null;
+        op_vote_count: number | null;
+        has_viewer_voted: boolean;
       }>();
 
     for (const row of rows) {
@@ -1779,6 +1842,16 @@ export class FeedService {
         // Postgres returns `count(*)` as bigint, which the driver hands back
         // as a string so a value past 2^53 cannot silently lose precision.
         replyCount: Number(row.reply_count),
+        // FEED-LIKE: `vote_count` is an `int` column, so the `MAX` over it
+        // arrives as a native number (or null for a thread with no OP row);
+        // the bigint-as-string `count(*)` above is the exception, needing
+        // `Number` to stay a safe integer.
+        opPostId: row.op_post_id ?? null,
+        opVoteCount: row.op_vote_count ?? 0,
+        // pg returns a native boolean for `BOOL_OR`, but the `=== true`
+        // check keeps the mapping honest if the driver ever hands back
+        // something else for a group with no rows.
+        hasViewerVoted: row.has_viewer_voted === true,
       });
     }
     return cards;
@@ -1841,7 +1914,7 @@ export class FeedService {
           ? Promise.resolve(ranking.communityById)
           : this.communitiesByIds(collectCommunityIds(candidates)),
         this.feedInteractions.forPosts(postIds, viewerId),
-        this.forumThreadCards(threadIds),
+        this.forumThreadCards(threadIds, viewerId),
       ]);
 
     /**
@@ -1943,9 +2016,23 @@ export class FeedService {
           const card: ForumThreadCard = threadCards.get(thread.id) ?? {
             excerpt: null,
             replyCount: 0,
+            // FEED-LIKE: no `forum_post` rows at all means no readable OP,
+            // so the card gets no like affordance.
+            opPostId: null,
+            opVoteCount: 0,
+            hasViewerVoted: false,
           };
+          // FEED-LIKE: `assertCanVote` refuses a self-vote with a 403, so a
+          // thread the viewer authored (anonymous threads included, since
+          // `authorId` holds the real author regardless of the byline mask)
+          // gets no like affordance. `reactionCount`/`myReaction` still show
+          // the OP's real vote state.
+          const isOwnThread = thread.authorId === viewerId;
+          const cardForViewer = isOwnThread
+            ? { ...card, opPostId: null }
+            : card;
           return {
-            ...forumThreadToFeedItem(thread, author, card),
+            ...forumThreadToFeedItem(thread, author, cardForViewer),
             ...signals,
           };
         }

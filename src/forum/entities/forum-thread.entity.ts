@@ -26,9 +26,14 @@ export class ForumThread {
   @Column({ type: 'varchar' })
   title!: string;
 
+  // NULL once the author's account has been erased. The migration-owned FK is
+  // `ON DELETE SET NULL` (`SetNullForumThreadAuthorOnUserErasure1823800300000`)
+  // so the thread, and every reply other members wrote under it, outlives
+  // the erasure. A null author renders through `UNKNOWN_AUTHOR`, owns
+  // nothing, and receives no notifications.
   @Index('IDX_forum_thread_author_id')
-  @Column({ type: 'uuid' })
-  authorId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  authorId!: string | null;
 
   @Index('IDX_forum_thread_category')
   @Column({ type: 'varchar' })

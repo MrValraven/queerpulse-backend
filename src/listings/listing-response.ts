@@ -378,6 +378,8 @@ export interface ListingDTO {
   submittedBy: MemberRef | null;
   /** Who suggested the place, on admin queue rows only; null everywhere else. */
   suggestedBy: MemberRef | null;
+  /** The staff member who authored the listing, on admin queue rows only; null everywhere else. */
+  addedByStaff: MemberRef | null;
   createdAt: string;
 
   path: string;
@@ -1510,6 +1512,9 @@ export function toListingDTO(
   // The suggester's reference, passed only by the admin queue
   // (`ListingsService.listQueue`); every other caller leaves it null.
   suggestedBy: MemberRef | null = null,
+  // The staff author's reference (`createdByStaffId`), passed only by the
+  // admin queue (`ListingsService.listQueue`); every other caller leaves it null.
+  addedByStaff: MemberRef | null = null,
 ): ListingDTO {
   const legacyPhotos = legacyPhotoSets(listing);
   return {
@@ -1518,6 +1523,7 @@ export function toListingDTO(
     status: listing.status,
     submittedBy,
     suggestedBy,
+    addedByStaff,
     createdAt: listing.createdAt.toISOString(),
 
     path: listing.path,

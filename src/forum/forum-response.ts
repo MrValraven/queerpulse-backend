@@ -109,10 +109,12 @@ const DELETED_AUTHOR: AuthorSummary = {
 
 /**
  * Maps a `MemberRef` (from `common/member-ref.ts`'s `MemberLookup`) to an
- * `AuthorSummary`. Falls back to a generic placeholder in the defensive case
- * where an author's profile can't be resolved — `ForumThreadResponse.author`/
+ * `AuthorSummary`. Falls back to a generic placeholder when an author's
+ * profile can't be resolved, which includes a thread whose author erased
+ * their account (`ForumThread.authorId` is NULL then, ENG-494, and the
+ * callers pass a null ref). `ForumThreadResponse.author`/
  * `ForumPostResponse.author` are non-nullable in `contracts.ts`, so callers
- * always get a well-formed object rather than `null`.
+ * always get a well-formed object.
  */
 export function toAuthorSummary(
   ref: MemberRef | null | undefined,
@@ -347,6 +349,11 @@ export interface ForumThreadResponse {
   // viewer: anonymity hides the byline, and a byline is both names — an
   // "anonymous" thread co-credited to a named member is not anonymous.
   coAuthor: AuthorSummary | null;
+  // Whether the VIEWER is the credited co-author (PRD-408), so the thread page
+  // can offer them a way to take their name off. Read straight from the row
+  // and independent of the byline mask: the credited member always knows they
+  // are credited, and nobody else is ever told `true`.
+  viewerIsCoAuthor: boolean;
   // When the thread became visible, which stops being `createdAt` the moment
   // the composer can schedule (see `ForumThread.publishedAt`). A future value
   // only ever reaches the thread's own author or a moderator; every other
@@ -562,6 +569,8 @@ export function toForumThreadResponse(
     // docstring gives: a byline is both names.
     coAuthor:
       isBylineMasked || coAuthor == null ? null : toAuthorSummary(coAuthor),
+    viewerIsCoAuthor:
+      thread.coAuthorId != null && thread.coAuthorId === viewer.userId,
     publishedAt: thread.publishedAt.toISOString(),
     reviewState: thread.reviewState,
     // The same two conditions `isThreadPublished` applies, in the same order:

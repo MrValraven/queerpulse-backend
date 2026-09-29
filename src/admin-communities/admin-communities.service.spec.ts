@@ -7,7 +7,13 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, FindManyOptions, FindOperator, In, IsNull } from 'typeorm';
-import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import { ACCOUNT_REMOVED } from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
+import {
+  COMMUNITY_BAN_AUDIT_ACTION,
+  CommunityGovernanceLogService,
+} from '../communities/community-governance-log.service';
+import { CommunityBan } from '../communities/entities/community-ban.entity';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import { SubcommunityCascadeService } from '../communities/subcommunity-cascade.service';
 import { SUBCOMMUNITIES_NOT_ALLOWED_CODE } from '../communities/subcommunity-rules';
@@ -21,6 +27,8 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Event as Gathering } from '../events/entities/event.entity';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   AccessTier,
   Community,
@@ -313,7 +321,13 @@ describe('AdminCommunitiesService', () => {
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let users: { findOne: jest.Mock };
   let dataSource: { transaction: jest.Mock; createQueryBuilder: jest.Mock };
-  let governanceLog: { log: jest.Mock };
+  let governanceLog: { log: jest.Mock; logModerationAudit: jest.Mock };
+  let bans: {
+    createQueryBuilder: jest.Mock;
+    findOne: jest.Mock;
+  };
+  let banInsertValues: jest.Mock;
+  let notifications: { create: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
   let spaceRequestApprovals: { closeOpenAsApproved: jest.Mock };
   let subcommunityCascade: {
@@ -388,7 +402,29 @@ describe('AdminCommunitiesService', () => {
       // resolves", which is what every test that is not about photos wants.
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub([])),
     };
-    governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
+    governanceLog = {
+      log: jest.fn().mockResolvedValue(undefined),
+      logModerationAudit: jest.fn().mockResolvedValue(undefined),
+    };
+    // `removeMember`'s bar: `createQueryBuilder().insert().into().values()
+    // .orIgnore().execute()`, then a read-back through `findOne`.
+    banInsertValues = jest.fn();
+    const banInsertBuilder = {
+      insert: jest.fn(),
+      into: jest.fn(),
+      values: banInsertValues,
+      orIgnore: jest.fn(),
+      execute: jest.fn().mockResolvedValue({ identifiers: [] }),
+    };
+    banInsertBuilder.insert.mockReturnValue(banInsertBuilder);
+    banInsertBuilder.into.mockReturnValue(banInsertBuilder);
+    banInsertBuilder.values.mockReturnValue(banInsertBuilder);
+    banInsertBuilder.orIgnore.mockReturnValue(banInsertBuilder);
+    bans = {
+      createQueryBuilder: jest.fn(() => banInsertBuilder),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
+    notifications = { create: jest.fn().mockResolvedValue(null) };
     eventEmitter = { emit: jest.fn() };
     spaceRequestApprovals = {
       closeOpenAsApproved: jest.fn().mockResolvedValue(undefined),
@@ -422,6 +458,7 @@ describe('AdminCommunitiesService', () => {
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(User), useValue: users },
+        { provide: getRepositoryToken(CommunityBan), useValue: bans },
         { provide: DataSource, useValue: dataSource },
         { provide: CommunityGovernanceLogService, useValue: governanceLog },
         {
@@ -433,6 +470,7 @@ describe('AdminCommunitiesService', () => {
           provide: SpaceRequestApprovalsService,
           useValue: spaceRequestApprovals,
         },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = module.get(AdminCommunitiesService);
@@ -2017,6 +2055,206 @@ describe('AdminCommunitiesService', () => {
           previousOwnerId: 'user-plain',
         },
       });
+    });
+
+    function arrangePlainMemberRemoval(): void {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-plain', slug: 'plain-pat' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({
+          id: 'member-plain',
+          userId: 'user-plain',
+          role: RosterRole.Member,
+        }),
+      );
+    }
+
+    function makeBan(overrides: Partial<CommunityBan> = {}): CommunityBan {
+      return {
+        id: 'ban-1',
+        communityId: 'community-1',
+        userId: 'user-plain',
+        bannedByUserId: 'user-admin',
+        reason: null,
+        expiresAt: null,
+        ruleIndex: null,
+        ruleVersion: null,
+        ruleText: null,
+        createdAt: FIXED_NOW,
+        ...overrides,
+      };
+    }
+
+    it('notifies the removed member with the community name', async () => {
+      arrangePlainMemberRemoval();
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'user-plain',
+        NotificationType.CommunityMemberRemoved,
+        {
+          source: 'community',
+          communitySlug: 'circle-of-care',
+          communityName: 'Circle of Care',
+        },
+      );
+    });
+
+    it('sends the removal bell with no actor so a block cannot suppress it', async () => {
+      arrangePlainMemberRemoval();
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      const [, , payload, ...actorArguments] = notifications.create.mock
+        .calls[0] as [string, NotificationType, Record<string, unknown>];
+      expect(actorArguments).toEqual([]);
+      expect(payload).not.toHaveProperty('actorId');
+      expect(Object.values(payload)).not.toContain('user-admin');
+    });
+
+    it('still completes the removal when the bell cannot be sent', async () => {
+      arrangePlainMemberRemoval();
+      notifications.create.mockRejectedValue(new Error('push down'));
+
+      await expect(
+        service.removeMember('circle-of-care', 'user-admin', 'plain-pat'),
+      ).resolves.toBeUndefined();
+      expect(communityMembers.delete).toHaveBeenCalledWith({
+        id: 'member-plain',
+      });
+    });
+
+    it('writes no bar by default', async () => {
+      arrangePlainMemberRemoval();
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      expect(bans.createQueryBuilder).not.toHaveBeenCalled();
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        ACCOUNT_REMOVED,
+        expect.anything(),
+      );
+      expect(governanceLog.logModerationAudit).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalledWith(
+        expect.anything(),
+        NotificationType.CommunityBanned,
+        expect.anything(),
+      );
+    });
+
+    it('writes a permanent bar, a ban-evasion signal and a banned bell when barReturn is set', async () => {
+      arrangePlainMemberRemoval();
+      bans.findOne.mockResolvedValue(makeBan());
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat', {
+        shouldBarReturn: true,
+      });
+
+      expect(banInsertValues).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        userId: 'user-plain',
+        bannedByUserId: 'user-admin',
+        reason: null,
+        expiresAt: null,
+        ruleIndex: null,
+        ruleVersion: null,
+        ruleText: null,
+      });
+      expect(eventEmitter.emit).toHaveBeenCalledWith(ACCOUNT_REMOVED, {
+        userId: 'user-plain',
+        removalKind: RemovalKind.CommunityBan,
+        communityId: 'community-1',
+        removedAt: FIXED_NOW,
+      });
+      expect(governanceLog.logModerationAudit).toHaveBeenCalledWith({
+        actorUserId: 'user-admin',
+        action: COMMUNITY_BAN_AUDIT_ACTION,
+        targetUserId: 'user-plain',
+        note: null,
+        duration: null,
+      });
+      // One bell, the banned one, with no actor argument.
+      expect(notifications.create).toHaveBeenCalledTimes(1);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'user-plain',
+        NotificationType.CommunityBanned,
+        {
+          source: 'community',
+          communitySlug: 'circle-of-care',
+          communityName: 'Circle of Care',
+          reason: null,
+          expiresAt: null,
+          ruleText: null,
+          ruleIndex: null,
+          ruleVersion: null,
+        },
+      );
+    });
+
+    it('logs MemberBanned with adminOverride when barring', async () => {
+      arrangePlainMemberRemoval();
+      bans.findOne.mockResolvedValue(makeBan());
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat', {
+        shouldBarReturn: true,
+      });
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.MemberBanned,
+        targetUserId: 'user-plain',
+        metadata: { adminOverride: true, banExpiresAt: null },
+      });
+      expect(governanceLog.log).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: GovernanceLogAction.MemberRemoved }),
+      );
+    });
+
+    it('keeps the ban already on file when the member is already barred', async () => {
+      arrangePlainMemberRemoval();
+      // The insert hit the unique (community, user) index and wrote nothing;
+      // the read-back returns the timed bar a community moderator set.
+      const existingExpiry = new Date('2026-08-19T12:00:00.000Z');
+      bans.findOne.mockResolvedValue(
+        makeBan({
+          id: 'ban-existing',
+          bannedByUserId: 'user-mod',
+          reason: 'Spam in the welcome thread',
+          expiresAt: existingExpiry,
+        }),
+      );
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat', {
+        shouldBarReturn: true,
+      });
+
+      expect(bans.findOne).toHaveBeenCalledWith({
+        where: { communityId: 'community-1', userId: 'user-plain' },
+      });
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: GovernanceLogAction.MemberBanned,
+          metadata: {
+            adminOverride: true,
+            banExpiresAt: existingExpiry.toISOString(),
+          },
+        }),
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'user-plain',
+        NotificationType.CommunityBanned,
+        expect.objectContaining({
+          reason: 'Spam in the welcome thread',
+          expiresAt: existingExpiry.toISOString(),
+        }),
+      );
     });
   });
 });

@@ -123,6 +123,36 @@ describe('AmbassadorCircleService', () => {
     expect(lockRunner.release).toHaveBeenCalled();
   });
 
+  describe('findCircle (ENG-459)', () => {
+    it('returns the pinned community', async () => {
+      const { service, dataSource, communitiesService } = buildService({
+        pinResults: [pinRow],
+      });
+
+      await expect(service.findCircle()).resolves.toBe(circleCommunity);
+
+      expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+      expect(communitiesService.create).not.toHaveBeenCalled();
+    });
+
+    it('returns null before the circle is founded, and founds nothing', async () => {
+      const {
+        service,
+        dataSource,
+        communitiesService,
+        circlePinRepository,
+        cardPrograms,
+      } = buildService({ pinResults: [null] });
+
+      await expect(service.findCircle()).resolves.toBeNull();
+
+      expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+      expect(communitiesService.create).not.toHaveBeenCalled();
+      expect(circlePinRepository.insert).not.toHaveBeenCalled();
+      expect(cardPrograms.upsert).not.toHaveBeenCalled();
+    });
+  });
+
   it('creates the circle with the agreed identity: private, with a coral card', () => {
     expect(CIRCLE_COMMUNITY_INPUT.name).toBe('QueerPulse Ambassadors');
     expect(CIRCLE_COMMUNITY_INPUT.handle).toBe('queerpulse-ambassadors');

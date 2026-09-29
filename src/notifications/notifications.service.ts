@@ -22,6 +22,7 @@ import { User } from '../users/entities/user.entity';
 import { isForeignKeyViolation } from '../common/db-errors';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { visibleThroughMailboxSeatRules } from './notification-mailbox-block';
+import { visibleThroughActorBlocks } from './notification-actor-block';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
   NOTIFICATION_BUNDLE_WINDOW_MS,
@@ -30,8 +31,10 @@ import {
 import {
   NOTIFICATION_BATCH_CREATED,
   NOTIFICATION_CREATED,
+  NOTIFICATION_STATE_CHANGED,
   NotificationBatchCreatedEvent,
   NotificationCreatedEvent,
+  NotificationStateChangedEvent,
 } from './notification.events';
 import {
   NotificationResponse,
@@ -93,8 +96,8 @@ export class NotificationsService {
    * action triggered it) is hidden from the recipient — blocked in either
    * direction, or muted by the recipient. Returns `null` when suppressed.
    *
-   * ENFORCEMENT POINT — write time, not read time. Three reasons this is the
-   * right side of the line:
+   * PRIMARY ENFORCEMENT POINT: write time. Three reasons the write is where
+   * a block has to bite first:
    *  1. `announce()` pushes every persisted notification straight to the
    *     recipient's live sockets (`notification:new`, via the chat gateway).
    *     A read-time filter in `list()` could never unring that bell — the
@@ -108,9 +111,21 @@ export class NotificationsService {
    *  3. `unreadCount()` is a separate query from `list()`; filtering at read
    *     time means keeping two independent filters in sync or shipping a badge
    *     count that never matches the list below it.
-   * The trade-off — notifications created *before* a block are not
-   * retroactively hidden — is consistent with how blocks behave elsewhere and
-   * is why this is enforcement, not history rewriting.
+   *
+   * PRD-403 adds the read-time half for rows written BEFORE a block. Every
+   * read of the member's own rows (`list`, `unreadCount`, `markAllRead` and
+   * the mentions inbox) composes `visibleThroughActorBlocks`, which leaves
+   * out a row whose actor (`ACTOR_PAYLOAD_KEY`, the key `actorIdOf` reads) is
+   * blocked either way with the reader. Point 2 above is met by reading the
+   * one `ACTOR_PAYLOAD_KEY` table the display already uses, so a new type
+   * that names its actor on the bell is filtered with no further change; a
+   * type that hands its actor only to this write-time gate (a persona update,
+   * an anonymous vouch) keeps only this gate. Point 3 is met by putting that
+   * one condition on every one of those queries, so the badge counts exactly
+   * the rows the list shows. The write-time gate stays, for point 1: a row
+   * that is never written is never pushed live. Rows are hidden only while
+   * the block stands, so unblocking brings them back, and a row whose type
+   * names no actor key is never hidden this way.
    *
    * Task 13g adds one read-time rule on top, for a different reason: a row
    * that names a business mailbox thread carries a copy of that thread's
@@ -335,9 +350,12 @@ export class NotificationsService {
     const page = normalizePage(opts.page);
     // Task 13g: `visibleThroughMailboxSeatRules` leaves out a row naming a
     // business mailbox thread this member is now blocked out of. Task 14a:
-    // or has left along with the business.
+    // or has left along with the business. PRD-403:
+    // `visibleThroughActorBlocks` leaves out a row whose actor is blocked
+    // either way with this member, for as long as the block stands.
     const where = {
       userId,
+      id: visibleThroughActorBlocks(userId),
       ...(opts.unread ? { read: false } : {}),
       payload: visibleThroughMailboxSeatRules(userId),
     };
@@ -392,10 +410,11 @@ export class NotificationsService {
   }
 
   unreadCount(userId: string): Promise<number> {
-    // Task 13g: the badge counts exactly the rows `list` shows.
+    // Task 13g and PRD-403: the badge counts exactly the rows `list` shows.
     return this.notifications.count({
       where: {
         userId,
+        id: visibleThroughActorBlocks(userId),
         read: false,
         payload: visibleThroughMailboxSeatRules(userId),
       },
@@ -410,6 +429,7 @@ export class NotificationsService {
     if (!result.affected) {
       throw new NotFoundException('Notification not found');
     }
+    this.announceStateChanged(userId);
     return { ok: true };
   }
 
@@ -418,13 +438,23 @@ export class NotificationsService {
    * `visibleThroughMailboxSeatRules` filter `list`/`unreadCount` read
    * through: without it, a row a mailbox block currently hides still gets
    * `read: true` here, so lifting the block later resurfaces a row the
-   * member never actually saw, already marked read.
+   * member never actually saw, already marked read. PRD-403: the actor
+   * block filter is composed for the same reason, so an unblock brings back
+   * rows still unread.
    */
   async markAllRead(userId: string): Promise<{ ok: true }> {
-    await this.notifications.update(
-      { userId, read: false, payload: visibleThroughMailboxSeatRules(userId) },
+    const result = await this.notifications.update(
+      {
+        userId,
+        id: visibleThroughActorBlocks(userId),
+        read: false,
+        payload: visibleThroughMailboxSeatRules(userId),
+      },
       { read: true },
     );
+    if ((result.affected ?? 0) > 0) {
+      this.announceStateChanged(userId);
+    }
     return { ok: true };
   }
 
@@ -453,6 +483,7 @@ export class NotificationsService {
     if (!result.affected) {
       throw new NotFoundException('Notification not found');
     }
+    this.announceStateChanged(userId);
     return { ok: true };
   }
 
@@ -705,6 +736,18 @@ export class NotificationsService {
       notification,
     };
     this.eventEmitter.emit(NOTIFICATION_CREATED, event);
+  }
+
+  /**
+   * Announce that `userId`'s own rows changed read state or were deleted.
+   * The chat gateway relays it as `notification:changed` so the member's
+   * other tabs and devices refetch their bell. Same synchronous
+   * fire-and-forget `emit` as `announce()`: a throwing listener must never
+   * fail the write.
+   */
+  private announceStateChanged(userId: string): void {
+    const event: NotificationStateChangedEvent = { userId };
+    this.eventEmitter.emit(NOTIFICATION_STATE_CHANGED, event);
   }
 
   /**

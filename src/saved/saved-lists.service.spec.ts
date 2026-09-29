@@ -416,7 +416,7 @@ describe('SavedListsService', () => {
       );
     });
 
-    it('keeps a dead item in the shared list, with its snapshot and no href', async () => {
+    it('keeps a dead item in the shared list, with its snapshot blanked and no href', async () => {
       lists.findOne.mockResolvedValue(list());
       entries.find.mockResolvedValue([
         { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
@@ -434,6 +434,60 @@ describe('SavedListsService', () => {
       expect(shared.itemCount).toBe(1);
       expect(shared.items[0]?.availability).toBe('unavailable');
       expect(shared.items[0]?.href).toBeNull();
+      // ENG-443: the snapshot itself does NOT stay on this route, unlike the
+      // owner's own saved list. The recipient is a third party, and an
+      // unavailable subject can mean its owner blocked or hid from THIS
+      // recipient specifically, so the title and meta must not disclose who
+      // that is.
+      expect(shared.items[0]?.title).toBe('');
+      expect(shared.items[0]?.meta).toBeUndefined();
+    });
+
+    // ENG-443. The blocked/hidden flatmate case named in the scan: a saved
+    // flatmate listing snapshots the person's name (`title`) and neighbourhood
+    // (`meta`). If they have since blocked the recipient, or hidden from them,
+    // `SavedAvailabilityService` reports the subject unavailable, and that
+    // must be enough on its own to withhold the name and neighbourhood.
+    it('withholds a flatmate snapshot once its subject is unavailable to the recipient', async () => {
+      lists.findOne.mockResolvedValue(list());
+      entries.find.mockResolvedValue([
+        { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
+      ]);
+      savedItems.find.mockResolvedValue([
+        sharedItem({
+          subjectType: SavedKind.Flatmate,
+          subjectId: 'harper',
+          title: 'Harper',
+          meta: 'Bairro Alto',
+          href: '/members/harper',
+        }),
+      ]);
+      // Harper blocked (or hid from) the recipient after the list was shared.
+      availability.availableRefs.mockResolvedValue(new Set<string>());
+
+      const shared = await service.getShared('g'.repeat(64), 'recipient-1');
+
+      expect(shared.items[0]?.availability).toBe('unavailable');
+      expect(shared.items[0]?.title).toBe('');
+      expect(shared.items[0]?.meta).toBeUndefined();
+      expect(shared.items[0]?.href).toBeNull();
+      expect(JSON.stringify(shared)).not.toContain('Harper');
+      expect(JSON.stringify(shared)).not.toContain('Bairro Alto');
+    });
+
+    it('still shows the snapshot for an available item on the same shared list', async () => {
+      lists.findOne.mockResolvedValue(list());
+      entries.find.mockResolvedValue([
+        { id: 'entry-1', listId: 'list-1', savedItemId: 'item-1' },
+      ]);
+      savedItems.find.mockResolvedValue([sharedItem({ meta: 'Bairro Alto' })]);
+      availability.availableRefs.mockResolvedValue(
+        new Set(['listing:drama-bar']),
+      );
+
+      const shared = await service.getShared('h'.repeat(64), 'recipient-1');
+
+      expect(shared.items[0]?.availability).toBe('available');
       expect(shared.items[0]?.title).toBe('Drama Bar');
       expect(shared.items[0]?.meta).toBe('Bairro Alto');
     });

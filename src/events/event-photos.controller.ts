@@ -16,6 +16,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { AttachEventPhotoDto } from './dto/attach-event-photo.dto';
 import { EventPhotosService } from './event-photos.service';
+import { Feature } from '../common/feature.decorator';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -32,6 +33,7 @@ import {
 // Event photo album. `ActiveMemberGuard` (class-level, mirrors EventsController)
 // requires an active member; per-action authorization (organizer vs. attendee)
 // lives in the service.
+@Feature('events')
 @ApiTags('Events')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({

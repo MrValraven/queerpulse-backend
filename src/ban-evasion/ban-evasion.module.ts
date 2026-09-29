@@ -72,8 +72,11 @@ import { RemovedAccountSignal } from './entities/removed-account-signal.entity';
     // telling somebody about it must never be able to fail it.
     BanEvasionNotificationsListener,
   ],
-  // Exported so a ban path can call `recordRemovedAccount` directly if the
-  // event hop is ever removed. The shipped wiring is the event listener.
-  exports: [BanEvasionService],
+  // `BanEvasionService` is exported so a ban path can call
+  // `recordRemovedAccount` directly if the event hop is ever removed. The
+  // shipped wiring is the event listener. `CommunityBanEvasionService` is
+  // exported so `CommunitiesService.join` can call `isMatchingCommunityBan`
+  // for the person trying to join.
+  exports: [BanEvasionService, CommunityBanEvasionService],
 })
 export class BanEvasionModule {}

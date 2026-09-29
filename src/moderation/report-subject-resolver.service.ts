@@ -94,8 +94,8 @@ const UNRESOLVED: ReportSubjectResolution = {
 
 // Loose enough to guard a `uuid`-typed column from a Postgres "invalid input
 // syntax for type uuid" error when a non-uuid `subjectId` (a slug, the
-// `"unspecified"` sentinel the safety form files, ...) reaches a lookup keyed
-// by id. Same pattern (and same reason) as `AccountEnforcementService`'s copy.
+// `unlinked:<uuid>` id the safety form files, ...) reaches a lookup keyed by
+// id. Same pattern (and same reason) as `AccountEnforcementService`'s copy.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -325,11 +325,12 @@ export class ReportSubjectResolverService {
       case ReportSubjectType.LandlordRecommendation:
         return this.queryByUuid(LANDLORD_RECOMMENDATION_SQL, subjectIds);
 
-      // A `venue` report is filed from the safety form, which deliberately
-      // sends the `"unspecified"` sentinel rather than an id (see
-      // `ReportSections.tsx`): the reporter describes the place in prose. The
-      // local directory's venues are demo-only and have no table of their own,
-      // so there is genuinely nobody to resolve. Three nulls, never a guess.
+      // A `venue` report is filed from the safety form, which names no record
+      // and files each incident under its own `unlinked:<uuid>` id
+      // (`reports/unlinked-subject.ts`): the reporter describes the place in
+      // prose. The local directory's venues are demo-only and have no table of
+      // their own, so there is genuinely nobody to resolve, and this answers
+      // with three nulls.
       case ReportSubjectType.Venue:
         return new Map();
 

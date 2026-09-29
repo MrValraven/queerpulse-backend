@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { Connection } from '../connections/entities/connection.entity';
+import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -61,6 +62,7 @@ describe('HousingGroupsService — group-listing review (LOC-19)', () => {
   let listings: { findOne: jest.Mock; save: jest.Mock };
   let notifications: { create: jest.Mock };
   let profiles: { find: jest.Mock };
+  let modAudit: { writeAuditLog: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -69,6 +71,7 @@ describe('HousingGroupsService — group-listing review (LOC-19)', () => {
     };
     notifications = { create: jest.fn().mockResolvedValue(null) };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -87,6 +90,7 @@ describe('HousingGroupsService — group-listing review (LOC-19)', () => {
           provide: AdminQueueNotificationsService,
           useValue: { announce: jest.fn().mockResolvedValue(undefined) },
         },
+        { provide: ModAuditService, useValue: modAudit },
       ],
     }).compile();
     service = module.get(HousingGroupsService);
@@ -245,5 +249,184 @@ describe('HousingGroupsService — group-listing review (LOC-19)', () => {
         'moderator-1',
       ),
     ).resolves.toMatchObject({ status: GroupListingStatus.Live });
+  });
+
+  describe('setListingHidden (PRD-463, ENG-490)', () => {
+    const REASON = 'The listing asks for a broker fee.';
+
+    it('hides a listing, stores the reason, and tells the poster why', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ status: GroupListingStatus.Live }),
+      );
+
+      await service.setListingHidden(
+        'listing-1',
+        { hidden: true, reason: `  ${REASON}  ` },
+        'moderator-1',
+      );
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ hidden: true, hiddenReason: REASON }),
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-9',
+        NotificationType.GroupListingDecided,
+        {
+          source: 'housing_group',
+          decision: 'hidden',
+          groupSlug: 'sao-bento-flatshares',
+          groupName: 'Sao Bento flatshares',
+          listingTitle: 'Sunny room off Rua da Bica',
+          reason: REASON,
+        },
+      );
+    });
+
+    it('records the hide in the audit trail with the acting staff member and the reason', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ status: GroupListingStatus.Live }),
+      );
+
+      await service.setListingHidden(
+        'listing-1',
+        { hidden: true, reason: REASON },
+        'moderator-1',
+      );
+
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-1',
+        'housing_group_listing_hide',
+        undefined,
+        expect.stringMatching(/listing-1.*broker fee/),
+      );
+    });
+
+    it('refuses a hide with no reason, and writes nothing', async () => {
+      listings.findOne.mockResolvedValue(makeListing());
+
+      await expect(
+        service.setListingHidden(
+          'listing-1',
+          { hidden: true, reason: '   ' },
+          'moderator-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(listings.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+      expect(modAudit.writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('un-hides a live listing, tells the poster it is live, and audits the unhide', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          status: GroupListingStatus.Live,
+          hidden: true,
+          hiddenReason: REASON,
+        }),
+      );
+
+      await service.setListingHidden(
+        'listing-1',
+        { hidden: false, reason: 'ignored on unhide' },
+        'moderator-2',
+      );
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ hidden: false, hiddenReason: null }),
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-9',
+        NotificationType.GroupListingDecided,
+        {
+          source: 'housing_group',
+          decision: GroupListingStatus.Live,
+          groupSlug: 'sao-bento-flatshares',
+          groupName: 'Sao Bento flatshares',
+          listingTitle: 'Sunny room off Rua da Bica',
+        },
+      );
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-2',
+        'housing_group_listing_unhide',
+        undefined,
+        expect.stringContaining('listing-1'),
+      );
+    });
+
+    // Un-hiding a listing that never passed review leaves it invisible, so
+    // telling the poster it is live would be false.
+    it('does not tell the poster "live" when the un-hidden listing is still in review', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ hidden: true, hiddenReason: REASON }),
+      );
+
+      await service.setListingHidden(
+        'listing-1',
+        { hidden: false },
+        'moderator-1',
+      );
+
+      expect(listings.save).toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    // A listing still in review was never on the board, so hiding it changes
+    // nothing its poster can see. The takedown and its audit row still land.
+    it('does not send the hidden notice when the listing was never live', async () => {
+      listings.findOne.mockResolvedValue(makeListing());
+
+      await service.setListingHidden(
+        'listing-1',
+        { hidden: true, reason: REASON },
+        'moderator-1',
+      );
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ hidden: true, hiddenReason: REASON }),
+      );
+      expect(modAudit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'moderator-1',
+        'housing_group_listing_hide',
+        undefined,
+        expect.stringContaining('listing-1'),
+      );
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('does not repeat the notice for a second identical hide', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          status: GroupListingStatus.Live,
+          hidden: true,
+          hiddenReason: REASON,
+        }),
+      );
+
+      await service.setListingHidden(
+        'listing-1',
+        { hidden: true, reason: REASON },
+        'moderator-1',
+      );
+
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('skips the notice silently when the listing has no poster', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ status: GroupListingStatus.Live, postedByUserId: null }),
+      );
+
+      await expect(
+        service.setListingHidden(
+          'listing-1',
+          { hidden: true, reason: REASON },
+          'moderator-1',
+        ),
+      ).resolves.toMatchObject({ hidden: true });
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
   });
 });

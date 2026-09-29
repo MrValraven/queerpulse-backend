@@ -14,6 +14,7 @@ import {
   ConversationKind,
 } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { groupJoinHistoryFloorCoversPredicate } from '../messaging/group-join-history-floor';
 import { MetricsService } from '../metrics/metrics.service';
 import { Report, ReportSubjectType } from './entities/report.entity';
 import { REPORT_NOT_PARTICIPANT_CODE, ReportsService } from './reports.service';
@@ -28,17 +29,77 @@ const SENT_AT = new Date('2026-09-10T12:00:00.000Z');
 const FLOOR_AFTER_SEND = new Date('2026-09-11T12:00:00.000Z');
 const FLOOR_BEFORE_SEND = new Date('2026-09-09T12:00:00.000Z');
 
+const EXPECTED_JOIN_FLOOR_CLAUSE = groupJoinHistoryFloorCoversPredicate(
+  'message.created_at',
+  'seat',
+);
+
 /**
  * Task 13h review (M1): a mailbox staff member must not be able to report,
  * by id, a message their seat's history floor hides from them. Refused with
  * the exact refusal a message outside the conversation gets.
+ * PRD-400: a member who joined a group after it began gets that same refusal
+ * for a message from before their join. That check runs in SQL, so the
+ * `Message` stand-in below accepts only the clauses it knows and answers the
+ * join floor clause from the seat and conversation the test set up.
  */
-describe('ReportsService: message reports behind a mailbox staff floor', () => {
+describe('ReportsService: message reports behind a seat history floor', () => {
   let service: ReportsService;
   let reports: { save: jest.Mock };
   let conversationParticipants: { findOne: jest.Mock };
   let conversations: { findOne: jest.Mock };
   let identities: { getById: jest.Mock };
+  let messageQueryBuilder: jest.Mock;
+  let seatState: {
+    historyFloorAt: Date | null;
+    conversationKind: ConversationKind;
+  };
+
+  const joinFloorQuery = () => {
+    const parameters: Record<string, unknown> = {};
+    const clauses: string[] = [];
+    const builder = {
+      withDeleted: () => builder,
+      innerJoin: (
+        _entity: unknown,
+        _alias: string,
+        _condition: string,
+        joinParameters?: Record<string, unknown>,
+      ) => {
+        Object.assign(parameters, joinParameters);
+        return builder;
+      },
+      where: (clause: string, whereParameters?: Record<string, unknown>) => {
+        clauses.push(clause);
+        Object.assign(parameters, whereParameters);
+        return builder;
+      },
+      andWhere: (clause: string) => {
+        clauses.push(clause);
+        return builder;
+      },
+      getExists: () => {
+        expect(parameters.seatId).toBe('seat-1');
+        expect(parameters.messageId).toBe(MESSAGE_ID);
+        let isCovered = true;
+        for (const clause of clauses) {
+          if (clause === 'message.id = :messageId') {
+            continue;
+          } else if (clause === EXPECTED_JOIN_FLOOR_CLAUSE) {
+            isCovered =
+              isCovered &&
+              seatState.historyFloorAt !== null &&
+              seatState.conversationKind === ConversationKind.Group &&
+              SENT_AT.getTime() <= seatState.historyFloorAt.getTime();
+          } else {
+            throw new Error(`Unrecognised join floor clause: ${clause}`);
+          }
+        }
+        return Promise.resolve(isCovered);
+      },
+    };
+    return builder;
+  };
 
   // A seated staff member carries both columns at one instant, so
   // `clearedAt` follows `historyFloorAt` unless a test sets it apart.
@@ -49,6 +110,10 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
     conversationKind?: ConversationKind;
     isOfficial?: boolean;
   }) => {
+    seatState = {
+      historyFloorAt: options.historyFloorAt,
+      conversationKind: options.conversationKind ?? ConversationKind.Direct,
+    };
     conversationParticipants.findOne.mockResolvedValue({
       id: 'seat-1',
       leftAt: null,
@@ -98,6 +163,11 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
     conversationParticipants = { findOne: jest.fn() };
     conversations = { findOne: jest.fn() };
     identities = { getById: jest.fn() };
+    messageQueryBuilder = jest.fn(joinFloorQuery);
+    seatState = {
+      historyFloorAt: null,
+      conversationKind: ConversationKind.Direct,
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -126,6 +196,7 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
               kind: 'text',
               attachment: null,
             }),
+            createQueryBuilder: messageQueryBuilder,
           },
         },
         {
@@ -201,18 +272,6 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
       false,
     ],
     [
-      'a group seat after clear chat',
-      IdentityKind.Profile,
-      ConversationKind.Group,
-      false,
-    ],
-    [
-      'a business seat in a group thread',
-      IdentityKind.Listing,
-      ConversationKind.Group,
-      false,
-    ],
-    [
       'a business seat in an official thread',
       IdentityKind.Listing,
       ConversationKind.Direct,
@@ -261,5 +320,68 @@ describe('ReportsService: message reports behind a mailbox staff floor', () => {
     });
     expect(identities.getById).not.toHaveBeenCalled();
     expect(conversations.findOne).not.toHaveBeenCalled();
+    expect(messageQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  describe('PRD-400: a group join floor', () => {
+    it.each([
+      ['a personal seat', IdentityKind.Profile],
+      ['a business seat', IdentityKind.Listing],
+    ])(
+      'refuses %s that joined after the message was sent, exactly as an outsider is refused',
+      async (_label, identityKind) => {
+        conversationParticipants.findOne.mockResolvedValueOnce(null);
+        const outsiderRefusal = await refusalOf();
+
+        seat({
+          identityKind,
+          historyFloorAt: FLOOR_AFTER_SEND,
+          conversationKind: ConversationKind.Group,
+        });
+        const joinerRefusal = await refusalOf();
+
+        expect(joinerRefusal).toEqual(outsiderRefusal);
+        expect(joinerRefusal).toMatchObject({
+          code: REPORT_NOT_PARTICIPANT_CODE,
+        });
+        expect(messageQueryBuilder).toHaveBeenCalledTimes(1);
+        expect(identities.getById).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses a message sent at the join floor instant itself', async () => {
+      seat({
+        identityKind: IdentityKind.Profile,
+        historyFloorAt: SENT_AT,
+        conversationKind: ConversationKind.Group,
+      });
+      await refusalOf();
+    });
+
+    it('lets a member who joined before the message was sent report it', async () => {
+      seat({
+        identityKind: IdentityKind.Profile,
+        historyFloorAt: FLOOR_BEFORE_SEND,
+        conversationKind: ConversationKind.Group,
+      });
+      await expect(reportMessage()).resolves.toMatchObject({
+        subjectType: 'message',
+      });
+      expect(messageQueryBuilder).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a group seat with no join floor report a message its own clear chat hides, with no floor query', async () => {
+      seat({
+        identityKind: IdentityKind.Profile,
+        historyFloorAt: null,
+        clearedAt: FLOOR_AFTER_SEND,
+        conversationKind: ConversationKind.Group,
+      });
+      await expect(reportMessage()).resolves.toMatchObject({
+        subjectType: 'message',
+      });
+      expect(messageQueryBuilder).not.toHaveBeenCalled();
+    });
   });
 });

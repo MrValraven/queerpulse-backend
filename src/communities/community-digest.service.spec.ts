@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Event } from '../events/entities/event.entity';
 import { Report } from '../reports/entities/report.entity';
+import { DIGEST_EXCERPT_LENGTH } from './community-digest-response';
 import { CommunityDigestService } from './community-digest.service';
 import {
   CommunityMember,
@@ -11,6 +12,8 @@ import {
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { Community } from './entities/community.entity';
 import { CommunityPost } from './entities/community-post.entity';
+
+const GRINNING_FACE = '\u{1F600}';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
 // results by default. Mirrors `landing.service.spec.ts`'s `qbStub`.
@@ -136,6 +139,41 @@ describe('CommunityDigestService', () => {
       // No space in the caller's roster means no parent ids to resolve, so
       // the batched parent-name lookup never runs a second query.
       expect(communities.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps an emoji at the excerpt boundary whole', async () => {
+      members.find.mockResolvedValue([
+        {
+          communityId: 'community-1',
+          role: RosterRole.Member,
+          notificationLevel: CommunityNotificationLevel.All,
+        },
+      ]);
+      communities.find.mockResolvedValueOnce([
+        {
+          id: 'community-1',
+          slug: 'trans-nb-network',
+          name: 'Trans & Non-Binary Network',
+          parentId: null,
+          avatarImageUrl: null,
+        },
+      ]);
+      const body = 'a'.repeat(DIGEST_EXCERPT_LENGTH - 1) + GRINNING_FACE;
+      posts.query.mockResolvedValueOnce([
+        {
+          id: 'post-1',
+          community_id: 'community-1',
+          body,
+          kind: 'post',
+          created_at: new Date('2026-01-01T00:00:00Z'),
+        },
+      ]);
+
+      const result = await service.getDigest('user-1');
+
+      expect(result.communities[0]?.excerpts).toEqual([
+        expect.objectContaining({ postId: 'post-1', excerpt: body }),
+      ]);
     });
   });
 });

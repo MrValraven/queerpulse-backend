@@ -147,7 +147,16 @@ export class ConversationParticipant {
    * floor. A personal "clear chat"
    * writes `clearedAt` alone: it hides history from this person's own list
    * and leaves every other action on older messages working, as in a
-   * personal chat. NULL on every personal and group seat.
+   * personal chat. NULL on every personal seat.
+   *
+   * PRD-400: a GROUP seat created for someone joining an existing group
+   * (added, invite accepted, link join, Go together late joiner) holds its
+   * JOIN floor here, written with `clearedAt` from the same instant by
+   * `readGroupJoinHistoryFloor`. Reply quotes read it through
+   * `groupJoinHistoryFloorCoversPredicate` so a pre-join parent is quoted as
+   * unavailable. The mailbox staff predicate above never matches a group
+   * seat. NULL on every seat taken at group creation and on every group
+   * seat that existed before PRD-400.
    */
   @Column({ type: 'timestamptz', nullable: true })
   historyFloorAt!: Date | null;

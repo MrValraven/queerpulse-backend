@@ -31,7 +31,12 @@ import {
   seatExcludedFromMailboxPredicate,
   staffSeatExcludedFromMailboxPredicate,
 } from '../messaging/mailbox-seats';
-import { FORMER_MEMBER_DISPLAY_NAME } from '../messaging/message-response';
+import {
+  FORMER_MEMBER_DISPLAY_NAME,
+  FULL_MEMBER_NAMES,
+  memberNameOptionsFor,
+  type MemberNameOptions,
+} from '../messaging/message-response';
 import {
   MESSAGE_SUBJECT_TYPE,
   notModeratedMessagePredicate,
@@ -365,6 +370,9 @@ function describeAttachment(
 interface ConversationContext {
   title: string | null;
   kind: ExportedConversationKind;
+  /** PRD-423: first names only for the other members of a matched Go
+   *  together chat, as the chat itself shows them. */
+  nameOptions: MemberNameOptions;
 }
 
 /**
@@ -487,7 +495,14 @@ async function loadConversationContexts(
   for (const idChunk of chunked(conversationIds, ID_LOOKUP_CHUNK_SIZE)) {
     const conversations = await manager.getRepository(Conversation).find({
       where: { id: In(idChunk) },
-      select: { id: true, isOfficial: true, kind: true, title: true },
+      select: {
+        id: true,
+        isOfficial: true,
+        kind: true,
+        title: true,
+        isGoTogetherChat: true,
+        eventMatchGroupId: true,
+      },
     });
     const directConversationIds = conversations
       .filter(
@@ -558,11 +573,13 @@ async function loadConversationContexts(
         contexts.set(conversation.id, {
           title: conversation.title ?? OFFICIAL_CONVERSATION_TITLE,
           kind: 'official',
+          nameOptions: FULL_MEMBER_NAMES,
         });
       } else if (conversation.kind === ConversationKind.Group) {
         contexts.set(conversation.id, {
           title: conversation.title,
           kind: 'group',
+          nameOptions: memberNameOptionsFor(conversation),
         });
       } else {
         const conversationSeats =
@@ -581,6 +598,7 @@ async function loadConversationContexts(
             mailboxExcludedConversationIds.has(conversation.id),
           ),
           kind: 'direct',
+          nameOptions: FULL_MEMBER_NAMES,
         });
       }
     }
@@ -923,10 +941,16 @@ export async function buildReportedConversationsExport(
         const facts = describeAttachment(row.kind, row.attachment);
         return {
           id: row.id,
+          // PRD-423: another member of a matched Go together chat exports
+          // under the first name the chat showed; the member's own name stays
+          // whole in their own archive.
           senderDisplayName: renderMessageSender(
             row,
             profileByUser,
             senderContext,
+            row.senderId === userId
+              ? FULL_MEMBER_NAMES
+              : (context?.nameOptions ?? FULL_MEMBER_NAMES),
           ).displayName,
           isOwnMessage: row.senderId === userId,
           kind: row.kind,
