@@ -538,8 +538,8 @@ export class ListingsController {
     return this.listingsService.replyToReview(ref, user.userId, reviewId, dto);
   }
 
-  // Any active member (NOT owner-gated): contest a "friendly"/unowned listing
-  // — including the named business claiming it (item #13). Files a
+  // Any active member (NOT owner-gated) can contest a listing, including the
+  // named business when the entry misrepresents it (item #13). Files a
   // `listing_dispute` report through the shared report+moderation pipeline;
   // throttled like `POST /reports` since it is a report-filing surface.
   @Post(':ref/dispute')

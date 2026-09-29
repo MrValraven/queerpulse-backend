@@ -1,16 +1,20 @@
 import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminMembersModule } from '../admin-members/admin-members.module';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { SocialModule } from '../social/social.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AdminMagazineAuthorsController } from './admin-magazine-authors.controller';
 import { AdminMagazineDecksController } from './admin-magazine-decks.controller';
+import { AdminMagazineDeskViewsController } from './admin-magazine-desk-views.controller';
 import { AdminMagazineIssuesController } from './admin-magazine-issues.controller';
 import { AdminMagazineLifecycleController } from './admin-magazine-lifecycle.controller';
 import { AdminMagazinePiecesController } from './admin-magazine-pieces.controller';
@@ -24,6 +28,7 @@ import { MagazineArticleVersion } from './entities/magazine-article-version.enti
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineCorrection } from './entities/magazine-correction.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
+import { MagazineDeskView } from './entities/magazine-desk-view.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
@@ -41,6 +46,9 @@ import { MagazineFrontService } from './magazine-front.service';
 import { MagazineIssueContentsController } from './magazine-issue-contents.controller';
 import { MagazineIssueContentsService } from './magazine-issue-contents.service';
 import { MagazineIssueCostsService } from './magazine-issue-costs.service';
+import { MagazineDeskPresenceGateway } from './magazine-desk-presence.gateway';
+import { MagazineDeskPresenceService } from './magazine-desk-presence.service';
+import { MagazineDeskViewsService } from './magazine-desk-views.service';
 import { MagazineLifecycleService } from './magazine-lifecycle.service';
 import { MagazinePieceService } from './magazine-piece.service';
 import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
@@ -59,6 +67,7 @@ import { WriterApplicationsService } from './writer-applications.service';
       MagazineAuthor,
       MagazineCorrection,
       MagazineDeck,
+      MagazineDeskView,
       MagazineIssue,
       MagazineLetter,
       MagazinePayment,
@@ -73,7 +82,17 @@ import { WriterApplicationsService } from './writer-applications.service';
       Profile,
       User,
       UserStaffRole,
+      // Read-side only: the desk presence handshake asks whether the session
+      // behind the access token is still live, as `ChatGateway` does.
+      RefreshToken,
     ]),
+    // The desk presence gateway verifies the handshake token itself and
+    // passes the secret on each call, as `ChatGateway` does, so no defaults.
+    JwtModule.register({}),
+    // `PlatformSettingsService`: the desk presence handshake applies the
+    // platform-lockdown rule, as `ChatGateway` does. That module imports only
+    // `TypeOrmModule`, so this adds no cycle.
+    PlatformSettingsModule,
     NotificationsModule,
     MediaCropsModule,
     ContentModerationModule,
@@ -102,6 +121,9 @@ import { WriterApplicationsService } from './writer-applications.service';
     MagazineIssueContentsController,
     AdminMagazineAuthorsController,
     AdminMagazineDecksController,
+    // Each editor's saved desk views. Its own controller, per the admin-CRUD
+    // convention.
+    AdminMagazineDeskViewsController,
     AdminMagazineIssuesController,
     // CON-16 — the content lifecycle desk (archive, supersede, re-review,
     // translations). Its own controller, per the admin-CRUD convention.
@@ -117,6 +139,7 @@ import { WriterApplicationsService } from './writer-applications.service';
     MagazineFrontService,
     MagazineIssueContentsService,
     MagazineIssueCostsService,
+    MagazineDeskViewsService,
     MagazineLifecycleService,
     StorySubmissionsService,
     AdminStorySubmissionsService,
@@ -124,6 +147,9 @@ import { WriterApplicationsService } from './writer-applications.service';
     MagazineReaderCommentsService,
     WriterApplicationsService,
     AdminWriterApplicationsService,
+    // Who is viewing which piece on the desk (namespace `/magazine-desk`).
+    MagazineDeskPresenceService,
+    MagazineDeskPresenceGateway,
   ],
   exports: [StorySubmissionsService, MagazineService],
 })

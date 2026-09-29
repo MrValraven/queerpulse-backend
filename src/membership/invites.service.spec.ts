@@ -11,6 +11,7 @@ import { Invite, InviteStatus } from './entities/invite.entity';
 import { resolveInviteStatus, toPublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
 import { RecognitionEntitlementsService } from '../recognition/recognition-entitlements.service';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 
 // NOTE: the `InvitesService.acceptInvite` suite that used to sit here is gone
 // along with the method and the `POST /invites/:code/accept` route. The route
@@ -87,7 +88,7 @@ describe('toPublicInviteView', () => {
   } as unknown as User;
 
   it('builds the public payload with the configured validity window', () => {
-    const view = toPublicInviteView(invite, inviter, 247, now);
+    const view = toPublicInviteView(invite, inviter, 247, now, false);
     expect(view).toEqual({
       code: 'QP-7F3K-2026',
       status: 'valid',
@@ -100,6 +101,7 @@ describe('toPublicInviteView', () => {
         lastName: 'Tavares',
         avatarUrl: 'https://cdn/ines.jpg',
         memberSince: '2024',
+        isAmbassador: false,
       },
       // An active inviter maps to `inviterActive: true`; an erased or
       // non-active inviter reads as inactive (see the null-inviter test).
@@ -110,9 +112,16 @@ describe('toPublicInviteView', () => {
   });
 
   it('exposes no inviter ids/emails — only the whitelisted public fields', () => {
-    const view = toPublicInviteView(invite, inviter, 1, now);
+    const view = toPublicInviteView(invite, inviter, 1, now, false);
     expect(Object.keys(view.inviter).sort()).toEqual(
-      ['avatarUrl', 'firstName', 'lastName', 'memberSince', 'slug'].sort(),
+      [
+        'avatarUrl',
+        'firstName',
+        'isAmbassador',
+        'lastName',
+        'memberSince',
+        'slug',
+      ].sort(),
     );
   });
 
@@ -122,11 +131,17 @@ describe('toPublicInviteView', () => {
       null,
       0,
       now,
+      false,
     );
     expect(view.note).toBeNull();
     expect(view.vouch).toBeNull();
     expect(view.inviter.avatarUrl).toBeNull();
     expect(view.inviter).not.toHaveProperty('memberSince');
+  });
+
+  it('sets isAmbassador on the inviter block from the given flag', () => {
+    const view = toPublicInviteView(invite, inviter, 247, now, true);
+    expect(view.inviter.isAmbassador).toBe(true);
   });
 });
 
@@ -137,12 +152,29 @@ describe('InvitesService.resolveInvite', () => {
     findByIdWithProfile: jest.Mock;
     countActiveMembers: jest.Mock;
   };
+  let ambassadorStatus: { isVisibleAmbassador: jest.Mock };
+
+  const buildInviterUser = () => ({
+    id: 'inviter',
+    status: UserStatus.Active,
+    activatedAt: new Date('2024-03-01T00:00:00.000Z'),
+    createdAt: new Date('2024-02-01T00:00:00.000Z'),
+    profile: {
+      slug: 'ines',
+      firstName: 'Inês',
+      lastName: 'Tavares',
+      avatarUrl: null,
+    },
+  });
 
   beforeEach(async () => {
     repo = { findOne: jest.fn() };
     users = {
       findByIdWithProfile: jest.fn(),
       countActiveMembers: jest.fn().mockResolvedValue(247),
+    };
+    ambassadorStatus = {
+      isVisibleAmbassador: jest.fn().mockResolvedValue(false),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -158,6 +190,7 @@ describe('InvitesService.resolveInvite', () => {
           provide: RecognitionEntitlementsService,
           useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
         },
+        { provide: AmbassadorStatusService, useValue: ambassadorStatus },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
       ],
     }).compile();
@@ -180,16 +213,7 @@ describe('InvitesService.resolveInvite', () => {
       createdAt: new Date('2026-06-23T10:42:00.000Z'),
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
-    users.findByIdWithProfile.mockResolvedValue({
-      activatedAt: new Date('2024-03-01T00:00:00.000Z'),
-      createdAt: new Date('2024-02-01T00:00:00.000Z'),
-      profile: {
-        slug: 'ines',
-        firstName: 'Inês',
-        lastName: 'Tavares',
-        avatarUrl: null,
-      },
-    });
+    users.findByIdWithProfile.mockResolvedValue(buildInviterUser());
 
     const view = await service.resolveInvite('QP-7F3K-2026');
 
@@ -199,6 +223,69 @@ describe('InvitesService.resolveInvite', () => {
     expect(view.inviter.slug).toBe('ines');
     expect(view.note).toBe('hello');
   });
+
+  // Review Focus 2: the frontend only counts isAmbassador === true, so a
+  // hidden tag must read as false even with an active grant underneath it.
+  it('flags the inviter as an ambassador only when their tag is visible', async () => {
+    repo.findOne.mockResolvedValue({
+      code: 'QP-7F3K-2026',
+      inviterId: 'inviter',
+      status: InviteStatus.Pending,
+      note: null,
+      createdAt: new Date('2026-06-23T10:42:00.000Z'),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+    users.findByIdWithProfile.mockResolvedValue(buildInviterUser());
+
+    ambassadorStatus.isVisibleAmbassador.mockResolvedValue(true);
+    const visibleView = await service.resolveInvite('QP-7F3K-2026');
+    expect(visibleView.inviter.isAmbassador).toBe(true);
+
+    // Hidden tag, even with an active grant underneath. isVisibleAmbassador
+    // is the single source of truth here and already folds that in.
+    ambassadorStatus.isVisibleAmbassador.mockResolvedValue(false);
+    const hiddenView = await service.resolveInvite('QP-7F3K-2026');
+    expect(hiddenView.inviter.isAmbassador).toBe(false);
+  });
+
+  it('never checks ambassador status when the invite has no resolvable inviter', async () => {
+    repo.findOne.mockResolvedValue({
+      code: 'QP-7F3K-2026',
+      inviterId: 'gone',
+      status: InviteStatus.Pending,
+      note: null,
+      createdAt: new Date('2026-06-23T10:42:00.000Z'),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+    users.findByIdWithProfile.mockResolvedValue(null);
+
+    const view = await service.resolveInvite('QP-7F3K-2026');
+
+    expect(view.inviter.isAmbassador).toBe(false);
+    expect(ambassadorStatus.isVisibleAmbassador).not.toHaveBeenCalled();
+  });
+
+  it('never flags an inactive inviter as an ambassador', async () => {
+    repo.findOne.mockResolvedValue({
+      code: 'QP-7F3K-2026',
+      inviterId: 'inviter',
+      status: InviteStatus.Pending,
+      note: null,
+      createdAt: new Date('2026-06-23T10:42:00.000Z'),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+    users.findByIdWithProfile.mockResolvedValue({
+      ...buildInviterUser(),
+      status: UserStatus.Suspended,
+    });
+    ambassadorStatus.isVisibleAmbassador.mockResolvedValue(true);
+
+    const view = await service.resolveInvite('QP-7F3K-2026');
+
+    expect(view.inviter.isAmbassador).toBe(false);
+    expect(view.inviterActive).toBe(false);
+    expect(ambassadorStatus.isVisibleAmbassador).not.toHaveBeenCalled();
+  });
 });
 
 describe('InvitesService.getQuota', () => {
@@ -206,6 +293,8 @@ describe('InvitesService.getQuota', () => {
   let invitesRepo: { count: jest.Mock };
   let users: { findById: jest.Mock; countActiveMembers: jest.Mock };
   let config: { get: jest.Mock };
+  let recognitionEntitlements: { getInviteQuotaBonus: jest.Mock };
+  let ambassadorStatus: { getInviteBonus: jest.Mock };
 
   const build = async () => {
     invitesRepo = { count: jest.fn().mockResolvedValue(0) };
@@ -214,6 +303,10 @@ describe('InvitesService.getQuota', () => {
       countActiveMembers: jest.fn().mockResolvedValue(247),
     };
     config = { get: jest.fn(() => 5) };
+    recognitionEntitlements = {
+      getInviteQuotaBonus: jest.fn().mockResolvedValue(0),
+    };
+    ambassadorStatus = { getInviteBonus: jest.fn().mockResolvedValue(0) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         InvitesService,
@@ -223,11 +316,12 @@ describe('InvitesService.getQuota', () => {
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
         // SUS-04: the invite quota now adds a recognition bonus on top of the
         // configured base. These suites cover the base/override behaviour, so
-        // the bonus is stubbed at 0 throughout.
+        // the bonus is stubbed at 0 unless a case overrides it.
         {
           provide: RecognitionEntitlementsService,
-          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+          useValue: recognitionEntitlements,
         },
+        { provide: AmbassadorStatusService, useValue: ambassadorStatus },
         { provide: ConfigService, useValue: config },
       ],
     }).compile();
@@ -235,6 +329,25 @@ describe('InvitesService.getQuota', () => {
   };
 
   beforeEach(build);
+
+  it('adds the ambassador bonus on top of base and level bonus', async () => {
+    // Base 5 (config default), levelBonus 2, ambassador bonus 10 -> limit 17.
+    recognitionEntitlements.getInviteQuotaBonus.mockResolvedValue(2);
+    ambassadorStatus.getInviteBonus.mockResolvedValue(10);
+
+    const quota = await service.getQuota('inviter');
+
+    expect(quota.limit).toBe(17);
+  });
+
+  it('lets a per-user quota override replace the ambassador bonus too', async () => {
+    users.findById.mockResolvedValue({ inviteMonthlyQuota: 3 });
+    ambassadorStatus.getInviteBonus.mockResolvedValue(10);
+
+    const quota = await service.getQuota('inviter');
+
+    expect(quota.limit).toBe(3);
+  });
 
   it('uses the config default when the member has no override', async () => {
     users.findById.mockResolvedValue(null);
@@ -330,6 +443,12 @@ describe('InvitesService.createInvite', () => {
         {
           provide: RecognitionEntitlementsService,
           useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
+        // Same SUS-04 rationale: stubbed at 0 so these suites stay focused on
+        // base/override behaviour.
+        {
+          provide: AmbassadorStatusService,
+          useValue: { getInviteBonus: jest.fn().mockResolvedValue(0) },
         },
         { provide: ConfigService, useValue: config },
       ],
@@ -593,6 +712,10 @@ describe('InvitesService.listMyInvites', () => {
           provide: RecognitionEntitlementsService,
           useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
         },
+        {
+          provide: AmbassadorStatusService,
+          useValue: { getInviteBonus: jest.fn().mockResolvedValue(0) },
+        },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
       ],
     }).compile();
@@ -681,6 +804,10 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
         {
           provide: RecognitionEntitlementsService,
           useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
+        {
+          provide: AmbassadorStatusService,
+          useValue: { getInviteBonus: jest.fn().mockResolvedValue(0) },
         },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
       ],

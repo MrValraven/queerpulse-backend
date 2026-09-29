@@ -1519,12 +1519,17 @@ export class DirectoryService {
     );
 
     // Tell the owner someone asked, so the question does not sit unanswered
-    // because nobody knew it was there. Best-effort and never rethrown — the
+    // because nobody knew it was there. Best-effort and never rethrown; the
     // question has already committed, and the same ordering every other
-    // notification in this module uses. Skipped for a listing with no real
-    // owner (`friendly`/`suggested` rows), which is also the case a moderator
-    // answer exists for. The asker is the actor, so a blocked or muted asker is
-    // filtered by `NotificationsService.create` rather than here.
+    // notification in this module uses. Skipped for a listing with no owner,
+    // since ownership is `ownerId` alone: a `suggest` listing the platform
+    // still holds (the suggester recorded separately in `suggestedByUserId`
+    // with no ownership rights), or any other ownerless listing. A
+    // `friendly` badge describes the business and an owned friendly listing
+    // notifies its owner like any other. That is
+    // also the case a moderator answer exists for. The asker is the actor,
+    // so a blocked or muted asker is filtered by
+    // `NotificationsService.create` rather than here.
     if (listing.ownerId) {
       try {
         await this.notifications.create(

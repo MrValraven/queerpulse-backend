@@ -13,7 +13,11 @@ import { MagazineDeck } from './entities/magazine-deck.entity';
 import {
   computePublishGate,
   deriveLate,
+  derivePaymentStatus,
+  deriveStageEnteredAt,
   deriveWaitingOn,
+  isStageEntryEvent,
+  latestStageEntryAt,
   toArchiveEntryFromArticle,
   toArchiveEntryFromDeck,
   toDeskSummary,
@@ -254,7 +258,19 @@ describe('toPieceListItem', () => {
       deckId: null,
       art: 'none',
       contentsBlurb: '',
+      stageEnteredAt: '2026-08-01T10:00:00.000Z',
+      paymentStatus: 'none',
     });
+  });
+
+  it('reads stageEnteredAt and paymentStatus from the batched context', () => {
+    const listItem = toPieceListItem(makePiece(), {
+      latestStageEntryAt: new Date('2026-08-04T15:30:00Z'),
+      payment: { status: 'approved_unpaid' },
+    });
+
+    expect(listItem.stageEnteredAt).toBe('2026-08-04T15:30:00.000Z');
+    expect(listItem.paymentStatus).toBe('owed');
   });
 
   it('maps a non-default art state through', () => {
@@ -325,6 +341,7 @@ describe('toPitchResponse', () => {
       status: 'waiting',
       fresh: true,
       returnedAt: null,
+      receivedAt: '2026-08-05T09:00:00.000Z',
     });
     expect(response).not.toHaveProperty('passTemplate');
     expect(response).not.toHaveProperty('passNote');
@@ -372,7 +389,168 @@ describe('toPitchResponse', () => {
   });
 });
 
+describe('isStageEntryEvent', () => {
+  it('counts a stage_changed event only when its detail names the stage', () => {
+    const event = { action: 'stage_changed', detail: 'edit' };
+
+    expect(isStageEntryEvent(event, 'edit')).toBe(true);
+    expect(isStageEntryEvent(event, 'layout')).toBe(false);
+  });
+
+  it('counts the actions that set a stage without a stage_changed row', () => {
+    expect(
+      isStageEntryEvent({ action: 'filed', detail: null }, 'in_review'),
+    ).toBe(true);
+    expect(
+      isStageEntryEvent(
+        { action: 'article_unpublished', detail: null },
+        'ready',
+      ),
+    ).toBe(true);
+    expect(
+      isStageEntryEvent(
+        { action: 'article_published', detail: null },
+        'published',
+      ),
+    ).toBe(true);
+    expect(
+      isStageEntryEvent(
+        { action: 'issue_shipped', detail: 'issue 05' },
+        'published',
+      ),
+    ).toBe(true);
+  });
+
+  it('ignores those actions for any other current stage', () => {
+    expect(
+      isStageEntryEvent({ action: 'filed', detail: null }, 'drafting'),
+    ).toBe(false);
+    expect(
+      isStageEntryEvent({ action: 'issue_shipped', detail: null }, 'ready'),
+    ).toBe(false);
+    expect(
+      isStageEntryEvent({ action: 'commented', detail: null }, 'edit'),
+    ).toBe(false);
+  });
+});
+
+describe('latestStageEntryAt', () => {
+  it('returns the newest matching event whatever order the trail is in', () => {
+    const events = [
+      makeEvent({
+        action: 'stage_changed',
+        detail: 'edit',
+        createdAt: new Date('2026-08-06T09:00:00Z'),
+      }),
+      makeEvent({
+        action: 'stage_changed',
+        detail: 'edit',
+        createdAt: new Date('2026-08-03T09:00:00Z'),
+      }),
+      makeEvent({
+        action: 'stage_changed',
+        detail: 'layout',
+        createdAt: new Date('2026-08-09T09:00:00Z'),
+      }),
+    ];
+
+    expect(latestStageEntryAt(events, 'edit')).toEqual(
+      new Date('2026-08-06T09:00:00Z'),
+    );
+  });
+
+  it('is null when nothing on the trail entered the stage', () => {
+    expect(latestStageEntryAt([makeEvent()], 'layout')).toBeNull();
+  });
+
+  it('restarts the Ready clock when a live piece is rescheduled into the future', () => {
+    const events = [
+      makeEvent({
+        action: 'stage_changed',
+        detail: 'ready',
+        createdAt: new Date('2026-08-01T09:00:00Z'),
+      }),
+      makeEvent({
+        action: 'article_published',
+        createdAt: new Date('2026-08-02T09:00:00Z'),
+      }),
+      makeEvent({
+        action: 'article_scheduled',
+        createdAt: new Date('2026-08-05T09:00:00Z'),
+      }),
+    ];
+
+    expect(latestStageEntryAt(events, 'ready')).toEqual(
+      new Date('2026-08-05T09:00:00Z'),
+    );
+  });
+});
+
+describe('deriveStageEnteredAt', () => {
+  it('uses the stage-entry event when there is one', () => {
+    expect(
+      deriveStageEnteredAt(
+        makePiece({ stage: 'edit' }),
+        new Date('2026-08-07T08:00:00Z'),
+      ),
+    ).toBe('2026-08-07T08:00:00.000Z');
+  });
+
+  it('falls back to createdAt for a piece still in the stage it was created in', () => {
+    const piece = makePiece({
+      stage: 'commissioned',
+      createdAt: new Date('2026-07-20T10:00:00Z'),
+      updatedAt: new Date('2026-08-05T10:00:00Z'),
+    });
+
+    expect(deriveStageEnteredAt(piece, null)).toBe('2026-07-20T10:00:00.000Z');
+  });
+
+  it('falls back to updatedAt for a published piece with no publish event', () => {
+    const piece = makePiece({
+      stage: 'published',
+      createdAt: new Date('2026-07-20T10:00:00Z'),
+      updatedAt: new Date('2026-08-05T10:00:00Z'),
+    });
+
+    expect(deriveStageEnteredAt(piece, null)).toBe('2026-08-05T10:00:00.000Z');
+  });
+});
+
+describe('derivePaymentStatus', () => {
+  it('is none when the piece has no payment row', () => {
+    expect(derivePaymentStatus(null)).toBe('none');
+  });
+
+  it('is owed for a row at agreed or approved_unpaid', () => {
+    expect(derivePaymentStatus({ status: 'agreed' })).toBe('owed');
+    expect(derivePaymentStatus({ status: 'approved_unpaid' })).toBe('owed');
+  });
+
+  it('is paid for a row at paid', () => {
+    expect(derivePaymentStatus({ status: 'paid' })).toBe('paid');
+  });
+});
+
 describe('toPieceRecordSummary', () => {
+  it('reads stageEnteredAt from its own trail and paymentStatus from the payment row', () => {
+    const piece = makePiece({ stage: 'in_review' });
+    const events = [
+      makeEvent({
+        action: 'filed',
+        detail: null,
+        createdAt: new Date('2026-08-04T11:00:00Z'),
+      }),
+    ];
+
+    const record = toPieceRecordSummary(piece, events, new Map(), null, {
+      status: 'paid',
+    });
+
+    expect(record.stageEnteredAt).toBe('2026-08-04T11:00:00.000Z');
+    expect(record.paymentStatus).toBe('paid');
+  });
+
   it('extends the list item with brief, care, and mapped audit events', () => {
     const piece = makePiece({
       brief: {
@@ -884,6 +1062,7 @@ describe('toPieceRecordFull', () => {
     const record = toPieceRecordFull(piece, [], new Map(), payment, [], []);
 
     expect(record.payment).toEqual(toPaymentResponse(payment));
+    expect(record.paymentStatus).toBe('owed');
   });
 });
 

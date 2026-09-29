@@ -14,8 +14,9 @@ import {
  * possible public addresses and the client builds the link from these three
  * fields alone (`personaOwnerAddress` in `personaLinks.data.ts` is the only
  * sanctioned builder):
- *  - LINKED  -> `/members/<ownerSlug>/<slug>`, where `ownerSlug` is the
- *    CREATOR's profile slug, never the viewer's and never a co-owner's.
+ *  - LINKED  -> `/p/<handle>`, or `/members/<ownerSlug>/<slug>` while it
+ *    holds no handle yet. `ownerSlug` is the CREATOR's profile slug, whoever
+ *    is viewing and whoever else co-owns the persona.
  *  - UNLINKED -> `/p/<handle>`.
  *
  * `ownerSlug` is therefore populated for LINKED personas ONLY and is `null` for
@@ -38,7 +39,10 @@ export interface FollowedPersonaView {
   accent: string | null;
   /** The persona's per-owner slug, the second segment of the nested address. */
   slug: string;
-  /** The global handle of an unlinked persona, `null` for a linked one. */
+  /** The persona's global handle, its `/p/<handle>` address, for both link
+   *  kinds. `null` while a persona holds none (a draft, or a linked row the
+   *  handle backfill has not reached), and the client falls back to the
+   *  nested address. */
   handle: string | null;
   linkVisibility: SubprofileLinkVisibility;
   /** The CREATOR's profile slug. LINKED personas only, else `null`. */

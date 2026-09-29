@@ -38,6 +38,7 @@ import {
   communityPostPath,
   gatheringPath,
   nestedPersonaPath,
+  personaPath,
   threadPath,
 } from './activity-links';
 
@@ -269,8 +270,8 @@ export class ActivityListener {
   }
 
   /**
-   * Where a published persona lives publicly: nested under its owner's main
-   * profile.
+   * Where a published LINKED persona lives publicly: its own `/p/<handle>`
+   * page, or nested under its owner's main profile while it has no handle yet.
    *
    * An UNLINKED persona gets no link and therefore no activity row at all,
    * which is the point: unlinked means the persona is deliberately not tied
@@ -281,6 +282,9 @@ export class ActivityListener {
   private async personaLink(persona: Subprofile): Promise<string | null> {
     if (persona.linkVisibility !== SubprofileLinkVisibility.Linked) {
       return null;
+    }
+    if (persona.handle) {
+      return personaPath(persona.handle);
     }
     const owner = await this.profiles.findOne({
       where: { userId: persona.userId },

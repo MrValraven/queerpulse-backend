@@ -1120,8 +1120,8 @@ export class AuthService {
    * `AccountService.revokeOtherSessions` and never comes through this method.
    *
    * Every other caller is the platform acting ON a member rather than a member
-   * acting on themselves: refresh-token reuse detection, the under-18
-   * disclosure lockout, and the moderation suspend/ban paths.
+   * acting on themselves: refresh-token reuse detection and the moderation
+   * suspend/ban paths.
    */
   async revokeAllForUser(userId: string): Promise<void> {
     await this.revokeAllUserSessions(userId, 'sign-out-everywhere');
@@ -1137,9 +1137,9 @@ export class AuthService {
    * `reason` is a LOG LABEL only. It is never persisted: `RefreshToken` has no
    * reason column, and the value reaches nothing but the `logger.warn` below.
    * It was `'logout-all'` until 2026-08-26, named after the route. It reads
-   * `'sign-out-everywhere'` now because the label has to cover reuse detection,
-   * the under-18 lockout and moderation as well as the member's own
-   * `POST /auth/logout-all`, and only the last of those is a logout.
+   * `'sign-out-everywhere'` now because the label has to cover reuse detection
+   * and moderation as well as the member's own `POST /auth/logout-all`, and
+   * only the last of those is a logout.
    */
   private async revokeAllUserSessions(
     userId: string,

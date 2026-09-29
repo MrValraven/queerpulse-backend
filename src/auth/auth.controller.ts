@@ -39,10 +39,6 @@ import {
 } from './auth-cookies';
 import { AuthService, GoogleUserInput } from './auth.service';
 import {
-  UnderAgeDisclosureResult,
-  UnderAgeDisclosureService,
-} from './under-age-disclosure.service';
-import {
   CurrentUser,
   CurrentUserData,
 } from './decorators/current-user.decorator';
@@ -65,7 +61,6 @@ import {
   resolveReauthCompletionUrl,
   signInErrorUrl,
 } from './safe-redirect';
-import { Throttle, seconds } from '@nestjs/throttler';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { toImageUrl } from '../common/image-url';
 import {
@@ -126,7 +121,6 @@ export class AuthController {
     private readonly usersService: UsersService,
     private readonly config: ConfigService,
     private readonly mediaCropService: MediaCropService,
-    private readonly underAgeDisclosure: UnderAgeDisclosureService,
     // PRD-14: lets an `invite_required` rejection hand a lost status
     // token back to the applicant Google has just verified.
     private readonly joinRequestsService: JoinRequestsService,
@@ -645,49 +639,6 @@ export class AuthController {
       guidelinesAcceptedAt: result.guidelinesAcceptedAt.toISOString(),
       guidelinesVersion: result.guidelinesVersion,
     };
-  }
-
-  /**
-   * The member has just told us they are not 18 yet (the onboarding wizard's
-   * under-18 branch). Records the disclosure, suspends the account permanently,
-   * and revokes every live session — see `UnderAgeDisclosureService` for why
-   * each of those three is part of the same act.
-   *
-   * Authenticated but deliberately NOT behind `ActiveMemberGuard`: a retry
-   * arriving after the first call has already suspended the account must still
-   * be accepted rather than 403, so the client can be honest about failures
-   * instead of silently giving up. Idempotent for the same reason.
-   *
-   * This device's cookies are cleared on the way out, so the browser is not
-   * left holding a session the server has already killed. The frontend signs
-   * out immediately afterwards regardless of what this answers. (This used to
-   * point at `logout-all` as the reference implementation of that clearing;
-   * that route was removed on 2026-08-26, and this is now the only route that
-   * clears cookies alongside a full session revoke.)
-   *
-   * Throttled: it is a self-declared, one-time act, so a burst is never
-   * legitimate traffic.
-   */
-  @ApiOperation({
-    summary: 'Record a self-declared under-18 disclosure and lock the account.',
-  })
-  @ApiCookieAuth('access_token')
-  @ApiCreatedResponse({
-    description:
-      'Disclosure recorded; the account is suspended and signed out.',
-  })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  @ApiTooManyRequestsResponse({ description: 'Too many attempts.' })
-  @Throttle({ default: { limit: 5, ttl: seconds(60) } })
-  @Post('under-18-disclosure')
-  async underEighteenDisclosure(
-    @CurrentUser() current: CurrentUserData,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<UnderAgeDisclosureResult> {
-    const result = await this.underAgeDisclosure.record(current.userId);
-    clearAuthCookies(res, this.cookieOpts());
-    clearCsrfCookie(res);
-    return result;
   }
 
   /**

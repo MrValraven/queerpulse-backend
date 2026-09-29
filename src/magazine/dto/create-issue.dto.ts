@@ -62,6 +62,16 @@ export class CreateIssueDto {
   @IsDateString()
   publishedOn?: string;
 
+  /** The day the issue stops taking copy, optional for the same reason as
+   *  `publishedOn`: a desk opens a number before it knows its schedule.
+   *  Same `YYYY-MM-DD` shape and the same pair of format decorators. */
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'closesOn must be a YYYY-MM-DD date',
+  })
+  @IsDateString()
+  closesOn?: string;
+
   /** Optional at creation: the entity column is `text NOT NULL`, so an
    *  omitted dek is persisted as `''` rather than left null. */
   @IsOptional()

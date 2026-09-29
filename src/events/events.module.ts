@@ -156,6 +156,6 @@ import { RsvpService } from './rsvp.service';
     // would create (`EventsService` already injects `RsvpService`).
     EventAudienceGateService,
   ],
-  exports: [EventsService],
+  exports: [EventsService, EventAudienceGateService],
 })
 export class EventsModule {}

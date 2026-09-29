@@ -4,6 +4,7 @@ import { In, Repository } from 'typeorm';
 import { runWithConcurrency } from '../common/run-with-concurrency';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { personaPath } from '../profiles/activity-links';
 import { Profile } from '../users/entities/profile.entity';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import {
@@ -13,7 +14,6 @@ import {
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import {
   Subprofile,
-  SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
@@ -284,16 +284,14 @@ export class SubprofileUpdatesService {
 
   /**
    * The persona's own page, for the notification's deep link. Same two shapes
-   * and the same anonymity rule `SubprofileCreditsService.buildPersonaDeepLink`
-   * applies: an UNLINKED persona resolves to its standalone `/p/:handle` page
-   * and never to its owner's, a LINKED one to `/members/:ownerSlug/:slug`.
+   * `SubprofileCreditsService.buildPersonaDeepLink` builds: any persona holding
+   * a handle (both link kinds claim one at publish) resolves to its
+   * `/p/:handle` page, so an UNLINKED one never points at its owner's. Only a
+   * persona with no handle yet falls back to `/members/:ownerSlug/:slug`.
    */
   private async buildPersonaDeepLink(persona: Subprofile): Promise<string> {
-    if (
-      persona.linkVisibility === SubprofileLinkVisibility.Unlinked &&
-      persona.handle
-    ) {
-      return `/p/${persona.handle}`;
+    if (persona.handle) {
+      return personaPath(persona.handle);
     }
     const ownerProfile = await this.profiles.findOne({
       where: { userId: persona.userId },

@@ -316,9 +316,15 @@ export class ListingOwnerOffersService {
           throw new ConflictException(ALREADY_ANSWERED_MESSAGE);
         }
 
-        const offeredListing = await manager
-          .getRepository(Listing)
-          .findOne({ where: { id: current.listingId } });
+        // Locked for the reason `ListingClaimsService.review` locks it:
+        // `transferOwnership` saves this entity whole, so an unlocked read
+        // could write stale columns back over a staff edit
+        // (`ListingsService.adminUpdate`) that committed in between. The
+        // listing row is taken first, the same order `adminUpdate` uses.
+        const offeredListing = await manager.getRepository(Listing).findOne({
+          where: { id: current.listingId },
+          lock: { mode: 'pessimistic_write' },
+        });
         if (!offeredListing) {
           throw new NotFoundException('The listing no longer exists');
         }

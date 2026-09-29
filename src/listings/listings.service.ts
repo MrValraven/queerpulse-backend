@@ -16,6 +16,7 @@ import { toImageUrl } from '../common/image-url';
 import {
   Brackets,
   DataSource,
+  EntityManager,
   In,
   IsNull,
   MoreThan,
@@ -77,6 +78,7 @@ import {
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
 import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
+import { AdminUpdateListingDto } from './dto/admin-update-listing.dto';
 import { CreateListingDto, ListingDayHoursDto } from './dto/create-listing.dto';
 import { UpdateOperatingStateDto } from './dto/update-operating-state.dto';
 import { ReplyToReviewDto } from './dto/reply-to-review.dto';
@@ -254,6 +256,45 @@ function normalizeHoursExceptions(
  */
 type ListingCreateInput = Omit<CreateListingDto, 'affirmingBaselineAccepted'>;
 
+/** What a suggestion stores in the owner's personal columns: nothing. The
+ *  values match what `ListingOwnershipService.transferOwnership` leaves
+ *  behind, plus the four columns that default to a member-facing choice.
+ *  `visibility` is blanked to its column default here because
+ *  `normalizeCreate` would otherwise store the suggester's answer, and a
+ *  transfer does not reset it, so a later claimant would inherit it. */
+const SUGGESTION_OWNER_PERSONAL_BLANKS = {
+  ownerName: '',
+  ownerRole: '',
+  ownerBio: '',
+  rel: '',
+  visibility: '',
+  consentOuting: false,
+  consentGuide: false,
+  linkToProfile: false,
+} as const;
+
+/**
+ * Who moderators talk to about a listing: its owner, or on a suggestion the
+ * platform holds, the member who suggested it. Null on a house-authored row
+ * and on a row whose members erased their accounts.
+ */
+function submitterIdOf(
+  listing: Pick<Listing, 'ownerId' | 'suggestedByUserId'>,
+): string | null {
+  return listing.ownerId ?? listing.suggestedByUserId;
+}
+
+/**
+ * True when `submitterIdOf` resolves to the suggester: the platform holds the
+ * listing and a member suggested it. Moderation DMs to that member speak of
+ * "the place you suggested", because the listing is not theirs.
+ */
+function isSubmitterTheSuggester(
+  listing: Pick<Listing, 'ownerId' | 'suggestedByUserId'>,
+): boolean {
+  return listing.ownerId === null && listing.suggestedByUserId !== null;
+}
+
 /** Bridges `CreateListingDto`'s optional fields to `Listing`'s
  * fully-populated columns (mirrors `PartnersService.createWithUniqueSlug`'s
  * inline defaulting). */
@@ -266,6 +307,8 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
   // Set only by the staff create path, which stamps the admin who authored
   // the listing; the member-submission wizard never supplies it.
   | 'createdByStaffId'
+  // Set only on the suggest path, by `create`.
+  | 'suggestedByUserId'
   | 'status'
   | 'createdAt'
   | 'updatedAt'
@@ -414,7 +457,9 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
         : null;
 
   Object.assign(listing, {
-    ...(dto.path !== undefined ? { path: dto.path } : {}),
+    // `path` is fixed at creation. It records how the listing came in (a
+    // claim, or a suggestion the platform holds), which the claim and
+    // enquiry rules read, so a PATCH that still carries it leaves it alone.
     ...(dto.name !== undefined ? { name: dto.name } : {}),
     ...(dto.cats !== undefined ? { cats: dto.cats } : {}),
     // Same rule on update as on create (LOC-15): a submitted city is normalised
@@ -696,12 +741,11 @@ function changedListingFields(
 }
 
 /**
- * The plain-language `reason` recorded on an `owner_edited` audit row: what the
- * owner changed, and whether the edit cost the listing its queer-owned badge.
+ * The changed fields as the plain-language list both edit reasons quote, each
+ * label once, in the order the fields changed.
  */
-function describeOwnerEdit(
+function summarizeEditedFields(
   changedFields: readonly (keyof Listing)[],
-  wasQueerOwnedBadgeCleared: boolean,
 ): string {
   const changedLabels: string[] = [];
   for (const field of changedFields) {
@@ -710,19 +754,55 @@ function describeOwnerEdit(
       changedLabels.push(label);
     }
   }
-  const changeSummary =
-    changedLabels.length > 0
-      ? changedLabels.join(', ')
-      : 'other listing details';
-  const badgeNote = wasQueerOwnedBadgeCleared
+  return changedLabels.length > 0
+    ? changedLabels.join(', ')
+    : 'other listing details';
+}
+
+/** The sentence an edit reason ends with when it cost the listing its
+ *  queer-owned badge, and nothing when it did not. */
+function queerOwnedBadgeClearedNote(
+  wasQueerOwnedBadgeCleared: boolean,
+): string {
+  return wasQueerOwnedBadgeCleared
     ? ' The queer-owned verification badge was cleared by this edit, because the' +
-      ' listing no longer carries the identity a moderator confirmed. A' +
-      ' moderator has to confirm it again.'
+        ' listing no longer carries the identity a moderator confirmed. A' +
+        ' moderator has to confirm it again.'
     : '';
+}
+
+/**
+ * The plain-language `reason` recorded on an `owner_edited` audit row: what the
+ * owner changed, and whether the edit cost the listing its queer-owned badge.
+ */
+function describeOwnerEdit(
+  changedFields: readonly (keyof Listing)[],
+  wasQueerOwnedBadgeCleared: boolean,
+): string {
+  const changeSummary = summarizeEditedFields(changedFields);
+  const badgeNote = queerOwnedBadgeClearedNote(wasQueerOwnedBadgeCleared);
   return (
     `The owner edited this live listing and changed ${changeSummary}. ` +
     'The listing stayed live: once a listing is approved it does not need ' +
     `another approval to publish.${badgeNote}`
+  );
+}
+
+/**
+ * The `reason` on a `staff_edited` audit row, told from the admin's side. A
+ * listing the platform holds has no owner, and a staff edit can land on a
+ * listing that is still in review, so the owner's sentence would misstate
+ * both. The field list and the badge note are the owner's, word for word.
+ */
+function describeStaffEdit(
+  changedFields: readonly (keyof Listing)[],
+  wasQueerOwnedBadgeCleared: boolean,
+): string {
+  const changeSummary = summarizeEditedFields(changedFields);
+  const badgeNote = queerOwnedBadgeClearedNote(wasQueerOwnedBadgeCleared);
+  return (
+    `An admin edited this listing and changed ${changeSummary}. ` +
+    `Its status stayed as it was.${badgeNote}`
   );
 }
 
@@ -819,7 +899,10 @@ export class ListingsService {
     private readonly safeSpaceVisits: SafeSpaceVisitsService,
   ) {}
 
-  async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
+  async create(
+    submitterUserId: string,
+    dto: CreateListingDto,
+  ): Promise<ListingDTO> {
     // Path-branched required fields whose shape is too nested for the DTO's
     // `@ValidateIf` to express (item #2): `hours` (≥1 open day) and the hero
     // photo are required on the `claim` path, optional on `suggest`.
@@ -829,10 +912,24 @@ export class ListingsService {
     const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
 
     const ref = await this.nextRef();
-    const saved = await this.createWithUniqueSlug(ownerId, ref, {
-      ...dto,
-      tags,
-    });
+    // A suggestion is held by the platform: no owner until a claim or an owner
+    // offer hands it over. The suggester is recorded apart from ownership and
+    // their personal answers are not stored, because the listing does not
+    // describe them. The affirming baseline waits for the owner, the same as
+    // on `adminCreate`.
+    const isSuggestion = dto.path === 'suggest';
+    const saved = await this.createWithUniqueSlug(
+      isSuggestion ? null : submitterUserId,
+      ref,
+      { ...dto, tags },
+      isSuggestion
+        ? {
+            suggestedByUserId: submitterUserId,
+            affirmingBaselineAcceptedAt: null,
+            ...SUGGESTION_OWNER_PERSONAL_BLANKS,
+          }
+        : {},
+    );
     // Tell whoever works the listing-submission queue that a listing landed
     // for review. Awaited, but safe to await: `announce` catches everything
     // internally, so a notification failure can never fail the member's
@@ -841,11 +938,11 @@ export class ListingsService {
       AdminQueueKey.ListingSubmissions,
       saved.id,
     );
-    // A "friendly" (unowned) or suggested listing needs a human to reach out to
-    // the business so it can claim/correct the entry — enqueue that as a task in
-    // the shared moderation queue (item #13). Best-effort: never fail the
-    // submission if the task can't be filed.
-    await this.enqueueOwnerNotifyIfNeeded(ownerId, saved, dto);
+    // A suggested listing is held by the platform, so a human needs to reach
+    // out to the business so it can claim or correct the entry. Enqueue that
+    // as a task in the shared moderation queue (item #13). Best-effort: the
+    // submission never fails because the task could not be filed.
+    await this.enqueueOwnerNotifyIfNeeded(submitterUserId, saved, dto);
     return this.buildDTO(saved);
   }
 
@@ -956,7 +1053,7 @@ export class ListingsService {
    * Files a dispute/claim against a listing through the SHARED report pipeline
    * (item #13) — the very same `reports` table + moderation queue every other
    * report flows through, not a parallel one. Deliberately NOT owner-gated:
-   * anyone (including the named business contesting a "friendly"/unowned entry)
+   * anyone (including the named business contesting an entry that names it)
    * can dispute, so this only 404s on an unknown `ref`. `ReportsService.create`
    * dedupes one open report per (reporter, subject), so a member spamming the
    * button gets their existing open dispute back rather than piling rows on the
@@ -1149,32 +1246,33 @@ export class ListingsService {
 
   /**
    * Enqueues an owner-outreach task in the shared moderation queue when a newly
-   * created listing is "friendly" (badge) or was submitted via the suggest
-   * path — someone should contact the named business so it can claim/correct
-   * the entry. Filed as a `listing_owner_notify`-coded report against the
-   * listing's slug; the submitter is the reporter so a moderator can follow up.
-   * The listing's own pasted `evidence` is surfaced to the reviewer by the
-   * moderation queue's detail lookup (it reads the live `Listing` row), so it is
-   * not duplicated into the report here. Best-effort — a failure to enqueue must
-   * never roll back the already-committed listing.
+   * created listing was submitted through the suggest path: the platform holds
+   * it with no owner, so someone should contact the named business so it can
+   * claim or correct the entry. `badge` plays no part: `'friendly'` says the
+   * business is LGBTQ+ friendly as opposed to queer-owned, and a claim-path
+   * create with that badge already has its owner as the submitter. Filed as a
+   * `listing_owner_notify`-coded report against the listing's slug; the
+   * submitter is the reporter so a moderator can follow up. The listing's own
+   * pasted `evidence` is surfaced to the reviewer by the moderation queue's
+   * detail lookup (it reads the live `Listing` row), so it is not duplicated
+   * into the report here. Best-effort: a failure to enqueue must leave the
+   * already-committed listing in place.
    */
   private async enqueueOwnerNotifyIfNeeded(
     reporterId: string,
     listing: Listing,
     dto: CreateListingDto,
   ): Promise<void> {
-    const isFriendly = dto.badge === 'friendly';
     const isSuggested = dto.path === 'suggest';
-    if (!isFriendly && !isSuggested) return;
+    if (!isSuggested) return;
 
-    const kind = isSuggested ? 'suggested' : 'friendly (unowned)';
     try {
       await this.reports.create(reporterId, {
         subjectType: ReportSubjectType.Listing,
         subjectId: listing.slug,
         reasonCode: 'listing_owner_notify',
         detail:
-          `Owner outreach: ${kind} listing "${listing.name}" ` +
+          `Owner outreach: suggested listing "${listing.name}" ` +
           `(${listing.ref}) awaits contact so the business can claim or ` +
           `correct it.`,
       });
@@ -1276,8 +1374,12 @@ export class ListingsService {
     const [paginated, counts] = await Promise.all([
       paginate(qb, page, async (rows) => {
         if (!rows.length) return [];
+        // Owners and suggesters resolve in the one batch: a suggestion has
+        // no owner, and the queue credits the member who sent it.
         const refs = await new MemberLookup(this.profiles).byUserIds(
-          presentActorIds(rows.map((row) => row.ownerId)),
+          presentActorIds(
+            rows.flatMap((row) => [row.ownerId, row.suggestedByUserId]),
+          ),
         );
         // ONE batched crop lookup for every row's gallery photos on the
         // page — never a per-row query.
@@ -1285,7 +1387,12 @@ export class ListingsService {
           rows.flatMap((row) => listingPhotoKeys(row)),
         );
         return rows.map((row) =>
-          toListingDTO(row, actorFromLookup(refs, row.ownerId) ?? null, crops),
+          toListingDTO(
+            row,
+            actorFromLookup(refs, row.ownerId) ?? null,
+            crops,
+            actorFromLookup(refs, row.suggestedByUserId) ?? null,
+          ),
         );
       }),
       this.computeQueueCounts(trimmedSearch),
@@ -1314,11 +1421,15 @@ export class ListingsService {
       // existing unique b-tree, unusable for a leading-wildcard match) —
       // acceptable for a moderator-only, paginated tool; a trigram index on
       // `ref` would be the follow-up if that ever shows up as slow.
+      // The submitter is the owner, or on a suggestion the platform holds,
+      // the member who suggested it (the same fallback as `submitterIdOf`).
+      // COALESCE keeps it to one profile per listing, so the grouped status
+      // counts built on this query never double-count a row.
       const pattern = `%${escapeLikeTerm(trimmedSearch)}%`;
       qb.leftJoin(
         Profile,
         'submitter',
-        'submitter.user_id = l.owner_id',
+        'submitter.user_id = COALESCE(l.owner_id, l.suggested_by_user_id)',
       ).andWhere(
         '(l.name ILIKE :pattern OR submitter.first_name ILIKE :pattern OR l.ref ILIKE :pattern)',
         { pattern },
@@ -1434,6 +1545,119 @@ export class ListingsService {
     // the ordered `photoGallery` and the legacy `photos` slot pair. And both
     // stored shapes go into the comparison set, so a listing whose row predates
     // the backfill still recognises its own photos.
+    this.assertNoForeignListingPhotoIntroduced(listing, userId, dto);
+
+    // Tags are pick-only from `LISTING_TAG_GROUPS`. A tag the listing already
+    // carries from before the vocabulary stays savable, so an unrelated edit
+    // never forces the owner to delete it first.
+    const normalizedDto: UpdateListingDto =
+      dto.tags !== undefined
+        ? {
+            ...dto,
+            tags: resolveListingTagsOrThrow(dto.tags, listing.tags ?? []),
+          }
+        : dto;
+    const { saved, orphanedImageKeys } = await this.applyListingEdit(
+      listing,
+      userId,
+      normalizedDto,
+      ListingModerationAction.OwnerEdited,
+      true, // shouldAuditOnlyWhenLive
+      true, // shouldStampDetailsConfirmed
+    );
+    // Delete-on-replace: any photo object no longer referenced by the saved
+    // listing is now orphaned. Best-effort + post-commit: a storage failure
+    // must never fail the edit.
+    await this.deleteOrphanedObjects(orphanedImageKeys, `listing ${saved.ref}`);
+    return this.buildManagedDTO(saved, isOwner);
+  }
+
+  /**
+   * ADMIN (`AdminListingsController.getEditable`): the listing as its editor
+   * loads it, for staff editing a listing the platform holds. Built the way a
+   * co-manager sees it, with the owner's personal answers redacted, because
+   * staff edit the business and never the person. Readable for any listing;
+   * `adminUpdate` is where an owner is refused.
+   */
+  async getEditableForStaff(ref: string): Promise<ManagedListingDTO> {
+    return this.buildManagedDTO(await this.loadOr404(ref), false);
+  }
+
+  /**
+   * ADMIN (`AdminListingsController.update`): staff edit a listing the
+   * platform holds, which is how the admins act for a suggestion or a
+   * house-authored listing until someone takes it over.
+   *
+   * Refused with 409 once the listing has an owner: from then on the owner
+   * edits it and staff changes go through edit suggestions. The row is
+   * locked for the whole edit, so a claim approved at the same moment either
+   * lands first (and this answers 409) or waits for this save.
+   *
+   * Status is never changed here; publishing stays `setStatus`. The audit row
+   * is `staff_edited`, written for every edit that moved a field, live or not.
+   *
+   * The orphaned photos are deleted after the transaction has committed, the
+   * same order `update` keeps, so a rolled-back edit never loses a photo its
+   * listing still points at.
+   */
+  async adminUpdate(
+    ref: string,
+    staffUserId: string,
+    dto: AdminUpdateListingDto,
+  ): Promise<ListingDTO> {
+    const { saved, orphanedImageKeys } = await this.dataSource.transaction(
+      async (manager) => {
+        const listing = await manager.getRepository(Listing).findOne({
+          where: { ref },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!listing) throw new NotFoundException('Listing not found');
+        if (listing.ownerId !== null) {
+          throw new ConflictException({
+            message: 'This listing has an owner now, so its owner edits it.',
+            code: 'LISTING_HAS_OWNER',
+          });
+        }
+        // Staff uploads come from the admin's own account, but the photos a
+        // suggester uploaded are re-sent on every save. The handler is on
+        // `SHARED_UPLOAD_HANDLERS` for that, so this keeps the owner's rule:
+        // a stored photo passes, a new upload from anybody else is refused.
+        this.assertNoForeignListingPhotoIntroduced(listing, staffUserId, dto);
+        const normalizedDto: UpdateListingDto =
+          dto.tags !== undefined
+            ? {
+                ...dto,
+                tags: resolveListingTagsOrThrow(dto.tags, listing.tags ?? []),
+              }
+            : dto;
+        return this.applyListingEdit(
+          listing,
+          staffUserId,
+          normalizedDto,
+          ListingModerationAction.StaffEdited,
+          false, // shouldAuditOnlyWhenLive
+          false, // shouldStampDetailsConfirmed
+          manager,
+        );
+      },
+    );
+    await this.deleteOrphanedObjects(orphanedImageKeys, `listing ${saved.ref}`);
+    return this.buildDTO(saved);
+  }
+
+  /**
+   * The unchanged-value half of the foreign-upload rule, for the listing
+   * editors on `SHARED_UPLOAD_HANDLERS` (`ListingsController.update` and
+   * `AdminListingsController.update`). An incoming photo key uploaded by
+   * somebody else passes only when the listing already carries it; see the
+   * call site in `update` for why both request shapes and both stored shapes
+   * are compared.
+   */
+  private assertNoForeignListingPhotoIntroduced(
+    listing: Listing,
+    userId: string,
+    dto: UpdateListingDto,
+  ): void {
     if (dto.photoGallery !== undefined || dto.photos !== undefined) {
       const alreadyStoredPhotoKeys = [
         ...galleryImageReferences(listing.photoGallery),
@@ -1456,7 +1680,35 @@ export class ListingsService {
         );
       }
     }
+  }
 
+  /**
+   * The edit itself, shared by the team's `update` and the staff
+   * `adminUpdate`: merge, describe what moved, clear a queer-owned badge the
+   * listing no longer matches, save with its audit row, and report the photos
+   * the edit orphaned. `auditAction` names the audit row and picks its
+   * `reason` (`describeOwnerEdit` or `describeStaffEdit`), and
+   * `shouldAuditOnlyWhenLive` keeps the team's rule (an edit to a listing
+   * nobody has seen yet tells a moderator nothing) while staff edits are
+   * always recorded. `shouldStampDetailsConfirmed` is true for the team
+   * only: `detailsConfirmedAt` records the owner vouching for the details,
+   * and an admin correcting a platform-held listing is nobody's vouch.
+   *
+   * With a `manager` the saves ride the caller's transaction; without one,
+   * this opens its own around the listing and its audit row, as `update`
+   * always has. Either way the orphaned keys go back to the caller, which
+   * deletes them from the bucket once it knows the save has committed.
+   */
+  private async applyListingEdit(
+    listing: Listing,
+    actorId: string,
+    dto: UpdateListingDto,
+    auditAction:
+      ListingModerationAction.OwnerEdited | ListingModerationAction.StaffEdited,
+    shouldAuditOnlyWhenLive: boolean,
+    shouldStampDetailsConfirmed: boolean,
+    manager?: EntityManager,
+  ): Promise<{ saved: Listing; orphanedImageKeys: string[] }> {
     // Snapshot the gallery keys BEFORE the merge so any photo the edit replaces
     // or clears can be deleted from the bucket once the new set has committed.
     const previousImageKeys = this.collectListingImageKeys(listing);
@@ -1466,17 +1718,7 @@ export class ListingsService {
     // "before" picture (see `changedListingFields`).
     const listingBeforeEdit: Listing = { ...listing };
     const wasLive = listing.status === ListingStatus.Live;
-    // Tags are pick-only from `LISTING_TAG_GROUPS`. A tag the listing already
-    // carries from before the vocabulary stays savable, so an unrelated edit
-    // never forces the owner to delete it first.
-    const normalizedDto: UpdateListingDto =
-      dto.tags !== undefined
-        ? {
-            ...dto,
-            tags: resolveListingTagsOrThrow(dto.tags, listing.tags ?? []),
-          }
-        : dto;
-    applyUpdate(listing, normalizedDto);
+    applyUpdate(listing, dto);
 
     // An owner edit NEVER changes `listing.status`. Once a moderator has
     // approved a listing it stays live through its owner's corrections, and a
@@ -1484,13 +1726,14 @@ export class ListingsService {
     // Publication is no longer gated on the edit, so the audit trail carries
     // the edit instead: moderators keep a record of what an owner changed on a
     // live listing (`owner_edited`), which is what the old forced re-review was
-    // really providing.
+    // really providing. A staff edit leaves the status alone just the same.
     //
     // Computed for EVERY listing, live or not, because the freshness stamp
     // below cares only about whether the edit actually moved something. The
-    // audit trail still narrows to live listings (`changedFields` right after
-    // this), since an `owner_edited` event on a listing that has not been
-    // published yet tells a moderator nothing they will not see in the queue.
+    // owner's audit trail still narrows to live listings (`changedFields`
+    // right after this), since an `owner_edited` event on a listing that has
+    // not been published yet tells a moderator nothing they will not see in
+    // the queue.
     const editedFields = changedListingFields(
       listingBeforeEdit,
       listing,
@@ -1503,12 +1746,14 @@ export class ListingsService {
     // stamps nothing, which is the same "was this a real edit?" test the audit
     // row uses. `detailsConfirmedAt` is deliberately absent from
     // `OWNER_EDITABLE_FIELD_LABELS`, so writing it here can never feed back
-    // into `editedFields` or into the audit `reason`.
-    if (editedFields.length > 0) {
+    // into `editedFields` or into the audit `reason`. A staff edit leaves the
+    // stamp as it was, because the column records the owner's confirmation.
+    if (shouldStampDetailsConfirmed && editedFields.length > 0) {
       listing.detailsConfirmedAt = new Date();
     }
 
-    const changedFields = wasLive ? editedFields : [];
+    const changedFields =
+      shouldAuditOnlyWhenLive && !wasLive ? [] : editedFields;
     const hasIdentityChanged =
       wasLive &&
       changedListingFields(listingBeforeEdit, listing, IDENTITY_LISTING_FIELDS)
@@ -1530,38 +1775,46 @@ export class ListingsService {
 
     // The listing save and its audit event are two writes with no external I/O
     // between them, so they run in one transaction, the same shape `setStatus`
-    // uses for the moderator-initiated equivalent. `actorId` is the OWNER here
-    // rather than a moderator: the event records who made the edit.
-    // `fromStatus`/`toStatus` are both null, because an owner edit moves no
-    // moderation state.
-    const saved =
-      changedFields.length > 0
-        ? await this.dataSource.transaction(async (manager) => {
-            const savedListing = await manager.save(listing);
-            await manager.save(ListingModerationEvent, {
-              listingId: savedListing.id,
-              actorId: userId,
-              action: ListingModerationAction.OwnerEdited,
-              fromStatus: null,
-              toStatus: null,
-              reason: describeOwnerEdit(
-                changedFields,
-                wasQueerOwnedBadgeCleared,
-              ),
-              changedFields: [...changedFields],
-            });
-            return savedListing;
-          })
-        : await this.listings.save(listing);
-    // Delete-on-replace: any photo object no longer referenced by the saved
-    // listing is now orphaned. Best-effort + post-commit — a storage failure
-    // must never fail the edit.
+    // uses for the moderator-initiated equivalent. `actorId` is whoever made
+    // the edit, because the event records exactly that: the owner or a
+    // co-manager on `update`, the admin on `adminUpdate`. With a `manager` the
+    // caller's transaction already wraps both writes. `fromStatus`/`toStatus`
+    // are both null, because an edit moves no moderation state.
+    const writeEdit = async (
+      entityManager: EntityManager,
+    ): Promise<Listing> => {
+      const savedListing = await entityManager.save(listing);
+      if (changedFields.length > 0) {
+        await entityManager.save(ListingModerationEvent, {
+          listingId: savedListing.id,
+          actorId,
+          action: auditAction,
+          fromStatus: null,
+          toStatus: null,
+          reason:
+            auditAction === ListingModerationAction.StaffEdited
+              ? describeStaffEdit(changedFields, wasQueerOwnedBadgeCleared)
+              : describeOwnerEdit(changedFields, wasQueerOwnedBadgeCleared),
+          changedFields: [...changedFields],
+        });
+      }
+      return savedListing;
+    };
+    let saved: Listing;
+    if (manager) {
+      saved = await writeEdit(manager);
+    } else if (changedFields.length > 0) {
+      saved = await this.dataSource.transaction(writeEdit);
+    } else {
+      saved = await this.listings.save(listing);
+    }
     const survivingImageKeys = new Set(this.collectListingImageKeys(saved));
-    await this.deleteOrphanedObjects(
-      previousImageKeys.filter((key) => !survivingImageKeys.has(key)),
-      `listing ${saved.ref}`,
-    );
-    return this.buildManagedDTO(saved, isOwner);
+    return {
+      saved,
+      orphanedImageKeys: previousImageKeys.filter(
+        (key) => !survivingImageKeys.has(key),
+      ),
+    };
   }
 
   /**
@@ -1734,7 +1987,8 @@ export class ListingsService {
     const listingId = listing.id;
     const listingRef = listing.ref;
     const listingName = listing.name;
-    const listingOwnerId = listing.ownerId;
+    const recipientId = submitterIdOf(listing);
+    const isForSuggester = isSubmitterTheSuggester(listing);
     const previousStatus = listing.status;
 
     await this.dataSource.transaction(async (manager) => {
@@ -1754,13 +2008,11 @@ export class ListingsService {
       `moderated listing ${listingRef}`,
     );
 
-    if (listingOwnerId) {
+    if (recipientId) {
       await this.notifySubmitterBestEffort(
         actorId,
-        { ref: listingRef, ownerId: listingOwnerId },
-        `Your listing "${listingName}" was removed from QueerPulse.${
-          reason ? ` Reason: ${reason}` : ''
-        }`,
+        { ref: listingRef, recipientId },
+        this.removalMessage(listingName, reason, isForSuggester),
       );
     }
   }
@@ -1782,9 +2034,11 @@ export class ListingsService {
    * per listing whose status actually changed, once the transaction has
    * committed: a transition INTO Live creates the same best-effort
    * `ListingApproved` persisted notification `setStatus` creates
-   * (`notifyApprovedBestEffort`); every OTHER real transition instead
-   * best-effort DMs the submitter (`notifySubmitterBestEffort`, item #15,
-   * mirrors `bulkRemove`'s notify pass). Never both for the same listing.
+   * (`notifyApprovedBestEffort`), or on a suggestion the platform holds the
+   * same `suggestionLiveMessage` DM to its suggester; every OTHER real
+   * transition instead best-effort DMs the submitter
+   * (`notifySubmitterBestEffort`, item #15, mirrors `bulkRemove`'s notify
+   * pass). Never both for the same listing.
    */
   async bulkSetStatus(
     refs: string[],
@@ -1794,8 +2048,11 @@ export class ListingsService {
   ): Promise<BulkListingResultDTO> {
     const updated: string[] = [];
     const failed: string[] = [];
-    const approvedTargets: { ownerId: string; slug: string }[] = [];
-    const sentBackTargets: { ref: string; ownerId: string; name: string }[] =
+    // A listing whose submitter gets a DM once the transaction commits.
+    type SubmitterTarget = { ref: string; recipientId: string; name: string };
+    const approvedTargets: { recipientId: string; slug: string }[] = [];
+    const suggestionLiveTargets: SubmitterTarget[] = [];
+    const sentBackTargets: (SubmitterTarget & { isForSuggester: boolean })[] =
       [];
 
     await this.dataSource.transaction(async (manager) => {
@@ -1826,17 +2083,22 @@ export class ListingsService {
             toStatus: status,
             reason: reason ?? null,
           });
-          if (listing.ownerId) {
-            if (status === ListingStatus.Live) {
-              approvedTargets.push({
-                ownerId: listing.ownerId,
-                slug: listing.slug,
+          const recipientId = submitterIdOf(listing);
+          if (recipientId) {
+            if (status === ListingStatus.Live && listing.ownerId) {
+              approvedTargets.push({ recipientId, slug: listing.slug });
+            } else if (status === ListingStatus.Live) {
+              suggestionLiveTargets.push({
+                ref: listing.ref,
+                recipientId,
+                name: listing.name,
               });
             } else {
               sentBackTargets.push({
                 ref: listing.ref,
-                ownerId: listing.ownerId,
+                recipientId,
                 name: listing.name,
+                isForSuggester: isSubmitterTheSuggester(listing),
               });
             }
           }
@@ -1846,13 +2108,25 @@ export class ListingsService {
     });
 
     for (const target of approvedTargets) {
-      await this.notifyApprovedBestEffort(target.ownerId, target.slug);
+      await this.notifyApprovedBestEffort(target.recipientId, target.slug);
+    }
+    for (const target of suggestionLiveTargets) {
+      await this.notifySubmitterBestEffort(
+        actorId,
+        target,
+        this.suggestionLiveMessage(target.name),
+      );
     }
     for (const target of sentBackTargets) {
       await this.notifySubmitterBestEffort(
         actorId,
         target,
-        this.statusChangeMessage(target.name, status, reason),
+        this.statusChangeMessage(
+          target.name,
+          status,
+          reason,
+          target.isForSuggester,
+        ),
       );
     }
 
@@ -1876,7 +2150,12 @@ export class ListingsService {
     const updated: string[] = [];
     const failed: string[] = [];
     const orphanedImageKeys: string[] = [];
-    const notifyTargets: { ref: string; name: string; ownerId: string }[] = [];
+    const notifyTargets: {
+      ref: string;
+      name: string;
+      recipientId: string;
+      isForSuggester: boolean;
+    }[] = [];
 
     await this.dataSource.transaction(async (manager) => {
       const listingsRepo = manager.getRepository(Listing);
@@ -1895,11 +2174,13 @@ export class ListingsService {
         }
 
         orphanedImageKeys.push(...this.collectListingImageKeys(listing));
-        if (listing.ownerId) {
+        const recipientId = submitterIdOf(listing);
+        if (recipientId) {
           notifyTargets.push({
             ref: listing.ref,
             name: listing.name,
-            ownerId: listing.ownerId,
+            recipientId,
+            isForSuggester: isSubmitterTheSuggester(listing),
           });
         }
 
@@ -1925,9 +2206,7 @@ export class ListingsService {
       await this.notifySubmitterBestEffort(
         actorId,
         target,
-        `Your listing "${target.name}" was removed from QueerPulse.${
-          reason ? ` Reason: ${reason}` : ''
-        }`,
+        this.removalMessage(target.name, reason, target.isForSuggester),
       );
     }
 
@@ -2160,23 +2439,35 @@ export class ListingsService {
 
     // Approval = a submitted listing going Live. Notify the submitter once, on
     // the transition into Live (never on a re-save of an already-live listing).
-    // No actor: the platform is telling the owner about their own listing.
-    // Best-effort; guarded on a real submitter (`ownerId` can be null on
-    // admin-seeded listings). Deep-links to the public detail page via `slug`.
-    if (status === ListingStatus.Live && !wasLive && saved.ownerId) {
-      await this.notifyApprovedBestEffort(saved.ownerId, saved.slug);
-    } else if (
-      statusChanged &&
-      status !== ListingStatus.Live &&
-      saved.ownerId
-    ) {
+    // An owner gets the `ListingApproved` notification, with no actor: the
+    // platform is telling the owner about their own listing, deep-linked to
+    // the public detail page via `slug`. A suggestion the platform holds gets
+    // a DM to its suggester, because that notification says "your listing".
+    // Best-effort; a house-authored row has nobody to tell.
+    const recipientId = submitterIdOf(saved);
+    if (status === ListingStatus.Live && !wasLive && recipientId) {
+      if (saved.ownerId) {
+        await this.notifyApprovedBestEffort(recipientId, saved.slug);
+      } else {
+        await this.notifySubmitterBestEffort(
+          actorId,
+          { ref: saved.ref, recipientId },
+          this.suggestionLiveMessage(saved.name),
+        );
+      }
+    } else if (statusChanged && status !== ListingStatus.Live && recipientId) {
       // "Send back" (item #15) — any real transition away from an
       // in-flight review that ISN'T the Live approval above. Best-effort DM
       // through the same cold-contact path `askQuestion` uses.
       await this.notifySubmitterBestEffort(
         actorId,
-        { ref: saved.ref, ownerId: saved.ownerId },
-        this.statusChangeMessage(saved.name, status, reason),
+        { ref: saved.ref, recipientId },
+        this.statusChangeMessage(
+          saved.name,
+          status,
+          reason,
+          isSubmitterTheSuggester(saved),
+        ),
       );
     }
     return this.buildDTO(saved);
@@ -2186,29 +2477,58 @@ export class ListingsService {
    * change (item #15). Kept tiny and file-local — there's no i18n layer on
    * the backend (copy lives in the frontend), so this is a plain functional
    * English sentence, mirroring `enqueueOwnerNotifyIfNeeded`'s inline
-   * `detail` string precedent. */
+   * `detail` string precedent. `isForSuggester` switches to the wording a
+   * suggester reads (see `isSubmitterTheSuggester`), in the same tone as
+   * `suggestionLiveMessage`. */
   private statusChangeMessage(
     listingName: string,
     status: ListingStatus,
-    reason?: string,
+    reason: string | undefined,
+    isForSuggester: boolean,
   ): string {
+    const subject = isForSuggester
+      ? `The place you suggested, "${listingName}",`
+      : `Your listing "${listingName}"`;
     const base =
       status === ListingStatus.Question
-        ? `Your listing "${listingName}" needs more information before it can go live.`
-        : `Your listing "${listingName}" was sent back to review.`;
+        ? `${subject} needs more information before it can go live.`
+        : `${subject} was sent back to review.`;
     return reason ? `${base} Reason: ${reason}` : base;
+  }
+
+  /** The DM a submitter receives when a moderator removes a listing, shared
+   * by `removeByModerator` and `bulkRemove`. The reason is appended the same
+   * way `statusChangeMessage` appends it. */
+  private removalMessage(
+    listingName: string,
+    reason: string | undefined,
+    isForSuggester: boolean,
+  ): string {
+    const base = isForSuggester
+      ? `The place you suggested, "${listingName}", was removed from the directory.`
+      : `Your listing "${listingName}" was removed from QueerPulse.`;
+    return reason ? `${base} Reason: ${reason}` : base;
+  }
+
+  /** The approval message a suggester receives. A DM, because the
+   *  `ListingApproved` notification says "your listing" and a suggester does
+   *  not hold the listing. Plain English, like `statusChangeMessage`. */
+  private suggestionLiveMessage(listingName: string): string {
+    return `The place you suggested, "${listingName}", is now live in the directory.`;
   }
 
   /** Best-effort DM to a listing's submitter (item #15) — never blocks or
    * fails the caller's already-committed mutation. Shared by `setStatus`,
-   * `removeByModerator`, and `bulkRemove`. */
+   * `bulkSetStatus`, `removeByModerator`, and `bulkRemove`. `recipientId` is
+   * the owner, or on a suggestion the platform holds, the suggester
+   * (`submitterIdOf`). */
   private async notifySubmitterBestEffort(
     actorId: string,
-    target: { ref: string; ownerId: string },
+    target: { ref: string; recipientId: string },
     message: string,
   ): Promise<void> {
     try {
-      await this.messaging.deliverEnquiry(actorId, target.ownerId, message);
+      await this.messaging.deliverEnquiry(actorId, target.recipientId, message);
     } catch (error) {
       this.logger.warn(
         `Failed to notify submitter for listing ${target.ref}: ${
@@ -2260,7 +2580,9 @@ export class ListingsService {
     body: string,
   ): Promise<ListingDTO> {
     const listing = await this.loadOr404(ref);
-    if (!listing.ownerId) {
+    // The owner, or on a suggestion the platform holds, its suggester.
+    const submitterId = submitterIdOf(listing);
+    if (!submitterId) {
       throw new BadRequestException('This listing has no submitter to contact');
     }
 
@@ -2272,11 +2594,7 @@ export class ListingsService {
       // Throws ForbiddenException on a block either way, or BadRequest if the
       // moderator somehow owns the listing — surfaced to the FE as a specific
       // reason. Sent last so nothing can fail after it and strand a duplicate.
-      await this.messaging.deliverEnquiry(
-        moderatorUserId,
-        listing.ownerId,
-        body,
-      );
+      await this.messaging.deliverEnquiry(moderatorUserId, submitterId, body);
     } catch (error) {
       // DM failed — undo the status change so the state stays consistent and a
       // retry starts clean.
@@ -2424,9 +2742,10 @@ export class ListingsService {
    *
    * WHY MODERATORS CAN ANSWER AT ALL. Owner-only was the obvious rule and it is
    * the wrong one here, for a reason specific to this directory: a large share
-   * of listings have no owner. The `friendly` and `suggested` submission paths
-   * create rows with a null `owner_id` for businesses that never claimed their
-   * page, and those are frequently exactly the venues people have questions
+   * of listings have no owner. A suggestion is held by the platform with a
+   * null `owner_id`; the suggester is `suggested_by_user_id`. Staff-authored
+   * entries also wait for their business to claim the page, and those
+   * unclaimed pages are frequently exactly the venues people have questions
    * about. Under an owner-only rule the question box on every one of them would
    * be a form that accepts questions nobody is able to answer, which is worse
    * than not offering it. Abandoned owned listings fail the same way, more
@@ -3270,7 +3589,18 @@ export class ListingsService {
     overrides: Partial<
       Pick<
         Listing,
-        'status' | 'affirmingBaselineAcceptedAt' | 'createdByStaffId'
+        | 'status'
+        | 'affirmingBaselineAcceptedAt'
+        | 'createdByStaffId'
+        | 'suggestedByUserId'
+        | 'ownerName'
+        | 'ownerRole'
+        | 'ownerBio'
+        | 'rel'
+        | 'consentOuting'
+        | 'consentGuide'
+        | 'linkToProfile'
+        | 'visibility'
       >
     > = {},
   ): Promise<Listing> {
@@ -3289,16 +3619,15 @@ export class ListingsService {
             status: ListingStatus.Review,
             // Stamped here, from the server clock, because the submitter
             // agreed to the affirming baseline in the act of submitting.
-            // `CreateListingDto.affirmingBaselineAccepted` is `@Equals(true)`,
-            // so by the time this runs there is no path that reaches it
-            // without acceptance, and the client never gets to say WHEN it
-            // happened.
+            // `CreateListingDto.affirmingBaselineAccepted` is `@Equals(true)`
+            // on the claim path, so by the time this runs a claim cannot reach
+            // it without acceptance, and the client never gets to say WHEN it
+            // happened. The suggest and staff paths override it to null.
             affirmingBaselineAcceptedAt: new Date(),
             ...normalizeCreate(dto),
-            // The staff authoring path's own stamps, spread last so they win
-            // over the member defaults above. Empty on the member path, where
-            // this line contributes nothing and the object literal stays the
-            // one it has always been.
+            // The staff authoring and suggest paths' own stamps, spread last
+            // so they win over the member defaults above. Empty on the claim
+            // path, where this line contributes nothing.
             ...overrides,
           }),
         );

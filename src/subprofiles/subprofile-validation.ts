@@ -10,6 +10,8 @@ import {
 import { SubprofileItem } from './entities/subprofile-item.entity';
 import { HANDLE_RE, RESERVED_HANDLES } from '../common/handles';
 import { BLOCKED_TERMS, textHasBlockedTerm } from '../common/blocked-terms';
+import { handleIsKindName, handleNamesOwner } from './persona-handle';
+import type { SubprofileKind } from './subprofile-kinds';
 
 // --- C5 constants (must stay identical to the frontend mirror) --------------
 // `HANDLE_RE` and `RESERVED_HANDLES` now live in the shared handle module
@@ -62,6 +64,8 @@ export type PublishUnmetCode =
   | 'handle_invalid'
   | 'handle_taken'
   | 'handle_reserved'
+  | 'handle_names_owner'
+  | 'handle_is_kind'
   | 'avatar_missing'
   | 'bio_too_short'
   | 'not_enough_items'
@@ -71,41 +75,100 @@ function containsBlockedTerm(sp: Subprofile): boolean {
   return textHasBlockedTerm(sp.displayName, sp.bio, sp.handle);
 }
 
+// The three namespace checks every claimed handle passes, for both link kinds.
+// A linked persona's typed handle runs them through `linkedHandleUnmetCodes`.
+export function handleUnmetCodes(
+  handle: string | null,
+  handleTaken: boolean,
+): PublishUnmetCode[] {
+  if (!handle || !HANDLE_RE.test(handle)) {
+    return ['handle_invalid'];
+  }
+  if (RESERVED_HANDLES.includes(handle)) {
+    return ['handle_reserved'];
+  }
+  if (handleTaken) {
+    return ['handle_taken'];
+  }
+  return [];
+}
+
+// The checks a handle the owner typed on a LINKED persona passes: the three
+// namespace checks, plus the blocked-term screen on the handle alone. The
+// handle is a public `/p/` address, so it is screened like an unlinked
+// persona's; the rest of a linked persona's text keeps skipping the screen
+// (design spec §4.2). When `kind` is given, a handle that passes the namespace
+// checks yet is only the persona's own kind name ("therapist") is refused with
+// `handle_is_kind`. Exported for the link switch in
+// `SubprofilesService.update`, which claims a typed handle outside
+// `validatePublish`.
+export function linkedHandleUnmetCodes(
+  handle: string,
+  handleTaken: boolean,
+  kind?: SubprofileKind,
+): PublishUnmetCode[] {
+  const unmet = handleUnmetCodes(handle, handleTaken);
+  if (unmet.length === 0 && kind && handleIsKindName(handle, kind)) {
+    unmet.push('handle_is_kind');
+  }
+  if (textHasBlockedTerm(handle)) {
+    unmet.push('blocked_terms');
+  }
+  return unmet;
+}
+
 /**
  * Runs the completeness check for publishing a subprofile and returns the list
  * of unmet requirement codes (empty === may publish).
  *
- * - **Linked** personas only require a non-empty `display_name` (guaranteed at
- *   create/update); they render nested and never claim a handle, so the handle/
- *   avatar/bio checks are skipped (design spec §4).
+ * - **Linked** personas claim a `/p/<handle>` too. With no handle the server
+ *   derives one at publish (`<creatorSlug>-<personaSlug>`), so a null handle
+ *   passes. A handle the owner typed runs the three handle checks (invalid,
+ *   reserved, taken), the kind-name check (`handle_is_kind`) and the
+ *   blocked-term screen on the handle alone, since it is a public address;
+ *   the avatar and bio checks, and the blocked-term screen on the rest of the
+ *   text, stay unlinked-only (design spec §4.2).
  * - **Unlinked** personas must pass the full automated completeness check.
+ *   Their handle also may not carry the creator's profile slug
+ *   (`handle_names_owner`, checked when `creatorSlug` is supplied), since that
+ *   would say who runs a pseudonymous persona.
+ * - For both link kinds, a handle that is only the persona's own kind name
+ *   ("therapist", "terapia") is refused with `handle_is_kind`: a `/p/`
+ *   address has to name the persona itself.
  *
  * Content items are NOT part of that check: a persona may go live empty and
  * fill up afterwards, so `not_enough_items` is never emitted and `_items` goes
  * unread. The parameter stays so every existing caller keeps compiling, and the
  * frontend carries the same threshold as an optional "add a few pieces" nudge.
  *
- * `handleTaken` is supplied by the caller (the service queries the partial
- * unique `handle` index) so this function stays synchronous and pure.
+ * `handleTaken` is supplied by the caller (the service asks the handles
+ * registry) so this function stays synchronous and pure. `creatorSlug` is the
+ * persona CREATOR's `profiles.slug`, also looked up by the caller.
  */
 export function validatePublish(
   sp: Subprofile,
   _items: SubprofileItem[],
   handleTaken = false,
+  creatorSlug: string | null = null,
 ): PublishUnmetCode[] {
   if (sp.linkVisibility === SubprofileLinkVisibility.Linked) {
-    return [];
+    return sp.handle
+      ? linkedHandleUnmetCodes(sp.handle, handleTaken, sp.kind)
+      : [];
   }
 
-  const unmet: PublishUnmetCode[] = [];
-
   const handle = sp.handle;
-  if (!handle || !HANDLE_RE.test(handle)) {
-    unmet.push('handle_invalid');
-  } else if (RESERVED_HANDLES.includes(handle)) {
-    unmet.push('handle_reserved');
-  } else if (handleTaken) {
-    unmet.push('handle_taken');
+  const unmet = handleUnmetCodes(handle, handleTaken);
+  if (
+    unmet.length === 0 &&
+    handle &&
+    creatorSlug &&
+    handleNamesOwner(handle, creatorSlug)
+  ) {
+    unmet.push('handle_names_owner');
+  }
+  if (unmet.length === 0 && handle && handleIsKindName(handle, sp.kind)) {
+    unmet.push('handle_is_kind');
   }
 
   if (!sp.avatarUrl) {

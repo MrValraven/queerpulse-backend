@@ -586,11 +586,16 @@ export class CreateListingDto {
   @IsOptional() @IsBoolean() consentGuide?: boolean;
 
   /**
-   * The submitter agrees to the LGBTQ+ affirming baseline. REQUIRED, and
-   * required to be `true`: every listing agrees to it in order to appear in
-   * this directory at all, matching the housing side's mandatory pledge. It is
-   * not an optional flag and there is no version of a listing that declines it,
-   * so `false` is rejected rather than stored.
+   * The submitter agrees to the LGBTQ+ affirming baseline. REQUIRED on the
+   * claim path, and required to be `true`: every listing agrees to it in order
+   * to appear in this directory at all, matching the housing side's mandatory
+   * pledge. It is not an optional flag and there is no version of a listing
+   * that declines it, so `false` is rejected rather than stored.
+   *
+   * On the `suggest` path it is skipped. A suggester is someone who knows the
+   * place, and the promise belongs to the business, so the owner makes it when
+   * a claim is approved or an owner offer is accepted, the same way
+   * `adminCreate` records a house-authored listing with no acceptance yet.
    *
    * What is agreed to is a commitment about the business's own conduct: to
    * welcome and serve LGBTQ+ people, and to deal with it when someone in the
@@ -603,10 +608,11 @@ export class CreateListingDto {
    * only exists because of, and a PATCH carrying this field is rejected by the
    * global `forbidNonWhitelisted` pipe rather than silently ignored.
    */
+  @ValidateIf((dto: CreateListingDto) => dto.path !== 'suggest')
   @IsBoolean()
   @Equals(true, {
     message:
       'Every listing agrees to the LGBTQ+ affirming baseline in order to appear in the directory.',
   })
-  affirmingBaselineAccepted!: boolean;
+  affirmingBaselineAccepted?: boolean;
 }

@@ -18,6 +18,7 @@ import {
   SelectQueryBuilder,
 } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
@@ -63,10 +64,12 @@ import { ProfileNowHistory } from './entities/profile-now-history.entity';
 import { pruneDiscoverable } from './identities';
 import { normalizeOpenTo } from './open-to';
 import { closenessFor, type RelatedCloseness } from './related-closeness';
-import { reconcileDisciplineProfession } from './professions';
+import { hasUnlistedWork, reconcileDisciplineProfession } from './professions';
 import {
   applyDirectoryFilters,
   countDirectoryFacets,
+  memberSearchIds,
+  memberSearchTextMatch,
   type DirectoryFacetCounts,
   type DirectoryFacetGroup,
 } from './member-directory.query';
@@ -210,6 +213,9 @@ export class ProfilesService {
     // path) only, never from `searchMembers`/`toMemberCard` (the list path),
     // where one aggregate per row would turn a single query into N.
     private readonly nowInsights: NowInsightsService,
+    // Owner-only: whether the caller has an active Ambassador grant, read on
+    // the owner path only. See buildFullProfile.
+    private readonly ambassadorStatus: AmbassadorStatusService,
   ) {}
 
   /**
@@ -447,26 +453,51 @@ export class ProfilesService {
         workItem.imageUrl ? [workItem.imageUrl] : [],
       ),
     );
-    // The three reads below are all about the PROFILE OWNER (not the viewer),
+    // The four reads below are all about the PROFILE OWNER (not the viewer),
     // and independent of each other and of the parallel block above, so they
     // run together rather than in series.
     // `activityBand` is one primary-key lookup on a two-column table;
     // `mutualVoucherCount` is two bounded trust-graph reads; `respondsWithin`
-    // is one grouped aggregate over `connections`.
-    const [activityBand, mutualVoucherCount, respondsWithin] =
-      await Promise.all([
-        // The band the VIEWER may see: `visibleBand` applies the member's
-        // opt-out, with the owner exempted so their own switch has a visible
-        // effect.
-        this.lastActive
-          .getSignal(userId)
-          .then((signal) => visibleBand(signal, isOwner)),
-        this.loadMutualVoucherCount(profile, viewerUserId),
-        // Ungated, same as `now`/`notHereFor`: this is the single-profile
-        // read path, never the member-directory list path (`searchMembers`),
-        // which must not call this per row.
-        this.nowInsights.getRespondsWithin(userId),
-      ]);
+    // is one grouped aggregate over `connections`; `shouldIncludeUnlistedWork`
+    // is zero or one connection-pair lookup (see below); `ownAmbassador` is
+    // one primary-key-shaped lookup, resolved only on the owner path.
+    const [
+      activityBand,
+      mutualVoucherCount,
+      respondsWithin,
+      shouldIncludeUnlistedWork,
+      ownAmbassador,
+    ] = await Promise.all([
+      // The band the VIEWER may see: `visibleBand` applies the member's
+      // opt-out, with the owner exempted so their own switch has a visible
+      // effect.
+      this.lastActive
+        .getSignal(userId)
+        .then((signal) => visibleBand(signal, isOwner)),
+      this.loadMutualVoucherCount(profile, viewerUserId),
+      // Ungated, same as `now`/`notHereFor`: this is the single-profile
+      // read path, never the member-directory list path (`searchMembers`),
+      // which must not call this per row.
+      this.nowInsights.getRespondsWithin(userId),
+      // Coordinator ruling 15: unlisted (`adultWork`) work shows on the full
+      // profile only to the owner and to the owner's accepted connections.
+      // The profile's own `visibility` tier plays no part: an `open` profile
+      // is full to every signed-in member, which would otherwise make the
+      // directory a slug sweep away from rebuilding the list this feature
+      // exists to prevent. `hasUnlistedWork` short-circuits the connection
+      // query for the overwhelming majority of profiles that never selected
+      // it, so an ordinary profile read costs nothing extra here.
+      isOwner
+        ? Promise.resolve(true)
+        : hasUnlistedWork(profile)
+          ? this.connectionsService.areConnected(viewerUserId, profile.userId)
+          : Promise.resolve(false),
+      // The owner's own active grant, for the owner-only `ambassador` field.
+      // A non-owner viewer never needs this, so it stays unfetched for them.
+      isOwner
+        ? this.ambassadorStatus.findActive(userId)
+        : Promise.resolve(null),
+    ]);
     // Response counts and the first few responders for this member's board,
     // in ONE query keyed by post id — never per post. See loadBoardResponses.
     // `viewerUserId` gates each responder by the same visibility rule every
@@ -481,11 +512,13 @@ export class ProfilesService {
       rels,
       vouchCount,
       isOwner,
+      shouldIncludeUnlistedWork,
       crops,
       activityBand,
       mutualVoucherCount,
       respondsWithin,
       boardResponses,
+      ownAmbassador,
     );
   }
 
@@ -846,8 +879,16 @@ export class ProfilesService {
     ]);
     return rows.map((r) => {
       const isSelf = r.userId === viewerUserId;
+      // Same rule as toMemberCard/toLimitedProfile: a related card for
+      // anyone but the viewer themself must not carry `adultWork`/its
+      // professions. `toProfileCard` strips by default; opting back in only
+      // for the viewer's own row mirrors `toMemberCard`'s `isOwner` gate. See
+      // professions.ts#UNLISTED_DISCIPLINE_IDS.
+      const card = toProfileCard(r, counts.get(r.userId) ?? 0, {
+        shouldIncludeUnlistedWork: isSelf,
+      });
       return {
-        ...toProfileCard(r, counts.get(r.userId) ?? 0),
+        ...card,
         avatarUrl: gateAvatarUrl(r, isSelf),
         // Same two-layer gate `toMemberCard` applies to a directory card: a
         // `network`/`private` member shows no neighbourhood at all, and an
@@ -2014,14 +2055,57 @@ export class ProfilesService {
     const memberSearchTsQuery = foldedSearchQuery('memberSearchTerm');
     const hasSearchTerm = Boolean(q.query);
 
+    // Text hits first, whatever the sort. A member found only through a
+    // profession or field of work (the `searchProfessions` /
+    // `searchDisciplines` branch of the search predicate) has no name or bio
+    // hit. The frontend resolves those ids from word prefixes of three letters
+    // or more, so typing a NAME prefix like "Ana" also sends
+    // `financialAnalyst`, and without this grouping the grid would fill with
+    // analysts ahead of the Anas the member was looking for. The relevance
+    // rank alone cannot hold the line either: `similarity()` over a
+    // profession-only member's name and bio can score above zero on shared
+    // trigrams and lift them past a real substring hit.
+    //
+    // So when that branch is in play, every sort orders by a text-hit flag
+    // first and then by its own keys, which still decide the order within
+    // each group. Selected under a DOT-FREE alias for the pagination reason
+    // spelled out at `ClosestMutuals` below. With no search ids the flag is
+    // never selected and each sort issues exactly the calls it always has.
+    const { searchProfessions, searchDisciplines } = memberSearchIds(q);
+    const hasProfessionSearch =
+      searchProfessions.length > 0 || searchDisciplines.length > 0;
+    if (hasProfessionSearch) {
+      qb.addSelect(
+        `CASE WHEN (${memberSearchTextMatch()}) THEN 1 ELSE 0 END`,
+        'member_search_text_hit',
+      ).orderBy('member_search_text_hit', 'DESC');
+    }
+    // A sort's leading key: appended after the text-hit flag when the flag is
+    // in play, and the first ORDER BY term otherwise.
+    const orderFirst = (
+      sortKey: string,
+      direction: 'ASC' | 'DESC',
+      nullsPlacement?: 'NULLS FIRST' | 'NULLS LAST',
+    ): SelectQueryBuilder<Profile> => {
+      if (hasProfessionSearch) {
+        return nullsPlacement
+          ? qb.addOrderBy(sortKey, direction, nullsPlacement)
+          : qb.addOrderBy(sortKey, direction);
+      }
+      return nullsPlacement
+        ? qb.orderBy(sortKey, direction, nullsPlacement)
+        : qb.orderBy(sortKey, direction);
+    };
+
     // Ordering. Applied here rather than on the client because the directory is
     // paginated — the client only ever holds one page and cannot sort across the
     // whole set. Every branch ends with a `p.slug` tiebreaker so pages stay
     // deterministic when the primary key ties (otherwise the same member could
-    // straddle a page boundary).
+    // straddle a page boundary). Each branch starts through `orderFirst`, so
+    // the text-hit grouping above leads whenever it applies.
     switch (q.sort) {
       case MemberSort.AToZ:
-        qb.orderBy('p.firstName', 'ASC').addOrderBy('p.lastName', 'ASC');
+        orderFirst('p.firstName', 'ASC').addOrderBy('p.lastName', 'ASC');
         break;
       case MemberSort.MostVouched:
         // Reads the denormalized `profiles.vouch_count` column instead of a
@@ -2042,7 +2126,7 @@ export class ProfilesService {
         // nudge of one place is not worth reopening that. The NUMBER each
         // card prints is unaffected: `searchMembers` maps its cards from the
         // batched, block-aware `VouchService.getVouchCounts` below.
-        qb.orderBy('p.vouchCount', 'DESC').addOrderBy('p.firstName', 'ASC');
+        orderFirst('p.vouchCount', 'DESC').addOrderBy('p.firstName', 'ASC');
         break;
       case MemberSort.ClosestMutuals: {
         // Rank by how many of the viewer's own accepted connections each
@@ -2079,12 +2163,13 @@ export class ProfilesService {
                   AND ((mc.requester_id = p.user_id AND mc.addressee_id IN (${placeholders}))
                     OR (mc.addressee_id = p.user_id AND mc.requester_id IN (${placeholders}))))`,
             'mutual_connection_count',
-          )
-            .setParameters(parameters)
-            .orderBy('mutual_connection_count', 'DESC')
-            .addOrderBy('p.joinedAt', 'DESC');
+          ).setParameters(parameters);
+          orderFirst('mutual_connection_count', 'DESC').addOrderBy(
+            'p.joinedAt',
+            'DESC',
+          );
         } else {
-          qb.orderBy('p.joinedAt', 'DESC');
+          orderFirst('p.joinedAt', 'DESC');
         }
         break;
       }
@@ -2113,16 +2198,19 @@ export class ProfilesService {
           `(SELECT la.last_active_month FROM profile_last_active la
               WHERE la.user_id = p.user_id AND la.is_hidden = false)`,
           'last_active_month_sort',
-        )
-          .orderBy('last_active_month_sort', 'DESC', 'NULLS LAST')
-          .addOrderBy('p.joinedAt', 'DESC');
+        );
+        orderFirst('last_active_month_sort', 'DESC', 'NULLS LAST').addOrderBy(
+          'p.joinedAt',
+          'DESC',
+        );
         break;
       case MemberSort.RecentlyJoined:
       default:
         // With a search term and no sort chosen, order by relevance (SOC-08).
-        // Every explicit sort above is left exactly as it was: a member who
-        // picked "A to Z" asked for A to Z, term or no term. Selected under a
-        // DOT-FREE alias for the same reason `ClosestMutuals` and
+        // Every explicit sort above keeps its own keys: a member who picked
+        // "A to Z" gets A to Z, term or no term, and when the text-hit
+        // grouping applies they get A to Z within each group. Selected under
+        // a DOT-FREE alias for the same reason `ClosestMutuals` and
         // `RecentlyActive` are: this query paginates over a join, so TypeORM
         // rewrites it into a DISTINCT-id subquery and re-parses each ORDER BY
         // term as `alias.column`.
@@ -2135,11 +2223,13 @@ export class ProfilesService {
               foldedSearchTerm('memberSearchTerm'),
             ),
             'member_search_rank',
-          )
-            .orderBy('member_search_rank', 'DESC')
-            .addOrderBy('p.joinedAt', 'DESC');
+          );
+          orderFirst('member_search_rank', 'DESC').addOrderBy(
+            'p.joinedAt',
+            'DESC',
+          );
         } else {
-          qb.orderBy('p.joinedAt', 'DESC');
+          orderFirst('p.joinedAt', 'DESC');
         }
         break;
     }

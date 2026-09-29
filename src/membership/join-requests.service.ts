@@ -19,7 +19,8 @@ import {
 import { joinRequestDueAt } from './join-request-sla';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
-import { Invite } from './entities/invite.entity';
+import { Invite, InviteStatus } from './entities/invite.entity';
+import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
   PlatformJoinRequest,
   PlatformJoinRequestStatus,
@@ -1088,6 +1089,134 @@ export class JoinRequestsService {
       null,
       optionalQueueAssigneeName(request.assignedStaffId, staffRefs),
       optionalQueueAssigneeName(request.reviewedBy, staffRefs),
+    );
+  }
+
+  /**
+   * Revoke the still-valid invite an approval handed out, addressed by the
+   * JOIN REQUEST: `POST /admin/join-requests/:id/invite/revoke`.
+   *
+   * QueerPulse sends no email, so reviewers carry approval links over by hand.
+   * A link pasted into the wrong conversation, or an approval that should be
+   * pulled back, needs a way to be switched off. The member-facing revoke is
+   * scoped to the inviter, which on an approval invite is whichever reviewer
+   * approved it, so a second moderator picking the case up could not use it.
+   * This route is the review queue's own lever, guarded like the rest of it.
+   *
+   * Answers:
+   *  - 404 when the id is unknown, or the request never minted an invite (not
+   *    approved, or approved before invites were recorded), one answer for
+   *    all of them, like reissue;
+   *  - 409 when the invite was already accepted, revoked, or has expired. The
+   *    guard reads the RESOLVED status, so a `pending` row past `expires_at`
+   *    counts as expired.
+   *
+   * The flip is a conditional `status = Pending` update, so a redemption racing
+   * the revoke cannot both win; the loser re-reads and reports the state that
+   * won. The `mod_audit_logs` row (`invite_revoked`, invite code in `note`) is
+   * written in the SAME transaction, mirroring `AdminInvitesService.revoke`.
+   * The applicant has no account yet, so the row names them by `targetName`
+   * with a NULL `targetUserId`.
+   */
+  async revokeInvite(id: string, reviewerId: string): Promise<JoinRequestView> {
+    const request = await this.joinRequests.findOne({ where: { id } });
+    if (
+      !request ||
+      request.status !== PlatformJoinRequestStatus.Approved ||
+      !request.inviteId
+    ) {
+      throw new NotFoundException('No invite to revoke for this request');
+    }
+    const inviteRepository = this.dataSource.getRepository(Invite);
+    const invite = await inviteRepository.findOne({
+      where: { id: request.inviteId },
+    });
+    if (!invite) {
+      throw new NotFoundException('No invite to revoke for this request');
+    }
+    this.assertApprovalInviteRevocable(invite, new Date());
+
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.update(
+        Invite,
+        { id: invite.id, status: InviteStatus.Pending },
+        { status: InviteStatus.Revoked },
+      );
+      if (result.affected !== 1) {
+        // Lost a race with a redemption, the expiry sweeper, or a concurrent
+        // revoke. Re-read and report the state that actually won.
+        const currentInvite = await manager.findOne(Invite, {
+          where: { id: invite.id },
+        });
+        if (!currentInvite) {
+          throw new NotFoundException('No invite to revoke for this request');
+        }
+        this.assertApprovalInviteRevocable(currentInvite, new Date());
+        throw new ConflictException('Only a valid invite can be revoked.');
+      }
+
+      const auditLogs = manager.getRepository(ModAuditLog);
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: reviewerId,
+          targetUserId: null,
+          targetName: request.name,
+          action: 'invite_revoked',
+          reasonCode: null,
+          note: invite.code,
+          duration: null,
+        }),
+      );
+    });
+
+    this.logger.log(
+      `Reviewer ${reviewerId} revoked the approval invite on join request ${id}`,
+    );
+    const revokedInvite = await inviteRepository.findOne({
+      where: { id: invite.id },
+    });
+    if (!revokedInvite) {
+      throw new NotFoundException('No invite to revoke for this request');
+    }
+    // Same reason as reissue: the caller patches a decided row in place, so the
+    // reviewer's name has to survive the patch. One batched lookup.
+    const staffRefs = await this.staffRefs([
+      request.reviewedBy,
+      request.assignedStaffId,
+    ]);
+    return toJoinRequestView(
+      request,
+      {
+        code: revokedInvite.code,
+        status: resolveInviteStatus(revokedInvite, new Date()),
+        expiresAt: revokedInvite.expiresAt,
+      },
+      [],
+      0,
+      null,
+      null,
+      optionalQueueAssigneeName(request.assignedStaffId, staffRefs),
+      optionalQueueAssigneeName(request.reviewedBy, staffRefs),
+    );
+  }
+
+  /** 409 with the reason an approval invite cannot be revoked, or return
+   *  quietly when it can. Reads the RESOLVED status so a lapsed `pending` row
+   *  the sweeper has yet to reach is reported as expired. */
+  private assertApprovalInviteRevocable(invite: Invite, now: Date): void {
+    const status = resolveInviteStatus(invite, now);
+    if (status === 'valid') return;
+    if (status === 'used') {
+      throw new ConflictException(
+        'This invite has already been accepted, so there is nothing to revoke.',
+      );
+    }
+    if (status === 'revoked') {
+      throw new ConflictException('This invite was already revoked.');
+    }
+    throw new ConflictException(
+      'This invite has already expired, so there is nothing to revoke.',
     );
   }
 }

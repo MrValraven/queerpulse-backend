@@ -166,6 +166,16 @@ export enum ListingModerationAction {
    * as `directory_paused`.
    */
   DirectoryResumed = 'directory_resumed',
+  /**
+   * Staff edited a listing the platform holds (`ListingsService.adminUpdate`).
+   * Only a listing with no owner can be edited this way; once it has an owner,
+   * staff changes arrive as edit suggestions. `actorId` is the admin,
+   * `changedFields` lists the `Listing` properties the edit moved, and the
+   * `reason` is the same fixed plain-language sentence `owner_edited` uses.
+   * `fromStatus`/`toStatus` are both null: an edit moves no moderation state.
+   * See migration `MoveSuggestedListingsToPlatform1822600000000`.
+   */
+  StaffEdited = 'staff_edited',
 }
 
 /**

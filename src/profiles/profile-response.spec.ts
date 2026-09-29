@@ -1,3 +1,4 @@
+import type { Ambassador } from '../ambassadors/entities/ambassador.entity';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
@@ -46,6 +47,7 @@ const profile = (overrides: Partial<Profile> = {}): Profile =>
     photoVisible: true,
     hoodVisible: true,
     vouchersVisible: true,
+    isAmbassadorTagVisible: true,
     visibility: ProfileVisibility.Open,
     openTo: [{ kind: 'preset', id: 'collaborating' }] as OpenToEntry[],
     identities: ['Queer'],
@@ -55,6 +57,19 @@ const profile = (overrides: Partial<Profile> = {}): Profile =>
     joinedAt: new Date('2024-03-01T00:00:00.000Z'),
     ...overrides,
   }) as Profile;
+
+const ambassadorGrant = (overrides: Partial<Ambassador> = {}): Ambassador => ({
+  id: 'amb-1',
+  userId: 'u1',
+  focusArea: 'trans_health',
+  grantedById: null,
+  grantedAt: new Date('2026-01-15T00:00:00.000Z'),
+  grantReason: 'community leadership',
+  revokedAt: null,
+  revokedById: null,
+  revokeReason: null,
+  ...overrides,
+});
 
 const LONG_BIO =
   "I build things for the web and spend most weekends cooking for more people than my kitchen was designed for. Lately I've been learning to bind books.";
@@ -124,12 +139,20 @@ describe('profile-response mappers', () => {
     // applied the owner and hidden-roster gates. Defaulting to null keeps a
     // caller that forgets the argument on the safe side.
     expect(
-      toFullProfile(profile(), emptyRels, 2, false, undefined, null, 3)
+      toFullProfile(profile(), emptyRels, 2, false, false, undefined, null, 3)
         .mutualVoucherCount,
     ).toBe(3);
     expect(
-      toFullProfile(profile(), emptyRels, 2, false, undefined, null, null)
-        .mutualVoucherCount,
+      toFullProfile(
+        profile(),
+        emptyRels,
+        2,
+        false,
+        false,
+        undefined,
+        null,
+        null,
+      ).mutualVoucherCount,
     ).toBeNull();
     expect(
       toFullProfile(profile(), emptyRels, 2).mutualVoucherCount,
@@ -178,11 +201,100 @@ describe('profile-response mappers', () => {
     expect(viewed).not.toHaveProperty('hiddenUntil');
   });
 
+  it('toFullProfile carries the owner ambassador grant, and null when there is none', () => {
+    const grant = ambassadorGrant();
+    const owned = toFullProfile(
+      profile(),
+      emptyRels,
+      2,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      grant,
+    );
+    expect(owned.ambassador).toEqual({
+      since: '2026-01-15T00:00:00.000Z',
+      focusArea: 'trans_health',
+    });
+
+    const ownedNoGrant = toFullProfile(
+      profile(),
+      emptyRels,
+      2,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      null,
+    );
+    expect(ownedNoGrant.ambassador).toBeNull();
+  });
+
+  it('toFullProfile omits ambassador entirely for a non-owner viewer', () => {
+    const viewed = toFullProfile(
+      profile(),
+      emptyRels,
+      2,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ambassadorGrant(),
+    );
+    expect('ambassador' in viewed).toBe(false);
+  });
+
+  it('isAmbassadorTagVisible is absent from every card', () => {
+    const hiddenTag = profile({ isAmbassadorTagVisible: false });
+    expect('isAmbassadorTagVisible' in toProfileCard(hiddenTag, 0)).toBe(false);
+    expect(
+      'isAmbassadorTagVisible' in
+        toProfileCard(hiddenTag, 0, { shouldIncludeUnlistedWork: true }),
+    ).toBe(false);
+    expect('isAmbassadorTagVisible' in toMemberCard(hiddenTag, 0)).toBe(false);
+    expect('isAmbassadorTagVisible' in toLimitedProfile(hiddenTag, 0)).toBe(
+      false,
+    );
+  });
+
+  it('isAmbassadorTagVisible is absent from a non-owner full profile', () => {
+    const hiddenTag = profile({ isAmbassadorTagVisible: false });
+    const viewedHidden = toFullProfile(hiddenTag, emptyRels, 2, false);
+    expect('isAmbassadorTagVisible' in viewedHidden).toBe(false);
+
+    const visibleTag = profile({ isAmbassadorTagVisible: true });
+    const viewedVisible = toFullProfile(visibleTag, emptyRels, 2, false);
+    expect('isAmbassadorTagVisible' in viewedVisible).toBe(false);
+  });
+
+  it('isAmbassadorTagVisible carries the stored value for the owner', () => {
+    const hiddenTag = profile({ isAmbassadorTagVisible: false });
+    expect(
+      toFullProfile(hiddenTag, emptyRels, 2, true).isAmbassadorTagVisible,
+    ).toBe(false);
+
+    const visibleTag = profile({ isAmbassadorTagVisible: true });
+    expect(
+      toFullProfile(visibleTag, emptyRels, 2, true).isAmbassadorTagVisible,
+    ).toBe(true);
+  });
+
   it('carries respondsWithin on the full profile', () => {
     const dto = toFullProfile(
       profile(),
       emptyRels,
       2,
+      false,
       false,
       undefined,
       null,
@@ -490,6 +602,85 @@ describe('profile-response mappers', () => {
     const card = toMemberCard(p, 1, true);
     expect(card.avatarUrl).toBe('https://x/a.png');
     expect(card.location).toBe('Arroios');
+  });
+
+  // A member can save `adultWork`/`sexWorker` on "sex work & adult content".
+  // It must show on their own card and stay off everybody else's directory
+  // card. See professions.ts#UNLISTED_DISCIPLINE_IDS.
+  it('toMemberCard strips adultWork/sexWorker for a non-owner viewer, but keeps it for the owner', () => {
+    const p = profile({
+      discipline: ['healthcare', 'adultWork'],
+      profession: ['nurse', 'sexWorker'],
+    });
+
+    const viewed = toMemberCard(p, 1);
+    expect(viewed.discipline).toEqual(['healthcare']);
+    expect(viewed.profession).toEqual(['nurse']);
+
+    const owned = toMemberCard(p, 1, true);
+    expect(owned.discipline).toEqual(['healthcare', 'adultWork']);
+    expect(owned.profession).toEqual(['nurse', 'sexWorker']);
+  });
+
+  it('toLimitedProfile strips adultWork/sexWorker for a non-owner viewer, but keeps it for the owner', () => {
+    const p = profile({
+      discipline: ['healthcare', 'adultWork'],
+      profession: ['nurse', 'sexWorker'],
+    });
+
+    const viewed = toLimitedProfile(p, 1);
+    expect(viewed.discipline).toEqual(['healthcare']);
+    expect(viewed.profession).toEqual(['nurse']);
+
+    const owned = toLimitedProfile(p, 1, true);
+    expect(owned.discipline).toEqual(['healthcare', 'adultWork']);
+    expect(owned.profession).toEqual(['nurse', 'sexWorker']);
+  });
+
+  // toProfileCard is the RAW card every other mapper builds on; the strip
+  // lives here (M3) so a future card built on it can't forget to apply it.
+  it('toProfileCard strips adultWork/sexWorker by default, and keeps them with shouldIncludeUnlistedWork', () => {
+    const p = profile({
+      discipline: ['healthcare', 'adultWork'],
+      profession: ['nurse', 'sexWorker'],
+    });
+
+    const stripped = toProfileCard(p, 1);
+    expect(stripped.discipline).toEqual(['healthcare']);
+    expect(stripped.profession).toEqual(['nurse']);
+
+    const kept = toProfileCard(p, 1, { shouldIncludeUnlistedWork: true });
+    expect(kept.discipline).toEqual(['healthcare', 'adultWork']);
+    expect(kept.profession).toEqual(['nurse', 'sexWorker']);
+  });
+
+  // Coordinator ruling 15: unlisted work shows on the full profile only to
+  // the owner and to an accepted connection. Being entitled to the full
+  // profile at all is not enough on its own (an `open` profile is full to
+  // every signed-in member). `ProfilesService.buildFullProfile` computes
+  // `shouldIncludeUnlistedWork`; this mapper only obeys the flag.
+  it('toFullProfile strips adultWork/sexWorker for a non-connected viewer, and keeps them for the owner or a connection', () => {
+    const p = profile({
+      discipline: ['healthcare', 'adultWork'],
+      profession: ['nurse', 'sexWorker'],
+    });
+
+    // Default: neither owner nor flagged as a connection, the safe case.
+    const strangerViewed = toFullProfile(p, emptyRels, 1);
+    expect(strangerViewed.discipline).toEqual(['healthcare']);
+    expect(strangerViewed.profession).toEqual(['nurse']);
+
+    // isOwner true, shouldIncludeUnlistedWork left at its default: the owner
+    // still gets their own unlisted work regardless of the connection flag,
+    // since ProfilesService always resolves it to true for the owner.
+    const owned = toFullProfile(p, emptyRels, 1, true, true);
+    expect(owned.discipline).toEqual(['healthcare', 'adultWork']);
+    expect(owned.profession).toEqual(['nurse', 'sexWorker']);
+
+    // A non-owner viewer the caller has resolved as an accepted connection.
+    const connectionViewed = toFullProfile(p, emptyRels, 1, false, true);
+    expect(connectionViewed.discipline).toEqual(['healthcare', 'adultWork']);
+    expect(connectionViewed.profession).toEqual(['nurse', 'sexWorker']);
   });
 
   it('gateAvatarUrl/gateLocation: owner always sees the real value, non-owner only when the toggle is on', () => {

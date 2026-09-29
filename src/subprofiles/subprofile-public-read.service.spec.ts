@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In } from 'typeorm';
@@ -40,6 +40,7 @@ import { SubprofileEndorsementsService } from './subprofile-endorsements.service
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
+import { restrictedAccessBody } from './subprofile-response';
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -83,6 +84,20 @@ function findOneFrom<Row extends object>(rows: Row[]) {
           ([key, value]) => (row as Record<string, unknown>)[key] === value,
         ),
       ) ?? null,
+    );
+}
+
+// The `find({ where })` counterpart of `findOneFrom`: every matching row, in
+// list order. `order`/`select` are ignored, so a test lists its rows in the
+// order the real query would return them.
+function findFrom<Row extends object>(rows: Row[]) {
+  return ({ where }: { where: Record<string, unknown> }): Promise<Row[]> =>
+    Promise.resolve(
+      rows.filter((row) =>
+        Object.entries(where).every(
+          ([key, value]) => (row as Record<string, unknown>)[key] === value,
+        ),
+      ),
     );
 }
 
@@ -196,7 +211,11 @@ function makeSocialCountsQueryBuilderStub(
 
 describe('SubprofilePublicReadService', () => {
   let service: SubprofilePublicReadService;
-  let subprofiles: { createQueryBuilder: jest.Mock; findOne: jest.Mock };
+  let subprofiles: {
+    createQueryBuilder: jest.Mock;
+    find: jest.Mock;
+    findOne: jest.Mock;
+  };
   let socialLinks: { createQueryBuilder: jest.Mock; find: jest.Mock };
   let items: { find: jest.Mock };
   let profiles: { find: jest.Mock; findOne: jest.Mock };
@@ -227,6 +246,7 @@ describe('SubprofilePublicReadService', () => {
   beforeEach(async () => {
     subprofiles = {
       createQueryBuilder: jest.fn(),
+      find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
     };
     // Neither `loadSocialCountsFor` nor its `socialLinks` dependency is
@@ -430,6 +450,38 @@ describe('SubprofilePublicReadService', () => {
       expect(searchCall?.[1]).toMatchObject({ term: '%50\\% off\\_grid%' });
     });
 
+    it('matches a profession alias against sp.kind, so "dm" finds every game master', async () => {
+      const rows = [makeSubprofile({ id: 'sp-a' })];
+      const qb = makeSubprofilesQueryBuilderStub(rows);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({ query: 'dm' }, 'viewer-1');
+
+      const searchCall = qb.andWhere.mock.calls.find((call) =>
+        call[0].includes('sp.displayName ILIKE :term'),
+      );
+      expect(searchCall).toBeDefined();
+      expect(searchCall?.[0]).toContain('sp.kind IN (:...searchKinds)');
+      expect(searchCall?.[1]?.searchKinds).toEqual(
+        expect.arrayContaining([SubprofileKind.GameMaster]),
+      );
+    });
+
+    it('keeps a plain word like "de" to name/tagline matches only, no kind branch', async () => {
+      const rows = [makeSubprofile({ id: 'sp-a' })];
+      const qb = makeSubprofilesQueryBuilderStub(rows);
+      subprofiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.directory({ query: 'de' }, 'viewer-1');
+
+      const searchCall = qb.andWhere.mock.calls.find((call) =>
+        call[0].includes('sp.displayName ILIKE :term'),
+      );
+      expect(searchCall).toBeDefined();
+      expect(searchCall?.[0]).not.toContain('sp.kind IN (:...searchKinds)');
+      expect(searchCall?.[1]?.searchKinds).toEqual([]);
+    });
+
     it('also matches a LINKED persona by its owner name, folded, and never an unlinked one', async () => {
       const rows = [makeSubprofile({ id: 'sp-a' })];
       const qb = makeSubprofilesQueryBuilderStub(rows);
@@ -592,6 +644,245 @@ describe('SubprofilePublicReadService', () => {
     });
   });
 
+  // --- `/p/<handle>` reads for both link kinds -------------------------------
+
+  describe('getByHandle for linked and unlinked personas', () => {
+    const activeViewer: CurrentUserData = {
+      userId: 'viewer-1',
+      email: 'viewer@example.com',
+      status: UserStatus.Active,
+      role: 'member',
+    };
+
+    let personaRows: Subprofile[];
+
+    beforeEach(() => {
+      personaRows = [];
+      profiles.findOne.mockImplementation(
+        findOneFrom([
+          {
+            userId: 'creator-1',
+            slug: 'ana',
+            firstName: 'Ana',
+            lastName: 'Reis',
+          },
+        ]),
+      );
+      subprofiles.findOne.mockImplementation(findOneFrom(personaRows));
+      subprofiles.find.mockImplementation(findFrom(personaRows));
+    });
+
+    function linkedPersona(overrides: Partial<Subprofile> = {}): Subprofile {
+      return makeSubprofile({
+        id: 'sp-linked',
+        userId: 'creator-1',
+        slug: 'dj-set',
+        handle: 'ana-dj-set',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+        visibility: SubprofileVisibility.Open,
+        status: SubprofileStatus.Published,
+        ...overrides,
+      });
+    }
+
+    function forbiddenBodyOf(error: unknown): unknown {
+      expect(error).toBeInstanceOf(ForbiddenException);
+      return (error as ForbiddenException).getResponse();
+    }
+
+    it('serves a linked published open persona to an active member with its creator named', async () => {
+      personaRows.push(linkedPersona());
+
+      const view = await service.getByHandle('ana-dj-set', activeViewer);
+
+      expect(view.id).toBe('sp-linked');
+      expect(view.handle).toBe('ana-dj-set');
+      expect(view.ownerSlug).toBe('ana');
+      expect(view.ownerName).toBe('Ana Reis');
+      expect(profiles.findOne).toHaveBeenCalledWith({
+        where: { userId: 'creator-1' },
+      });
+    });
+
+    it('answers members_only to a signed-out caller on a linked open persona', async () => {
+      personaRows.push(linkedPersona());
+
+      const error = await rejectionOf(
+        service.getByHandle('ana-dj-set', undefined),
+      );
+
+      expect(forbiddenBodyOf(error)).toEqual(
+        restrictedAccessBody('members_only'),
+      );
+    });
+
+    it('answers members_only on the nested route too for a signed-out caller', async () => {
+      personaRows.push(linkedPersona());
+
+      const error = await rejectionOf(
+        service.getBySlugForProfile('ana', 'dj-set', undefined),
+      );
+
+      expect(forbiddenBodyOf(error)).toEqual(
+        restrictedAccessBody('members_only'),
+      );
+    });
+
+    it('keeps an unlinked persona owner-stripped and never reads its owner profile', async () => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-unlinked',
+          userId: 'creator-1',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        }),
+      );
+
+      const view = await service.getByHandle('nightform', activeViewer);
+
+      expect(view.id).toBe('sp-unlinked');
+      expect(view.ownerSlug).toBeUndefined();
+      expect(view.ownerName).toBeUndefined();
+      expect(profiles.findOne).not.toHaveBeenCalled();
+    });
+
+    it('serves the published persona to a stranger when a draft holds the same handle', async () => {
+      // The draft is listed first, so a lookup by handle alone would return it
+      // and the stranger would get a 404 for a live persona.
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-draft',
+          userId: 'someone-else',
+          handle: 'nightform',
+          status: SubprofileStatus.Draft,
+        }),
+        makeSubprofile({
+          id: 'sp-published',
+          userId: 'creator-1',
+          handle: 'nightform',
+          status: SubprofileStatus.Published,
+        }),
+      );
+
+      const view = await service.getByHandle('nightform', activeViewer);
+
+      expect(view.id).toBe('sp-published');
+      expect(subprofiles.findOne).toHaveBeenNthCalledWith(1, {
+        where: { handle: 'nightform', status: SubprofileStatus.Published },
+      });
+    });
+
+    it('still serves a draft to its owner when no published persona holds the handle', async () => {
+      personaRows.push(
+        makeSubprofile({
+          id: 'sp-draft',
+          userId: 'creator-1',
+          handle: 'nightform',
+          status: SubprofileStatus.Draft,
+        }),
+      );
+      membership.isMember.mockResolvedValue(true);
+
+      const view = await service.getByHandle('nightform', activeViewer);
+
+      expect(view.id).toBe('sp-draft');
+      expect(view.status).toBe(SubprofileStatus.Draft);
+    });
+
+    describe('when two drafts share the handle and none is published', () => {
+      let members: { find: jest.Mock };
+
+      beforeEach(() => {
+        // Oldest first, as the real query orders them. The viewer co-owns only
+        // the newer one.
+        personaRows.push(
+          makeSubprofile({
+            id: 'sp-draft-other',
+            userId: 'someone-else',
+            handle: 'nightform',
+            status: SubprofileStatus.Draft,
+          }),
+          makeSubprofile({
+            id: 'sp-draft-mine',
+            userId: 'creator-1',
+            handle: 'nightform',
+            status: SubprofileStatus.Draft,
+          }),
+        );
+        members = module.get<{ find: jest.Mock }>(
+          getRepositoryToken(SubprofileMember),
+        );
+        members.find.mockResolvedValue([{ subprofileId: 'sp-draft-mine' }]);
+        membership.isMember.mockImplementation(
+          (userId: string, subprofileId: string) =>
+            Promise.resolve(
+              userId === 'viewer-1' && subprofileId === 'sp-draft-mine',
+            ),
+        );
+      });
+
+      it("serves the viewer's own draft over an older draft they do not co-own", async () => {
+        const view = await service.getByHandle('nightform', activeViewer);
+
+        expect(view.id).toBe('sp-draft-mine');
+        expect(view.status).toBe(SubprofileStatus.Draft);
+        expect(members.find).toHaveBeenCalledWith({
+          where: {
+            subprofileId: In(['sp-draft-other', 'sp-draft-mine']),
+            userId: 'viewer-1',
+          },
+          select: { subprofileId: true },
+        });
+      });
+
+      it('falls back to the oldest draft for a signed-out caller without a roster lookup', async () => {
+        const error = await rejectionOf(
+          service.getByHandle('nightform', undefined),
+        );
+
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect(members.find).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('after a linked persona renamed its handle', () => {
+      beforeEach(() => {
+        personaRows.push(linkedPersona({ handle: 'ana-beats' }));
+        handles.previousSubprofileOwnerOf.mockImplementation((handle: string) =>
+          Promise.resolve(handle === 'ana-dj-set' ? 'sp-linked' : null),
+        );
+      });
+
+      it('forwards an active member to the new handle', async () => {
+        const error = await rejectionOf(
+          service.getByHandle('ana-dj-set', activeViewer),
+        );
+
+        expect(error).toBeInstanceOf(NotFoundException);
+        expect((error as NotFoundException).getResponse()).toEqual({
+          code: 'PERSONA_MOVED',
+          message: 'That handle has moved',
+          handle: 'ana-beats',
+        });
+      });
+
+      it('gives a signed-out caller the plain 404', async () => {
+        const error = await rejectionOf(
+          service.getByHandle('ana-dj-set', undefined),
+        );
+
+        expect(error).toBeInstanceOf(NotFoundException);
+        const body = (error as NotFoundException).getResponse() as Record<
+          string,
+          unknown
+        >;
+        expect(body.message).toBe('Subprofile not found');
+        expect(body.code).toBeUndefined();
+        expect(body.handle).toBeUndefined();
+      });
+    });
+  });
+
   // --- nested persona forwarding after a creator handoff --------------------
 
   describe('getBySlugForProfile forwarding after a creator handoff', () => {
@@ -682,16 +973,18 @@ describe('SubprofilePublicReadService', () => {
       });
     });
 
-    it('forwards an anonymous visitor to an open persona', async () => {
+    it('withholds the forward from an anonymous visitor because a linked persona is members-only', async () => {
+      // An open linked persona still answers `members_only` to a signed-out
+      // caller, and a forward must tell them no more than the new address
+      // would, so they get the plain 404.
       const error = await rejectionOf(
         service.getBySlugForProfile('ana', 'nightform', undefined),
       );
 
-      expect(responseBodyOf(error)).toMatchObject({
-        code: 'PERSONA_REHOMED',
-        ownerSlug: 'bea',
-        slug: 'nightform-2',
-      });
+      const body = responseBodyOf(error);
+      expect(body.message).toBe('Subprofile not found');
+      expect(body.code).toBeUndefined();
+      expect(body.ownerSlug).toBeUndefined();
       // An anonymous visitor has no account to block anyone, so no block
       // lookup runs and the cacheable anonymous answer stays viewer-independent.
       expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();

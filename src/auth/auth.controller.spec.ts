@@ -11,7 +11,6 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { MediaCropService } from '../media-crops/media-crops.service';
-import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 import { JoinRequestsService } from '../membership/join-requests.service';
 import { PushService } from '../push/push.service';
 import {
@@ -94,12 +93,6 @@ function build(configNodeEnv = 'test', domain?: string) {
   };
   const config = makeConfig(configNodeEnv, domain);
   const mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
-  const underAgeDisclosure = {
-    record: jest.fn().mockResolvedValue({
-      disclosedAt: '2026-01-01T00:00:00.000Z',
-      status: 'suspended',
-    }),
-  };
   // PRD-14. Defaults to "this address never applied", so every existing case
   // keeps falling through to the unchanged `signInErrorUrl` redirect.
   const joinRequestsService = {
@@ -116,7 +109,6 @@ function build(configNodeEnv = 'test', domain?: string) {
     usersService as unknown as UsersService,
     config as unknown as ConfigService,
     mediaCropService as unknown as MediaCropService,
-    underAgeDisclosure as unknown as UnderAgeDisclosureService,
     joinRequestsService as unknown as JoinRequestsService,
     pushService as unknown as PushService,
     socketTickets as unknown as SocketTicketService,
@@ -129,7 +121,6 @@ function build(configNodeEnv = 'test', domain?: string) {
     usersService,
     config,
     mediaCropService,
-    underAgeDisclosure,
     socketTickets,
   };
 }
@@ -662,26 +653,6 @@ describe('AuthController.logoutAll', () => {
       'access_token',
       expect.anything(),
     );
-  });
-});
-
-describe('AuthController.underEighteenDisclosure', () => {
-  it("records the disclosure and clears this device's cookies", async () => {
-    const { controller, underAgeDisclosure } = build();
-    const res = makeRes();
-    const out = await controller.underEighteenDisclosure(
-      { userId: 'u1', email: 'a@b.c', status: 'active', role: 'member' },
-      res as unknown as Response,
-    );
-    expect(underAgeDisclosure.record).toHaveBeenCalledWith('u1');
-    expect(res.clearCookie).toHaveBeenCalledWith(
-      'csrf_token',
-      expect.objectContaining({ path: '/' }),
-    );
-    expect(out).toEqual({
-      disclosedAt: '2026-01-01T00:00:00.000Z',
-      status: 'suspended',
-    });
   });
 });
 

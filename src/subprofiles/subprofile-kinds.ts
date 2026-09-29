@@ -114,7 +114,28 @@ export type SubprofileKind =
   | 'facilitator'
   | 'tutor'
   | 'lecturer'
-  | 'pole_dancer';
+  | 'pole_dancer'
+  // Quest personas (+20)
+  | 'game_master'
+  | 'ttrpg_designer'
+  | 'board_game_reviewer'
+  | 'game_night_host'
+  | 'larp_organizer'
+  | 'miniature_painter'
+  | 'cartographer'
+  | 'dice_maker'
+  | 'tournament_organizer'
+  | 'actual_play'
+  | 'streamer'
+  | 'speedrunner'
+  | 'modder'
+  | 'cosplayer'
+  | 'prop_maker'
+  | 'puzzle_designer'
+  | 'podcaster'
+  | 'voice_actor'
+  | 'fanfic_writer'
+  | 'game_critic';
 
 // section enum values (union across all kinds + the universal 'links')
 export type SubprofileSection =
@@ -233,7 +254,26 @@ export type SubprofileSection =
   | 'nights'
   | 'roster'
   | 'courses'
-  | 'subjects';
+  | 'subjects'
+  // Quest personas (+16). 'campaigns' is not repeated here: it is already a
+  // union member above (organizer/activist/heritage/model), reused verbatim
+  // by game_master.
+  | 'sessions'
+  | 'playthroughs'
+  | 'library'
+  | 'larps'
+  | 'minis'
+  | 'maps'
+  | 'dice'
+  | 'results'
+  | 'streams'
+  | 'runs'
+  | 'mods'
+  | 'cons'
+  | 'puzzles'
+  | 'episodes'
+  | 'roles'
+  | 'works';
 
 // kind -> ordered content sections (excludes the universal 'links')
 export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
@@ -346,6 +386,27 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   tutor: ['subjects', 'courses'],
   lecturer: ['courses', 'papers'],
   pole_dancer: ['performances', 'classes', 'reel', 'workshops'],
+  // Quest personas (+20). Identical mapping to the FE mirror.
+  game_master: ['campaigns', 'sessions'],
+  ttrpg_designer: ['games', 'jams'],
+  board_game_reviewer: ['reviews', 'playthroughs'],
+  game_night_host: ['nights', 'library'],
+  larp_organizer: ['larps', 'workshops'],
+  miniature_painter: ['minis', 'commissions'],
+  cartographer: ['maps', 'commissions'],
+  dice_maker: ['dice', 'commissions'],
+  tournament_organizer: ['events', 'results'],
+  actual_play: ['shows', 'appearances'],
+  streamer: ['streams', 'videos'],
+  speedrunner: ['runs', 'videos'],
+  modder: ['mods', 'open_source'],
+  cosplayer: ['builds', 'cons'],
+  prop_maker: ['builds', 'commissions'],
+  puzzle_designer: ['puzzles', 'events'],
+  podcaster: ['episodes', 'appearances'],
+  voice_actor: ['reel', 'roles'],
+  fanfic_writer: ['works', 'series'],
+  game_critic: ['reviews', 'publications'],
 };
 
 // helpers (both repos)

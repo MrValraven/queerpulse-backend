@@ -16,7 +16,10 @@ import { MagazinePiece } from './entities/magazine-piece.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { Profile } from '../users/entities/profile.entity';
-import { MagazineService } from './magazine.service';
+import {
+  DECK_PUBLISH_VIA_PIECE_CODE,
+  MagazineService,
+} from './magazine.service';
 
 type QueryBuilderMock = {
   select: jest.Mock;
@@ -210,7 +213,7 @@ describe('MagazineService', () => {
   // ENG-112/PRD-131 — deck delete checks for a desk piece still pointing at
   // the deck, and the "With issue" read resolves the deck's issue through
   // that same piece.
-  let pieces: { findOne: jest.Mock };
+  let pieces: { findOne: jest.Mock; update: jest.Mock };
 
   beforeEach(async () => {
     articles = {
@@ -246,7 +249,11 @@ describe('MagazineService', () => {
       save: jest.fn(async (entity: Partial<MagazineDeck>) => entity),
       delete: jest.fn(async () => ({ affected: 1 })),
     };
-    pieces = { findOne: jest.fn().mockResolvedValue(null) };
+    pieces = {
+      findOne: jest.fn().mockResolvedValue(null),
+      // `updateDeck` keeps a linked desk piece's title in step with the deck.
+      update: jest.fn().mockResolvedValue({ affected: 0 }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -882,6 +889,131 @@ describe('MagazineService', () => {
           EDITOR_ID,
         );
         expect(response.publishedAt).toEqual(publishedAt.toISOString());
+      });
+    });
+
+    // A linked deck publishes through its piece, where the care gate,
+    // the stage move, the audit event and the writer's bell all live.
+    describe('updateDeck on a deck a piece links to', () => {
+      async function expectPublishViaPieceRefusal(
+        request: Promise<unknown>,
+      ): Promise<void> {
+        const error: unknown = await request.then(
+          () => null,
+          (rejection: unknown) => rejection,
+        );
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual(
+          expect.objectContaining({
+            code: DECK_PUBLISH_VIA_PIECE_CODE,
+            pieceId: 'piece-1',
+          }),
+        );
+      }
+
+      it('refuses to publish a deck a piece links to with a 409 and saves nothing', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue({ id: 'piece-1' });
+
+        await expectPublishViaPieceRefusal(
+          service.updateDeck('deck-1', { published: true }, EDITOR_ID),
+        );
+        expect(pieces.findOne).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { deckId: 'deck-1' } }),
+        );
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses to schedule or unpublish a linked deck too', async () => {
+        pieces.findOne.mockResolvedValue({ id: 'piece-1' });
+
+        decks.findOne.mockResolvedValue(makeDeck());
+        await expectPublishViaPieceRefusal(
+          service.updateDeck(
+            'deck-1',
+            { publishedAt: new Date(Date.now() + 86_400_000).toISOString() },
+            EDITOR_ID,
+          ),
+        );
+
+        decks.findOne.mockResolvedValue(makeDeck({ publishedAt: new Date() }));
+        await expectPublishViaPieceRefusal(
+          service.updateDeck('deck-1', { published: false }, EDITOR_ID),
+        );
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('still saves a linked deck when the publish state stays the same', async () => {
+        const publishedAt = new Date('2026-02-02T00:00:00.000Z');
+        decks.findOne.mockResolvedValue(makeDeck({ publishedAt }));
+        pieces.findOne.mockResolvedValue({ id: 'piece-1' });
+
+        const response = await service.updateDeck(
+          'deck-1',
+          { kicker: 'Photo essay', published: true },
+          EDITOR_ID,
+        );
+
+        expect(decks.save).toHaveBeenCalled();
+        expect(response.publishedAt).toEqual(publishedAt.toISOString());
+      });
+
+      it('publishes a standalone deck the way it always has', async () => {
+        decks.findOne.mockResolvedValue(makeDeck());
+        pieces.findOne.mockResolvedValue(null);
+
+        const response = await service.updateDeck(
+          'deck-1',
+          { published: true },
+          EDITOR_ID,
+        );
+
+        expect(response.publishedAt).not.toBeNull();
+      });
+    });
+
+    // A deck built from the desk starts as "Untitled deck"; the desk reads the
+    // piece's title, so renaming the deck renames its piece too.
+    describe('updateDeck title sync', () => {
+      it('renames the linked piece when the deck title changes', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ title: 'Untitled deck' }));
+
+        await service.updateDeck(
+          'deck-1',
+          { title: '  Ten years of Lisbon Pride ' },
+          EDITOR_ID,
+        );
+
+        expect(pieces.update).toHaveBeenCalledWith(
+          { deckId: 'deck-1' },
+          { title: 'Ten years of Lisbon Pride' },
+        );
+      });
+
+      it('leaves the piece alone when the title is unchanged or absent', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ title: 'A deck' }));
+        await service.updateDeck('deck-1', { title: 'A deck' }, EDITOR_ID);
+
+        decks.findOne.mockResolvedValue(makeDeck({ title: 'A deck' }));
+        await service.updateDeck(
+          'deck-1',
+          { kicker: 'Photo essay' },
+          EDITOR_ID,
+        );
+
+        expect(pieces.update).not.toHaveBeenCalled();
+      });
+
+      it('saves the deck before touching the piece', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ title: 'Untitled deck' }));
+
+        await service.updateDeck('deck-1', { title: 'Renamed' }, EDITOR_ID);
+
+        const [deckSaveOrder] = decks.save.mock.invocationCallOrder;
+        const [pieceUpdateOrder] = pieces.update.mock.invocationCallOrder;
+        expect(deckSaveOrder ?? Number.POSITIVE_INFINITY).toBeLessThan(
+          pieceUpdateOrder ?? 0,
+        );
       });
     });
 

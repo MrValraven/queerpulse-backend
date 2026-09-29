@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { AmbassadorStatusModule } from '../ambassadors/ambassador-status.module';
 import { RecognitionEntitlementsModule } from '../recognition/recognition-entitlements.module';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { Invite } from './entities/invite.entity';
@@ -24,6 +25,9 @@ import { JoinRequestsService } from './join-requests.service';
     // `NotificationsModule`, so the full module would risk a cycle.
     RecognitionEntitlementsModule,
     AdminQueueNotificationsModule,
+    // The ambassador invite-quota bonus and the public inviter `isAmbassador`
+    // flag (InvitesService).
+    AmbassadorStatusModule,
   ],
   controllers: [
     InvitesController,

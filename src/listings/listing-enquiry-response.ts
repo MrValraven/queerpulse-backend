@@ -13,10 +13,11 @@
 
 /** Why the owner of a listing cannot be written to. */
 export type ListingContactUnavailableReason =
-  /** Nobody has claimed this entry: it was suggested by another member, or
-   *  recommended as a friendly venue, so the account attached to it belongs to
-   *  the SUBMITTER and not to the business. Writing to them would deliver a
-   *  question about a bar to a stranger who once recommended it. */
+  /** Nobody has claimed this entry: the listing has no owner (`ownerId` is
+   *  null, as on a suggestion the platform still holds) and no co-manager is
+   *  seated to answer for it, so a message would land in a thread nobody
+   *  reads. Ownership is `ownerId` alone; the `friendly` badge describes the
+   *  business and an owned friendly listing is reachable like any other. */
   | 'unclaimed'
   /** Nobody who manages the listing can receive messages: the owner is
    *  missing, the house account, or not active, and no active co-manager can

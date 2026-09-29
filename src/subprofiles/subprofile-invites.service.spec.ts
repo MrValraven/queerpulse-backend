@@ -78,6 +78,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     photoVisible: true,
     hoodVisible: true,
     vouchersVisible: true,
+    isAmbassadorTagVisible: true,
     now: null,
     nowUpdatedAt: null,
     hiddenUntil: null,

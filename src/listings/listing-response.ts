@@ -376,6 +376,8 @@ export interface ListingDTO {
   slug: string;
   status: ListingStatus;
   submittedBy: MemberRef | null;
+  /** Who suggested the place, on admin queue rows only; null everywhere else. */
+  suggestedBy: MemberRef | null;
   createdAt: string;
 
   path: string;
@@ -751,6 +753,10 @@ export interface DirectoryCardDTO {
   cat: string;
   hood: string;
   blurb: string;
+  /** The listing's pills: its `price` band first when one is set, then its own
+   * tags. The card renders the first three and the detail page renders them
+   * all; `DirectoryDetailDTO` inherits this via `extends`. */
+  pills: string[];
   tint: DirectoryTint;
   av: string;
   /** The submitter's OWN "queer-owned" claim (wizard step 1's `badge`), which
@@ -932,6 +938,8 @@ export function toDirectoryCard(
     cat: listing.cats[0] ?? '',
     hood: listing.hood,
     blurb: listing.blurb,
+    // Price tier first (when set), then the listing's own tags.
+    pills: [...(listing.price ? [listing.price] : []), ...listing.tags],
     tint: tintForSlug(listing.slug),
     av: initialsForName(listing.name),
     // The submitter's own answer to "how are you connected to this place?"
@@ -1232,7 +1240,6 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   /** IANA timezone the hours run on; `null` ⇒ the frontend defaults to
    * Europe/Lisbon for its "Open now" computation. */
   timezone: string | null;
-  pills: string[];
   /** LEGACY caption strip: one string per photo, its `caption` when it has one
    * and its `alt` otherwise. Kept as the fallback the prototype rendered for
    * listings/demo places without images. Superseded by `photoGallery`, where
@@ -1415,8 +1422,6 @@ export function toDirectoryDetail(
     // Europe-Lisbon), same `|| null` idiom the safe-space fields below use.
     city: listing.city || null,
     timezone: listing.timezone || null,
-    // Price tier first (when set), then the listing's own tags, as detail pills.
-    pills: [...(listing.price ? [listing.price] : []), ...listing.tags],
     // LEGACY caption strip (the prototype rendered caption cells, no images).
     // A photo's own `caption` when it has one, its `alt` otherwise, in gallery
     // order, with nothing to say dropped.
@@ -1502,6 +1507,9 @@ export function toListingDTO(
   // ONE `MediaCropService.getMany` (see `listingPhotoKeys`) and passes the
   // resulting Map straight through; this mapper stays synchronous.
   crops: Map<string, CropRect> = new Map(),
+  // The suggester's reference, passed only by the admin queue
+  // (`ListingsService.listQueue`); every other caller leaves it null.
+  suggestedBy: MemberRef | null = null,
 ): ListingDTO {
   const legacyPhotos = legacyPhotoSets(listing);
   return {
@@ -1509,6 +1517,7 @@ export function toListingDTO(
     slug: listing.slug,
     status: listing.status,
     submittedBy,
+    suggestedBy,
     createdAt: listing.createdAt.toISOString(),
 
     path: listing.path,

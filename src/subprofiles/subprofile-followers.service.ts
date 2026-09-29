@@ -316,10 +316,10 @@ export class SubprofileFollowersService {
           avatarUrl: toImageUrl(persona.avatarUrl),
           accent: persona.accent,
           slug: persona.slug,
-          // An unlinked persona is addressed by its handle; a linked one is
-          // addressed under its creator and its handle is not part of that
-          // address, so it is not shipped.
-          handle: isLinked ? null : persona.handle,
+          // Every persona is addressed by its handle (`/p/<handle>`). A linked
+          // persona is addressed by its handle when it has one; `ownerSlug`
+          // below stays for the nested fallback while it has none yet.
+          handle: persona.handle,
           linkVisibility: persona.linkVisibility,
           ownerSlug: isLinked
             ? (ownerSlugByUserId.get(persona.userId) ?? null)

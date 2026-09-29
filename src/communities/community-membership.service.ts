@@ -470,24 +470,37 @@ export class CommunityMembershipService {
   }
 
   /**
-   * Batched community-id -> `{slug,name}` ref lookup (mirrors
+   * Batched community-id -> `{slug,name,avatarImageUrl}` ref lookup (mirrors
    * `PartnersService.refsByIds`'s shape) for feature modules (volunteering,
    * ...) resolving embedded community refs on a list/detail view in one
    * query instead of N+1. No archived/roster gate, same "display
    * convenience, not a guard" reasoning as `slugById`.
+   *
+   * `avatarImageUrl` is the raw stored value (a storage key or an https URL).
+   * Callers that put it on the wire resolve it with `toImageUrl` at their
+   * response boundary.
    */
   async refsByIds(
     ids: string[],
-  ): Promise<Map<string, { slug: string; name: string }>> {
-    const map = new Map<string, { slug: string; name: string }>();
+  ): Promise<
+    Map<string, { slug: string; name: string; avatarImageUrl: string | null }>
+  > {
+    const map = new Map<
+      string,
+      { slug: string; name: string; avatarImageUrl: string | null }
+    >();
     if (!ids.length) return map;
 
     const rows = await this.communities.find({
       where: { id: In(ids) },
-      select: { id: true, slug: true, name: true },
+      select: { id: true, slug: true, name: true, avatarImageUrl: true },
     });
     for (const row of rows) {
-      map.set(row.id, { slug: row.slug, name: row.name });
+      map.set(row.id, {
+        slug: row.slug,
+        name: row.name,
+        avatarImageUrl: row.avatarImageUrl,
+      });
     }
     return map;
   }

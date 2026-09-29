@@ -9,8 +9,10 @@ import {
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 
-/** Review lifecycle for a member's claim on an existing (unowned/"friendly")
- * business listing. */
+/** Review lifecycle for a member's claim on an existing business listing
+ * nobody owns: a null `ownerId` (such as a suggestion the platform still
+ * holds), a missing owner row, or a system owner. The `friendly` badge plays
+ * no part (`ListingClaimsService.assertClaimable`). */
 export enum ListingClaimStatus {
   Pending = 'pending',
   Approved = 'approved',

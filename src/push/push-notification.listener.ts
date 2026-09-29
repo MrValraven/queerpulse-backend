@@ -213,6 +213,24 @@ export class PushNotificationListener {
         case NotificationType.SecurityNewSignIn:
           await this.pushSecurityNewSignIn(userIds, notification);
           return;
+        // Go together: a member invites a friend to go to a gathering with
+        // them as a pair (Task 3). Gated by `EventInvites`, the same category
+        // an event RSVP invite answers to.
+        case NotificationType.GoTogetherPairInvite:
+          await this.pushGoTogetherPairInvite(userIds, notification);
+          return;
+        // Go together: an opt-in window closed and this member's group is
+        // ready. Gated by `EventReminders`, the same category the gathering
+        // itself uses.
+        case NotificationType.GoTogetherGroupReady:
+          await this.pushGoTogetherGroupReady(userIds, notification);
+          return;
+        // Go together: both members of a pair said they want to meet again.
+        // Gated by `Connections`, the same category a mutual connection
+        // request answers to.
+        case NotificationType.GoTogetherMutual:
+          await this.pushGoTogetherMutual(userIds, notification);
+          return;
         // Whitelist: every other type — CRITICALLY `NewMessage` and
         // `EventReminder`, which already push elsewhere — falls through here and
         // produces no push. Do NOT add them; doing so double-sends.
@@ -1086,6 +1104,142 @@ export class PushNotificationListener {
       },
       timestamp: notification.createdAt.getTime(),
     });
+  }
+
+  /**
+   * "Ana wants to go to a gathering together" (Go together, Task 3): a
+   * friend who opted in to a gathering invited this member to join them as
+   * a pair, so the two are matched into a group together.
+   *
+   * Gated by `EventInvites`, the same category an event RSVP invite answers
+   * to, and sent through the preview split with the generic NOTIFICATION
+   * copy: the inviting member's name is exactly what a lock screen must not
+   * show to somebody hiding previews. The copy never names the gathering
+   * itself (spec 7), so even the rich variant says only that an invite
+   * exists.
+   *
+   * Opens the gathering's own page via `gatheringPath`, the shared route
+   * contract with the frontend (`event-paths.ts`), falling back to the
+   * gatherings board when the payload carries no slug.
+   */
+  private async pushGoTogetherPairInvite(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.EventInvites,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const eventSlug = this.payloadString(notification, 'eventSlug');
+    const url = eventSlug ? gatheringPath(eventSlug) : GATHERINGS_BOARD_PATH;
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Go together',
+        body: `${name} wants to go to a gathering together`,
+        tag: `notification:${notification.id}`,
+        data: { url },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:goTogether.pairInvite.title',
+          bodyKey: 'push:goTogether.pairInvite.body',
+          params: { name },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "Your group for a gathering is ready" (Go together, Task 3): the opt-in
+   * window closed and this member's group was seated.
+   *
+   * Gated by `EventReminders`, the same category the gathering itself uses,
+   * and sent through the preview split with the generic NOTIFICATION copy.
+   * There is no actor: the matching pass itself forms a group, so the copy
+   * carries no name and takes no `l10n.params`. The copy never names the
+   * gathering itself (spec 7).
+   *
+   * Opens the gathering's own page via `gatheringPath`, falling back to
+   * `/notifications` when the payload carries no slug: unlike
+   * `pushGoTogetherPairInvite`, this member is already grouped, so the
+   * gatherings board is a worse fallback than the notifications centre.
+   */
+  private async pushGoTogetherGroupReady(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.EventReminders,
+    );
+    if (recipientUserIds.length === 0) return;
+    const eventSlug = this.payloadString(notification, 'eventSlug');
+    const url = eventSlug ? gatheringPath(eventSlug) : '/notifications';
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Go together',
+        body: 'Your group for a gathering is ready',
+        tag: `notification:${notification.id}`,
+        data: { url },
+        l10n: {
+          titleKey: 'push:goTogether.groupReady.title',
+          bodyKey: 'push:goTogether.groupReady.body',
+          params: {},
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
+  }
+
+  /**
+   * "You and Ana both want to meet again" (Go together, Task 3): both
+   * members of a past pair said, independently, that they want to meet
+   * again.
+   *
+   * Gated by `Connections`, the same category a mutual connection request
+   * answers to, and sent through the preview split with the generic
+   * NOTIFICATION copy: the other member's name is exactly what a lock
+   * screen must not show to somebody hiding previews.
+   *
+   * Opens `/notifications`: this event carries no gathering slug of its
+   * own, only the past pairing, so the notifications centre is the one
+   * destination that always reads.
+   */
+  private async pushGoTogetherMutual(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Connections,
+    );
+    if (recipientUserIds.length === 0) return;
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    await this.previewPrivacy.sendSplitByPreviewPreference(
+      recipientUserIds,
+      {
+        title: 'Go together',
+        body: `You and ${name} both want to meet again`,
+        tag: `notification:${notification.id}`,
+        data: { url: '/notifications' },
+        ...this.iconOf(actor),
+        l10n: {
+          titleKey: 'push:goTogether.mutual.title',
+          bodyKey: 'push:goTogether.mutual.body',
+          params: { name },
+        },
+        timestamp: notification.createdAt.getTime(),
+      },
+      GENERIC_PUSH_COPY.notification,
+    );
   }
 
   /**

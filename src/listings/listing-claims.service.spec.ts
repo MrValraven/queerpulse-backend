@@ -17,21 +17,22 @@ import { ListingOwnershipService } from './listing-ownership.service';
 
 const now = new Date('2026-08-20T12:00:00.000Z');
 
-// A listing submitted through the `suggest` path is unowned by
-// `assertClaimable`'s own rules, so a claim on it never needs the `users`
-// lookup this suite otherwise has no reason to exercise.
+// A listing submitted through the `suggest` path and still held by the
+// platform (`ownerId` null) is unowned by `assertClaimable`'s own rules, so a
+// claim on it never needs the `users` lookup.
 const suggestedListing = {
   id: 'listing-1',
   ref: 'QPL-2026-0001',
   slug: 'lux-cafe',
   name: 'Lux Café',
-  ownerId: 'owner-1',
+  ownerId: null,
+  suggestedByUserId: null,
   path: 'suggest',
   badge: '',
 } as Listing;
 
 /** An admin-authored listing, exactly as `review`'s approve branch sees it:
- * unowned by `assertClaimable`'s rules (`path: 'suggest'`), and carrying
+ * unowned by `assertClaimable`'s rules (a null `ownerId`), and carrying
  * whatever `affirmingBaselineAcceptedAt` a test needs to exercise the two
  * outcomes of the stamp-on-approval guard. */
 const listingForReview = (overrides: Partial<Listing> = {}): Listing =>
@@ -40,7 +41,8 @@ const listingForReview = (overrides: Partial<Listing> = {}): Listing =>
     ref: 'QPL-2026-0001',
     slug: 'lux-cafe',
     name: 'Lux Café',
-    ownerId: 'seed-house-account',
+    ownerId: null,
+    suggestedByUserId: null,
     path: 'suggest',
     badge: '',
     affirmingBaselineAcceptedAt: null,
@@ -63,6 +65,7 @@ const claimFixture = (overrides: Partial<ListingClaim> = {}): ListingClaim =>
 describe('ListingClaimsService', () => {
   let service: ListingClaimsService;
   let listings: { findOne: jest.Mock };
+  let users: { findOne: jest.Mock };
   let claims: {
     create: jest.Mock;
     save: jest.Mock;
@@ -106,6 +109,7 @@ describe('ListingClaimsService', () => {
 
   beforeEach(async () => {
     listings = { findOne: jest.fn().mockResolvedValue(suggestedListing) };
+    users = { findOne: jest.fn().mockResolvedValue(null) };
     claims = {
       create: jest.fn((v: Partial<ListingClaim>) => v),
       save: jest.fn((v: Partial<ListingClaim>) =>
@@ -141,7 +145,7 @@ describe('ListingClaimsService', () => {
         { provide: getRepositoryToken(Listing), useValue: listings },
         { provide: getRepositoryToken(ListingClaim), useValue: claims },
         { provide: getRepositoryToken(Profile), useValue: {} },
-        { provide: getRepositoryToken(User), useValue: {} },
+        { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
         { provide: NotificationsService, useValue: { create: jest.fn() } },
         { provide: MessagingService, useValue: { deliverEnquiry: jest.fn() } },
@@ -169,6 +173,11 @@ describe('ListingClaimsService', () => {
     });
 
     it('tells nobody when the claim is refused as a self-claim', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        ownerId: 'owner-1',
+      });
+
       await expect(
         service.requestClaim('QPL-2026-0001', 'owner-1'),
       ).rejects.toThrow('You already own this listing');
@@ -183,6 +192,113 @@ describe('ListingClaimsService', () => {
         service.requestClaim('QPL-2026-0001', 'claimant-1'),
       ).rejects.toThrow('write failed');
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    // Review Focus 1: a suggester who later claims their own suggestion.
+    // The row is held by the platform with `ownerId` null and the suggester
+    // recorded only in `suggestedByUserId`, which the self-claim guard never
+    // reads, so "suggester === claimant" is accepted rather than refused.
+    it('accepts a claim by the member who suggested the listing', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        ownerId: null,
+        suggestedByUserId: 'claimant-1',
+      });
+
+      const result = await service.requestClaim('QPL-2026-0001', 'claimant-1');
+
+      expect(result.id).toBe('claim-1');
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.ListingClaims,
+        'claim-1',
+      );
+    });
+
+    it('accepts a claim on a suggestion the platform still holds', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        ownerId: null,
+        suggestedByUserId: 'suggester-1',
+      });
+
+      const result = await service.requestClaim('QPL-2026-0001', 'claimant-1');
+
+      expect(result.id).toBe('claim-1');
+      expect(users.findOne).not.toHaveBeenCalled();
+    });
+
+    // An accepted admin owner offer seats a member on a suggestion without
+    // writing any claim row, so only the `ownerId` shows it has an owner now.
+    it('refuses a claim on a suggestion a member took through an owner offer', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        ownerId: 'offer-accepter',
+        suggestedByUserId: 'suggester-1',
+      });
+      users.findOne.mockResolvedValue({
+        id: 'offer-accepter',
+        isSystem: false,
+      });
+
+      await expect(
+        service.requestClaim('QPL-2026-0001', 'claimant-1'),
+      ).rejects.toThrow('This listing already has an owner');
+      expect(claims.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    // `badge === 'friendly'` describes the business (LGBTQ+ friendly as
+    // opposed to queer-owned), and a real owner picks it for their own
+    // listing. Ownership is read from `ownerId` alone.
+    it('refuses a claim on an owned friendly listing with the owned-listing error', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        path: 'claim',
+        badge: 'friendly',
+        ownerId: 'friendly-owner',
+      });
+      users.findOne.mockResolvedValue({
+        id: 'friendly-owner',
+        isSystem: false,
+      });
+
+      await expect(
+        service.requestClaim('QPL-2026-0001', 'claimant-1'),
+      ).rejects.toThrow('This listing already has an owner');
+      expect(claims.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('accepts a claim on a friendly listing that has no owner', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        path: 'claim',
+        badge: 'friendly',
+        ownerId: null,
+      });
+
+      const result = await service.requestClaim('QPL-2026-0001', 'claimant-1');
+
+      expect(result.id).toBe('claim-1');
+      expect(users.findOne).not.toHaveBeenCalled();
+    });
+
+    it('accepts a claim on a listing parked on a system account', async () => {
+      listings.findOne.mockResolvedValue({
+        ...suggestedListing,
+        path: 'claim',
+        badge: 'owned',
+        ownerId: 'house-account',
+      });
+      users.findOne.mockResolvedValue({ id: 'house-account', isSystem: true });
+
+      const result = await service.requestClaim('QPL-2026-0001', 'claimant-1');
+
+      expect(result.id).toBe('claim-1');
+      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
+        AdminQueueKey.ListingClaims,
+        'claim-1',
+      );
     });
   });
 
@@ -241,6 +357,20 @@ describe('ListingClaimsService', () => {
       expect(listing.affirmingBaselineAcceptedAt).toBeNull();
       expect(ownership.transferOwnership).not.toHaveBeenCalled();
       expect(ownership.emitTransferChanges).not.toHaveBeenCalled();
+    });
+
+    it('reads the listing under a pessimistic write lock before the transfer saves it', async () => {
+      listings.findOne.mockResolvedValue(listingForReview());
+      claims.findOne.mockResolvedValue(claimFixture());
+
+      await service.review('claim-1', 'reviewer-1', 'approved');
+
+      // The transfer saves the listing entity whole, so a staff edit that
+      // committed after an unlocked read would be written over.
+      expect(listings.findOne).toHaveBeenCalledWith({
+        where: { id: claimFixture().listingId },
+        lock: { mode: 'pessimistic_write' },
+      });
     });
 
     it('emits the transfer changes once, after the approval commits', async () => {

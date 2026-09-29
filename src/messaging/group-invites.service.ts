@@ -50,6 +50,9 @@ import { MessagingCoreService } from './messaging-core.service';
 const GROUP_FULL_CODE = 'GROUP_FULL';
 const GROUP_DISSOLVED_CODE = 'GROUP_DISSOLVED';
 const GROUP_ADD_REFUSED_CODE = 'GROUP_ADD_REFUSED';
+/** Mirrors `GroupsService`'s `MATCHED_GROUP_LOCKED_CODE` (same wire contract,
+ *  same reason for a separate literal as the three above). */
+const MATCHED_GROUP_LOCKED_CODE = 'MATCHED_GROUP_LOCKED';
 export const INVITE_NOT_FOUND_CODE = 'INVITE_NOT_FOUND';
 export const INVITE_LINK_INVALID_CODE = 'INVITE_LINK_INVALID';
 export const REMOVED_FROM_GROUP_CODE = 'REMOVED_FROM_GROUP';
@@ -198,6 +201,10 @@ export class GroupInvitesService {
         code: GROUP_DISSOLVED_CODE,
       });
     }
+    // Go together: defence in depth. `GroupsService` never creates an invite
+    // for a matched group, so this only catches a row that slipped in some
+    // other way; the roster of a matched group belongs to the matching engine.
+    this.assertNotMatchedGroup(convo);
     const activeMemberUserIds = await this.activeMemberUserIds(convo.id);
     if (activeMemberUserIds.length + 1 > MAX_GROUP_MEMBERS) {
       throw new ConflictException({
@@ -470,6 +477,9 @@ export class GroupInvitesService {
         code: INVITE_LINK_INVALID_CODE,
       });
     }
+    // Go together: defence in depth. `requireGroupRole` refuses minting a
+    // link on a matched group, so no live token should ever reach here.
+    this.assertNotMatchedGroup(convo);
     const existingRow = await this.participants.findOne({
       where: { conversationId: convo.id, userId },
     });
@@ -576,6 +586,21 @@ export class GroupInvitesService {
       memberUserIds: [userId],
     } satisfies ConversationCreatedEvent);
     return this.buildGroupConversationResponse(convo, userId);
+  }
+
+  /**
+   * Go together: refuse any invite or link path into a matched group
+   * (`Conversation.eventMatchGroupId` set) with the same coded 403
+   * `GroupsService.requireGroupRole` uses for its member routes.
+   */
+  private assertNotMatchedGroup(convo: Conversation): void {
+    if (convo.eventMatchGroupId) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        message: 'This group was formed by Go together and cannot be changed',
+        code: MATCHED_GROUP_LOCKED_CODE,
+      });
+    }
   }
 
   /**
@@ -879,6 +904,7 @@ export class GroupInvitesService {
       hasLeft: callerRow?.leftAt != null,
       description: convo.description,
       dissolvedAt: convo.dissolvedAt?.toISOString() ?? null,
+      eventMatchGroupId: convo.eventMatchGroupId,
       leftReason: computeGroupLeftReason({
         leftAt: callerRow?.leftAt,
         removedAt: callerRow?.removedAt,

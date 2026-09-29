@@ -170,6 +170,8 @@ const ISSUE: MagazineIssue = {
   publishedOn: '',
   // PRD-106 — nullable by default; an editor sets it on the production page.
   submissionDeadline: null,
+  // Nullable by default; the desk header shows no countdown until it is set.
+  closesOn: null,
   coverUrl: null,
   theme: 'Belonging',
   runOrder: [],
@@ -215,6 +217,21 @@ const PITCH: MagazinePitch = {
   returnedAt: null,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
 };
+
+/** The grouped `MAX(created_at)` query behind a list row's `stageEnteredAt`. */
+function makeStageEntryQueryBuilder(
+  rows: { pieceId: string; enteredAt: Date | string }[],
+) {
+  return {
+    innerJoin: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    groupBy: jest.fn().mockReturnThis(),
+    getRawMany: jest.fn().mockResolvedValue(rows),
+  };
+}
 
 describe('MagazinePieceService', () => {
   let service: MagazinePieceService;
@@ -333,6 +350,13 @@ describe('MagazinePieceService', () => {
       ],
     }).compile();
 
+    // `loadStageEnteredAt`'s grouped query, which every list read runs. Empty
+    // by default (every piece falls back to createdAt); a test that wants a
+    // stage-entry event overrides it with its own rows.
+    pieceEvents.createQueryBuilder.mockReturnValue(
+      makeStageEntryQueryBuilder([]),
+    );
+
     service = module.get(MagazinePieceService);
     // The article-draft response resolves stored image keys through
     // `toImageUrl`, which throws `Service temporarily unavailable` when the
@@ -447,6 +471,36 @@ describe('MagazinePieceService', () => {
         service.updatePiece('piece-1', dto, 'editor-1'),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(pieces.save).not.toHaveBeenCalled();
+    });
+
+    // A published piece leaves `published` only through the real
+    // unpublish path (`unpublishPiece`), which also clears the live
+    // article/deck `publishedAt`. A plain stage PATCH must not do that
+    // silently.
+    it('refuses a stage PATCH on a published piece with a 409 and saves nothing', async () => {
+      const piece = { ...PIECE, stage: 'published' as const };
+      pieces.findOne.mockResolvedValue(piece);
+
+      const dto: UpdatePieceDto = { stage: 'ready' };
+      await expect(
+        service.updatePiece('piece-1', dto, 'editor-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(pieces.save).not.toHaveBeenCalled();
+      expect(pieceEvents.create).not.toHaveBeenCalled();
+    });
+
+    it('still patches other fields on a published piece', async () => {
+      const piece = { ...PIECE, stage: 'published' as const };
+      pieces.findOne.mockResolvedValue(piece);
+      pieceEvents.find.mockResolvedValue([]);
+
+      const dto: UpdatePieceDto = { title: 'On chosen family, revisited' };
+      const result = await service.updatePiece('piece-1', dto, 'editor-1');
+
+      expect(piece.title).toBe('On chosen family, revisited');
+      expect(piece.stage).toBe('published');
+      expect(pieces.save).toHaveBeenCalledWith(piece);
+      expect(result.title).toBe('On chosen family, revisited');
     });
   });
 
@@ -2045,6 +2099,8 @@ describe('MagazinePieceService', () => {
           id: 'issue-1',
           number: '07',
           theme: 'Chosen family',
+          publishedOn: '2026-09-30',
+          closesOn: '2026-09-12',
         } as MagazineIssue,
       ]);
       pieces.count.mockResolvedValue(3);
@@ -2067,6 +2123,8 @@ describe('MagazinePieceService', () => {
         theme: 'Chosen family',
         filled: 3,
         slots: 5,
+        publishedOn: '2026-09-30',
+        closesOn: '2026-09-12',
       });
     });
 
@@ -2135,6 +2193,58 @@ describe('MagazinePieceService', () => {
 
       expect(queryBuilder.offset).toHaveBeenCalledWith(20);
       expect(queryBuilder.limit).toHaveBeenCalledWith(10);
+    });
+
+    // One grouped event query and one payment query for the whole page, so a
+    // 50-row board costs two extra round trips however many rows it shows.
+    it('reads stageEnteredAt and paymentStatus for the page in two batched queries', async () => {
+      pieces.createQueryBuilder.mockReturnValue(
+        makeListQueryBuilder(
+          [
+            { ...PIECE, id: 'piece-moved', stage: 'edit' as const },
+            { ...PIECE, id: 'piece-fresh' },
+          ],
+          2,
+        ),
+      );
+      const stageEntryQueryBuilder = makeStageEntryQueryBuilder([
+        { pieceId: 'piece-moved', enteredAt: new Date('2026-08-06T09:00:00Z') },
+      ]);
+      pieceEvents.createQueryBuilder.mockReturnValue(stageEntryQueryBuilder);
+      payments.find.mockResolvedValue([
+        { pieceId: 'piece-moved', status: 'paid' },
+        { pieceId: 'piece-fresh', status: 'agreed' },
+      ]);
+
+      const result = await service.listPieces({});
+
+      expect(pieceEvents.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(stageEntryQueryBuilder.where).toHaveBeenCalledWith(
+        'stageEvent.pieceId IN (:...pieceIds)',
+        { pieceIds: ['piece-moved', 'piece-fresh'] },
+      );
+      expect(payments.find).toHaveBeenCalledTimes(1);
+      expect(result.items).toEqual([
+        expect.objectContaining({
+          id: 'piece-moved',
+          stageEnteredAt: '2026-08-06T09:00:00.000Z',
+          paymentStatus: 'paid',
+        }),
+        expect.objectContaining({
+          id: 'piece-fresh',
+          stageEnteredAt: PIECE.createdAt.toISOString(),
+          paymentStatus: 'owed',
+        }),
+      ]);
+    });
+
+    it('runs no stage or payment query for an empty page', async () => {
+      pieces.createQueryBuilder.mockReturnValue(makeListQueryBuilder([], 0));
+
+      await service.listPieces({});
+
+      expect(pieceEvents.createQueryBuilder).not.toHaveBeenCalled();
+      expect(payments.find).not.toHaveBeenCalled();
     });
   });
 
@@ -3259,6 +3369,81 @@ describe('MagazinePieceService', () => {
           'editor-1',
         ),
       ).resolves.toEqual({ submissionDeadline: '2026-12-01' });
+    });
+  });
+
+  // The day the issue stops taking copy: the desk header's "closes" line and
+  // days-left countdown read it.
+  describe('issue close date', () => {
+    it('404s an unknown issue number on read', async () => {
+      issues.findOne.mockResolvedValue(null);
+      await expect(service.getIssueClosesOn('99')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('404s an unknown issue number on write', async () => {
+      issues.findOne.mockResolvedValue(null);
+      await expect(
+        service.updateIssueClosesOn(
+          '99',
+          { closesOn: '2026-10-01' },
+          'editor-1',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('reads back null when the desk has set no close date', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, closesOn: null });
+      await expect(service.getIssueClosesOn('05')).resolves.toEqual({
+        closesOn: null,
+      });
+    });
+
+    it('stores the date the editor set', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, closesOn: null });
+
+      await expect(
+        service.updateIssueClosesOn(
+          '05',
+          { closesOn: '2026-10-01' },
+          'editor-1',
+        ),
+      ).resolves.toEqual({ closesOn: '2026-10-01' });
+      expect(issues.save).toHaveBeenCalledWith(
+        expect.objectContaining({ closesOn: '2026-10-01' }),
+      );
+    });
+
+    it('clears the close date on null', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, closesOn: '2026-10-01' });
+
+      await expect(
+        service.updateIssueClosesOn('05', { closesOn: null }, 'editor-1'),
+      ).resolves.toEqual({ closesOn: null });
+      expect(issues.save).toHaveBeenCalledWith(
+        expect.objectContaining({ closesOn: null }),
+      );
+    });
+
+    it('surfaces closesOn on every desk issue summary', async () => {
+      issues.find.mockResolvedValue([
+        { ...ISSUE, closesOn: '2026-09-12', publishedOn: '2026-09-30' },
+      ]);
+      pieces.createQueryBuilder.mockReturnValue({
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        groupBy: jest.fn().mockReturnThis(),
+        getRawMany: jest.fn().mockResolvedValue([]),
+      });
+
+      const [summary] = await service.listIssuesForDesk();
+
+      expect(summary).toMatchObject({
+        publishedOn: '2026-09-30',
+        closesOn: '2026-09-12',
+      });
     });
   });
 });

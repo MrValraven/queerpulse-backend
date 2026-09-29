@@ -14,7 +14,7 @@ import {
 // --- in-memory fake registry -------------------------------------------------
 // A tiny stand-in for the `handles` + `handle_history` tables and the slice of
 // EntityManager the service touches (create/insert/delete/findOne/upsert). The
-// fake is ENTITY-AWARE — it dispatches on the entity class to the right map —
+// fake is ENTITY-AWARE: it dispatches on the entity class to the right map,
 // because the service now reads and writes both tables in one transaction.
 //
 // `findOne`/`delete` match the WHOLE where clause (not just `name`): the service
@@ -62,7 +62,7 @@ function makeManager(stores: FakeStores): EntityManager {
       } as unknown as { name: string });
       return Promise.resolve();
     },
-    // Upsert-by-name — `handle_history`'s only write path (reservation on
+    // Upsert-by-name: `handle_history`'s only write path (reservation on
     // release). Overwrites so the latest release wins, matching the PK upsert.
     upsert: (entity: unknown, data: { name: string }): Promise<void> => {
       mapFor(entity).set(data.name, { ...data });
@@ -79,6 +79,23 @@ function makeManager(stores: FakeStores): EntityManager {
       }
       rows.delete(where.name as string);
       return Promise.resolve({ affected: 1 });
+    },
+    // Bulk update: patches EVERY row matching the where clause, the way a
+    // `WHERE` without the PK does in Postgres.
+    update: (
+      entity: unknown,
+      where: Record<string, unknown>,
+      patch: Record<string, unknown>,
+    ): Promise<{ affected: number }> => {
+      const rows = mapFor(entity);
+      let affected = 0;
+      for (const [name, row] of rows) {
+        if (matchesWhere(row as Record<string, unknown>, where)) {
+          rows.set(name, { ...row, ...patch });
+          affected += 1;
+        }
+      }
+      return Promise.resolve({ affected });
     },
     findOne: (
       entity: unknown,
@@ -133,11 +150,13 @@ function seedProfile(rows: Map<string, Handle>, name: string, userId: string) {
 
 // Seed a reclaim reservation directly, so cooldown boundaries can be exercised
 // without waiting real time. `reclaimableAt` in the future = still cooling.
+// `isForwarding` defaults to true, matching the entity's column default.
 function seedReservation(
   historyRows: Map<string, HandleHistory>,
   name: string,
   previousOwner: HandleOwner,
   reclaimableAt: Date,
+  isForwarding = true,
 ) {
   historyRows.set(name, {
     name,
@@ -151,6 +170,7 @@ function seedReservation(
       previousOwner.kind === 'subprofile' ? previousOwner.subprofileId : null,
     releasedAt: new Date(reclaimableAt.getTime() - 1000),
     reclaimableAt,
+    isForwarding,
   } as HandleHistory);
 }
 
@@ -278,6 +298,36 @@ describe('HandlesService.claim', () => {
     await service.claim(manager, 'aurora', profileOwner('user-1'));
     expect(rows.get('aurora')).toMatchObject({ userId: 'user-1' });
     expect(historyRows.has('aurora')).toBe(false);
+  });
+
+  it('refuses the previous owner reclaiming a non-forwarding name within the cooldown', async () => {
+    const { service, manager, rows, historyRows } = makeService();
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      oneDayFromNow(),
+      false,
+    );
+    await expect(
+      service.claim(manager, 'nightform', subprofileOwner('sp-1')),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(rows.has('nightform')).toBe(false);
+    expect(historyRows.has('nightform')).toBe(true);
+  });
+
+  it('lets the previous owner claim a non-forwarding name once it has lapsed', async () => {
+    const { service, manager, rows, historyRows } = makeService();
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      oneDayAgo(),
+      false,
+    );
+    await service.claim(manager, 'nightform', subprofileOwner('sp-1'));
+    expect(rows.get('nightform')).toMatchObject({ subprofileId: 'sp-1' });
+    expect(historyRows.has('nightform')).toBe(false);
   });
 
   it('lets anyone claim once the cooldown has lapsed, clearing the reservation', async () => {
@@ -508,6 +558,39 @@ describe('HandlesService.isTaken', () => {
       service.isTaken(manager, 'aurora', profileOwner('user-2')),
     ).resolves.toBe(false);
   });
+
+  // A link switch writes a non-forwarding reservation. Letting the persona
+  // reclaim it would carry its pseudonymous name across the switch.
+  it('treats a cooling-down non-forwarding name as taken for its previous owner too', async () => {
+    const { service, manager, historyRows } = makeService();
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      oneDayFromNow(),
+      false,
+    );
+    await expect(
+      service.isTaken(manager, 'nightform', subprofileOwner('sp-1')),
+    ).resolves.toBe(true);
+    await expect(
+      service.isTaken(manager, 'nightform', subprofileOwner('sp-2')),
+    ).resolves.toBe(true);
+  });
+
+  it('treats a lapsed non-forwarding name as free for its previous owner', async () => {
+    const { service, manager, historyRows } = makeService();
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      oneDayAgo(),
+      false,
+    );
+    await expect(
+      service.isTaken(manager, 'nightform', subprofileOwner('sp-1')),
+    ).resolves.toBe(false);
+  });
 });
 
 // --- release() ownership scoping ---------------------------------------------
@@ -579,6 +662,142 @@ describe('HandlesService.release ownership scoping', () => {
       previousOwnerKind: HandleOwnerKind.Profile,
       previousOwnerUserId: 'user-1',
     });
+  });
+});
+
+// --- release() isForwarding ---------------------------------------------------
+// A persona switching between linked and unlinked passes `isForwarding: false`
+// so the reservation it writes can never be used to connect the released
+// pseudonymous address to the persona's new one.
+
+describe('HandlesService.release isForwarding', () => {
+  it('upserts isForwarding false when passed { isForwarding: false }', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'nightform', 'user-1');
+    const { service, manager, historyRows } = makeService(rows);
+
+    await service.release(manager, 'nightform', profileOwner('user-1'), {
+      isForwarding: false,
+    });
+
+    expect(historyRows.get('nightform')).toMatchObject({
+      isForwarding: false,
+    });
+  });
+
+  it('upserts isForwarding true when the option is omitted', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'nightform', 'user-1');
+    const { service, manager, historyRows } = makeService(rows);
+
+    await service.release(manager, 'nightform', profileOwner('user-1'));
+
+    expect(historyRows.get('nightform')).toMatchObject({
+      isForwarding: true,
+    });
+  });
+});
+
+// --- previousSubprofileOwnerOf() isForwarding ---------------------------------
+
+describe('HandlesService.previousSubprofileOwnerOf', () => {
+  it('returns null for a live-cooldown reservation with isForwarding false', async () => {
+    const { service, historyRows } = makeService();
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      oneDayFromNow(),
+      false,
+    );
+
+    await expect(service.previousSubprofileOwnerOf('nightform')).resolves.toBe(
+      null,
+    );
+  });
+
+  it('returns the previous subprofile id for a live-cooldown reservation with isForwarding true', async () => {
+    const { service, historyRows } = makeService();
+    seedReservation(
+      historyRows,
+      'nightform',
+      subprofileOwner('sp-1'),
+      oneDayFromNow(),
+      true,
+    );
+
+    await expect(service.previousSubprofileOwnerOf('nightform')).resolves.toBe(
+      'sp-1',
+    );
+  });
+});
+
+// --- stopForwardingFor() -------------------------------------------------------
+// A link switch cuts every address the persona held before it, including names
+// an earlier rename released while they still forwarded.
+
+describe('HandlesService.stopForwardingFor', () => {
+  it('issues one update scoped to the persona reservations', async () => {
+    const { service, manager } = makeService();
+    const updateSpy = jest.spyOn(manager, 'update');
+
+    await service.stopForwardingFor(manager, 'sp-1');
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(
+      HandleHistory,
+      {
+        previousOwnerKind: HandleOwnerKind.Subprofile,
+        previousOwnerSubprofileId: 'sp-1',
+      },
+      { isForwarding: false },
+    );
+  });
+
+  it('stops every forwarding row of that persona and leaves other owners and cooldowns alone', async () => {
+    const { service, manager, historyRows } = makeService();
+    const cooldownEnd = oneDayFromNow();
+    seedReservation(
+      historyRows,
+      'old-name',
+      subprofileOwner('sp-1'),
+      cooldownEnd,
+    );
+    seedReservation(
+      historyRows,
+      'older-name',
+      subprofileOwner('sp-1'),
+      cooldownEnd,
+    );
+    seedReservation(
+      historyRows,
+      'other-persona',
+      subprofileOwner('sp-2'),
+      cooldownEnd,
+    );
+    seedReservation(
+      historyRows,
+      'a-member',
+      profileOwner('user-1'),
+      cooldownEnd,
+    );
+
+    await service.stopForwardingFor(manager, 'sp-1');
+
+    expect(historyRows.get('old-name')).toMatchObject({
+      isForwarding: false,
+      reclaimableAt: cooldownEnd,
+    });
+    expect(historyRows.get('older-name')).toMatchObject({
+      isForwarding: false,
+    });
+    expect(historyRows.get('other-persona')).toMatchObject({
+      isForwarding: true,
+    });
+    expect(historyRows.get('a-member')).toMatchObject({ isForwarding: true });
+    await expect(service.previousSubprofileOwnerOf('old-name')).resolves.toBe(
+      null,
+    );
   });
 });
 

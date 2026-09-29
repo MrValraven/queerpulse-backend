@@ -1,5 +1,13 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 import { MAX_PAGE } from '../../common/pagination';
 
 /**
@@ -72,13 +80,30 @@ export class ListMembersQuery {
   // `profiles.profession`. See src/profiles/professions.ts.
   @IsOptional() @IsString() professions?: string;
 
+  // comma-separated discipline ids the frontend read out of the `query` words,
+  // e.g. ?searchDisciplines=healthcare. Part of the free-text search and only
+  // meaningful beside `query`: a member whose `profiles.discipline` holds one
+  // of them matches the search the way a name or bio hit does. The frontend
+  // owns the EN/PT labels, so it resolves words to ids. Unknown ids are
+  // dropped. See `applyDirectoryFilters`.
+  @IsOptional() @IsString() searchDisciplines?: string;
+
+  // comma-separated profession ids the frontend read out of the `query` words,
+  // e.g. ?searchProfessions=nurse,gp. Same contract as `searchDisciplines`,
+  // over `profiles.profession`.
+  @IsOptional() @IsString() searchProfessions?: string;
+
   // comma-separated language codes, e.g. ?languages=PT,EN. Filters
   // `profiles.languages`. See src/profiles/languages.ts.
   @IsOptional() @IsString() languages?: string;
 
-  // Years-on-QueerPulse range, both inclusive. Either bound may be sent
-  // alone. Computed from `profiles.joined_at` at query time — there is no
-  // stored "tenure" column.
-  @IsOptional() @Type(() => Number) @IsInt() @Min(0) yearsFrom?: number;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(200) yearsTo?: number;
+  // The "Ambassadors" filter chip: `"1"` when on, absent otherwise. Requires
+  // `profiles.is_ambassador_tag_visible = true` and an active `ambassadors`
+  // row. See src/ambassadors/ambassador-focus-areas.ts.
+  @IsOptional() @IsIn(['1']) ambassador?: '1';
+
+  // comma-separated ambassador focus-area keys, e.g. ?focus=housing,youth.
+  // Only applies alongside `ambassador=1`; unknown keys are dropped. See
+  // `applyDirectoryFilters`.
+  @IsOptional() @IsString() focus?: string;
 }

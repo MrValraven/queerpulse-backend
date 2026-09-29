@@ -4,12 +4,10 @@ import { In, Repository } from 'typeorm';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { personaPath } from '../profiles/activity-links';
 import { Profile } from '../users/entities/profile.entity';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
-import {
-  Subprofile,
-  SubprofileLinkVisibility,
-} from './entities/subprofile.entity';
+import { Subprofile } from './entities/subprofile.entity';
 import {
   SubprofileItem,
   SubprofileSection,
@@ -172,15 +170,16 @@ export class SubprofileCreditsService {
   }
 
   // The persona's own page, for a `subprofile_credit` notification's
-  // deep link. Unlinked + published (a claimed global handle) → its
-  // standalone `/p/:handle` page. Otherwise (linked, or unlinked but not yet
-  // published) → the nested `/members/:ownerSlug/:slug` shape, resolving the
-  // owner's profile slug once — a persona credited before it's ever
-  // published is an edge case the link degrades gracefully for rather than
-  // 500ing, at the cost of not being a live route until the owner publishes.
+  // deep link. Any persona holding a handle (both link kinds claim one at
+  // publish) → its `/p/:handle` page. Otherwise (a linked persona with no
+  // handle yet, or one not yet published) → the nested
+  // `/members/:ownerSlug/:slug` shape, resolving the owner's profile slug
+  // once. A persona credited before it's ever published is an edge case the
+  // link degrades gracefully for rather than 500ing, at the cost of not being
+  // a live route until the owner publishes.
   private async buildPersonaDeepLink(sp: Subprofile): Promise<string> {
-    if (sp.linkVisibility === SubprofileLinkVisibility.Unlinked && sp.handle) {
-      return `/p/${sp.handle}`;
+    if (sp.handle) {
+      return personaPath(sp.handle);
     }
     const ownerProfile = await this.profiles.findOne({
       where: { userId: sp.userId },

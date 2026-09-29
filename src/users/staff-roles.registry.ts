@@ -77,7 +77,9 @@ export interface StaffRoleDef {
    *     nominations, so its decisions land on applying organisations and on
    *     third-party nominees rather than on a member's own membership or their
    *     own content. Nothing it decides changes what a member may post or
-   *     whether they stay.
+   *     whether they stay. Naming a QueerPulse Ambassador does reach a member,
+   *     and it grants an honour and perks while holding no power over that
+   *     member, so the grant still earns no public staff badge.
    *
    * Account tiers are a separate axis entirely: moderators and admins are on the
    * roster because of `User.role`, and never need a grant to be badged.
@@ -178,6 +180,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'Maintain the organisation tiers (admin/org-tiers). The only money here is `priceDisplay`, the figure the public For Organisations page prints; there is no negotiated fee and no internal number in this domain',
       'Maintain the changemaker roster and its nominations (admin/changemakers, admin/changemaker-nominations): the nominee, the reason written for them, and the triage history',
       'NOT who nominated whom: a nomination is a private submission about a third party who never opted in and may not know they were named, so the pairing of the two names stays Moderator/Admin while the pitch itself is delegated',
+      'Name and stand down QueerPulse Ambassadors (admin/ambassadors), with the reason kept internal, and take a moderator seat in their private circle',
     ],
   },
 };

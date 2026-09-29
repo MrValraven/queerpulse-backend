@@ -123,6 +123,29 @@ export enum SubprofileKind {
   Lecturer = 'lecturer',
   // stage (performer + teacher)
   PoleDancer = 'pole_dancer',
+  // Quest personas (+20). Purely additive: 20 new kinds for the new `quest`
+  // page family (migration `AddQuestPersonaKinds`). Kept in lockstep with the
+  // FE mirror and `../subprofile-kinds.ts`.
+  GameMaster = 'game_master',
+  TtrpgDesigner = 'ttrpg_designer',
+  BoardGameReviewer = 'board_game_reviewer',
+  GameNightHost = 'game_night_host',
+  LarpOrganizer = 'larp_organizer',
+  MiniaturePainter = 'miniature_painter',
+  Cartographer = 'cartographer',
+  DiceMaker = 'dice_maker',
+  TournamentOrganizer = 'tournament_organizer',
+  ActualPlay = 'actual_play',
+  Streamer = 'streamer',
+  Speedrunner = 'speedrunner',
+  Modder = 'modder',
+  Cosplayer = 'cosplayer',
+  PropMaker = 'prop_maker',
+  PuzzleDesigner = 'puzzle_designer',
+  Podcaster = 'podcaster',
+  VoiceActor = 'voice_actor',
+  FanficWriter = 'fanfic_writer',
+  GameCritic = 'game_critic',
 }
 
 export enum SubprofileLinkVisibility {
@@ -381,6 +404,17 @@ export interface SkinData {
   faq?: { question: string; answer: string }[] | null;
   /** Therapist layout: people and services the therapist works alongside. */
   worksAlongside?: TherapistWorksAlongside[] | null;
+  /** Quest skin: how the table runs. Read for directory cards through
+   *  `subprofile-table-summary.ts`, which keeps known values only. */
+  atTheTable?: {
+    format?: 'online' | 'in_person' | 'both';
+    where?: string;
+    systems?: string[];
+    safetyTools?: string[];
+    vibe?: string[];
+    price?: string;
+    note?: string;
+  };
 }
 
 @Entity('subprofiles')

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { plainToInstance } from 'class-transformer';
 import { DataSource } from 'typeorm';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
@@ -21,6 +22,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { truncateAtWord } from './directory-blurb';
+import { MemberSort } from './dto/list-members.query';
 import { Activity } from './entities/activity.entity';
 import {
   BoardKind,
@@ -157,6 +159,10 @@ describe('ProfilesService.getBySlug visibility', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ProfilesService,
+        {
+          provide: AmbassadorStatusService,
+          useValue: { findActive: jest.fn().mockResolvedValue(null) },
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(SocialLink), useValue: findEmpty() },
         { provide: getRepositoryToken(WorkItem), useValue: findEmpty() },
@@ -350,6 +356,68 @@ describe('ProfilesService.getBySlug visibility', () => {
     connections.areConnected.mockResolvedValue(true);
     const res = await service.getBySlug('jo', 'someone-else');
     expect(res.limited).toBe(false);
+  });
+
+  describe('unlisted work (adultWork) visibility on the full profile', () => {
+    // Coordinator ruling 15: unlisted (`adultWork`) work shows on the full
+    // profile only to the owner and to the owner's accepted connections,
+    // whatever the profile's `visibility` tier says. An `open` profile is
+    // otherwise full to every signed-in member (see `canViewFull`), which
+    // would make the member directory a slug sweep away from rebuilding the
+    // list this feature exists to prevent. See
+    // professions.ts#UNLISTED_DISCIPLINE_IDS.
+    const sexWorkerProfile = (overrides = {}) =>
+      profile({
+        discipline: ['healthcare', 'adultWork'],
+        profession: ['nurse', 'sexWorker'],
+        ...overrides,
+      });
+
+    it('strips adultWork/sexWorker from an open profile for a non-connected viewer', async () => {
+      profiles.findOne.mockResolvedValue(
+        sexWorkerProfile({ visibility: ProfileVisibility.Open }),
+      );
+      const res = await service.getBySlug('jo', 'someone-else');
+      const full = res as Extract<typeof res, { limited: false }>;
+      expect(full.discipline).toEqual(['healthcare']);
+      expect(full.profession).toEqual(['nurse']);
+    });
+
+    it('keeps adultWork/sexWorker on an open profile for an accepted connection', async () => {
+      profiles.findOne.mockResolvedValue(
+        sexWorkerProfile({ visibility: ProfileVisibility.Open }),
+      );
+      connections.areConnected.mockResolvedValue(true);
+      const res = await service.getBySlug('jo', 'someone-else');
+      const full = res as Extract<typeof res, { limited: false }>;
+      expect(full.discipline).toEqual(['healthcare', 'adultWork']);
+      expect(full.profession).toEqual(['nurse', 'sexWorker']);
+    });
+
+    it('keeps adultWork/sexWorker for the owner without ever calling areConnected', async () => {
+      profiles.findOne.mockResolvedValue(
+        sexWorkerProfile({ visibility: ProfileVisibility.Open }),
+      );
+      // The owner reads their own profile through the same getBySlug path
+      // `getMine` delegates to; `viewerUserId` equal to the profile's
+      // `userId` ('owner-1', see the `profile` factory above) is that case.
+      const res = await service.getBySlug('jo', 'owner-1');
+      const full = res as Extract<typeof res, { limited: false }>;
+      expect(full.discipline).toEqual(['healthcare', 'adultWork']);
+      expect(full.profession).toEqual(['nurse', 'sexWorker']);
+      expect(connections.areConnected).not.toHaveBeenCalled();
+    });
+
+    it('never calls areConnected for a profile with no unlisted work', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ visibility: ProfileVisibility.Open }),
+      );
+      await service.getBySlug('jo', 'someone-else');
+      // `hasUnlistedWork` short-circuits the connection lookup for the
+      // overwhelming majority of profiles that never selected `adultWork`,
+      // so an ordinary profile read costs no extra query.
+      expect(connections.areConnected).not.toHaveBeenCalled();
+    });
   });
 
   it('assembles the full profile with new relations and ISO joinedAt', async () => {
@@ -888,6 +956,55 @@ describe('ProfilesService.getBySlug visibility', () => {
       expect(qb.orderBy).toHaveBeenCalledWith('member_search_rank', 'DESC');
     });
 
+    it('orders text hits first and then A to Z when the search carries profession ids', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers(
+        {
+          query: 'ana',
+          searchProfessions: 'financialAnalyst',
+          sort: MemberSort.AToZ,
+        },
+        'viewer-1',
+      );
+
+      expect(qb.addSelect).toHaveBeenCalledWith(
+        expect.stringContaining('CASE WHEN'),
+        'member_search_text_hit',
+      );
+      // The text-hit flag leads, and the chosen sort's keys follow it so
+      // A to Z still decides the order inside each group.
+      expect(qb.orderBy).toHaveBeenCalledTimes(1);
+      expect(qb.orderBy).toHaveBeenCalledWith('member_search_text_hit', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledTimes(3);
+      expect(qb.addOrderBy).toHaveBeenNthCalledWith(1, 'p.firstName', 'ASC');
+      expect(qb.addOrderBy).toHaveBeenNthCalledWith(2, 'p.lastName', 'ASC');
+      expect(qb.addOrderBy).toHaveBeenNthCalledWith(3, 'p.slug', 'ASC');
+    });
+
+    it('keeps A to Z exactly as it was when the search carries no profession ids', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers(
+        { query: 'ana', sort: MemberSort.AToZ },
+        'viewer-1',
+      );
+
+      expect(qb.addSelect).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'member_search_text_hit',
+      );
+      expect(qb.orderBy).toHaveBeenCalledTimes(1);
+      expect(qb.orderBy).toHaveBeenCalledWith('p.firstName', 'ASC');
+      expect(qb.addOrderBy).toHaveBeenCalledTimes(2);
+      expect(qb.addOrderBy).toHaveBeenNthCalledWith(1, 'p.lastName', 'ASC');
+      expect(qb.addOrderBy).toHaveBeenNthCalledWith(2, 'p.slug', 'ASC');
+    });
+
     it('keeps the newest-first default when there is no term to rank by', async () => {
       const qb = qbStub();
       qb.getManyAndCount.mockResolvedValue([[], 0]);
@@ -1087,6 +1204,10 @@ describe('ProfilesService replace-list endpoints', () => {
     const module = await Test.createTestingModule({
       providers: [
         ProfilesService,
+        {
+          provide: AmbassadorStatusService,
+          useValue: { findActive: jest.fn().mockResolvedValue(null) },
+        },
         {
           provide: getRepositoryToken(Profile),
           useValue: overrides.profiles ?? {

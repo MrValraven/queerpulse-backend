@@ -261,12 +261,40 @@ describe('ActivityListener write gate: communities', () => {
 });
 
 describe('ActivityListener write gate: personas', () => {
-  it('records a linked, published, open persona', async () => {
+  it('records a linked, published, open persona at its /p/ handle', async () => {
     const { listener, record, subprofiles, profiles } = await buildListener();
     subprofiles.findOne.mockResolvedValue({
       id: 'persona-1',
       userId: 'member-1',
       slug: 'dj-set',
+      handle: 'ana-dj-set',
+      displayName: 'DJ Set',
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    profiles.findOne.mockResolvedValue({ slug: 'ana' });
+
+    await listener.onSubprofilePublished({
+      subprofileId: 'persona-1',
+      ownerUserId: 'member-1',
+    });
+
+    expect(recorded(record)).toMatchObject({
+      kind: ActivityKind.Persona,
+      toLink: '/p/ana-dj-set',
+      subjectKind: ActivitySubjectKind.Persona,
+      subjectId: 'persona-1',
+    });
+    // The handle alone builds the address.
+    expect(profiles.findOne).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the nested path for a linked persona with no handle yet', async () => {
+    const { listener, record, subprofiles, profiles } = await buildListener();
+    subprofiles.findOne.mockResolvedValue({
+      id: 'persona-1',
+      userId: 'member-1',
+      slug: 'dj-set',
+      handle: null,
       displayName: 'DJ Set',
       linkVisibility: SubprofileLinkVisibility.Linked,
     });

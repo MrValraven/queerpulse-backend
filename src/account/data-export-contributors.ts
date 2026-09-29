@@ -6,6 +6,11 @@ import { CommunityPostReply } from '../communities/entities/community-post-reply
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
+import { EventMatchEntry } from '../go-together/entities/event-match-entry.entity';
+import { FriendMatchProfile } from '../go-together/entities/friend-match-profile.entity';
+import { MatchAvoidance } from '../go-together/entities/match-avoidance.entity';
+import { MatchFeedback } from '../go-together/entities/match-feedback.entity';
+import { MatchGroupFeedback } from '../go-together/entities/match-group-feedback.entity';
 import { GovernanceProposal } from '../governance/entities/governance-proposal.entity';
 import { GovernanceVote } from '../governance/entities/governance-vote.entity';
 import { HousingReview } from '../housing-reviews/entities/housing-review.entity';
@@ -84,9 +89,16 @@ export class ListingsExportContributor implements DataExportContribution {
     private readonly listings: Repository<Listing>,
   ) {}
 
+  /**
+   * The listings the member owns and the places they suggested. A suggestion
+   * is held by the platform (or later by whoever claims it), so it carries the
+   * member on `suggestedByUserId` alone; each row's `relationship` says which
+   * of the two ties it to the member. A row that matches both is reported as
+   * `owner`, the stronger tie.
+   */
   async buildContribution(userId: string): Promise<unknown> {
     const rows = await this.listings.find({
-      where: { ownerId: userId },
+      where: [{ ownerId: userId }, { suggestedByUserId: userId }],
       order: { createdAt: 'ASC' },
     });
     return rows.map((listing) => ({
@@ -95,6 +107,7 @@ export class ListingsExportContributor implements DataExportContribution {
       slug: listing.slug,
       name: listing.name,
       status: listing.status,
+      relationship: listing.ownerId === userId ? 'owner' : 'suggested',
       createdAt: listing.createdAt.toISOString(),
     }));
   }
@@ -689,6 +702,93 @@ export class ProfileNowHistoryExportContributor implements DataExportContributio
 }
 
 /**
+ * `goTogether`: the member's Go together questionnaire, the opt-ins they
+ * made, the "meet again" verdicts they gave about other people, their
+ * answers about each group as a whole, and their private "Not for me"
+ * avoidances.
+ *
+ * Only the member's own rows go into the export: the answers and verdicts
+ * this member gave themselves. A "meet again" verdict is one member's
+ * private read of another, so a row where this member is only the subject
+ * (`rateeId`) stays in the rater's own export.
+ */
+@Injectable()
+export class GoTogetherExportContributor implements DataExportContribution {
+  readonly category = 'goTogether';
+  readonly archiveKey = 'go-together';
+
+  constructor(
+    @InjectRepository(FriendMatchProfile)
+    private readonly profiles: Repository<FriendMatchProfile>,
+    @InjectRepository(EventMatchEntry)
+    private readonly entries: Repository<EventMatchEntry>,
+    @InjectRepository(MatchFeedback)
+    private readonly feedback: Repository<MatchFeedback>,
+    @InjectRepository(MatchGroupFeedback)
+    private readonly groupFeedback: Repository<MatchGroupFeedback>,
+    @InjectRepository(MatchAvoidance)
+    private readonly avoidances: Repository<MatchAvoidance>,
+  ) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const [profile, entries, given, groupAnswers, avoided] = await Promise.all([
+      this.profiles.findOne({ where: { userId } }),
+      this.entries.find({ where: { userId }, order: { createdAt: 'ASC' } }),
+      this.feedback.find({
+        where: { raterId: userId },
+        order: { createdAt: 'ASC' },
+      }),
+      this.groupFeedback.find({
+        where: { raterId: userId },
+        order: { createdAt: 'ASC' },
+      }),
+      this.avoidances.find({
+        where: { userId },
+        order: { createdAt: 'ASC' },
+      }),
+    ]);
+    return {
+      questionnaire: profile
+        ? {
+            answers: profile.answers,
+            questionnaireVersion: profile.questionnaireVersion,
+            consentedAt: profile.consentedAt.toISOString(),
+            updatedAt: profile.updatedAt.toISOString(),
+          }
+        : null,
+      optIns: entries.map((entry) => ({
+        eventId: entry.eventId,
+        status: entry.status,
+        pairStatus: entry.pairStatus,
+        lens: entry.lens,
+        lensConsentedAt: entry.lensConsentedAt?.toISOString() ?? null,
+        hostAnswers: entry.hostAnswers,
+        groupId: entry.groupId,
+        checkedInAt: entry.checkedInAt?.toISOString() ?? null,
+        leftEventAt: entry.leftEventAt?.toISOString() ?? null,
+        createdAt: entry.createdAt.toISOString(),
+      })),
+      meetAgainAnswersGiven: given.map((row) => ({
+        groupId: row.groupId,
+        aboutUserId: row.rateeId,
+        verdict: row.verdict,
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+      groupAnswersGiven: groupAnswers.map((row) => ({
+        groupId: row.groupId,
+        clicked: row.clicked,
+        goAgain: row.goAgain,
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+      notForMe: avoided.map((row) => ({
+        userId: row.avoidedUserId,
+        createdAt: row.createdAt.toISOString(),
+      })),
+    };
+  }
+}
+
+/**
  * `media` — the member's uploaded FILES.
  *
  * This contribution deliberately carries no bytes. It lists what the bucket
@@ -790,5 +890,6 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   GovernanceExportContributor,
   ReviewsExportContributor,
   ProfileNowHistoryExportContributor,
+  GoTogetherExportContributor,
   MediaExportContributor,
 ] as const;

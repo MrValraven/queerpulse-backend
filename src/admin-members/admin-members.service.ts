@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
@@ -22,6 +23,7 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
@@ -53,6 +55,15 @@ export const ADMIN_MEMBERS_PAGE_SIZE = 20;
 
 /** The `filter: 'new'` window on `list()` — "joined in the last week". */
 const NEW_MEMBER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** What the `q` name search on `list()` matches against: the same folded
+ *  vocabulary as member search, so accents never hide anyone. */
+const ADMIN_MEMBERS_SEARCH_HAYSTACK = foldedHaystack('profile', [
+  'first_name',
+  'last_name',
+  'slug',
+  'pronouns',
+]);
 
 /** How many of a member's most recent vouchers are shown as avatars on the
  *  list card. */
@@ -154,6 +165,18 @@ export class AdminMembersService {
       profileQueryBuilder.andWhere('profile.joinedAt >= :since', {
         since: new Date(Date.now() - NEW_MEMBER_WINDOW_MS),
       });
+    }
+
+    // Matched here rather than over the rows the client already holds, so a
+    // member on a page nobody has loaded yet is still found. Names, handle and
+    // pronouns are folded into one haystack, so "ana lopes" matches across the
+    // first/last name columns and "Joao" finds "João".
+    const searchTerm = query.q?.trim();
+    if (searchTerm) {
+      profileQueryBuilder.andWhere(
+        `${ADMIN_MEMBERS_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('searchTerm')} ESCAPE '\\'`,
+        { searchTerm: `%${escapeLikeTerm(searchTerm)}%` },
+      );
     }
 
     profileQueryBuilder

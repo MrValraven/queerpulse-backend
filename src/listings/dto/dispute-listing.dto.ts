@@ -19,8 +19,8 @@ import {
 export const LISTING_DISPUTE_REASON_CODE = 'listing_dispute';
 
 /**
- * `POST /listings/:ref/dispute` body (item #13). Anyone — including the named
- * business itself — can contest a "friendly"/unowned listing: `reason` is the
+ * `POST /listings/:ref/dispute` body (item #13). Anyone, the named business
+ * included, can contest a listing, owned or ownerless: `reason` is the
  * free-text explanation a moderator reads in the queue, `contactEmail` an
  * optional way to reach a disputer who has no reason to be reachable via their
  * member account. The dispute is filed through the existing report+moderation

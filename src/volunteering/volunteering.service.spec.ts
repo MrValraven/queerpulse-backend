@@ -1,4 +1,9 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -78,7 +83,7 @@ describe('VolunteeringService', () => {
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let partnersService: { idBySlug: jest.Mock; refsByIds: jest.Mock };
+  let partnersService: { ownedIdBySlug: jest.Mock; refsByIds: jest.Mock };
   let communityMembership: {
     assertOwnerOrModBySlug: jest.Mock;
     isSubcommunity: jest.Mock;
@@ -146,16 +151,18 @@ describe('VolunteeringService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
-    // Default: an unknown/absent partnerSlug never resolves, and no
-    // opportunity carries a partner link — every existing test (written
-    // before Partners existed) keeps passing unmodified.
+    // Default: a partnerSlug names no partner (404), and no opportunity
+    // carries a partner link, so every test that sends no partnerSlug never
+    // reaches Partners. The partner-link tests override these per case.
     partnersService = {
-      idBySlug: jest.fn().mockResolvedValue(null),
+      ownedIdBySlug: jest
+        .fn()
+        .mockRejectedValue(new NotFoundException('Partner not found')),
       refsByIds: jest.fn().mockResolvedValue(new Map()),
     };
-    // Default: no test in this file sets `communitySlug`, so
-    // `resolveCommunityId` short-circuits on the falsy check and never calls
-    // this — registered only so Nest's DI has something to inject.
+    // Default: the poster owns or moderates any community slug they send and
+    // no community link exists yet. The community-link tests override these
+    // per case.
     communityMembership = {
       assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
       // Default: a top-level community. The space case overrides it.
@@ -223,13 +230,13 @@ describe('VolunteeringService', () => {
   });
 
   describe('create', () => {
-    it('stores partnerId: null when partnerSlug does not resolve to a known partner', async () => {
+    it('stores partnerId: null when partnerSlug is empty', async () => {
       const res = await service.create('poster-1', {
         ...baseDto,
-        partnerSlug: 'some-partner',
+        partnerSlug: '',
       });
 
-      expect(partnersService.idBySlug).toHaveBeenCalledWith('some-partner');
+      expect(partnersService.ownedIdBySlug).not.toHaveBeenCalled();
       expect(opportunities.save).toHaveBeenCalledWith(
         expect.objectContaining({ partnerId: null, posterId: 'poster-1' }),
       );
@@ -238,18 +245,48 @@ describe('VolunteeringService', () => {
       expect(res.canEditOpportunity).toBe(true);
     });
 
-    it('resolves a known partnerSlug to partner_id via PartnersService', async () => {
-      partnersService.idBySlug.mockResolvedValue('partner-1');
+    it('links a partner the poster maintains via PartnersService.ownedIdBySlug', async () => {
+      partnersService.ownedIdBySlug.mockResolvedValue('partner-1');
 
       await service.create('poster-1', {
         ...baseDto,
         partnerSlug: 'ilga-portugal',
       });
 
-      expect(partnersService.idBySlug).toHaveBeenCalledWith('ilga-portugal');
+      expect(partnersService.ownedIdBySlug).toHaveBeenCalledWith(
+        'ilga-portugal',
+        'poster-1',
+      );
       expect(opportunities.save).toHaveBeenCalledWith(
         expect.objectContaining({ partnerId: 'partner-1' }),
       );
+    });
+
+    it('rejects a partner the poster does not maintain', async () => {
+      partnersService.ownedIdBySlug.mockRejectedValue(
+        new ForbiddenException('You can only link a partner you maintain'),
+      );
+
+      await expect(
+        service.create('poster-1', {
+          ...baseDto,
+          partnerSlug: 'ilga-portugal',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(opportunities.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a request naming both a partner and a community (400)', async () => {
+      await expect(
+        service.create('poster-1', {
+          ...baseDto,
+          partnerSlug: 'ilga-portugal',
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(partnersService.ownedIdBySlug).not.toHaveBeenCalled();
+      expect(communityMembership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
+      expect(opportunities.save).not.toHaveBeenCalled();
     });
 
     it('resolves team slugs via MemberLookup and seeds volunteer_opportunity_team rows, deduping the poster', async () => {
@@ -458,11 +495,14 @@ describe('VolunteeringService', () => {
           teamIntro: null,
         },
       });
-      partnersService.idBySlug.mockResolvedValue('partner-2');
+      partnersService.ownedIdBySlug.mockResolvedValue('partner-2');
 
       await service.update('x', 'poster-1', { partnerSlug: 'a-partner' });
 
-      expect(partnersService.idBySlug).toHaveBeenCalledWith('a-partner');
+      expect(partnersService.ownedIdBySlug).toHaveBeenCalledWith(
+        'a-partner',
+        'poster-1',
+      );
       expect(opportunities.save).toHaveBeenCalledWith(
         expect.objectContaining({ partnerId: 'partner-2' }),
       );
@@ -485,7 +525,7 @@ describe('VolunteeringService', () => {
 
       await service.update('x', 'poster-1', { role: 'New role' });
 
-      expect(partnersService.idBySlug).not.toHaveBeenCalled();
+      expect(partnersService.ownedIdBySlug).not.toHaveBeenCalled();
       expect(opportunities.save).toHaveBeenCalledWith(
         expect.objectContaining({ partnerId: 'partner-1' }),
       );
@@ -517,7 +557,7 @@ describe('VolunteeringService', () => {
       );
     });
 
-    it('rejects re-linking to a community the poster no longer owns/moderates', async () => {
+    it('still asserts owner/mod standing when the patch names a different community', async () => {
       opportunities.findOne.mockResolvedValue({
         id: 'opp-1',
         slug: 'x',
@@ -531,6 +571,18 @@ describe('VolunteeringService', () => {
           teamIntro: null,
         },
       });
+      communityMembership.refsByIds.mockResolvedValue(
+        new Map([
+          [
+            'community-1',
+            {
+              slug: 'old-community',
+              name: 'Old',
+              avatarImageUrl: null,
+            },
+          ],
+        ]),
+      );
       communityMembership.assertOwnerOrModBySlug.mockRejectedValue(
         new ForbiddenException(
           'Only the community owner or a moderator can do that',
@@ -540,6 +592,215 @@ describe('VolunteeringService', () => {
       await expect(
         service.update('x', 'poster-1', { communitySlug: 'queer-devs' }),
       ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(communityMembership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'poster-1',
+      );
+      expect(opportunities.save).not.toHaveBeenCalled();
+    });
+
+    it('keeps an unchanged community link without the owner/mod check (the poster lost their mod role)', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        partnerId: null,
+        communityId: 'community-1',
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+      communityMembership.refsByIds.mockResolvedValue(
+        new Map([
+          [
+            'community-1',
+            {
+              slug: 'queer-devs',
+              name: 'Queer Devs',
+              avatarImageUrl: null,
+            },
+          ],
+        ]),
+      );
+      communityMembership.assertOwnerOrModBySlug.mockRejectedValue(
+        new ForbiddenException(
+          'Only the community owner or a moderator can do that',
+        ),
+      );
+
+      // The edit form re-sends the full state on every save.
+      await service.update('x', 'poster-1', {
+        role: 'New role',
+        partnerSlug: '',
+        communitySlug: 'queer-devs',
+      });
+
+      expect(communityMembership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
+      expect(communityMembership.isSubcommunity).not.toHaveBeenCalled();
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'community-1',
+          partnerId: null,
+          role: 'New role',
+        }),
+      );
+    });
+
+    it('keeps an unchanged legacy partner link without the ownership check', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        partnerId: 'partner-legacy',
+        communityId: null,
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+      partnersService.refsByIds.mockResolvedValue(
+        new Map([
+          [
+            'partner-legacy',
+            { slug: 'legacy-org', name: 'Legacy', logo: 'LO' },
+          ],
+        ]),
+      );
+      partnersService.ownedIdBySlug.mockRejectedValue(
+        new ForbiddenException('You can only link a partner you maintain'),
+      );
+
+      await service.update('x', 'poster-1', {
+        role: 'New role',
+        partnerSlug: 'legacy-org',
+        communitySlug: '',
+      });
+
+      expect(partnersService.ownedIdBySlug).not.toHaveBeenCalled();
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          partnerId: 'partner-legacy',
+          communityId: null,
+        }),
+      );
+    });
+
+    it('runs the ownership check when a legacy partner link is swapped for another partner', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        partnerId: 'partner-legacy',
+        communityId: null,
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+      partnersService.refsByIds.mockResolvedValue(
+        new Map([
+          [
+            'partner-legacy',
+            { slug: 'legacy-org', name: 'Legacy', logo: 'LO' },
+          ],
+        ]),
+      );
+      partnersService.ownedIdBySlug.mockRejectedValue(
+        new ForbiddenException('You can only link a partner you maintain'),
+      );
+
+      await expect(
+        service.update('x', 'poster-1', { partnerSlug: 'other-org' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(partnersService.ownedIdBySlug).toHaveBeenCalledWith(
+        'other-org',
+        'poster-1',
+      );
+      expect(opportunities.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a patch naming both a partner and a community (400)', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        partnerId: null,
+        communityId: null,
+      });
+
+      await expect(
+        service.update('x', 'poster-1', {
+          partnerSlug: 'ilga-portugal',
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(partnersService.ownedIdBySlug).not.toHaveBeenCalled();
+      expect(communityMembership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
+      expect(opportunities.save).not.toHaveBeenCalled();
+    });
+
+    it('clears the community link when a partial patch links a partner', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        partnerId: null,
+        communityId: 'community-1',
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+      partnersService.ownedIdBySlug.mockResolvedValue('partner-1');
+
+      await service.update('x', 'poster-1', { partnerSlug: 'ilga-portugal' });
+
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ partnerId: 'partner-1', communityId: null }),
+      );
+    });
+
+    it('clears the partner link when a partial patch links a community', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        partnerId: 'partner-1',
+        communityId: null,
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+
+      await service.update('x', 'poster-1', { communitySlug: 'queer-devs' });
+
+      expect(communityMembership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'poster-1',
+      );
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          partnerId: null,
+          communityId: 'community-1',
+        }),
+      );
     });
   });
 

@@ -35,6 +35,7 @@
     "storage:cors": "node scripts/set-bucket-cors.mjs",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
     "recognition:rebase": "ts-node -r tsconfig-paths/register src/recognition/recognition-xp-rebase-cli.ts",
+    "go-together:tune": "ts-node -r tsconfig-paths/register src/go-together/go-together-tune-weights-cli.ts",
     "seed:safe-spaces": "ts-node -r tsconfig-paths/register src/database/seed-safe-spaces.ts"
   },
   "dependencies": {

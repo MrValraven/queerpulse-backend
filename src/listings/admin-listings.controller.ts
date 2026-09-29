@@ -24,6 +24,7 @@ import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
+import { AdminUpdateListingDto } from './dto/admin-update-listing.dto';
 import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
 import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { BulkRemoveDto, BulkStatusDto } from './dto/bulk-listing.dto';
@@ -44,7 +45,10 @@ import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingOwnerOfferDTO } from './listing-owner-offer-response';
 import { ListingOwnerOffersService } from './listing-owner-offers.service';
-import { toDirectoryModerationListingDTO } from './listing-owner-personal-fields';
+import {
+  ManagedListingDTO,
+  toDirectoryModerationListingDTO,
+} from './listing-owner-personal-fields';
 import { ListingDTO } from './listing-response';
 import { ListingsService } from './listings.service';
 import {
@@ -352,10 +356,11 @@ export class AdminListingsController {
   // Moderator answers a member's PUBLIC question on a listing.
   //
   // WHY THIS ROUTE EXISTS AT ALL, given the owner already has one. A large
-  // share of directory listings have no owner: the `friendly` and `suggested`
-  // submission paths create rows with a null `owner_id` for businesses that
-  // never claimed their page, and those are often exactly the venues people
-  // have questions about. Owner-only would make the public question box on
+  // share of directory listings have no owner. A suggestion is held by the
+  // platform with a null `owner_id`; the suggester is `suggested_by_user_id`.
+  // Staff-authored entries also wait for their business to claim the page,
+  // and those unclaimed pages are often exactly the venues people have
+  // questions about. Owner-only would make the public question box on
   // every one of them a form that accepts questions nobody can answer, which is
   // worse than not offering it. Abandoned owned listings fail the same way,
   // more slowly.
@@ -590,6 +595,68 @@ export class AdminListingsController {
       user.userId,
       memberSlug,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // STAFF EDITING: admins acting for a listing the platform holds, a
+  // suggestion or a house-authored page nobody has taken over yet.
+  //
+  // ADMIN ONLY, with the empty `@StaffRoles()` beside `@Roles(UserRole.Admin)`
+  // for the reason `create`'s doc comment sets out: without it the class-level
+  // `@StaffRoles('directory_moderator')` stays in scope. Editing the page is
+  // the same platform-tier decision as authoring it.
+  //
+  // Declared here, after every other `PATCH` in the class, because
+  // `@Patch(':ref')` is a single parameter segment: declared above
+  // `@Patch('bulk-status')` it would bind `bulk-status` as a `ref` and swallow
+  // the bulk moderation route. The two-segment `PATCH` routes above
+  // (`claims/:id`, `:ref/status`, …) can never match a one-segment path, so
+  // only the literal needs the ordering, and it gets it here. `GET
+  // :ref/editable` is safe anywhere in the class: the other two-segment GETs
+  // (`:ref/history`, `:ref/owner-offer`, `:ref/co-managers`) end in a
+  // different literal, and no `<literal>/:param` GET exists that could
+  // capture it.
+  // ---------------------------------------------------------------------------
+
+  /** The listing as its editor loads it, for staff editing a listing the
+   *  platform holds. Admin only, like authoring one. */
+  @Get(':ref/editable')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Load a listing for staff editing' })
+  @ApiOkResponse({
+    description:
+      "The listing as its editor loads it, with the owner's personal answers redacted.",
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  getEditable(@Param('ref') ref: string): Promise<ManagedListingDTO> {
+    return this.listingsService.getEditableForStaff(ref);
+  }
+
+  /** Staff edit a listing the platform holds. 409 `LISTING_HAS_OWNER` once
+   *  somebody owns it. Admin only, like authoring one. */
+  @Patch(':ref')
+  @StaffRoles()
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Edit a listing the platform holds' })
+  @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiBadRequestResponse({
+    description:
+      'The body carries a field staff cannot set, or an unknown listing tag.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The listing has an owner now (`code: LISTING_HAS_OWNER`), so its owner edits it.',
+  })
+  update(
+    @Param('ref') ref: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: AdminUpdateListingDto,
+  ): Promise<ListingDTO> {
+    return this.listingsService.adminUpdate(ref, user.userId, dto);
   }
 
   // Permanently delete any listing regardless of owner. The owner-only

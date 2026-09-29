@@ -38,6 +38,14 @@ import { toImageUrl } from '../common/image-url';
 
 export type WaitingOn = 'writer' | 'you' | 'nobody';
 
+/**
+ * Where a piece's money stands, as one word the desk can filter on. A piece
+ * has at most one `magazine_payment` row (unique on `pieceId`), so: no row
+ * is `none`, a row at `paid` is `paid`, and a row at any earlier status
+ * (`agreed`, `approved_unpaid`) is `owed`.
+ */
+export type PiecePaymentStatus = 'none' | 'owed' | 'paid';
+
 export interface PieceListItem {
   id: string;
   format: PieceFormat;
@@ -59,6 +67,14 @@ export interface PieceListItem {
   deckId: string | null;
   art: ArtState;
   contentsBlurb: string;
+  /**
+   * ISO instant the piece entered its CURRENT stage, so the desk can say how
+   * long it has sat there. Derived from the audit trail by
+   * `deriveStageEnteredAt` on every read.
+   */
+  stageEnteredAt: string;
+  /** See `PiecePaymentStatus`; derived by `derivePaymentStatus`. */
+  paymentStatus: PiecePaymentStatus;
 }
 
 export interface PitchResponse {
@@ -92,6 +108,9 @@ export interface PitchResponse {
    * row reappearing is explained rather than surprising.
    */
   returnedAt: string | null;
+  /** ISO instant the pitch arrived (its `createdAt`), so the inbox can say
+   *  how long it has waited for an answer. */
+  receivedAt: string;
 }
 
 /**
@@ -236,7 +255,113 @@ export function deriveWaitingOn(
   return 'nobody';
 }
 
-export function toPieceListItem(piece: MagazinePiece): PieceListItem {
+/**
+ * Audit actions that move a piece INTO a stage without writing a
+ * `stage_changed` row. `updatePiece` records `stage_changed` with the new
+ * stage as `detail`, which covers every move an editor makes by hand. Five
+ * other paths set the stage themselves and log their own action instead:
+ * a writer filing (`filed`, commissioned/drafting to in_review), a publish
+ * (`article_published`), an issue ship (`issue_shipped`), taking a live
+ * piece down (`article_unpublished`, published to ready), and rescheduling a
+ * live piece to a future instant (`article_scheduled`, published to ready).
+ *
+ * Each of those actions can also fire WITHOUT a stage move (a refile while
+ * already in review, a re-save of a live piece, unscheduling a piece still at
+ * ready, a scheduled ship that leaves the piece at ready). Counting it anyway
+ * restarts the clock on the latest one, which the desk reads correctly: a
+ * refile is fresh copy waiting on the editor. Scoping every action to the
+ * piece's CURRENT stage keeps an unrelated stage's event from counting.
+ *
+ * Shared by the SQL in `MagazinePieceService.loadStageEnteredAt` and the
+ * in-memory `isStageEntryEvent`, so the list and the record agree.
+ */
+export const STAGE_ENTRY_ACTIONS: Partial<
+  Record<PieceStage, readonly string[]>
+> = {
+  in_review: ['filed'],
+  ready: ['article_unpublished', 'article_scheduled'],
+  published: ['article_published', 'issue_shipped'],
+};
+
+/** Whether `event` moved a piece into `stage` (see `STAGE_ENTRY_ACTIONS`). */
+export function isStageEntryEvent(
+  event: Pick<MagazinePieceEvent, 'action' | 'detail'>,
+  stage: PieceStage,
+): boolean {
+  if (event.action === 'stage_changed') {
+    return event.detail === stage;
+  }
+  return STAGE_ENTRY_ACTIONS[stage]?.includes(event.action) ?? false;
+}
+
+/**
+ * When the piece entered its current stage. `latestEntryAt` is the newest
+ * stage-entry event for that stage (`isStageEntryEvent`), or `null` when the
+ * trail has none. The fallbacks cover the pieces whose stage was never logged:
+ * a piece still in the stage it was CREATED in (commissioned, a story
+ * submission landing in review, a translation opening at drafting) entered it
+ * at `createdAt`; a published piece with no publish event on its trail (data
+ * from before those events existed) uses `updatedAt`, the closest record of
+ * the write that published it.
+ */
+export function deriveStageEnteredAt(
+  piece: Pick<MagazinePiece, 'stage' | 'createdAt' | 'updatedAt'>,
+  latestEntryAt: Date | null,
+): string {
+  if (latestEntryAt !== null) {
+    return latestEntryAt.toISOString();
+  }
+  const fallback =
+    piece.stage === 'published' ? piece.updatedAt : piece.createdAt;
+  return fallback.toISOString();
+}
+
+/**
+ * The newest event in `events` that moved the piece into `stage`, or `null`.
+ * Order-agnostic: callers hand the trail in ascending or descending order.
+ */
+export function latestStageEntryAt(
+  events: Pick<MagazinePieceEvent, 'action' | 'detail' | 'createdAt'>[],
+  stage: PieceStage,
+): Date | null {
+  let latest: Date | null = null;
+  for (const event of events) {
+    if (!isStageEntryEvent(event, stage)) {
+      continue;
+    }
+    if (latest === null || event.createdAt.getTime() > latest.getTime()) {
+      latest = event.createdAt;
+    }
+  }
+  return latest;
+}
+
+/** `PiecePaymentStatus` from the piece's payment row, or `null` for none. */
+export function derivePaymentStatus(
+  payment: Pick<MagazinePayment, 'status'> | null,
+): PiecePaymentStatus {
+  if (payment === null) {
+    return 'none';
+  }
+  return payment.status === 'paid' ? 'paid' : 'owed';
+}
+
+/**
+ * What a list row needs beyond the piece's own columns. The caller loads it
+ * in one batch for a whole page (`MagazinePieceService.loadListContext`), so
+ * the mapper stays a pure function of its inputs.
+ */
+export interface PieceListItemContext {
+  /** Newest stage-entry event; omitted, `deriveStageEnteredAt` falls back. */
+  latestStageEntryAt?: Date | null;
+  /** The piece's payment row (only `status` is read); omitted means none. */
+  payment?: Pick<MagazinePayment, 'status'> | null;
+}
+
+export function toPieceListItem(
+  piece: MagazinePiece,
+  context: PieceListItemContext = {},
+): PieceListItem {
   return {
     id: piece.id,
     format: piece.format,
@@ -258,6 +383,11 @@ export function toPieceListItem(piece: MagazinePiece): PieceListItem {
     deckId: piece.deckId,
     art: piece.art,
     contentsBlurb: piece.contentsBlurb,
+    stageEnteredAt: deriveStageEnteredAt(
+      piece,
+      context.latestStageEntryAt ?? null,
+    ),
+    paymentStatus: derivePaymentStatus(context.payment ?? null),
   };
 }
 
@@ -288,6 +418,7 @@ export function toPitchResponse(
     status: pitch.status,
     fresh: pitch.fresh,
     returnedAt: pitch.returnedAt?.toISOString() ?? null,
+    receivedAt: pitch.createdAt.toISOString(),
   };
 }
 
@@ -356,10 +487,16 @@ export function toPieceRecordSummary(
   events: MagazinePieceEvent[],
   actorNameById: Map<string, string>,
   content: PieceLinkedContent | null = null,
+  payment: Pick<MagazinePayment, 'status'> | null = null,
 ): PieceRecord {
   const publishedAt = content?.publishedAt ?? null;
   return {
-    ...toPieceListItem(piece),
+    // The record already holds the whole trail, so the stage-entry event is
+    // read from it with no second query.
+    ...toPieceListItem(piece, {
+      latestStageEntryAt: latestStageEntryAt(events, piece.stage),
+      payment,
+    }),
     brief: piece.brief,
     care: piece.care,
     audit: events.map((event) =>
@@ -530,7 +667,7 @@ export function toPieceRecordFull(
   content: PieceLinkedContent | null = null,
 ): PieceRecordFull {
   return {
-    ...toPieceRecordSummary(piece, events, actorNameById, content),
+    ...toPieceRecordSummary(piece, events, actorNameById, content, payment),
     payment: payment === null ? null : toPaymentResponse(payment),
     letters: letters.map(toLetterResponse),
     corrections: corrections.map(toCorrectionResponse),
@@ -935,12 +1072,19 @@ function sortPiecesForFallbackRunOrder(
  * slot fill and ship gate — the running order and the issue's actual
  * contents would disagree. Self-healing: the moment an editor saves the
  * order, the appended entries become real `runOrder` items.
+ *
+ * `contextByPieceId` carries each piece's batched list context
+ * (`MagazinePieceService.loadListContext`); a piece missing from it reads
+ * with the `toPieceListItem` defaults.
  */
 export function toIssueProduction(
   issue: MagazineIssue,
   pieces: MagazinePiece[],
+  contextByPieceId: Map<string, PieceListItemContext> = new Map(),
 ): IssueProductionResponse {
   const pieceById = new Map(pieces.map((piece) => [piece.id, piece]));
+  const toRunOrderPiece = (piece: MagazinePiece): PieceListItem =>
+    toPieceListItem(piece, contextByPieceId.get(piece.id));
 
   const orderedPieceIds = new Set(issue.runOrder.map((item) => item.pieceId));
   const unorderedPieces = pieces.filter(
@@ -957,20 +1101,20 @@ export function toIssueProduction(
             }
             return [
               {
-                piece: toPieceListItem(piece),
+                piece: toRunOrderPiece(piece),
                 pages: item.pages,
                 laidOut: piece.laidOut,
               },
             ];
           }),
           ...sortPiecesForFallbackRunOrder(unorderedPieces).map((piece) => ({
-            piece: toPieceListItem(piece),
+            piece: toRunOrderPiece(piece),
             pages: piece.pages ?? '',
             laidOut: piece.laidOut,
           })),
         ]
       : sortPiecesForFallbackRunOrder(pieces).map((piece) => ({
-          piece: toPieceListItem(piece),
+          piece: toRunOrderPiece(piece),
           pages: piece.pages ?? '',
           laidOut: piece.laidOut,
         }));
@@ -1100,13 +1244,20 @@ export interface CurrentIssueSummary {
   theme: string;
   filled: number;
   slots: number;
+  /** `YYYY-MM-DD`, or `null` while the issue is still unscheduled. */
+  publishedOn: string | null;
+  /**
+   * `YYYY-MM-DD` the issue stops taking copy, or `null` while the desk has
+   * set none. The header's "closes" line and days-left countdown read it.
+   */
+  closesOn: string | null;
 }
 
 /**
  * One row of the desk's issue switcher (`GET /magazine/admin/issues`).
- * Extends the current-issue read model with the fields the switcher and the
- * new-issue modal need: `title` for the option label and `publishedOn` for
- * the header meta line.
+ * Extends the current-issue read model with `title`, which the switcher and
+ * the new-issue modal need for the option label. `publishedOn` and
+ * `closesOn` (the header meta line) come from the current-issue model.
  *
  * The public `GET /magazine/issues` cannot serve this list: it projects
  * `id` and `theme` away on purpose (`MagazineService.listIssues`), and `id`
@@ -1114,8 +1265,6 @@ export interface CurrentIssueSummary {
  */
 export interface IssueSummaryResponse extends CurrentIssueSummary {
   title: string;
-  /** `YYYY-MM-DD`, or `null` while the issue is still unscheduled. */
-  publishedOn: string | null;
 }
 
 /**

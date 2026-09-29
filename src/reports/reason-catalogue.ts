@@ -31,9 +31,9 @@ export type ReasonCode =
   // never offers them and `POST /reports`'s `@IsIn(REASON_CODES)` rejects them).
   // They are set only by `ListingsService` when it files through the reports
   // pipeline: `listing_dispute` = a member (possibly the named business)
-  // contesting a "friendly"/unowned listing via `POST /listings/:ref/dispute`;
+  // contesting a listing via `POST /listings/:ref/dispute`;
   // `listing_owner_notify` = the owner-outreach task auto-enqueued when a
-  // friendly/suggested listing is created (item #13).
+  // suggested listing (held by the platform, no owner) is created (item #13).
   | 'listing_dispute'
   | 'listing_owner_notify'
   | 'other';
@@ -86,7 +86,7 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   // System-filed listing codes (see the `ReasonCode` union comment) — labelled
   // so any code→label lookup is total, but never surfaced as a report option.
   listing_dispute: 'Dispute or claim of a business listing',
-  listing_owner_notify: 'Owner outreach — friendly/suggested listing',
+  listing_owner_notify: 'Owner outreach: suggested listing',
   other: 'Something else — explained in detail',
 };
 

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AmbassadorStatusModule } from '../ambassadors/ambassador-status.module';
 import { Community } from '../communities/entities/community.entity';
 import { Event as GatheringEvent } from '../events/entities/event.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
@@ -83,6 +84,9 @@ import { ProfilesService } from './profiles.service';
     // Batched crop lookup (`MediaCropService.getMany`) for a work item's
     // `imageUrl` sibling `crop`.
     MediaCropsModule,
+    // `AmbassadorStatusService.findActive` backs the owner-only `ambassador`
+    // field on the full profile response. A leaf module, so no cycle risk.
+    AmbassadorStatusModule,
   ],
   controllers: [
     ProfilesController,

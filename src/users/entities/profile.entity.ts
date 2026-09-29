@@ -194,6 +194,14 @@ export class Profile {
   @Column({ type: 'boolean', default: true })
   vouchersVisible!: boolean;
 
+  /**
+   * Whether this member's QueerPulse Ambassador tag shows. Lives on the
+   * profile so the choice survives a revoke and re-grant. Off hides the tag,
+   * the directory filter entry and the invitee welcome line; the perks stay.
+   */
+  @Column({ type: 'boolean', default: true })
+  isAmbassadorTagVisible!: boolean;
+
   @Column({ type: 'text', nullable: true })
   now!: string | null;
 

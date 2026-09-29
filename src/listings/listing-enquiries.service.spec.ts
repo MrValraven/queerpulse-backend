@@ -214,22 +214,55 @@ describe('ListingEnquiriesService', () => {
       expect(contact.existingConversationId).toBe('conversation-9');
     });
 
-    // The `friendly`/`suggested` paths carry a non-null owner_id belonging to
-    // whoever recommended the place, not to the business.
-    it('refuses a suggested listing rather than messaging whoever suggested it', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ path: 'suggest' }));
+    // `badge === 'friendly'` says the business is LGBTQ+ friendly as opposed
+    // to queer-owned, and a real owner picks it for their own listing.
+    // Ownership is read from `ownerId` alone, so the mailbox decides.
+    it('offers the contact route on an owned friendly listing with a deliverable mailbox', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ badge: 'friendly' }));
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact).toEqual({ ...REACHABLE, ...UNCAPPED });
+      expect(messaging.identityEnquiryContactability).toHaveBeenCalledWith(
+        'member-1',
+        'listing-identity',
+      );
+    });
+
+    it('refuses an ownerless friendly listing with no staff as unclaimed', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({ badge: 'friendly', ownerId: null }),
+      );
+      refuseAs('IDENTITY_HAS_NO_STAFF');
       const contact = await service.getContact('drama-bar', 'member-1');
       expect(contact).toMatchObject({
         canMessageOwner: false,
         unavailableReason: 'unclaimed',
       });
-      expect(messaging.identityEnquiryContactability).not.toHaveBeenCalled();
+      expect(users.find).not.toHaveBeenCalled();
     });
 
-    it('refuses a friendly recommendation for the same reason', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ badge: 'friendly' }));
+    // A `suggest` listing the platform still holds has `ownerId` null and no
+    // co-manager, so messaging refuses as `IDENTITY_HAS_NO_STAFF`, which
+    // reads back through the mailbox refusal as `unclaimed`.
+    it('refuses a platform-held suggestion with no staff to answer it', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({ path: 'suggest', ownerId: null }),
+      );
+      refuseAs('IDENTITY_HAS_NO_STAFF');
       const contact = await service.getContact('drama-bar', 'member-1');
-      expect(contact.unavailableReason).toBe('unclaimed');
+      expect(contact).toMatchObject({
+        canMessageOwner: false,
+        unavailableReason: 'unclaimed',
+      });
+    });
+
+    // A suggestion later claimed keeps `suggestedByUserId` but gets a real
+    // owner, so its mailbox is reachable like any other claimed listing.
+    it('offers the contact route on a suggestion the claimant now owns', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({ path: 'suggest', ownerId: 'claimant-id' }),
+      );
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact.canMessageOwner).toBe(true);
     });
 
     // Messaging refuses as `blocked` whenever nobody could read the message;
@@ -241,15 +274,16 @@ describe('ListingEnquiriesService', () => {
       expect(contact.unavailableReason).toBe('no_owner_account');
     });
 
-    // `no_owner_account` stays the wire code for "nobody who manages this
-    // listing can receive messages", which the frontend already reads.
-    it('refuses an ownerless listing with no co-manager, with the existing code', async () => {
+    // An ownerless listing with no co-manager reads the same as a listing
+    // nobody has claimed yet, so it answers `unclaimed` rather than
+    // `no_owner_account`.
+    it('refuses an ownerless listing with no co-manager as unclaimed', async () => {
       listings.findOne.mockResolvedValue(baseListing({ ownerId: null }));
       refuseAs('IDENTITY_HAS_NO_STAFF');
       const contact = await service.getContact('drama-bar', 'member-1');
       expect(contact).toMatchObject({
         canMessageOwner: false,
-        unavailableReason: 'no_owner_account',
+        unavailableReason: 'unclaimed',
         ...UNCAPPED,
       });
       expect(users.find).not.toHaveBeenCalled();
@@ -480,7 +514,10 @@ describe('ListingEnquiriesService', () => {
     });
 
     it('refuses an unclaimed listing with a 400 rather than opening a dead thread', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ path: 'suggest' }));
+      listings.findOne.mockResolvedValue(
+        baseListing({ path: 'suggest', ownerId: null }),
+      );
+      refuseAs('IDENTITY_HAS_NO_STAFF');
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
       ).rejects.toThrow(BadRequestException);
@@ -703,7 +740,10 @@ describe('ListingEnquiriesService', () => {
 
   describe('the quota read is not run when there is nobody to write to', () => {
     it('skips it entirely on an unclaimed listing', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ path: 'suggest' }));
+      listings.findOne.mockResolvedValue(
+        baseListing({ path: 'suggest', ownerId: null }),
+      );
+      refuseAs('IDENTITY_HAS_NO_STAFF');
       const contact = await service.getContact('drama-bar', 'member-1');
       expect(contact).toMatchObject(UNCAPPED);
       expect(enquiries.find).not.toHaveBeenCalled();

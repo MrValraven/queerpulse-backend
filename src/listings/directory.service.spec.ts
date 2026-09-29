@@ -519,8 +519,10 @@ describe('DirectoryService', () => {
 
     it('still posts the question when there is no owner to notify', async () => {
       // `Listing.ownerId` is typed non-nullable on the entity while the column
-      // is nullable in the database (`friendly`/`suggested` rows carry no
-      // owner), so the fixture states the real row shape directly.
+      // is nullable in the database: a platform-held suggestion, or any
+      // listing whose owner is null, has no owner; `friendly` is a business
+      // attribute and carries no ownership meaning. The fixture states the
+      // real row shape directly.
       listings.findOne.mockResolvedValue({
         ...LIVE_LISTING,
         ownerId: null as unknown as string,
@@ -571,6 +573,8 @@ describe('DirectoryService', () => {
         cats: ['food'],
         hood: 'Anjos',
         blurb: 'Coffee and zines.',
+        tags: [],
+        price: '',
         badge: 'owned',
         ownerName: 'Ana Silva',
         ownerRole: 'Founder',

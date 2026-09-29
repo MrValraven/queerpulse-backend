@@ -312,8 +312,15 @@ export class ListingClaimsService {
       }
 
       const listingsRepo = manager.getRepository(Listing);
+      // Locked, because `transferOwnership` saves this entity whole. An
+      // unlocked read could predate a staff edit (`ListingsService.adminUpdate`
+      // locks the same row) that commits before our save, and the save would
+      // write the stale columns back over it. Holding the row makes the edit
+      // either land first and be read here, or wait and then answer 409.
+      // Listing row first, the same order `adminUpdate` takes it in.
       const listing = await listingsRepo.findOne({
         where: { id: current.listingId },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!listing) {
         throw new NotFoundException('The claimed listing no longer exists');
@@ -517,45 +524,47 @@ export class ListingClaimsService {
   /**
    * BE-HSG-05: a claim may only target a listing nobody is actually running.
    *
-   * `Listing.ownerId` is NOT NULL, so "unowned" is a product state rather than
-   * a null: it is either a listing somebody else SUGGESTED (`path === 'suggest'`)
-   * or one submitted as a "friendly" recommendation rather than an ownership
-   * claim (`badge === 'friendly'`) — the exact two cases
-   * `ListingsService.enqueueOwnerNotifyIfNeeded` already files an owner-outreach
-   * task for, precisely so the named business can come and claim the entry — or
-   * a listing parked on a non-human platform account (`users.is_system`, the
-   * house account seeded content is attributed to). A listing whose owner row
-   * has since been erased is treated as unowned too.
+   * Ownership is decided by `ownerId` alone. A listing is claimable when no
+   * approved claim exists on it AND one of these holds:
+   *
+   *  - `ownerId` is null. A suggestion the platform still holds is saved this
+   *    way, with the suggester recorded separately in `suggestedByUserId`,
+   *    which keeps no ownership rights. An owner whose account was erased
+   *    also leaves a null `ownerId`
+   *    (`SetNullContentAuthorFksOnUserErasure1794610000000`).
+   *  - the owner row is missing.
+   *  - the owner is a non-human platform account (`users.is_system`, the
+   *    house account seeded content is attributed to).
+   *
+   * `path` and `badge` are the submitter's description of the entry and play
+   * no part here. `badge === 'friendly'` says the business is LGBTQ+ friendly
+   * as opposed to queer-owned, which a real owner picks for their own listing
+   * in the create wizard, so a friendly listing with an owner is refused like
+   * any other owned listing. A suggestion that an accepted owner offer seated
+   * a member on has a non-null `ownerId` and is refused the same way.
    *
    * Everything else has a member behind it, and approving a claim on it hands
    * an attacker that member's listing, its reviews, its ref and the personal
-   * fields on it. That is a dispute, not a claim: `POST /listings/:ref/dispute`
-   * files one through the report pipeline, where a moderator investigates
-   * rather than reassigns with one click.
+   * fields on it. This situation calls for a dispute: `POST
+   * /listings/:ref/dispute` files one through the report pipeline, where a
+   * moderator investigates before any transfer happens.
    */
   private async assertClaimable(listing: Listing): Promise<void> {
     // Checked FIRST, and it overrides everything below: once a claim on this
     // listing has been approved, the listing has found its real owner and is
-    // closed to further claims. `path`/`badge` are the SUBMITTER's description
-    // of the entry and are never rewritten by a transfer, so without this a
-    // listing that started as a suggestion would stay permanently claimable and
-    // the second claimant would take it from the business that just claimed it.
+    // closed to further claims, including after that owner's account is
+    // erased and the `ownerId` below reads null again.
     const alreadyTransferred = await this.claims.exists({
       where: { listingId: listing.id, status: ListingClaimStatus.Approved },
     });
     if (!alreadyTransferred) {
-      // Somebody else suggested this business, or recommended it as "friendly"
-      // rather than claiming to run it. Both are exactly the cases
-      // `ListingsService.enqueueOwnerNotifyIfNeeded` files an owner-outreach
-      // task for, so that the named business can come and claim the entry.
-      if (listing.path === 'suggest' || listing.badge === 'friendly') return;
-
-      // Parked on a non-human platform account (the house account seeded
-      // content is attributed to), or on an account that has since been
-      // erased. Erasure now shows up as a NULL `ownerId`
-      // (`SetNullContentAuthorFksOnUserErasure1794610000000`) rather than a
-      // missing row, and means the same thing here: the entry is claimable.
+      // Held by the platform (a suggestion nobody has taken on yet), or left
+      // ownerless by an erased account, which leaves a NULL `ownerId`
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`). Either way
+      // the entry is claimable.
       if (listing.ownerId === null) return;
+      // Parked on a non-human platform account (the house account seeded
+      // content is attributed to), or on an owner row that no longer exists.
       const owner = await this.users.findOne({
         where: { id: listing.ownerId },
         select: { id: true, isSystem: true },

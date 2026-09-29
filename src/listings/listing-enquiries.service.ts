@@ -118,13 +118,19 @@ type EnquiryQuotaState =
  *    connection is accepted). `replyRequiresConnection` is kept for existing
  *    callers.
  *
- * AN UNCLAIMED LISTING CANNOT BE MESSAGED, and says so. `suggest` and
- * `friendly` listings do have a non-null `owner_id`, but it belongs to the
- * member who suggested or recommended the place, not to the business (the same
- * distinction `ListingClaimsService.assertClaimable` is built on). Delivering a
- * question about a venue to whoever once recommended it would be worse than not
- * offering the button, so those listings answer `unclaimed` and the flow can
- * point at the claim path instead of opening a thread nobody will ever read.
+ * AN UNCLAIMED LISTING CANNOT BE MESSAGED, and says so. Ownership is read
+ * from `ownerId` alone, the same rule `ListingClaimsService.assertClaimable`
+ * is built on; `badge === 'friendly'` only says the business is LGBTQ+
+ * friendly as opposed to queer-owned, and an owned friendly listing is
+ * reachable like any other. A `suggest` listing is held by the platform:
+ * `ownerId` is null and the suggester is recorded separately in
+ * `suggestedByUserId`, which keeps no ownership rights. An ownerless listing
+ * is refused as `unclaimed` (messaging reports `IDENTITY_HAS_NO_STAFF`),
+ * unless a staff-attached co-manager has been seated on it, in which case
+ * the mailbox is reachable through that co-manager (business mailboxes
+ * design, section 9). With nobody staffing it, a question would land in a
+ * thread nobody will ever read, so an unstaffed listing answers `unclaimed`
+ * and the flow can point at the claim path instead.
  *
  * A CLAIMED LISTING IS REACHABLE WHILE ANYBODY WHO MANAGES IT CAN RECEIVE.
  * Reachability is decided from the listing's staff (`resolveReachability`),
@@ -377,12 +383,12 @@ export class ListingEnquiriesService {
    * Whether anybody who manages this listing can receive an enquiry from
    * `viewerUserId`, and the listing's mailbox identity when somebody can.
    *
-   * UNCLAIMED FIRST. The cases are the ones
-   * `ListingClaimsService.assertClaimable` treats as claimable, read from the
-   * other direction: a listing anybody may claim is by definition a listing
-   * nobody is answering messages on, whoever its `owner_id` names.
+   * Ownership is read from `ownerId` alone; `badge` describes the business
+   * and plays no part. The viewer's own listing is refused as `own_listing`
+   * first. "Unclaimed" is then messaging's `IDENTITY_HAS_NO_STAFF`: an
+   * ownerless listing with no co-manager seated on it.
    *
-   * THEN MESSAGING DECIDES, with the rule persona and company mailboxes use
+   * MESSAGING DECIDES, with the rule persona and company mailboxes use
    * (`MessagingService.identityEnquiryContactability`). The staff are the
    * owner when there is one plus every active co-manager
    * (`IdentitiesService.staffUserIds`, which also seats the thread), and the
@@ -399,9 +405,6 @@ export class ListingEnquiriesService {
     listing: Listing,
     viewerUserId: string,
   ): Promise<ListingReachability> {
-    if (listing.path === 'suggest' || listing.badge === 'friendly') {
-      return { isReachable: false, reason: 'unclaimed' };
-    }
     if (listing.ownerId === viewerUserId) {
       return { isReachable: false, reason: 'own_listing' };
     }
@@ -434,7 +437,9 @@ export class ListingEnquiriesService {
    * Messaging's refusal, in the listing's own reason codes.
    *
    *  - `IDENTITY_IS_YOUR_OWN` is a co-manager writing to their own listing.
-   *  - `IDENTITY_HAS_NO_STAFF` is an ownerless listing with no co-manager.
+   *  - `IDENTITY_HAS_NO_STAFF` is an ownerless listing with no co-manager to
+   *    answer for it, which reads the same as a listing nobody has claimed,
+   *    so it maps to `unclaimed`.
    *  - `blocked` covers both "blocked from everybody who could receive" and
    *    "nobody could receive at all". Only the first is about this member,
    *    so the staff are read once more to tell them apart: with no staff
@@ -454,7 +459,10 @@ export class ListingEnquiriesService {
       case 'IDENTITY_IS_YOUR_OWN':
         return 'own_listing';
       case 'IDENTITY_HAS_NO_STAFF':
-        return 'no_owner_account';
+        // An ownerless listing (a platform-held suggestion, or a claimed
+        // listing whose owner has since been removed) with no staff-attached
+        // co-manager reads the same as a listing nobody has claimed yet.
+        return 'unclaimed';
       case 'blocked':
         return (await this.hasReceivingStaff(listingIdentityId))
           ? 'unavailable'

@@ -368,6 +368,14 @@ export enum NotificationType {
    * Payload: `{ source: 'community', communitySlug, communityName }`.
    */
   CommunitySpaceRequestDeclined = 'community_space_request_declined',
+  /**
+   * Staff named this member a QueerPulse Ambassador. Sent to the member.
+   * Payload: `{ focusArea, communitySlug }`, the slug of the ambassadors'
+   * circle, so the bell can open it.
+   */
+  AmbassadorGranted = 'ambassador_granted',
+  /** Staff ended this member's QueerPulse Ambassador status. No payload. */
+  AmbassadorRevoked = 'ambassador_revoked',
   // Sent to a barter listing's OWNER when a member proposes a swap on it
   // (`BarterService.createProposal`). Before this, a proposal reached the
   // owner ONLY as a DM through `MessagingService.deliverEnquiry`, so the bell
@@ -1463,6 +1471,15 @@ export enum NotificationType {
    * See migration `AddSubprofileCreatorChangedNotificationType1821500300000`.
    */
   SubprofileCreatorChanged = 'subprofile_creator_changed',
+  // Go together (design spec 2026-09-28). Payloads carry eventId, eventSlug,
+  // eventTitle and, where relevant, groupId, conversationId, isFinal,
+  // mergeOfferGroupId, actorId.
+  GoTogetherPairInvite = 'go_together_pair_invite',
+  GoTogetherGroupReady = 'go_together_group_ready',
+  GoTogetherUnmatched = 'go_together_unmatched',
+  GoTogetherMemberLeft = 'go_together_member_left',
+  GoTogetherMeetAgain = 'go_together_meet_again',
+  GoTogetherMutual = 'go_together_mutual',
 }
 
 @Entity('notifications')

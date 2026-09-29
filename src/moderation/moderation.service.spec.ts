@@ -3643,7 +3643,12 @@ describe('ModerationService', () => {
         ]),
       );
       communityMembership.refsByIds.mockResolvedValue(
-        new Map([['community-1', { slug: 'porto-queers', name: 'Porto' }]]),
+        new Map([
+          [
+            'community-1',
+            { slug: 'porto-queers', name: 'Porto', avatarImageUrl: null },
+          ],
+        ]),
       );
 
       const page = await service.list({});

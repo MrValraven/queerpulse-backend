@@ -178,7 +178,8 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'avatarUrl',
     idColumn: 'id',
     labelColumns: ['displayName'],
-    slugColumn: 'slug',
+    // The FE builds `/p/<slug>` from this field, so it must carry the handle.
+    slugColumn: 'handle',
   }),
   plainSource({
     type: 'persona-cover',
@@ -187,7 +188,8 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'coverUrl',
     idColumn: 'id',
     labelColumns: ['displayName'],
-    slugColumn: 'slug',
+    // The FE builds `/p/<slug>` from this field, so it must carry the handle.
+    slugColumn: 'handle',
   }),
   plainSource({
     type: 'community-post',
@@ -390,8 +392,8 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
 ];
 
 // --- persona-item — SPECIAL source, not the generic plainSource. ---------
-// `SubprofileItem.imageUrl` matches, but the item row has no persona slug of
-// its own — the reference must LINK to the PARENT persona (`/p/<slug>`). So
+// `SubprofileItem.imageUrl` matches, but the item row has no persona handle of
+// its own: the reference must LINK to the PARENT persona (`/p/<handle>`). So
 // this source resolves matching items first, then looks up the parent
 // `Subprofile` rows (there is no ORM relation between the two entities) and
 // returns the PARENT persona's id as `entityId` (not the item's own id) so
@@ -415,10 +417,11 @@ const PERSONA_ITEM_SOURCE: MediaReferenceSource = {
     const subprofileRepository = dataSource.getRepository(Subprofile);
     const parentSubprofiles = await subprofileRepository.find({
       where: { id: In(parentSubprofileIds) },
-      select: ['id', 'slug'],
+      select: ['id', 'handle'],
     });
-    const parentSlugById = new Map(
-      parentSubprofiles.map((subprofile) => [subprofile.id, subprofile.slug]),
+    // The FE builds `/p/<slug>` from this field, so it must carry the handle.
+    const parentHandleById = new Map(
+      parentSubprofiles.map((subprofile) => [subprofile.id, subprofile.handle]),
     );
 
     return matchingItems.map((item) => {
@@ -427,7 +430,7 @@ const PERSONA_ITEM_SOURCE: MediaReferenceSource = {
         type: 'persona-item',
         entityId: item.subprofileId,
         label: item.title ?? '',
-        slug: parentSlugById.get(item.subprofileId) ?? '',
+        slug: parentHandleById.get(item.subprofileId) ?? '',
       };
       return [bareKey, reference] as [string, MediaReference];
     });

@@ -6,6 +6,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, FindOperator } from 'typeorm';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandlesService } from '../handles/handles.service';
@@ -107,6 +108,10 @@ describe('ProfilesService board lifecycle', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ProfilesService,
+        {
+          provide: AmbassadorStatusService,
+          useValue: { findActive: jest.fn().mockResolvedValue(null) },
+        },
         { provide: getRepositoryToken(Profile), useValue: findEmpty() },
         { provide: getRepositoryToken(SocialLink), useValue: findEmpty() },
         { provide: getRepositoryToken(WorkItem), useValue: findEmpty() },

@@ -96,6 +96,18 @@ export class MagazineIssue {
   @Column({ type: 'date', nullable: true })
   submissionDeadline!: string | null;
 
+  /**
+   * The day this issue stops taking copy: after it, the desk is laying out
+   * and shipping what it has. A Postgres `date` (`YYYY-MM-DD`, same handling
+   * as `publishedOn`). It sits between the two other dates on this row:
+   * `submissionDeadline` is the last day for pitches, `closesOn` is the last
+   * day for filed pieces, and `publishedOn` is when the issue goes out. NULL
+   * until an editor sets one, and the desk header shows no countdown while
+   * it is NULL.
+   */
+  @Column({ type: 'date', nullable: true })
+  closesOn!: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   coverUrl!: string | null;
 

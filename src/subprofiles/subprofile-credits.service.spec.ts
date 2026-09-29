@@ -296,6 +296,69 @@ describe('SubprofileCreditsService', () => {
       );
     });
 
+    it('deep-links a linked persona that holds a handle to its /p/ page', async () => {
+      const sp = makeSubprofile({
+        slug: 'dj-set',
+        handle: 'ana-dj-set',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      });
+      membersRepo.find.mockResolvedValue([
+        { userId: 'user-1' } as SubprofileMember,
+      ]);
+      handleRegistry.find.mockResolvedValue([
+        makeHandleRow({ name: 'alice', userId: 'user-2' }),
+      ]);
+      profilesRepo.findOne.mockResolvedValue({ slug: 'ana' } as Profile);
+
+      await service.emitSubprofileCreditNotifications(
+        sp,
+        'sp-1',
+        ['alice'],
+        [{ title: 'Collab track', collaborators: ['alice'] }],
+        [['alice']],
+      );
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'user-2',
+        NotificationType.SubprofileCredit,
+        expect.objectContaining({ deepLink: '/p/ana-dj-set' }),
+        'user-1',
+      );
+      // The handle alone builds the address, so the creator's profile is
+      // never looked up.
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the nested path for a linked persona with no handle yet', async () => {
+      const sp = makeSubprofile({
+        slug: 'dj-set',
+        handle: null,
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      });
+      membersRepo.find.mockResolvedValue([
+        { userId: 'user-1' } as SubprofileMember,
+      ]);
+      handleRegistry.find.mockResolvedValue([
+        makeHandleRow({ name: 'alice', userId: 'user-2' }),
+      ]);
+      profilesRepo.findOne.mockResolvedValue({ slug: 'ana' } as Profile);
+
+      await service.emitSubprofileCreditNotifications(
+        sp,
+        'sp-1',
+        ['alice'],
+        [{ title: 'Collab track', collaborators: ['alice'] }],
+        [['alice']],
+      );
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'user-2',
+        NotificationType.SubprofileCredit,
+        expect.objectContaining({ deepLink: '/members/ana/dj-set' }),
+        'user-1',
+      );
+    });
+
     it('emits exactly one notification PER newly-credited handle, never once for the whole batch', async () => {
       const sp = makeSubprofile();
       membersRepo.find.mockResolvedValue([

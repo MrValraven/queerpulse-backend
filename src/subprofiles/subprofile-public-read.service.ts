@@ -52,7 +52,13 @@ import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
+import { kindsMatchingSearch } from './subprofile-kind-search';
 import { SubprofileMembershipService } from './subprofile-membership.service';
+import {
+  QUEST_KINDS,
+  toCardTableSummary,
+  type CardTableSummary,
+} from './subprofile-table-summary';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 import {
   AffiliationView,
@@ -386,30 +392,96 @@ export class SubprofilePublicReadService {
     );
   }
 
-  // Unlinked persona reachable by its global handle (owner-stripped, unless
-  // the viewer IS the owner/a co-owner). `viewer` is `undefined` for an
-  // anonymous caller — the by-handle route now allows signed-out visitors so
-  // an anonymous visitor on a `network` persona gets `members_only` rather
-  // than a blanket 401 (design plan Phase 1b Task 1). Status/visibility are no
-  // longer pre-filtered in the query — `buildPublicView` below decides,
-  // per the Shared Contract rule order, whether this viewer may see it at all.
+  // Any persona reachable by its global handle: both link kinds live at
+  // `/p/<handle>`. A LINKED persona carries its creator's name and profile slug
+  // in the view, as it does on the nested route. An UNLINKED one stays
+  // owner-stripped, so its owner identity never leaks through this read.
+  // `viewer` is `undefined` for an anonymous caller: the by-handle route allows
+  // signed-out visitors so an anonymous visitor on a `network` or linked
+  // persona gets `members_only` rather than a blanket 401 (design plan Phase
+  // 1b Task 1). Status/visibility are no longer pre-filtered in the query:
+  // `buildPublicView` below decides, per the Shared Contract rule order,
+  // whether this viewer may see it at all.
   async getByHandle(
     handle: string,
     viewer: CurrentUserData | undefined,
   ): Promise<SubprofilePublicView> {
-    const sp = await this.subprofiles.findOne({
-      where: {
-        handle,
-        linkVisibility: SubprofileLinkVisibility.Unlinked,
-      },
-    });
+    // The unique index on `handle` covers published rows only, so a draft may
+    // hold the same name as a published persona; the published row wins. Two
+    // explicit lookups say so directly, where an `ORDER BY status` would lean
+    // on the enum's declaration order. With no published holder, the draft
+    // fallback is `draftForHandle` below, which prefers the viewer's own.
+    const sp =
+      (await this.subprofiles.findOne({
+        where: { handle, status: SubprofileStatus.Published },
+      })) ?? (await this.draftForHandle(handle, viewer));
     if (!sp) {
       // PRD-204: no live persona holds this handle, but the persona that used
       // to may still be inside its reclaim cooldown. Always throws.
       return this.throwPersonaMovedOrNotFound(handle, viewer);
     }
-    // no owner ref → owner identity never leaks for an unlinked persona.
-    return this.buildPublicView(sp, viewer, undefined);
+    return this.buildPublicView(sp, viewer, await this.linkedOwnerRefFor(sp));
+  }
+
+  // The draft `/p/<handle>` resolves to when no published persona holds the
+  // name. A linked persona stores its derived handle from the moment it is
+  // created, and the unique index only binds published rows, so two drafts can
+  // end up sharing a name (the derivation skips names other rows store, but a
+  // draft older than that rule, or a race between two creates, can still
+  // collide). The owner previewing their own draft must land on it, so a draft
+  // the viewer co-owns wins. Everyone else keeps the oldest draft, which
+  // `buildPublicView` then hides from a non-owner as a plain 404 anyway.
+  //
+  // One query for the drafts, plus one batched roster lookup only when there
+  // is more than one draft to choose between and a signed-in viewer to choose
+  // for. `null` when no draft holds the name either.
+  private async draftForHandle(
+    handle: string,
+    viewer: CurrentUserData | undefined,
+  ): Promise<Subprofile | null> {
+    const drafts = await this.subprofiles.find({
+      where: { handle, status: SubprofileStatus.Draft },
+      order: { createdAt: 'ASC', id: 'ASC' },
+    });
+    const [oldestDraft] = drafts;
+    if (!oldestDraft) {
+      return null;
+    }
+    if (drafts.length === 1 || !viewer) {
+      return oldestDraft;
+    }
+    const viewerMemberRows = await this.members.find({
+      where: {
+        subprofileId: In(drafts.map((draft) => draft.id)),
+        userId: viewer.userId,
+      },
+      select: { subprofileId: true },
+    });
+    const viewerDraftIds = new Set(
+      viewerMemberRows.map((row) => row.subprofileId),
+    );
+    return drafts.find((draft) => viewerDraftIds.has(draft.id)) ?? oldestDraft;
+  }
+
+  // The creator's name and profile slug for a LINKED persona, built exactly as
+  // `getBySlugForProfile` builds them. `undefined` for an unlinked persona (its
+  // owner stays anonymous) and for a creator with no profile row.
+  private async linkedOwnerRefFor(
+    sp: Subprofile,
+  ): Promise<SubprofileOwnerRef | undefined> {
+    if (sp.linkVisibility !== SubprofileLinkVisibility.Linked) {
+      return undefined;
+    }
+    const profile = await this.profiles.findOne({
+      where: { userId: sp.userId },
+    });
+    if (!profile) {
+      return undefined;
+    }
+    return {
+      slug: profile.slug,
+      name: `${profile.firstName} ${profile.lastName}`.trim(),
+    };
   }
 
   /**
@@ -456,13 +528,12 @@ export class SubprofilePublicReadService {
       where: { id: previousOwnerSubprofileId },
     });
     // A persona with no current handle has not moved anywhere: it released the
-    // name by unpublishing or by going linked, and there is no new address to
-    // send anyone to. Same plain 404.
-    if (
-      !moved ||
-      !moved.handle ||
-      moved.linkVisibility !== SubprofileLinkVisibility.Unlinked
-    ) {
+    // name by unpublishing, and there is no new address to send anyone to.
+    // Same plain 404. Both link kinds forward a handle rename, since both live
+    // at `/p/<handle>`; the visibility check below still keeps a linked
+    // persona's forward from a signed-out caller, who gets `members_only`
+    // there and so the plain 404 here.
+    if (!moved || !moved.handle) {
       throw new NotFoundException('Subprofile not found');
     }
     await this.assertMovedTargetVisibleOrNotFound(
@@ -660,7 +731,8 @@ export class SubprofilePublicReadService {
    *   - it must pass `assertMovedTargetVisibleOrNotFound`, so a persona that is
    *     private, network-only for this viewer, a draft, removed, taken down or
    *     blocked either way with its current creator answers exactly like an
-   *     address nobody ever held.
+   *     address nobody ever held. A linked persona is members-only, so a
+   *     signed-out caller always gets that plain 404 here.
    *   - the viewer must not be blocked either way with the PREVIOUS creator.
    *     The forward names the new creator, but it also confirms that the
    *     previous creator made this persona. Before the handoff a blocked
@@ -748,9 +820,9 @@ export class SubprofilePublicReadService {
    * driving the frontend's draft banner). Everyone else is gated in order:
    * `removedAt` set → 403 `removed`; not published → 404 (an unpublished draft
    * is invisible to a non-owner, never a distinct restricted state); `private`
-   * → 403 `private`; `network` and the viewer isn't an authenticated active
-   * member → 403 `members_only`; a moderator takedown → 404; blocked either
-   * way → 404.
+   * → 403 `private`; `network` OR linked, and the viewer isn't an
+   * authenticated active member → 403 `members_only`; a moderator takedown →
+   * 404; blocked either way → 404.
    *
    * Its own method because PRD-204's forwarding has to reach the SAME verdict
    * before it will name a persona it is about to send someone to
@@ -775,10 +847,13 @@ export class SubprofilePublicReadService {
     if (sp.visibility === SubprofileVisibility.Private) {
       throw new ForbiddenException(restrictedAccessBody('private'));
     }
-    if (
-      sp.visibility === SubprofileVisibility.Network &&
-      viewer?.status !== UserStatus.Active
-    ) {
+    // A linked persona names its owner, and member profiles are members-only,
+    // so it gets the same wall as a `network` persona for anyone who is not an
+    // active member, whatever its own visibility says.
+    const isMembersOnly =
+      sp.visibility === SubprofileVisibility.Network ||
+      sp.linkVisibility === SubprofileLinkVisibility.Linked;
+    if (isMembersOnly && viewer?.status !== UserStatus.Active) {
       throw new ForbiddenException(restrictedAccessBody('members_only'));
     }
     // Pre-existing moderator-takedown withhold — a SEPARATE mechanism from
@@ -953,14 +1028,23 @@ export class SubprofilePublicReadService {
       // The persona's own name/tagline keep their plain ILIKE: those two
       // columns carry GIN trigram indexes built on the unfolded values, and
       // folding them here would silently stop using them.
+      // A term that names a profession ("dm", "mestre de jogo", "cosplay")
+      // also matches every persona of that kind, whatever it is called. The
+      // kind column is covered by IDX_subprofiles_directory.
+      const searchKinds = kindsMatchingSearch(query.query);
+      const kindBranch =
+        searchKinds.length > 0 ? ' OR sp.kind IN (:...searchKinds)' : '';
       qb.andWhere(
-        '(sp.displayName ILIKE :term OR sp.tagline ILIKE :term OR ' +
+        '(sp.displayName ILIKE :term OR sp.tagline ILIKE :term' +
+          kindBranch +
+          ' OR ' +
           `(sp.linkVisibility = :linkedForSearch AND ${OWNER_SEARCH_HAYSTACK} ` +
           `LIKE ${foldedSearchTerm('ownerTerm')}))`,
         {
           term,
           ownerTerm: term,
           linkedForSearch: SubprofileLinkVisibility.Linked,
+          searchKinds,
         },
       );
     }
@@ -1008,15 +1092,16 @@ export class SubprofilePublicReadService {
           .map((row) => row.userId),
       ),
     ];
-    // The four per-page fan-out reads are mutually independent — batched into
-    // one round trip. Each is ONE grouped query over the page's ids, never
-    // per-card (Personas redesign Phase 4, design plan Decision §3).
+    // The six per-page fan-out reads are mutually independent, batched into
+    // one round trip. Each is ONE grouped query over the page's ids
+    // (Personas redesign Phase 4, design plan Decision §3).
     const [
       socialCountsById,
       tagsById,
       followerCountsById,
       ownerProfiles,
       crops,
+      tableSummariesById,
     ] = await Promise.all([
       this.loadSocialCountsFor(rowIds),
       this.loadContentTagsFor(rowIds),
@@ -1040,6 +1125,7 @@ export class SubprofilePublicReadService {
           ),
         ),
       ),
+      this.loadTableSummariesFor(rows),
     ]);
     const ownerSlugByUserId = new Map(
       ownerProfiles.map((profile) => [profile.userId, profile.slug]),
@@ -1062,6 +1148,7 @@ export class SubprofilePublicReadService {
           ownerSlugByUserId.get(row.userId) ?? null,
           crops,
           ownerNameByUserId.get(row.userId) ?? null,
+          tableSummariesById.get(row.id),
         ),
       ),
       total,
@@ -1592,5 +1679,36 @@ export class SubprofilePublicReadService {
       tagsBySubprofileId.set(row.subprofileId, existing);
     }
     return tagsBySubprofileId;
+  }
+
+  /**
+   * The "At the table" summary for the Quest personas on one directory page,
+   * in ONE query that reads only that jsonb key; the directory select leaves
+   * `skin_data` out. Values are cleaned by `toCardTableSummary`, so junk
+   * stored through the schemaless PATCH never reaches a card.
+   */
+  private async loadTableSummariesFor(
+    rows: Pick<Subprofile, 'id' | 'kind'>[],
+  ): Promise<Map<string, CardTableSummary>> {
+    const summaries = new Map<string, CardTableSummary>();
+    const kindById = new Map(
+      rows
+        .filter((row) => QUEST_KINDS.has(row.kind))
+        .map((row) => [row.id, row.kind]),
+    );
+    if (kindById.size === 0) return summaries;
+    const rawRows = await this.subprofiles
+      .createQueryBuilder('sp')
+      .select('sp.id', 'id')
+      .addSelect(`"sp"."skin_data" -> 'atTheTable'`, 'at_the_table')
+      .where('sp.id IN (:...ids)', { ids: [...kindById.keys()] })
+      .getRawMany<{ id: string; at_the_table: unknown }>();
+    for (const raw of rawRows) {
+      const kind = kindById.get(raw.id);
+      if (!kind) continue;
+      const summary = toCardTableSummary(kind, raw.at_the_table);
+      if (summary) summaries.set(raw.id, summary);
+    }
+    return summaries;
   }
 }

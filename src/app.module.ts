@@ -76,10 +76,12 @@ import { PlatformStaffModule } from './platform-staff/platform-staff.module';
 import { PublicEligibilityModule } from './public-eligibility/public-eligibility.module';
 import { PushModule } from './push/push.module';
 import { EventsModule } from './events/events.module';
+import { GoTogetherModule } from './go-together/go-together.module';
 import { CalendarFeedModule } from './calendar-feed/calendar-feed.module';
 import { JobsModule } from './jobs/jobs.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PartnersModule } from './partners/partners.module';
+import { AmbassadorsModule } from './ambassadors/ambassadors.module';
 import { OrgTiersModule } from './org-tiers/org-tiers.module';
 import { StorageModule } from './storage/storage.module';
 import { StorageKeyOwnershipInterceptor } from './storage/storage-key-ownership.interceptor';
@@ -273,6 +275,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     StickersModule,
     AdminStickersModule,
     EventsModule,
+    GoTogetherModule,
     CalendarFeedModule,
     CommunitiesModule,
     CompaniesModule,
@@ -281,6 +284,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     IdentityContactModule,
     JobsModule,
     PartnersModule,
+    AmbassadorsModule,
     InquiriesModule,
     OrgTiersModule,
     VolunteeringModule,

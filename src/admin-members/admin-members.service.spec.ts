@@ -329,6 +329,39 @@ describe('AdminMembersService', () => {
       );
     });
 
+    it('matches a name search on the server, folded and with LIKE wildcards escaped', async () => {
+      const profileQueryBuilder = makeQueryBuilderStub({
+        getManyAndCount: [[], 0],
+      });
+      profiles.createQueryBuilder.mockReturnValue(profileQueryBuilder);
+
+      await service.list({ q: '  Joao_%  ' });
+
+      const andWhereCalls = (profileQueryBuilder.andWhere?.mock.calls ??
+        []) as [string, unknown][];
+      const searchCall = andWhereCalls.find(([clause]) =>
+        clause.includes(':searchTerm'),
+      );
+      expect(searchCall).toBeDefined();
+      const [clause, parameters] = searchCall ?? ['', undefined];
+      expect(clause).toContain('"profile"."first_name"');
+      expect(clause).toContain('"profile"."pronouns"');
+      expect(clause).toContain('translate(');
+      expect(clause).toContain("ESCAPE '\\'");
+      expect(parameters).toEqual({ searchTerm: '%Joao\\_\\%%' });
+    });
+
+    it('adds no search clause for a blank query', async () => {
+      const profileQueryBuilder = makeQueryBuilderStub({
+        getManyAndCount: [[], 0],
+      });
+      profiles.createQueryBuilder.mockReturnValue(profileQueryBuilder);
+
+      await service.list({ q: '   ' });
+
+      expect(profileQueryBuilder.andWhere).not.toHaveBeenCalled();
+    });
+
     it('defaults to page 1 and returns an empty envelope with no members', async () => {
       profiles.createQueryBuilder.mockReturnValue(
         makeQueryBuilderStub({ getManyAndCount: [[], 0] }),

@@ -969,6 +969,7 @@ export class ConversationsService {
         dissolvedAt: isGroup
           ? (convo.dissolvedAt?.toISOString() ?? null)
           : null,
+        eventMatchGroupId: isGroup ? convo.eventMatchGroupId : null,
         leftReason: isGroup
           ? computeGroupLeftReason({
               leftAt: part.leftAt,
@@ -2203,6 +2204,7 @@ export class ConversationsService {
       memberPreview: [],
       description: null,
       dissolvedAt: null,
+      eventMatchGroupId: null,
       leftReason: null,
       inviteToken: null,
       pendingInvites: [],

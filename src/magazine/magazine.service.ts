@@ -57,6 +57,21 @@ import {
   toSectionResponse,
 } from './magazine-response';
 
+/**
+ * The 409 `code` `updateDeck` answers when a publish-state change targets a
+ * deck a desk piece links to. The deck editor reads it to send the same act
+ * through the piece's publish/unpublish endpoints instead.
+ */
+export const DECK_PUBLISH_VIA_PIECE_CODE = 'magazine_deck_publish_via_piece';
+
+/** Two nullable publish instants name the same moment (or are both null). */
+function isSameInstant(left: Date | null, right: Date | null): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  return left.getTime() === right.getTime();
+}
+
 export interface ListArticlesInput {
   issue?: string;
   tag?: string;
@@ -1085,6 +1100,29 @@ export class MagazineService {
     // Both omitted leaves the current state alone.
     const nextPublishedAt = this.resolveDeckPublishedAt(deck, dto);
 
+    // A deck a desk piece links to goes live (or comes down) through the
+    // piece: `MagazinePieceService.publishPiece` runs the care gate (consent,
+    // sensitivity read), moves the piece's stage, records the audit event and
+    // rings the writer's bell, and this endpoint does none of that. Any change
+    // to the publish instant is refused here, before anything is written, so
+    // the deck editor has to take the piece path. The piece id rides along so
+    // a client can reroute the same click. Plain saves (no publish control,
+    // or the instant already stored) are untouched.
+    if (!isSameInstant(nextPublishedAt, deck.publishedAt)) {
+      const linkedPiece = await this.pieces.findOne({
+        where: { deckId: id },
+        select: { id: true },
+      });
+      if (linkedPiece) {
+        throw new ConflictException({
+          message:
+            'This deck belongs to a desk piece. Publish or unpublish it from the piece.',
+          code: DECK_PUBLISH_VIA_PIECE_CODE,
+          pieceId: linkedPiece.id,
+        });
+      }
+    }
+
     // The readiness bar, re-checked server-side (PRD-131). It mirrors the
     // REQUIRED items of the editor's own checklist (see `isDeckPublishReady`),
     // so a direct request cannot do what the UI refuses to: publish an empty
@@ -1100,6 +1138,7 @@ export class MagazineService {
     }
     deck.publishedAt = nextPublishedAt;
 
+    const deckTitleBeforeUpdate = deck.title;
     Object.assign(deck, {
       ...(dto.slug !== undefined ? { slug: dto.slug } : {}),
       ...(dto.title !== undefined ? { title: dto.title } : {}),
@@ -1116,6 +1155,21 @@ export class MagazineService {
     });
 
     await this.decks.save(deck);
+
+    // The desk, the command palette and the piece record all read
+    // `MagazinePiece.title`. A deck built from the desk starts as "Untitled
+    // deck", so the linked piece follows the deck editor's real headline, the
+    // same way `updateArticleDraft` keeps an article piece's title in step.
+    // One query, and a no-op for a deck no piece links to.
+    const nextTitle = deck.title.trim();
+    if (
+      dto.title !== undefined &&
+      nextTitle &&
+      nextTitle !== deckTitleBeforeUpdate
+    ) {
+      await this.pieces.update({ deckId: id }, { title: nextTitle });
+    }
+
     return toDeckResponse(deck);
   }
 

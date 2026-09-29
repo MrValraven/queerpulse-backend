@@ -8,6 +8,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { toImageUrl } from '../common/image-url';
 import {
   DataSource,
   FindOptionsWhere,
@@ -70,15 +71,16 @@ import {
 // consistent with that precedent).
 export interface CreateOpportunityInput {
   org: string;
-  // Resolved to `partner_id` via `PartnersService.idBySlug` — see
-  // `resolvePartnerId`/`createWithUniqueSlug`. `null` when absent or when the
-  // slug doesn't resolve to any partner (any `status` counts as a match; see
-  // `PartnersService.idBySlug`).
+  // Resolved to `partner_id` via `PartnersService.ownedIdBySlug` (see
+  // `resolvePartnerId`). `null` when absent or `''`. An approved partner the
+  // poster does not maintain 403s and every other miss (unknown slug, pending
+  // or rejected application) 404s, except an unchanged link on update, which
+  // is kept as is.
   partnerSlug?: string;
   // Resolved to `community_id` via
-  // `CommunityMembershipService.assertMemberBySlug` — see
-  // `resolveCommunityId`. Unlike `partnerSlug`, an unknown/non-member slug
-  // throws (404/403) rather than resolving to `null`.
+  // `CommunityMembershipService.assertOwnerOrModBySlug` (see
+  // `resolveCommunityId`). Same rules as `partnerSlug`, with owner/mod
+  // standing as the test. At most one of the two may be non-empty (400).
   communitySlug?: string;
   role: string;
   // One to three, poster-ordered. Deduplicated by `dedupeCauses` before it
@@ -157,6 +159,21 @@ function dedupeCauses(causes: OpportunityCause[]): OpportunityCause[] {
   return [...new Set(causes)];
 }
 
+/** An opportunity is attributed to at most ONE linked organisation: a partner
+ * or a community. The picker sends `''` for the side it leaves empty, so only
+ * a request carrying two non-empty slugs is refused (400). Checked on create
+ * and on update, before anything resolves or saves. */
+function assertSingleOrganisationLink(dto: {
+  partnerSlug?: string;
+  communitySlug?: string;
+}): void {
+  if (dto.partnerSlug && dto.communitySlug) {
+    throw new BadRequestException(
+      'An opportunity can be linked to one organisation: a partner or a community',
+    );
+  }
+}
+
 /** Fills every `OpportunityDetailBody` subfield so the `jsonb NOT NULL`
  * `detail` column is always fully populated, even when a caller only
  * supplies part of it (or omits it entirely at creation). Mirrors
@@ -218,7 +235,10 @@ export class VolunteeringService {
     const MAX_ATTEMPTS = 5;
     // Resolved once, outside the retry loop — these are reads against
     // Partners/Communities, not part of the slug-race being retried below.
-    const partnerId = await this.resolvePartnerId(dto.partnerSlug);
+    // A new opportunity has no current link, so both resolvers run their
+    // full ownership checks.
+    assertSingleOrganisationLink(dto);
+    const partnerId = await this.resolvePartnerId(dto.partnerSlug, posterId);
     const communityId = await this.resolveCommunityId(
       dto.communitySlug,
       posterId,
@@ -357,6 +377,7 @@ export class VolunteeringService {
         'Only the poster can update this opportunity',
       );
     }
+    assertSingleOrganisationLink(dto);
 
     Object.assign(opportunity, {
       ...(dto.org !== undefined ? { org: dto.org } : {}),
@@ -371,22 +392,34 @@ export class VolunteeringService {
       ...(dto.applyRole !== undefined ? { applyRole: dto.applyRole } : {}),
     });
 
-    // Unlike `handle`/`team`, `partnerSlug` IS a legitimate PATCH field — see
-    // `UpdateOpportunityInput`'s comment. Absent (`undefined`) leaves the
-    // existing link untouched; present (even `''`/unknown) re-resolves it,
-    // including clearing it back to `null` for an unknown slug.
+    // Unlike `handle`/`team`, `partnerSlug` IS a legitimate PATCH field (see
+    // `UpdateOpportunityInput`'s comment). Absent (`undefined`) leaves the
+    // existing link untouched; `''` clears it; any other slug re-resolves it.
+    // The current id is passed so an unchanged link (the edit form always
+    // re-sends the full state) is kept without re-running the ownership check.
     if (dto.partnerSlug !== undefined) {
-      opportunity.partnerId = await this.resolvePartnerId(dto.partnerSlug);
+      opportunity.partnerId = await this.resolvePartnerId(
+        dto.partnerSlug,
+        posterId,
+        opportunity.partnerId,
+      );
     }
 
-    // Same "absent leaves it, present re-resolves/clears it" semantics as
-    // `partnerSlug` above, via `resolveCommunityId` instead.
+    // Same "absent leaves it, `''` clears it, a slug re-resolves it" semantics
+    // as `partnerSlug` above, via `resolveCommunityId` instead.
     if (dto.communitySlug !== undefined) {
       opportunity.communityId = await this.resolveCommunityId(
         dto.communitySlug,
         posterId,
+        opportunity.communityId,
       );
     }
+
+    // One linked organisation at most. Linking one side clears the other, so
+    // a partial PATCH that names only the new side cannot leave both set.
+    // Runs after both resolvers, which read the current ids above.
+    if (dto.partnerSlug) opportunity.communityId = null;
+    if (dto.communitySlug) opportunity.partnerId = null;
 
     // `why`/`tasks`/`commitments`/`goodFor`/`teamIntro` are flat fields on
     // `CreateOpportunityDto` (unlike Jobs' single nested `detail` object), so
@@ -1148,17 +1181,40 @@ export class VolunteeringService {
     );
   }
 
-  /** Resolves a `partnerSlug` to a `partner_id`, treating an absent or
-   * unknown slug identically as `null` (`PartnersService.idBySlug` itself
-   * never throws — see its doc comment on why "any status" counts as a
-   * match). */
-  private async resolvePartnerId(slug?: string): Promise<string | null> {
+  /**
+   * Resolves a `partnerSlug` to a `partner_id`, asserting the given user
+   * MAINTAINS that partner (`PartnersService.ownedIdBySlug`: an approved
+   * partner they do not maintain 403s, every other miss 404s, including a
+   * pending or rejected application). Linking an opportunity to an
+   * organisation is speaking for it. An absent or empty slug resolves to
+   * `null`, which is how the edit form clears the link.
+   *
+   * UNCHANGED LINK IS KEPT. When `currentPartnerId` is set and `slug` is that
+   * partner's slug, the current id comes back without the ownership check.
+   * The edit form re-sends the full state on every save, so a legacy link to
+   * a partner the poster does not maintain (linked before this check existed,
+   * or a seat staff later moved) survives an edit that leaves it alone. A
+   * changed or new slug always runs the full check.
+   */
+  private async resolvePartnerId(
+    slug: string | undefined,
+    userId: string,
+    currentPartnerId?: string | null,
+  ): Promise<string | null> {
     if (!slug) return null;
-    return this.partnersService.idBySlug(slug);
+    if (currentPartnerId) {
+      const currentRefs = await this.partnersService.refsByIds([
+        currentPartnerId,
+      ]);
+      if (currentRefs.get(currentPartnerId)?.slug === slug) {
+        return currentPartnerId;
+      }
+    }
+    return this.partnersService.ownedIdBySlug(slug, userId);
   }
 
   /**
-   * Batches `partnerId -> {slug,name}` resolution through
+   * Batches `partnerId -> {slug,name,logo}` resolution through
    * `PartnersService.refsByIds` (mirrors `spotsFilledForMany`'s "one query
    * for the whole page/id-set" shape), deduping and dropping `null`s first so
    * a page of cards with no partner links never even calls out to Partners.
@@ -1213,18 +1269,36 @@ export class VolunteeringService {
     );
   }
 
-  /** Resolves a `communitySlug` to a `community_id`, asserting the given
+  /**
+   * Resolves a `communitySlug` to a `community_id`, asserting the given
    * user owns or moderates that community (see
-   * `CommunityMembershipService.assertOwnerOrModBySlug` — unknown slug 404s,
+   * `CommunityMembershipService.assertOwnerOrModBySlug`: unknown slug 404s,
    * non-owner/mod 403s). Attributing an opportunity to a community is
    * speaking for it, so plain membership isn't enough. Absent/empty slug
    * resolves to `null`, same "clears the link" convention as
-   * `resolvePartnerId`. */
+   * `resolvePartnerId`.
+   *
+   * UNCHANGED LINK IS KEPT, by the same rule as `resolvePartnerId`: when
+   * `currentCommunityId` is set and `slug` is that community's slug, the
+   * current id comes back without the owner/mod or space checks. A poster who
+   * has since lost their mod role can still save their opportunity, because
+   * the edit form re-sends the community slug on every save. A changed or new
+   * slug runs the owner/mod and space checks.
+   */
   private async resolveCommunityId(
     slug: string | undefined,
     userId: string,
+    currentCommunityId?: string | null,
   ): Promise<string | null> {
     if (!slug) return null;
+    if (currentCommunityId) {
+      const currentRefs = await this.communityMembership.refsByIds([
+        currentCommunityId,
+      ]);
+      if (currentRefs.get(currentCommunityId)?.slug === slug) {
+        return currentCommunityId;
+      }
+    }
     const communityId = await this.communityMembership.assertOwnerOrModBySlug(
       slug,
       userId,
@@ -1241,15 +1315,25 @@ export class VolunteeringService {
     return communityId;
   }
 
-  /** Batches `communityId -> {slug,name}` resolution through
+  /** Batches `communityId -> {slug,name,avatarUrl}` resolution through
    * `CommunityMembershipService.refsByIds`, mirroring
-   * `partnerRefsForMany`. */
+   * `partnerRefsForMany`. The raw stored avatar is resolved with
+   * `toImageUrl` here, so a `CommunityRef` only ever carries a fetchable URL. */
   private async communityRefsForMany(
     communityIds: (string | null)[],
   ): Promise<Map<string, CommunityRef>> {
     const ids = [...new Set(communityIds.filter((id): id is string => !!id))];
     if (!ids.length) return new Map();
-    return this.communityMembership.refsByIds(ids);
+    const rawRefs = await this.communityMembership.refsByIds(ids);
+    const resolvedRefs = new Map<string, CommunityRef>();
+    for (const [communityId, rawRef] of rawRefs) {
+      resolvedRefs.set(communityId, {
+        slug: rawRef.slug,
+        name: rawRef.name,
+        avatarUrl: toImageUrl(rawRef.avatarImageUrl),
+      });
+    }
+    return resolvedRefs;
   }
 
   private async spotsFilledFor(opportunityId: string): Promise<number> {

@@ -157,6 +157,10 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // its reader is exposed. It yields `actor: null` and reads as the platform,
   // and its emit site passes no `actorId` to `create` either, so there is no
   // block or mute gate to lose.
+  // Go together. The friend who sent the pair invite, and the other member of
+  // a mutual "meet again", so the bell names them and block and mute apply.
+  [NotificationType.GoTogetherPairInvite]: 'actorId',
+  [NotificationType.GoTogetherMutual]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -499,6 +503,10 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.CommunityTagRequestResolved]: ['label'],
     [NotificationType.CommunitySpaceRequestApproved]: ['communityName'],
     [NotificationType.CommunitySpaceRequestDeclined]: ['communityName'],
+    // The ambassador's own focus key and the circle's slug for the deep link.
+    // The internal grant and revoke reasons are never on a notification.
+    [NotificationType.AmbassadorGranted]: ['focusArea', 'communitySlug'],
+    [NotificationType.AmbassadorRevoked]: [],
     [NotificationType.CommunityRoleChanged]: ['communityName', 'role'],
     [NotificationType.CommunityMemberRemoved]: ['communityName'],
     [NotificationType.CommunityOwnershipTransferred]: ['communityName'],
@@ -793,6 +801,34 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // own review text is absent for the stronger reason that this allowlist
     // carries no member-authored content at all.
     [NotificationType.ReviewReplied]: ['subjectLabel'],
+    // Go together (design spec 2026-09-28). Ids and the gathering's own public
+    // title only: no member-authored text, no questionnaire answers, no match
+    // reasons. `eventSlug` rides in `COMMON_PAYLOAD_KEYS` and is what the deep
+    // link is built from.
+    [NotificationType.GoTogetherPairInvite]: ['eventId', 'eventTitle'],
+    [NotificationType.GoTogetherGroupReady]: [
+      'eventId',
+      'eventTitle',
+      'groupId',
+      'conversationId',
+    ],
+    [NotificationType.GoTogetherUnmatched]: [
+      'eventId',
+      'eventTitle',
+      'isFinal',
+    ],
+    [NotificationType.GoTogetherMemberLeft]: [
+      'eventId',
+      'eventTitle',
+      'groupId',
+      'mergeOfferGroupId',
+    ],
+    [NotificationType.GoTogetherMeetAgain]: [
+      'eventId',
+      'eventTitle',
+      'groupId',
+    ],
+    [NotificationType.GoTogetherMutual]: ['eventId', 'eventTitle', 'groupId'],
   };
 
 /**

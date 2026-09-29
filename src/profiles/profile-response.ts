@@ -1,3 +1,5 @@
+import type { AmbassadorFocusArea } from '../ambassadors/ambassador-focus-areas';
+import type { Ambassador } from '../ambassadors/entities/ambassador.entity';
 import { toImageUrl } from '../common/image-url';
 import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
@@ -16,6 +18,18 @@ import { OpenToEntry } from './open-to';
 import type { RelatedCloseness } from './related-closeness';
 import { facetsForLabels } from './identities';
 import { matchNeighbourhood } from './neighbourhoods';
+import { withoutUnlistedWork } from './professions';
+
+/**
+ * Options for `toProfileCard`. Only `shouldIncludeUnlistedWork` exists today
+ * (a narrower object than a boolean parameter, matching the style the other
+ * mappers in this file use for a card's identity-gating flag), and it
+ * defaults to `false` so a caller that forgets it gets the safe, stripped
+ * card rather than accidentally leaking `adultWork`.
+ */
+export interface ProfileCardOptions {
+  shouldIncludeUnlistedWork?: boolean;
+}
 
 export interface ProfileCard {
   slug: string;
@@ -27,9 +41,13 @@ export interface ProfileCard {
   tagline: string | null;
   avatarUrl: string | null;
   tags: string[];
-  // Professional-identity facts, ungated by `visibility` — same as `tags`
-  // above. See Profile.discipline/profession/languages and
-  // src/profiles/professions.ts.
+  // Professional-identity facts, ungated by `visibility` like `tags` above,
+  // for every LISTED discipline/profession. The one exception is `adultWork`
+  // and its six professions: `toProfileCard` strips them by default, and a
+  // caller opts back in with `shouldIncludeUnlistedWork` only for the owner
+  // or (on the full profile) an accepted connection. See
+  // Profile.discipline/profession/languages and
+  // src/profiles/professions.ts#UNLISTED_DISCIPLINE_IDS.
   discipline: string[];
   profession: string[];
   languages: string[];
@@ -44,6 +62,9 @@ export interface ProfileCard {
   photoVisible: boolean;
   hoodVisible: boolean;
   vouchersVisible: boolean;
+  // The Ambassador tag toggle is deliberately absent here: a card reaches
+  // every member, and a `false` would single out exactly the ambassadors who
+  // chose to hide. It travels owner-only on FullProfileResponse instead.
 }
 
 /**
@@ -260,6 +281,15 @@ export interface FullProfileResponse extends ProfileCard {
   // mirroring privateNetwork/featuredConsent above — knowing exactly when
   // someone will reappear from hiding is itself a minor privacy leak.
   hiddenUntil?: string | null;
+  // Owner-only: the member's own active Ambassador grant, or `null` when they
+  // have none. Never surfaced to non-owner viewers, mirroring
+  // privateNetwork/featuredConsent/hiddenUntil above. See
+  // AmbassadorStatusService.findActive.
+  ambassador?: { since: string; focusArea: AmbassadorFocusArea } | null;
+  // Owner-only: whether the member shows their Ambassador tag (see
+  // Profile.isAmbassadorTagVisible). Omitted for every other viewer, because
+  // a visible `false` would mark exactly the ambassadors who chose to hide.
+  isAmbassadorTagVisible?: boolean;
   socials: SocialLinkView[];
   work: WorkView[];
   board: BoardView[];
@@ -342,10 +372,24 @@ export function sortShapings(rows: Shaping[]): Shaping[] {
 // Do NOT resolve the directory blurb fallback here: the profile editor seeds its
 // short-bio input from this field, so borrowed bio text would let a member save
 // words they never typed. The fallback belongs to the list path — toMemberCard.
+//
+// Safe by default: `discipline`/`profession` are stripped of unlisted
+// (`adultWork`) ids unless the caller opts in with
+// `shouldIncludeUnlistedWork`. Every caller of this mapper gets the strip for
+// free instead of repeating it by hand, so a future card built on
+// `toProfileCard` can't forget it. See professions.ts#withoutUnlistedWork.
 export function toProfileCard(
   profile: Profile,
   vouchCount: number,
+  { shouldIncludeUnlistedWork = false }: ProfileCardOptions = {},
 ): ProfileCard {
+  const rawWork = {
+    discipline: profile.discipline ?? [],
+    profession: profile.profession ?? [],
+  };
+  const work = shouldIncludeUnlistedWork
+    ? rawWork
+    : withoutUnlistedWork(rawWork);
   return {
     slug: profile.slug,
     firstName: profile.firstName,
@@ -355,8 +399,8 @@ export function toProfileCard(
     tagline: profile.tagline,
     avatarUrl: toImageUrl(profile.avatarUrl),
     tags: profile.tags,
-    discipline: profile.discipline ?? [],
-    profession: profile.profession ?? [],
+    discipline: work.discipline,
+    profession: work.profession,
     languages: profile.languages ?? [],
     vouchCount,
     visibility: profile.visibility,
@@ -417,8 +461,18 @@ export function toMemberCard(
   // is `open` AND (they are the owner OR the member opted into `hoodVisible`).
   const open = p.visibility === ProfileVisibility.Open;
   const locationVisible = open && (isOwner || p.hoodVisible);
+  // A member can select "sex work & adult content", but a non-owner must
+  // never see `adultWork`/its professions on a directory card, or the
+  // directory becomes a way to spot a sex worker by scrolling instead of
+  // filtering. The owner keeps seeing it on their own card.
+  // `toProfileCard` strips by default; `shouldIncludeUnlistedWork: isOwner`
+  // opts back in only for the owner's own row. See
+  // professions.ts#UNLISTED_DISCIPLINE_IDS.
+  const card = toProfileCard(p, vouchCount, {
+    shouldIncludeUnlistedWork: isOwner,
+  });
   return {
-    ...toProfileCard(p, vouchCount),
+    ...card,
     // The card DTO deliberately omits `bio`, so a browser can't do this itself —
     // the fallback has to happen here, where the bio is in scope. See
     // ./directory-blurb.ts; this is the list path only.
@@ -465,6 +519,15 @@ export function toFullProfile(
   // The Interests preferences are private; only surface them to the owner. Any
   // other viewer of a full (open/network) profile gets empty arrays.
   isOwner = false,
+  // Whether this viewer may see the owner's unlisted (`adultWork`) work.
+  // Already gated by the caller (`ProfilesService.buildFullProfile`): true
+  // for the owner, and otherwise true only when the profile actually has
+  // unlisted work AND the viewer is an accepted connection; the profile's
+  // own `open`/`network`/`private` tier plays no part in this flag. This
+  // mapper never decides who is connected, exactly like
+  // `activityBand`/`mutualVoucherCount` below. See coordinator ruling 15 and
+  // professions.ts#UNLISTED_DISCIPLINE_IDS.
+  shouldIncludeUnlistedWork = false,
   // Pre-loaded crop lookup for `rels.work[].imageUrl` — the caller batches ONE
   // `MediaCropService.getMany` for the whole profile read and passes the
   // resulting Map straight through; this mapper stays synchronous.
@@ -493,9 +556,14 @@ export function toFullProfile(
       helloCount: number;
     }
   > = new Map(),
+  // The owner's own active Ambassador grant, already resolved by the caller
+  // (`ProfilesService.buildFullProfile` calls `AmbassadorStatusService.
+  // findActive` on the owner path only). This mapper never decides who is an
+  // ambassador, exactly like `activityBand`/`mutualVoucherCount` above.
+  ownAmbassador: Ambassador | null = null,
 ): FullProfileResponse {
   return {
-    ...toProfileCard(p, vouchCount),
+    ...toProfileCard(p, vouchCount, { shouldIncludeUnlistedWork }),
     verified: p.verified,
     joinedAt: p.joinedAt.toISOString(),
     mutualVoucherCount,
@@ -524,6 +592,17 @@ export function toFullProfile(
     ...(isOwner ? { privateNetwork: p.privateNetwork ?? false } : {}),
     ...(isOwner ? { featuredConsent: p.featuredConsent ?? false } : {}),
     ...(isOwner ? { hiddenUntil: p.hiddenUntil?.toISOString() ?? null } : {}),
+    ...(isOwner
+      ? {
+          ambassador: ownAmbassador
+            ? {
+                since: ownAmbassador.grantedAt.toISOString(),
+                focusArea: ownAmbassador.focusArea,
+              }
+            : null,
+        }
+      : {}),
+    ...(isOwner ? { isAmbassadorTagVisible: p.isAmbassadorTagVisible } : {}),
     socials: rels.socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,
@@ -572,8 +651,14 @@ export function toLimitedProfile(
   // Already gated by the caller. See MutualVoucherCount.
   mutualVoucherCount: MutualVoucherCount = null,
 ): LimitedProfileResponse {
+  // Same rule as toMemberCard: a non-owner viewer of a limited profile must
+  // not see `adultWork`/its professions either. See
+  // professions.ts#UNLISTED_DISCIPLINE_IDS.
+  const card = toProfileCard(p, vouchCount, {
+    shouldIncludeUnlistedWork: isOwner,
+  });
   return {
-    ...toProfileCard(p, vouchCount),
+    ...card,
     // Overrides the ungated `avatarUrl`/`location`-adjacent fields the spread
     // above copied from toProfileCard — same gating as toFullProfile/
     // toMemberCard, so a `photoVisible: false` limited profile can't ship a

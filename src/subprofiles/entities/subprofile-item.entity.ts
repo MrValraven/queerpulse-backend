@@ -172,6 +172,26 @@ export enum SubprofileSection {
   Roster = 'roster',
   Courses = 'courses',
   Subjects = 'subjects',
+  // Quest personas (+16, migration `AddQuestPersonaKinds`). 'campaigns' is not
+  // repeated here: it is already declared above (organizer/activist/heritage
+  // skin), reused verbatim by the game_master kind. Kept in lockstep with
+  // `KIND_SECTIONS` in `../subprofile-kinds.ts` and the FE mirror.
+  Sessions = 'sessions',
+  Playthroughs = 'playthroughs',
+  Library = 'library',
+  Larps = 'larps',
+  Minis = 'minis',
+  Maps = 'maps',
+  Dice = 'dice',
+  Results = 'results',
+  Streams = 'streams',
+  Runs = 'runs',
+  Mods = 'mods',
+  Cons = 'cons',
+  Puzzles = 'puzzles',
+  Episodes = 'episodes',
+  Roles = 'roles',
+  Works = 'works',
 }
 
 @Entity('subprofile_items')

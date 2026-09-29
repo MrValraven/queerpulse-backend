@@ -55,6 +55,9 @@ export const SHARED_UPLOAD_HANDLERS: ReadonlySet<string> = new Set([
   'ConversationsController.update',
   // Business listing photos: claimed listings have more than one editor.
   'ListingsController.update',
+  // A listing the platform holds: admins re-save the photos its suggester
+  // uploaded. Paired with the same service-side unchanged-value check.
+  'AdminListingsController.update',
   // Housing listing gallery: co-listers edit the same listing.
   'HousingListingsController.update',
   // Company logo/work images: co-managed company pages.

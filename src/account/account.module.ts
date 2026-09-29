@@ -16,6 +16,11 @@ import { EventSeries } from '../events/entities/event-series.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { EventMatchEntry } from '../go-together/entities/event-match-entry.entity';
+import { FriendMatchProfile } from '../go-together/entities/friend-match-profile.entity';
+import { MatchAvoidance } from '../go-together/entities/match-avoidance.entity';
+import { MatchFeedback } from '../go-together/entities/match-feedback.entity';
+import { MatchGroupFeedback } from '../go-together/entities/match-group-feedback.entity';
 import { GovernanceProposal } from '../governance/entities/governance-proposal.entity';
 import { GovernanceVote } from '../governance/entities/governance-vote.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
@@ -199,6 +204,18 @@ import { DsarRequest } from './entities/dsar-request.entity';
       // owned by `ProfilesModule`'s own `forFeature`. Same cross-module
       // registration pattern as every entity above.
       ProfileNowHistory,
+      // Read-only sources for `GoTogetherExportContributor`'s `goTogether`
+      // category: the member's Go together questionnaire, their opt-ins into
+      // gatherings, the "meet again" verdicts they gave, their answers about
+      // each group, and their private avoidances. Same cross-module
+      // registration pattern as every entity above: the owning module keeps
+      // its own `forFeature`, and TypeORM allows the same entity in more than
+      // one.
+      FriendMatchProfile,
+      EventMatchEntry,
+      MatchFeedback,
+      MatchGroupFeedback,
+      MatchAvoidance,
     ]),
   ],
   controllers: [AccountController],

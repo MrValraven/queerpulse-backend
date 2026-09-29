@@ -143,6 +143,33 @@ export class AdminJoinRequestsController {
   }
 
   /**
+   * Revoke the still-valid invite an approval minted.
+   *
+   * QueerPulse sends no email, so reviewers hand approval links over by hand. A
+   * link sent to the wrong place, or an approval that should be pulled back,
+   * needs a lever. The member-facing revoke is scoped to the inviter (the
+   * reviewer who approved), so a second moderator picking the case up could
+   * not use it. Guarded at class level with the rest of this queue.
+   */
+  @Post(':id/invite/revoke')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Revoke the still-valid invite from an approval' })
+  @ApiOkResponse({ description: 'The request, with its revoked invite.' })
+  @ApiNotFoundResponse({
+    description: 'No such request, or it never minted an invite.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The invite was already accepted, revoked, or expired. Only a valid invite can be revoked.',
+  })
+  revokeInvite(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<JoinRequestView> {
+    return this.joinRequestsService.revokeInvite(id, user.userId);
+  }
+
+  /**
    * Claim or release an invite request (OPS-04).
    *
    * The same route shape, body and semantics as

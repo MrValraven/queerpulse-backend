@@ -14,6 +14,7 @@ import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
+import { listedDisciplines, listedProfessions } from '../profiles/professions';
 import { TOP_LEVEL_WHERE } from '../communities/subcommunity-rules';
 import { MemberSuggestionDismissal } from './entities/member-suggestion-dismissal.entity';
 import {
@@ -155,9 +156,14 @@ export class MemberSuggestionsService {
       connectionUserIds: new Set(connectionUserIds),
       openTo: viewerProfile.openTo ?? [],
       tags: toComparableSet(viewerProfile.tags),
+      // Built from `listed*`, so "sex work & adult content" is selectable
+      // but stays out of suggestion signals (see
+      // professions.ts#UNLISTED_DISCIPLINE_IDS): an unlisted id can never
+      // enter the viewer's comparable set, so it can never anchor a "you
+      // both do X" suggestion.
       professions: toComparableSet([
-        ...(viewerProfile.profession ?? []),
-        ...(viewerProfile.discipline ?? []),
+        ...listedProfessions(viewerProfile.profession ?? []),
+        ...listedDisciplines(viewerProfile.discipline ?? []),
       ]),
       languages: toComparableSet(viewerProfile.languages),
     };
@@ -212,9 +218,11 @@ export class MemberSuggestionsService {
         mutualConnectionCount: mutualCounts.get(profile.userId) ?? 0,
         openTo: visibleOpenTo(profile),
         tags: profile.tags ?? [],
+        // Same reason as the viewer's own set above: an unlisted id must
+        // never let a candidate be explained as "you both do sex work".
         professions: [
-          ...(profile.profession ?? []),
-          ...(profile.discipline ?? []),
+          ...listedProfessions(profile.profession ?? []),
+          ...listedDisciplines(profile.discipline ?? []),
         ],
         languages: profile.languages ?? [],
       };
@@ -408,6 +416,10 @@ export class MemberSuggestionsService {
    */
   private async interestMatches(viewer: ViewerAffinity): Promise<Set<string>> {
     const tags = [...viewer.tags];
+    // `viewer.professions` was already built with `listedProfessions`/
+    // `listedDisciplines` in `suggest()`, so this candidate-recruiting query
+    // can never be built from an unlisted id (sex work & adult content). It
+    // only ever searches for words the viewer is findable by themselves.
     const professions = [...viewer.professions];
     if (!tags.length && !professions.length) {
       return new Set();

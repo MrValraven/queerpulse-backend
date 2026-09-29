@@ -30,6 +30,7 @@ import { Feature } from '../common/feature.decorator';
 import { CreateIssueDto } from './dto/create-issue.dto';
 import { UpdateCoverDto } from './dto/update-cover.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
+import { UpdateIssueClosesOnDto } from './dto/update-issue-closes-on.dto';
 import { UpdateIssueScheduleDto } from './dto/update-issue-schedule.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
 import { UpdateSubmissionDeadlineDto } from './dto/update-submission-deadline.dto';
@@ -157,6 +158,40 @@ export class AdminMagazineIssuesController {
       dto,
       user.userId,
     );
+  }
+
+  // The day the issue stops taking copy, on its own pair of routes beside the
+  // submission deadline. Two path segments, so neither competes with
+  // `:number` for a match.
+  @Get(':number/closes-on')
+  @ApiOperation({
+    summary: 'When this issue stops taking copy.',
+  })
+  @ApiOkResponse({
+    description:
+      '`{ closesOn }` as `YYYY-MM-DD`, or `null` when the desk has set none. ' +
+      'The desk header counts down to this date.',
+  })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  getIssueClosesOn(@Param('number') number: string) {
+    return this.magazinePieces.getIssueClosesOn(number);
+  }
+
+  @Patch(':number/closes-on')
+  @ApiOperation({
+    summary:
+      'Set, move, or clear when this issue stops taking copy (`null` clears ' +
+      'it, which takes the countdown off the desk header).',
+  })
+  @ApiOkResponse({ description: 'The stored close date.' })
+  @ApiBadRequestResponse({ description: 'The close date is invalid.' })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  updateIssueClosesOn(
+    @Param('number') number: string,
+    @Body() dto: UpdateIssueClosesOnDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.updateIssueClosesOn(number, dto, user.userId);
   }
 
   @Get(':number')

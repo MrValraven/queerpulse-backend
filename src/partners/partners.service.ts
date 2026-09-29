@@ -8,7 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
-import { In, IsNull, Repository } from 'typeorm';
+import { FindOptionsWhere, In, IsNull, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import {
   optionalQueueAssigneeName,
@@ -219,6 +219,17 @@ function applyProfileFields(
   if (input.contact !== undefined) {
     partner.contact = normalizeContact(input.contact);
   }
+}
+
+/**
+ * The one definition of "a partner this member maintains": they own the seat
+ * and the profile is approved. `listOwned` (what `GET /my-partners` offers the
+ * frontend's organisation picker) and `ownedIdBySlug` (what a volunteering
+ * opportunity may link to) both query with it, so the picker and the write
+ * check always agree on the same set.
+ */
+function maintainedPartnerWhere(memberId: string): FindOptionsWhere<Partner> {
+  return { ownerUserId: memberId, status: PartnerStatus.Approved };
 }
 
 @Injectable()
@@ -533,7 +544,7 @@ export class PartnersService {
    */
   async listOwned(memberId: string): Promise<OwnedPartnerDTO[]> {
     const rows = await this.partners.find({
-      where: { ownerUserId: memberId, status: PartnerStatus.Approved },
+      where: maintainedPartnerWhere(memberId),
       order: { createdAt: 'DESC', id: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
@@ -585,41 +596,63 @@ export class PartnersService {
   // `VolunteeringModule` never registers its own `Partner` repository (mirrors
   // `JobsModule` never registering `Company`/`CompanyTeamMember` — see
   // `.superpowers/sdd/spec-phaseB-companies-jobs.md`), so it reaches partner
-  // data only through these two methods on the already-imported
+  // data only through the methods below on the already-imported
   // `PartnersService`.
 
   /**
-   * Resolves ANY partner (regardless of `status`) by slug to its id — used by
-   * `VolunteeringService` to link an opportunity to a partner org. Unlike the
-   * public `getBySlug`, this doesn't gate on `status === approved`: an
-   * opportunity poster may reference a partner application that hasn't been
-   * reviewed yet. Returns `null` for an unknown slug (never throws — the
-   * caller treats "unresolved" the same as "no partner").
+   * Resolves a partner slug to its id for a member who MAINTAINS that partner,
+   * used by `VolunteeringService` to link an opportunity to a partner org.
+   * Linking an opportunity to an organisation is speaking for it, so the
+   * poster must hold its seat.
+   *
+   * The ownership test is `maintainedPartnerWhere`, the same predicate
+   * `listOwned` queries with, so this accepts exactly the set the picker
+   * offers.
+   *
+   *  - an APPROVED partner this member does not maintain (another owner or
+   *    no owner) -> 403, so the picker can tell "no such partner" apart from
+   *    "you cannot speak for this one". Approved partner slugs are public on
+   *    the directory, so the 403 reveals nothing new;
+   *  - every other miss (unknown slug, or a pending or rejected application)
+   *    -> 404. Application slugs are private, and a 403 there would confirm
+   *    that the application exists.
    */
-  async idBySlug(slug: string): Promise<string | null> {
-    const partner = await this.partners.findOne({ where: { slug } });
-    return partner?.id ?? null;
+  async ownedIdBySlug(slug: string, memberId: string): Promise<string> {
+    const maintainedPartner = await this.partners.findOne({
+      where: { slug, ...maintainedPartnerWhere(memberId) },
+      select: ['id'],
+    });
+    if (maintainedPartner) return maintainedPartner.id;
+
+    const isApprovedPartner = await this.partners.exists({
+      where: { slug, status: PartnerStatus.Approved },
+    });
+    if (!isApprovedPartner) {
+      throw new NotFoundException('Partner not found');
+    }
+    throw new ForbiddenException('You can only link a partner you maintain');
   }
 
   /**
-   * Batched partner-id -> `{slug,name}` ref lookup (mirrors
+   * Batched partner-id -> `{slug,name,logo}` ref lookup (mirrors
    * `CompaniesService.companyRefsByIds`'s shape) for `VolunteeringService`'s
    * list/detail views, so a page of opportunity cards resolves every
-   * embedded partner ref in one query instead of N+1. Not status-gated, for
-   * the same reason as `idBySlug`.
+   * embedded partner ref in one query instead of N+1. Not status-gated, so an
+   * opportunity that already links a partner keeps rendering that ref
+   * whatever the partner's current status.
    */
   async refsByIds(
     ids: string[],
-  ): Promise<Map<string, { slug: string; name: string }>> {
-    const map = new Map<string, { slug: string; name: string }>();
+  ): Promise<Map<string, { slug: string; name: string; logo: string }>> {
+    const map = new Map<string, { slug: string; name: string; logo: string }>();
     if (!ids.length) return map;
 
     const rows = await this.partners.find({
       where: { id: In(ids) },
-      select: ['id', 'slug', 'name'],
+      select: ['id', 'slug', 'name', 'logo'],
     });
     for (const row of rows) {
-      map.set(row.id, { slug: row.slug, name: row.name });
+      map.set(row.id, { slug: row.slug, name: row.name, logo: row.logo });
     }
     return map;
   }

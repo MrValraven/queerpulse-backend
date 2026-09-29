@@ -1,0 +1,143 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
+import { InjectRepository } from '@nestjs/typeorm';
+import { In, MoreThan, Repository } from 'typeorm';
+import { Event } from '../events/entities/event.entity';
+import {
+  MATCHED_GROUP_MEMBER_LEFT,
+  MatchedGroupMemberLeftEvent,
+} from '../messaging/messaging.events';
+import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
+import {
+  EntryStatus,
+  EventMatchEntry,
+} from './entities/event-match-entry.entity';
+import { GoTogetherFormationService } from './go-together-formation.service';
+
+/** Entries a block can still change. Withdrawn entries are history. */
+const LIVE_ENTRY_STATUSES: EntryStatus[] = ['waiting', 'grouped', 'unmatched'];
+/** A gathering counts as upcoming until twelve hours after it started. */
+const UPCOMING_GRACE_MS = 12 * 60 * 60 * 1000;
+
+@Injectable()
+export class GoTogetherListener {
+  private readonly logger = new Logger(GoTogetherListener.name);
+
+  constructor(
+    @InjectRepository(EventMatchEntry)
+    private readonly entries: Repository<EventMatchEntry>,
+    @InjectRepository(Event) private readonly events: Repository<Event>,
+    private readonly formation: GoTogetherFormationService,
+  ) {}
+
+  /** A block must take effect in a shared chat right away (spec 3.6); the
+   *  5-minute reconcile pass is too slow for someone who just blocked a
+   *  stranger they are about to meet. */
+  @OnEvent(MEMBER_BLOCKED)
+  async onMemberBlocked(event: MemberBlockedEvent): Promise<void> {
+    try {
+      await this.handleBlock(event.blockerId, event.blockedId, new Date());
+    } catch (error) {
+      this.logger.error(
+        `Go together block handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Leaving the matched chat before the gathering counts as leaving the group
+   * (spec 3.6): the entry is withdrawn, an accepted partner goes solo and the
+   * group left behind gets a merge offer when it got small. Once the
+   * gathering has started only the chat membership ends: the member stays in
+   * the group record and keeps the meet-again page. Only an entry still
+   * seated in that group is touched. `removeMember` calls the chat's leave
+   * again, which is a no-op for a member who already left and flagged as Go
+   * together's own removal, so no second event comes back here.
+   */
+  @OnEvent(MATCHED_GROUP_MEMBER_LEFT)
+  async onMatchedGroupMemberLeft(
+    event: MatchedGroupMemberLeftEvent,
+    now: Date = new Date(),
+  ): Promise<void> {
+    try {
+      const seatedEntry = await this.entries.findOne({
+        where: {
+          userId: event.userId,
+          groupId: event.eventMatchGroupId,
+          status: 'grouped',
+        },
+      });
+      if (!seatedEntry) return;
+      const gathering = await this.events.findOne({
+        where: { id: seatedEntry.eventId },
+        select: { id: true, startAt: true },
+      });
+      const hasStarted =
+        !gathering || gathering.startAt.getTime() <= now.getTime();
+      if (hasStarted) return;
+      await this.formation.removeMember(seatedEntry);
+    } catch (error) {
+      this.logger.error(
+        `Go together chat leave handling failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+    }
+  }
+
+  private async handleBlock(
+    blockerId: string,
+    blockedId: string,
+    now: Date,
+  ): Promise<void> {
+    if (blockerId === blockedId) return;
+    const liveEntries = await this.entries.find({
+      where: {
+        userId: In([blockerId, blockedId]),
+        status: In(LIVE_ENTRY_STATUSES),
+      },
+    });
+    const eventIds = [...new Set(liveEntries.map((entry) => entry.eventId))];
+    if (eventIds.length === 0) return;
+    const upcomingEvents = await this.events.find({
+      where: {
+        id: In(eventIds),
+        startAt: MoreThan(new Date(now.getTime() - UPCOMING_GRACE_MS)),
+      },
+      select: ['id'],
+    });
+
+    for (const { id: eventId } of upcomingEvents) {
+      const eventEntries = liveEntries.filter(
+        (entry) => entry.eventId === eventId,
+      );
+      const blockerEntry = eventEntries.find(
+        (entry) => entry.userId === blockerId,
+      );
+      const blockedEntry = eventEntries.find(
+        (entry) => entry.userId === blockedId,
+      );
+
+      // 1. An accepted pair or a pending invite between the two ends: each
+      //    entry pointing at the other goes back to solo.
+      const pairedEntryIds = [
+        blockerEntry?.pairPartnerId === blockedId ? blockerEntry.id : null,
+        blockedEntry?.pairPartnerId === blockerId ? blockedEntry.id : null,
+      ].filter((entryId): entryId is string => entryId !== null);
+      if (pairedEntryIds.length > 0) {
+        await this.entries.update(
+          { id: In(pairedEntryIds) },
+          { pairStatus: 'none', pairPartnerId: null },
+        );
+      }
+
+      // 2. Sharing a group: the blocker moves out.
+      const isSharingGroup =
+        blockerEntry?.status === 'grouped' &&
+        blockedEntry?.status === 'grouped' &&
+        blockerEntry.groupId !== null &&
+        blockerEntry.groupId === blockedEntry.groupId;
+      if (isSharingGroup) {
+        await this.formation.moveAfterBlock(eventId, blockerId, blockedId);
+      }
+    }
+  }
+}

@@ -769,6 +769,10 @@ export interface ConversationResponse {
    *  is read-only: every write route refuses with `GROUP_DISSOLVED`. Always
    *  null for DMs, which are never dissolved. */
   dissolvedAt: string | null;
+  /** Go together: the matched group this chat belongs to, else null. The
+   *  client shows the group card above the thread when set. Always null for
+   *  DMs. */
+  eventMatchGroupId: string | null;
   /**
    * DES-227: why THIS caller can no longer act as a member here, or null while
    * they still can. `'left'` (voluntary), `'removed'` (an owner/admin acted),

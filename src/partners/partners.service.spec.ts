@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
@@ -835,28 +839,21 @@ describe('PartnersService', () => {
     });
   });
 
-  describe('idBySlug / refsByIds', () => {
-    it('resolves any partner regardless of status', async () => {
-      partners.findOne.mockResolvedValue({
-        id: 'partner-1',
-        status: PartnerStatus.Pending,
-      });
-      await expect(service.idBySlug('some-partner')).resolves.toBe('partner-1');
-    });
-
-    it('returns null for an unknown slug', async () => {
-      partners.findOne.mockResolvedValue(null);
-      await expect(service.idBySlug('nope')).resolves.toBeNull();
-    });
-
-    it('batches id -> {slug,name} refs', async () => {
+  describe('refsByIds', () => {
+    it('batches id -> {slug,name,logo} refs', async () => {
       partners.find.mockResolvedValue([
-        { id: 'partner-1', slug: 'ilga-portugal', name: 'ILGA Portugal' },
+        {
+          id: 'partner-1',
+          slug: 'ilga-portugal',
+          name: 'ILGA Portugal',
+          logo: 'IP',
+        },
       ]);
       const refs = await service.refsByIds(['partner-1']);
       expect(refs.get('partner-1')).toEqual({
         slug: 'ilga-portugal',
         name: 'ILGA Portugal',
+        logo: 'IP',
       });
     });
 
@@ -864,6 +861,69 @@ describe('PartnersService', () => {
       const refs = await service.refsByIds([]);
       expect(refs.size).toBe(0);
       expect(partners.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ownedIdBySlug', () => {
+    it('resolves a partner the member maintains, querying with the listOwned predicate', async () => {
+      partners.findOne.mockResolvedValue({ id: 'partner-1' });
+
+      await expect(
+        service.ownedIdBySlug('ilga-portugal', 'member-1'),
+      ).resolves.toBe('partner-1');
+      expect(partners.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            slug: 'ilga-portugal',
+            ownerUserId: 'member-1',
+            status: PartnerStatus.Approved,
+          },
+        }),
+      );
+    });
+
+    it('offers and accepts the same set: listOwned filters on the identical predicate', async () => {
+      await service.listOwned('member-1');
+
+      expect(partners.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { ownerUserId: 'member-1', status: PartnerStatus.Approved },
+        }),
+      );
+    });
+
+    it('403s an approved partner the member does not maintain', async () => {
+      partners.findOne.mockResolvedValue(null);
+      partners.exists.mockResolvedValue(true);
+
+      await expect(
+        service.ownedIdBySlug('ilga-portugal', 'member-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(partners.exists).toHaveBeenCalledWith({
+        where: { slug: 'ilga-portugal', status: PartnerStatus.Approved },
+      });
+    });
+
+    it('404s an unknown slug', async () => {
+      partners.findOne.mockResolvedValue(null);
+      partners.exists.mockResolvedValue(false);
+
+      await expect(
+        service.ownedIdBySlug('nope', 'member-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s a pending partner owned by someone else, hiding that the application exists', async () => {
+      partners.findOne.mockResolvedValue(null);
+      // The approved-only existence check misses a pending application.
+      partners.exists.mockResolvedValue(false);
+
+      await expect(
+        service.ownedIdBySlug('pending-collective', 'member-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(partners.exists).toHaveBeenCalledWith({
+        where: { slug: 'pending-collective', status: PartnerStatus.Approved },
+      });
     });
   });
 });

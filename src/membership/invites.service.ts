@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AmbassadorStatusService } from '../ambassadors/ambassador-status.service';
 import { RecognitionEntitlementsService } from '../recognition/recognition-entitlements.service';
 import { DEFAULT_INVITE_MONTHLY_QUOTA } from '../recognition/recognition.catalog';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -102,6 +103,7 @@ export class InvitesService {
     private readonly dataSource: DataSource,
     private readonly config: ConfigService,
     private readonly recognitionEntitlements: RecognitionEntitlementsService,
+    private readonly ambassadorStatus: AmbassadorStatusService,
   ) {}
 
   async createInvite(
@@ -301,7 +303,19 @@ export class InvitesService {
       this.usersService.findByIdWithProfile(invite.inviterId),
       this.usersService.countActiveMembers(),
     ]);
-    return toPublicInviteView(invite, inviter, memberCount, new Date());
+    // Only an active inviter can carry the ambassador line, the same rule
+    // `inviterActive` applies to the rest of the inviter card.
+    const isInviterAmbassador =
+      inviter?.status === UserStatus.Active
+        ? await this.ambassadorStatus.isVisibleAmbassador(inviter.id)
+        : false;
+    return toPublicInviteView(
+      invite,
+      inviter,
+      memberCount,
+      new Date(),
+      isInviterAmbassador,
+    );
   }
 
   // Returns a mapped view (never raw entities): whitelisted fields only, plus a
@@ -562,18 +576,24 @@ export class InvitesService {
   // matches the enforced one.
   async getQuota(inviterId: string): Promise<InviteQuotaView> {
     const now = new Date();
-    const [inviter, used, memberCount, levelBonus] = await Promise.all([
-      this.usersService.findById(inviterId),
-      this.invites.count({
-        where: {
-          inviterId,
-          createdAt: MoreThanOrEqual(currentMonthStart(now)),
-        },
-      }),
-      this.usersService.countActiveMembers(),
-      this.recognitionEntitlements.getInviteQuotaBonus(inviterId),
-    ]);
-    const limit = this.resolveMonthlyLimit(inviter, levelBonus);
+    const [inviter, used, memberCount, levelBonus, ambassadorBonus] =
+      await Promise.all([
+        this.usersService.findById(inviterId),
+        this.invites.count({
+          where: {
+            inviterId,
+            createdAt: MoreThanOrEqual(currentMonthStart(now)),
+          },
+        }),
+        this.usersService.countActiveMembers(),
+        this.recognitionEntitlements.getInviteQuotaBonus(inviterId),
+        this.ambassadorStatus.getInviteBonus(inviterId),
+      ]);
+    const limit = this.resolveMonthlyLimit(
+      inviter,
+      levelBonus,
+      ambassadorBonus,
+    );
     return toInviteQuotaView(limit, used, nextMonthStart(now), memberCount);
   }
 
@@ -663,7 +683,8 @@ export class InvitesService {
    *      outright, bonus included;
    *   2. the configured base (INVITE_MONTHLY_QUOTA, default
    *      `DEFAULT_INVITE_MONTHLY_QUOTA`) plus `levelBonus`, the recognition
-   *      perk the member has unlocked AND claimed.
+   *      perk the member has unlocked AND claimed, plus `ambassadorBonus`,
+   *      the flat allowance an active ambassador grant adds.
    *
    * `levelBonus` comes from `RecognitionEntitlementsService`, which reads it
    * out of `INVITE_QUOTA_BONUS_BY_LEVEL` — the same constant the perks page
@@ -671,19 +692,25 @@ export class InvitesService {
    * at all while the perks catalogue advertised "your allowance increases from
    * 1 to 2", so the advertised number was fiction in both directions.
    *
+   * `ambassadorBonus` comes from `AmbassadorStatusService.getInviteBonus`,
+   * which is `AMBASSADOR_INVITE_BONUS` for an active grant and 0 otherwise. It
+   * applies regardless of whether the ambassador's tag is visible: the tag
+   * gates only who sees the badge.
+   *
    * Shared by the enforcement path (assertWithinMonthlyQuota) and the read path
    * (getQuota) so the number shown and the number enforced never drift.
    */
   private resolveMonthlyLimit(
     inviter: User | null,
     levelBonus: number,
+    ambassadorBonus: number,
   ): number {
     if (inviter?.inviteMonthlyQuota != null) return inviter.inviteMonthlyQuota;
     const base = this.config.get<number>(
       'app.inviteMonthlyQuota',
       DEFAULT_INVITE_MONTHLY_QUOTA,
     );
-    return base + levelBonus;
+    return base + levelBonus + ambassadorBonus;
   }
 
   // Enforces "N invites per calendar month". Counts every invite the member
@@ -695,19 +722,26 @@ export class InvitesService {
     manager: EntityManager,
     inviterId: string,
   ): Promise<void> {
-    // Read the recognition bonus BEFORE taking the lock: it touches only the
-    // recognition tables, nothing in this transaction writes them, and doing
-    // it first keeps the inviter row locked for as short a time as possible.
-    const levelBonus =
-      await this.recognitionEntitlements.getInviteQuotaBonus(inviterId);
+    // Read the recognition and ambassador bonuses BEFORE taking the lock: they
+    // touch only the recognition and ambassador tables, nothing in this
+    // transaction writes them, and doing it first keeps the inviter row locked
+    // for as short a time as possible.
+    const [levelBonus, ambassadorBonus] = await Promise.all([
+      this.recognitionEntitlements.getInviteQuotaBonus(inviterId),
+      this.ambassadorStatus.getInviteBonus(inviterId),
+    ]);
     // Lock the inviter's row for the duration of the transaction. See
-    // `resolveMonthlyLimit` for how the per-user override, the configured base
-    // and the recognition bonus combine.
+    // `resolveMonthlyLimit` for how the per-user override, the configured
+    // base, the recognition bonus, and the ambassador bonus combine.
     const inviter = await manager.getRepository(User).findOne({
       where: { id: inviterId },
       lock: { mode: 'pessimistic_write' },
     });
-    const limit = this.resolveMonthlyLimit(inviter, levelBonus);
+    const limit = this.resolveMonthlyLimit(
+      inviter,
+      levelBonus,
+      ambassadorBonus,
+    );
     const now = new Date();
     const monthStart = currentMonthStart(now);
     const used = await manager.count(Invite, {

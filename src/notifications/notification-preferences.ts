@@ -112,6 +112,21 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventNearlyFull]:
     NotificationPreferenceCategory.EventCapacity,
+  // Go together. The pair invite is an invitation; the group lifecycle is the
+  // same lead-time nudge as a reminder for a gathering you are attending; a
+  // mutual "meet again" is a new connection.
+  [NotificationType.GoTogetherPairInvite]:
+    NotificationPreferenceCategory.EventInvites,
+  [NotificationType.GoTogetherGroupReady]:
+    NotificationPreferenceCategory.EventReminders,
+  [NotificationType.GoTogetherUnmatched]:
+    NotificationPreferenceCategory.EventReminders,
+  [NotificationType.GoTogetherMemberLeft]:
+    NotificationPreferenceCategory.EventReminders,
+  [NotificationType.GoTogetherMeetAgain]:
+    NotificationPreferenceCategory.EventReminders,
+  [NotificationType.GoTogetherMutual]:
+    NotificationPreferenceCategory.Connections,
 
   // --- Messages and connections --------------------------------------------
   [NotificationType.NewMessage]: NotificationPreferenceCategory.NewMessages,
@@ -341,6 +356,10 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // the card stops working at a door, in front of people. It arrives once per
     // term, so there is no volume for a switch to control.
     NotificationType.CardExpiring,
+    // A change to the member's own standing on the platform, arriving at most
+    // once per grant, so there is no volume for a switch to control.
+    NotificationType.AmbassadorGranted,
+    NotificationType.AmbassadorRevoked,
 
     // 3. Governance of a community or persona you belong to.
     NotificationType.CommunityRoleChanged,

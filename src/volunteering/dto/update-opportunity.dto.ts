@@ -6,6 +6,8 @@ import { CreateOpportunityDto } from './create-opportunity.dto';
 // `UpdateOpportunityInput` type omits both and never reads them — slugs never
 // change post-creation and team membership isn't re-seeded on PATCH (mirrors
 // `UpdateCompanyDto`'s identical "handle/team ignored on patch" precedent).
-// `partnerSlug` is different: it IS read on PATCH, re-resolving (or clearing)
-// the opportunity's partner link — see `VolunteeringService.update`.
+// `partnerSlug`/`communitySlug` are different: both ARE read on PATCH,
+// re-resolving (or clearing) the opportunity's organisation link. Re-sending
+// the slug already linked keeps it without re-checking ownership, and setting
+// one side clears the other (see `VolunteeringService.update`).
 export class UpdateOpportunityDto extends PartialType(CreateOpportunityDto) {}

@@ -77,6 +77,24 @@ export interface GroupInviteCreatedEvent {
   inviterUserId: string;
 }
 
+/**
+ * Go together: a member left a matched group chat (`eventMatchGroupId` set)
+ * through the ordinary chat Leave route. Consumed by `GoTogetherListener`,
+ * which withdraws their Go together entry for that group, so the group card,
+ * the pair and the merge offers follow the chat. Emitted post-commit and
+ * best-effort. Go together's own removals (a leave from the card, a move, a
+ * merge) pass `isGoTogetherRemoval` to `leaveGroup` and emit nothing, so the
+ * listener never feeds back into the formation write that caused it.
+ */
+export const MATCHED_GROUP_MEMBER_LEFT = 'matched.group.member.left';
+
+/** See {@link MATCHED_GROUP_MEMBER_LEFT}. */
+export interface MatchedGroupMemberLeftEvent {
+  conversationId: string;
+  eventMatchGroupId: string;
+  userId: string;
+}
+
 export interface MessageCreatedEvent {
   conversationId: string;
   /** Internal shape — consumed by the push + notification listeners (they read

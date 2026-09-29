@@ -21,6 +21,7 @@ import {
   type WorkState,
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
+import type { CardTableSummary } from './subprofile-table-summary';
 
 export interface SubprofileItemView {
   id: string;
@@ -227,7 +228,7 @@ export interface SubprofileCardView {
   tags: string[];
   // Personas redesign Phase 4 (design plan Decision §3): batched from
   // `SubprofileFollowersService.loadFollowerCountsFor` in the directory list
-  // path (ONE grouped query, never per-card) — mirrors `socialCount`/`tags`.
+  // path (ONE batched query per page), mirroring `socialCount`/`tags`.
   followerCount: number;
   // Inc2 Task A: `directory()` now returns BOTH linked and unlinked personas
   // (all kinds), so the card needs enough to route a linked persona to
@@ -246,6 +247,8 @@ export interface SubprofileCardView {
   ownerName: string | null;
   // The persona's per-owner slug (for the `/members/:ownerSlug/:slug` route).
   slug: string;
+  /** Quest personas only: cleaned "At the table" summary for the card line and Refine filters. */
+  table?: CardTableSummary;
 }
 
 export interface SubprofileOwnerRef {
@@ -521,6 +524,11 @@ export function toCardDTO(
   // Pre-loaded crop lookup — see `toSubprofileDTO`'s param doc.
   crops: Map<string, CropRect> = new Map(),
   ownerName: string | null = null,
+  // Quest personas only: batched by the caller (`loadTableSummariesFor`) from
+  // one batched query over the page's ids, mirroring `tags`/`socialCount`.
+  // Left out of the object for a non-Quest persona or a block that cleaned
+  // to nothing.
+  table?: CardTableSummary,
 ): SubprofileCardView {
   return {
     handle: subprofile.handle ?? '',
@@ -549,5 +557,6 @@ export function toCardDTO(
       subprofile.linkVisibility === SubprofileLinkVisibility.Linked
         ? ownerName
         : null,
+    ...(table ? { table } : {}),
   };
 }

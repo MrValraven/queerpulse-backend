@@ -73,6 +73,7 @@ export const EXPORT_CSV_CATEGORIES = [
   'volunteering',
   'governance',
   'reviews',
+  'go-together',
 ] as const;
 
 /**

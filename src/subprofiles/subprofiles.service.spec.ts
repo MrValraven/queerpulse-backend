@@ -12,7 +12,7 @@ import {
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, In, IsNull } from 'typeorm';
+import { DataSource, In, IsNull, Not } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
   AccessTier,
@@ -201,6 +201,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     photoVisible: true,
     hoodVisible: true,
     vouchersVisible: true,
+    isAmbassadorTagVisible: true,
     now: null,
     nowUpdatedAt: null,
     hiddenUntil: null,
@@ -254,7 +255,7 @@ async function expectRestricted(
 // --- validatePublish (pure) -------------------------------------------------
 
 describe('validatePublish', () => {
-  it('returns [] for a linked persona (only display name required)', () => {
+  it('returns [] for a linked persona with no handle, since the server derives one', () => {
     const sp = makeSubprofile({
       linkVisibility: SubprofileLinkVisibility.Linked,
       handle: null,
@@ -262,6 +263,55 @@ describe('validatePublish', () => {
       bio: null,
     });
     expect(validatePublish(sp, [])).toEqual([]);
+  });
+
+  it('runs only the handle checks for a linked persona with a typed handle', () => {
+    const linkedWith = (handle: string) =>
+      makeSubprofile({
+        linkVisibility: SubprofileLinkVisibility.Linked,
+        handle,
+        avatarUrl: null,
+        bio: null,
+      });
+    expect(validatePublish(linkedWith('x'), [])).toEqual(['handle_invalid']);
+    expect(validatePublish(linkedWith('admin'), [])).toEqual([
+      'handle_reserved',
+    ]);
+    expect(validatePublish(linkedWith('night-owl'), [], true)).toEqual([
+      'handle_taken',
+    ]);
+    // No avatar or bio, and a handle that carries the creator slug: both fine.
+    expect(
+      validatePublish(linkedWith('robin-nightform'), [], false, 'robin'),
+    ).toEqual([]);
+  });
+
+  // A linked persona's typed handle is a public `/p/` address, so it is
+  // screened. The rest of its text keeps skipping the screen.
+  it('flags blocked_terms for a linked persona whose typed handle carries a blocked term', () => {
+    const blockedHandle = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Linked,
+      handle: `robin-${BLOCKED_TERMS[0]}`,
+    });
+    expect(validatePublish(blockedHandle, [])).toEqual(['blocked_terms']);
+    const blockedBioOnly = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Linked,
+      handle: 'robin-nightform',
+      bio: `a bio that says ${BLOCKED_TERMS[0]}`,
+    });
+    expect(validatePublish(blockedBioOnly, [])).toEqual([]);
+  });
+
+  it('flags handle_names_owner for an unlinked handle that carries the creator slug', () => {
+    const sp = completeUnlinked({ handle: 'robin-after-dark' });
+    expect(validatePublish(sp, [], false, 'robin')).toEqual([
+      'handle_names_owner',
+    ]);
+    // Without the creator slug the check cannot run.
+    expect(validatePublish(sp, [])).toEqual([]);
+    // A handle that merely shares letters with the slug passes.
+    const unrelated = completeUnlinked({ handle: 'robinson-crusoe' });
+    expect(validatePublish(unrelated, [], false, 'robin')).toEqual([]);
   });
 
   it('returns [] when an unlinked persona meets every requirement', () => {
@@ -357,6 +407,13 @@ describe('isSectionAllowed', () => {
     for (const kind of Object.values(SubprofileKind)) {
       expect(isSectionAllowed(kind, SubprofileSection.Gallery)).toBe(true);
     }
+  });
+
+  it('allows each quest kind its own sections', () => {
+    expect(isSectionAllowed('game_master', 'campaigns')).toBe(true);
+    expect(isSectionAllowed('game_master', 'sessions')).toBe(true);
+    expect(isSectionAllowed('cosplayer', 'cons')).toBe(true);
+    expect(isSectionAllowed('cosplayer', 'campaigns')).toBe(false);
   });
 });
 
@@ -666,8 +723,15 @@ describe('SubprofilesService', () => {
     save: jest.Mock<Promise<unknown>, unknown[]>;
     update: jest.Mock;
     query: jest.Mock;
+    exists: jest.Mock;
   };
-  let dataSource: { transaction: jest.Mock };
+  // `manager` is the UNLOCKED manager (`dataSource.manager`), kept apart
+  // from the transaction `manager` above so a test that stages the locked
+  // re-read never changes what `publish` reads before its transaction.
+  let dataSource: {
+    transaction: jest.Mock;
+    manager: { findOne: jest.Mock };
+  };
   let blockFilter: {
     isBlockedEitherWay: ServiceMockFn<BlockFilterService, 'isBlockedEitherWay'>;
     excludeBlocked: jest.Mock;
@@ -745,6 +809,7 @@ describe('SubprofilesService', () => {
     isTaken: jest.Mock;
     release: jest.Mock;
     rename: jest.Mock;
+    stopForwardingFor: jest.Mock;
   };
   // A copy of the row `getOwned` last loaded, taken before the service
   // mutates it: what the locked re-read sees as committed when a test stages
@@ -875,6 +940,10 @@ describe('SubprofilesService', () => {
       // Backs `create()`'s per-user advisory lock
       // (`pg_advisory_xact_lock`) taken at the top of its transaction.
       query: jest.fn().mockResolvedValue(undefined),
+      // Backs the linked-draft handle derivation's "another subprofile row
+      // already stores this name" check. Defaults to "no other row", so a
+      // derived name is only skipped where a test stages one.
+      exists: jest.fn().mockResolvedValue(false),
     };
     dataSource = {
       transaction: jest
@@ -886,6 +955,24 @@ describe('SubprofilesService', () => {
             ) => Promise<unknown>,
           ) => runInTransaction(manager),
         ),
+      // `publish` reads the persona creator's profile here before its claim
+      // transaction. Every creator gets the profile slug `robin` by default,
+      // so a linked persona `nightform` derives `robin-nightform`.
+      manager: {
+        findOne: jest
+          .fn()
+          .mockImplementation(
+            (entity: unknown, options?: { where?: { userId?: string } }) =>
+              Promise.resolve(
+                entity === Profile
+                  ? makeProfile({
+                      userId: options?.where?.userId ?? 'user-1',
+                      slug: 'robin',
+                    })
+                  : null,
+              ),
+          ),
+      },
     };
     blockFilter = {
       isBlockedEitherWay: jest
@@ -1171,20 +1258,31 @@ describe('SubprofilesService', () => {
             memberPositionsBySubprofileId,
           ).map((sp) => toPublicDTO(sp, [], owner));
         }),
+      // Mirrors SubprofilePublicReadService.getByHandle: both link kinds
+      // resolve by handle, the published holder first (a draft may share the
+      // name), and a linked persona carries its creator as the owner.
       getByHandle: jest
         .fn()
         .mockImplementation(
           async (handle: string, viewer: CurrentUserData | undefined) => {
-            const sp = await subprofiles.findOne({
-              where: {
-                handle,
-                linkVisibility: SubprofileLinkVisibility.Unlinked,
-              },
-            });
+            const sp =
+              (await subprofiles.findOne({
+                where: { handle, status: SubprofileStatus.Published },
+              })) ?? (await subprofiles.findOne({ where: { handle } }));
             if (!sp) {
               throw new NotFoundException('Subprofile not found');
             }
-            return buildPublicView(sp, viewer, undefined);
+            const creatorProfile =
+              sp.linkVisibility === SubprofileLinkVisibility.Linked
+                ? await profiles.findOne({ where: { userId: sp.userId } })
+                : null;
+            const owner = creatorProfile
+              ? {
+                  slug: creatorProfile.slug,
+                  name: `${creatorProfile.firstName} ${creatorProfile.lastName}`.trim(),
+                }
+              : undefined;
+            return buildPublicView(sp, viewer, owner);
           },
         ),
       getBySlugForProfile: jest
@@ -1280,6 +1378,7 @@ describe('SubprofilesService', () => {
             isTaken: jest.fn().mockResolvedValue(false),
             release: jest.fn().mockResolvedValue(undefined),
             rename: jest.fn().mockResolvedValue(undefined),
+            stopForwardingFor: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
@@ -1399,6 +1498,84 @@ describe('SubprofilesService', () => {
           displayName: 'Nightform',
         }),
       ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    // A new persona is a linked draft, so it stores its derived
+    // `<creatorSlug>-<personaSlug>` handle from the start. Drafts never claim
+    // a registry row, so nothing is renamed or released.
+    describe('linked draft handle', () => {
+      const stageCreatorProfileInTransaction = (slug: string) => {
+        manager.findOne.mockImplementation(
+          (entity: unknown, options?: { where?: { userId?: string } }) =>
+            Promise.resolve(
+              entity === Profile
+                ? makeProfile({ userId: options?.where?.userId, slug })
+                : null,
+            ),
+        );
+      };
+
+      it('stores the derived handle on the new linked draft and claims no registry row', async () => {
+        subprofiles.find.mockResolvedValue([]);
+        stageCreatorProfileInTransaction('robin');
+
+        const dto = await service.create('user-1', {
+          kind: SubprofileKind.Musician,
+          displayName: 'Nightform',
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          handle: 'robin-nightform',
+        });
+        expect(manager.findOne).toHaveBeenCalledWith(Profile, {
+          where: { userId: 'user-1' },
+        });
+        // The row is not inserted yet, so no own name or row is left out.
+        expect(handlesService.isTaken).toHaveBeenCalledWith(
+          manager,
+          'robin-nightform',
+          undefined,
+        );
+        expect(manager.exists).toHaveBeenCalledWith(Subprofile, {
+          where: { handle: 'robin-nightform' },
+        });
+        expect(handlesService.rename).not.toHaveBeenCalled();
+        expect(handlesService.release).not.toHaveBeenCalled();
+        expect(dto.handle).toBe('robin-nightform');
+      });
+
+      it('skips a derived name another subprofile row already stores', async () => {
+        subprofiles.find.mockResolvedValue([]);
+        stageCreatorProfileInTransaction('robin');
+        manager.exists.mockImplementation(
+          (_entity: unknown, options: { where: { handle: string } }) =>
+            Promise.resolve(options.where.handle === 'robin-nightform'),
+        );
+
+        await service.create('user-1', {
+          kind: SubprofileKind.Musician,
+          displayName: 'Nightform',
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved.handle).toBe('robin-nightform-2');
+      });
+
+      it('leaves the handle null and still saves when the creator has no profile', async () => {
+        subprofiles.find.mockResolvedValue([]);
+
+        await service.create('user-1', {
+          kind: SubprofileKind.Musician,
+          displayName: 'Nightform',
+        });
+
+        const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+        expect(saved.handle).toBeNull();
+        expect(manager.save).toHaveBeenCalledTimes(2);
+        expect(handlesService.isTaken).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -1841,17 +2018,39 @@ describe('SubprofilesService', () => {
       ).rejects.toThrow(NotFoundException);
     });
 
-    it('queries by handle + unlinked only — status/visibility are no longer pre-filtered', async () => {
+    it('queries by handle alone for both link kinds, the published holder first', async () => {
       subprofiles.findOne.mockResolvedValue(null);
       await service
         .getByHandle('nightform', makeViewer())
         .catch(() => undefined);
-      expect(subprofiles.findOne).toHaveBeenCalledWith({
-        where: {
-          handle: 'nightform',
-          linkVisibility: SubprofileLinkVisibility.Unlinked,
-        },
+      expect(subprofiles.findOne).toHaveBeenNthCalledWith(1, {
+        where: { handle: 'nightform', status: SubprofileStatus.Published },
       });
+      expect(subprofiles.findOne).toHaveBeenNthCalledWith(2, {
+        where: { handle: 'nightform' },
+      });
+    });
+
+    it('resolves a published linked persona by its handle, with its creator as owner', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          handle: 'robin-nightform',
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+        }),
+      );
+      profiles.findOne.mockResolvedValue({
+        slug: 'robin',
+        userId: 'user-1',
+        firstName: 'Robin',
+        lastName: 'Reyes',
+      });
+      members.findOne.mockResolvedValue(null);
+
+      const dto = await service.getByHandle('robin-nightform', makeViewer());
+
+      expect(dto.status).toBe(SubprofileStatus.Published);
+      expect(dto).toMatchObject({ ownerSlug: 'robin' });
     });
 
     it('returns the full DTO (status: draft) to the owner viewing their own unpublished draft', async () => {
@@ -2602,19 +2801,313 @@ describe('SubprofilesService', () => {
       );
     });
 
-    it('publishes a linked persona with no handle/avatar/bio and nulls the handle', async () => {
-      const sp = makeSubprofile({
-        linkVisibility: SubprofileLinkVisibility.Linked,
-        handle: 'leftover',
-        avatarUrl: null,
-        bio: null,
-        status: SubprofileStatus.Draft,
+    // Linked personas claim a real `/p/<handle>` in the shared registry, the
+    // way unlinked ones do. With no handle the server derives
+    // `<creatorSlug>-<personaSlug>` from the CREATOR's profile slug.
+    describe('linked personas claim a handle', () => {
+      const personaOwner = { kind: 'subprofile', subprofileId: 'sp-1' };
+      const linkedDraft = (overrides: Partial<Subprofile> = {}) =>
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Draft,
+          handle: null,
+          avatarUrl: null,
+          bio: null,
+          ...overrides,
+        });
+      const rejectionOf = async (promise: Promise<unknown>) => {
+        try {
+          await promise;
+        } catch (err) {
+          return err;
+        }
+        throw new Error('Expected the promise to reject');
+      };
+
+      beforeEach(() => {
+        items.find.mockResolvedValue([]);
       });
-      subprofiles.findOne.mockResolvedValue(sp);
-      items.find.mockResolvedValue([]);
-      const dto = await service.publish('user-1', 'sp-1');
-      expect(dto.status).toBe(SubprofileStatus.Published);
+
+      it('derives <creatorSlug>-<slug> for a draft with no handle and claims it in one transaction', async () => {
+        subprofiles.findOne.mockResolvedValue(linkedDraft());
+
+        const dto = await service.publish('user-1', 'sp-1');
+
+        expect(dataSource.manager.findOne).toHaveBeenCalledWith(Profile, {
+          where: { userId: 'user-1' },
+        });
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(handlesService.rename).toHaveBeenCalledWith(
+          manager,
+          null,
+          'robin-nightform',
+          personaOwner,
+        );
+        expect(manager.update).toHaveBeenCalledWith(
+          Subprofile,
+          { id: 'sp-1' },
+          { status: SubprofileStatus.Published, handle: 'robin-nightform' },
+        );
+        expect(dto.status).toBe(SubprofileStatus.Published);
+        expect(dto.handle).toBe('robin-nightform');
+      });
+
+      it('uses the creator slug when a co-owner publishes', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          linkedDraft({ userId: 'creator-1' }),
+        );
+        dataSource.manager.findOne.mockImplementation((entity: unknown) =>
+          Promise.resolve(
+            entity === Profile
+              ? makeProfile({ userId: 'creator-1', slug: 'sam' })
+              : null,
+          ),
+        );
+
+        const dto = await service.publish('user-1', 'sp-1');
+
+        expect(dataSource.manager.findOne).toHaveBeenCalledWith(Profile, {
+          where: { userId: 'creator-1' },
+        });
+        expect(dto.handle).toBe('sam-nightform');
+      });
+
+      it('claims the handle the owner typed', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          linkedDraft({ handle: 'night-owl' }),
+        );
+
+        const dto = await service.publish('user-1', 'sp-1');
+
+        expect(handlesService.isTaken).toHaveBeenCalledWith(
+          dataSource.manager,
+          'night-owl',
+          personaOwner,
+        );
+        expect(handlesService.rename).toHaveBeenCalledWith(
+          manager,
+          null,
+          'night-owl',
+          personaOwner,
+        );
+        expect(manager.update).toHaveBeenCalledWith(
+          Subprofile,
+          { id: 'sp-1' },
+          { status: SubprofileStatus.Published, handle: 'night-owl' },
+        );
+        expect(dto.handle).toBe('night-owl');
+      });
+
+      it('422s a typed handle that is already taken, before any transaction', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          linkedDraft({ handle: 'night-owl' }),
+        );
+        handlesService.isTaken.mockResolvedValue(true);
+
+        const error = await rejectionOf(service.publish('user-1', 'sp-1'));
+
+        expect(error).toBeInstanceOf(UnprocessableEntityException);
+        expect(
+          (error as UnprocessableEntityException).getResponse(),
+        ).toMatchObject({ unmet: ['handle_taken'] });
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+
+      it('422s a linked draft with no handle when its creator has no profile', async () => {
+        subprofiles.findOne.mockResolvedValue(linkedDraft());
+        dataSource.manager.findOne.mockResolvedValue(null);
+
+        const error = await rejectionOf(service.publish('user-1', 'sp-1'));
+
+        expect(error).toBeInstanceOf(UnprocessableEntityException);
+        expect(
+          (error as UnprocessableEntityException).getResponse(),
+        ).toMatchObject({
+          code: 'SUBPROFILE_NOT_READY',
+          unmet: ['handle_invalid'],
+        });
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+        expect(handlesService.rename).not.toHaveBeenCalled();
+      });
+
+      it('retries a derived handle lost to a concurrent claim with the next candidate', async () => {
+        subprofiles.findOne.mockResolvedValue(linkedDraft());
+        // The concurrent writer commits `robin-nightform` as the first claim
+        // fails, so the second derivation reads it as taken.
+        const takenNames = new Set<string>();
+        handlesService.isTaken.mockImplementation(
+          (_entityManager: unknown, name: string) =>
+            Promise.resolve(takenNames.has(name)),
+        );
+        handlesService.rename.mockImplementationOnce(() => {
+          takenNames.add('robin-nightform');
+          return Promise.reject(
+            new ConflictException('That handle is already taken'),
+          );
+        });
+
+        const dto = await service.publish('user-1', 'sp-1');
+
+        expect(dataSource.transaction).toHaveBeenCalledTimes(2);
+        expect(handlesService.rename).toHaveBeenCalledTimes(2);
+        expect(handlesService.rename).toHaveBeenLastCalledWith(
+          manager,
+          null,
+          'robin-nightform-2',
+          personaOwner,
+        );
+        expect(dto.handle).toBe('robin-nightform-2');
+        expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      });
+
+      it('gives up on a derived handle after 5 lost races', async () => {
+        subprofiles.findOne.mockResolvedValue(linkedDraft());
+        handlesService.rename.mockRejectedValue(
+          new ConflictException('That handle is already taken'),
+        );
+
+        const error = await rejectionOf(service.publish('user-1', 'sp-1'));
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toMatchObject({
+          code: 'handle_derivation_failed',
+        });
+        expect(handlesService.rename).toHaveBeenCalledTimes(5);
+        expect(manager.update).not.toHaveBeenCalled();
+        expect(eventEmitter.emit).not.toHaveBeenCalled();
+      });
+
+      it('surfaces a typed handle lost to a concurrent claim as 422 handle_taken, with no retry', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          linkedDraft({ handle: 'night-owl' }),
+        );
+        handlesService.rename.mockRejectedValue(
+          new ConflictException('That handle is already taken'),
+        );
+
+        const error = await rejectionOf(service.publish('user-1', 'sp-1'));
+
+        expect(error).toBeInstanceOf(UnprocessableEntityException);
+        expect(
+          (error as UnprocessableEntityException).getResponse(),
+        ).toMatchObject({ unmet: ['handle_taken'] });
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(handlesService.rename).toHaveBeenCalledTimes(1);
+      });
+
+      it('422s an unlinked handle that carries the creator slug', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({ handle: 'robin-after-dark' }),
+        );
+
+        const error = await rejectionOf(service.publish('user-1', 'sp-1'));
+
+        expect(error).toBeInstanceOf(UnprocessableEntityException);
+        expect(
+          (error as UnprocessableEntityException).getResponse(),
+        ).toMatchObject({ unmet: ['handle_names_owner'] });
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('unpublish', () => {
+    // A linked draft keeps its `/p/` address for the owner's preview, so the
+    // registry claim is released but the handle stays on the row.
+    it('releases the registry claim of a published linked persona and keeps its handle on the draft, in one transaction', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+          handle: 'robin-nightform',
+        }),
+      );
+
+      const dto = await service.unpublish('user-1', 'sp-1');
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(handlesService.release).toHaveBeenCalledWith(
+        manager,
+        'robin-nightform',
+        { kind: 'subprofile', subprofileId: 'sp-1' },
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        Subprofile,
+        { id: 'sp-1' },
+        { status: SubprofileStatus.Draft, handle: 'robin-nightform' },
+      );
+      expect(dto.status).toBe(SubprofileStatus.Draft);
+      expect(dto.handle).toBe('robin-nightform');
+    });
+
+    it('releases the handle of a published unlinked persona and nulls it in one transaction', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        completeUnlinked({ status: SubprofileStatus.Published }),
+      );
+
+      const dto = await service.unpublish('user-1', 'sp-1');
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(handlesService.release).toHaveBeenCalledWith(
+        manager,
+        'nightform',
+        { kind: 'subprofile', subprofileId: 'sp-1' },
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        Subprofile,
+        { id: 'sp-1' },
+        { status: SubprofileStatus.Draft, handle: null },
+      );
+      expect(dto.status).toBe(SubprofileStatus.Draft);
       expect(dto.handle).toBeNull();
+    });
+
+    it('refuses with a 409 when the persona was unlinked after the load, and releases nothing', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+          handle: 'robin-nightform',
+        }),
+      );
+      manager.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          status: SubprofileStatus.Published,
+          handle: 'robin-nightform',
+        }),
+      );
+
+      await expect(service.unpublish('user-1', 'sp-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+
+      expect(handlesService.release).not.toHaveBeenCalled();
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses with a 409 when the handle changed after the load, and releases nothing', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+          handle: 'robin-nightform',
+        }),
+      );
+      manager.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+          handle: 'night-owl',
+        }),
+      );
+
+      await expect(service.unpublish('user-1', 'sp-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+
+      expect(handlesService.release).not.toHaveBeenCalled();
+      expect(manager.update).not.toHaveBeenCalled();
     });
   });
 
@@ -2781,27 +3274,39 @@ describe('SubprofilesService', () => {
       expect(manager.save).not.toHaveBeenCalled();
     });
 
-    it('a linked publish loaded before the transfer keeps the new creator', async () => {
+    it('a linked publish loaded before the transfer derives from the new creator and writes only status and handle', async () => {
       subprofiles.findOne.mockResolvedValue(
         loadedBeforeTransfer({
           linkVisibility: SubprofileLinkVisibility.Linked,
           status: SubprofileStatus.Draft,
         }),
       );
-      manager.findOne.mockResolvedValue(
-        committedAfterTransfer({
-          linkVisibility: SubprofileLinkVisibility.Linked,
-        }),
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === Profile
+            ? makeProfile({ userId: 'successor-1', slug: 'sam' })
+            : committedAfterTransfer({
+                linkVisibility: SubprofileLinkVisibility.Linked,
+              }),
+        ),
       );
       items.find.mockResolvedValue([]);
 
       await service.publish('user-1', 'sp-1');
 
-      expect(savedSubprofile()).toMatchObject({
-        userId: 'successor-1',
-        slug: 'nightform-2',
-        status: SubprofileStatus.Published,
+      // The locked row names the successor, so the handle is built from
+      // their profile slug and the committed persona slug.
+      expect(manager.findOne).toHaveBeenCalledWith(Profile, {
+        where: { userId: 'successor-1' },
       });
+      // Only these two columns are written, so the stale creator and slug
+      // loaded before the transfer are never written back.
+      expect(manager.update).toHaveBeenCalledWith(
+        Subprofile,
+        { id: 'sp-1' },
+        { status: SubprofileStatus.Published, handle: 'sam-nightform-2' },
+      );
+      expect(manager.save).not.toHaveBeenCalled();
     });
 
     it('refuses an unpublish by the former creator of a linked persona', async () => {
@@ -2940,7 +3445,9 @@ describe('SubprofilesService', () => {
   });
 
   describe('update', () => {
-    it('nulls the handle when switching to linked', async () => {
+    // The transaction manager stages no creator profile here, so the linked
+    // draft has no name to derive and keeps a null handle.
+    it('drops the unlinked handle when switching to linked, and leaves it null when the creator has no profile', async () => {
       const sp = completeUnlinked({
         linkVisibility: SubprofileLinkVisibility.Unlinked,
       });
@@ -2950,6 +3457,9 @@ describe('SubprofilesService', () => {
       });
       const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.handle).toBeNull();
+      expect(manager.findOne).toHaveBeenCalledWith(Profile, {
+        where: { userId: 'user-1' },
+      });
     });
 
     it('drops back to draft when switching to unlinked', async () => {
@@ -2963,6 +3473,465 @@ describe('SubprofilesService', () => {
       });
       const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.status).toBe(SubprofileStatus.Draft);
+    });
+
+    // A link switch frees the old name WITHOUT forwarding, in either
+    // direction: forwarding would tie a pseudonymous address to the member
+    // behind it. A plain handle edit keeps forwarding, for both link kinds.
+    describe('link switches and handle edits', () => {
+      const personaOwner = { kind: 'subprofile', subprofileId: 'sp-1' };
+      const savedSubprofile = () =>
+        (manager.save.mock.calls[0] as [Subprofile])[0];
+      // The locked re-read returns the row as loaded; a `Profile` read in
+      // the transaction returns the creator's profile.
+      const stageCreatorProfileInTransaction = (slug: string) => {
+        manager.findOne.mockImplementation(
+          (entity: unknown, options?: { where?: { userId?: string } }) =>
+            Promise.resolve(
+              entity === Profile
+                ? makeProfile({ userId: options?.where?.userId, slug })
+                : entity === Subprofile && committedRowAtLoad
+                  ? { ...committedRowAtLoad }
+                  : null,
+            ),
+        );
+      };
+
+      it('linked to unlinked with no new handle releases the old one without forwarding and nulls it', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: 'robin-nightform',
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        });
+
+        expect(handlesService.release).toHaveBeenCalledTimes(1);
+        expect(handlesService.release).toHaveBeenCalledWith(
+          manager,
+          'robin-nightform',
+          personaOwner,
+          { isForwarding: false },
+        );
+        expect(savedSubprofile()).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          status: SubprofileStatus.Draft,
+          handle: null,
+        });
+        expect(handlesService.rename).not.toHaveBeenCalled();
+      });
+
+      it('linked to unlinked with a newly typed handle keeps the typed handle and releases the old one without forwarding', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: 'robin-nightform',
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          handle: 'night-owl',
+        });
+
+        expect(handlesService.release).toHaveBeenCalledTimes(1);
+        expect(handlesService.release).toHaveBeenCalledWith(
+          manager,
+          'robin-nightform',
+          personaOwner,
+          { isForwarding: false },
+        );
+        expect(savedSubprofile()).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+          status: SubprofileStatus.Draft,
+          handle: 'night-owl',
+        });
+        // The typed handle waits for the next publish, which checks it.
+        expect(handlesService.rename).not.toHaveBeenCalled();
+      });
+
+      it('unlinked to linked on a published persona releases the old handle without forwarding and claims a derived one in the same transaction', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            status: SubprofileStatus.Published,
+            handle: 'after-dark',
+          }),
+        );
+        stageCreatorProfileInTransaction('robin');
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(handlesService.release).toHaveBeenCalledWith(
+          manager,
+          'after-dark',
+          personaOwner,
+          { isForwarding: false },
+        );
+        expect(handlesService.rename).toHaveBeenCalledWith(
+          manager,
+          null,
+          'robin-nightform',
+          personaOwner,
+        );
+        const releaseOrder =
+          handlesService.release.mock.invocationCallOrder[0] ?? 0;
+        const renameOrder =
+          handlesService.rename.mock.invocationCallOrder[0] ?? 0;
+        const saveOrder = manager.save.mock.invocationCallOrder[0] ?? 0;
+        expect(releaseOrder).toBeLessThan(renameOrder);
+        expect(renameOrder).toBeLessThan(saveOrder);
+        expect(savedSubprofile()).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+          handle: 'robin-nightform',
+        });
+      });
+
+      it('unlinked to linked on a published persona claims a handle typed in the same edit', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            status: SubprofileStatus.Published,
+            handle: 'after-dark',
+          }),
+        );
+        stageCreatorProfileInTransaction('robin');
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          handle: 'night-owl',
+        });
+
+        expect(handlesService.isTaken).toHaveBeenCalledWith(
+          manager,
+          'night-owl',
+          personaOwner,
+        );
+        expect(handlesService.rename).toHaveBeenCalledWith(
+          manager,
+          null,
+          'night-owl',
+          personaOwner,
+        );
+        expect(savedSubprofile()).toMatchObject({
+          status: SubprofileStatus.Published,
+          handle: 'night-owl',
+        });
+      });
+
+      it('unlinked to linked refuses a typed handle that is taken, and saves nothing', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            status: SubprofileStatus.Published,
+            handle: 'after-dark',
+          }),
+        );
+        stageCreatorProfileInTransaction('robin');
+        handlesService.isTaken.mockResolvedValue(true);
+
+        await expect(
+          service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            handle: 'night-owl',
+          }),
+        ).rejects.toBeInstanceOf(UnprocessableEntityException);
+
+        expect(handlesService.rename).not.toHaveBeenCalled();
+        expect(manager.save).not.toHaveBeenCalled();
+      });
+
+      it('unlinked to linked on a draft claims nothing and stores the derived handle', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            status: SubprofileStatus.Draft,
+            handle: 'after-dark',
+          }),
+        );
+        stageCreatorProfileInTransaction('robin');
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+
+        expect(handlesService.release).not.toHaveBeenCalled();
+        expect(handlesService.rename).not.toHaveBeenCalled();
+        expect(savedSubprofile()).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Draft,
+          handle: 'robin-nightform',
+        });
+      });
+
+      // A linked draft stores its `/p/<handle>` so the owner can preview it
+      // before publish. The name sits on the row with no registry claim.
+      describe('a linked draft stores its derived handle', () => {
+        const linkedDraft = (overrides: Partial<Subprofile> = {}) =>
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+            ...overrides,
+          });
+
+        it('derives and stores the handle of a linked draft saved with none, and claims nothing', async () => {
+          subprofiles.findOne.mockResolvedValue(linkedDraft());
+          stageCreatorProfileInTransaction('robin');
+
+          await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+          expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+          expect(manager.findOne).toHaveBeenCalledWith(Profile, {
+            where: { userId: 'user-1' },
+          });
+          expect(handlesService.isTaken).toHaveBeenCalledWith(
+            manager,
+            'robin-nightform',
+            personaOwner,
+          );
+          expect(manager.exists).toHaveBeenCalledWith(Subprofile, {
+            where: { handle: 'robin-nightform', id: Not('sp-1') },
+          });
+          expect(handlesService.rename).not.toHaveBeenCalled();
+          expect(handlesService.release).not.toHaveBeenCalled();
+          expect(savedSubprofile()).toMatchObject({
+            status: SubprofileStatus.Draft,
+            handle: 'robin-nightform',
+            bio: 'Fresh bio',
+          });
+        });
+
+        it('derives from the slug this edit sets', async () => {
+          subprofiles.findOne.mockResolvedValue(linkedDraft());
+          stageCreatorProfileInTransaction('robin');
+
+          await service.update('user-1', 'sp-1', { slug: 'night-owl' });
+
+          expect(savedSubprofile()).toMatchObject({
+            slug: 'night-owl',
+            handle: 'robin-night-owl',
+          });
+        });
+
+        it('skips a derived name another subprofile row already stores', async () => {
+          subprofiles.findOne.mockResolvedValue(linkedDraft());
+          stageCreatorProfileInTransaction('robin');
+          manager.exists.mockImplementation(
+            (_entity: unknown, options: { where: { handle: string } }) =>
+              Promise.resolve(options.where.handle === 'robin-nightform'),
+          );
+
+          await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+          expect(savedSubprofile().handle).toBe('robin-nightform-2');
+          expect(handlesService.rename).not.toHaveBeenCalled();
+        });
+
+        it('derives the handle again when the creator clears it', async () => {
+          subprofiles.findOne.mockResolvedValue(
+            linkedDraft({ handle: 'night-owl' }),
+          );
+          stageCreatorProfileInTransaction('robin');
+
+          await service.update('user-1', 'sp-1', { handle: '' });
+
+          expect(savedSubprofile()).toMatchObject({
+            status: SubprofileStatus.Draft,
+            handle: 'robin-nightform',
+          });
+          expect(handlesService.release).not.toHaveBeenCalled();
+          expect(handlesService.rename).not.toHaveBeenCalled();
+        });
+
+        it('lets a co-owner save an unrelated field on a linked draft with no handle, and derives from the creator', async () => {
+          subprofiles.findOne.mockResolvedValue(
+            linkedDraft({ userId: 'creator-1' }),
+          );
+          stageCreatorProfileInTransaction('sam');
+
+          await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+          expect(manager.findOne).toHaveBeenCalledWith(Profile, {
+            where: { userId: 'creator-1' },
+          });
+          expect(savedSubprofile()).toMatchObject({
+            userId: 'creator-1',
+            handle: 'sam-nightform',
+            bio: 'Fresh bio',
+          });
+        });
+
+        it('leaves a published linked persona to its own claim paths', async () => {
+          subprofiles.findOne.mockResolvedValue(
+            linkedDraft({ status: SubprofileStatus.Published }),
+          );
+          stageCreatorProfileInTransaction('robin');
+
+          await service.update('user-1', 'sp-1', { bio: 'Fresh bio' });
+
+          expect(manager.findOne).not.toHaveBeenCalledWith(
+            Profile,
+            expect.anything(),
+          );
+          expect(savedSubprofile()).toMatchObject({
+            status: SubprofileStatus.Published,
+            handle: null,
+          });
+        });
+      });
+
+      it('a link switch stops forwarding for every name the persona released, in both directions', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: 'robin-nightform',
+          }),
+        );
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        });
+        expect(handlesService.stopForwardingFor).toHaveBeenCalledWith(
+          manager,
+          'sp-1',
+        );
+        // After the releases, in the same transaction.
+        const releaseOrder =
+          handlesService.release.mock.invocationCallOrder[0] ?? 0;
+        const stopOrder =
+          handlesService.stopForwardingFor.mock.invocationCallOrder[0] ?? 0;
+        expect(releaseOrder).toBeLessThan(stopOrder);
+
+        handlesService.stopForwardingFor.mockClear();
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({
+            status: SubprofileStatus.Published,
+            handle: 'after-dark',
+          }),
+        );
+        stageCreatorProfileInTransaction('robin');
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+        expect(handlesService.stopForwardingFor).toHaveBeenCalledWith(
+          manager,
+          'sp-1',
+        );
+      });
+
+      it('a link switch on a draft with nothing to release still stops forwarding', async () => {
+        // A draft that was renamed while published earlier holds no handle
+        // now, but its older names may still forward.
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            status: SubprofileStatus.Draft,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', {
+          linkVisibility: SubprofileLinkVisibility.Linked,
+        });
+
+        expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+        expect(handlesService.release).not.toHaveBeenCalled();
+        expect(handlesService.stopForwardingFor).toHaveBeenCalledWith(
+          manager,
+          'sp-1',
+        );
+      });
+
+      it('editing the handle of a published linked persona drafts it and releases the old name with forwarding', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: 'robin-nightform',
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', { handle: 'robin-sings' });
+
+        expect(handlesService.release).toHaveBeenCalledWith(
+          manager,
+          'robin-nightform',
+          personaOwner,
+          { isForwarding: true },
+        );
+        expect(handlesService.stopForwardingFor).not.toHaveBeenCalled();
+        expect(savedSubprofile()).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Draft,
+          handle: 'robin-sings',
+        });
+      });
+
+      it('editing the handle of a published unlinked persona does not stop forwarding', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          completeUnlinked({ status: SubprofileStatus.Published }),
+        );
+
+        await service.update('user-1', 'sp-1', { handle: 'nightform-renamed' });
+
+        expect(handlesService.release).toHaveBeenCalledWith(
+          manager,
+          'nightform',
+          personaOwner,
+          { isForwarding: true },
+        );
+        expect(handlesService.stopForwardingFor).not.toHaveBeenCalled();
+      });
+
+      // A published linked persona the backfill skipped holds no handle and
+      // no registry row. A typed handle must wait for publish to validate and
+      // claim it, so `/p/` never serves an unregistered name.
+      it('typing a handle on a published linked persona with no handle drafts it and releases nothing', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: null,
+          }),
+        );
+
+        await service.update('user-1', 'sp-1', { handle: 'robin-sings' });
+
+        expect(handlesService.release).not.toHaveBeenCalled();
+        expect(handlesService.rename).not.toHaveBeenCalled();
+        expect(savedSubprofile()).toMatchObject({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Draft,
+          handle: 'robin-sings',
+        });
+      });
+
+      it('refuses a co-owner editing the handle of a published linked persona', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({
+            userId: 'creator-1',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: 'robin-nightform',
+          }),
+        );
+
+        await expect(
+          service.update('user-1', 'sp-1', { handle: 'robin-sings' }),
+        ).rejects.toThrow(
+          new ForbiddenException(
+            'Only the persona creator can change its handle',
+          ),
+        );
+
+        expect(handlesService.release).not.toHaveBeenCalled();
+      });
     });
 
     // Linking (Unlinked to Linked) nests the persona under the creator's
@@ -3420,7 +4389,7 @@ describe('SubprofilesService', () => {
         expect(manager.update).toHaveBeenCalledWith(
           Subprofile,
           { id: 'sp-1' },
-          { status: SubprofileStatus.Published },
+          { status: SubprofileStatus.Published, handle: 'nightform' },
         );
         expect(manager.save).not.toHaveBeenCalled();
       });

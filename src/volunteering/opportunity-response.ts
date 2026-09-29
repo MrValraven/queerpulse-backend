@@ -13,9 +13,9 @@ import {
 } from './entities/volunteer-signup.entity';
 
 /**
- * Deliberately kept file-local rather than imported from `partners/` —
+ * Deliberately kept file-local rather than imported from `partners/`:
  * this is the minimal shape every mapper here needs, and it's structurally
- * identical to (duck-type compatible with) the `{slug,name}` refs
+ * identical to (duck-type compatible with) the `{slug,name,logo}` refs
  * `PartnersService.refsByIds` returns, so no import/cycle is required.
  * `VolunteeringService` resolves `opportunity.partnerId` to one of these via
  * `partnerRefsForMany`, `null` when there's no linked partner.
@@ -23,18 +23,26 @@ import {
 export interface PartnerRef {
   slug: string;
   name: string;
+  /** The partner's short text mark (initials like "IP"), shown as the card's
+   * logo tile. It is plain text, so it needs no URL resolution. */
+  logo: string;
 }
 
 /**
- * Same file-local, duck-type-compatible shape as `PartnerRef`, resolved from
- * `opportunity.communityId` via `CommunityMembershipService.refsByIds`
- * (`VolunteeringService.communityRefsForMany`). `partner` and `community` are
- * structurally independent — the frontend's single combined organization
+ * File-local like `PartnerRef`, resolved from `opportunity.communityId` via
+ * `CommunityMembershipService.refsByIds`
+ * (`VolunteeringService.communityRefsForMany`), which turns the raw stored
+ * avatar value into `avatarUrl`. `partner` and `community` are
+ * structurally independent. The frontend's single combined organization
  * picker is what keeps only one populated per opportunity in practice.
  */
 export interface CommunityRef {
   slug: string;
   name: string;
+  /** The community's avatar as a fetchable URL, already resolved with
+   * `toImageUrl` in `communityRefsForMany`; `null` when the community has no
+   * avatar. */
+  avatarUrl: string | null;
 }
 
 export interface OpportunityCardDTO {

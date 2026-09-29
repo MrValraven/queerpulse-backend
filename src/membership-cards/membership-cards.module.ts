@@ -97,6 +97,10 @@ import { MyCardsService } from './my-cards.service';
   // `MembershipCardsService` and `MyCardsService` are exported so
   // `AccountModule` can inject `MyCardsService.forUser(userId)` into the
   // Art. 20 data-export archive (`membershipCards` category).
-  exports: [MembershipCardsService, MyCardsService],
+  //
+  // `CardProgramsService` is exported so `AmbassadorsModule` can switch on the
+  // circle's card programme when it founds the circle. Nothing this module
+  // imports reaches `AmbassadorsModule`, so there is no cycle.
+  exports: [MembershipCardsService, MyCardsService, CardProgramsService],
 })
 export class MembershipCardsModule {}

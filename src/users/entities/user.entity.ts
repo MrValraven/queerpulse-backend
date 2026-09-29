@@ -148,20 +148,16 @@ export class User {
   termsVersion!: string | null;
 
   /**
-   * When the member told us they are NOT 18 yet — the onboarding wizard's
-   * "I'm not 18" branch, recorded by `POST /auth/under-18-disclosure`
-   * (`UnderAgeDisclosureService`). The counterpart to `ageAttestedAt`: one is
-   * an affirmative "I am 18+", this is the retraction of it.
+   * Historical record only. When a member told us they were under 18, through
+   * the onboarding wizard's former "I'm not 18" branch. The former
+   * `POST /auth/under-18-disclosure` route wrote it, together with a permanent
+   * suspension (`status = Suspended`, `suspendedUntil = null`). That route was
+   * removed on 2026-09-29, and nothing writes this column now: the 18+
+   * attestation happens at sign-up (`ageAttestedAt`), and anyone with an
+   * account is treated as 18+.
    *
-   * Stamped ONCE and never cleared. Nothing on the platform lifts it, and it is
-   * deliberately not a self-expiring "until their birthday" clock: we have no
-   * date of birth, only a declaration. Reaching 18 is handled by a human
-   * through the contact link the notice shows, never by a timer.
-   *
-   * Always written together with `status = Suspended` and `suspendedUntil =
-   * null` (permanent, the same shape a ban takes — see `suspendedUntil`), so
-   * the account is out of an adults-only space rather than merely annotated.
-   * NULL for everyone who has made no such declaration; never backfilled (see
+   * Kept because the rows that do carry a timestamp record why those accounts
+   * were suspended. NULL for everyone else; never backfilled (see
    * `AddUnderAgeDisclosure1793700000000`).
    */
   @Column({ type: 'timestamptz', nullable: true })

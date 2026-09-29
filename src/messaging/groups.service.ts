@@ -44,7 +44,9 @@ import {
   GROUP_MEMBERS_ADDED,
   GroupInviteCreatedEvent,
   GroupMembersAddedEvent,
+  MATCHED_GROUP_MEMBER_LEFT,
   MESSAGE_CREATED,
+  MatchedGroupMemberLeftEvent,
   MessageCreatedEvent,
 } from './messaging.events';
 import { MessagingCoreService } from './messaging-core.service';
@@ -61,6 +63,10 @@ export const GROUP_DISSOLVED_CODE = 'GROUP_DISSOLVED';
 /** PRD-354: a candidate is blocked either way with the adder OR with any
  *  active member, refused with copy that never names who. */
 export const GROUP_ADD_REFUSED_CODE = 'GROUP_ADD_REFUSED';
+/** Go together: a member route reached a chat formed for a matched group
+ *  (`Conversation.eventMatchGroupId` set). Nobody can add, invite, rename,
+ *  change roles, transfer or dissolve it; leaving stays open. */
+export const MATCHED_GROUP_LOCKED_CODE = 'MATCHED_GROUP_LOCKED';
 
 /**
  * Plain-text `body` for each kind of system message. This is only a FALLBACK for
@@ -327,15 +333,193 @@ export class GroupsService {
   }
 
   /**
+   * Go together: a server-formed group for members matched to attend a
+   * gathering together. The house account is the Owner; members are seated
+   * directly, because opting into matching was their consent, so the
+   * connection rule and `groupAddPolicy` do not apply. No
+   * `GROUP_MEMBERS_ADDED` emit: the Go together notification is the only
+   * "your group is ready" signal, and a second "added you" bell would double it.
+   * The meeting point arrives as `description`, sanitised to plain text the
+   * same way `updateGroup` stores a member-authored one.
+   */
+  async createMatchedGroup(input: {
+    ownerUserId: string;
+    memberUserIds: string[];
+    title: string;
+    description: string | null;
+    eventMatchGroupId: string;
+  }): Promise<{ conversationId: string }> {
+    const trimmedTitle = input.title.trim();
+    if (!trimmedTitle) {
+      throw new BadRequestException('A group needs a name');
+    }
+    const ownerIdentityId = await this.identities.resolveProfileIdentityId(
+      input.ownerUserId,
+    );
+    const memberUserIds = [...new Set(input.memberUserIds)].filter(
+      (memberUserId) => memberUserId !== input.ownerUserId,
+    );
+    const { conversation, systemMessage } = await this.dataSource.transaction(
+      async (manager) => {
+        const createdConversation = await manager.save(
+          manager.create(Conversation, {
+            kind: ConversationKind.Group,
+            isOfficial: false,
+            pairKey: null,
+            title: trimmedTitle,
+            avatarUrl: null,
+            createdBy: input.ownerUserId,
+            description: toStoredPlainTextOrNull(input.description),
+            eventMatchGroupId: input.eventMatchGroupId,
+          }),
+        );
+        const memberIdentityIdByUserId = await this.profileIdentityIdsByUser(
+          manager,
+          memberUserIds,
+        );
+        await manager.save([
+          manager.create(ConversationParticipant, {
+            conversationId: createdConversation.id,
+            userId: input.ownerUserId,
+            identityId: ownerIdentityId,
+            role: ConversationRole.Owner,
+          }),
+          ...memberUserIds.map((memberUserId) =>
+            manager.create(ConversationParticipant, {
+              conversationId: createdConversation.id,
+              userId: memberUserId,
+              identityId: memberIdentityIdByUserId.get(memberUserId),
+              role: ConversationRole.Member,
+            }),
+          ),
+        ]);
+        const openingPill = await this.insertSystemMessage(
+          manager,
+          createdConversation.id,
+          { type: 'group_created', actorId: input.ownerUserId },
+          ownerIdentityId,
+        );
+        return {
+          conversation: createdConversation,
+          systemMessage: openingPill,
+        };
+      },
+    );
+    // Best-effort live fan-out AFTER commit, same order as `createGroup`.
+    await this.broadcastSystemMessage(systemMessage);
+    this.emitBestEffort(CONVERSATION_CREATED, {
+      conversationId: conversation.id,
+      memberUserIds: [input.ownerUserId, ...memberUserIds],
+    } satisfies ConversationCreatedEvent);
+    return { conversationId: conversation.id };
+  }
+
+  /**
+   * Go together: seat late joiners in an existing matched group. Only the
+   * group's Owner (the house account) may do this, and only while the group
+   * is active. Seats go through `seatMembersInTransaction`, the same
+   * insert-or-revive path `addMembers` uses, with one `member_added` pill per
+   * seat. The connection rule, `groupAddPolicy` and `GROUP_MEMBERS_ADDED` are
+   * skipped for the same reason as in `createMatchedGroup`. Already-active
+   * members and the owner are skipped silently, so a repeat call is a no-op.
+   */
+  async addMatchedMembers(
+    conversationId: string,
+    ownerUserId: string,
+    memberUserIds: string[],
+  ): Promise<void> {
+    const { convo } = await this.requireMatchedGroupOwner(
+      conversationId,
+      ownerUserId,
+    );
+    if (convo.dissolvedAt) {
+      throw new BadRequestException('This Go together group has ended');
+    }
+    const candidateUserIds = [...new Set(memberUserIds)].filter(
+      (memberUserId) => memberUserId !== ownerUserId,
+    );
+    if (!candidateUserIds.length) {
+      return;
+    }
+    const existingRows = await this.participants.find({
+      where: { conversationId, userId: In(candidateUserIds) },
+      select: {
+        id: true,
+        userId: true,
+        leftAt: true,
+        clearedAt: true,
+        role: true,
+      },
+    });
+    const existingRowByUserId = new Map(
+      existingRows.map((row) => [row.userId, row]),
+    );
+    const seats = candidateUserIds
+      .map((memberUserId) => ({
+        userId: memberUserId,
+        existing: existingRowByUserId.get(memberUserId),
+      }))
+      .filter(({ existing }) => !existing || existing.leftAt != null);
+    if (!seats.length) {
+      return;
+    }
+    const systemMessages = await this.dataSource.transaction((manager) =>
+      this.seatMembersInTransaction(
+        manager,
+        conversationId,
+        ownerUserId,
+        seats,
+      ),
+    );
+    // Best-effort live fan-out AFTER commit: one pill per seat, then the
+    // group reaches each new member's `user:<id>` room so their inbox
+    // refetches live.
+    for (const systemMessage of systemMessages) {
+      await this.broadcastSystemMessage(systemMessage);
+    }
+    this.emitBestEffort(CONVERSATION_CREATED, {
+      conversationId,
+      memberUserIds: seats.map(({ userId }) => userId),
+    } satisfies ConversationCreatedEvent);
+  }
+
+  /**
+   * Go together: end a matched group (the gathering was cancelled, or the
+   * group fell apart). The member route `dissolveGroup` refuses matched
+   * groups through `requireGroupRole`, so this is the only way to end one,
+   * and only the group's Owner (the house account) may call it. Idempotent:
+   * an already dissolved group returns without a second pill.
+   */
+  async dissolveMatchedGroup(
+    conversationId: string,
+    ownerUserId: string,
+  ): Promise<void> {
+    const { convo } = await this.requireMatchedGroupOwner(
+      conversationId,
+      ownerUserId,
+    );
+    if (convo.dissolvedAt) {
+      return;
+    }
+    await this.dissolveGroupAs(convo, ownerUserId);
+  }
+
+  /**
    * `POST /conversations/:id/leave` — the caller leaves a GROUP. Stamps their
    * `left_at` (KEEPING the row for history + identity resolution), seeds a
    * `member_left` system message, and broadcasts it to the room. Idempotent: a
    * repeat leave is a no-op success. Adding/removing OTHERS and role changes are
    * Phase 2 — this only covers the foundational self-leave.
+   *
+   * Leaving a matched chat through this route also emits
+   * `MATCHED_GROUP_MEMBER_LEFT`, so Go together withdraws the member's entry.
+   * Go together passes `isGoTogetherRemoval` when it takes a member out
+   * itself; that write already updates the entry, so no event goes out.
    */
   async leaveGroup(
     conversationId: string,
     userId: string,
+    options: { isGoTogetherRemoval?: boolean } = {},
   ): Promise<{ ok: true }> {
     const participant = await this.core.requireParticipant(
       conversationId,
@@ -438,6 +622,13 @@ export class GroupsService {
     } satisfies ConversationMembershipRevokedEvent);
     if (promotedSuccessor) {
       await this.fanGroupRefresh(conversationId);
+    }
+    if (convo.eventMatchGroupId && options.isGoTogetherRemoval !== true) {
+      this.emitBestEffort(MATCHED_GROUP_MEMBER_LEFT, {
+        conversationId,
+        eventMatchGroupId: convo.eventMatchGroupId,
+        userId,
+      } satisfies MatchedGroupMemberLeftEvent);
     }
     return { ok: true };
   }
@@ -572,89 +763,15 @@ export class GroupsService {
     // no longer leaves some members added with no pill / no fan-out.
     const { pills: systemMessages, createdInvites } =
       await this.dataSource.transaction(async (manager) => {
-        const pills: Message[] = [];
-        if (toSeat.length) {
-          // ENG-239: the unlocked pre-transaction count above is only a fast
-          // fail, so re-run it under a row lock on the conversation,
-          // immediately before seating, so two concurrent writers (another
-          // `addMembers`, an `accept`, a link `joinByToken`) racing at the
-          // ceiling can never both commit and leave the group over
-          // `MAX_GROUP_MEMBERS`; the loser's `GROUP_FULL` throw here rolls
-          // its own transaction back.
-          await manager.findOne(Conversation, {
-            where: { id: conversationId },
-            lock: { mode: 'pessimistic_write' },
-          });
-          const activeCountNow = await manager.count(ConversationParticipant, {
-            where: { conversationId, leftAt: IsNull() },
-          });
-          if (activeCountNow + toSeat.length > MAX_GROUP_MEMBERS) {
-            throw new ConflictException({
-              statusCode: 409,
-              message: `A group can have at most ${MAX_GROUP_MEMBERS} members`,
-              code: GROUP_FULL_CODE,
-            });
-          }
-        }
-        // A brand-new seat carries its member's own profile identity (the
-        // column is NOT NULL); a reactivated row keeps the one it has.
-        const newSeatIdentityIdByUserId = await this.profileIdentityIdsByUser(
+        const pills = await this.seatMembersInTransaction(
           manager,
-          toSeat
-            .filter(({ existing }) => !existing)
-            .map(({ profile }) => profile.userId),
+          conversationId,
+          actorUserId,
+          toSeat.map(({ profile, existing }) => ({
+            userId: profile.userId,
+            existing,
+          })),
         );
-        for (const { profile, existing } of toSeat) {
-          if (existing) {
-            // Re-activation resumes history FROM THE RE-ADD POINT, not from
-            // the beginning of the thread. Nulling `clearedAt` outright (as
-            // this used to) erased two things at once: the read ceiling that
-            // held while they were out — handing a member removed for a period
-            // everything said about them in the interim — and their own
-            // "delete for me" floor, resurrecting history they had chosen to
-            // clear. Carrying the floor forward to the later of the two
-            // preserves both: everything they could legitimately see before
-            // leaving stays visible, the gap stays hidden.
-            const resumeFloor = [existing.clearedAt, existing.leftAt]
-              .filter((value): value is Date => value != null)
-              .reduce<Date | null>(
-                (latest, value) =>
-                  latest === null || value > latest ? value : latest,
-                null,
-              );
-            await manager.update(
-              ConversationParticipant,
-              { id: existing.id },
-              {
-                clearedAt: resumeFloor,
-                leftAt: null,
-                role: ConversationRole.Member,
-                // Re-seating clears a past removal: a re-added member reads
-                // as freshly added, not still "removed". Both columns,
-                // together: `removedAt` is the durable record
-                // `computeGroupLeftReason`/`joinByToken` actually gate on.
-                removedBy: null,
-                removedAt: null,
-              },
-            );
-          } else {
-            await manager.save(
-              manager.create(ConversationParticipant, {
-                conversationId,
-                userId: profile.userId,
-                identityId: newSeatIdentityIdByUserId.get(profile.userId),
-                role: ConversationRole.Member,
-              }),
-            );
-          }
-          pills.push(
-            await this.insertSystemMessage(manager, conversationId, {
-              type: 'member_added',
-              actorId: actorUserId,
-              targetId: profile.userId,
-            }),
-          );
-        }
         // PRD-353: idempotent against the pending unique index: a candidate
         // who already has an open invite on this exact group (e.g. a repeat
         // `addMembers` call naming them again) is left alone rather than
@@ -1036,6 +1153,22 @@ export class GroupsService {
       actorUserId,
       ConversationRole.Owner,
     );
+    await this.dissolveGroupAs(convo, actorUserId);
+    return this.toGroupConversationResponse(convo, actorUserId);
+  }
+
+  /**
+   * The dissolve itself, shared by `dissolveGroup` (member route, gated by
+   * `requireGroupRole`) and `dissolveMatchedGroup` (Go together, gated on the
+   * house account's Owner seat). The caller has already checked the actor's
+   * right to end `convo`. Mirrors the transaction's writes onto `convo` so a
+   * caller building a response from it needs no second fetch.
+   */
+  private async dissolveGroupAs(
+    convo: Conversation,
+    actorUserId: string,
+  ): Promise<void> {
+    const conversationId = convo.id;
     const { systemMessage, memberUserIds } = await this.dataSource.transaction(
       async (manager) => {
         const activeRows = await manager.find(ConversationParticipant, {
@@ -1069,9 +1202,10 @@ export class GroupsService {
         return { systemMessage, memberUserIds };
       },
     );
-    // Mirror the transaction's own writes onto the in-memory `convo` so the
-    // response built below (which re-reads participants from the DB, but not
-    // the conversation row) reflects the dissolve without a second fetch.
+    // Mirror the transaction's own writes onto the in-memory `convo` so a
+    // response the caller builds from it (which re-reads participants from
+    // the DB, but not the conversation row) reflects the dissolve without a
+    // second fetch.
     convo.dissolvedAt = systemMessage.createdAt;
     convo.inviteToken = null;
 
@@ -1084,7 +1218,6 @@ export class GroupsService {
       conversationId,
       userIds: memberUserIds,
     } satisfies ConversationMembershipRevokedEvent);
-    return this.toGroupConversationResponse(convo, actorUserId);
   }
 
   /**
@@ -1139,6 +1272,107 @@ export class GroupsService {
   }
 
   /**
+   * Seat each member INSIDE the caller's transaction, shared by `addMembers`
+   * and `addMatchedMembers`: a member with no prior row gets a fresh
+   * `member` seat, a member who left or was removed has their row revived,
+   * and each seat gets its own `member_added` pill (actor = `actorUserId`).
+   * The caller broadcasts the returned pills after commit. Callers have
+   * already filtered out active members and run their own consent gates.
+   */
+  private async seatMembersInTransaction(
+    manager: EntityManager,
+    conversationId: string,
+    actorUserId: string,
+    seats: {
+      userId: string;
+      existing: ConversationParticipant | undefined;
+    }[],
+  ): Promise<Message[]> {
+    const pills: Message[] = [];
+    if (seats.length) {
+      // ENG-239: the unlocked pre-transaction count a caller runs is only a
+      // fast fail, so re-run it under a row lock on the conversation,
+      // immediately before seating, so two concurrent writers (another
+      // `addMembers`, an `accept`, a link `joinByToken`) racing at the
+      // ceiling can never both commit and leave the group over
+      // `MAX_GROUP_MEMBERS`; the loser's `GROUP_FULL` throw here rolls
+      // its own transaction back.
+      await manager.findOne(Conversation, {
+        where: { id: conversationId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const activeCountNow = await manager.count(ConversationParticipant, {
+        where: { conversationId, leftAt: IsNull() },
+      });
+      if (activeCountNow + seats.length > MAX_GROUP_MEMBERS) {
+        throw new ConflictException({
+          statusCode: 409,
+          message: `A group can have at most ${MAX_GROUP_MEMBERS} members`,
+          code: GROUP_FULL_CODE,
+        });
+      }
+    }
+    // A brand-new seat carries its member's own profile identity (the
+    // column is NOT NULL); a reactivated row keeps the one it has.
+    const newSeatIdentityIdByUserId = await this.profileIdentityIdsByUser(
+      manager,
+      seats.filter(({ existing }) => !existing).map(({ userId }) => userId),
+    );
+    for (const { userId, existing } of seats) {
+      if (existing) {
+        // Re-activation resumes history FROM THE RE-ADD POINT onward.
+        // Nulling `clearedAt` outright (as
+        // this used to) erased two things at once: the read ceiling that
+        // held while they were out (handing a member removed for a period
+        // everything said about them in the interim) and their own
+        // "delete for me" floor, resurrecting history they had chosen to
+        // clear. Carrying the floor forward to the later of the two
+        // preserves both: everything they could legitimately see before
+        // leaving stays visible, the gap stays hidden.
+        const resumeFloor = [existing.clearedAt, existing.leftAt]
+          .filter((value): value is Date => value != null)
+          .reduce<Date | null>(
+            (latest, value) =>
+              latest === null || value > latest ? value : latest,
+            null,
+          );
+        await manager.update(
+          ConversationParticipant,
+          { id: existing.id },
+          {
+            clearedAt: resumeFloor,
+            leftAt: null,
+            role: ConversationRole.Member,
+            // Re-seating clears a past removal: a re-added member reads
+            // as freshly added, with no lingering "removed" state. Both columns,
+            // together: `removedAt` is the durable record
+            // `computeGroupLeftReason`/`joinByToken` actually gate on.
+            removedBy: null,
+            removedAt: null,
+          },
+        );
+      } else {
+        await manager.save(
+          manager.create(ConversationParticipant, {
+            conversationId,
+            userId,
+            identityId: newSeatIdentityIdByUserId.get(userId),
+            role: ConversationRole.Member,
+          }),
+        );
+      }
+      pills.push(
+        await this.insertSystemMessage(manager, conversationId, {
+          type: 'member_added',
+          actorId: actorUserId,
+          targetId: userId,
+        }),
+      );
+    }
+    return pills;
+  }
+
+  /**
    * Server-authoritative group role gate. Loads the caller's participant row +
    * the conversation, asserts it's a group they still belong to (not left), and
    * that their role meets `minRole` in owner > admin > member order. EVERY
@@ -1172,11 +1406,56 @@ export class GroupsService {
         code: GROUP_DISSOLVED_CODE,
       });
     }
+    // Go together: a matched group's roster and settings belong to the
+    // matching engine, so every management route refuses it here. Leaving
+    // (`leaveGroup`) never passes through this gate and stays open.
+    if (convo.eventMatchGroupId) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        message: 'This group was formed by Go together and cannot be changed',
+        code: MATCHED_GROUP_LOCKED_CODE,
+      });
+    }
     if (participant.leftAt) {
       throw new ForbiddenException('You have left this group');
     }
     if (ROLE_RANK[participant.role] > ROLE_RANK[minRole]) {
       throw new ForbiddenException('You do not have permission to do that');
+    }
+    return { participant, convo };
+  }
+
+  /**
+   * Go together's own gate for `addMatchedMembers` and `dissolveMatchedGroup`,
+   * the counterpart of `requireGroupRole` for the one account allowed to
+   * change a matched group. Asserts the conversation is a matched group and
+   * that `ownerUserId` holds its Owner seat. A dissolved group has every seat
+   * stamped `leftAt`, so a departed owner is refused only while the group is
+   * still active; each caller decides what a dissolved group means for it.
+   */
+  private async requireMatchedGroupOwner(
+    conversationId: string,
+    ownerUserId: string,
+  ): Promise<{ participant: ConversationParticipant; convo: Conversation }> {
+    const convo = await this.conversations.findOne({
+      where: { id: conversationId },
+    });
+    if (
+      !convo ||
+      convo.kind !== ConversationKind.Group ||
+      !convo.eventMatchGroupId
+    ) {
+      throw new BadRequestException('This is not a Go together group');
+    }
+    const participant = await this.core.requireParticipant(
+      conversationId,
+      ownerUserId,
+    );
+    if (
+      participant.role !== ConversationRole.Owner ||
+      (participant.leftAt != null && !convo.dissolvedAt)
+    ) {
+      throw new ForbiddenException('Only the group owner can do that');
     }
     return { participant, convo };
   }
@@ -1656,6 +1935,7 @@ export class GroupsService {
       hasLeft: callerRow?.leftAt != null,
       description: convo.description,
       dissolvedAt: convo.dissolvedAt?.toISOString() ?? null,
+      eventMatchGroupId: convo.eventMatchGroupId,
       leftReason: computeGroupLeftReason({
         leftAt: callerRow?.leftAt,
         removedAt: callerRow?.removedAt,

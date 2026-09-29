@@ -110,6 +110,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   slug: 'lux-cafe',
   ownerId: 'owner-1',
   createdByStaffId: null,
+  suggestedByUserId: null,
   status: ListingStatus.Review,
   path: 'claim',
   verify: '',
@@ -262,6 +263,7 @@ describe('ListingsService', () => {
     listingIdsCoManagedBy: jest.Mock;
   };
   let adminQueueNotifications: { announce: jest.Mock };
+  let reports: { create: jest.Mock };
   // The stub `EntityManager` every `dataSource.transaction(...)` call in a
   // given test is handed — see `buildTransactionManager`'s doc comment for
   // why this must be a single instance rather than built fresh per call.
@@ -347,6 +349,7 @@ describe('ListingsService', () => {
     adminQueueNotifications = {
       announce: jest.fn().mockResolvedValue(undefined),
     };
+    reports = { create: jest.fn() };
     transactionManager = buildTransactionManager(listings);
     coManagerSeats = { find: jest.fn().mockResolvedValue([]) };
     dataSource = {
@@ -386,9 +389,9 @@ describe('ListingsService', () => {
           useValue: { deleteObjectByReference: jest.fn() },
         },
         // Item #13: disputes + owner-notify tasks file through the shared
-        // reports pipeline. `create` is only reached for friendly/suggested
-        // listings, so a bare mock suffices for the existing cases.
-        { provide: ReportsService, useValue: { create: jest.fn() } },
+        // reports pipeline. A create reaches `create` only for a suggestion,
+        // so a bare mock suffices for the existing cases.
+        { provide: ReportsService, useValue: reports },
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
@@ -495,6 +498,104 @@ describe('ListingsService', () => {
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
     });
 
+    describe('who holds the new listing', () => {
+      /** What `listings.save` was handed, which is the row as it was written. */
+      const savedRow = (): Record<string, unknown> => {
+        const [firstCall] = listings.save.mock.calls as [
+          Record<string, unknown>,
+        ][];
+        expect(firstCall).toBeDefined();
+        return firstCall![0];
+      };
+
+      it('keeps a suggestion with the platform and records the suggester apart', async () => {
+        await service.create('member-1', {
+          name: 'Lux Café',
+          path: 'suggest',
+          ownerName: 'Ana',
+          visibility: 'anon',
+          linkToProfile: true,
+        } as CreateListingDto);
+
+        const row = savedRow();
+        expect(row).toEqual(
+          expect.objectContaining({
+            ownerId: null,
+            suggestedByUserId: 'member-1',
+            affirmingBaselineAcceptedAt: null,
+            ownerName: '',
+            visibility: '',
+            linkToProfile: false,
+          }),
+        );
+      });
+
+      it('makes the claimant the owner, with an acceptance and no suggester', async () => {
+        await service.create('member-1', {
+          name: 'Lux Café',
+          path: 'claim',
+          hours: {
+            Mon: { open: true, intervals: [{ from: '09:00', to: '17:00' }] },
+          },
+          photoGallery: [
+            { image: 'https://example.com/front.jpg', alt: 'The front door' },
+          ],
+        } as CreateListingDto);
+
+        const row = savedRow();
+        expect(row).toEqual(expect.objectContaining({ ownerId: 'member-1' }));
+        // `normalizeCreate` omits the column and the claim path passes no
+        // overrides, so the create call carries no such property at all.
+        expect(row.suggestedByUserId).toBeUndefined();
+        expect(row.affirmingBaselineAcceptedAt).toBeInstanceOf(Date);
+      });
+    });
+
+    describe('owner outreach', () => {
+      /** The reason codes of every report the create filed. */
+      const filedReasonCodes = (): unknown[] =>
+        (reports.create.mock.calls as [string, { reasonCode: string }][]).map(
+          ([, reportBody]) => reportBody.reasonCode,
+        );
+
+      // `badge: 'friendly'` says the business is LGBTQ+ friendly as opposed
+      // to queer-owned. On the claim path the submitter is its owner, so
+      // nobody needs to reach out to the business.
+      it('files no owner-outreach task for a claim-path create with the friendly badge', async () => {
+        await service.create('member-1', {
+          name: 'Lux Café',
+          path: 'claim',
+          badge: 'friendly',
+          hours: {
+            Mon: { open: true, intervals: [{ from: '09:00', to: '17:00' }] },
+          },
+          photoGallery: [
+            { image: 'https://example.com/front.jpg', alt: 'The front door' },
+          ],
+        } as CreateListingDto);
+
+        expect(listings.save).toHaveBeenCalled();
+        expect(filedReasonCodes()).not.toContain('listing_owner_notify');
+      });
+
+      it('files an owner-outreach task for a suggestion', async () => {
+        await service.create('member-1', {
+          name: 'Lux Café',
+          path: 'suggest',
+        } as CreateListingDto);
+
+        expect(reports.create).toHaveBeenCalledWith(
+          'member-1',
+          expect.objectContaining({
+            reasonCode: 'listing_owner_notify',
+            detail: expect.stringContaining(
+              'Owner outreach: suggested listing',
+            ) as unknown,
+          }),
+        );
+      });
+    });
+
     describe('curated tags', () => {
       it('stores vocabulary tags in their canonical spelling', async () => {
         await service.create('owner-1', {
@@ -587,6 +688,23 @@ describe('ListingsService', () => {
 
       expect(dto.blurb).toBe('new blurb');
       expect(dto.name).toBe('Lux Café'); // untouched field preserved
+    });
+
+    it('accepts a stale path in the patch and keeps the path the listing came in on', async () => {
+      // An older cached frontend still sends `path`. It is fixed at creation,
+      // so the PATCH succeeds and the stored value stays as it was.
+      listings.findOne.mockResolvedValue(
+        baseListing({ ownerId: 'owner-1', path: 'suggest' }),
+      );
+
+      const dto = await service.update('QPL-2026-0001', 'owner-1', {
+        path: 'claim',
+      });
+
+      expect(dto.path).toBe('suggest');
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ path: 'suggest' }),
+      );
     });
 
     it('merges partial social/photos patches instead of replacing the whole object', async () => {
@@ -942,6 +1060,191 @@ describe('ListingsService', () => {
       // Not an approval — no persisted notification.
       expect(notifications.create).not.toHaveBeenCalled();
     });
+
+    it('tells the suggester by DM when a suggestion the platform holds goes live', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          status: ListingStatus.Review,
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+        }),
+      );
+
+      await service.setStatus('QPL-2026-0001', ListingStatus.Live, 'mod-1');
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-1',
+        expect.stringContaining('is now live in the directory'),
+      );
+      // The `ListingApproved` notification says "your listing", which a
+      // suggester does not hold, so the DM above replaces it.
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('asks the suggester for more information in suggestion wording', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          status: ListingStatus.Review,
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+        }),
+      );
+
+      await service.setStatus(
+        'QPL-2026-0001',
+        ListingStatus.Question,
+        'mod-1',
+        'need opening hours',
+      );
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-1',
+        'The place you suggested, "Lux Café", needs more information before it can go live. Reason: need opening hours',
+      );
+    });
+
+    it('tells the suggester their suggestion was sent back to review in suggestion wording', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          status: ListingStatus.Live,
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+        }),
+      );
+
+      await service.setStatus('QPL-2026-0001', ListingStatus.Review, 'mod-1');
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-1',
+        'The place you suggested, "Lux Café", was sent back to review.',
+      );
+    });
+
+    it('keeps the owner wording for an owned listing sent to question', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          status: ListingStatus.Review,
+          ownerId: 'owner-1',
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+        }),
+      );
+
+      await service.setStatus(
+        'QPL-2026-0001',
+        ListingStatus.Question,
+        'mod-1',
+        'need opening hours',
+      );
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'owner-1',
+        'Your listing "Lux Café" needs more information before it can go live. Reason: need opening hours',
+      );
+    });
+
+    it('keeps the owner wording for an owned listing sent back to review', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          status: ListingStatus.Live,
+          ownerId: 'owner-1',
+          name: 'Lux Café',
+        }),
+      );
+
+      await service.setStatus('QPL-2026-0001', ListingStatus.Review, 'mod-1');
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'owner-1',
+        'Your listing "Lux Café" was sent back to review.',
+      );
+    });
+  });
+
+  describe('removeByModerator', () => {
+    it('tells the suggester their suggestion was removed in suggestion wording', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+        }),
+      );
+
+      await service.removeByModerator(
+        'QPL-2026-0001',
+        'mod-1',
+        'policy violation',
+      );
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-1',
+        'The place you suggested, "Lux Café", was removed from the directory. Reason: policy violation',
+      );
+    });
+
+    it('keeps the owner wording when the listing has an owner', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({ ownerId: 'owner-1', name: 'Lux Café' }),
+      );
+
+      await service.removeByModerator('QPL-2026-0001', 'mod-1');
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'owner-1',
+        'Your listing "Lux Café" was removed from QueerPulse.',
+      );
+    });
+  });
+
+  describe('askQuestion', () => {
+    it('asks the suggester when the platform holds the suggestion', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-id',
+        }),
+      );
+
+      await service.askQuestion(
+        'QPL-2026-0001',
+        'mod-1',
+        'Which street is it on?',
+      );
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-id',
+        'Which street is it on?',
+      );
+    });
+
+    it('400s a house-authored listing with nobody to ask', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({ ownerId: null, suggestedByUserId: null }),
+      );
+
+      await expect(
+        service.askQuestion('QPL-2026-0001', 'mod-1', 'Which street is it on?'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+      expect(listings.save).not.toHaveBeenCalled();
+    });
   });
 
   describe('replyToReview', () => {
@@ -1273,7 +1576,13 @@ describe('ListingsService', () => {
         sort: 'name',
       });
 
-      expect(searchQb.leftJoin).toHaveBeenCalled();
+      // Joined on the owner, falling back to the suggester, so a moderator
+      // searching a suggester's name still finds the suggestions they sent.
+      expect(searchQb.leftJoin).toHaveBeenCalledWith(
+        expect.anything(),
+        'submitter',
+        'submitter.user_id = COALESCE(l.owner_id, l.suggested_by_user_id)',
+      );
       expect(searchQb.andWhere).toHaveBeenCalledWith(
         expect.stringContaining('ILIKE') as unknown,
         { pattern: '%lux%' },
@@ -1287,6 +1596,44 @@ describe('ListingsService', () => {
         question: 0,
         live: 5,
       });
+    });
+
+    it('credits the suggester on a suggestion the platform holds', async () => {
+      const searchQb = qbStub();
+      searchQb.getManyAndCount.mockResolvedValue([
+        [
+          baseListing({
+            path: 'suggest',
+            ownerId: null,
+            suggestedByUserId: 'suggester-1',
+          }),
+        ],
+        1,
+      ]);
+      listings.createQueryBuilder
+        .mockReturnValueOnce(searchQb)
+        .mockReturnValueOnce(qbStub());
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'suggester-1',
+          slug: 'bea-costa',
+          firstName: 'Bea',
+          lastName: 'Costa',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+
+      const result = await service.listQueue({});
+
+      const [row] = result.items;
+      expect(row?.submittedBy).toBeNull();
+      expect(row?.suggestedBy).toEqual(
+        expect.objectContaining({ slug: 'bea-costa', firstName: 'Bea' }),
+      );
+      // Owners and suggesters resolve in one profile read.
+      expect(profiles.find).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1368,6 +1715,32 @@ describe('ListingsService', () => {
       expect(notifications.create).not.toHaveBeenCalled();
     });
 
+    it('tells a suggester in suggestion wording when a bulk transition sends their suggestion back', async () => {
+      listings.find.mockResolvedValue([
+        baseListing({
+          ref: 'QPL-2026-0001',
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+          status: ListingStatus.Live,
+        }),
+      ]);
+
+      await service.bulkSetStatus(
+        ['QPL-2026-0001'],
+        ListingStatus.Review,
+        'mod-1',
+        'needs another look',
+      );
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-1',
+        'The place you suggested, "Lux Café", was sent back to review. Reason: needs another look',
+      );
+    });
+
     it('counts an already-at-target-status ref as updated but writes no event, DM, or notification', async () => {
       const listing = baseListing({
         ref: 'QPL-2026-0001',
@@ -1425,7 +1798,27 @@ describe('ListingsService', () => {
       expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
         'mod-1',
         'owner-1',
-        expect.stringContaining('policy violation'),
+        'Your listing "Lux Café" was removed from QueerPulse. Reason: policy violation',
+      );
+    });
+
+    it('tells a suggester in suggestion wording when their suggestion is bulk-removed', async () => {
+      listings.find.mockResolvedValue([
+        baseListing({
+          ref: 'QPL-2026-0001',
+          path: 'suggest',
+          ownerId: null,
+          suggestedByUserId: 'suggester-1',
+          name: 'Lux Café',
+        }),
+      ]);
+
+      await service.bulkRemove(['QPL-2026-0001'], 'mod-1', 'policy violation');
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'mod-1',
+        'suggester-1',
+        'The place you suggested, "Lux Café", was removed from the directory. Reason: policy violation',
       );
     });
   });
@@ -2190,9 +2583,9 @@ describe('ListingsService', () => {
 
     it('never lets a moderator answer read as the business speaking', async () => {
       // `Listing.ownerId` is typed non-nullable on the entity while the column
-      // is nullable in the database (`friendly`/`suggested` rows carry no
-      // owner) — the cast keeps this fixture honest about the real row shape
-      // without changing an entity this work does not own.
+      // is nullable in the database (a suggestion the platform holds carries
+      // no owner). The cast keeps this fixture honest about the real row
+      // shape while leaving an entity this work does not own untouched.
       listings.findOne.mockResolvedValue(
         baseListing({ ownerId: null as unknown as string }),
       );
@@ -2213,9 +2606,9 @@ describe('ListingsService', () => {
 
     it('names no actor on a moderator answer, so the asker is not told which staff member wrote it', async () => {
       // `Listing.ownerId` is typed non-nullable on the entity while the column
-      // is nullable in the database (`friendly`/`suggested` rows carry no
-      // owner) — the cast keeps this fixture honest about the real row shape
-      // without changing an entity this work does not own.
+      // is nullable in the database (a suggestion the platform holds carries
+      // no owner). The cast keeps this fixture honest about the real row
+      // shape while leaving an entity this work does not own untouched.
       listings.findOne.mockResolvedValue(
         baseListing({ ownerId: null as unknown as string }),
       );

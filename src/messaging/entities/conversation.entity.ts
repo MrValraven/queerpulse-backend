@@ -153,6 +153,21 @@ export class Conversation {
   dissolvedAt!: Date | null;
 
   /**
+   * Go together: the matched group this chat belongs to. Set only by
+   * `GroupsService.createMatchedGroup`. While set, nobody can add members,
+   * mint an invite link, rename, change roles, transfer or dissolve through the
+   * member routes: `requireGroupRole` refuses with `MATCHED_GROUP_LOCKED`.
+   * Leaving stays open to every member. FK `ON DELETE SET NULL` to
+   * `event_match_groups`, created with its partial index by the Go together
+   * migration.
+   */
+  @Index('IDX_conversations_event_match_group_id', {
+    where: '"event_match_group_id" IS NOT NULL',
+  })
+  @Column({ type: 'uuid', nullable: true })
+  eventMatchGroupId!: string | null;
+
+  /**
    * The one staff member currently answering a shared business mailbox
    * thread. Claiming narrows push to that person (Task 12) and tells
    * colleagues the thread is already handled. NULL means unclaimed, which is

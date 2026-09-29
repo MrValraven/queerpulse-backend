@@ -79,7 +79,7 @@ export function handleWriteError(
 }
 
 /**
- * Reads and writes the `handles` registry — the ONE global username namespace
+ * Reads and writes the `handles` registry: the ONE global username namespace
  * shared by main-profile usernames and subprofile handles (design plan PART C /
  * UC3). Every write method takes an `EntityManager` so callers run the handle
  * mutation inside the SAME transaction as the row it names (profile slug change,
@@ -100,7 +100,8 @@ export class HandlesService {
   //
   // `exceptOwner` (the caller's own identity, when known) lets a name that is
   // still inside its reclaim cooldown read as AVAILABLE to the previous owner
-  // reclaiming it, while remaining `taken` for everyone else.
+  // reclaiming it, while remaining `taken` for everyone else. A non-forwarding
+  // reservation reads as `taken` to the previous owner too (see `isTaken`).
   async check(name: string, exceptOwner?: HandleOwner): Promise<HandleCheck> {
     const formatError = handleFormatError(name);
     if (formatError) {
@@ -131,7 +132,10 @@ export class HandlesService {
    * this method inherits from somewhere else.
    *
    * A subprofile-owned reservation returns `null`: personas resolve through
-   * their own read path, which owns its own answer.
+   * their own read path, which owns its own answer. So does a reservation
+   * written with `isForwarding: false`: a release that must never forward
+   * (a persona switching between linked and unlinked) withholds the answer
+   * even while its cooldown is still live.
    */
   async previousProfileOwnerOf(name: string): Promise<string | null> {
     const normalized = normalizeHandle(name);
@@ -143,7 +147,8 @@ export class HandlesService {
       !reservation ||
       reservation.previousOwnerKind !== HandleOwnerKind.Profile ||
       !reservation.previousOwnerUserId ||
-      reservation.reclaimableAt <= new Date()
+      reservation.reclaimableAt <= new Date() ||
+      !reservation.isForwarding
     ) {
       return null;
     }
@@ -169,7 +174,7 @@ export class HandlesService {
    *    a forwarding answer can never outlive the window during which the name
    *    is the previous owner's to reclaim;
    * 3. nothing holds the name in the live `handles` registry, so a stranger who
-   *    legitimately claimed the name inherits none of its old traffic — and
+   *    legitimately claimed the name inherits none of its old traffic, and
    *    that stays true however `claim` is changed later.
    *
    * A profile-owned reservation returns `null`, the exact counterpart of the
@@ -179,7 +184,9 @@ export class HandlesService {
    *
    * The name is the same shared global namespace, so both methods deliberately
    * read the same reservation row and disagree only about which owner kind they
-   * will speak for.
+   * will speak for. A reservation written with `isForwarding: false` (a
+   * persona switching between linked and unlinked) returns `null` too: that
+   * release must never forward, even while its cooldown is still live.
    */
   async previousSubprofileOwnerOf(name: string): Promise<string | null> {
     const normalized = normalizeHandle(name);
@@ -191,7 +198,8 @@ export class HandlesService {
       !reservation ||
       reservation.previousOwnerKind !== HandleOwnerKind.Subprofile ||
       !reservation.previousOwnerSubprofileId ||
-      reservation.reclaimableAt <= new Date()
+      reservation.reclaimableAt <= new Date() ||
+      !reservation.isForwarding
     ) {
       return null;
     }
@@ -211,8 +219,14 @@ export class HandlesService {
   // active (`reclaimableAt` in the future) and belongs to SOMEONE ELSE, the
   // claim is refused so a stranger cannot hijack a just-freed handle (and the
   // old `@mentions` that still point at it). The previous owner reclaiming
-  // within the window — and anyone at all once it has lapsed — is allowed, and
+  // within the window (and anyone at all once it has lapsed) is allowed, and
   // the stale reservation row is cleared as part of the same transaction.
+  //
+  // A non-forwarding reservation (`isForwarding: false`, written by a persona
+  // link switch) is refused to its previous owner as well until it lapses.
+  // Otherwise a persona could switch link kind and then type its old handle
+  // back, so a pseudonymous name would become the address of the owner-named
+  // page and undo the no-forwarding guarantee.
   async claim(
     m: EntityManager,
     name: string,
@@ -226,7 +240,7 @@ export class HandlesService {
     });
     if (reservation) {
       const withinCooldown = reservation.reclaimableAt > new Date();
-      if (withinCooldown && !this.reservationHeldBy(reservation, owner)) {
+      if (withinCooldown && !this.isReclaimableBy(reservation, owner)) {
         throw new ConflictException(
           'That handle was recently released and is reserved for a short while',
         );
@@ -289,13 +303,13 @@ export class HandlesService {
 
   /**
    * Frees a handle AND records a reclaim reservation. Safe to call when the row
-   * does not exist (a true no-op then — no reservation is written).
+   * does not exist (a true no-op then: no reservation is written).
    *
    * `owner` scopes the delete, and passing it is strongly preferred. Names are
    * normalized (lowercased) but `profiles.slug` is stored raw and is only
    * case-SENSITIVELY unique, so two profiles can hold `John` and `john` while
    * the registry has a single `john` row. Deleting by name alone let the profile
-   * that did NOT own that row release it out from under the one that did —
+   * that did NOT own that row release it out from under the one that did,
    * freeing a name whose `/members/<slug>` was still live, for anyone to reclaim.
    *
    * Omitting `owner` deletes by name regardless of ownership; only do so where
@@ -304,15 +318,26 @@ export class HandlesService {
    * Instead of hard-deleting and forgetting the name, this upserts a
    * `handle_history` row for whoever actually held it, with `reclaimableAt` set
    * one cooldown window out. Until then the name reads as TAKEN to everyone but
-   * that previous owner (see `isTaken`/`claim`), which prevents a stranger from
+   * that previous owner (see `isTaken`/`claim`; a non-forwarding reservation
+   * reads as TAKEN to the previous owner too), which prevents a stranger from
    * instantly reclaiming a freed handle and silently inheriting its old
    * `@mentions`. All writes use the passed `EntityManager`, so they commit (or
    * roll back) with the rename/unpublish that called in.
+   *
+   * `options.isForwarding` (default `true`) controls whether
+   * `previousProfileOwnerOf`/`previousSubprofileOwnerOf` may answer for this
+   * release once it is a reservation. Pass `false` for a release that must
+   * never forward, such as a persona switching between linked and unlinked:
+   * the name still cools down, no caller can use the reservation to connect a
+   * pseudonymous address to the owner behind it, and the previous owner cannot
+   * reclaim it either until the cooldown lapses, so the persona cannot carry
+   * its old name across the switch.
    */
   async release(
     m: EntityManager,
     name: string,
     owner?: HandleOwner,
+    options?: { isForwarding?: boolean },
   ): Promise<void> {
     const normalized = normalizeHandle(name);
     const where = {
@@ -347,8 +372,35 @@ export class HandlesService {
         previousOwnerSubprofileId: freed.subprofileId,
         releasedAt,
         reclaimableAt,
+        isForwarding: options?.isForwarding ?? true,
       },
       ['name'],
+    );
+  }
+
+  /**
+   * Marks every reservation a persona left behind as non-forwarding.
+   *
+   * A link switch cuts every address the persona held in its previous link
+   * era, so none of them may forward across the boundary: a name released by
+   * an earlier rename while the persona was unlinked must never lead to its
+   * owner-named address once it is linked, and the same holds in reverse. The
+   * release written at the switch itself is already non-forwarding; this
+   * covers the older rows. Cooldowns are untouched, so every name stays
+   * reserved for its full window, and a non-forwarding name is withheld from
+   * the persona itself as well until it lapses (see `isTaken`).
+   */
+  async stopForwardingFor(
+    m: EntityManager,
+    subprofileId: string,
+  ): Promise<void> {
+    await m.update(
+      HandleHistory,
+      {
+        previousOwnerKind: HandleOwnerKind.Subprofile,
+        previousOwnerSubprofileId: subprofileId,
+      },
+      { isForwarding: false },
     );
   }
 
@@ -360,6 +412,11 @@ export class HandlesService {
   // reservation whose cooldown has not lapsed reserves the name for its previous
   // owner. It reads as available only to that previous owner (`exceptOwner`
   // matches the reservation) or once the window has passed.
+  //
+  // A non-forwarding reservation (`isForwarding: false`) reads as TAKEN to
+  // everyone, its previous owner included, until it lapses. It was written by
+  // a persona link switch, and letting the persona reclaim the name would put
+  // its old pseudonymous address on the other side of that switch.
   async isTaken(
     m: EntityManager,
     name: string,
@@ -386,15 +443,16 @@ export class HandlesService {
       }
       return true;
     }
-    // No live claim — is it still cooling down under a reservation?
+    // No live claim: is it still cooling down under a reservation?
     const reservation = await m.findOne(HandleHistory, {
       where: { name: normalized },
     });
     if (!reservation || reservation.reclaimableAt <= new Date()) {
       return false;
     }
-    // Reserved and still cooling: taken for all but the previous owner.
-    return !(exceptOwner && this.reservationHeldBy(reservation, exceptOwner));
+    // Reserved and still cooling: taken for all but a previous owner who may
+    // reclaim it.
+    return !(exceptOwner && this.isReclaimableBy(reservation, exceptOwner));
   }
 
   /**
@@ -433,8 +491,20 @@ export class HandlesService {
     }
   }
 
-  // Whether a reclaim reservation belongs to `owner` — the previous owner
-  // allowed to reclaim the name during its cooldown window.
+  // Whether `owner` may reclaim a reservation still inside its cooldown: it
+  // must be the previous owner, and the reservation must be a forwarding one.
+  // A non-forwarding reservation stays out of reach until it lapses.
+  private isReclaimableBy(
+    reservation: HandleHistory,
+    owner: HandleOwner,
+  ): boolean {
+    return (
+      reservation.isForwarding && this.reservationHeldBy(reservation, owner)
+    );
+  }
+
+  // Whether a reclaim reservation belongs to `owner`: the name's previous
+  // owner.
   private reservationHeldBy(
     reservation: HandleHistory,
     owner: HandleOwner,

@@ -10,7 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { isUniqueViolation } from '../common/db-errors';
 import { textHasBlockedTerm } from '../common/blocked-terms';
-import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import { normalizeHandle } from '../common/handles';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
@@ -22,10 +22,11 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
-import { HandlesService } from '../handles/handles.service';
+import { HandleOwner, HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { storageKeyOwnerId } from '../storage/storage-key';
+import { Profile } from '../users/entities/profile.entity';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
@@ -65,9 +66,11 @@ import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { isSectionAllowed } from './subprofile-kinds';
+import { deriveLinkedPersonaHandle } from './persona-handle';
 import {
   ACCENT_KEYS,
   AVAILABILITY_KEYS,
+  linkedHandleUnmetCodes,
   isValidAffiliation,
   MAX_AFFILIATIONS,
   MAX_COLLABORATORS_PER_ITEM,
@@ -254,6 +257,36 @@ class PersonaChangedMeanwhileException extends ConflictException {
       'This persona changed while you were editing. Reload it and try again.',
     );
   }
+}
+
+/** How many times a server-derived handle claim may lose a race to another
+ * writer before the write gives up: a publish, or an update that links a
+ * published persona. Each attempt re-derives, so the next one skips the name
+ * that was just taken. */
+const MAX_DERIVED_HANDLE_CLAIM_ATTEMPTS = 5;
+
+/** Raised inside a claim transaction when a server-derived handle was taken
+ * between the availability check and the insert. It never leaves the service:
+ * `retryLostDerivedHandleRace` catches it and runs the transaction again. */
+class LostDerivedHandleRaceError extends Error {
+  constructor() {
+    super('A derived persona handle was claimed by another writer first.');
+  }
+}
+
+/** The registry owner for a persona's handle. */
+function subprofileHandleOwner(subprofileId: string): HandleOwner {
+  return { kind: 'subprofile', subprofileId };
+}
+
+/** The 422 a linked persona gets when its creator has no profile row, so no
+ * `<creatorSlug>-<personaSlug>` handle can be built for it. */
+function missingCreatorProfileException(): UnprocessableEntityException {
+  return new UnprocessableEntityException({
+    code: 'SUBPROFILE_NOT_READY',
+    message: 'This persona has no owner profile to build its address from.',
+    unmet: ['handle_invalid'],
+  });
 }
 
 @Injectable()
@@ -664,11 +697,14 @@ export class SubprofilesService {
     dto: CreateSubprofileDTO,
   ): Promise<SubprofileView> {
     const slug = await this.generateSlug(userId, dto.displayName);
+    // Set explicitly (it is also the column default) so the handle derivation
+    // below reads the link state before the insert returns it.
     const sp = this.subprofiles.create({
       userId,
       kind: dto.kind,
       displayName: dto.displayName,
       slug,
+      linkVisibility: SubprofileLinkVisibility.Linked,
     });
     // The count-then-insert cap check is wrapped in ONE transaction guarded by
     // a per-user advisory lock — without it two concurrent creates could both
@@ -693,6 +729,20 @@ export class SubprofilesService {
         if (count >= MAX_SUBPROFILES) {
           throw new BadRequestException(
             `You can have at most ${MAX_SUBPROFILES} subprofiles`,
+          );
+        }
+        // A new persona is a linked draft, so it stores its `/p/<handle>`
+        // from the start (see `deriveLinkedDraftHandle`). The row is not
+        // inserted yet, so there is no own name or row to leave out.
+        if (
+          sp.linkVisibility === SubprofileLinkVisibility.Linked &&
+          !sp.handle
+        ) {
+          sp.handle = await this.deriveLinkedDraftHandle(
+            manager,
+            undefined,
+            userId,
+            slug,
           );
         }
         await manager.save(sp);
@@ -773,11 +823,13 @@ export class SubprofilesService {
     const isCreator = sp.userId === userId;
     const prevVisibility = sp.visibility;
     const prevStatus = sp.status;
-    // A registry row exists for this persona IFF it is published + unlinked (see
-    // the invariant documented on `publish`), and its name equals `prevHandle`.
-    const wasPublishedUnlinked =
-      sp.status === SubprofileStatus.Published &&
-      prevLink === SubprofileLinkVisibility.Unlinked;
+    // A registry row exists for this persona IFF it is published, whatever its
+    // link kind (see the invariant documented on `publish`), and its name
+    // equals `prevHandle`. Read off the loaded row, before `Object.assign`.
+    // A published persona can still hold no handle (a linked row the backfill
+    // skipped), so the handle-edit branch below reads `prevStatus` instead.
+    const wasPublishedWithHandle =
+      sp.status === SubprofileStatus.Published && !!prevHandle;
     const { linkVisibility, ...rest } = dto;
 
     if (
@@ -842,31 +894,58 @@ export class SubprofilesService {
       throw new BadRequestException('ctaLabel and ctaUrl must be set together');
     }
 
-    // Global-namespace names to free as a side effect of this update.
-    const releases: string[] = [];
+    // Global-namespace names to free as a side effect of this update. A name
+    // freed by a link switch must not forward (`isForwarding: false`): its old
+    // address leading to the new one would tie a pseudonymous persona to the
+    // member who runs it.
+    const releases: Array<{ name: string; isForwarding: boolean }> = [];
+    // Set when a PUBLISHED persona is linked: it stays published, so it must
+    // hold a handle the moment the edit commits. The claim runs in the same
+    // transaction as the release below.
+    let shouldClaimLinkedHandleNow = false;
 
     if (linkVisibility && linkVisibility !== prevLink) {
       sp.linkVisibility = linkVisibility;
-      if (linkVisibility === SubprofileLinkVisibility.Linked) {
-        // unlinked → linked: it becomes nested and drops its global handle. If
-        // it was a published unlinked persona, free the name it held.
-        if (wasPublishedUnlinked && prevHandle) {
-          releases.push(prevHandle);
-        }
+      // Either direction frees the name a published persona held, and drops
+      // it from the row unless this same edit typed a new one.
+      if (wasPublishedWithHandle && prevHandle) {
+        releases.push({ name: prevHandle, isForwarding: false });
+      }
+      const hasTypedNewHandle = !!sp.handle && sp.handle !== prevHandle;
+      if (!hasTypedNewHandle) {
         sp.handle = null;
+      }
+      if (linkVisibility === SubprofileLinkVisibility.Linked) {
+        // unlinked to linked: a published persona claims its new handle (the
+        // typed one, or `<creatorSlug>-<personaSlug>`) right away. A draft
+        // stores the typed one, or has `<creatorSlug>-<personaSlug>` stored
+        // for it below, with no registry claim until publish.
+        shouldClaimLinkedHandleNow = prevStatus === SubprofileStatus.Published;
       } else {
-        // linked → unlinked: must re-pass the completeness check before it can
-        // (re)publish and claim a handle — leave it unpublished until then.
+        // linked to unlinked: must re-pass the completeness check, with a
+        // handle that does not name the creator, before it can (re)publish
+        // and claim one. Leave it unpublished until then.
         sp.status = SubprofileStatus.Draft;
       }
-    } else if (wasPublishedUnlinked && prevHandle && sp.handle !== prevHandle) {
-      // RULE (chosen): changing the `handle` of an already-published, UNLINKED
-      // persona invalidates its live listing. Mirroring the existing
-      // "must re-validate" rule, we revert it to DRAFT and RELEASE the old
-      // registry name now; the claim happens (under the new name) on the next
-      // publish, never here. No release/reclaim churn while it stays a draft.
+    } else if (
+      prevStatus === SubprofileStatus.Published &&
+      (sp.handle ?? null) !== (prevHandle ?? null)
+    ) {
+      // RULE (chosen): changing the `handle` of an already-published persona,
+      // of either link kind, invalidates its live address. Mirroring the
+      // existing "must re-validate" rule, we revert it to DRAFT and RELEASE the
+      // old registry name now, with forwarding so `PERSONA_MOVED` can point
+      // old links at the new name; the claim happens (under the new name) on
+      // the next publish. No release/reclaim churn while it stays a draft.
+      //
+      // A published persona with no stored handle (a linked row the backfill
+      // skipped, or one published before the deploy) drafts as well, so a
+      // typed handle is validated and claimed at publish before `/p/` serves
+      // it. It held no registry name, so there is nothing to release.
       sp.status = SubprofileStatus.Draft;
-      releases.push(prevHandle);
+      if (prevHandle) {
+        releases.push({ name: prevHandle, isForwarding: true });
+      }
     }
 
     // --- Task 4: creator-only destructive ops ------------------------------
@@ -879,8 +958,9 @@ export class SubprofilesService {
     // Linking (Unlinked to Linked) nests the persona under the creator's
     // profile and shows the creator's name on it, so only the creator may
     // make that switch. It is checked first, so a co-owner linking a
-    // published unlinked persona (which also drops its handle) gets this
-    // reason. Unlinking keeps the rules below.
+    // published unlinked persona (which also swaps its handle) gets this
+    // reason. Unlinking keeps the rules below. The handle rule covers both
+    // link kinds, since a linked persona holds a `/p/<handle>` as well.
     const isLinkingToCreatorProfile =
       prevLink === SubprofileLinkVisibility.Unlinked &&
       sp.linkVisibility === SubprofileLinkVisibility.Linked;
@@ -954,27 +1034,92 @@ export class SubprofilesService {
       );
     }
 
-    if (releases.length) {
+    // A linked draft stores its `/p/<handle>` on the row, so the owner can
+    // preview that address before publish (see `deriveLinkedDraftHandle`).
+    // This edit leaves one without a handle when it links a draft, clears
+    // the handle field, drafts a published persona whose handle it cleared,
+    // or saves a row stored before this rule. The name is filled in under the
+    // row lock below. The creator-only gate and `saveOptions` above were
+    // decided on the user's own input first, so a co-owner's unrelated edit
+    // never reads as a handle change.
+    const shouldDeriveLinkedDraftHandle =
+      sp.linkVisibility === SubprofileLinkVisibility.Linked &&
+      sp.status !== SubprofileStatus.Published &&
+      !sp.handle;
+
+    // The handle typed in this edit, captured once before the transaction so
+    // every retry after a lost derived-handle race claims from the same
+    // input. A claim that loses the race rejects before its `await` can
+    // assign `sp.handle`, so the snapshot only keeps each run independent of
+    // whatever the transaction body writes to `sp`.
+    const typedLinkedHandle = shouldClaimLinkedHandleNow ? sp.handle : null;
+    if (
+      releases.length ||
+      saveOptions.hasEditedLinkVisibility ||
+      shouldDeriveLinkedDraftHandle
+    ) {
       try {
-        await this.dataSource.transaction(async (m) => {
-          // The persona row lock comes FIRST, before any handle row is
-          // touched: every transaction here takes the persona row and then
-          // the handle row, in that order, so two of them can never wait on
-          // each other. It also refuses a former member or creator before
-          // anything is released.
-          const current = await this.lockCurrentSubprofile(
-            m,
-            sp.id,
-            saveOptions,
-          );
-          for (const name of releases) {
-            await this.handles.release(m, name, {
-              kind: 'subprofile',
-              subprofileId: sp.id,
-            });
-          }
-          await this.applyCommittedColumnsAndSave(m, sp, current, saveOptions);
-        });
+        await this.retryLostDerivedHandleRace(() =>
+          this.dataSource.transaction(async (m) => {
+            // The persona row lock comes FIRST, before any handle row is
+            // touched: every transaction here takes the persona row and then
+            // the handle row, in that order, so two of them can never wait on
+            // each other. It also refuses a former member or creator before
+            // anything is released.
+            const current = await this.lockCurrentSubprofile(
+              m,
+              sp.id,
+              saveOptions,
+            );
+            for (const { name, isForwarding } of releases) {
+              await this.handles.release(
+                m,
+                name,
+                subprofileHandleOwner(sp.id),
+                { isForwarding },
+              );
+            }
+            if (saveOptions.hasEditedLinkVisibility) {
+              // A link switch cuts every address the persona held before it,
+              // so names an earlier rename released stop forwarding too.
+              await this.handles.stopForwardingFor(m, sp.id);
+            }
+            if (shouldClaimLinkedHandleNow) {
+              sp.handle = await this.claimHandleForNewlyLinkedPersona(
+                m,
+                current,
+                typedLinkedHandle,
+                saveOptions.hasEditedSlug ? sp.slug : current.slug,
+              );
+            }
+            // Derived from the creator and slug on the locked row (the slug
+            // this edit sets, if any). Skipped when the committed link or
+            // status moved since the load: the save below then refuses the
+            // edit or keeps the committed link state, handle included.
+            const hasLinkOrStatusMovedMeanwhile =
+              current.linkVisibility !== prevLink ||
+              current.status !== prevStatus;
+            if (
+              shouldDeriveLinkedDraftHandle &&
+              !hasLinkOrStatusMovedMeanwhile
+            ) {
+              sp.handle = await this.deriveLinkedDraftHandle(
+                m,
+                sp.id,
+                current.userId,
+                saveOptions.hasEditedSlug ? sp.slug : current.slug,
+              );
+            }
+            // Writes the claimed or derived `handle` too: a link switch
+            // keeps the edit's own link state, status and handle.
+            await this.applyCommittedColumnsAndSave(
+              m,
+              sp,
+              current,
+              saveOptions,
+            );
+          }),
+        );
       } catch (err) {
         this.throwConflictOnUniqueViolation(err);
       }
@@ -1542,25 +1687,41 @@ export class SubprofilesService {
       where: { subprofileId: id },
       order: { position: 'ASC' },
     });
+    const subprofileOwner = subprofileHandleOwner(sp.id);
 
-    const unlinked = sp.linkVisibility === SubprofileLinkVisibility.Unlinked;
+    // The CREATOR's profile (`subprofiles.user_id`), whoever is publishing: a
+    // linked persona with no handle derives `<creatorSlug>-<personaSlug>`
+    // from it, and an unlinked persona's handle may not carry its slug.
+    const creatorProfile = await this.dataSource.manager.findOne(Profile, {
+      where: { userId: sp.userId },
+    });
+    const isDerived = !sp.handle;
+    if (
+      sp.linkVisibility === SubprofileLinkVisibility.Linked &&
+      isDerived &&
+      !creatorProfile
+    ) {
+      throw missingCreatorProfileException();
+    }
 
-    // `handle_taken` now reflects the WHOLE global namespace (main usernames +
-    // every other subprofile handle), not just other subprofiles. Excluding
-    // this persona's own owner lets a re-publish of the same name pass.
+    // `handle_taken` reflects the WHOLE global namespace (main usernames +
+    // every other subprofile handle), for both link kinds. Excluding this
+    // persona's own owner lets a re-publish of the same name pass.
     let handleTaken = false;
-    if (unlinked && sp.handle) {
+    if (sp.handle) {
       handleTaken = await this.handles.isTaken(
         this.dataSource.manager,
         sp.handle,
-        {
-          kind: 'subprofile',
-          subprofileId: sp.id,
-        },
+        subprofileOwner,
       );
     }
 
-    const unmet = validatePublish(sp, items, handleTaken);
+    const unmet = validatePublish(
+      sp,
+      items,
+      handleTaken,
+      creatorProfile?.slug ?? null,
+    );
     if (unmet.length) {
       throw new UnprocessableEntityException({
         code: 'SUBPROFILE_NOT_READY',
@@ -1569,102 +1730,67 @@ export class SubprofilesService {
       });
     }
 
-    // Single-persona co-owner headcount, shared by both return paths below
-    // (Personas redesign Phase 2 dashboard plan Decision §5).
+    // Single-persona co-owner headcount for the response (Personas redesign
+    // Phase 2 dashboard plan Decision §5).
     const memberCount =
       (await this.membership.loadMemberCountsFor([sp.id])).get(sp.id) ?? 1;
-    // Shared by both return paths below, same reasoning as `memberCount`.
     const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
 
-    if (!unlinked) {
-      const loadedStatus = sp.status;
-      // Linked personas render nested and never carry a global handle.
-      sp.handle = null;
-      sp.status = SubprofileStatus.Published;
-      await this.saveSubprofile(sp, {
-        editorUserId: userId,
-        hasEditedSlug: false,
-        hasEditedLinkVisibility: false,
-        hasLinkDependentChange: true,
-        loadedLinkVisibility: sp.linkVisibility,
-        loadedStatus,
-      });
-      // The profiles `ActivityListener` records a "Published a persona" row
-      // from this. It re-reads the persona and applies its own gate (published,
-      // `open` visibility, LINKED, not removed), so that rule lives in exactly
-      // one place and emitting on every publish is correct: an unlinked persona
-      // is dropped there rather than being filtered twice.
-      this.eventEmitter.emit(SUBPROFILE_PUBLISHED, {
-        subprofileId: sp.id,
-        ownerUserId: sp.userId,
-      } satisfies SubprofilePublishedEvent);
-      return toSubprofileDTO(
-        sp,
-        items,
-        socialLinkRows,
-        0,
-        0,
-        [],
-        new Map(),
-        memberCount,
-        crops,
-      );
-    }
-
-    // Unlinked: claim the validated handle in the global registry AND flip to
-    // published in ONE transaction, so a lost race on the name fails atomically
-    // (the row stays a draft). INVARIANT: a registry row exists for a persona
-    // IFF it is currently published + unlinked, and that row's name equals its
-    // `handle`. So an already-published re-publish renames `handle → handle`
-    // (a no-op that keeps the existing claim); a draft renames `null → handle`
-    // (a fresh claim).
+    // Claim the handle in the global registry AND flip to published in ONE
+    // transaction, for both link kinds, so a lost race on the name fails
+    // atomically (the row stays a draft). INVARIANT: a registry row exists
+    // for a persona IFF it is currently published, whatever its link kind,
+    // and that row's name equals its `handle`. So an already-published
+    // re-publish renames `handle` to itself (a no-op that keeps the existing
+    // claim); a draft renames `null` to its handle (a fresh claim). A linked
+    // persona with no handle claims the one derived here, and a derived name
+    // lost to a concurrent writer is derived again (the next suffix), up to
+    // `MAX_DERIVED_HANDLE_CLAIM_ATTEMPTS` times.
     const existingClaimedName =
       sp.status === SubprofileStatus.Published ? sp.handle : null;
-    try {
-      await this.dataSource.transaction(async (m) => {
+    const claimedName = await this.retryLostDerivedHandleRace(() =>
+      this.dataSource.transaction(async (m) => {
         // Persona row lock before the handle row, the order every
         // transaction here keeps; it also refuses an editor who has left.
         const current = await this.lockCurrentSubprofile(m, sp.id, {
           editorUserId: userId,
         });
         // The claim below was decided on the loaded row. If the link, status
-        // or handle moved meanwhile (the creator linked it, or another
+        // or handle moved meanwhile (the creator switched it, or another
         // publish claimed the name), claiming now would leave a registry row
         // the persona no longer matches. `sp.status` is still the loaded
         // value here.
         const hasPersonaMovedMeanwhile =
-          current.linkVisibility !== SubprofileLinkVisibility.Unlinked ||
+          current.linkVisibility !== sp.linkVisibility ||
           current.status !== sp.status ||
           (current.handle ?? null) !== (sp.handle ?? null);
         if (hasPersonaMovedMeanwhile) {
           throw new PersonaChangedMeanwhileException();
         }
-        await this.handles.rename(m, existingClaimedName, sp.handle!, {
-          kind: 'subprofile',
-          subprofileId: sp.id,
-        });
+        const nameToClaim =
+          sp.handle ??
+          (await this.deriveLinkedPersonaHandleUnderLock(
+            m,
+            current,
+            creatorProfile,
+            current.slug,
+          ));
+        await this.claimPersonaHandle(
+          m,
+          existingClaimedName,
+          nameToClaim,
+          sp.id,
+          isDerived,
+        );
         await m.update(
           Subprofile,
           { id: sp.id },
-          { status: SubprofileStatus.Published },
+          { status: SubprofileStatus.Published, handle: nameToClaim },
         );
-      });
-    } catch (err) {
-      // Someone claimed the name between the pre-check and the write. Surface as
-      // 422 `handle_taken` to stay consistent with the publish completeness
-      // contract (rather than leaking a bare 409).
-      if (err instanceof PersonaChangedMeanwhileException) {
-        throw err;
-      }
-      if (err instanceof ConflictException) {
-        throw new UnprocessableEntityException({
-          code: 'SUBPROFILE_NOT_READY',
-          message: 'That handle was just taken. Choose another.',
-          unmet: ['handle_taken'],
-        });
-      }
-      throw err;
-    }
+        return nameToClaim;
+      }),
+    );
+    sp.handle = claimedName;
     sp.status = SubprofileStatus.Published;
     // The profiles `ActivityListener` records a "Published a persona" row
     // from this. It re-reads the persona and applies its own gate (published,
@@ -1696,31 +1822,45 @@ export class SubprofilesService {
     if (sp.userId !== userId) {
       throw new ForbiddenException('Only the persona creator can unpublish it');
     }
-    if (sp.linkVisibility === SubprofileLinkVisibility.Unlinked && sp.handle) {
-      // Free the global name AND null the handle + draft the status in ONE
-      // transaction, so the registry and the row can never disagree.
+    if (sp.handle) {
+      // Free the global name AND draft the status in ONE transaction, so the
+      // registry and the row can never disagree. Both link kinds hold a
+      // handle while published (see the invariant on `publish`). An unlinked
+      // draft drops its handle. A linked draft keeps it on the row with no
+      // registry claim, so the owner's `/p/` preview still works, and a
+      // republish claims that stored name again (or surfaces `handle_taken`
+      // if someone took it meanwhile).
       const handle = sp.handle;
+      const isLinked = sp.linkVisibility === SubprofileLinkVisibility.Linked;
+      const handleAfterUnpublish = isLinked ? handle : null;
       await this.dataSource.transaction(async (m) => {
         // Persona row lock before the handle row, the order every
         // transaction here keeps. Re-checks the creator under it: the gate
         // above read the row before any lock, and the creator role may have
         // moved since.
-        await this.lockCurrentSubprofile(m, sp.id, {
+        const current = await this.lockCurrentSubprofile(m, sp.id, {
           editorUserId: userId,
           requiredCreatorUserId: userId,
         });
-        await this.handles.release(m, handle, {
-          kind: 'subprofile',
-          subprofileId: sp.id,
-        });
+        // A handle edit or link switch committed since the load holds a
+        // different name; releasing the loaded one would leave that claim
+        // behind on a draft. A link switch alone also moves which handle
+        // the draft keeps, so it is refused the same way.
+        if (
+          (current.handle ?? null) !== handle ||
+          current.linkVisibility !== sp.linkVisibility
+        ) {
+          throw new PersonaChangedMeanwhileException();
+        }
+        await this.handles.release(m, handle, subprofileHandleOwner(sp.id));
         await m.update(
           Subprofile,
           { id: sp.id },
-          { status: SubprofileStatus.Draft, handle: null },
+          { status: SubprofileStatus.Draft, handle: handleAfterUnpublish },
         );
       });
       sp.status = SubprofileStatus.Draft;
-      sp.handle = null;
+      sp.handle = handleAfterUnpublish;
     } else {
       const loadedStatus = sp.status;
       sp.status = SubprofileStatus.Draft;
@@ -2072,12 +2212,13 @@ export class SubprofilesService {
     // could re-link a persona that was unlinked meanwhile (or unlink one that
     // was linked). An edit that does not itself switch the link keeps the
     // committed link state, like `slug`. The link switch also owns `status`
-    // (unlinking drafts it) and `handle` (a linked persona holds none), so
-    // those follow the committed row too. A publish, unpublish or handle
-    // edit was decided against the loaded link state and is refused instead.
-    // A link switch is refused too when the committed link or status moved:
-    // switching a row published since the load would keep its handle claim
-    // on a linked persona, or silently revert that publish.
+    // (unlinking drafts it) and `handle` (a switch releases the old name and
+    // clears or re-claims it), so those follow the committed row too. A
+    // publish, unpublish or handle edit was decided against the loaded link
+    // state and is refused instead. A link switch is refused too when the
+    // committed link or status moved: switching a row published since the
+    // load would skip releasing the name that publish claimed, or silently
+    // revert that publish.
     const hasSwitchedLinkOverMovedRow =
       options.hasEditedLinkVisibility &&
       (current.linkVisibility !== options.loadedLinkVisibility ||
@@ -2102,6 +2243,196 @@ export class SubprofilesService {
       sp.slug = current.slug;
     }
     await manager.save(sp);
+  }
+
+  /** The `<creatorSlug>-<personaSlug>` handle a linked DRAFT stores on its
+   * row, so the owner's `/p/<handle>` preview works before publish. It
+   * claims no registry row, since a draft holds none (see the invariant on
+   * `publish`), and publish claims the stored name like a typed one. A
+   * candidate is skipped when the registry holds it or a reservation still
+   * cools it for anyone but this persona, and when another subprofile row
+   * already stores it (any status), so `/p/` resolves one persona per name.
+   * `subprofileId` is undefined for a row not inserted yet. Returns null
+   * when the creator has no profile to build the name from, or no candidate
+   * is free, so the save still goes ahead: the nested address keeps serving
+   * the draft, and publish derives or reports the name itself. */
+  private async deriveLinkedDraftHandle(
+    manager: EntityManager,
+    subprofileId: string | undefined,
+    creatorUserId: string,
+    personaSlug: string,
+  ): Promise<string | null> {
+    const creatorProfile = await manager.findOne(Profile, {
+      where: { userId: creatorUserId },
+    });
+    if (!creatorProfile) {
+      return null;
+    }
+    const owner = subprofileId
+      ? subprofileHandleOwner(subprofileId)
+      : undefined;
+    try {
+      return await deriveLinkedPersonaHandle(
+        creatorProfile.slug,
+        personaSlug,
+        async (candidate) => {
+          if (await this.handles.isTaken(manager, candidate, owner)) {
+            return false;
+          }
+          const isStoredByAnotherSubprofile = await manager.exists(Subprofile, {
+            where: subprofileId
+              ? { handle: candidate, id: Not(subprofileId) }
+              : { handle: candidate },
+          });
+          return !isStoredByAnotherSubprofile;
+        },
+      );
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /** Runs a claim transaction, and runs it again (up to
+   * `MAX_DERIVED_HANDLE_CLAIM_ATTEMPTS` in all) while a server-derived handle
+   * keeps losing its race. Each run re-derives, so it moves on to the next
+   * free suffix. Any other error passes straight through. */
+  private async retryLostDerivedHandleRace<Result>(
+    runClaimTransaction: () => Promise<Result>,
+  ): Promise<Result> {
+    for (
+      let attempt = 1;
+      attempt <= MAX_DERIVED_HANDLE_CLAIM_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await runClaimTransaction();
+      } catch (err) {
+        if (!(err instanceof LostDerivedHandleRaceError)) {
+          throw err;
+        }
+      }
+    }
+    throw new ConflictException({
+      code: 'handle_derivation_failed',
+      message: 'We could not find a free address for this persona.',
+    });
+  }
+
+  /** Moves the persona's registry claim from `previousName` to
+   * `nameToClaim`. A name taken meanwhile is a lost race when the server
+   * derived it (the caller retries) and the publish checklist's
+   * `handle_taken` when the owner typed it. */
+  private async claimPersonaHandle(
+    manager: EntityManager,
+    previousName: string | null,
+    nameToClaim: string,
+    subprofileId: string,
+    isDerived: boolean,
+  ): Promise<void> {
+    try {
+      await this.handles.rename(
+        manager,
+        previousName,
+        nameToClaim,
+        subprofileHandleOwner(subprofileId),
+      );
+    } catch (err) {
+      if (!(err instanceof ConflictException)) {
+        throw err;
+      }
+      if (isDerived) {
+        throw new LostDerivedHandleRaceError();
+      }
+      throw new UnprocessableEntityException({
+        code: 'SUBPROFILE_NOT_READY',
+        message: 'That handle was just taken. Choose another.',
+        unmet: ['handle_taken'],
+      });
+    }
+  }
+
+  /** A linked persona's default handle, `<creatorSlug>-<personaSlug>`, from
+   * the creator on the LOCKED row (a creator transfer may have committed since
+   * the load). `loadedCreatorProfile` saves the read when it is that same
+   * creator's profile. Availability is read in the claim transaction. */
+  private async deriveLinkedPersonaHandleUnderLock(
+    manager: EntityManager,
+    current: Subprofile,
+    loadedCreatorProfile: Profile | null,
+    personaSlug: string,
+  ): Promise<string> {
+    const creatorProfile =
+      loadedCreatorProfile?.userId === current.userId
+        ? loadedCreatorProfile
+        : await manager.findOne(Profile, {
+            where: { userId: current.userId },
+          });
+    if (!creatorProfile) {
+      throw missingCreatorProfileException();
+    }
+    const owner = subprofileHandleOwner(current.id);
+    return deriveLinkedPersonaHandle(
+      creatorProfile.slug,
+      personaSlug,
+      async (candidate) =>
+        !(await this.handles.isTaken(manager, candidate, owner)),
+    );
+  }
+
+  /** The handle a published persona claims as the creator links it: the one
+   * typed in the same edit, checked like a linked publish (namespace checks,
+   * the kind-name check and the blocked-term screen), or the derived default.
+   * Runs after the old name was released, so it claims from nothing. */
+  private async claimHandleForNewlyLinkedPersona(
+    manager: EntityManager,
+    current: Subprofile,
+    typedHandle: string | null,
+    personaSlug: string,
+  ): Promise<string> {
+    if (typedHandle) {
+      const handleTaken = await this.handles.isTaken(
+        manager,
+        typedHandle,
+        subprofileHandleOwner(current.id),
+      );
+      const unmet = linkedHandleUnmetCodes(
+        typedHandle,
+        handleTaken,
+        current.kind,
+      );
+      if (unmet.length) {
+        throw new UnprocessableEntityException({
+          code: 'SUBPROFILE_NOT_READY',
+          message: 'That handle is not available.',
+          unmet,
+        });
+      }
+      await this.claimPersonaHandle(
+        manager,
+        null,
+        typedHandle,
+        current.id,
+        false,
+      );
+      return typedHandle;
+    }
+    const derivedHandle = await this.deriveLinkedPersonaHandleUnderLock(
+      manager,
+      current,
+      null,
+      personaSlug,
+    );
+    await this.claimPersonaHandle(
+      manager,
+      null,
+      derivedHandle,
+      current.id,
+      true,
+    );
+    return derivedHandle;
   }
 
   /** The persona row under `pessimistic_write`, the lock every roster writer

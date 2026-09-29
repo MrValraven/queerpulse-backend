@@ -7,7 +7,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Not, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  IsNull,
+  Not,
+  Repository,
+} from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
@@ -41,6 +49,7 @@ import { UpdateArticleDto } from './dto/update-article.dto';
 import { UpdateBylineDto } from './dto/update-byline.dto';
 import { UpdateCoverDto } from './dto/update-cover.dto';
 import { UpdateIssueScheduleDto } from './dto/update-issue-schedule.dto';
+import { UpdateIssueClosesOnDto } from './dto/update-issue-closes-on.dto';
 import { UpdateSubmissionDeadlineDto } from './dto/update-submission-deadline.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
@@ -89,7 +98,9 @@ import {
   PieceListItem,
   PieceRecord,
   PieceRecordFull,
+  PieceListItemContext,
   PitchResponse,
+  STAGE_ENTRY_ACTIONS,
   toArchiveEntryFromArticle,
   toArchiveEntryFromDeck,
   toArticleDraftResponse,
@@ -154,6 +165,20 @@ function todayIsoDate(): string {
  * meant in Lisbon time, so the hour a scheduled issue goes live has to be
  * resolved in this zone rather than in UTC.
  */
+/**
+ * The 409 `code` `convertDeckToArticle` answers for a live or scheduled deck.
+ * The deck editor reads it to name the step that unblocks the conversion.
+ */
+export const DECK_CONVERT_PUBLISHED_CODE = 'magazine_deck_convert_published';
+
+function deckConvertPublishedConflict(): ConflictException {
+  return new ConflictException({
+    message:
+      'This deck is published. Unpublish it before converting it to an article.',
+    code: DECK_CONVERT_PUBLISHED_CODE,
+  });
+}
+
 const MAGAZINE_TIMEZONE = 'Europe/Lisbon';
 
 /**
@@ -476,8 +501,11 @@ export class MagazinePieceService {
       .limit(pageSize)
       .getManyAndCount();
 
+    const contextByPieceId = await this.loadListContext(rows);
     return {
-      items: rows.map(toPieceListItem),
+      items: rows.map((piece) =>
+        toPieceListItem(piece, contextByPieceId.get(piece.id)),
+      ),
       total,
       page,
       pageSize,
@@ -499,11 +527,17 @@ export class MagazinePieceService {
     piece: MagazinePiece,
     events: MagazinePieceEvent[],
   ): Promise<PieceRecord> {
-    const [actorNameById, content] = await Promise.all([
+    const [actorNameById, content, payment] = await Promise.all([
       this.resolveActorDisplayNames(auditActorIds(events)),
       this.loadPieceContent(piece),
+      // Only the status: the record's `paymentStatus` must agree with the
+      // list row the desk patches from it.
+      this.payments.findOne({
+        where: { pieceId: piece.id },
+        select: { id: true, status: true },
+      }),
     ]);
-    return toPieceRecordSummary(piece, events, actorNameById, content);
+    return toPieceRecordSummary(piece, events, actorNameById, content, payment);
   }
 
   /**
@@ -1229,7 +1263,11 @@ export class MagazinePieceService {
       art: dto.art ?? 'none',
       contentsBlurb: dto.contentsBlurb ?? '',
     });
-    await this.pieces.save(piece);
+    if (piece.format === 'deck') {
+      await this.savePieceWithDraftDeck(piece);
+    } else {
+      await this.pieces.save(piece);
+    }
 
     if (dto.pitchId) {
       const pitch = await this.loadPitchOr404(dto.pitchId);
@@ -1256,12 +1294,110 @@ export class MagazinePieceService {
     return this.pieceRecordFor(piece, events);
   }
 
+  /**
+   * The empty draft deck a new deck-format piece owns from its first moment,
+   * so the desk's "Build a deck" lands straight in the deck editor on a real
+   * deck id and the desk never has to read the separate deck registry. Title,
+   * section and byline start from the piece; the deck editor changes them
+   * like any other deck. Unpublished, with no slides, so nothing reaches
+   * readers until the editor publishes it.
+   *
+   * The deck and the piece save in one transaction, so a saved deck piece
+   * always carries its `deckId` and a failed piece save rolls its deck back
+   * too. Unlike an article draft this is not lazy: the deck editor addresses
+   * a deck by its own id (`?id=<deckId>`), so the id has to exist before the
+   * editor opens.
+   *
+   * The slug is checked and then inserted, so two "Build a deck" clicks at
+   * the same instant can both pick the same free slug. The one that loses on
+   * `UQ_magazine_deck_slug` runs once more; the winner's slug is taken by
+   * then, so the second run allocates a suffixed one.
+   */
+  private async savePieceWithDraftDeck(piece: MagazinePiece): Promise<void> {
+    try {
+      await this.saveDraftDeckAndPiece(piece);
+    } catch (error) {
+      if (!isUniqueViolation(error, 'UQ_magazine_deck_slug')) throw error;
+      await this.saveDraftDeckAndPiece(piece);
+    }
+  }
+
+  private async saveDraftDeckAndPiece(piece: MagazinePiece): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await this.createDraftDeckInTransaction(manager, piece);
+      await manager.getRepository(MagazinePiece).save(piece);
+    });
+  }
+
+  /**
+   * Creates the piece's empty draft deck through the caller's transaction
+   * `manager` and stamps `piece.deckId`, leaving the piece save to the caller.
+   * Shared by `saveDraftDeckAndPiece` and `commissionPitch`, which each open
+   * their own transaction, so every deck piece is born with its deck.
+   */
+  private async createDraftDeckInTransaction(
+    manager: EntityManager,
+    piece: MagazinePiece,
+  ): Promise<void> {
+    const decks = manager.getRepository(MagazineDeck);
+    const slug = await allocateUniqueSlug(
+      slugify(piece.title, 'deck'),
+      async (candidate) =>
+        (await decks.findOne({ where: { slug: candidate } })) !== null,
+    );
+    const deck = decks.create({
+      slug,
+      title: piece.title,
+      section: piece.section,
+      byline: piece.byline,
+      role: null,
+      slides: [],
+      publishedAt: null,
+    });
+    await decks.save(deck);
+    piece.deckId = deck.id;
+  }
+
   async updatePiece(
     id: string,
     dto: UpdatePieceDto,
     actorId: string,
   ): Promise<PieceRecord> {
     const piece = await this.loadPieceOr404(id);
+
+    // A published piece leaves `published` only through the real unpublish
+    // path (`unpublishPiece`, above), which also clears the live
+    // article/deck `publishedAt`. `UpdatePieceDto.stage` can never carry
+    // `'published'` itself (see `PIECE_STAGES` in `update-piece.dto.ts`), but
+    // nothing before this stopped a plain stage PATCH from moving a piece
+    // that IS published to an EARLIER stage without that side effect, leaving
+    // the article/deck live while the desk read Ready or Edit. Refuse before
+    // any validation or write, same posture as `deletePiece`'s
+    // published-content refusal below: the destructive-looking move stays
+    // one click, explicit, on the record's own Unpublish action.
+    if (
+      piece.stage === 'published' &&
+      dto.stage !== undefined &&
+      dto.stage !== piece.stage
+    ) {
+      throw new ConflictException(
+        'This piece is published. Unpublish it from the piece record to move it back.',
+      );
+    }
+
+    // A piece's format and its content row travel together: a deck piece owns
+    // a deck, an article piece owns an article. Once content exists, a format
+    // PATCH would leave the piece holding the wrong kind (an article piece
+    // pointing at a deck, or the reverse), so it is refused; a deck becomes an
+    // article through `convertDeckToArticle`. An empty piece may still switch,
+    // and switching to `deck` creates its draft deck below.
+    const isFormatChange =
+      dto.format !== undefined && dto.format !== piece.format;
+    if (isFormatChange && (piece.articleId !== null || piece.deckId !== null)) {
+      throw new ConflictException(
+        'This piece already has content in its current format, so its format cannot change.',
+      );
+    }
 
     // Validate the jsonb payloads BEFORE mutating the entity, so a malformed
     // brief/care never partially applies the rest of the patch.
@@ -1301,7 +1437,18 @@ export class MagazinePieceService {
         : {}),
     });
 
-    await this.pieces.save(piece);
+    // A PATCH to `deck` on a piece with no deck yet gets its draft deck in the
+    // same transaction as the piece save, as `createPiece` does, so the desk
+    // never holds a deck piece the deck editor cannot open.
+    if (
+      dto.format === 'deck' &&
+      piece.deckId === null &&
+      piece.articleId === null
+    ) {
+      await this.savePieceWithDraftDeck(piece);
+    } else {
+      await this.pieces.save(piece);
+    }
 
     if (dto.stage !== undefined && dto.stage !== previousStage) {
       await this.recordEvent(piece.id, actorId, 'stage_changed', dto.stage);
@@ -1927,6 +2074,8 @@ export class MagazinePieceService {
       theme: issue.theme,
       filled,
       slots,
+      publishedOn: issue.publishedOn,
+      closesOn: issue.closesOn,
     };
   }
 
@@ -1974,6 +2123,7 @@ export class MagazinePieceService {
       title: issue.title,
       theme: issue.theme,
       publishedOn: issue.publishedOn,
+      closesOn: issue.closesOn,
       filled: filledByIssueId.get(issue.id) ?? 0,
       slots,
     }));
@@ -2008,6 +2158,7 @@ export class MagazinePieceService {
       // NULL, not today's date: an unscheduled issue must read as unscheduled
       // everywhere rather than quietly claiming a publish day nobody chose.
       publishedOn: dto.publishedOn ?? null,
+      closesOn: dto.closesOn ?? null,
       dek: dto.dek ?? '',
       coverUrl: null,
     });
@@ -2024,6 +2175,7 @@ export class MagazinePieceService {
       title: issue.title,
       theme: issue.theme,
       publishedOn: issue.publishedOn,
+      closesOn: issue.closesOn,
       filled: 0,
       slots: sections.reduce((total, section) => total + section.target, 0),
     };
@@ -2181,7 +2333,7 @@ export class MagazinePieceService {
   ): Promise<IssueProductionResponse> {
     const issue = await this.loadIssueOr404(issueNumber);
     const pieces = await this.pieces.find({ where: { issueId: issue.id } });
-    return toIssueProduction(issue, pieces);
+    return toIssueProduction(issue, pieces, await this.loadListContext(pieces));
   }
 
   /**
@@ -2353,6 +2505,45 @@ export class MagazinePieceService {
       } by user ${actorId}`,
     );
     return { submissionDeadline: issue.submissionDeadline };
+  }
+
+  /**
+   * The day the issue stops taking copy, read on its own. Same one-field
+   * shape as `getSubmissionDeadline`; the desk also receives it on every
+   * issue summary, and this pair is what the close-date editor reads and
+   * writes. `null` means the desk has set none.
+   */
+  async getIssueClosesOn(
+    issueNumber: string,
+  ): Promise<{ closesOn: string | null }> {
+    const issue = await this.loadIssueOr404(issueNumber);
+    return { closesOn: issue.closesOn };
+  }
+
+  /**
+   * Sets, moves, or clears the day the issue stops taking copy. `null` clears
+   * it (the same required-but-nullable contract as `updateSubmissionDeadline`),
+   * which takes the countdown off the desk header.
+   *
+   * Nothing enforces an ordering against `submissionDeadline` or
+   * `publishedOn`, for the reason `updateSubmissionDeadline` gives: a desk
+   * reopens and reschedules issues, and a refused date would block a real
+   * editorial move.
+   */
+  async updateIssueClosesOn(
+    issueNumber: string,
+    dto: UpdateIssueClosesOnDto,
+    actorId: string,
+  ): Promise<{ closesOn: string | null }> {
+    const issue = await this.loadIssueOr404(issueNumber);
+    issue.closesOn = dto.closesOn;
+    await this.issues.save(issue);
+    this.logger.log(
+      `Magazine issue ${issue.number} close date set to ${
+        dto.closesOn ?? 'none'
+      } by user ${actorId}`,
+    );
+    return { closesOn: issue.closesOn };
   }
 
   /**
@@ -2556,7 +2747,11 @@ export class MagazinePieceService {
     // safe to call on every ship — it only ever announces once.
     await this.announceIssueIfScheduled(shippedIssue);
 
-    return toIssueProduction(shippedIssue, shippedPieces);
+    return toIssueProduction(
+      shippedIssue,
+      shippedPieces,
+      await this.loadListContext(shippedPieces),
+    );
   }
 
   /**
@@ -2636,10 +2831,21 @@ export class MagazinePieceService {
    * deck editor page only ever knows the deck's own id — never the piece's
    * (`DeckEditorPage`/`PieceRecordPage` link to it as `?id=<deckId>`).
    * `piece.articleId !== null` is the idempotency guard: a piece can only be
-   * converted once, and the orphaned `MagazineDeck` row is deliberately left
-   * alone (not deleted) in case of a future undo. Uses the same
-   * slug-allocation and byline-resolution helpers as `ensureArticleForPiece`
-   * so a converted article behaves identically to one drafted from scratch.
+   * converted once. Uses the same slug-allocation and byline-resolution
+   * helpers as `ensureArticleForPiece` so a converted article behaves
+   * identically to one drafted from scratch.
+   *
+   * The old deck does not outlive the conversion. It used to stay behind for
+   * an undo that never shipped, with no piece and no desk surface left to
+   * reach it, still holding its slug. Now:
+   * - A PUBLISHED (or scheduled) deck is refused with a 409. Deleting it
+   *   would break a URL readers hold, and keeping it would leave live content
+   *   nobody can take down. Unpublishing first (through the piece) keeps the
+   *   takedown explicit, the same trade `deleteDeck` and `deletePiece` make.
+   * - A draft deck is deleted in the same transaction that saves the article
+   *   and relinks the piece. The convert dialog already tells the editor the
+   *   dropped slides cannot be recovered, so nothing is lost that was
+   *   promised.
    */
   async convertDeckToArticle(
     deckId: string,
@@ -2662,6 +2868,9 @@ export class MagazinePieceService {
       throw new ConflictException(
         'This piece has already been converted to an article.',
       );
+    }
+    if (deck.publishedAt !== null) {
+      throw deckConvertPublishedConflict();
     }
 
     const { blocks, droppedSlideKinds } = mapDeckSlidesToArticleBlocks(
@@ -2695,12 +2904,25 @@ export class MagazinePieceService {
       // `saveArticleDraftGuarded` will match on.
       version: 0,
     });
-    await this.articles.save(article);
 
-    piece.articleId = article.id;
-    piece.deckId = null;
-    piece.format = 'article';
-    await this.pieces.save(piece);
+    await this.dataSource.transaction(async (manager) => {
+      await manager.getRepository(MagazineArticle).save(article);
+      piece.articleId = article.id;
+      piece.deckId = null;
+      piece.format = 'article';
+      await manager.getRepository(MagazinePiece).save(piece);
+      // The piece no longer points at the deck, so nothing else can: the
+      // deck is gone with it or the whole conversion rolls back. The delete
+      // only matches a deck that is still a draft, so a publish that landed
+      // after the check above refuses the conversion instead of deleting a
+      // live deck.
+      const deletion = await manager
+        .getRepository(MagazineDeck)
+        .delete({ id: deck.id, publishedAt: IsNull() });
+      if (deletion.affected !== 1) {
+        throw deckConvertPublishedConflict();
+      }
+    });
 
     await this.recordEvent(
       piece.id,
@@ -3389,8 +3611,8 @@ export class MagazinePieceService {
             submitterId,
           ) ?? null);
 
-    const { piece, events } = await this.dataSource.transaction(
-      async (manager) => {
+    const commissionInTransaction = () =>
+      this.dataSource.transaction(async (manager) => {
         const pitchRepository = manager.getRepository(MagazinePitch);
         const pieceRepository = manager.getRepository(MagazinePiece);
         const eventRepository = manager.getRepository(MagazinePieceEvent);
@@ -3434,6 +3656,13 @@ export class MagazinePieceService {
           fresh: pitch.fresh,
           pitchId: pitch.id,
         });
+        // A deck commission is born with its empty draft deck, exactly like
+        // `createPiece`, so the desk's Edit opens the deck editor on a real
+        // deck id. Without it the editor's first save created a standalone
+        // deck no piece pointed at.
+        if (piece.format === 'deck') {
+          await this.createDraftDeckInTransaction(manager, piece);
+        }
         await pieceRepository.save(piece);
 
         const event = eventRepository.create({
@@ -3449,8 +3678,20 @@ export class MagazinePieceService {
           order: { createdAt: 'ASC' },
         });
         return { piece, events };
-      },
-    );
+      });
+
+    // Same slug race as `savePieceWithDraftDeck`: the loser on
+    // `UQ_magazine_deck_slug` rolled the whole commission back (the pitch
+    // status too), so running it once more is safe and allocates a suffixed
+    // slug.
+    let commissioned: Awaited<ReturnType<typeof commissionInTransaction>>;
+    try {
+      commissioned = await commissionInTransaction();
+    } catch (error) {
+      if (!isUniqueViolation(error, 'UQ_magazine_deck_slug')) throw error;
+      commissioned = await commissionInTransaction();
+    }
+    const { piece, events } = commissioned;
 
     // PRD-121/PRD-123 — now that a commission from an internal pitch carries a
     // real `writerId`, tell that person. `notifyWriterOfPiece` no-ops on an
@@ -3499,6 +3740,87 @@ export class MagazinePieceService {
       detail: detail ?? null,
     });
     await this.pieceEvents.save(event);
+  }
+
+  /**
+   * Everything a page of list rows needs beyond the piece columns, keyed by
+   * piece id: the newest stage-entry event and the payment row's status. Two
+   * batched queries per page, run side by side, whatever the page size.
+   */
+  private async loadListContext(
+    pieces: MagazinePiece[],
+  ): Promise<Map<string, PieceListItemContext>> {
+    if (pieces.length === 0) {
+      return new Map();
+    }
+    const [stageEntryAtByPieceId, payments] = await Promise.all([
+      this.loadStageEnteredAt(pieces),
+      this.payments.find({
+        where: { pieceId: In(pieces.map((piece) => piece.id)) },
+        select: { pieceId: true, status: true },
+      }),
+    ]);
+    const paymentByPieceId = new Map(
+      payments.map((payment) => [payment.pieceId, payment]),
+    );
+    return new Map(
+      pieces.map((piece) => [
+        piece.id,
+        {
+          latestStageEntryAt: stageEntryAtByPieceId.get(piece.id) ?? null,
+          payment: paymentByPieceId.get(piece.id) ?? null,
+        },
+      ]),
+    );
+  }
+
+  /**
+   * Each piece's newest stage-entry event (`STAGE_ENTRY_ACTIONS`), keyed by
+   * piece id, for the desk's time-in-stage reading. ONE grouped query for the
+   * whole page, however many pieces it holds; a piece with no matching event
+   * is absent from the map and reads with `deriveStageEnteredAt`'s fallback.
+   *
+   * The join to `magazine_piece` scopes every event to the piece's CURRENT
+   * stage, so a `stage_changed` into an earlier stage never counts. The
+   * existing `IDX_magazine_piece_event_piece` index narrows the scan to the
+   * page's own pieces, whose trails are short, so no extra index is needed.
+   */
+  private async loadStageEnteredAt(
+    pieces: MagazinePiece[],
+  ): Promise<Map<string, Date>> {
+    if (pieces.length === 0) {
+      return new Map();
+    }
+
+    const entryConditions = [
+      "(stageEvent.action = 'stage_changed' AND stageEvent.detail = piece.stage)",
+    ];
+    const entryParameters: Record<string, string | readonly string[]> = {};
+    Object.entries(STAGE_ENTRY_ACTIONS).forEach(
+      ([stage, actions], position) => {
+        entryConditions.push(
+          `(piece.stage = :entryStage${position} AND stageEvent.action IN (:...entryActions${position}))`,
+        );
+        entryParameters[`entryStage${position}`] = stage;
+        entryParameters[`entryActions${position}`] = actions ?? [];
+      },
+    );
+
+    const rows = await this.pieceEvents
+      .createQueryBuilder('stageEvent')
+      .innerJoin(MagazinePiece, 'piece', 'piece.id = stageEvent.pieceId')
+      .select('stageEvent.pieceId', 'pieceId')
+      .addSelect('MAX(stageEvent.createdAt)', 'enteredAt')
+      .where('stageEvent.pieceId IN (:...pieceIds)', {
+        pieceIds: pieces.map((piece) => piece.id),
+      })
+      .andWhere(`(${entryConditions.join(' OR ')})`, entryParameters)
+      .groupBy('stageEvent.pieceId')
+      .getRawMany<{ pieceId: string; enteredAt: Date | string }>();
+
+    // `pg` parses a `timestamptz` aggregate to a Date; `new Date` also accepts
+    // the string form, so a driver setting that returns text reads the same.
+    return new Map(rows.map((row) => [row.pieceId, new Date(row.enteredAt)]));
   }
 
   private async eventsFor(pieceId: string): Promise<MagazinePieceEvent[]> {

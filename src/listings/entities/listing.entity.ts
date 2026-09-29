@@ -264,6 +264,19 @@ export class Listing {
   @Column({ type: 'uuid', nullable: true })
   createdByStaffId!: string | null;
 
+  /**
+   * The member who suggested this place for the directory, when a member
+   * did. A suggestion is held by the platform: `ownerId` stays null until a
+   * claim or an owner offer hands it to someone, and this column grants its
+   * member nothing on the listing. It is kept so moderators can reach the
+   * person who sent it (`askQuestion`, the send-back and approval messages)
+   * and so the admin queue can credit them. An ownership transfer leaves it
+   * as it is. `ON DELETE SET NULL`, like `ownerId`.
+   */
+  @Index('IDX_listings_suggested_by_user_id')
+  @Column({ type: 'uuid', nullable: true })
+  suggestedByUserId!: string | null;
+
   // Filtered on nearly every directory read (`DirectoryService`'s
   // `status = live` gates) and the admin moderation queue
   // (`ListingsService.listQueue`) — mirrors `HousingListing.status`

@@ -9,9 +9,9 @@
  *
  * Kept here as one small module rather than inline template literals so the
  * shapes have a single definition on this side of the wire. They mirror the
- * frontend's `routeMap.ts` (`communityPath`, `thread`, `nestedPersonaPath`)
- * and `features/communities/communityPostPath.ts`; changing a route there
- * means changing it here.
+ * frontend's `routeMap.ts` (`communityPath`, `thread`, `personaPath`,
+ * `nestedPersonaPath`) and `features/communities/communityPostPath.ts`;
+ * changing a route there means changing it here.
  */
 
 /** A gathering's detail page (`/gatherings/:slug`). */
@@ -27,7 +27,14 @@ export const communityPath = (slug: string): string => `/community/${slug}`;
 export const communityPostPath = (slug: string, postId: string): string =>
   `${communityPath(slug)}/post/${postId}`;
 
-/** A linked persona nested under its owner's main profile. */
+/** Any persona's public page by its handle (`/p/:handle`). */
+export const personaPath = (handle: string): string => `/p/${handle}`;
+
+/**
+ * A linked persona nested under its owner's main profile. Now only the
+ * fallback for a linked persona with no handle yet; `personaPath` is the
+ * address whenever a handle exists.
+ */
 export const nestedPersonaPath = (
   ownerSlug: string,
   personaSlug: string,

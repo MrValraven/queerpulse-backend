@@ -578,6 +578,20 @@ describe('ListingOwnerOffersService', () => {
       );
     });
 
+    it('reads the listing under a pessimistic write lock before the transfer saves it', async () => {
+      offers.findOne.mockResolvedValue(offerFixture());
+      listingExists(listingFixture());
+
+      await service.respond('offer-1', OFFEREE_ID, true);
+
+      // The transfer saves the listing entity whole, so a staff edit that
+      // committed after an unlocked read would be written over.
+      expect(listings.findOne).toHaveBeenCalledWith({
+        where: { id: LISTING_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+    });
+
     it('calls transferOwnership once on accept and never on decline', async () => {
       // The shared helper is the only route into `listings.owner_id`.
       offers.findOne.mockImplementation(() =>

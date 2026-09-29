@@ -14,6 +14,9 @@ export interface PublicInviterView {
   lastName: string;
   avatarUrl: string | null;
   memberSince?: string;
+  // True only for an active ambassador whose tag is visible; the welcome step
+  // names them as one.
+  isAmbassador: boolean;
 }
 
 export interface PublicInviteView {
@@ -121,6 +124,7 @@ export function toPublicInviteView(
   inviter: User | null,
   memberCount: number,
   now: Date,
+  isInviterAmbassador: boolean,
 ): PublicInviteView {
   const profile = inviter?.profile;
   // "Member since <year>" — prefer the year they became active, falling back to
@@ -148,6 +152,7 @@ export function toPublicInviteView(
       lastName: profile?.lastName ?? '',
       avatarUrl: toImageUrl(profile?.avatarUrl),
       ...(memberSince ? { memberSince } : {}),
+      isAmbassador: isInviterAmbassador,
     },
     // Only an active member can meaningfully be "your inviter" — a missing row
     // (erased) or any non-active status reads as inactive.

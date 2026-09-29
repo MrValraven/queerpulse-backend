@@ -229,6 +229,15 @@ export class CommunityOwnerInactivityService {
         WHERE candidate.needs_owner_review_at IS NULL
           AND candidate.owner_id IS NOT NULL
           AND candidate.archived_at IS NULL
+          -- A system owner never signs in by design: the house account
+          -- owns the QueerPulse Ambassadors circle, which must stay off the
+          -- owner-review queue.
+          AND NOT EXISTS (
+            SELECT 1
+              FROM users owner_user
+             WHERE owner_user.id = candidate.owner_id
+               AND owner_user.is_system
+          )
           AND (owner_session.last_touch_at IS NULL
                OR owner_session.last_touch_at < $1)
         ORDER BY candidate.id

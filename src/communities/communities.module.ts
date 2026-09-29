@@ -36,6 +36,7 @@ import { CommunityResourcesController } from './community-resources.controller';
 import { CommunityResourcesService } from './community-resources.service';
 import { CommunitySupportOffersController } from './community-support-offers.controller';
 import { CommunitySupportOffersService } from './community-support-offers.service';
+import { CommunitySystemMembershipService } from './community-system-membership.service';
 import { CommunityPreferencesController } from './community-preferences.controller';
 import { CommunityPreferencesService } from './community-preferences.service';
 import { CommunityPublicController } from './community-public.controller';
@@ -288,6 +289,9 @@ import { SubcommunitiesService } from './subcommunities.service';
     CommunitySupportOffersService,
     SubcommunitiesService,
     SpaceRequestsService,
+    // Roster writes the platform makes with no human actor (the ambassadors'
+    // circle). Emits the same join/leave events as a human join or leave.
+    CommunitySystemMembershipService,
   ],
   // `CommunityOwnerOrphanService` is exported so `AccountModule` can call
   // `handleOwnerErasure(userId)` from `AccountDeletionProcessorService.eraseAccount`,
@@ -301,10 +305,15 @@ import { SubcommunitiesService } from './subcommunities.service';
   // (programme enable/disable) and `MembershipCardsService` (card
   // suspend/revoke/reinstate). Same no-cycle argument: nothing this module
   // imports, directly or transitively, imports `MembershipCardsModule`.
+  //
+  // `CommunitySystemMembershipService` is exported so `AmbassadorsModule` can
+  // join a grant to the circle and take it out on a revoke. Same no-cycle
+  // argument: nothing this module imports reaches `AmbassadorsModule`.
   exports: [
     CommunitiesService,
     CommunityOwnerOrphanService,
     CommunityGovernanceLogService,
+    CommunitySystemMembershipService,
   ],
 })
 export class CommunitiesModule {}

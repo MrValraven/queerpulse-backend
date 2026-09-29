@@ -203,6 +203,13 @@ export class UpdateProfileDto {
   @IsBoolean()
   vouchersVisible?: boolean;
 
+  // Whether the member's QueerPulse Ambassador tag is shown on the roster,
+  // the directory filter and the invitee welcome line. See
+  // Profile.isAmbassadorTagVisible.
+  @IsOptional()
+  @IsBoolean()
+  isAmbassadorTagVisible?: boolean;
+
   // Whether the member consents to being featured (member quote /
   // changemaker highlight) on the admin-curated live landing page. See
   // Profile.featuredConsent.

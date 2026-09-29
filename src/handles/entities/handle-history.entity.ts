@@ -11,7 +11,7 @@ import { Subprofile } from '../../subprofiles/entities/subprofile.entity';
 import { HandleOwnerKind } from './handle.entity';
 
 /**
- * The `handle_history` reservation ledger — one row per handle that has been
+ * The `handle_history` reservation ledger: one row per handle that has been
  * RELEASED (a username rename or a subprofile unpublish). It exists to close an
  * impersonation hole: mentions are stored as raw `@slug` text and re-resolved to
  * a user at fan-out time, so a handle reclaimed by a stranger the instant it is
@@ -30,7 +30,7 @@ import { HandleOwnerKind } from './handle.entity';
  */
 @Entity('handle_history')
 export class HandleHistory {
-  // The normalized released handle, PRIMARY KEY — one reservation per name.
+  // The normalized released handle, PRIMARY KEY: one reservation per name.
   @PrimaryColumn({ type: 'varchar' })
   name!: string;
 
@@ -43,7 +43,7 @@ export class HandleHistory {
 
   // Set when previousOwnerKind === 'profile'; null otherwise (enforced by the
   // migration CHECK constraint). Cascades so a deleted user drops the
-  // reservation — a name whose previous owner no longer exists is nobody's to
+  // reservation: a name whose previous owner no longer exists is nobody's to
   // protect, so it becomes freely claimable again.
   @Index('IDX_handle_history_previous_owner_user_id')
   @Column({ type: 'uuid', nullable: true })
@@ -73,4 +73,11 @@ export class HandleHistory {
   @Index('IDX_handle_history_reclaimable_at')
   @Column({ type: 'timestamptz' })
   reclaimableAt!: Date;
+
+  // False when the release must never forward (`PERSONA_MOVED`): a persona
+  // switching between linked and unlinked. The cooldown still applies, so the
+  // name stays reserved; only the forwarding answer is withheld, because it
+  // would connect a pseudonymous address to its owner's.
+  @Column({ type: 'boolean', default: true })
+  isForwarding!: boolean;
 }

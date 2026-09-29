@@ -1,4 +1,12 @@
 import { type ObjectLiteral, type SelectQueryBuilder } from 'typeorm';
+import {
+  AMBASSADOR_FOCUS_AREAS,
+  isAmbassadorFocusArea,
+} from '../ambassadors/ambassador-focus-areas';
+import {
+  NOT_BADGED_STAFF_PARAMETERS,
+  notBadgedStaffClause,
+} from '../ambassadors/ambassador-status.service';
 import { countByFilterClauses } from '../common/facet-counts';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
@@ -20,10 +28,10 @@ import { LANGUAGE_CODES, knownLanguages } from './languages';
 import { NEIGHBOURHOODS, knownNeighbourhoods } from './neighbourhoods';
 import { OPEN_TO_PRESET_IDS } from './open-to';
 import {
-  DISCIPLINE_BY_PROFESSION,
-  DISCIPLINE_IDS,
-  knownDisciplines,
-  knownProfessions,
+  LISTED_DISCIPLINE_IDS,
+  LISTED_PROFESSION_IDS,
+  listedDisciplines,
+  listedProfessions,
 } from './professions';
 
 /**
@@ -65,7 +73,8 @@ export type DirectoryFacetGroup =
   | 'identities'
   | 'disciplines'
   | 'professions'
-  | 'languages';
+  | 'languages'
+  | 'ambassador';
 
 export interface DirectoryFacetCounts {
   openTo: Record<string, number>;
@@ -74,6 +83,9 @@ export interface DirectoryFacetCounts {
   disciplines: Record<string, number>;
   professions: Record<string, number>;
   languages: Record<string, number>;
+  /** One count per focus-area key, each assuming `ambassador=1`: "how many
+   *  visible ambassadors would I get if I also picked this focus area". */
+  ambassador: Record<string, number>;
 }
 
 /** The frontend's "show every neighbourhood" row. It is chrome: the FE strips
@@ -88,20 +100,24 @@ const ALL_OF_LISBON = 'All of Lisbon';
 /** Every row of the "Where they're based" card, in sidebar order. */
 const HOOD_FACET_IDS: readonly string[] = [...NEIGHBOURHOODS, ALL_OF_LISBON];
 
-const PROFESSION_IDS = Object.keys(DISCIPLINE_BY_PROFESSION);
-
 /** Every option of every counted group, zeroed. The count queries overwrite the
- *  entries they find; whatever they never mention stays a truthful `0`. */
+ *  entries they find; whatever they never mention stays a truthful `0`.
+ *
+ *  Disciplines and professions are zeroed over the LISTED sets only, so
+ *  `adultWork`/`sexWorker` and its five siblings never get a key at all
+ *  here, no matter what the count queries below would otherwise find. See
+ *  `professions.ts#UNLISTED_DISCIPLINE_IDS`. */
 export function zeroedFacetCounts(): DirectoryFacetCounts {
   const zero = (ids: readonly string[]): Record<string, number> =>
     Object.fromEntries(ids.map((id) => [id, 0]));
   return {
     openTo: zero(OPEN_TO_PRESET_IDS),
     identities: zero(DIRECTORY_IDENTITY_FACETS),
-    disciplines: zero(DISCIPLINE_IDS),
-    professions: zero(PROFESSION_IDS),
+    disciplines: zero(LISTED_DISCIPLINE_IDS),
+    professions: zero(LISTED_PROFESSION_IDS),
     languages: zero(LANGUAGE_CODES),
     hoods: zero(HOOD_FACET_IDS),
+    ambassador: zero(AMBASSADOR_FOCUS_AREAS),
   };
 }
 
@@ -113,6 +129,44 @@ export function csv(raw: string | undefined): string[] {
         .map((v) => v.trim())
         .filter(Boolean)
     : [];
+}
+
+/**
+ * The name/bio half of the member search predicate: the weighted full-text
+ * match OR the folded substring match, left unparenthesised so the caller can
+ * OR further branches into the same group. Binds `:memberSearchTerm` and
+ * `:memberSearchPattern`, which `applyDirectoryFilters` sets.
+ *
+ * Exported so `searchMembers` can order text hits ahead of hits that came
+ * only through a profession or field of work, using the very expression the
+ * filter applied.
+ */
+export function memberSearchTextMatch(): string {
+  return (
+    `${weightedSearchVector('p', PROFILE_SEARCH_FIELDS)} @@ ${foldedSearchQuery('memberSearchTerm')} ` +
+    `OR ${foldedHaystack('p', PROFILE_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('memberSearchPattern')}`
+  );
+}
+
+/**
+ * The profession and discipline ids the frontend resolved from the search
+ * words, range-checked against the catalogs. Both lists are empty whenever
+ * there is no `query`: the ids are part of the search term and mean nothing
+ * on their own.
+ */
+export function memberSearchIds(q: ListMembersQuery): {
+  searchProfessions: string[];
+  searchDisciplines: string[];
+} {
+  if (!q.query) return { searchProfessions: [], searchDisciplines: [] };
+  return {
+    // Built from `listed*`: an unlisted id (sex work & adult content) must
+    // never widen a search, or a query that resolved to `sexWorker` would
+    // surface exactly the members that field exists to keep unfindable.
+    // See professions.ts#UNLISTED_DISCIPLINE_IDS.
+    searchProfessions: listedProfessions(csv(q.searchProfessions)),
+    searchDisciplines: listedDisciplines(csv(q.searchDisciplines)),
+  };
 }
 
 /**
@@ -152,29 +206,54 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
   q: ListMembersQuery,
   skip?: DirectoryFacetGroup,
 ): void {
-  // Free-text search (SOC-08). Two branches, OR'd:
+  // Free-text search (SOC-08). Up to three branches, OR'd:
   //
   //  - an accent-folded full-text match, so "Sao" finds "São" and a hit in a
   //    name outranks one in a bio (the weights live in `PROFILE_SEARCH_FIELDS`);
   //  - the original substring match, folded the same way. Kept because full
   //    text matches whole tokens: dropping it would stop "trans" finding
   //    "transfeminine", a regression on what members already rely on.
+  //  - a profession or field of work, so "nurse" or "enfermeira" finds the
+  //    members who picked Nurse even when their bio never says so. This one
+  //    is an array overlap on `profiles.profession` / `profiles.discipline`
+  //    against ids the CLIENT sends as `searchProfessions` /
+  //    `searchDisciplines`. The labels live in the frontend catalogs in EN and
+  //    PT and the server stores ids only, so the frontend is the side that can
+  //    turn typed words into ids. It mirrors the persona directory's kind
+  //    search (src/subprofiles/subprofile-kind-search.ts, used by
+  //    `subprofile-public-read.service.ts`), with the word-to-id step moved
+  //    client-side. Unknown ids are dropped, and a list that ends up empty
+  //    adds no branch at all, so the SQL never binds an empty array. The
+  //    parameter names are distinct from the chip filters' `:professions` /
+  //    `:disciplines` below, which stay exact AND filters in the same builder.
   //
   // The haystack includes `bio` and `bio_pt`. `bio_pt` matters most: a
   // Portuguese-speaking member writes their real self-description there.
   //
   // Not a facet group and so never skipped: a count is "how many of MY current
   // results", and the search term is part of what makes them the member's.
+  // The profession and discipline ids ride along for the same reason: they
+  // are the search term, read as a profession.
   if (q.query) {
     // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched
     // literally and can't inject wildcards. Postgres treats backslash as the
     // default LIKE escape character.
     const term = `%${escapeLikeTerm(q.query)}%`;
-    qb.andWhere(
-      `(${weightedSearchVector('p', PROFILE_SEARCH_FIELDS)} @@ ${foldedSearchQuery('memberSearchTerm')} ` +
-        `OR ${foldedHaystack('p', PROFILE_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('memberSearchPattern')})`,
-      { memberSearchTerm: q.query, memberSearchPattern: term },
-    );
+    const { searchProfessions, searchDisciplines } = memberSearchIds(q);
+    const searchBranches = [memberSearchTextMatch()];
+    const searchParameters: Record<string, unknown> = {
+      memberSearchTerm: q.query,
+      memberSearchPattern: term,
+    };
+    if (searchProfessions.length) {
+      searchBranches.push('p.profession && :memberSearchProfessions');
+      searchParameters.memberSearchProfessions = searchProfessions;
+    }
+    if (searchDisciplines.length) {
+      searchBranches.push('p.discipline && :memberSearchDisciplines');
+      searchParameters.memberSearchDisciplines = searchDisciplines;
+    }
+    qb.andWhere(`(${searchBranches.join(' OR ')})`, searchParameters);
   }
 
   const tags = csv(q.tags);
@@ -245,8 +324,14 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
   // discipline count drops only the discipline predicate and keeps the
   // profession one, and vice versa. That is what makes each number answer for
   // its own checkbox rather than for its neighbour's.
+  //
+  // Built from `listed*`: `adultWork`/`sexWorker` and its siblings are
+  // selectable but stay unfindable (see
+  // professions.ts#UNLISTED_DISCIPLINE_IDS), so a request naming only an
+  // unlisted id takes the exact `1 = 0` path an UNKNOWN id takes below.
+  // Nothing about the response tells the two apart.
   if (skip !== 'disciplines') {
-    const disciplines = knownDisciplines(csv(q.disciplines));
+    const disciplines = listedDisciplines(csv(q.disciplines));
     if (csv(q.disciplines).length) {
       if (!disciplines.length) {
         qb.andWhere('1 = 0');
@@ -256,7 +341,7 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
     }
   }
   if (skip !== 'professions') {
-    const professions = knownProfessions(csv(q.professions));
+    const professions = listedProfessions(csv(q.professions));
     if (csv(q.professions).length) {
       if (!professions.length) {
         qb.andWhere('1 = 0');
@@ -278,18 +363,26 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
     }
   }
 
-  // Member age (tenure) filter — years since joined, computed from
-  // `profiles.joined_at`. Either bound may be sent alone. Never skipped: the
-  // age range carries no counts (it is a numeric range, not a set of options).
-  if (q.yearsFrom !== undefined) {
-    qb.andWhere(`date_part('year', age(now(), p.joined_at)) >= :yearsFrom`, {
-      yearsFrom: q.yearsFrom,
-    });
-  }
-  if (q.yearsTo !== undefined) {
-    qb.andWhere(`date_part('year', age(now(), p.joined_at)) <= :yearsTo`, {
-      yearsTo: q.yearsTo,
-    });
+  // "Ambassadors" filter. `focus` narrows the same EXISTS and only means
+  // anything alongside `ambassador=1`; sent alone it is ignored, matching the
+  // design's "focus only applies alongside ambassador" rule. Unknown focus
+  // keys are dropped, and the visible-tag gate keeps a member whose tag is
+  // hidden out of the directory the same way it stays off the roster and the
+  // invitee welcome line. Staff always win: a member wearing a staff badge is
+  // never a visible ambassador here either (see `notBadgedStaffClause`).
+  if (skip !== 'ambassador' && q.ambassador === '1') {
+    const focusAreas = csv(q.focus).filter(isAmbassadorFocusArea);
+    qb.andWhere(
+      `p.is_ambassador_tag_visible = true AND EXISTS (
+        SELECT 1 FROM "ambassadors" "amb"
+        WHERE "amb"."user_id" = p.user_id AND "amb"."revoked_at" IS NULL
+        ${focusAreas.length ? 'AND "amb"."focus_area" IN (:...ambassadorFocusAreas)' : ''}
+      ) AND ${notBadgedStaffClause('"p"."user_id"')}`,
+      {
+        ...NOT_BADGED_STAFF_PARAMETERS,
+        ...(focusAreas.length ? { ambassadorFocusAreas: focusAreas } : {}),
+      },
+    );
   }
 }
 
@@ -298,11 +391,11 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
  *
  * `base(skip)` must return a FRESH query builder each call — carrying the
  * viewer's visibility gates and `applyDirectoryFilters(qb, q, skip)` — because
- * each of these six queries mutates the builder it is handed.
+ * each of these seven queries mutates the builder it is handed.
  *
- * The six run concurrently. They are six extra round trips per directory
+ * The seven run concurrently. They are seven extra round trips per directory
  * request; at this directory's size that is cheaper than the alternatives
- * (grouping sets over six different predicate sets, or a materialized facet
+ * (grouping sets over seven different predicate sets, or a materialized facet
  * table that would go stale). If it ever stops being cheap, the escape hatch is
  * to have the sidebar ask for them only when it is open, rather than to make
  * the numbers less true.
@@ -310,56 +403,84 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
 export async function countDirectoryFacets(
   base: (skip: DirectoryFacetGroup) => SelectQueryBuilder<ObjectLiteral>,
 ): Promise<DirectoryFacetCounts> {
-  const [openTo, hoods, identities, disciplines, professions, languages] =
-    await Promise.all([
-      countByFilterClauses(
-        base('openTo'),
-        OPEN_TO_PRESET_IDS,
-        (param) => openToPresetExists(param, false),
-        (option) => option,
-      ),
-      // Neighbourhoods are the one group that matches by substring over
-      // free-text `location` rather than by set overlap, so their count clause
-      // is the same `ILIKE` the filter uses. `All of Lisbon` is the "no hood
-      // restriction" row, so it binds the pattern that matches everyone, and
-      // the COALESCE is what makes that true of members who never wrote a
-      // location at all (`NULL ILIKE '%'` is NULL, which would quietly
-      // undercount exactly the members that row promises to include).
-      countByFilterClauses(
-        base('hoods'),
-        HOOD_FACET_IDS,
-        (param) => `COALESCE("p"."location", '') ILIKE :${param}`,
-        (option) => (option === ALL_OF_LISBON ? '%' : `%${option}%`),
-      ),
-      // Identities count per FACET, not per stored label, and so cannot use the
-      // array-unnest shape the plain-array groups could: a member holding both
-      // 'Trans' and 'Genderfluid' answers the single "Trans & non-binary"
-      // checkbox once, and grouping by label would count them twice.
-      countByFilterClauses(
-        base('identities'),
-        DIRECTORY_IDENTITY_FACETS,
-        (param) => `"p"."discoverable_identities" && :${param}`,
-        (option) => FACET_LABELS[option as DirectoryIdentityFacet],
-      ),
-      countByFilterClauses(
-        base('disciplines'),
-        DISCIPLINE_IDS,
-        (param) => `"p"."discipline" && :${param}`,
-        (option) => [option],
-      ),
-      countByFilterClauses(
-        base('professions'),
-        PROFESSION_IDS,
-        (param) => `"p"."profession" && :${param}`,
-        (option) => [option],
-      ),
-      countByFilterClauses(
-        base('languages'),
-        LANGUAGE_CODES,
-        (param) => `"p"."languages" && :${param}`,
-        (option) => [option],
-      ),
-    ]);
+  const [
+    openTo,
+    hoods,
+    identities,
+    disciplines,
+    professions,
+    languages,
+    ambassador,
+  ] = await Promise.all([
+    countByFilterClauses(
+      base('openTo'),
+      OPEN_TO_PRESET_IDS,
+      (param) => openToPresetExists(param, false),
+      (option) => option,
+    ),
+    // Neighbourhoods are the one group that matches by substring over
+    // free-text `location` rather than by set overlap, so their count clause
+    // is the same `ILIKE` the filter uses. `All of Lisbon` is the "no hood
+    // restriction" row, so it binds the pattern that matches everyone, and
+    // the COALESCE is what makes that true of members who never wrote a
+    // location at all (`NULL ILIKE '%'` is NULL, which would quietly
+    // undercount exactly the members that row promises to include).
+    countByFilterClauses(
+      base('hoods'),
+      HOOD_FACET_IDS,
+      (param) => `COALESCE("p"."location", '') ILIKE :${param}`,
+      (option) => (option === ALL_OF_LISBON ? '%' : `%${option}%`),
+    ),
+    // Identities count per FACET, not per stored label, and so cannot use the
+    // array-unnest shape the plain-array groups could: a member holding both
+    // 'Trans' and 'Genderfluid' answers the single "Trans & non-binary"
+    // checkbox once, and grouping by label would count them twice.
+    countByFilterClauses(
+      base('identities'),
+      DIRECTORY_IDENTITY_FACETS,
+      (param) => `"p"."discoverable_identities" && :${param}`,
+      (option) => FACET_LABELS[option as DirectoryIdentityFacet],
+    ),
+    // LISTED ids only: iterating the full taxonomy here would hand
+    // `adultWork`/`sexWorker` a facet-count key, which is a count (a way
+    // to learn how many members are sex workers) exactly as much as a
+    // chip filter is. See professions.ts#UNLISTED_DISCIPLINE_IDS.
+    countByFilterClauses(
+      base('disciplines'),
+      LISTED_DISCIPLINE_IDS,
+      (param) => `"p"."discipline" && :${param}`,
+      (option) => [option],
+    ),
+    countByFilterClauses(
+      base('professions'),
+      LISTED_PROFESSION_IDS,
+      (param) => `"p"."profession" && :${param}`,
+      (option) => [option],
+    ),
+    countByFilterClauses(
+      base('languages'),
+      LANGUAGE_CODES,
+      (param) => `"p"."languages" && :${param}`,
+      (option) => [option],
+    ),
+    // One count per focus area, each assuming the visible-tag gate, the
+    // active-ambassador EXISTS and the staff exclusion the filter itself
+    // applies (see `applyDirectoryFilters`). It is the same predicate either
+    // way, per this file's header. The staff parameters go on the builder
+    // first, because `countByFilterClauses` binds only the per-option one.
+    countByFilterClauses(
+      base('ambassador').setParameters(NOT_BADGED_STAFF_PARAMETERS),
+      AMBASSADOR_FOCUS_AREAS,
+      (param) =>
+        `"p"."is_ambassador_tag_visible" = true AND EXISTS (
+            SELECT 1 FROM "ambassadors" "ambCount"
+            WHERE "ambCount"."user_id" = "p"."user_id"
+              AND "ambCount"."revoked_at" IS NULL
+              AND "ambCount"."focus_area" = :${param}
+          ) AND ${notBadgedStaffClause('"p"."user_id"')}`,
+      (option) => option,
+    ),
+  ]);
   return {
     ...zeroedFacetCounts(),
     openTo,
@@ -368,5 +489,6 @@ export async function countDirectoryFacets(
     disciplines,
     professions,
     languages,
+    ambassador,
   };
 }

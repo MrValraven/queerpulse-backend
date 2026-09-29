@@ -42,21 +42,24 @@ export class OpportunityCommitmentDto {
 export class CreateOpportunityDto {
   @IsString() @MinLength(1) @MaxLength(200) org!: string;
 
-  // Existing partner org slug — resolved to `partner_id` via
-  // `PartnersService.idBySlug` (see `VolunteeringService.create`/`update`).
+  // Slug of a partner org the poster MAINTAINS (owns the approved seat of),
+  // resolved to `partner_id` via `PartnersService.ownedIdBySlug` (see
+  // `VolunteeringService.resolvePartnerId`). An unknown slug 404s and a
+  // partner the poster does not maintain 403s; on update, re-sending the
+  // slug of the partner already linked keeps that link as is.
   // Deliberately no `@MinLength(1)`: the edit form always sends the FULL
   // desired state, so `''` is how "no organisation is linked" (and unlinking
   // one) reaches `update`, which resolves an empty slug to `null`.
   @IsOptional() @IsString() @MaxLength(100) partnerSlug?: string;
 
-  // Community slug — resolved to `community_id` via
-  // `CommunityMembershipService.assertMemberBySlug`, so (unlike
-  // `partnerSlug`) an unknown slug 404s and a non-member slug 403s rather
-  // than silently resolving to `null` (see `VolunteeringService.create`/
-  // `update`). The frontend's combined organization picker only ever sets
-  // one of `partnerSlug`/`communitySlug` at a time, sending `''` for the
-  // other, so this field skips `@MinLength(1)` for the same reason
-  // `partnerSlug` does.
+  // Slug of a community the poster owns or moderates, resolved to
+  // `community_id` via `CommunityMembershipService.assertOwnerOrModBySlug`
+  // (see `VolunteeringService.resolveCommunityId`): an unknown slug 404s and
+  // a community without that standing 403s, with the same "unchanged link is
+  // kept" rule on update as `partnerSlug`. The frontend's combined
+  // organisation picker sets one of `partnerSlug`/`communitySlug` at a time,
+  // sending `''` for the other; two non-empty slugs are a 400. This field
+  // skips `@MinLength(1)` for the same reason `partnerSlug` does.
   @IsOptional()
   @IsString()
   @MaxLength(100)

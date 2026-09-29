@@ -23,7 +23,6 @@ import { AuthService } from './auth.service';
 import { AuthMaintenanceService } from './auth-maintenance.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { IdentityRelinkCandidate } from './entities/identity-relink-candidate.entity';
-import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard';
@@ -121,12 +120,6 @@ import {
   providers: [
     AuthService,
     AuthMaintenanceService,
-    // `POST /auth/under-18-disclosure`. Lives here rather than with the
-    // moderation services because `ModerationModule` imports THIS module —
-    // injecting `AccountEnforcementService` would close that cycle. It reuses
-    // `AuthService.revokeAllForUser` (and so `USER_SESSION_REVOKED`) plus the
-    // `AccountDeactivation` registration already declared above.
-    UnderAgeDisclosureService,
     GoogleStrategy,
     JwtStrategy,
     // Registered for the same reason `StorageModule` registers
