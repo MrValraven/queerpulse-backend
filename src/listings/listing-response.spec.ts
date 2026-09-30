@@ -472,6 +472,41 @@ describe('the menu and pricing mode on the response DTOs', () => {
   });
 });
 
+describe('ownedBy on the public directory responses', () => {
+  it('is on the card and the detail, and the two agree', () => {
+    const listing = makeDirectoryListing({ ownedBy: ['women', 'nonbinary'] });
+    expect(toDirectoryCard(listing).ownedBy).toEqual(['women', 'nonbinary']);
+    expect(toDirectoryDetail(listing, [], [], 0).ownedBy).toEqual([
+      'women',
+      'nonbinary',
+    ]);
+  });
+
+  it('is a real empty array on a listing that never declared any, not undefined', () => {
+    const listing = makeDirectoryListing();
+    expect(toDirectoryCard(listing)).toHaveProperty('ownedBy', []);
+    expect(toDirectoryDetail(listing, [], [], 0)).toHaveProperty('ownedBy', []);
+  });
+
+  it('serves stored values in canonical order and drops anything unknown', () => {
+    const card = toDirectoryCard(
+      makeDirectoryListing({
+        ownedBy: ['nonbinary', 'retired-value', 'women'] as Listing['ownedBy'],
+      }),
+    );
+    expect(card.ownedBy).toEqual(['women', 'nonbinary']);
+  });
+
+  it('is independent of the queer-owned claim and its verification', () => {
+    const card = toDirectoryCard(
+      makeDirectoryListing({ ownedBy: ['trans'], badge: 'friendly' }),
+    );
+    expect(card.ownedBy).toEqual(['trans']);
+    expect(card.owned).toBe(false);
+    expect(card.queerOwnedVerified).toBe(false);
+  });
+});
+
 describe('toListingDTO (the owner/managed response)', () => {
   // Every column `toListingDTO` reads, directly or through one of the
   // sub-mappers it calls (`accessibilityView`, `toGalleryView`,
@@ -490,6 +525,7 @@ describe('toListingDTO (the owner/managed response)', () => {
       hood: 'Arroios',
       badge: '',
       evidence: '',
+      ownedBy: [],
       price: '',
       blurb: 'A queer café',
       tagline: '',
@@ -576,6 +612,13 @@ describe('toListingDTO (the owner/managed response)', () => {
       file: null,
       link: '',
     });
+  });
+
+  it('carries ownedBy for the owner’s edit wizard, always as an array', () => {
+    expect(toListingDTO(makeManagedListing(), null).ownedBy).toEqual([]);
+    expect(
+      toListingDTO(makeManagedListing({ ownedBy: ['trans'] }), null).ownedBy,
+    ).toEqual(['trans']);
   });
 
   it('never serves the retired contactEmail, even when an old row still holds one', () => {

@@ -473,7 +473,10 @@ export class DirectoryService {
    * bounded (`take` vs `paginate`'s `skip`/`take`).
    */
   private buildDirectoryQuery(
-    query: Pick<ListListingDirectoryQuery, 'cat' | 'q' | 'safe' | 'access'>,
+    query: Pick<
+      ListListingDirectoryQuery,
+      'cat' | 'q' | 'safe' | 'owned' | 'access'
+    >,
   ): SelectQueryBuilder<Listing> {
     const qb = this.listings
       .createQueryBuilder('listing')
@@ -504,6 +507,14 @@ export class DirectoryService {
         safeSpaceStatus: SafeSpaceStatus.Verified,
       });
       qb.andWhere(`NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}`);
+    }
+
+    if (query.owned?.length) {
+      // Array overlap (`&&`): a listing matches when its owner declared ANY of
+      // the requested values, so several values are an OR. Self-declared by
+      // the owner, never verified. Filtered in the query so
+      // `listDirectoryPage`'s `total` counts only matching rows.
+      qb.andWhere('listing.ownedBy && :ownedBy', { ownedBy: query.owned });
     }
 
     if (query.access?.length) {

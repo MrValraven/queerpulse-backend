@@ -6,11 +6,11 @@ import { ListingDTO } from './listing-response';
  * the business as a business.
  *
  * The first four are not a new judgement. `ListingOwnershipService` already
- * clears exactly `ownerName`, `ownerBio`, `consentOuting` and `consentGuide`
- * when a listing changes hands, on the stated grounds that they belong to the
- * previous owner and cannot transfer to somebody else. That set is treated here
- * as authoritative, and this module is the single place it is written down for
- * both purposes. The transfer also scrubs the retired `contactEmail` column,
+ * clears `ownerName`, `ownerBio`, `consentOuting` and `consentGuide` (and
+ * `ownedBy`, below) when a listing changes hands, on the stated grounds that
+ * they belong to the previous owner and cannot transfer to somebody else. That
+ * set is treated here as authoritative, and this module is the single place it
+ * is written down for both purposes. The transfer also scrubs the retired `contactEmail` column,
  * which is absent here because no response carries it and no write stores it.
  *
  * Three more are added for the co-manager boundary:
@@ -24,6 +24,16 @@ import { ListingDTO } from './listing-response';
  *  - `rel` states the owner's own relationship to the business ("I own it",
  *    "I work here"). It is a claim about a person, and it is one of the inputs
  *    a moderator weighs on a queer-owned verification.
+ *
+ * And one more for the owner's own identity:
+ *
+ *  - `ownedBy` says who owns and runs the business (`women`, `trans`,
+ *    `nonbinary`). Every value discloses the owner's gender identity, which
+ *    is an outing risk, so only the owner may set or see it on the management
+ *    side. A handover clears it too (`ListingOwnershipService`), because it
+ *    describes the previous owner rather than the business, and a suggestion
+ *    or a staff-authored listing never stores it. Once the owner sets it, it
+ *    is public on the directory card and detail by the owner's own choice.
  *
  * `ownerRole` is deliberately NOT in this set, matching the claim-transfer
  * precedent, which leaves it alone. It is a job title at the business
@@ -46,6 +56,7 @@ export const OWNER_PERSONAL_LISTING_FIELDS = [
   'visibility',
   'linkToProfile',
   'rel',
+  'ownedBy',
 ] as const;
 
 export type OwnerPersonalListingField =
@@ -53,7 +64,7 @@ export type OwnerPersonalListingField =
 
 /**
  * A listing as a CO-MANAGER sees it: every business field, and none of the
- * seven owner-personal ones.
+ * eight owner-personal ones.
  *
  * Modelled as an `Omit` rather than as "the same interface with nulls" on
  * purpose. A co-manager's response does not contain a blanked-out owner
@@ -88,8 +99,9 @@ export type ManagedListingDTO =
  * Strips the owner-personal keys from a listing response.
  *
  * Deletes the keys rather than overwriting them, so the result genuinely has no
- * such property. `structuredClone`-free shallow copy is enough: every one of
- * the seven is a scalar.
+ * such property. `structuredClone`-free shallow copy is enough: a key is
+ * deleted, never mutated, so the one array among the eight (`ownedBy`) is
+ * never touched either.
  */
 export function redactOwnerPersonalFields(
   listing: ListingDTO,
@@ -167,11 +179,11 @@ export function assertNoOwnerPersonalListingFields(
  * WHY A SECOND, SMALLER SET than `OWNER_PERSONAL_LISTING_FIELDS` above. That
  * one is the CO-MANAGER boundary and it is wider, because a co-manager is
  * somebody the owner picked to help run the business rather than somebody
- * judging it. A directory moderator is judging it, so five of the seven stay:
- * `ownerName`, `ownerBio`, `visibility` and `linkToProfile` decide what the
- * public listing page actually shows, and that page is the thing under review;
- * `rel` is a documented input to the queer-owned verification this same
- * controller grants (see the note on `rel` above).
+ * judging it. A directory moderator is judging it, so six of the eight stay:
+ * `ownerName`, `ownerBio`, `visibility`, `linkToProfile` and `ownedBy` decide
+ * what the public listing page actually shows, and that page is the thing
+ * under review; `rel` is a documented input to the queer-owned verification
+ * this same controller grants (see the note on `rel` above).
  *
  * The two that leave carry nothing any decision on that controller needs:
  *

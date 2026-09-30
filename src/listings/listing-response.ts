@@ -28,6 +28,7 @@ import {
   SafeSpaceVouch,
 } from './entities/listing.entity';
 import { toListingMenuView } from './listing-menu';
+import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
 import type { ListingTagGroup } from './listing-tags';
 import {
   ListingAccessibilityAnswerMap,
@@ -440,6 +441,10 @@ export interface ListingDTO {
   linkToProfile: boolean;
   consentOuting: boolean;
   consentGuide: boolean;
+  /** Who owns and runs the business, as the owner declared it (`women`,
+   * `trans`, `nonbinary`). OWNER-PERSONAL: omitted from a co-manager's copy
+   * like the seven fields above. Always an array. */
+  ownedBy: ListingOwnedBy[];
   /** Moderator-verified confirmation of the "queer-owned" badge as it
    * CURRENTLY reads — distinct from `linkToProfile` (the member's own
    * self-reported claim). `false` once the grant has passed its
@@ -774,6 +779,13 @@ export interface DirectoryCardDTO {
    * hands. `DirectoryDetailDTO` inherits this via `extends DirectoryCardDTO`
    * — no separate detail mapping needed. */
   queerOwnedVerified: boolean;
+  /** Who owns and runs the business, as the OWNER declared it: any of
+   * `women`, `trans`, `nonbinary`, in canonical order. `[]` when they declared
+   * none, never undefined. Self-declared: nobody verifies it, so a surface
+   * must not render it the way it renders `queerOwnedVerified`. Public by the
+   * owner's own choice, and the directory's `owned=` filter matches on it.
+   * `DirectoryDetailDTO` inherits it. */
+  ownedBy: ListingOwnedBy[];
   memberFirst: string | null;
   /** The owner's real profile photo, so the card's "run by <first>" line shows
    * the member's face rather than initials over a tint. Resolved by
@@ -953,6 +965,7 @@ export function toDirectoryCard(
     // (suggested listings, older rows) claims nothing, so it stays false.
     owned: listing.badge === 'owned',
     queerOwnedVerified: isQueerOwnedCurrentlyVerified(listing),
+    ownedBy: normalizeListingOwnedBy(listing.ownedBy),
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
     memberFirst: listing.linkToProfile ? owner.first || null : null,
@@ -1564,6 +1577,7 @@ export function toListingDTO(
     linkToProfile: listing.linkToProfile,
     consentOuting: listing.consentOuting,
     consentGuide: listing.consentGuide,
+    ownedBy: normalizeListingOwnedBy(listing.ownedBy),
     // The badge as it currently reads: an expired grant stops saying
     // "verified" here too, so the owner and the moderation queue see exactly
     // what a member sees. The grant itself is preserved on the block below.

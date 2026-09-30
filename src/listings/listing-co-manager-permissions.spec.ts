@@ -7,6 +7,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -25,6 +26,7 @@ import {
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
 import { ListingCoManagersService } from './listing-co-managers.service';
+import { ListingOwnedBy } from './listing-owned-by';
 import {
   ListingManagementRole,
   OWNER_PERSONAL_LISTING_FIELDS,
@@ -70,6 +72,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   timezone: '',
   badge: '',
   evidence: '',
+  ownedBy: ['women', 'trans'],
   price: '',
   blurb: '',
   tagline: '',
@@ -313,6 +316,12 @@ describe('listing co-manager permission boundary', () => {
           provide: AdminQueueNotificationsService,
           useValue: { announce: jest.fn().mockResolvedValue(undefined) },
         },
+        // `ListingsService` takes it for the safe-space visit count; no case
+        // here reaches that read.
+        {
+          provide: SafeSpaceVisitsService,
+          useValue: { countIndependentVisits: jest.fn() },
+        },
       ],
     }).compile();
     service = module.get(ListingsService);
@@ -391,13 +400,35 @@ describe('listing co-manager permission boundary', () => {
       expect(result.managementRole).toBe(ListingManagementRole.CoManager);
     });
 
+    // Every value discloses the owner's gender identity, so a co-manager can
+    // neither set nor clear it, and a valid value is refused as firmly as a
+    // bogus one.
+    it.each([[['women']], [[]]])(
+      'rejects a co-manager PATCH carrying ownedBy %j with 403 and saves nothing',
+      async (ownedBy) => {
+        await expect(
+          service.update('QPL-2026-0001', CO_MANAGER_ID, {
+            ownedBy: ownedBy as ListingOwnedBy[],
+          }),
+        ).rejects.toThrow('Only the listing owner can change ownedBy');
+
+        expect(hasSavedTheListing()).toBe(false);
+      },
+    );
+
     it('lets the OWNER write the very fields the co-manager cannot', async () => {
-      await service.update('QPL-2026-0001', OWNER_ID, {
+      const result = await service.update('QPL-2026-0001', OWNER_ID, {
         ownerName: 'Ana R.',
         consentOuting: false,
+        ownedBy: ['nonbinary', 'women'],
       });
 
       expect(hasSavedTheListing()).toBe(true);
+      // Stored and served in canonical order, whatever order was sent.
+      expect((result as unknown as Record<string, unknown>).ownedBy).toEqual([
+        'women',
+        'nonbinary',
+      ]);
     });
   });
 
@@ -411,7 +442,7 @@ describe('listing co-manager permission boundary', () => {
       coManagers.isActiveCoManager.mockResolvedValue(true);
     });
 
-    it('omits all seven from GET /listings/:ref', async () => {
+    it('omits all eight from GET /listings/:ref', async () => {
       const result = (await service.getByRef(
         'QPL-2026-0001',
         CO_MANAGER_ID,
@@ -436,9 +467,10 @@ describe('listing co-manager permission boundary', () => {
 
       expect('ownerName' in result).toBe(false);
       expect('ownerBio' in result).toBe(false);
+      expect('ownedBy' in result).toBe(false);
     });
 
-    it('gives the owner all seven, and tags the seat as owner', async () => {
+    it('gives the owner all eight, and tags the seat as owner', async () => {
       const result = (await service.getByRef(
         'QPL-2026-0001',
         OWNER_ID,
@@ -447,6 +479,7 @@ describe('listing co-manager permission boundary', () => {
       expect(result.managementRole).toBe(ListingManagementRole.Owner);
       expect(result.ownerName).toBe('Ana Ribeiro');
       expect(result.ownerBio).toBe('Runs the place since 2019.');
+      expect(result.ownedBy).toEqual(['women', 'trans']);
     });
   });
 

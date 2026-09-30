@@ -489,6 +489,56 @@ describe('DirectoryService public reads', () => {
     });
   });
 
+  describe('listDirectory owned filter', () => {
+    /** The `listing.ownedBy && ...` predicate, if one was added. */
+    const overlapCall = () =>
+      andWhereCalls().find(
+        (call) =>
+          typeof call[0] === 'string' && call[0].includes('listing.ownedBy'),
+      );
+
+    it('adds no ownedBy predicate when `owned` is absent', async () => {
+      await service.listDirectory({});
+
+      expect(overlapCall()).toBeUndefined();
+    });
+
+    it('adds no ownedBy predicate for an empty `owned` array', async () => {
+      await service.listDirectory({ owned: [] });
+
+      expect(overlapCall()).toBeUndefined();
+    });
+
+    it('matches on array overlap, so several values are an OR', async () => {
+      await service.listDirectory({ owned: ['women', 'trans'] });
+
+      const call = overlapCall();
+      expect(call?.[0]).toBe('listing.ownedBy && :ownedBy');
+      expect(call?.[1]).toEqual({ ownedBy: ['women', 'trans'] });
+      // ONE predicate for N values: an OR, never an AND of N tests.
+      expect(
+        andWhereCalls().filter(
+          (each) =>
+            typeof each[0] === 'string' && each[0].includes('listing.ownedBy'),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('applies the filter in the paged query, so `total` counts only matches', async () => {
+      queryBuilder['skip'] = jest.fn().mockReturnValue(queryBuilder);
+      queryBuilder['getManyAndCount'] = jest.fn().mockResolvedValue([[], 0]);
+
+      const page = await service.listDirectoryPage({
+        owned: ['nonbinary'],
+        page: 1,
+      });
+
+      expect(overlapCall()?.[1]).toEqual({ ownedBy: ['nonbinary'] });
+      expect(queryBuilder['getManyAndCount']).toHaveBeenCalledTimes(1);
+      expect(page.total).toBe(0);
+    });
+  });
+
   // --- "list your business" wizard: the curated tag vocabulary -------------
   describe('listTagVocabulary', () => {
     it('returns every curated group with its tags, in order', () => {
@@ -576,6 +626,19 @@ describe('toDirectoryCard hours and accessibility', () => {
     expect(card.accessibilityAnswers['accessible-toilet']).toBe('no');
     expect(card.accessibilityAnswers['quiet-hours']).toBe('unknown');
     expect(Object.keys(card.accessibilityAnswers)).toHaveLength(6);
+  });
+
+  it('carries the owner’s ownedBy', () => {
+    expect(
+      toDirectoryCard(makeListing({ ownedBy: ['trans', 'nonbinary'] })).ownedBy,
+    ).toEqual(['trans', 'nonbinary']);
+  });
+
+  it('reads a row missing the ownedBy column as [], never undefined', () => {
+    const listing = makeListing();
+    delete (listing as Partial<Listing>).ownedBy;
+
+    expect(toDirectoryCard(listing).ownedBy).toEqual([]);
   });
 
   it('fills a row written before a question existed with `unknown`, never `yes`', () => {
