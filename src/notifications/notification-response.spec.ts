@@ -195,6 +195,29 @@ describe('toClientPayload (ENG-409 lifecycle rows)', () => {
     expect(projected).toEqual({ subprofileName: 'Night Cartographer' });
   });
 
+  it('forwards the feed-import fields (count as a number) and nothing else', () => {
+    const projected = toClientPayload(
+      notificationRow(NotificationType.PersonaImportReady, {
+        subprofileId: 'sp1',
+        subprofileName: 'Night Radio',
+        subprofileSlugOrHandle: 'nightradio',
+        feedId: 'f1',
+        feedTitle: 'The Show',
+        newItemCount: 3,
+        episodeTitle: 'must not leak',
+        remoteImageUrl: 'https://cdn.example/art.jpg',
+      }),
+    );
+    expect(projected).toEqual({
+      subprofileId: 'sp1',
+      subprofileName: 'Night Radio',
+      subprofileSlugOrHandle: 'nightradio',
+      feedId: 'f1',
+      feedTitle: 'The Show',
+      newItemCount: 3,
+    });
+  });
+
   it('forwards the gathering title on an announcement and keeps the body off the wire', () => {
     const projected = toClientPayload(
       notificationRow(NotificationType.EventAnnouncement, {

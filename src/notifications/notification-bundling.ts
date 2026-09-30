@@ -141,6 +141,10 @@ function subjectFor(
     // and floats back to the top, so the row stays worth opening.
     case NotificationType.PersonaUpdate:
       return stringField(payload, 'subprofileId');
+    // New podcast episodes waiting for review collapse onto the PERSONA, so
+    // several feeds on one persona syncing within the window stay one row.
+    case NotificationType.PersonaImportReady:
+      return stringField(payload, 'subprofileId');
     // An admin queue's arrivals collapse onto the QUEUE.
     //
     // This is the one always-delivered type that bundles, which the docstring

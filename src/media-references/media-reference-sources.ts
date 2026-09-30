@@ -16,6 +16,7 @@ import { Conversation } from '../messaging/entities/conversation.entity';
 import { Event } from '../events/entities/event.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
+import { SubprofileFeed } from '../subprofiles/entities/subprofile-feed.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumPostPhoto } from '../forum/entities/forum-post-photo.entity';
@@ -437,6 +438,46 @@ const PERSONA_ITEM_SOURCE: MediaReferenceSource = {
   },
 };
 
+// --- persona feed show art — SPECIAL source, shaped like PERSONA_ITEM_SOURCE.
+// `SubprofileFeed.imageKey` is OUR stored copy of a connected podcast's show
+// art (persona feed import): a `work-image` key the server wrote, which
+// published episodes fall back to. It must count as in use, or the orphan
+// sweep collects it from a live feed. Like an item, the feed has no page of
+// its own, so the reference links to the PARENT persona and is labelled with
+// the show's title. Typed `persona-item`, the reference type for content that
+// sits inside a persona.
+const PERSONA_FEED_SOURCE: MediaReferenceSource = {
+  type: 'persona-item',
+  field: 'SubprofileFeed.imageKey',
+  async resolve(dataSource, _candidateBareKeys, candidateStoredForms) {
+    if (candidateStoredForms.length === 0) return [];
+    const matchingFeeds = await dataSource.getRepository(SubprofileFeed).find({
+      where: { imageKey: In(candidateStoredForms) },
+      select: ['imageKey', 'title', 'subprofileId'],
+    });
+    if (matchingFeeds.length === 0) return [];
+    const parentSubprofiles = await dataSource.getRepository(Subprofile).find({
+      where: { id: In([...new Set(matchingFeeds.map((f) => f.subprofileId))]) },
+      select: ['id', 'handle'],
+    });
+    const parentHandleById = new Map(
+      parentSubprofiles.map((subprofile) => [subprofile.id, subprofile.handle]),
+    );
+    return matchingFeeds.map((feed) => {
+      const reference: MediaReference = {
+        type: 'persona-item',
+        entityId: feed.subprofileId,
+        label: feed.title ?? '',
+        slug: parentHandleById.get(feed.subprofileId) ?? '',
+      };
+      return [toBareKey(String(feed.imageKey)), reference] as [
+        string,
+        MediaReference,
+      ];
+    });
+  },
+};
+
 // --- membership-card programme art — SPECIAL sources, beyond `plainSource`. -
 // A `CommunityCard` row is the card PROGRAMME an issuer designs once, and it
 // holds two uploads of its own: the crest printed on the card and the ground
@@ -738,6 +779,7 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
 export const MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
   ...PLAIN_MEDIA_REFERENCE_SOURCES,
   PERSONA_ITEM_SOURCE,
+  PERSONA_FEED_SOURCE,
   ...CARD_PROGRAM_SOURCES,
   ...ARRAY_MEDIA_REFERENCE_SOURCES,
 ];

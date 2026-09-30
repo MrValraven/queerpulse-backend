@@ -1532,6 +1532,29 @@ export enum NotificationType {
   ListingSuggestionNeedsInfo = 'listing_suggestion_needs_info',
   ListingSuggestionSentBack = 'listing_suggestion_sent_back',
   ListingSuggestionRemoved = 'listing_suggestion_removed',
+  /**
+   * A persona's connected podcast feed brought in new episodes that are
+   * waiting for review (persona feed import). Written to EVERY member of the
+   * persona (creator and accepted co-owners) by the scheduled sync in
+   * `SubprofileFeedsService`, only when a check found new episodes that are
+   * still PENDING. Never on the first connect (the owner is looking at the
+   * import right then), never on a manual sync (same reason), and never for
+   * episodes an `autoPublish` feed published straight away: those reach
+   * followers through the ordinary `PersonaUpdate` path instead.
+   *
+   * Payload `{ subprofileId, subprofileName, subprofileSlugOrHandle, feedId,
+   * feedTitle, newItemCount }`. `feedTitle` is the show's own public
+   * `<channel><title>`; no episode text rides along.
+   *
+   * NO ACTOR: the platform's scheduler did this, not a member. BUNDLES on
+   * `subprofileId`, so three feeds on one persona syncing inside the bundling
+   * window leave one unread row. Gated by the owner-facing `personas`
+   * category, alongside `SubprofileCoOwnerJoined`. Bell-only (no push), like
+   * the other owner-facing persona types.
+   *
+   * See migration `AddPersonaImportReadyNotificationType1827800200000`.
+   */
+  PersonaImportReady = 'persona_import_ready',
 }
 
 @Entity('notifications')

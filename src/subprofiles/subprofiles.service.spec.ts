@@ -72,6 +72,7 @@ import { SubprofileEndorsementsService } from './subprofile-endorsements.service
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofileCreditsService } from './subprofile-credits.service';
+import { SubprofileUpdatesService } from './subprofile-updates.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { editableSnapshot, SubprofilesService } from './subprofiles.service';
 import { SUBPROFILE_DELETED } from './subprofile.events';
@@ -796,6 +797,10 @@ describe('SubprofilesService', () => {
     listPublicHandles: jest.Mock;
   };
   let eventEmitter: { emit: jest.Mock };
+  let updates: {
+    snapshotSectionTitles: jest.Mock;
+    notifyFollowersOfNewItems: jest.Mock;
+  };
   // Event/community lookups behind `replaceAffiliations`. Empty by default;
   // the "Part of" describe block below stages its own targets.
   let eventsRepository: { find: jest.Mock };
@@ -1340,6 +1345,13 @@ describe('SubprofilesService', () => {
     };
 
     eventEmitter = { emit: jest.fn() };
+    // `replaceSection`/`insertItemsAtTop` snapshot the section before the write
+    // and tell followers after it; the follower fan-out itself is covered by
+    // `subprofile-updates.service.spec.ts`.
+    updates = {
+      snapshotSectionTitles: jest.fn().mockResolvedValue([]),
+      notifyFollowersOfNewItems: jest.fn().mockResolvedValue(undefined),
+    };
     eventsRepository = { find: jest.fn().mockResolvedValue([]) };
     communitiesRepository = { find: jest.fn().mockResolvedValue([]) };
     affiliationEligibility = {
@@ -1404,6 +1416,7 @@ describe('SubprofilesService', () => {
         },
         { provide: SubprofileMembershipService, useValue: membership },
         { provide: SubprofileCreditsService, useValue: credits },
+        { provide: SubprofileUpdatesService, useValue: updates },
         { provide: SubprofilePublicReadService, useValue: publicRead },
         {
           provide: SubprofileAffiliationEligibilityService,
@@ -2329,6 +2342,178 @@ describe('SubprofilesService', () => {
         ]),
       ).resolves.toBeDefined();
     });
+  });
+
+  // Persona feed import: publishing podcast episodes inserts server-built
+  // items at the TOP of a section, under the same persona lock and
+  // edit-version bump every editor write takes.
+  describe('insertItemsAtTop', () => {
+    const fields = (title: string) => ({
+      title,
+      subtitle: null,
+      description: null,
+      url: null,
+      imageUrl: null,
+      date: '2026-09',
+      meta: '48 min',
+    });
+    const stageSectionCount = (itemCount: number) => {
+      manager.count.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity === SubprofileItem ? itemCount : 1),
+      );
+    };
+
+    beforeEach(() => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Developer, editVersion: 4 }),
+      );
+      manager.save.mockImplementation((rows: unknown) =>
+        Promise.resolve(
+          (rows as Record<string, unknown>[]).map((row, index) => ({
+            ...row,
+            id: `item-${index}`,
+          })),
+        ),
+      );
+      updates.snapshotSectionTitles.mockResolvedValue(['Old A', 'Old B']);
+    });
+
+    it('shifts the section down and inserts the candidates at positions 0..k-1', async () => {
+      stageSectionCount(2);
+      const onInserted = jest.fn().mockResolvedValue(undefined);
+      const result = await service.insertItemsAtTop(
+        'user-1',
+        'sp-1',
+        SubprofileSection.Projects,
+        {
+          expectedEditVersion: 4,
+          selectCandidates: () =>
+            Promise.resolve([
+              { ref: 'entry-new', fields: fields('Newest') },
+              { ref: 'entry-old', fields: fields('Older') },
+            ]),
+          onInserted,
+        },
+      );
+
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('SET "position" = "position" + $1'),
+        [2, 'sp-1', SubprofileSection.Projects],
+      );
+      const [savedRows] = manager.save.mock.calls[0] as [SubprofileItem[]];
+      expect(
+        savedRows.map((row) => [row.title, row.position, row.isFeatured]),
+      ).toEqual([
+        ['Newest', 0, false],
+        ['Older', 1, false],
+      ]);
+      expect(onInserted).toHaveBeenCalledWith(manager, [
+        { ref: 'entry-new', itemId: 'item-0' },
+        { ref: 'entry-old', itemId: 'item-1' },
+      ]);
+      expect(manager.update).toHaveBeenCalledWith(
+        Subprofile,
+        { id: 'sp-1' },
+        { editVersion: 5 },
+      );
+      expect(result.inserted).toBe(2);
+      expect(result.subprofile.editVersion).toBe(5);
+      // Followers hear about it through the ordinary new-items path, with
+      // the new titles first.
+      expect(updates.notifyFollowersOfNewItems).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sp-1' }),
+        ['Old A', 'Old B'],
+        ['Newest', 'Older', 'Old A', 'Old B'],
+        SubprofileSection.Projects,
+      );
+      // Nothing an owner wrote changed, so no revision is recorded: the item
+      // insert is the only save.
+      expect(manager.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('inserts only as many as fit under MAX_ITEMS_PER_SECTION, newest first', async () => {
+      stageSectionCount(99);
+      const onInserted = jest.fn().mockResolvedValue(undefined);
+      const result = await service.insertItemsAtTop(
+        'user-1',
+        'sp-1',
+        SubprofileSection.Projects,
+        {
+          selectCandidates: () =>
+            Promise.resolve([
+              { ref: 'a', fields: fields('A') },
+              { ref: 'b', fields: fields('B') },
+            ]),
+          onInserted,
+        },
+      );
+      expect(result.inserted).toBe(1);
+      expect(onInserted).toHaveBeenCalledWith(manager, [
+        { ref: 'a', itemId: 'item-0' },
+      ]);
+    });
+
+    it('answers 422 SECTION_FULL when the section has no room', async () => {
+      stageSectionCount(100);
+      const error: unknown = await service
+        .insertItemsAtTop('user-1', 'sp-1', SubprofileSection.Projects, {
+          selectCandidates: () =>
+            Promise.resolve([{ ref: 'a', fields: fields('A') }]),
+          onInserted: jest.fn(),
+        })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(UnprocessableEntityException);
+      expect((error as UnprocessableEntityException).getResponse()).toEqual(
+        expect.objectContaining({ code: 'SECTION_FULL' }),
+      );
+      expect(manager.query).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE "subprofile_items"'),
+        expect.anything(),
+      );
+    });
+
+    it('writes nothing and keeps the edit version when no candidate is left', async () => {
+      stageSectionCount(2);
+      const result = await service.insertItemsAtTop(
+        'user-1',
+        'sp-1',
+        SubprofileSection.Projects,
+        { selectCandidates: () => Promise.resolve([]), onInserted: jest.fn() },
+      );
+      expect(result.inserted).toBe(0);
+      expect(manager.save).not.toHaveBeenCalled();
+      expect(
+        manager.update.mock.calls.some(
+          ([entity]: unknown[]) => entity === Subprofile,
+        ),
+      ).toBe(false);
+      expect(updates.notifyFollowersOfNewItems).not.toHaveBeenCalled();
+    });
+
+    it('refuses a stale expectedEditVersion before selecting anything', async () => {
+      stageSectionCount(2);
+      const selectCandidates = jest.fn().mockResolvedValue([]);
+      await expect(
+        service.insertItemsAtTop('user-1', 'sp-1', SubprofileSection.Projects, {
+          expectedEditVersion: 3,
+          selectCandidates,
+          onInserted: jest.fn(),
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(selectCandidates).not.toHaveBeenCalled();
+    });
+
+    it.each([SubprofileSection.Gallery, SubprofileSection.Links])(
+      'refuses to import into %s',
+      async (section) => {
+        await expect(
+          service.insertItemsAtTop('user-1', 'sp-1', section, {
+            selectCandidates: jest.fn(),
+            onInserted: jest.fn(),
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      },
+    );
   });
 
   describe('replaceSection', () => {

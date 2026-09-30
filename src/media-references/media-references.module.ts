@@ -12,6 +12,7 @@ import { Conversation } from '../messaging/entities/conversation.entity';
 import { Event } from '../events/entities/event.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
+import { SubprofileFeed } from '../subprofiles/entities/subprofile-feed.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityCard } from '../membership-cards/entities/community-card.entity';
@@ -44,6 +45,7 @@ import { HousingListing } from '../housing-listings/entities/housing-listing.ent
       Event,
       Subprofile,
       SubprofileItem,
+      SubprofileFeed,
       CommunityPost,
       Community,
       CommunityCard,

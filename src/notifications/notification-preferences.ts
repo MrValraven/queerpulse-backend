@@ -179,6 +179,10 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   [NotificationType.SubprofileInvite]: NotificationPreferenceCategory.Personas,
   [NotificationType.SubprofileCoOwnerJoined]:
     NotificationPreferenceCategory.Personas,
+  // New podcast episodes waiting for review on a persona you run: about the
+  // personas you RUN, so it answers to the same toggle as the two above.
+  [NotificationType.PersonaImportReady]:
+    NotificationPreferenceCategory.Personas,
 
   // --- Personas you follow --------------------------------------------------
   // The only type a FOLLOWER ever receives, and the reason the category exists

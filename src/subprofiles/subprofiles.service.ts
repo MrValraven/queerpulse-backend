@@ -228,6 +228,32 @@ export function canonicalStringify(value: unknown): string {
   return JSON.stringify(canonicalize(value));
 }
 
+/**
+ * The content of one item a server-side import inserts at the top of a
+ * section (persona feed import). Every other column takes its default, the
+ * way a new row from the section editor would.
+ */
+export interface TopInsertItemFields {
+  title: string;
+  subtitle: string | null;
+  description: string | null;
+  url: string | null;
+  imageUrl: string | null;
+  date: string | null;
+  meta: string | null;
+}
+
+/** One candidate for `SubprofilesService.insertItemsAtTop`, carrying the
+ * caller's own reference (e.g. the feed entry it came from). */
+export interface TopInsertCandidate<Ref> {
+  ref: Ref;
+  fields: TopInsertItemFields;
+}
+
+/** The typed code of the 422 `insertItemsAtTop` answers when the section is
+ * already at `MAX_ITEMS_PER_SECTION`. */
+export const SECTION_FULL_CODE = 'SECTION_FULL';
+
 /** Who is writing, re-checked against the locked persona row
  * (`SubprofilesService.lockCurrentSubprofile`). */
 interface SubprofileLockChecks {
@@ -1578,6 +1604,148 @@ export class SubprofilesService {
     );
 
     return this.ownerDTO(sp);
+  }
+
+  /**
+   * Insert server-built items at the TOP of one section (persona feed import:
+   * publishing podcast episodes). Existing rows shift down by the number
+   * inserted and keep their ids, content and revision history; no revision
+   * is recorded, since nothing an owner wrote changed.
+   *
+   * Runs as an editor write (ENG-451): under the persona row lock it
+   * re-checks that `editorUserId` still holds a roster row and, when given,
+   * that `expectedEditVersion` is current (409 `PERSONA_EDIT_CONFLICT`), then
+   * raises `edit_version` by 1, the same precondition and bump
+   * `lockAndAdvanceEditVersion` gives every section save.
+   *
+   * `selectCandidates` runs UNDER that lock, before anything is written, so
+   * a caller can re-read (and row-lock) what it is about to publish and two
+   * concurrent publishes of the same source serialize here. Candidates come
+   * newest first, in display order. Only as many as fit under
+   * `MAX_ITEMS_PER_SECTION` are inserted (422 `SECTION_FULL` when none fit);
+   * `onInserted` then runs in the same transaction with each inserted item's
+   * id. No candidates at all writes nothing and does not bump the version.
+   *
+   * Followers hear about the new items through the ordinary post-commit
+   * `notifyFollowersOfNewItems` path, exactly as for a section save.
+   */
+  async insertItemsAtTop<Ref>(
+    editorUserId: string,
+    subprofileId: string,
+    section: SubprofileSection,
+    options: {
+      expectedEditVersion?: number;
+      selectCandidates: (
+        manager: EntityManager,
+      ) => Promise<TopInsertCandidate<Ref>[]>;
+      onInserted: (
+        manager: EntityManager,
+        inserted: { ref: Ref; itemId: string }[],
+      ) => Promise<void>;
+    },
+  ): Promise<{ inserted: number; subprofile: SubprofileView }> {
+    const sp = await this.getOwned(editorUserId, subprofileId);
+    if (
+      section === SubprofileSection.Links ||
+      section === SubprofileSection.Gallery ||
+      !isSectionAllowed(sp.kind, section)
+    ) {
+      throw new BadRequestException(
+        `Section "${section}" is not valid for kind "${sp.kind}"`,
+      );
+    }
+    const sectionTitlesBefore = await this.updates.snapshotSectionTitles(
+      subprofileId,
+      section,
+    );
+
+    const outcome = await this.dataSource.transaction(async (manager) => {
+      const current = await this.lockCurrentSubprofile(manager, subprofileId, {
+        editorUserId,
+        expectedEditVersion: options.expectedEditVersion,
+      });
+      const candidates = await options.selectCandidates(manager);
+      if (!candidates.length) {
+        return { editVersion: current.editVersion, insertedTitles: [] };
+      }
+      const existingCount = await manager.count(SubprofileItem, {
+        where: { subprofileId, section },
+      });
+      const room = MAX_ITEMS_PER_SECTION - existingCount;
+      if (room <= 0) {
+        throw new UnprocessableEntityException({
+          code: SECTION_FULL_CODE,
+          message: `A section can have at most ${MAX_ITEMS_PER_SECTION} items`,
+        });
+      }
+      const accepted = candidates.slice(0, room);
+      // Make room at the top. Raw snake_case SQL: an aliasless update does
+      // not map camelCase properties (see `replaceSection`'s spotlight
+      // clear), and the increment has to be computed in SQL.
+      await manager.query(
+        `UPDATE "subprofile_items" SET "position" = "position" + $1 WHERE "subprofile_id" = $2 AND "section" = $3`,
+        [accepted.length, subprofileId, section],
+      );
+      const rows = accepted.map((candidate, index) =>
+        manager.create(SubprofileItem, {
+          subprofileId,
+          section,
+          title: candidate.fields.title,
+          subtitle: candidate.fields.subtitle,
+          description: candidate.fields.description,
+          url: candidate.fields.url,
+          imageUrl: candidate.fields.imageUrl,
+          date: candidate.fields.date,
+          meta: candidate.fields.meta,
+          tags: [],
+          collaborators: [],
+          isFeatured: false,
+          position: index,
+          venue: null,
+          doors: null,
+          ticketUrl: null,
+          gigState: null,
+          medium: null,
+          dimensions: null,
+          edition: null,
+          workState: null,
+          structured: null,
+        }),
+      );
+      const saved = await manager.save(rows);
+      await options.onInserted(
+        manager,
+        accepted.map((candidate, index) => ({
+          ref: candidate.ref,
+          itemId: saved[index]!.id,
+        })),
+      );
+      const advancedEditVersion = current.editVersion + 1;
+      await manager.update(
+        Subprofile,
+        { id: subprofileId },
+        { editVersion: advancedEditVersion },
+      );
+      return {
+        editVersion: advancedEditVersion,
+        insertedTitles: accepted.map((candidate) => candidate.fields.title),
+      };
+    });
+    sp.editVersion = outcome.editVersion;
+
+    if (outcome.insertedTitles.length) {
+      // Post-commit and best-effort (the service swallows its own failures).
+      await this.updates.notifyFollowersOfNewItems(
+        sp,
+        sectionTitlesBefore,
+        [...outcome.insertedTitles, ...sectionTitlesBefore],
+        section,
+      );
+    }
+    return {
+      inserted: outcome.insertedTitles.length,
+      subprofile: await this.ownerDTO(sp),
+    };
   }
 
   async replaceSocialLinks(

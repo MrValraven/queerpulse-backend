@@ -31,3 +31,25 @@ describe('bundleKeyFor for admin queue arrivals', () => {
     expect(bundleKeyFor(NotificationType.AdminQueueItem, {})).toBeNull();
   });
 });
+
+describe('bundleKeyFor for persona feed imports', () => {
+  it('collapses new-episode rows onto the persona, across its feeds', () => {
+    const first = bundleKeyFor(NotificationType.PersonaImportReady, {
+      subprofileId: 'sp-1',
+      feedId: 'feed-a',
+      newItemCount: 2,
+    });
+    const second = bundleKeyFor(NotificationType.PersonaImportReady, {
+      subprofileId: 'sp-1',
+      feedId: 'feed-b',
+      newItemCount: 1,
+    });
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+    expect(
+      bundleKeyFor(NotificationType.PersonaImportReady, {
+        subprofileId: 'sp-2',
+      }),
+    ).not.toBe(first);
+  });
+});

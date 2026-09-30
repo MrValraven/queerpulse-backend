@@ -114,6 +114,7 @@ import { SavedListEntry } from '../saved/entities/saved-list-entry.entity';
 import { SavedList } from '../saved/entities/saved-list.entity';
 import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affiliation.entity';
 import { SubprofileEndorsement } from '../subprofiles/entities/subprofile-endorsement.entity';
+import { SubprofileFeed } from '../subprofiles/entities/subprofile-feed.entity';
 import { SubprofileFollower } from '../subprofiles/entities/subprofile-follower.entity';
 import { SubprofileInvite } from '../subprofiles/entities/subprofile-invite.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
@@ -2787,10 +2788,13 @@ export class PersonaActivityExportContributor implements DataExportContribution 
 
 /**
  * `subprofiles` -> `personaContent`: what is on the personas the member
- * created or co-owns. The items in each section, the social links and the
- * events and communities the persona lists. Read through a join on the
- * persona's creator and its co-owner seats, so only personas the member
- * holds contribute.
+ * created or co-owns. The items in each section, the social links, the
+ * events and communities the persona lists, and the podcast feeds connected
+ * to it (the feed URL and settings; the episodes staged from a feed are the
+ * podcast's public listing, not the member's data, and the ones they chose to
+ * publish are already here as items). Read through a join on the persona's
+ * creator and its co-owner seats, so only personas the member holds
+ * contribute.
  */
 @Injectable()
 export class PersonaContentExportContributor implements DataExportContribution {
@@ -2804,6 +2808,8 @@ export class PersonaContentExportContributor implements DataExportContribution {
     private readonly subprofileSocialLinks: Repository<SubprofileSocialLink>,
     @InjectRepository(SubprofileAffiliation)
     private readonly subprofileAffiliations: Repository<SubprofileAffiliation>,
+    @InjectRepository(SubprofileFeed)
+    private readonly subprofileFeeds: Repository<SubprofileFeed>,
   ) {}
 
   /** Rows of a persona-keyed table for the personas this member holds. */
@@ -2833,10 +2839,11 @@ export class PersonaContentExportContributor implements DataExportContribution {
   }
 
   async buildContribution(userId: string): Promise<unknown> {
-    const [items, socialLinks, affiliations] = await Promise.all([
+    const [items, socialLinks, affiliations, feeds] = await Promise.all([
       this.heldPersonaRows(this.subprofileItems, 'item', userId),
       this.heldPersonaRows(this.subprofileSocialLinks, 'socialLink', userId),
       this.heldPersonaRows(this.subprofileAffiliations, 'affiliation', userId),
+      this.heldPersonaRows(this.subprofileFeeds, 'feed', userId),
     ]);
     return [
       ...items.map((item) => ({
@@ -2884,6 +2891,22 @@ export class PersonaContentExportContributor implements DataExportContribution {
         role: affiliation.role,
         position: affiliation.position,
         createdAt: affiliation.createdAt.toISOString(),
+      })),
+      ...feeds.map((feed) => ({
+        type: 'podcastFeed' as const,
+        id: feed.id,
+        subprofileId: feed.subprofileId,
+        feedUrl: feed.feedUrl,
+        section: feed.section,
+        title: feed.title,
+        author: feed.author,
+        imageUrl: feed.imageKey,
+        autoPublish: feed.autoPublish,
+        connectedByYou: feed.createdById === userId,
+        lastSyncedAt: feed.lastSyncedAt
+          ? feed.lastSyncedAt.toISOString()
+          : null,
+        createdAt: feed.createdAt.toISOString(),
       })),
     ];
   }

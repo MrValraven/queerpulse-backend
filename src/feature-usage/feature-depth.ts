@@ -26,6 +26,7 @@ import { CommissionInterest } from '../culture/entities/commission-interest.enti
 import { GovernanceVote } from '../governance/entities/governance-vote.entity';
 import { GovernanceProposalCosignature } from '../governance/entities/governance-proposal-cosignature.entity';
 import { RoadmapIdea } from '../roadmap/entities/roadmap-idea.entity';
+import { SubprofileFeed } from '../subprofiles/entities/subprofile-feed.entity';
 
 /**
  * How a feature's usage "depth" is measured.
@@ -157,6 +158,9 @@ export const FEATURE_DEPTH: Record<TrackedFeatureKey, DepthSpec> = {
     entities: [GovernanceVote, GovernanceProposalCosignature],
   },
   roadmap: { kind: 'rows', entities: [RoadmapIdea] },
+  // A connected feed is the deliberate act; its entries are written by the
+  // sync, not by the member, so they are not counted.
+  personaFeedImport: { kind: 'rows', entities: [SubprofileFeed] },
   // `CinemaTitle` is excluded: it is created only through
   // `AdminTitlesController`, gated by `@Roles(Moderator, Admin)` and
   // `@StaffRoles('editorial')`. There is no member-authored sibling row to

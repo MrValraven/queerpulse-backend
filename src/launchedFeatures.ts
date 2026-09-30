@@ -78,6 +78,10 @@ export const launchedFeatures = {
   governance: { launched: true },
   community: { launched: true },
   roadmap: { launched: true },
+  // Persona podcast-feed import (`/subprofiles/feeds/*`,
+  // `/subprofiles/:id/feeds*`) and its scheduled sync. Its own key so the
+  // outbound fetching can be switched off without touching personas.
+  personaFeedImport: { launched: true },
   // Cinema ships off until Mux is provisioned: launching it makes the Mux
   // credentials below mandatory at boot (see env.validation.ts). Flip to
   // `launched: true` in an environment that has those vars set.

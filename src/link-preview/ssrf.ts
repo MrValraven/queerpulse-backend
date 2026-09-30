@@ -22,7 +22,8 @@ import { Agent as UndiciAgent } from 'undici';
  *  3. Redirect cap with per-hop re-validation — a public URL can 3xx to an
  *     internal one, so redirects are followed manually and each Location is
  *     re-checked from scratch.
- *  4. Timeout + response-size cap live in `safeFetchHtml`.
+ *  4. Timeout + response-size cap live in `safeFetch` (and the HTML wrapper
+ *     `safeFetchHtml` built on it).
  *  5. Connection pinning — closes the TOCTOU / DNS-rebinding window. Validating
  *     with `lookup()` and then handing the *hostname* to `fetch`/`web-push`
  *     lets those re-resolve DNS at connect time, so a rebinding host can answer
@@ -37,6 +38,7 @@ import { Agent as UndiciAgent } from 'undici';
 const MAX_REDIRECTS = 3;
 const FETCH_TIMEOUT_MS = 4000;
 const MAX_BYTES = 512 * 1024; // 512 KB is ample for a document <head>.
+const HTML_CONTENT_TYPE = /text\/html|application\/xhtml\+xml/i;
 
 /** Parse a dotted-quad into its 32-bit integer, or null if malformed. */
 function ipv4ToInt(ip: string): number | null {
@@ -243,23 +245,105 @@ export function pinnedHttpsAgent(target: ValidatedTarget): HttpsAgent {
 }
 
 /**
- * Fetch `rawUrl` as HTML, SSRF-safe. Follows up to `MAX_REDIRECTS` redirects,
- * re-validating each hop; enforces a wall-clock timeout and a hard byte cap on
- * the response body (reads the stream and aborts past the cap rather than
- * trusting Content-Length). Returns the decoded HTML and the final URL, or
- * null when the target isn't fetchable/HTML. Never throws for the expected
- * "can't preview this" cases — callers treat null as "no card".
+ * Why a {@link safeFetch} call produced no body. Callers map these onto their
+ * own error vocabulary (the podcast importer surfaces them to the owner; the
+ * link preview collapses every one of them to "no card").
+ *  - `blocked`: the URL, or a redirect hop, failed {@link assertPublicUrl}.
+ *  - `unreachable`: DNS/connect/TLS failure, or the body stream broke.
+ *  - `timeout`: a hop did not finish within `timeoutMs`.
+ *  - `http_error`: a final status outside 2xx (and not a 304 answer).
+ *  - `too_large`: the body passed `maxBytes` with `overflow: 'error'`.
+ *  - `too_many_redirects`: more than `maxRedirects` hops, or a 3xx with no
+ *    usable `Location`.
+ *  - `unsupported_type`: `acceptsContentType` refused the final response.
  */
-export async function safeFetchHtml(
+export type SafeFetchFailure =
+  | 'blocked'
+  | 'unreachable'
+  | 'timeout'
+  | 'http_error'
+  | 'too_large'
+  | 'too_many_redirects'
+  | 'unsupported_type';
+
+export interface SafeFetchOptions {
+  /** The `Accept` request header. */
+  accept: string;
+  /** The `User-Agent` request header. */
+  userAgent: string;
+  /** Hard cap on the body, enforced while streaming (never trusts
+   *  Content-Length). */
+  maxBytes: number;
+  /** `truncate` keeps what arrived before the cap (an HTML `<head>` is near
+   *  the top); `error` fails the fetch with `too_large`. */
+  overflow: 'truncate' | 'error';
+  /** Wall-clock budget for each hop, body read included. */
+  timeoutMs: number;
+  /** Redirects followed, each re-validated from scratch. Defaults to 3. */
+  maxRedirects?: number;
+  /** Extra request headers (e.g. `If-None-Match`). No cookies are ever sent. */
+  headers?: Record<string, string>;
+  /** Checked against the final response's Content-Type (possibly empty)
+   *  before the body is read. */
+  acceptsContentType?: (contentType: string) => boolean;
+}
+
+export type SafeFetchResult =
+  | {
+      ok: true;
+      notModified: false;
+      status: number;
+      body: Uint8Array;
+      finalUrl: string;
+      headers: Headers;
+    }
+  | {
+      ok: true;
+      /** The server answered 304 to a conditional request. */
+      notModified: true;
+      status: 304;
+      finalUrl: string;
+      headers: Headers;
+    }
+  | { ok: false; failure: SafeFetchFailure; status?: number };
+
+/** A thrown fetch/stream error that came from the per-hop timeout signal. */
+function isTimeoutError(error: unknown): boolean {
+  // Duck-typed on `name`: the `DOMException` an aborted fetch throws is not
+  // guaranteed to pass `instanceof Error` across realms.
+  const name =
+    typeof error === 'object' && error !== null && 'name' in error
+      ? error.name
+      : undefined;
+  return name === 'TimeoutError' || name === 'AbortError';
+}
+
+/**
+ * Fetch `rawUrl` SSRF-safely and return its raw bytes. Follows up to
+ * `maxRedirects` redirects manually, re-validating every hop with
+ * {@link assertPublicUrl} and pinning each hop's socket to the vetted IP;
+ * enforces a per-hop wall-clock timeout and a hard byte cap on the body (read
+ * from the stream, aborting past the cap rather than trusting
+ * Content-Length). A 304 is reported as `notModified` so a conditional GET can
+ * tell "unchanged" from a failure. Never throws: every failure comes back as
+ * a typed {@link SafeFetchFailure}.
+ */
+export async function safeFetch(
   rawUrl: string,
-): Promise<{ html: string; finalUrl: string } | null> {
+  options: SafeFetchOptions,
+): Promise<SafeFetchResult> {
+  const maxRedirects = options.maxRedirects ?? MAX_REDIRECTS;
   let currentUrl = rawUrl;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+  for (let hop = 0; hop <= maxRedirects; hop++) {
     let validated: ValidatedTarget;
     try {
       validated = await assertPublicUrl(currentUrl);
-    } catch {
-      return null;
+    } catch (error) {
+      // A name that does not resolve is "unreachable", not an SSRF refusal.
+      const isDnsFailure =
+        error instanceof Error &&
+        ('code' in error || error.message === 'no-dns');
+      return { ok: false, failure: isDnsFailure ? 'unreachable' : 'blocked' };
     }
 
     // Pin this hop's socket to the exact IP we just vetted (closes the
@@ -269,12 +353,12 @@ export async function safeFetchHtml(
     const requestInit: RequestInit = {
       method: 'GET',
       redirect: 'manual',
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(options.timeoutMs),
       headers: {
-        // A UA + Accept nudges sites to return HTML with OG tags rather than
-        // a bot wall; we deliberately don't send cookies/credentials.
-        'user-agent': 'QueerPulseBot/1.0 (+link-preview)',
-        accept: 'text/html,application/xhtml+xml',
+        ...options.headers,
+        // We deliberately never send cookies/credentials.
+        'user-agent': options.userAgent,
+        accept: options.accept,
       },
     };
     (requestInit as { dispatcher?: unknown }).dispatcher =
@@ -283,61 +367,144 @@ export async function safeFetchHtml(
     let response: Response;
     try {
       response = await fetch(validated.url.toString(), requestInit);
-    } catch {
-      return null; // timeout, connection refused, DNS race, etc.
+    } catch (error) {
+      // Timeout, connection refused, TLS failure, DNS race, etc.
+      return {
+        ok: false,
+        failure: isTimeoutError(error) ? 'timeout' : 'unreachable',
+      };
+    }
+
+    const finalUrl = validated.url.toString();
+    if (response.status === 304) {
+      await response.body?.cancel().catch(() => undefined);
+      return {
+        ok: true,
+        notModified: true,
+        status: 304,
+        finalUrl,
+        headers: response.headers,
+      };
     }
 
     // Manual redirect handling: re-validate the next hop from scratch.
     if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
       const location = response.headers.get('location');
-      if (!location) return null;
+      if (!location) return { ok: false, failure: 'too_many_redirects' };
       try {
         currentUrl = new URL(location, validated.url).toString();
       } catch {
-        return null;
+        return { ok: false, failure: 'too_many_redirects' };
       }
       continue;
     }
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return { ok: false, failure: 'http_error', status: response.status };
+    }
     const contentType = response.headers.get('content-type') ?? '';
     if (
-      contentType &&
-      !/text\/html|application\/xhtml\+xml/i.test(contentType)
+      options.acceptsContentType &&
+      !options.acceptsContentType(contentType)
     ) {
-      return null; // not an HTML document — nothing to unfurl
+      await response.body?.cancel().catch(() => undefined);
+      return {
+        ok: false,
+        failure: 'unsupported_type',
+        status: response.status,
+      };
     }
 
-    const html = await readCapped(response);
-    if (html === null) return null;
-    return { html, finalUrl: validated.url.toString() };
+    const read = await readCappedBytes(response, options);
+    if (!read.ok) return read;
+    return {
+      ok: true,
+      notModified: false,
+      status: response.status,
+      body: read.body,
+      finalUrl,
+      headers: response.headers,
+    };
   }
-  return null; // too many redirects
+  return { ok: false, failure: 'too_many_redirects' };
 }
 
-/** Read a response body up to MAX_BYTES, decoding as UTF-8. Returns null if the
- *  body can't be read; truncates (doesn't error) once the cap is hit — the
- *  document <head> with its meta tags is near the top anyway. */
-async function readCapped(response: Response): Promise<string | null> {
+/** Read a response body up to `maxBytes`. With `overflow: 'truncate'` the
+ *  bytes before the cap are returned; with `'error'` the read is cancelled and
+ *  reported as `too_large`. */
+async function readCappedBytes(
+  response: Response,
+  options: Pick<SafeFetchOptions, 'maxBytes' | 'overflow'>,
+): Promise<
+  { ok: true; body: Uint8Array } | { ok: false; failure: SafeFetchFailure }
+> {
   const body = response.body;
-  if (!body) return null;
+  if (!body) return { ok: false, failure: 'unreachable' };
   const reader = body.getReader();
-  const decoder = new TextDecoder('utf-8');
+  const chunks: Uint8Array[] = [];
   let received = 0;
-  let out = '';
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.byteLength;
-      out += decoder.decode(value, { stream: true });
-      if (received >= MAX_BYTES) {
+      if (received > options.maxBytes) {
         await reader.cancel();
+        if (options.overflow === 'error') {
+          return { ok: false, failure: 'too_large' };
+        }
+        const keep = value.byteLength - (received - options.maxBytes);
+        chunks.push(value.subarray(0, keep));
+        received = options.maxBytes;
         break;
       }
+      chunks.push(value);
     }
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      ok: false,
+      failure: isTimeoutError(error) ? 'timeout' : 'unreachable',
+    };
   }
-  return out;
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, body: out };
+}
+
+/**
+ * Fetch `rawUrl` as HTML, SSRF-safe: {@link safeFetch} with the link
+ * preview's budget (`MAX_REDIRECTS` redirects, `FETCH_TIMEOUT_MS` per hop, the
+ * body truncated at `MAX_BYTES`). Returns the decoded HTML and the final URL,
+ * or null when the target isn't fetchable/HTML. Never throws for the expected
+ * "can't preview this" cases — callers treat null as "no card".
+ */
+export async function safeFetchHtml(
+  rawUrl: string,
+): Promise<{ html: string; finalUrl: string } | null> {
+  const fetched = await safeFetch(rawUrl, {
+    // A UA + Accept nudges sites to return HTML with OG tags rather than a
+    // bot wall.
+    userAgent: 'QueerPulseBot/1.0 (+link-preview)',
+    accept: 'text/html,application/xhtml+xml',
+    maxBytes: MAX_BYTES,
+    // The document <head> with its meta tags is near the top anyway.
+    overflow: 'truncate',
+    timeoutMs: FETCH_TIMEOUT_MS,
+    maxRedirects: MAX_REDIRECTS,
+    // A missing Content-Type is given the benefit of the doubt; anything that
+    // declares itself as something other than HTML has nothing to unfurl.
+    acceptsContentType: (contentType) =>
+      !contentType || HTML_CONTENT_TYPE.test(contentType),
+  });
+  if (!fetched.ok || fetched.notModified) return null;
+  return {
+    html: new TextDecoder('utf-8').decode(fetched.body),
+    finalUrl: fetched.finalUrl,
+  };
 }

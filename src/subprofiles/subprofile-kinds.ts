@@ -20,6 +20,8 @@ export type SubprofileKind =
   | 'performer'
   | 'photographer'
   | 'videomaker'
+  | 'video_creator'
+  | 'short_form_creator'
   | 'chef'
   | 'mixologist'
   | 'therapist'
@@ -133,6 +135,8 @@ export type SubprofileKind =
   | 'prop_maker'
   | 'puzzle_designer'
   | 'podcaster'
+  | 'podcast_producer'
+  | 'radio_host'
   | 'voice_actor'
   | 'fanfic_writer'
   | 'game_critic';
@@ -290,6 +294,8 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   performer: ['appearances', 'reel'],
   photographer: ['series', 'exhibitions'],
   videomaker: ['videos', 'screenings'],
+  video_creator: ['videos', 'series'],
+  short_form_creator: ['videos', 'campaigns'],
   chef: ['menus', 'residencies'],
   mixologist: ['cocktails', 'residencies'],
   therapist: ['specialisms', 'credentials'],
@@ -404,6 +410,8 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   prop_maker: ['builds', 'commissions'],
   puzzle_designer: ['puzzles', 'events'],
   podcaster: ['episodes', 'appearances'],
+  podcast_producer: ['productions', 'clients'],
+  radio_host: ['episodes', 'appearances'],
   voice_actor: ['reel', 'roles'],
   fanfic_writer: ['works', 'series'],
   game_critic: ['reviews', 'publications'],
