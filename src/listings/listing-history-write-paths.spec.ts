@@ -66,6 +66,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   timezone: '',
   badge: '',
   evidence: '',
+  ownedBy: [],
   price: '',
   blurb: '',
   tagline: '',

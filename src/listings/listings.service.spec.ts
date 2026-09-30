@@ -12,6 +12,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull, MoreThan, Not } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
@@ -126,6 +127,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   timezone: '',
   badge: '',
   evidence: '',
+  ownedBy: [],
   price: '',
   blurb: '',
   tagline: '',
@@ -413,6 +415,12 @@ describe('ListingsService', () => {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,
         },
+        // `ListingsService` takes it for the safe-space visit count; no case
+        // here reaches that read.
+        {
+          provide: SafeSpaceVisitsService,
+          useValue: { countIndependentVisits: jest.fn() },
+        },
       ],
     }).compile();
     service = module.get(ListingsService);
@@ -456,6 +464,44 @@ describe('ListingsService', () => {
           consentOuting: false,
         }),
       );
+    });
+
+    it('stores the owner’s ownedBy in canonical order and returns it', async () => {
+      const result = await service.create('owner-1', {
+        name: 'Lux Café',
+        ownedBy: ['nonbinary', 'trans'],
+      } as CreateListingDto);
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ ownedBy: ['trans', 'nonbinary'] }),
+      );
+      expect(result.ownedBy).toEqual(['trans', 'nonbinary']);
+    });
+
+    it('stores an empty ownedBy when the body leaves it out', async () => {
+      const result = await service.create('owner-1', {
+        name: 'Lux Café',
+      } as CreateListingDto);
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ ownedBy: [] }),
+      );
+      expect(result.ownedBy).toEqual([]);
+    });
+
+    // A suggester cannot declare the owner's gender identity for them, so the
+    // suggest path blanks it with the other owner-personal answers.
+    it('stores none of a suggester’s ownedBy', async () => {
+      const result = await service.create('member-1', {
+        name: 'Lux Café',
+        path: 'suggest',
+        ownedBy: ['women'],
+      } as CreateListingDto);
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ ownerId: null, ownedBy: [] }),
+      );
+      expect(result.ownedBy).toEqual([]);
     });
 
     // `contactEmail` is retired. A stale cached frontend may still send it, so

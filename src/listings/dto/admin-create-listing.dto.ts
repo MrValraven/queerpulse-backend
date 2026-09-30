@@ -11,7 +11,9 @@ import { CreateListingOwnerOfferDto } from './create-listing-owner-offer.dto';
  * The owner-personal fields and the affirming baseline are absent by
  * construction. They belong to whoever ends up holding the listing, and an
  * admin cannot truthfully answer any of them on a business's behalf. The
- * owner supplies them after accepting, in the editor they land in.
+ * owner supplies them after accepting, in the editor they land in. That
+ * includes `ownedBy`: who owns the business is the owner's own disclosure
+ * about their gender identity, never staff's to make for them.
  *
  * Omission is the enforcement: the global `forbidNonWhitelisted`
  * ValidationPipe rejects a body that carries any of them, so an admin who
@@ -31,6 +33,7 @@ export class AdminCreateListingDto extends OmitType(CreateListingDto, [
   'contactEmail',
   'consentOuting',
   'consentGuide',
+  'ownedBy',
 ] as const) {
   /** Publish straight away, or send it to the moderation queue. */
   @IsIn(['review', 'live'])

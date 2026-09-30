@@ -91,6 +91,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   timezone: '',
   badge: '',
   evidence: '',
+  ownedBy: [],
   price: '',
   blurb: '',
   tagline: '',
@@ -509,6 +510,72 @@ describe('ListingsService.adminUpdate', () => {
       await expect(
         service.getEditableForStaff('QPL-2026-9999'),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('who owns the business (ownedBy)', () => {
+    it('keeps it off the staff editor, which loads the co-manager shape', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownedBy: ['trans'] }));
+
+      const editable = await service.getEditableForStaff(LISTING_REF);
+
+      expect('ownedBy' in editable).toBe(false);
+    });
+
+    it('leaves a stored value alone on a staff edit', async () => {
+      lockedListings.findOne.mockResolvedValue(
+        baseListing({ ownedBy: ['women'] }),
+      );
+
+      await service.adminUpdate(
+        LISTING_REF,
+        STAFF_ID,
+        renameDto('Lux Café Arroios'),
+      );
+
+      expect(savedListings()[0]?.ownedBy).toEqual(['women']);
+    });
+
+    it('records an owner edit to it on a live listing, and keeps the queer-owned verification', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          status: ListingStatus.Live,
+          ownedBy: ['women'],
+          queerOwnedVerified: true,
+        }),
+      );
+
+      const result = await service.update(LISTING_REF, OWNER_ID, {
+        ownedBy: ['trans', 'women'],
+      });
+
+      expect((result as unknown as Record<string, unknown>).ownedBy).toEqual([
+        'women',
+        'trans',
+      ]);
+      const rows = auditRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.changedFields).toEqual(['ownedBy']);
+      expect(rows[0]?.reason).toContain('who owns the business');
+      // Self-declared, and separate from the identity a moderator confirmed.
+      expect(savedListings()[0]?.queerOwnedVerified).toBe(true);
+    });
+
+    it('writes no audit row when the PATCH re-sends the stored set in another order', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          status: ListingStatus.Live,
+          ownedBy: ['women', 'nonbinary'],
+        }),
+      );
+
+      await service.update(LISTING_REF, OWNER_ID, {
+        ownedBy: ['nonbinary', 'women'],
+      });
+
+      expect(auditRows()).toHaveLength(0);
     });
   });
 

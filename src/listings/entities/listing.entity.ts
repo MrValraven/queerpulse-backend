@@ -8,6 +8,7 @@ import {
 } from 'typeorm';
 import type { ListingAccessibilityAnswerMap } from '../listing-accessibility';
 import type { ListingGalleryPhoto } from '../listing-photo-gallery';
+import type { ListingOwnedBy } from '../listing-owned-by';
 
 /**
  * Moderation lifecycle for a member-submitted business directory listing.
@@ -523,6 +524,22 @@ export class Listing {
 
   @Column({ type: 'boolean', default: false })
   consentGuide!: boolean;
+
+  /**
+   * Who owns and runs the business, as the OWNER declares it: any of
+   * `LISTING_OWNED_BY_VALUES` (`women`, `trans`, `nonbinary`), each at most
+   * once, in canonical order. Empty when the owner declared none.
+   *
+   * Self-declared and never moderator-verified. OWNER-PERSONAL: every tag
+   * discloses the owner's gender identity, so it is one of
+   * `OWNER_PERSONAL_LISTING_FIELDS` (co-managers neither read nor write it, a
+   * suggestion and a staff-authored listing never store it, and a handover
+   * clears it). Public on the directory card and detail once set, and the
+   * directory's `owned=` filter matches on overlap. See
+   * `AddListingOwnedBy1827800000000`.
+   */
+  @Column({ type: 'text', array: true, default: '{}' })
+  ownedBy!: ListingOwnedBy[];
 
   // --- Queer-owned verification (moderator-checked badge) ---
   // `linkToProfile` is the member's own self-reported claim of ownership; this

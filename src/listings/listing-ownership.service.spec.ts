@@ -114,6 +114,7 @@ describe('ListingOwnershipService.transferOwnership', () => {
       ownerBio: 'A bio',
       consentOuting: true,
       consentGuide: true,
+      ownedBy: ['trans', 'nonbinary'],
     }) as Listing;
 
   const reasonOf = (manager: { save: jest.Mock }): string | undefined => {
@@ -146,6 +147,8 @@ describe('ListingOwnershipService.transferOwnership', () => {
     expect(listing.ownerBio).toBe('');
     expect(listing.consentOuting).toBe(false);
     expect(listing.consentGuide).toBe(false);
+    // The previous owner's gender-identity disclosure leaves with them.
+    expect(listing.ownedBy).toEqual([]);
     expect(result.previousOwnerId).toBe('old-owner');
     expect(result.revokedCoManagerCount).toBe(2);
   });

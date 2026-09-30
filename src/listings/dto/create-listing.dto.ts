@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
+  ArrayUnique,
   Equals,
   IsArray,
   IsBoolean,
@@ -26,6 +27,7 @@ import {
   MAX_ACCESSIBILITY_NOTE_LENGTH,
 } from '../listing-accessibility';
 import { LISTING_CATEGORY_SLUGS } from '../listing-categories';
+import { LISTING_OWNED_BY_VALUES, ListingOwnedBy } from '../listing-owned-by';
 import { MAX_LISTING_GALLERY_PHOTOS } from '../listing-photo-gallery';
 import type {
   ListingMenuDietary,
@@ -584,6 +586,21 @@ export class CreateListingDto {
 
   @IsOptional() @IsBoolean() consentOuting?: boolean;
   @IsOptional() @IsBoolean() consentGuide?: boolean;
+
+  /**
+   * Who owns and runs the business, as the owner declares it: any of
+   * `women`, `trans`, `nonbinary`, each at most once. Self-declared, never
+   * verified. OWNER-PERSONAL (it discloses the owner's gender identity): a
+   * co-manager PATCH carrying it is refused, a suggestion accepts it and
+   * stores none of it, and `AdminCreateListingDto` omits it. See
+   * `Listing.ownedBy`.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(LISTING_OWNED_BY_VALUES.length)
+  @IsIn(LISTING_OWNED_BY_VALUES as readonly string[], { each: true })
+  ownedBy?: ListingOwnedBy[];
 
   /**
    * The submitter agrees to the LGBTQ+ affirming baseline. REQUIRED on the

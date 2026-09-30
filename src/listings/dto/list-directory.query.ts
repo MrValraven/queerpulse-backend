@@ -15,11 +15,17 @@ import {
   LISTING_ACCESSIBILITY_QUESTION_SLUGS,
   ListingAccessibilityQuestionSlug,
 } from '../listing-accessibility';
+import {
+  LISTING_OWNED_BY_VALUES,
+  ListingOwnedBy,
+  isListingOwnedBy,
+  normalizeListingOwnedBy,
+} from '../listing-owned-by';
 
 /**
- * Normalizes whatever Express handed us for `access` into a de-duplicated
- * string array, so one repeated parameter and one comma-joined parameter mean
- * the same thing:
+ * Normalizes whatever Express handed us for a multi-value filter (`access`,
+ * and `owned` through `toOwnedByList`) into a de-duplicated string array, so
+ * one repeated parameter and one comma-joined parameter mean the same thing:
  *
  *   ?access=step-free-entrance&access=accessible-toilet
  *   ?access=step-free-entrance,accessible-toilet
@@ -29,7 +35,7 @@ import {
  * misspelt access requirement must never quietly widen the result set for
  * someone who is filtering on one.
  */
-function toAccessSlugList(value: unknown): unknown {
+function toQueryValueList(value: unknown): unknown {
   if (value === undefined || value === null) return undefined;
   const received: unknown[] = Array.isArray(value)
     ? (value as unknown[])
@@ -40,6 +46,23 @@ function toAccessSlugList(value: unknown): unknown {
       : [entry],
   );
   return [...new Set(cleaned.filter((entry) => entry !== ''))];
+}
+
+/**
+ * `owned`, parsed exactly like `access` (repeated or comma-joined, each value
+ * once) and then sorted into the canonical `LISTING_OWNED_BY_VALUES` order, so
+ * `?owned=trans,women` and `?owned=women&owned=trans` are the same request.
+ * An unknown value is kept, after the known ones, so `@IsIn` answers 400 for
+ * it rather than the filter quietly widening.
+ */
+function toOwnedByList(value: unknown): unknown {
+  const list = toQueryValueList(value);
+  if (!Array.isArray(list)) return list;
+  const known = normalizeListingOwnedBy(list as unknown[]);
+  const unknown = (list as unknown[]).filter(
+    (entry) => !isListingOwnedBy(entry),
+  );
+  return [...known, ...unknown];
 }
 
 /**
@@ -100,11 +123,30 @@ export class ListListingDirectoryQuery {
    * the three-valued model was built to end.
    */
   @IsOptional()
-  @Transform(({ value }) => toAccessSlugList(value))
+  @Transform(({ value }) => toQueryValueList(value))
   @IsArray()
   @ArrayMaxSize(LISTING_ACCESSIBILITY_QUESTION_SLUGS.length)
   @IsIn(LISTING_ACCESSIBILITY_QUESTION_SLUGS as readonly string[], {
     each: true,
   })
   access?: ListingAccessibilityQuestionSlug[];
+
+  /**
+   * Who owns the business, as its owner declared it (`LISTING_OWNED_BY_VALUES`:
+   * `women`, `trans`, `nonbinary`). Repeatable, and also accepted
+   * comma-joined, like `access`. Several values are an OR: a listing matches
+   * when its `ownedBy` holds ANY of them, because someone looking for
+   * businesses run by women or by trans people wants both sets.
+   *
+   * Self-declared, never verified. An unknown value is a 400 rather than an
+   * ignored filter, so a client never reads an unfiltered grid as a filtered
+   * one. Applied in the query itself, so the paginated `total` counts only
+   * matching rows.
+   */
+  @IsOptional()
+  @Transform(({ value }) => toOwnedByList(value))
+  @IsArray()
+  @ArrayMaxSize(LISTING_OWNED_BY_VALUES.length)
+  @IsIn(LISTING_OWNED_BY_VALUES as readonly string[], { each: true })
+  owned?: ListingOwnedBy[];
 }

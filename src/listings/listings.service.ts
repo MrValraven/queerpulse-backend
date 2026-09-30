@@ -12,6 +12,7 @@ import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry
 import { isUniqueViolation } from '../common/db-errors';
 import { resolveListingLocation, resolveListingTimezone } from './listing-city';
 import { resolveListingTagsOrThrow } from './listing-tags';
+import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
 import { toImageUrl } from '../common/image-url';
 import {
   Brackets,
@@ -267,17 +268,23 @@ type ListingCreateInput = Omit<CreateListingDto, 'affirmingBaselineAccepted'>;
  *  behind, plus the four columns that default to a member-facing choice.
  *  `visibility` is blanked to its column default here because
  *  `normalizeCreate` would otherwise store the suggester's answer, and a
- *  transfer does not reset it, so a later claimant would inherit it. */
-const SUGGESTION_OWNER_PERSONAL_BLANKS = {
-  ownerName: '',
-  ownerRole: '',
-  ownerBio: '',
-  rel: '',
-  visibility: '',
-  consentOuting: false,
-  consentGuide: false,
-  linkToProfile: false,
-} as const;
+ *  transfer does not reset it, so a later claimant would inherit it.
+ *  `ownedBy` is blanked because a suggester cannot declare the gender
+ *  identity of somebody else, the owner. A function rather than a shared
+ *  constant so every suggestion gets its own `ownedBy` array. */
+function suggestionOwnerPersonalBlanks() {
+  return {
+    ownerName: '',
+    ownerRole: '',
+    ownerBio: '',
+    rel: '',
+    visibility: '',
+    consentOuting: false,
+    consentGuide: false,
+    linkToProfile: false,
+    ownedBy: [] as ListingOwnedBy[],
+  };
+}
 
 /**
  * Who moderators talk to about a listing: its owner, or on a suggestion the
@@ -482,6 +489,10 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
     linkToProfile: dto.linkToProfile ?? false,
     consentOuting: dto.consentOuting ?? false,
     consentGuide: dto.consentGuide ?? false,
+    // Known values only, each once, in canonical order. The admin body has no
+    // such field, so a staff-authored listing lands on `[]` here, and the
+    // suggest path blanks it (`suggestionOwnerPersonalBlanks`).
+    ownedBy: normalizeListingOwnedBy(dto.ownedBy),
   };
 }
 
@@ -609,6 +620,10 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
       : {}),
     ...(dto.consentGuide !== undefined
       ? { consentGuide: dto.consentGuide }
+      : {}),
+    // Replaced wholesale: the owner sends the whole set they want shown.
+    ...(dto.ownedBy !== undefined
+      ? { ownedBy: normalizeListingOwnedBy(dto.ownedBy) }
       : {}),
   });
 }
@@ -741,6 +756,7 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   contactEmail: 'the contact email',
   consentOuting: 'the outing consent',
   consentGuide: 'the guide consent',
+  ownedBy: 'who owns the business',
 };
 
 /**
@@ -984,7 +1000,7 @@ export class ListingsService {
         ? {
             suggestedByUserId: submitterUserId,
             affirmingBaselineAcceptedAt: null,
-            ...SUGGESTION_OWNER_PERSONAL_BLANKS,
+            ...suggestionOwnerPersonalBlanks(),
           }
         : {},
     );
@@ -1564,7 +1580,7 @@ export class ListingsService {
    * one listing the caller runs.
    *
    * A co-manager's copy carries `managementRole: 'co_manager'` and none of the
-   * seven owner-personal fields (see `listing-owner-personal-fields.ts` for
+   * eight owner-personal fields (see `listing-owner-personal-fields.ts` for
    * what those are and why they leave). That redaction is also what makes the
    * write side ergonomic: the object a co-manager loads here round-trips into
    * `PATCH /listings/:ref` without tripping the owner-personal-field gate,
@@ -3451,7 +3467,7 @@ export class ListingsService {
     // what separates it from `remove` two methods up.
     //
     // `listings.visibility` is NOT this. That column is the owner's own
-    // identity-disclosure choice and is one of the seven owner-personal fields
+    // identity-disclosure choice and is one of the eight owner-personal fields
     // a co-manager can neither read nor write. Two unrelated meanings of one
     // word, and this comment is here so the two never get merged.
     const { listing, isOwner } = await this.loadOwnedOrCoManagedOr404(
@@ -3742,6 +3758,7 @@ export class ListingsService {
         | 'consentGuide'
         | 'linkToProfile'
         | 'visibility'
+        | 'ownedBy'
       >
     > = {},
   ): Promise<Listing> {

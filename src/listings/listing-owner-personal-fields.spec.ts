@@ -12,7 +12,7 @@ import { ListingDTO } from './listing-response';
  * The owner-personal-field boundary, tested on its own before it is tested
  * through the service.
  *
- * These helpers are the whole policy: one list of seven fields used in both
+ * These helpers are the whole policy: one list of eight fields used in both
  * directions. Everything that reads or writes a listing on behalf of a
  * co-manager goes through one of the three functions here, so a regression in
  * any of them is a regression in every route at once.
@@ -26,7 +26,7 @@ const listingDTO = (): ListingDTO =>
     ref: 'QPL-2026-0001',
     slug: 'lux-cafe',
     name: 'Lux Café',
-    // The seven owner-personal fields, each with a value a co-manager must
+    // The eight owner-personal fields, each with a value a co-manager must
     // never receive.
     ownerName: 'Ana Ribeiro',
     ownerBio: 'Runs the place since 2019.',
@@ -35,6 +35,7 @@ const listingDTO = (): ListingDTO =>
     visibility: 'public',
     linkToProfile: true,
     rel: 'owner',
+    ownedBy: ['trans'],
     // Business fields that must survive untouched, including the one
     // owner-shaped field that is deliberately NOT in the set.
     ownerRole: 'Co-founder and baker',
@@ -42,7 +43,7 @@ const listingDTO = (): ListingDTO =>
   }) as unknown as ListingDTO;
 
 describe('OWNER_PERSONAL_LISTING_FIELDS', () => {
-  it('is exactly the claim-transfer set plus the three consent/presentation fields', () => {
+  it('is exactly the claim-transfer set plus the presentation fields and ownedBy', () => {
     // Pinned deliberately. `ListingOwnershipService` clears the first four
     // when a listing changes hands, on the stated grounds that they are the
     // previous owner's rather than the business's; this set is that decision
@@ -53,6 +54,7 @@ describe('OWNER_PERSONAL_LISTING_FIELDS', () => {
         'consentGuide',
         'consentOuting',
         'linkToProfile',
+        'ownedBy',
         'ownerBio',
         'ownerName',
         'rel',
@@ -125,6 +127,7 @@ describe('toManagedListingDTO', () => {
 
     expect(managed.managementRole).toBe(ListingManagementRole.Owner);
     expect(managed.ownerName).toBe('Ana Ribeiro');
+    expect(managed.ownedBy).toEqual(['trans']);
   });
 
   it('gives a co-manager the redacted listing and tags the seat', () => {
@@ -136,6 +139,8 @@ describe('toManagedListingDTO', () => {
     expect(managed.managementRole).toBe(ListingManagementRole.CoManager);
     expect('ownerName' in managed).toBe(false);
     expect('ownerBio' in managed).toBe(false);
+    // Who owns the business discloses the owner's gender identity.
+    expect('ownedBy' in managed).toBe(false);
     expect(managed.name).toBe('Lux Café');
   });
 });
@@ -170,6 +175,10 @@ describe('assertNoOwnerPersonalListingFields', () => {
       assertNoOwnerPersonalListingFields({ consentOuting: false }),
     ).toThrow(ForbiddenException);
     expect(() => assertNoOwnerPersonalListingFields({ ownerName: '' })).toThrow(
+      ForbiddenException,
+    );
+    // Clearing who owns the business is as much the owner's call as setting it.
+    expect(() => assertNoOwnerPersonalListingFields({ ownedBy: [] })).toThrow(
       ForbiddenException,
     );
   });

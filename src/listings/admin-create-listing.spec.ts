@@ -233,11 +233,18 @@ describe('ListingsService.adminCreate', () => {
     );
   });
 
-  it('defaults the seven owner columns to empty for a body that omits them', async () => {
+  it('stores no ownedBy: who owns the business is the owner’s to declare', async () => {
+    const result = await service.adminCreate(ADMIN_ID, adminDto('live'));
+
+    expect(savedRow()).toEqual(expect.objectContaining({ ownedBy: [] }));
+    expect(result.ownedBy).toEqual([]);
+  });
+
+  it('defaults the eight owner columns to empty for a body that omits them', async () => {
     await service.adminCreate(ADMIN_ID, adminDto('live'));
 
     // WHAT THIS PINS, precisely: `normalizeCreate`'s `?? ''` and `?? false`
-    // defaults for the seven owner columns the admin DTO has no field for, so
+    // defaults for the eight owner columns the admin DTO has no field for, so
     // a house-authored row asserts nothing about a business it has not spoken
     // to. It does NOT prove the `OmitType` list is live: rejecting a body
     // that carries `ownerName` is the global `forbidNonWhitelisted`
@@ -253,6 +260,7 @@ describe('ListingsService.adminCreate', () => {
         linkToProfile: false,
         consentOuting: false,
         consentGuide: false,
+        ownedBy: [],
       }),
     );
     // The retired `contactEmail` is never written on any create path; the

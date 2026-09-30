@@ -89,6 +89,10 @@ export class ListingOwnershipService {
     listing.ownerBio = '';
     listing.consentOuting = false;
     listing.consentGuide = false;
+    // Who owns the business is the previous owner's disclosure about their own
+    // gender identity, and it may not describe the new one. The new owner
+    // declares their own.
+    listing.ownedBy = [];
     await manager.withRepository(this.listings).save(listing);
 
     // Every transfer runs the same revoke. Which seats actually go is decided
