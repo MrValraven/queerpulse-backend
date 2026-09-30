@@ -21,8 +21,8 @@ const NEW_KINDS = [
   'radio_host',
 ];
 
-export class AddVideoAndAudioCreatorKinds1827800000000 implements MigrationInterface {
-  name = 'AddVideoAndAudioCreatorKinds1827800000000';
+export class AddVideoAndAudioCreatorKinds1827800050000 implements MigrationInterface {
+  name = 'AddVideoAndAudioCreatorKinds1827800050000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     for (const kind of NEW_KINDS) {
