@@ -24,6 +24,11 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import {
+  foldedArrayElementMatch,
+  foldedHaystack,
+  foldedSearchTerm,
+} from '../search/search-text';
 import { CreateArticleCommentDto } from './dto/create-article-comment.dto';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
 import { CreateLetterDto } from './dto/create-letter.dto';
@@ -194,6 +199,17 @@ const RECENT_ACTIVITY_LIMIT = 20;
  * (Magazine Desk Phase 7, Task B1) — matches the ArchiveTab's page size.
  */
 const ARCHIVE_SEARCH_LIMIT = 20;
+
+/**
+ * The desk board's `?q=` haystack: title, byline and section of a
+ * `magazine_piece`, accent-folded as one text blob (ENG-503). Snake_case
+ * column names, since `foldedHaystack` quotes them as written.
+ */
+const DESK_PIECE_SEARCH_HAYSTACK = foldedHaystack('piece', [
+  'title',
+  'byline',
+  'section',
+]);
 
 /**
  * The human actors in an event trail, ready for `resolveActorDisplayNames`.
@@ -379,9 +395,11 @@ export class MagazinePieceService {
       });
     }
     if (query.q) {
+      // Accent-folded (ENG-503): the desk writes Portuguese, so "saude" has to
+      // find "Saúde". Title, byline and section fold into one haystack.
       const pattern = `%${escapeLikeTerm(query.q)}%`;
       queryBuilder.andWhere(
-        '(piece.title ILIKE :pattern OR piece.byline ILIKE :pattern OR piece.section ILIKE :pattern)',
+        `${DESK_PIECE_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
       );
     }
@@ -3927,11 +3945,15 @@ export class MagazinePieceService {
       .andWhere('article.published_at <= :now', { now: new Date() });
 
     if (term.length > 0) {
+      // Accent-folded (ENG-503), both sides. `author` is a LEFT JOIN, and
+      // `foldedHaystack` coalesces its NULL name to '' so the title and tag
+      // branches still decide the row.
       const pattern = `%${escapeLikeTerm(term)}%`;
+      const foldedPattern = foldedSearchTerm('pattern');
       queryBuilder.andWhere(
-        `(article.title ILIKE :pattern
-          OR author.name ILIKE :pattern
-          OR EXISTS (SELECT 1 FROM unnest(article.tags) AS tag WHERE tag ILIKE :pattern))`,
+        `(${foldedHaystack('article', ['title'])} LIKE ${foldedPattern} ESCAPE '\\' ` +
+          `OR ${foldedHaystack('author', ['name'])} LIKE ${foldedPattern} ESCAPE '\\' ` +
+          `OR ${foldedArrayElementMatch('article', 'tags', 'pattern')})`,
         { pattern },
       );
     }
@@ -3952,10 +3974,10 @@ export class MagazinePieceService {
 
     if (term.length > 0) {
       const pattern = `%${escapeLikeTerm(term)}%`;
+      const foldedPattern = foldedSearchTerm('pattern');
       queryBuilder.andWhere(
-        `(deck.title ILIKE :pattern
-          OR deck.byline ILIKE :pattern
-          OR EXISTS (SELECT 1 FROM unnest(deck.tags) AS tag WHERE tag ILIKE :pattern))`,
+        `(${foldedHaystack('deck', ['title', 'byline'])} LIKE ${foldedPattern} ESCAPE '\\' ` +
+          `OR ${foldedArrayElementMatch('deck', 'tags', 'pattern')})`,
         { pattern },
       );
     }

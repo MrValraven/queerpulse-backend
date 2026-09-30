@@ -9,11 +9,14 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Connection } from '../connections/entities/connection.entity';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
+import { PolicyAcceptance } from '../consent/entities/policy-acceptance.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventInvite } from '../events/entities/event-invite.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
 import { Event } from '../events/entities/event.entity';
+import { FlatmateLike } from '../flatmate-profiles/entities/flatmate-like.entity';
+import { FlatmateProfile } from '../flatmate-profiles/entities/flatmate-profile.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { EventMatchEntry } from '../go-together/entities/event-match-entry.entity';
@@ -23,8 +26,13 @@ import { MatchFeedback } from '../go-together/entities/match-feedback.entity';
 import { MatchGroupFeedback } from '../go-together/entities/match-group-feedback.entity';
 import { GovernanceProposal } from '../governance/entities/governance-proposal.entity';
 import { GovernanceVote } from '../governance/entities/governance-vote.entity';
+import { GroupJoinRequest } from '../housing-groups/entities/group-join-request.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingReview } from '../housing-reviews/entities/housing-review.entity';
+import { HousingSavedSearch } from '../housing-saved-searches/entities/housing-saved-search.entity';
+import { HousingViewing } from '../housing-viewings/entities/housing-viewing.entity';
+import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
+import { IdentityBlock } from '../identities/entities/identity-block.entity';
 import { IdentitiesModule } from '../identities/identities.module';
 import { Job } from '../jobs/entities/job.entity';
 import { ListingReview } from '../listings/entities/listing-review.entity';
@@ -36,11 +44,18 @@ import { MagazineStorySubmission } from '../magazine/entities/magazine-story-sub
 import { MediaReferencesModule } from '../media-references/media-references.module';
 import { MembershipCardsModule } from '../membership-cards/membership-cards.module';
 import { Message } from '../messaging/entities/message.entity';
+import { NotificationDeliveryPreference } from '../notifications/entities/notification-delivery-preference.entity';
+import { NotificationPreference } from '../notifications/entities/notification-preference.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Activity } from '../profiles/entities/activity.entity';
 import { ProfileNowHistory } from '../profiles/entities/profile-now-history.entity';
+import { PushSubscription } from '../push/entities/push-subscription.entity';
+import { Report } from '../reports/entities/report.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
+import { Block } from '../social/entities/block.entity';
+import { HiddenFromMember } from '../social/entities/hidden-from.entity';
+import { Mute } from '../social/entities/mute.entity';
 import { StorageModule } from '../storage/storage.module';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
@@ -56,6 +71,7 @@ import { AccountExportService } from './account-export.service';
 import { AccountRetentionService } from './account-retention.service';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
+import { AccountDependenciesService } from './account-dependencies.service';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
 import {
   DATA_EXPORT_CONTRIBUTORS,
@@ -68,6 +84,115 @@ import { AccountReauthToken } from './entities/account-reauth-token.entity';
 import { DataExportJob } from './entities/data-export-job.entity';
 import { DeletionRequest } from './entities/deletion-request.entity';
 import { DsarRequest } from './entities/dsar-request.entity';
+import { Affiliation } from '../affiliation/entities/affiliation.entity';
+import { Ambassador } from '../ambassadors/entities/ambassador.entity';
+import { BarterListing } from '../barter/entities/barter-listing.entity';
+import { BarterProposal } from '../barter/entities/barter-proposal.entity';
+import { ChangemakerNomination } from '../changemakers/entities/changemaker-nomination.entity';
+import { WatchProgress } from '../cinema/entities/watch-progress.entity';
+import { CollectionItem } from '../collections/entities/collection-item.entity';
+import { Collection } from '../collections/entities/collection.entity';
+import { CommunityInvite } from '../communities/entities/community-invite.entity';
+import { CommunityJoinRequest } from '../communities/entities/community-join-request.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
+import { CommunityOwnerReviewRequest } from '../communities/entities/community-owner-review-request.entity';
+import { CommunityPostEdit } from '../communities/entities/community-post-edit.entity';
+import { CommunityPostReaction } from '../communities/entities/community-post-reaction.entity';
+import { CommunityPostReplyEdit } from '../communities/entities/community-post-reply-edit.entity';
+import { CommunityResource } from '../communities/entities/community-resource.entity';
+import { CommunitySpaceRequest } from '../communities/entities/community-space-request.entity';
+import { CommunityTagRequest } from '../communities/entities/community-tag-request.entity';
+import { CompanyTeamMember } from '../companies/entities/company-team-member.entity';
+import { Company } from '../companies/entities/company.entity';
+import { ConnectionNote } from '../connections/entities/connection-note.entity';
+import { CommissionInterest } from '../culture/entities/commission-interest.entity';
+import { Draft } from '../drafts/entities/draft.entity';
+import { EventAnnouncement } from '../events/entities/event-announcement.entity';
+import { EventBookmark } from '../events/entities/event-bookmark.entity';
+import { EventCohostInvite } from '../events/entities/event-cohost-invite.entity';
+import { EventLineupEntry } from '../events/entities/event-lineup-entry.entity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
+import { MemberEventReminderPreferences } from '../events/entities/member-event-reminder-preferences.entity';
+import { FeedSourceMute } from '../feed/entities/feed-source-mute.entity';
+import { ForumPollVote } from '../forum/entities/forum-poll-vote.entity';
+import { ForumPostEdit } from '../forum/entities/forum-post-edit.entity';
+import { ForumPostVote } from '../forum/entities/forum-post-vote.entity';
+import { ForumThreadSubscription } from '../forum/entities/forum-thread-subscription.entity';
+import { GovernanceProposalCosignature } from '../governance/entities/governance-proposal-cosignature.entity';
+import { HandleHistory } from '../handles/entities/handle-history.entity';
+import { Handle } from '../handles/entities/handle.entity';
+import { GroupListing } from '../housing-groups/entities/group-listing.entity';
+import { IdentityStaffPreference } from '../identities/entities/identity-staff-preference.entity';
+import { IntakeSubmission } from '../intakes/entities/intake-submission.entity';
+import { JobApplication } from '../jobs/entities/job-application.entity';
+import { LandlordIntroRequest } from '../landlords/entities/landlord-intro-request.entity';
+import { LandlordRecommendation } from '../landlords/entities/landlord-recommendation.entity';
+import { Landlord } from '../landlords/entities/landlord.entity';
+import { ListingDraft } from '../listing-drafts/entities/listing-draft.entity';
+import { ListingClaim } from '../listings/entities/listing-claim.entity';
+import { ListingCoManager } from '../listings/entities/listing-co-manager.entity';
+import { ListingEditSuggestion } from '../listings/entities/listing-edit-suggestion.entity';
+import { ListingEnquiry } from '../listings/entities/listing-enquiry.entity';
+import { ListingOwnerOffer } from '../listings/entities/listing-owner-offer.entity';
+import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
+import { ListingReviewHelpfulVote } from '../listings/entities/listing-review-helpful-vote.entity';
+import { MagazineArticleComment } from '../magazine/entities/magazine-article-comment.entity';
+import { MagazinePieceMessage } from '../magazine/entities/magazine-piece-message.entity';
+import { MagazinePitch } from '../magazine/entities/magazine-pitch.entity';
+import { MagazineReaderComment } from '../magazine/entities/magazine-reader-comment.entity';
+import { MagazineWriterApplication } from '../magazine/entities/magazine-writer-application.entity';
+import { MediaCrop } from '../media-crops/entities/media-crop.entity';
+import { MemberSuggestionDismissal } from '../member-suggestions/entities/member-suggestion-dismissal.entity';
+import { MembershipCardScan } from '../membership-cards/entities/membership-card-scan.entity';
+import { MembershipCard } from '../membership-cards/entities/membership-card.entity';
+import { Invite } from '../membership/entities/invite.entity';
+import { GroupInvite } from '../messaging/entities/group-invite.entity';
+import { MessageHide } from '../messaging/entities/message-hide.entity';
+import { MessageReaction } from '../messaging/entities/message-reaction.entity';
+import { MessageStar } from '../messaging/entities/message-star.entity';
+import { Appeal } from '../moderation/entities/appeal.entity';
+import { Partner } from '../partners/entities/partner.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { BoardPostResponse } from '../profiles/entities/board-post-response.entity';
+import { BoardPost } from '../profiles/entities/board-post.entity';
+import { GroupMembership } from '../profiles/entities/group-membership.entity';
+import { ProfileFeaturedCommunity } from '../profiles/entities/profile-featured-community.entity';
+import { ProfileLastActive } from '../profiles/entities/profile-last-active.entity';
+import { Shaping } from '../profiles/entities/shaping.entity';
+import { Skill } from '../profiles/entities/skill.entity';
+import { SocialLink } from '../profiles/entities/social-link.entity';
+import { WorkItem } from '../profiles/entities/work-item.entity';
+import { ReadingGroupProposal } from '../reading-group-proposals/entities/reading-group-proposal.entity';
+import { RecognitionAward } from '../recognition/entities/recognition-award.entity';
+import { RecognitionLedgerEntry } from '../recognition/entities/recognition-ledger-entry.entity';
+import { RecognitionPerkClaim } from '../recognition/entities/recognition-perk-claim.entity';
+import { ResourceGuideRating } from '../resources/entities/resource-guide-rating.entity';
+import { ResourceSuggestion } from '../resources/entities/resource-suggestion.entity';
+import { RoadmapIdea } from '../roadmap/entities/roadmap-idea.entity';
+import { RoadmapItemComment } from '../roadmap/entities/roadmap-item-comment.entity';
+import { RoadmapVote } from '../roadmap/entities/roadmap-vote.entity';
+import { SafeSpaceFlag } from '../safe-space-nominations/entities/safe-space-flag.entity';
+import { SafeSpaceNomination } from '../safe-space-nominations/entities/safe-space-nomination.entity';
+import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
+import { SavedListEntry } from '../saved/entities/saved-list-entry.entity';
+import { SavedList } from '../saved/entities/saved-list.entity';
+import { SubprofileEndorsement } from '../subprofiles/entities/subprofile-endorsement.entity';
+import { SubprofileFollower } from '../subprofiles/entities/subprofile-follower.entity';
+import { SubprofileInvite } from '../subprofiles/entities/subprofile-invite.entity';
+import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
+import { TopicFollow } from '../topics/entities/topic-follow.entity';
+import { VerificationRequest } from '../verification/entities/verification-request.entity';
+import { MemberVerification } from '../verification/entities/member-verification.entity';
+import { VolunteerOpportunityTeam } from '../volunteering/entities/volunteer-opportunity-team.entity';
+import { ForumPollOption } from '../forum/entities/forum-poll-option.entity';
+import { ForumPoll } from '../forum/entities/forum-poll.entity';
+import { VerificationEvent } from '../verification/entities/verification-event.entity';
+import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { MagazinePayment } from '../magazine/entities/magazine-payment.entity';
+import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
+import { SubprofileSocialLink } from '../subprofiles/entities/subprofile-social-link.entity';
+import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affiliation.entity';
 
 @Module({
   imports: [
@@ -216,11 +341,150 @@ import { DsarRequest } from './entities/dsar-request.entity';
       MatchFeedback,
       MatchGroupFeedback,
       MatchAvoidance,
+      // ENG-495: read-only sources for the contributors in
+      // data-export-contributors-safety.ts: the member's flatmate profile,
+      // housing viewings and group/co-op join requests (`housing`), the blocks
+      // they placed (`connections`), the reports they filed (`reports`) and
+      // their policy acceptances (`consent`). Same cross-module registration
+      // pattern as every entity above.
+      FlatmateProfile,
+      HousingViewing,
+      GroupJoinRequest,
+      CoopJoinRequest,
+      Block,
+      IdentityBlock,
+      Report,
+      PolicyAcceptance,
+      // ENG-495 fix round 1: read-only sources for the contributors in
+      // data-export-contributors-account.ts (push devices, notification
+      // settings, mutes, hidden members, flatmate likes, housing saved
+      // searches). `sessions` reads `RefreshToken`, registered above.
+      PushSubscription,
+      NotificationPreference,
+      NotificationDeliveryPreference,
+      Mute,
+      HiddenFromMember,
+      FlatmateLike,
+      HousingSavedSearch,
+      // ENG-495b: read-only sources for the entity-audit contributors in
+      // data-export-contributors-more.ts.
+      // Fix round 1: forum polls, verification level changes, the join
+      // application, staff roles, magazine payments and persona content.
+      ForumPollOption,
+      ForumPoll,
+      VerificationEvent,
+      PlatformJoinRequest,
+      UserStaffRole,
+      MagazinePayment,
+      SubprofileItem,
+      SubprofileSocialLink,
+      SubprofileAffiliation,
+      Affiliation,
+      Ambassador,
+      BarterListing,
+      BarterProposal,
+      ChangemakerNomination,
+      WatchProgress,
+      CollectionItem,
+      Collection,
+      CommunityInvite,
+      CommunityJoinRequest,
+      CommunityMember,
+      CommunityOwnerReviewRequest,
+      CommunityPostEdit,
+      CommunityPostReaction,
+      CommunityPostReplyEdit,
+      CommunityResource,
+      CommunitySpaceRequest,
+      CommunityTagRequest,
+      CompanyTeamMember,
+      Company,
+      ConnectionNote,
+      CommissionInterest,
+      Draft,
+      EventAnnouncement,
+      EventBookmark,
+      EventCohostInvite,
+      EventLineupEntry,
+      EventPhoto,
+      MemberEventReminderPreferences,
+      FeedSourceMute,
+      ForumPollVote,
+      ForumPostEdit,
+      ForumPostVote,
+      ForumThreadSubscription,
+      GovernanceProposalCosignature,
+      HandleHistory,
+      Handle,
+      GroupListing,
+      IdentityStaffPreference,
+      IntakeSubmission,
+      JobApplication,
+      LandlordIntroRequest,
+      LandlordRecommendation,
+      Landlord,
+      ListingDraft,
+      ListingClaim,
+      ListingCoManager,
+      ListingEditSuggestion,
+      ListingEnquiry,
+      ListingOwnerOffer,
+      ListingPublicQuestion,
+      ListingReviewHelpfulVote,
+      MagazineArticleComment,
+      MagazinePieceMessage,
+      MagazinePitch,
+      MagazineReaderComment,
+      MagazineWriterApplication,
+      MediaCrop,
+      MemberSuggestionDismissal,
+      MembershipCardScan,
+      MembershipCard,
+      Invite,
+      GroupInvite,
+      MessageHide,
+      MessageReaction,
+      MessageStar,
+      Appeal,
+      Partner,
+      MemberPreferences,
+      BoardPostResponse,
+      BoardPost,
+      GroupMembership,
+      ProfileFeaturedCommunity,
+      ProfileLastActive,
+      Shaping,
+      Skill,
+      SocialLink,
+      WorkItem,
+      ReadingGroupProposal,
+      RecognitionAward,
+      RecognitionLedgerEntry,
+      RecognitionPerkClaim,
+      ResourceGuideRating,
+      ResourceSuggestion,
+      RoadmapIdea,
+      RoadmapItemComment,
+      RoadmapVote,
+      SafeSpaceFlag,
+      SafeSpaceNomination,
+      SafeSpaceMemberVouch,
+      SavedListEntry,
+      SavedList,
+      SubprofileEndorsement,
+      SubprofileFollower,
+      SubprofileInvite,
+      SubprofileMember,
+      TopicFollow,
+      VerificationRequest,
+      MemberVerification,
+      VolunteerOpportunityTeam,
     ]),
   ],
   controllers: [AccountController],
   providers: [
     AccountService,
+    AccountDependenciesService,
     AccountExportService,
     // Cron-only; nothing injects it. Registering it here is what starts the
     // daily erasure sweep.

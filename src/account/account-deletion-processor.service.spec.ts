@@ -483,6 +483,28 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       expect(storage.listUserObjects).not.toHaveBeenCalled();
     });
 
+    // ENG-499: the member's DSAR rows survive the user delete as a statutory
+    // record, so their own free text is wiped first, keyed on the member id.
+    it("wipes the member's DSAR free text before deleting the user row", async () => {
+      await service.processDueDeletions();
+
+      const queryCalls = manager.query.mock.calls as Array<[string, unknown[]]>;
+      const scrubIndex = queryCalls.findIndex(([sql]) =>
+        sql.includes('UPDATE "dsar_request"'),
+      );
+      expect(scrubIndex).toBeGreaterThanOrEqual(0);
+
+      const [scrubSql, scrubParams] = queryCalls[scrubIndex]!;
+      expect(scrubSql).toContain(`"details" = ''`);
+      expect(scrubSql).toContain('"context" = NULL');
+      expect(scrubSql).toContain('WHERE "user_id" = $1');
+      expect(scrubSql).not.toContain('DELETE');
+      expect(scrubParams).toEqual([USER_ID]);
+      expect(manager.query.mock.invocationCallOrder[scrubIndex]).toBeLessThan(
+        firstCallOrder(manager.delete),
+      );
+    });
+
     it('checks references only after the user row deletion has committed', async () => {
       // Asked inside the transaction, the resolver would still see the rows the
       // cascade is about to remove and would keep their objects forever. The

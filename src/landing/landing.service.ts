@@ -10,6 +10,11 @@ import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { toVisibleAvatarUrl } from '../common/member-ref';
 import {
   AccessTier,
@@ -373,8 +378,8 @@ export class LandingService {
   /**
    * Entities eligible to be featured in `section` that are NOT already
    * featured there (anti-join on `landing_feature`), optionally narrowed by
-   * an ILIKE `search` over name/slug. Capped at `MAX_ELIGIBLE_RESULTS`; see
-   * the constant's comment.
+   * an accent-folded `search` over name/slug (so "joao" finds "João").
+   * Capped at `MAX_ELIGIBLE_RESULTS`; see the constant's comment.
    */
   async listEligible(
     section: LandingSection,
@@ -400,7 +405,7 @@ export class LandingService {
       }
       if (searchPattern) {
         query.andWhere(
-          '(profile.firstName ILIKE :searchPattern OR profile.lastName ILIKE :searchPattern OR profile.slug ILIKE :searchPattern)',
+          `${foldedHaystack('profile', PROFILE_NAME_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`,
           { searchPattern },
         );
       }
@@ -432,7 +437,7 @@ export class LandingService {
       }
       if (searchPattern) {
         query.andWhere(
-          '(community.name ILIKE :searchPattern OR community.slug ILIKE :searchPattern)',
+          `${foldedHaystack('community', ['name', 'slug'])} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`,
           { searchPattern },
         );
       }
@@ -463,7 +468,7 @@ export class LandingService {
     }
     if (searchPattern) {
       query.andWhere(
-        '(changemaker.name ILIKE :searchPattern OR changemaker.slug ILIKE :searchPattern)',
+        `${foldedHaystack('changemaker', ['name', 'slug'])} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`,
         { searchPattern },
       );
     }

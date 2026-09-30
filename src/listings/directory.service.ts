@@ -10,7 +10,6 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
-  Brackets,
   DataSource,
   EntityManager,
   In,
@@ -25,6 +24,13 @@ import { toImageUrl } from '../common/image-url';
 import { StorageService } from '../storage/storage.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  foldedTextExpression,
+  LISTING_DIRECTORY_SEARCH_COLUMNS,
+  qualifyColumn,
+} from '../search/search-text';
 import { MemberLookup } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -399,6 +405,12 @@ export class DirectoryService {
                 AND NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}
               THEN 0 ELSE 1 END`;
 
+  // The listing name, lowercased and accent-folded exactly like the search
+  // term, for the relevance CASE in `searchByText`.
+  private static readonly FOLDED_NAME = foldedTextExpression(
+    qualifyColumn('listing', 'name'),
+  );
+
   /**
    * Which of these listings currently have their safe-space badge suspended,
    * as ONE query for the whole page.
@@ -474,13 +486,11 @@ export class DirectoryService {
 
     if (query.q) {
       const term = `%${escapeLikeTerm(query.q.trim().toLowerCase())}%`;
+      // Accent-folded on both sides, so "principe real" finds a listing in
+      // "Príncipe Real" and "sao" finds "São".
       qb.andWhere(
-        new Brackets((where) => {
-          where
-            .where('LOWER(listing.name) LIKE :term', { term })
-            .orWhere('LOWER(listing.blurb) LIKE :term', { term })
-            .orWhere('LOWER(listing.hood) LIKE :term', { term });
-        }),
+        `${foldedHaystack('listing', LISTING_DIRECTORY_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('term')} ESCAPE '\\'`,
+        { term },
       );
     }
 
@@ -578,8 +588,8 @@ export class DirectoryService {
    * takedown, closed or paused) is in the SQL, so reading exactly `limit`
    * rows never comes back short.
    *
-   * Relevance tiers, over the same case-insensitive fields the filter
-   * matches: the name equals the term, the name starts with it, the name
+   * Relevance tiers, over the same case- and accent-folded fields the
+   * filter matches: the name equals the term, the name starts with it, the name
    * contains it, then a blurb or neighbourhood hit.
    *
    * A search result shows a name, a category and a neighbourhood, so only
@@ -604,9 +614,9 @@ export class DirectoryService {
         'listing.hood',
       ])
       .orderBy(
-        `CASE WHEN LOWER(listing.name) = :directoryRankExact THEN 0
-              WHEN LOWER(listing.name) LIKE :directoryRankPrefix THEN 1
-              WHEN LOWER(listing.name) LIKE :directoryRankContains THEN 2
+        `CASE WHEN ${DirectoryService.FOLDED_NAME} = ${foldedSearchTerm('directoryRankExact')} THEN 0
+              WHEN ${DirectoryService.FOLDED_NAME} LIKE ${foldedSearchTerm('directoryRankPrefix')} ESCAPE '\\' THEN 1
+              WHEN ${DirectoryService.FOLDED_NAME} LIKE ${foldedSearchTerm('directoryRankContains')} ESCAPE '\\' THEN 2
               ELSE 3 END`,
         'ASC',
       )

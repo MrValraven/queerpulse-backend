@@ -20,6 +20,12 @@ import {
   countCommunityToggleFacets,
 } from './community-browse-facets';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  COMMUNITY_SEARCH_COLUMNS,
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { ConnectionsService } from '../connections/connections.service';
 import {
@@ -188,9 +194,22 @@ const REAPPLY_WAIT_DAYS_NOT_NOW = 30;
 // permanent bar is a ban (`community_bans`), which is a different decision.
 const REAPPLY_WAIT_DAYS_NOT_A_FIT = 180;
 
-// Cap on the free-text roster search term, so a pathological ILIKE pattern
+// Cap on the free-text roster search term, so a pathological LIKE pattern
 // cannot be handed to Postgres. Matches `ListCommunitiesQuery.q`'s own limit.
 const ROSTER_SEARCH_MAX_LENGTH = 200;
+
+// The discover filter and global search match one accent-folded blob over a
+// community's name, tagline and purpose, so "Principe Real" finds "Príncipe
+// Real". Snake_case DB columns under the `c` alias both queries use.
+const COMMUNITY_SEARCH_HAYSTACK = foldedHaystack('c', COMMUNITY_SEARCH_COLUMNS);
+
+// The roster search haystack: a member's first name, last name and handle
+// concatenated, so a full name typed as "joao silva" matches across the two
+// name columns and "Joao" finds "João". Aliased `rp` inside the EXISTS below.
+const ROSTER_SEARCH_HAYSTACK = foldedHaystack(
+  'rp',
+  PROFILE_NAME_SEARCH_COLUMNS,
+);
 
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on
 // the QueryFailedError or on the wrapped driverError depending on the path.
@@ -260,9 +279,9 @@ export interface CommunityListQuery {
   access?: AccessTier;
   page?: number;
   // Free-text search over name/tagline/purpose, ANDed with `type`/`access`/
-  // `filter` rather than replacing them — mirrors `searchByText`'s ILIKE
-  // clause, applied inline so it composes with the rest of `list()`'s query
-  // instead of duplicating the pagination/stats/role hydration path.
+  // `filter`. Mirrors `searchByText`'s accent-folded clause, applied inline so
+  // it composes with the rest of `list()`'s query and reuses its
+  // pagination/stats/role hydration path.
   q?: string;
   // Defaults to 'newest' (the pre-existing, unparametrized behavior) when
   // omitted — see `list()`'s `ORDER BY`.
@@ -756,10 +775,10 @@ export class CommunitiesService {
     }
     if (query.q) {
       // ANDed onto the existing filters (not a replacement) — mirrors
-      // `searchByText`'s ILIKE clause over the same three columns.
+      // `searchByText`'s accent-folded clause over the same three columns.
       const pattern = `%${escapeLikeTerm(query.q)}%`;
       communitiesQuery.andWhere(
-        '(c.name ILIKE :qPattern OR c.tagline ILIKE :qPattern OR c.purpose ILIKE :qPattern)',
+        `${COMMUNITY_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('qPattern')} ESCAPE '\\'`,
         { qPattern: pattern },
       );
     }
@@ -943,7 +962,8 @@ export class CommunitiesService {
 
   // Cross-entity global search (SearchService) — mirrors `list()`'s visibility
   // rule (private communities are only visible to their own members) and its
-  // batched stats/role hydration. ILIKE over name / tagline / purpose.
+  // batched stats/role hydration. Accent-folded match over name / tagline /
+  // purpose, so "saude" finds "Saúde".
   async searchByText(
     viewerId: string,
     term: string,
@@ -963,7 +983,7 @@ export class CommunitiesService {
         viewerId,
       })
       .andWhere(
-        '(c.name ILIKE :pattern OR c.tagline ILIKE :pattern OR c.purpose ILIKE :pattern)',
+        `${COMMUNITY_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
       )
       .andWhere('c.archived_at IS NULL');
@@ -2692,12 +2712,7 @@ export class CommunitiesService {
         `EXISTS (
            SELECT 1 FROM "profiles" "rp"
            WHERE "rp"."user_id" = m.user_id
-             AND (
-               "rp"."first_name" ILIKE :rosterPattern
-               OR "rp"."last_name" ILIKE :rosterPattern
-               OR ("rp"."first_name" || ' ' || "rp"."last_name") ILIKE :rosterPattern
-               OR "rp"."slug" ILIKE :rosterPattern
-             )
+             AND ${ROSTER_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('rosterPattern')} ESCAPE '\\'
          )`,
         { rosterPattern: pattern },
       );

@@ -25,6 +25,12 @@ import {
   SelectQueryBuilder,
 } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  foldSearchText,
+  LISTING_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { MemberLookup, toMemberRef } from '../common/member-ref';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -1129,8 +1135,8 @@ export class ListingsService {
 
   /**
    * Live dedupe search for the wizard (item #5): up to five live listings that
-   * either match `name` (case-insensitive substring, served by the existing
-   * `IDX_listings_name_lower_trgm` GIN trigram index) OR sit within ~150m of
+   * either match `name` (case- and accent-insensitive substring, so "Cafe
+   * Lux" flags an existing "Café Lux") OR sit within ~150m of
    * the supplied coordinates. Distance is computed per returned row and is
    * `null` for rows matched by name alone when no coordinates were supplied.
    */
@@ -1184,13 +1190,15 @@ export class ListingsService {
           // over-matching every row. Backslash first, then the wildcards; the
           // explicit `ESCAPE '\'` makes the escape char independent of server
           // defaults. (Already parameterized — this is over-matching, not
-          // injection.)
+          // injection.) Both sides are accent-folded, so a submitter typing
+          // "Cafe" still sees the live "Café" it would duplicate.
           const escapedName = trimmedName
             .toLowerCase()
             .replace(/[\\%_]/g, (metacharacter) => `\\${metacharacter}`);
-          qb.orWhere("lower(listing.name) LIKE :namePattern ESCAPE '\\'", {
-            namePattern: `%${escapedName}%`,
-          });
+          qb.orWhere(
+            `${foldedHaystack('listing', LISTING_NAME_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('namePattern')} ESCAPE '\\'`,
+            { namePattern: `%${escapedName}%` },
+          );
         }
         if (hasCoordinates) {
           const longitudeDelta =
@@ -1233,11 +1241,13 @@ export class ListingsService {
 
     // A coordinate-only match must actually be within range (the bounding box
     // is a square that overshoots the 150m circle at the corners); a name match
-    // survives regardless of distance.
+    // survives regardless of distance. The name check folds both sides the
+    // same way the SQL branch does, so a "Café Lux" row found for "Cafe Lux"
+    // stays in the result.
     const withinRangeOrNamed = scored.filter(({ listing, distanceM }) => {
       const nameMatches =
         useNameMatch &&
-        listing.name.toLowerCase().includes(trimmedName.toLowerCase());
+        foldSearchText(listing.name).includes(foldSearchText(trimmedName));
       const nearby = distanceM !== null && distanceM <= APPROX_METERS;
       return nameMatches || nearby;
     });
@@ -1471,14 +1481,15 @@ export class ListingsService {
       // Joins the submitter's profile so the search can match on their first
       // name too, not just the listing's own name/ref (a moderator often
       // remembers "who submitted this" rather than the business name).
-      // NOTE: `submitter.first_name ILIKE` is already served by the existing
-      // `IDX_profiles_first_name_trgm` GIN trigram index (raw column, not a
-      // `lower()` expression index — see `1785700100000-
-      // AddSearchTrgmAndTagsIndexes.ts`), so no follow-up index is needed
-      // for that branch. `l.ref ILIKE` has no dedicated index (only the
-      // existing unique b-tree, unusable for a leading-wildcard match) —
-      // acceptable for a moderator-only, paginated tool; a trigram index on
-      // `ref` would be the follow-up if that ever shows up as slow.
+      // The listing name and the submitter's first name are accent-folded on
+      // both sides, so "joao" finds "João". The name branch matches the
+      // expression `IDX_listings_name_folded_trgm` (1827600000000) indexes,
+      // but this query cannot use it: the OR also spans the joined
+      // submitter's first name and `l.ref`, and an index on `listings` alone
+      // cannot answer an OR with a branch on another table, so the planner
+      // scans. Acceptable for a moderator-only, paginated tool. `l.ref` is a
+      // generated ASCII reference code, so it keeps its plain ILIKE: folding
+      // it would match nothing new.
       // The submitter is the owner, or on a suggestion the platform holds,
       // the member who suggested it (the same fallback as `submitterIdOf`).
       // COALESCE keeps it to one profile per listing, so the grouped status
@@ -1489,7 +1500,9 @@ export class ListingsService {
         'submitter',
         'submitter.user_id = COALESCE(l.owner_id, l.suggested_by_user_id)',
       ).andWhere(
-        '(l.name ILIKE :pattern OR submitter.first_name ILIKE :pattern OR l.ref ILIKE :pattern)',
+        `(${foldedHaystack('l', LISTING_NAME_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'` +
+          ` OR ${foldedHaystack('submitter', ['first_name'])} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'` +
+          ' OR l.ref ILIKE :pattern)',
         { pattern },
       );
     }

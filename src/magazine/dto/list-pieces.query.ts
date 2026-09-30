@@ -60,7 +60,8 @@ export class ListPiecesQuery {
   @IsOptional() @IsIn(PIECE_STAGES) stage?: PieceStage;
 
   // Capped (CNT-24): `section` is matched with `=` and additionally feeds the
-  // free-text `ILIKE`, so an unbounded string is pure waste on the wire.
+  // free-text accent-folded LIKE, so an unbounded string is pure waste on the
+  // wire.
   @IsOptional() @IsString() @MaxLength(80) section?: string;
 
   @IsOptional() @IsUUID() issue?: string;

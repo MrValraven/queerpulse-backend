@@ -7,6 +7,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
+import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import { resolveInviteStatus, toPublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
@@ -522,6 +523,23 @@ describe('InvitesService.createInvite', () => {
       Invite,
       expect.objectContaining({ vouch: null }),
     );
+  });
+
+  // ENG-496: the mint used to 409 an erasure-suppressed address, which told any
+  // member that the address once had an account and erased it. The mock
+  // DataSource here has no `getRepository`, so a lookup through it would throw,
+  // and the transaction manager's `getRepository` must never be handed the
+  // suppression entity either.
+  it('mints an email-pinned invite without consulting the suppression list', async () => {
+    await expect(
+      service.createInvite('inviter', { email: '  Erased@Example.com ' }),
+    ).resolves.toMatchObject({ status: 'valid' });
+    expect(manager.getRepository).not.toHaveBeenCalledWith(EmailSuppression);
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
+      expect.objectContaining({ email: 'erased@example.com' }),
+    );
+    expect(manager.save).toHaveBeenCalled();
   });
 
   it('rejects with 403 when the monthly quota is exhausted', async () => {

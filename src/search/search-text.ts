@@ -38,7 +38,8 @@
  * a weight, or the folding means a NEW migration rebuilding those indexes: the
  * old ones would silently stop being used. `search-text.spec.ts` pins the
  * exact output against the SQL those migrations wrote, so an accidental change
- * fails there.
+ * fails there. The folded substring column lists further down are frozen the
+ * same way by `1827600000000-AddFoldedSearchTrgmIndexes`.
  */
 import { foldedTextExpression } from '../connections/connection-search';
 
@@ -208,6 +209,91 @@ export const FORUM_POST_SEARCH_FIELDS: WeightedSearchField[] = [
 ];
 
 export const FORUM_POST_SEARCH_COLUMNS = ['body'];
+
+// --- Folded substring haystacks (ENG-503) ------------------------------------
+// Each list below is the exact column list, in order, that one trigram index in
+// `1827600000000-AddFoldedSearchTrgmIndexes` was built over. Every caller
+// passes the constant to `foldedHaystack`, so editing a list here is the only
+// way to change what those searches match, and `search-text.spec.ts` pins each
+// one against the migration: a change means a NEW migration rebuilding the
+// index. Snake_case DB column names, as `qualifyColumn` quotes them.
+
+/** `profiles`: name and handle. `IDX_profiles_name_search_folded_trgm`. */
+export const PROFILE_NAME_SEARCH_COLUMNS = ['first_name', 'last_name', 'slug'];
+
+/**
+ * `communities`: discover and global search.
+ * `IDX_communities_search_folded_trgm`.
+ */
+export const COMMUNITY_SEARCH_COLUMNS = ['name', 'tagline', 'purpose'];
+
+/** `events`: the browse box. `IDX_events_discovery_search_folded_trgm`. */
+export const EVENT_DISCOVERY_SEARCH_COLUMNS = [
+  'title',
+  'venue',
+  'neighbourhood',
+  'description',
+];
+
+/** `events`: global search. `IDX_events_search_folded_trgm`. */
+export const EVENT_SEARCH_COLUMNS = ['title', 'venue', 'description'];
+
+/** `jobs`: global search. `IDX_jobs_search_folded_trgm`. */
+export const JOB_SEARCH_COLUMNS = ['title', 'desc'];
+
+/**
+ * `resources`: global search, both languages.
+ * `IDX_resources_search_folded_trgm`.
+ */
+export const RESOURCE_SEARCH_COLUMNS = [
+  'title',
+  'description',
+  'title_pt',
+  'description_pt',
+];
+
+/**
+ * `housing_listings`: the directory.
+ * `IDX_housing_listings_search_folded_trgm`.
+ */
+export const HOUSING_LISTING_SEARCH_COLUMNS = [
+  'title',
+  'blurb',
+  'city',
+  'area',
+];
+
+/** `listings`: the directory. `IDX_listings_directory_search_folded_trgm`. */
+export const LISTING_DIRECTORY_SEARCH_COLUMNS = ['name', 'blurb', 'hood'];
+
+/**
+ * `listings`: duplicate check and admin queue.
+ * `IDX_listings_name_folded_trgm`.
+ */
+export const LISTING_NAME_SEARCH_COLUMNS = ['name'];
+
+/**
+ * `subprofiles`: persona name and tagline.
+ * `IDX_subprofiles_search_folded_trgm`.
+ */
+export const SUBPROFILE_SEARCH_COLUMNS = ['display_name', 'tagline'];
+
+/**
+ * Matches a folded `LIKE` pattern against any one element of a text-array
+ * column (a row's `tags`), folding each element exactly like the bound
+ * parameter it is compared with. `parameterName` holds the escaped
+ * `%term%` pattern, compared with `ESCAPE '\'` like every other folded match.
+ */
+export function foldedArrayElementMatch(
+  alias: string,
+  column: string,
+  parameterName: string,
+): string {
+  return (
+    `EXISTS (SELECT 1 FROM unnest(${qualifyColumn(alias, column)}) AS "__tag" ` +
+    `WHERE ${foldedTextExpression('"__tag"')} LIKE ${foldedSearchTerm(parameterName)} ESCAPE '\\')`
+  );
+}
 
 // --- The same folding, in JavaScript -----------------------------------------
 

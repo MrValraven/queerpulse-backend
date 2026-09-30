@@ -39,6 +39,26 @@ import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportu
 import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
 import { DataExportContribution } from './data-export-contributor';
 import {
+  FlatmateLikesExportContributor,
+  HiddenMembersExportContributor,
+  HousingSavedSearchesExportContributor,
+  MutesExportContributor,
+  NotificationPreferencesExportContributor,
+  PolicyStatusExportContributor,
+  PushDevicesExportContributor,
+  SessionsExportContributor,
+} from './data-export-contributors-account';
+import {
+  BlocksExportContributor,
+  CoopJoinRequestsExportContributor,
+  FlatmateProfileExportContributor,
+  GroupJoinRequestsExportContributor,
+  HousingViewingsExportContributor,
+  PolicyAcceptancesExportContributor,
+  ReportsFiledExportContributor,
+} from './data-export-contributors-safety';
+import { MORE_EXPORT_CONTRIBUTORS } from './data-export-contributors-more';
+import {
   ExportMediaContribution,
   MEDIA_EXPORT_MAX_TOTAL_BYTES,
   planExportMedia,
@@ -118,6 +138,12 @@ export class ListingsExportContributor implements DataExportContribution {
   }
 }
 
+/**
+ * `housing` -> `housing`: the housing listings the member owns. The same
+ * category also writes `flatmateProfile`, `viewings`, `groupJoinRequests` and
+ * `coopJoinRequests` (ENG-495, data-export-contributors-safety.ts), so one
+ * Housing checkbox takes everything the member holds in the housing domain.
+ */
 @Injectable()
 export class HousingExportContributor implements DataExportContribution {
   readonly category = 'housing';
@@ -1004,9 +1030,27 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   SubprofilesExportContributor,
   ListingsExportContributor,
   HousingExportContributor,
+  // ENG-495: the rest of the `housing` category and the member-held safety,
+  // consent and account-settings tables (see data-export-contributors-safety.ts
+  // and data-export-contributors-account.ts).
+  FlatmateProfileExportContributor,
+  HousingViewingsExportContributor,
+  GroupJoinRequestsExportContributor,
+  CoopJoinRequestsExportContributor,
+  FlatmateLikesExportContributor,
+  HousingSavedSearchesExportContributor,
   SavedExportContributor,
   NotificationsExportContributor,
+  PushDevicesExportContributor,
+  NotificationPreferencesExportContributor,
   ConsentExportContributor,
+  PolicyAcceptancesExportContributor,
+  PolicyStatusExportContributor,
+  BlocksExportContributor,
+  MutesExportContributor,
+  HiddenMembersExportContributor,
+  ReportsFiledExportContributor,
+  SessionsExportContributor,
   MembershipCardsExportContributor,
   MagazineExportContributor,
   CommunitiesExportContributor,
@@ -1015,5 +1059,9 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   ReviewsExportContributor,
   ProfileNowHistoryExportContributor,
   GoTogetherExportContributor,
+  // ENG-495b: the member-held tables the entity audit found still missing
+  // (settings, profile sections, requests, votes, reactions and follows), see
+  // data-export-contributors-more.ts.
+  ...MORE_EXPORT_CONTRIBUTORS,
   MediaExportContributor,
 ] as const;

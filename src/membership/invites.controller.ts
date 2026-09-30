@@ -48,6 +48,10 @@ export class InvitesController {
   // successful mints, but a quota-exceeded attempt is a cheap 403 the quota
   // never rate-limits, so cap the burst here the same way the other write
   // routes do (auth/refresh uses 10/60s).
+  //
+  // ENG-496: an email-pinned mint answers the same for every well-formed
+  // address, so the route reveals nothing about who once had an account. See
+  // `InvitesService.createInvite`.
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
@@ -57,9 +61,6 @@ export class InvitesController {
   @ApiForbiddenResponse({
     description:
       'Monthly invite quota exceeded — body carries code "INVITE_QUOTA_EXCEEDED".',
-  })
-  @ApiConflictResponse({
-    description: 'The email address is on the erasure suppression list.',
   })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',

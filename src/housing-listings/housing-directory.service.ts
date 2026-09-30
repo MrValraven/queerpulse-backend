@@ -4,6 +4,11 @@ import { Repository, SelectQueryBuilder } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  HOUSING_LISTING_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
@@ -227,7 +232,8 @@ export class HousingDirectoryService {
   }
 
   // Cross-entity global search (SearchService) — LIVE listings only (mirrors
-  // `browse`'s visibility), ILIKE over title / blurb / city / area. No lister
+  // `browse`'s visibility), accent-folded match over title / blurb / city /
+  // area, so "Principe Real" finds a listing in "Príncipe Real". No lister
   // hydration — the search row needs none.
   async searchByText(term: string, limit: number): Promise<HousingSearchRow[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
@@ -238,7 +244,7 @@ export class HousingDirectoryService {
       .andWhere('l.filled_at IS NULL')
       .andWhere('l.expires_at > :now', { now: new Date() })
       .andWhere(
-        '(l.title ILIKE :pattern OR l.blurb ILIKE :pattern OR l.city ILIKE :pattern OR l.area ILIKE :pattern)',
+        `${foldedHaystack('l', HOUSING_LISTING_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
       );
     this.excludeModeratedListings(qbSearch);

@@ -52,6 +52,21 @@ function isTerminal(status: DsarStatus): boolean {
 }
 
 /**
+ * The requester's resolved ref, or null. `userId` is NULL once the member who
+ * filed the request has been erased (`DsarRequestUserSetNullOnErasure1827500000000`,
+ * ENG-499): the request survives as a statutory record and the queue shows it
+ * with a null `member` and `isRequesterErased: true` (set by
+ * `toAdminDsarRequestDTO`), which the admin UI renders as an erased member.
+ */
+function requesterOf(
+  request: DsarRequest,
+  refsByUserId: Map<string, MemberRef>,
+): MemberRef | null {
+  if (!request.userId) return null;
+  return refsByUserId.get(request.userId) ?? null;
+}
+
+/**
  * Read model plus the review transitions behind the admin DSAR queue.
  *
  * A DSAR (`POST /account/dsar`) starts a 30-day statutory clock the moment it
@@ -105,7 +120,7 @@ export class AdminDsarService {
 
     const refsByUserId = await this.membersFor(rows);
     const items = rows.map((row) =>
-      toAdminDsarRequestDTO(row, refsByUserId.get(row.userId) ?? null, now),
+      toAdminDsarRequestDTO(row, requesterOf(row, refsByUserId), now),
     );
     return { items, total, page, pageSize: PAGE_SIZE };
   }
@@ -119,7 +134,7 @@ export class AdminDsarService {
     const refsByUserId = await this.membersFor([request]);
     return toAdminDsarRequestDTO(
       request,
-      refsByUserId.get(request.userId) ?? null,
+      requesterOf(request, refsByUserId),
       new Date(),
     );
   }
@@ -177,16 +192,14 @@ export class AdminDsarService {
     }
     const saved = await this.dsarRequests.save(request);
 
-    if (isTerminal(nextStatus)) {
+    // An erased requester (NULL `userId`, see `requesterOf`) has no bell to
+    // notify, so the decision is recorded and nothing is sent.
+    if (isTerminal(nextStatus) && saved.userId) {
       await this.notifyMember(saved.userId, nextStatus, saved.reference);
     }
 
     const refsByUserId = await this.membersFor([saved]);
-    return toAdminDsarRequestDTO(
-      saved,
-      refsByUserId.get(saved.userId) ?? null,
-      now,
-    );
+    return toAdminDsarRequestDTO(saved, requesterOf(saved, refsByUserId), now);
   }
 
   /**
@@ -227,7 +240,13 @@ export class AdminDsarService {
 
   /** One batched profile lookup for a whole page of rows, never one per row. */
   private membersFor(rows: DsarRequest[]): Promise<Map<string, MemberRef>> {
-    const userIds = [...new Set(rows.map((row) => row.userId))];
+    const userIds = [
+      ...new Set(
+        rows
+          .map((row) => row.userId)
+          .filter((userId): userId is string => userId !== null),
+      ),
+    ];
     return new MemberLookup(this.profiles).byUserIds(userIds);
   }
 }

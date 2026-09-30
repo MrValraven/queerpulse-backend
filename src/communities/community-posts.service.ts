@@ -19,6 +19,7 @@ import { Event } from '../events/entities/event.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
 import { escapeLikeTerm } from '../common/like-escape';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { truncateCharacters } from '../common/text-characters';
 import {
@@ -263,17 +264,19 @@ export class CommunityPostsService {
       .where('p.community_id = :communityId', { communityId: community.id })
       .orderBy('p.pinned', 'DESC')
       .addOrderBy('p.created_at', 'DESC');
-    // Case-insensitive body search, ANDed into the same query as every other
-    // filter below so `paginate`'s LIMIT/OFFSET and its `total` both count
-    // only matching posts. A community's own posts were unsearchable until
-    // now: global search matches communities themselves and never their
-    // contents, so "what did we decide about X" had no answer past the point
-    // where scrolling stopped being practical.
+    // Case- and accent-insensitive body search ("saude" finds "saúde"), ANDed
+    // into the same query as every other filter below so `paginate`'s
+    // LIMIT/OFFSET and its `total` both count only matching posts. A
+    // community's own posts were unsearchable until now: global search
+    // matches communities themselves and never their contents, so "what did
+    // we decide about X" had no answer past the point where scrolling
+    // stopped being practical.
     const trimmedSearchTerm = searchTerm?.trim();
     if (trimmedSearchTerm) {
-      qb.andWhere('p.body ILIKE :searchPattern', {
-        searchPattern: `%${escapeLikeTerm(trimmedSearchTerm)}%`,
-      });
+      qb.andWhere(
+        `${foldedHaystack('p', ['body'])} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`,
+        { searchPattern: `%${escapeLikeTerm(trimmedSearchTerm)}%` },
+      );
     }
     // Blocked-either-way and muted authors' posts are excluded in-query, so
     // `paginate`'s LIMIT/OFFSET and its `total` both count only visible posts.

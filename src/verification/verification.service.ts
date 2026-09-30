@@ -21,6 +21,11 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { BulkDecideVerificationRequestsResultDTO } from './dto/bulk-decide-verification-requests.dto';
@@ -101,6 +106,17 @@ export interface AdminVerificationRequestListFilter {
 
 /** Rows-per-page for the admin request queue's list + "Load more". */
 const ADMIN_VERIFICATION_REQUEST_PAGE_SIZE = 25;
+
+/** The accent-folded (ENG-503) name + handle match, bound to `:searchPattern`,
+ * so a staff member typing "joao" finds "João". One variant per alias: the
+ * list queries test it inside an `EXISTS` over `"search_profile"`, the count
+ * queries against a left-joined `"profile"`. Email keeps its plain `ILIKE` on
+ * the same parameter: a stored address is ASCII in practice, so it carries no
+ * accent to fold. */
+const searchProfileMatch = (alias: string): string =>
+  `${foldedHaystack(alias, PROFILE_NAME_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`;
+const EXISTS_SEARCH_PROFILE_MATCH = searchProfileMatch('search_profile');
+const JOINED_SEARCH_PROFILE_MATCH = searchProfileMatch('profile');
 
 /** Input for `submitRequest`. `type` defaults to `identity` — the only kind
  * that exists today (see `VerificationType`). */
@@ -336,11 +352,7 @@ export class VerificationService {
           EXISTS (
             SELECT 1 FROM "profiles" "search_profile"
             WHERE "search_profile"."user_id" = member_verification.user_id
-              AND (
-                "search_profile"."first_name" ILIKE :searchPattern
-                OR "search_profile"."last_name" ILIKE :searchPattern
-                OR "search_profile"."slug" ILIKE :searchPattern
-              )
+              AND ${EXISTS_SEARCH_PROFILE_MATCH}
           )
           OR EXISTS (
             SELECT 1 FROM "users" "search_user"
@@ -448,7 +460,7 @@ export class VerificationService {
           'search_user.id = member_verification.userId',
         )
         .andWhere(
-          '(profile.firstName ILIKE :searchPattern OR profile.lastName ILIKE :searchPattern OR profile.slug ILIKE :searchPattern OR search_user.email ILIKE :searchPattern)',
+          `(${JOINED_SEARCH_PROFILE_MATCH} OR search_user.email ILIKE :searchPattern)`,
           { searchPattern: `%${escapeLikeTerm(query)}%` },
         );
     }
@@ -602,11 +614,7 @@ export class VerificationService {
           EXISTS (
             SELECT 1 FROM "profiles" "search_profile"
             WHERE "search_profile"."user_id" = verification_request.user_id
-              AND (
-                "search_profile"."first_name" ILIKE :searchPattern
-                OR "search_profile"."last_name" ILIKE :searchPattern
-                OR "search_profile"."slug" ILIKE :searchPattern
-              )
+              AND ${EXISTS_SEARCH_PROFILE_MATCH}
           )
           OR EXISTS (
             SELECT 1 FROM "users" "search_user"
@@ -769,7 +777,7 @@ export class VerificationService {
           'search_user.id = verification_request.userId',
         )
         .andWhere(
-          '(profile.firstName ILIKE :searchPattern OR profile.lastName ILIKE :searchPattern OR profile.slug ILIKE :searchPattern OR search_user.email ILIKE :searchPattern)',
+          `(${JOINED_SEARCH_PROFILE_MATCH} OR search_user.email ILIKE :searchPattern)`,
           { searchPattern: `%${escapeLikeTerm(query)}%` },
         );
     }

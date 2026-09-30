@@ -21,10 +21,6 @@ import {
 } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
-import {
-  EmailSuppression,
-  hashSuppressedEmail,
-} from '../account/entities/email-suppression.entity';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import {
@@ -121,17 +117,19 @@ export class InvitesService {
     const trimmedVouch = opts.vouch?.trim();
     const vouch = trimmedVouch ? trimmedVouch : null;
     const email = opts.email ?? null;
-    // Fail fast on an invite pinned to an erasure-suppressed address. That
-    // address deleted their account and can never sign up again (signup rejects
-    // it with `account_suppressed`), so this is a dead invite — reject it at
-    // mint time rather than letting the member spend a quota slot on a link that
-    // can never be redeemed. Only the personal-invite path checks this; the
-    // admin approval / genesis mint (createInviteForApproval) is exempt.
-    if (email && (await this.isEmailSuppressed(email))) {
-      throw new ConflictException(
-        'That email address can’t be invited — its owner has left the platform.',
-      );
-    }
+    // ENG-496. The mint skips the erasure suppression list on purpose. It used
+    // to refuse a suppressed address with a 409, which turned this route into
+    // an oracle: any member could type an address and learn that it once had
+    // an account and erased it. No neutral refusal can hide that, because this
+    // route has no other email-specific refusal to share a code with (the
+    // address shape is checked by the DTO, which the caller can predict), so
+    // every refusal here would still mean "suppressed".
+    //
+    // So a pinned invite to a suppressed address mints like any other and
+    // spends a quota slot. It is simply never redeemed: signup still rejects
+    // the address with `account_suppressed` (AuthService), which only the
+    // erased person themselves ever sees, and to the inviter the link reads as
+    // one nobody used before it lapsed.
     const fields = {
       email,
       note,
@@ -764,18 +762,6 @@ export class InvitesService {
         message: 'Monthly invite limit reached. Try again next month.',
       });
     }
-  }
-
-  // Reuses the erasure suppression list — the same check `AuthService` runs at
-  // signup — so an invite to an address that deleted its account fails at mint
-  // instead of at redemption. Reads the repo off the DataSource (the entity is
-  // registered by AccountModule/AuthModule and autoloaded) rather than taking a
-  // new constructor dependency. Only ever called with a non-empty email.
-  private async isEmailSuppressed(email: string): Promise<boolean> {
-    const hit = await this.dataSource.getRepository(EmailSuppression).findOne({
-      where: { emailHash: hashSuppressedEmail(email) },
-    });
-    return hit !== null;
   }
 
   private generateCode(): string {

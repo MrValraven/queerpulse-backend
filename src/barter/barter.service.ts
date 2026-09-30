@@ -10,6 +10,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedArrayElementMatch,
+  foldedHaystack,
+  foldedSearchTerm,
+} from '../search/search-text';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -58,6 +63,16 @@ import {
 /** SQL column reference for the block/mute filters, already quoted and
  *  snake-cased to match the `listing` alias under `SnakeNamingStrategy`. */
 const LISTING_OWNER_COLUMN = '"listing"."owner_id"';
+
+/** One accent-folded blob over both sides of the swap, snake_case DB columns
+ *  under the same `listing` alias. The tags are matched separately, one
+ *  array element at a time, in `applySearchFilter`. */
+const BARTER_SEARCH_HAYSTACK = foldedHaystack('listing', [
+  'offer',
+  'want',
+  'offer_detail',
+  'want_detail',
+]);
 
 @Injectable()
 export class BarterService {
@@ -623,7 +638,10 @@ export class BarterService {
     });
   }
 
-  /** Free-text search over both sides of the swap and its tags. */
+  /**
+   * Free-text search over both sides of the swap and its tags, accent-folded
+   * on both sides so "sofa" finds "sofá" and "Joao" finds "João".
+   */
   private applySearchFilter(
     qb: SelectQueryBuilder<BarterListing>,
     rawQuery: string | undefined,
@@ -631,14 +649,8 @@ export class BarterService {
     const term = rawQuery?.trim();
     if (!term) return;
     qb.andWhere(
-      `(listing.offer ILIKE :barterTerm
-        OR listing.want ILIKE :barterTerm
-        OR listing.offerDetail ILIKE :barterTerm
-        OR listing.wantDetail ILIKE :barterTerm
-        OR EXISTS (
-          SELECT 1 FROM unnest("listing"."tags") AS "__tag"
-          WHERE "__tag" ILIKE :barterTerm
-        ))`,
+      `(${BARTER_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('barterTerm')} ESCAPE '\\'` +
+        ` OR ${foldedArrayElementMatch('listing', 'tags', 'barterTerm')})`,
       { barterTerm: `%${escapeLikeTerm(term)}%` },
     );
   }

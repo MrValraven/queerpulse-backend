@@ -22,8 +22,21 @@ describe('toPrefixTsQuery', () => {
     );
   });
 
-  it('keeps letters outside ASCII', () => {
-    expect(toPrefixTsQuery('acolhimento São')).toBe('acolhimento:* & são:*');
+  // ENG-503: `search_vector` stores folded lexemes, so the needle folds too.
+  it('folds Latin-1 accents the way the search_vector does', () => {
+    expect(toPrefixTsQuery('acolhimento São Saúde')).toBe(
+      'acolhimento:* & sao:* & saude:*',
+    );
+  });
+
+  // A decomposed accent (base letter plus U+0301 combining acute) composes
+  // first, so it folds like the precomposed letter and stays one word.
+  it('folds a decomposed accent the same as a precomposed one', () => {
+    expect(toPrefixTsQuery('sau\u0301de')).toBe('saude:*');
+  });
+
+  it('keeps letters outside the folded Latin-1 set', () => {
+    expect(toPrefixTsQuery('Łódź')).toBe('łodź:*');
   });
 
   it('caps the token count so a pasted paragraph cannot build a huge query', () => {

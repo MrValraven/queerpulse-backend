@@ -1,3 +1,5 @@
+import { foldSearchText } from '../search/search-text';
+
 /**
  * The "where they're based" vocabulary, server-side. Mirrors
  * `LISBON_NEIGHBOURHOODS` in the frontend's
@@ -75,12 +77,22 @@ export function knownNeighbourhoods(ids: readonly string[]): string[] {
   return [...new Set(ids.filter(isNeighbourhood))];
 }
 
+/** The same candidates, each paired with its folded spelling. Folding is one
+ *  character in, one character out, so the longest-first order still holds. */
+const FOLDED_BY_LENGTH_DESC: readonly (readonly [string, string])[] =
+  BY_LENGTH_DESC.map((hood) => [hood, foldSearchText(hood)] as const);
+
 /** The most specific neighbourhood whose name appears in a member's free-text
  *  location, or `null` if none match (unset location, or a location outside
- *  the list — someone in Porto, say). Case-sensitive on purpose: the proper
- *  nouns are untranslated (i18n sweep §6) and the profile select now writes
- *  them verbatim. */
+ *  the list: someone in Porto, say). Case- and accent-folded with
+ *  `foldSearchText`, the JS twin of the fold the member directory's `?hoods=`
+ *  SQL filter applies, so "principe real" and "Principe Real" both resolve to
+ *  the canonical `Príncipe Real` the filter would sort them into. */
 export function matchNeighbourhood(location: string | null): string | null {
   if (!location) return null;
-  return BY_LENGTH_DESC.find((hood) => location.includes(hood)) ?? null;
+  const foldedLocation = foldSearchText(location);
+  const match = FOLDED_BY_LENGTH_DESC.find(([, foldedHood]) =>
+    foldedLocation.includes(foldedHood),
+  );
+  return match ? match[0] : null;
 }

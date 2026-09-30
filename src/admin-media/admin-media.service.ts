@@ -20,6 +20,11 @@ import { IMAGE_UPLOAD_TYPES } from '../storage/upload-content-types';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
 import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { ModAuditService } from '../moderation/mod-audit.service';
 import {
@@ -37,12 +42,20 @@ import type {
 } from './dto/admin-media.dto';
 
 /** A search term shorter than this returns no uploader results — a one- or
- *  two-character `ILIKE '%x%'` would match almost everyone. */
+ *  two-character `LIKE '%x%'` would match almost everyone. */
 const MIN_UPLOADER_SEARCH_LENGTH = 2;
 
 /** Cap on uploader typeahead rows — the picker is a "find this person" jump,
  *  not a browsable roster. */
 const UPLOADER_SEARCH_LIMIT = 20;
+
+/** What the uploader typeahead matches: names and handle, accent-folded
+ *  (ENG-503) so an admin typing "joao" finds "João". Database column names,
+ *  qualified by the builder alias. */
+const UPLOADER_SEARCH_HAYSTACK = foldedHaystack(
+  'profile',
+  PROFILE_NAME_SEARCH_COLUMNS,
+);
 
 const DEFAULT_LIMIT = 100;
 // Was 1000. The shipped console (`useAdminMedia`) never sends `limit` at all
@@ -271,11 +284,12 @@ export class AdminMediaService {
   }
 
   /**
-   * Typeahead behind the console's "filter by uploader" search box. ILIKE over
-   * `firstName`/`lastName`/`slug` (the same match shape as the landing
-   * eligible-member search), joined to an ACTIVE user so deactivated/erased
-   * accounts don't surface, ordered by first name and capped. Returns `[]` for a
-   * term under `MIN_UPLOADER_SEARCH_LENGTH` rather than matching almost everyone.
+   * Typeahead behind the console's "filter by uploader" search box. An
+   * accent-folded LIKE over `first_name`/`last_name`/`slug` (the same match
+   * shape as the landing eligible-member search), joined to an ACTIVE user so
+   * deactivated/erased accounts don't surface, ordered by first name and
+   * capped. Returns `[]` for a term under `MIN_UPLOADER_SEARCH_LENGTH`, which
+   * would match almost everyone.
    *
    * Deliberately does NOT restrict to members who actually have uploads —
    * verifying that would mean a bucket sweep per candidate. A picked member with
@@ -295,7 +309,7 @@ export class AdminMediaService {
         active: UserStatus.Active,
       })
       .where(
-        '(profile.firstName ILIKE :pattern OR profile.lastName ILIKE :pattern OR profile.slug ILIKE :pattern)',
+        `${UPLOADER_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
       )
       .orderBy('profile.firstName', 'ASC')

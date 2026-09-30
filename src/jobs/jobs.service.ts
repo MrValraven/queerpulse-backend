@@ -8,6 +8,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  JOB_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { UserRole } from '../users/entities/user.entity';
@@ -407,17 +412,18 @@ export class JobsService {
     return this.buildDetail(job, viewerId);
   }
 
-  // Cross-entity global search (SearchService) — open postings only, ILIKE
-  // over title / desc. No company/poster hydration: the search row needs only
-  // slug / title / category / location.
+  // Cross-entity global search (SearchService): open postings only, with an
+  // accent-folded match over title / desc. No company/poster hydration: the
+  // search row needs only slug / title / category / location.
   async searchByText(term: string, limit: number): Promise<JobSearchRow[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
     const qb = this.jobs
       .createQueryBuilder('j')
       .where('j.status = :open', { open: JobStatus.Open })
-      .andWhere('(j.title ILIKE :pattern OR j.desc ILIKE :pattern)', {
-        pattern,
-      });
+      .andWhere(
+        `${foldedHaystack('j', JOB_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
+        { pattern },
+      );
     // Global search is a cross-entity discovery surface with no per-viewer staff
     // role — a taken-down job must never resurface here for anyone.
     this.excludeModeratedJobs(qb);

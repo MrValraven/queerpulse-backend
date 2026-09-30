@@ -19,6 +19,11 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { ReportsService } from '../reports/reports.service';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  LISTING_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -1698,8 +1703,23 @@ describe('ListingsService', () => {
         'submitter',
         'submitter.user_id = COALESCE(l.owner_id, l.suggested_by_user_id)',
       );
+      // Name and submitter first name are accent-folded; the ASCII ref keeps
+      // its plain ILIKE. One assertion per branch, so dropping any of the
+      // three fails here.
       expect(searchQb.andWhere).toHaveBeenCalledWith(
-        expect.stringContaining('ILIKE') as unknown,
+        expect.stringContaining(
+          `(${foldedHaystack('l', LISTING_NAME_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
+        ) as unknown,
+        { pattern: '%lux%' },
+      );
+      expect(searchQb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `${foldedHaystack('submitter', ['first_name'])} LIKE ${foldedSearchTerm('pattern')}`,
+        ) as unknown,
+        { pattern: '%lux%' },
+      );
+      expect(searchQb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining(' OR l.ref ILIKE :pattern)') as unknown,
         { pattern: '%lux%' },
       );
       expect(searchQb.orderBy).toHaveBeenCalledWith('l.name', 'ASC');
@@ -1789,6 +1809,35 @@ describe('ListingsService', () => {
       );
       // The staff author joins the same batched profile read.
       expect(profiles.find).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('findSimilar', () => {
+    it('keeps an accented name match the folded query returned when no coordinates are given', async () => {
+      const similarQb = qbStub();
+      // The SQL branch folds accents, so the database hands back "Café Lux"
+      // for "Cafe Lux"; the JS post-filter must agree with it.
+      similarQb.getMany = jest.fn().mockResolvedValue([
+        baseListing({
+          name: 'Café Lux',
+          slug: 'cafe-lux',
+          status: ListingStatus.Live,
+          cats: ['cafe'],
+        }),
+      ]);
+      listings.createQueryBuilder.mockReturnValueOnce(similarQb);
+
+      const result = await service.findSimilar('Cafe Lux');
+
+      expect(result).toEqual([
+        {
+          name: 'Café Lux',
+          cat: 'cafe',
+          hood: 'Arroios',
+          slug: 'cafe-lux',
+          distanceM: null,
+        },
+      ]);
     });
   });
 

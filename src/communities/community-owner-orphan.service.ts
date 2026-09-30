@@ -61,30 +61,31 @@ interface OwnerPromotionOutcome {
  * Tenure (`joined_at ASC`) breaks the tie inside each tier, unchanged: it is
  * the only durable, non-arbitrary ordering the roster carries.
  *
- * ## Wiring — READ BEFORE CALLING
+ * ## Wiring: READ BEFORE CALLING
  *
  * There is no event bus hook for account erasure. `AccountDeletionProcessorService
  * .eraseAccount` (`src/account/account-deletion-processor.service.ts`) is a
  * single synchronous, transactional method: it loads the `User` row, nulls a
  * couple of unrelated FKs, then hard-deletes the user (`manager.delete(User,
  * { id: userId })`), letting every `ON DELETE CASCADE`/`SET NULL` FK across
- * the schema do its thing. `AccountModule` does not currently import
- * `CommunitiesModule`, so nothing calls `handleOwnerErasure` yet.
+ * the schema do its thing. `AccountModule` imports `CommunitiesModule`, and
+ * `eraseAccount` calls `handleOwnerErasure` as its step 0, before that user
+ * deletion (`src/account/account-deletion-processor.service.ts`, around line
+ * 287).
  *
- * `handleOwnerErasure` MUST be called BEFORE that `manager.delete(User, ...)`
- * statement runs — this method reads `communities.owner_id = :userId` to find
- * the communities that need handling, and once the user row is deleted the
- * `SET NULL` FK will have already blanked `owner_id` (and cascaded away the
- * erased owner's own `community_members` roster row), leaving no trace of
- * who used to own what. The intended call site is inside
- * `AccountDeletionProcessorService.eraseAccount`, immediately before step 3
- * ("Hard-delete the user"). Ideally that call happens inside the SAME
- * transaction as the user deletion for atomicity (this service does not
- * currently accept an external `EntityManager`, so as written it commits its
- * own transaction per community first) — whoever wires the call site should
- * weigh that gap. Wiring the actual call (and therefore importing
- * `CommunitiesModule` into `AccountModule`, watching for a circular
- * dependency) is left to a different task in this effort.
+ * That ordering is required. `handleOwnerErasure` MUST run BEFORE the
+ * `manager.delete(User, ...)` statement: this method reads
+ * `communities.owner_id = :userId` to find the communities that need handling,
+ * and once the user row is deleted the `SET NULL` FK will have already blanked
+ * `owner_id` (and cascaded away the erased owner's own `community_members`
+ * roster row), leaving no trace of who used to own what.
+ *
+ * The call sits OUTSIDE `eraseAccount`'s own transaction: this service does
+ * not accept an external `EntityManager`, so it commits its own transaction
+ * per community first. The two commits are therefore not one atomic unit.
+ * That is safe because a failed erasure is parked for a human retry, and a
+ * second call finds nothing left to do (it only acts on communities still
+ * owned by `userId`). See the step 0 comment in `eraseAccount`.
  */
 @Injectable()
 export class CommunityOwnerOrphanService {

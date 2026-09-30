@@ -34,8 +34,8 @@ export class ListThreadsQuery {
   @IsString()
   tag?: string;
 
-  // Free-text search (ILIKE) over the thread title OR the body of any visible
-  // post in the thread, folded into the list query. See
+  // Free-text search (accent-folded LIKE) over the thread title OR the body of
+  // any visible post in the thread, folded into the list query. See
   // `ForumThreadsService.applyTextAndTagFilters`.
   @IsOptional()
   @IsString()

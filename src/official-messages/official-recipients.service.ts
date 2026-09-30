@@ -2,6 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedTextExpression,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { Profile } from '../users/entities/profile.entity';
 import {
   OFFICIAL_RECIPIENT_SEARCH_LIMIT,
@@ -13,9 +18,15 @@ import {
   toOfficialRecipientResponse,
 } from './official-messages-response';
 
+// Name and handle as ONE folded haystack, compared against the folded `$1`
+// pattern. `$1` stays a bound parameter: only the placeholder is wrapped.
+const RECIPIENT_SEARCH_MATCH =
+  `${foldedHaystack('profile', PROFILE_NAME_SEARCH_COLUMNS)} ` +
+  `LIKE ${foldedTextExpression('$1')} ESCAPE '\\'`;
+
 /**
  * The "message one member" picker. Mirrors `AdminTrustNetworkService.
- * searchMembers` (same ILIKE over first name, last name and handle, same
+ * searchMembers` (a match over first name, last name and handle, same
  * minimum length), but answers with the member's `userId`, which the post
  * route needs and the trust-network search does not return, and leaves out
  * system accounts, which have no official thread.
@@ -24,6 +35,9 @@ import {
  * `toVisibleAvatarUrl`, the same "Show your photo" gate every other messaging
  * read path applies. A member who has hidden their face has hidden it here
  * too; an admin picker is not an exemption.
+ *
+ * The match is accent-folded on both sides (`RECIPIENT_SEARCH_MATCH`), so an
+ * admin typing "joao" finds "João".
  */
 @Injectable()
 export class OfficialRecipientsService {
@@ -41,7 +55,7 @@ export class OfficialRecipientsService {
        FROM "profiles" profile
        JOIN "users" member ON member.id = profile.user_id
        WHERE member.is_system = false
-         AND (profile.first_name ILIKE $1 OR profile.last_name ILIKE $1 OR profile.slug ILIKE $1)
+         AND ${RECIPIENT_SEARCH_MATCH}
        ORDER BY profile.first_name ASC, profile.last_name ASC
        LIMIT $2`,
       [pattern, OFFICIAL_RECIPIENT_SEARCH_LIMIT],

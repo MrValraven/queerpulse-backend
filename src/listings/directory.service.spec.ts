@@ -15,6 +15,11 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  foldedTextExpression,
+} from '../search/search-text';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
@@ -595,8 +600,12 @@ describe('DirectoryService', () => {
         string,
         string,
       ];
+      // Both sides of every relevance branch are accent-folded the same way.
       expect(lastOrderBy[0]).toContain(
-        'LOWER(listing.name) = :directoryRankExact',
+        `${foldedTextExpression('"listing"."name"')} = ${foldedSearchTerm('directoryRankExact')}`,
+      );
+      expect(lastOrderBy[0]).toContain(
+        `LIKE ${foldedSearchTerm('directoryRankPrefix')} ESCAPE`,
       );
       expect(lastOrderBy[1]).toBe('ASC');
       const addOrderByCalls = directoryQuery.addOrderBy.mock.calls.slice(
@@ -637,6 +646,9 @@ describe('DirectoryService', () => {
         ),
       ).toBe(true);
       expect(predicates).toContain('listing.isHiddenByOwner = false');
+      expect(predicates).toContain(
+        `${foldedHaystack('listing', ['name', 'blurb', 'hood'])} LIKE ${foldedSearchTerm('term')} ESCAPE '\\'`,
+      );
     });
     it('reads only the result columns and runs none of the card lookups', async () => {
       directoryQuery.getMany.mockResolvedValue([

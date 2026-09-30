@@ -2,6 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { toImageUrl } from '../common/image-url';
 import { Community } from '../communities/entities/community.entity';
 import { topLevelOnly } from '../communities/subcommunity-rules';
@@ -37,11 +42,18 @@ import { GetTrustNetworkQuery } from './dto/get-trust-network.query';
  *  Well above current scale; `truncated` signals when it bites. */
 const MAX_NODES = 500;
 
-/** `searchMembers` typeahead: shortest term it fires on (a 1-char ILIKE would
+/** `searchMembers` typeahead: shortest term it fires on (a 1-char LIKE would
  *  match almost everyone) and the max rows returned. Mirrors
  *  AdminMediaService's uploader search. */
 const MIN_SEARCH_LENGTH = 2;
 const SEARCH_LIMIT = 20;
+
+/** What `searchMembers` matches: names and handle, accent-folded (ENG-503) so
+ *  "joao" finds "João". Database column names, qualified by the builder alias. */
+const MEMBER_SEARCH_HAYSTACK = foldedHaystack(
+  'profile',
+  PROFILE_NAME_SEARCH_COLUMNS,
+);
 
 @Injectable()
 export class AdminTrustNetworkService {
@@ -302,10 +314,11 @@ export class AdminTrustNetworkService {
    * Typeahead behind the graph modal's "find a member" search box (ADM-10) —
    * lets an admin locate a member outside the MAX_NODES join-date window
    * instead of only ever seeing the newest MAX_NODES. Mirrors
-   * `AdminMediaService.searchUploaders`: ILIKE over first/last name + slug,
-   * ordered by name, capped, empty for a too-short term rather than matching
-   * almost everyone. Picking a result feeds its `slug` back in as `getGraph`'s
-   * `focus`, which pins it into the node set regardless of join date.
+   * `AdminMediaService.searchUploaders`: an accent-folded LIKE over first/last
+   * name + slug, ordered by name, capped, and empty for a too-short term
+   * (which would match almost everyone). Picking a result feeds its `slug`
+   * back in as `getGraph`'s `focus`, which pins it into the node set
+   * regardless of join date.
    */
   async searchMembers(
     term: string | undefined,
@@ -317,7 +330,7 @@ export class AdminTrustNetworkService {
     const rows = await this.profiles
       .createQueryBuilder('profile')
       .where(
-        '(profile.firstName ILIKE :pattern OR profile.lastName ILIKE :pattern OR profile.slug ILIKE :pattern)',
+        `${MEMBER_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
       )
       .orderBy('profile.firstName', 'ASC')

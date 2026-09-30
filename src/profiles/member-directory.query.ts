@@ -160,6 +160,19 @@ export const BIO_SEARCHABLE_CLAUSE = OPEN_PROFILE_CLAUSE;
  */
 export const HOOD_VISIBLE_CLAUSE = `(${OPEN_PROFILE_CLAUSE} AND "p"."hood_visible" = true)`;
 
+/**
+ * The member's free-text `location`, lowercased and accent-folded, for the
+ * neighbourhood filter and its facet counts. Folded so "Principe Real" typed
+ * without accents still matches the `Príncipe Real` neighbourhood, and the
+ * coalesce keeps a NULL location a plain non-match.
+ */
+const FOLDED_LOCATION = foldedHaystack('p', ['location']);
+
+/** One neighbourhood match against a bound, already-wildcarded parameter. */
+function locationMatches(parameterName: string): string {
+  return `${FOLDED_LOCATION} LIKE ${foldedSearchTerm(parameterName)} ESCAPE '\\'`;
+}
+
 /** The full-text OR substring match over one field list. */
 function textMatchOver(
   fields: WeightedSearchField[],
@@ -385,9 +398,9 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
   }
 
   // "Where they're based" filter. `profiles.location` is free text, so a
-  // neighbourhood "match" is the same substring test `matchNeighbourhood` uses
-  // for the card's `hood` field — filtering and display can't drift apart
-  // because they share one function.
+  // neighbourhood "match" is a substring test, the one `matchNeighbourhood`
+  // runs for the card's `hood` field. This side is case- and accent-folded
+  // (`locationMatches`), so "principe real" lands in `Príncipe Real`.
   //
   // Gated by `HOOD_VISIBLE_CLAUSE` (ENG-439), the card's own location gate:
   // a member whose card hides their neighbourhood (not `open`, or
@@ -401,7 +414,7 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
       } else {
         qb.andWhere(
           `(${HOOD_VISIBLE_CLAUSE} AND (` +
-            hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') +
+            hoods.map((_, i) => locationMatches(`hood${i}`)).join(' OR ') +
             '))',
           Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
         );
@@ -512,11 +525,12 @@ export async function countDirectoryFacets(
     ),
     // Neighbourhoods are the one group that matches by substring over
     // free-text `location` rather than by set overlap, so their count clause
-    // is the same `ILIKE` the filter uses. `All of Lisbon` is the "no hood
-    // restriction" row, so it binds the pattern that matches everyone, and
-    // the COALESCE is what makes that true of members who never wrote a
-    // location at all (`NULL ILIKE '%'` is NULL, which would quietly
-    // undercount exactly the members that row promises to include).
+    // is the same accent-folded `LIKE` the filter uses (`locationMatches`).
+    // `All of Lisbon` is the "no hood restriction" row, so it binds the
+    // pattern that matches everyone, and the coalesce inside `FOLDED_LOCATION`
+    // is what makes that true of members who never wrote a location at all
+    // (`NULL LIKE '%'` is NULL, which would quietly undercount exactly the
+    // members that row promises to include).
     //
     // Every real neighbourhood's clause carries `HOOD_VISIBLE_CLAUSE`, the
     // filter's own gate (ENG-439), so a hidden location adds to no count.
@@ -527,8 +541,8 @@ export async function countDirectoryFacets(
       HOOD_FACET_IDS,
       (param, option) =>
         option === ALL_OF_LISBON
-          ? `COALESCE("p"."location", '') ILIKE :${param}`
-          : `${HOOD_VISIBLE_CLAUSE} AND COALESCE("p"."location", '') ILIKE :${param}`,
+          ? locationMatches(param)
+          : `${HOOD_VISIBLE_CLAUSE} AND ${locationMatches(param)}`,
       (option) => (option === ALL_OF_LISBON ? '%' : `%${option}%`),
     ),
     // Identities count per FACET, not per stored label, and so cannot use the

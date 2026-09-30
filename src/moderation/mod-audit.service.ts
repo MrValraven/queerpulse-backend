@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { Report } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -171,9 +172,12 @@ export class ModAuditService {
       // audit feed's search box is a LIKE wildcard, so `q=%` returned every
       // row and a literal underscore matched any character. Same treatment
       // the communities/forum/admin-media searches already give their terms.
-      builder.andWhere('log.note ILIKE :search', {
-        search: `%${escapeLikeTerm(query.q.trim())}%`,
-      });
+      // Accent-folded on both sides (ENG-503): a moderator's note is free text
+      // in Portuguese, so "saude" has to find "saúde".
+      builder.andWhere(
+        `${foldedHaystack('log', ['note'])} LIKE ${foldedSearchTerm('search')} ESCAPE '\\'`,
+        { search: `%${escapeLikeTerm(query.q.trim())}%` },
+      );
     }
     return builder;
   }

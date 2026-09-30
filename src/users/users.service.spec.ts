@@ -4,6 +4,35 @@ import { EntityManager } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { UsersService } from './users.service';
+import {
+  PolicyAcceptance,
+  PolicyAcceptanceSource,
+} from '../consent/entities/policy-acceptance.entity';
+import { CURRENT_GUIDELINES_VERSION } from '../consent/policy-versions';
+
+/**
+ * A transaction host for `markOnboarded`. `storedRow` is what the locked read
+ * of the member's `users` row returns (null models a missing row). The stub
+ * records the `users` update and every ledger insert so a test can assert that
+ * both writes happened inside the one transaction, and that a replay wrote
+ * neither.
+ */
+function onboardingHarness(storedRow: Partial<User> | null) {
+  const lockedUsersRepo = {
+    findOne: jest.fn().mockResolvedValue(storedRow),
+    update: jest.fn().mockResolvedValue({ affected: storedRow ? 1 : 0 }),
+  };
+  const transactionManager = {
+    getRepository: jest.fn(() => lockedUsersRepo),
+    insert: jest.fn().mockResolvedValue(undefined),
+  };
+  const transactionHost = {
+    transaction: jest.fn((callback: (manager: unknown) => Promise<unknown>) =>
+      callback(transactionManager),
+    ),
+  };
+  return { lockedUsersRepo, transactionManager, transactionHost };
+}
 
 // The slug picker (`nextAvailableSlug`) resolves the next free slug by querying
 // the global `handles` registry through a fluent query builder. This stubs that
@@ -420,6 +449,113 @@ describe('UsersService', () => {
         'ada-lovelace',
         'ada-lovelace-1',
       ]);
+    });
+  });
+
+  describe('markOnboarded', () => {
+    // `usersRepo` is the provider's `useValue` object, so the service sees a
+    // `manager` attached after the module compiled.
+    function attach(harness: ReturnType<typeof onboardingHarness>) {
+      Object.assign(usersRepo, { manager: harness.transactionHost });
+    }
+
+    it('stamps the member and appends one Onboarding evidence row in the same transaction', async () => {
+      const harness = onboardingHarness({
+        id: 'u1',
+        onboardedAt: null,
+        guidelinesAcceptedAt: null,
+        guidelinesVersion: null,
+        termsVersion: '2.3',
+      });
+      attach(harness);
+
+      const result = await service.markOnboarded('u1');
+
+      expect(harness.transactionHost.transaction).toHaveBeenCalledTimes(1);
+      // The read is locked so a racing retry waits for this call to commit.
+      expect(harness.lockedUsersRepo.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ lock: { mode: 'pessimistic_write' } }),
+      );
+      expect(harness.lockedUsersRepo.update).toHaveBeenCalledWith(
+        { id: 'u1' },
+        {
+          onboardedAt: result.onboardedAt,
+          guidelinesAcceptedAt: result.onboardedAt,
+          guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+        },
+      );
+      expect(harness.transactionManager.insert).toHaveBeenCalledTimes(1);
+      expect(harness.transactionManager.insert).toHaveBeenCalledWith(
+        PolicyAcceptance,
+        {
+          userId: 'u1',
+          // The Terms were agreed at signup; onboarding records them unchanged.
+          termsVersion: '2.3',
+          guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+          previousTermsVersion: '2.3',
+          previousGuidelinesVersion: null,
+          source: PolicyAcceptanceSource.Onboarding,
+          createdAt: result.onboardedAt,
+        },
+      );
+      expect(result.guidelinesVersion).toBe(CURRENT_GUIDELINES_VERSION);
+    });
+
+    it('writes nothing on a replay and returns the original stamps', async () => {
+      const originalStamp = new Date('2026-01-02T03:04:05.000Z');
+      const harness = onboardingHarness({
+        id: 'u1',
+        onboardedAt: originalStamp,
+        guidelinesAcceptedAt: originalStamp,
+        guidelinesVersion: '0.9',
+        termsVersion: '2.3',
+      });
+      attach(harness);
+
+      const result = await service.markOnboarded('u1');
+
+      expect(result).toEqual({
+        onboardedAt: originalStamp,
+        guidelinesAcceptedAt: originalStamp,
+        guidelinesVersion: '0.9',
+      });
+      expect(harness.lockedUsersRepo.update).not.toHaveBeenCalled();
+      expect(harness.transactionManager.insert).not.toHaveBeenCalled();
+    });
+
+    it('stamps a legacy account with no Terms on file and writes no evidence row', async () => {
+      const harness = onboardingHarness({
+        id: 'u1',
+        onboardedAt: null,
+        guidelinesAcceptedAt: null,
+        guidelinesVersion: null,
+        termsVersion: null,
+      });
+      attach(harness);
+
+      const result = await service.markOnboarded('u1');
+
+      expect(harness.lockedUsersRepo.update).toHaveBeenCalledWith(
+        { id: 'u1' },
+        {
+          onboardedAt: result.onboardedAt,
+          guidelinesAcceptedAt: result.onboardedAt,
+          guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+        },
+      );
+      // A Terms revision the member never saw would be invented evidence.
+      expect(harness.transactionManager.insert).not.toHaveBeenCalled();
+    });
+
+    it('skips both writes when the member row is missing', async () => {
+      const harness = onboardingHarness(null);
+      attach(harness);
+
+      const result = await service.markOnboarded('ghost');
+
+      expect(result.guidelinesVersion).toBe(CURRENT_GUIDELINES_VERSION);
+      expect(harness.lockedUsersRepo.update).not.toHaveBeenCalled();
+      expect(harness.transactionManager.insert).not.toHaveBeenCalled();
     });
   });
 });

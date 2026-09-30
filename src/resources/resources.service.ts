@@ -3,6 +3,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, SelectQueryBuilder } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
+  foldedHaystack,
+  foldedSearchTerm,
+  RESOURCE_SEARCH_COLUMNS,
+} from '../search/search-text';
+import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
   paginate,
@@ -131,8 +136,9 @@ export class ResourcesService {
   }
 
   // Cross-entity global search (SearchService) — published and reviewed
-  // resources only (same gate as `list`), ILIKE over title / description.
-  // Body/meta stay out.
+  // resources only (same gate as `list`), accent-folded match over the title
+  // and description in both languages, so a PT member searching "saude" finds
+  // a guide whose Portuguese card copy says "Saúde". Body/meta stay out.
   async searchByText(
     term: string,
     limit: number,
@@ -141,9 +147,10 @@ export class ResourcesService {
     const rows = await this.applyPublicGate(
       this.resources.createQueryBuilder('r'),
     )
-      .andWhere('(r.title ILIKE :pattern OR r.description ILIKE :pattern)', {
-        pattern,
-      })
+      .andWhere(
+        `${foldedHaystack('r', RESOURCE_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
+        { pattern },
+      )
       .orderBy('r.publishedAt', 'DESC')
       .take(limit)
       .getMany();

@@ -11,6 +11,10 @@ import { User, UserRole, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { handleWriteError } from '../handles/handles.service';
 import { CURRENT_GUIDELINES_VERSION } from '../consent/policy-versions';
+import {
+  PolicyAcceptance,
+  PolicyAcceptanceSource,
+} from '../consent/entities/policy-acceptance.entity';
 
 // Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug). This
 // caps CONCURRENT contention only — each retry recomputes the next slug from the
@@ -259,47 +263,81 @@ export class UsersService {
    * checked, and then ignored in favour of the constant. The `_` prefix is this
    * codebase's marker for an argument a signature must keep and a body has no
    * use for.
+   *
+   * EVIDENCE ROW (ENG-498). The first completion also appends a
+   * `policy_acceptance` row with source `Onboarding`, in the same transaction
+   * as the `users` stamp. The `users` columns are overwritten by every later
+   * re-acceptance, so this row is what keeps the date and revision of the
+   * member's FIRST agreement to the guidelines on record. The welcome step asks
+   * for the guidelines only; the Terms were agreed at signup with the 18+
+   * attestation. The row therefore records the Terms revision already on file,
+   * unchanged (its previous and new Terms values are equal). A legacy account
+   * with no Terms on record still gets its `users` stamp and gets NO ledger row:
+   * `termsVersion` is NOT NULL there, and any value written for it would be
+   * invented evidence of agreement to a revision the member never saw.
+   *
+   * At most one Onboarding row per member. It is written whenever this method
+   * sets `onboardedAt` for a member with Terms on file; members onboarded before
+   * ENG-498 have none. The user row is read under a `pessimistic_write` lock, so
+   * a retry that races the first call waits for it to commit, then sees
+   * `onboardedAt` already set and returns the stamps on record without writing
+   * anything. The ledger has no unique index to lean on (history is its
+   * product), which is why the guard lives here.
    */
   async markOnboarded(
     id: string,
     _opts: { guidelinesVersion?: string | null } = {},
   ): Promise<OnboardingResult> {
-    const existing = await this.usersRepo.findOne({
-      where: { id },
-      select: {
-        id: true,
-        onboardedAt: true,
-        guidelinesAcceptedAt: true,
-        guidelinesVersion: true,
-      },
-    });
-    if (existing?.onboardedAt) {
-      // Already onboarded — return the stamps on record. `guidelinesAcceptedAt`
-      // may be NULL for a member onboarded before this consent was captured
-      // (never backfilled); fall back to `onboardedAt`/the current version so
-      // the caller always gets a concrete answer.
-      return {
-        onboardedAt: existing.onboardedAt,
-        guidelinesAcceptedAt:
-          existing.guidelinesAcceptedAt ?? existing.onboardedAt,
-        guidelinesVersion:
-          existing.guidelinesVersion ?? CURRENT_GUIDELINES_VERSION,
-      };
-    }
-    const now = new Date();
-    await this.usersRepo.update(
-      { id },
-      {
+    return this.usersRepo.manager.transaction(async (manager) => {
+      const existing = await manager.getRepository(User).findOne({
+        where: { id },
+        select: {
+          id: true,
+          onboardedAt: true,
+          guidelinesAcceptedAt: true,
+          guidelinesVersion: true,
+          termsVersion: true,
+        },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (existing?.onboardedAt) {
+        // Already onboarded: return the stamps on record. `guidelinesAcceptedAt`
+        // may be NULL for a member onboarded before this consent was captured
+        // (never backfilled); fall back to `onboardedAt`/the current version so
+        // the caller always gets a concrete answer.
+        return {
+          onboardedAt: existing.onboardedAt,
+          guidelinesAcceptedAt:
+            existing.guidelinesAcceptedAt ?? existing.onboardedAt,
+          guidelinesVersion:
+            existing.guidelinesVersion ?? CURRENT_GUIDELINES_VERSION,
+        };
+      }
+      const now = new Date();
+      const result: OnboardingResult = {
         onboardedAt: now,
         guidelinesAcceptedAt: now,
         guidelinesVersion: CURRENT_GUIDELINES_VERSION,
-      },
-    );
-    return {
-      onboardedAt: now,
-      guidelinesAcceptedAt: now,
-      guidelinesVersion: CURRENT_GUIDELINES_VERSION,
-    };
+      };
+      // A missing row stays a no-op stamp. The ledger row is skipped with it:
+      // `policy_acceptance.user_id` is a foreign key to `users`.
+      if (!existing) return result;
+
+      await manager.getRepository(User).update({ id }, result);
+      // Legacy account with no Terms on file: see the docstring for why the
+      // stamp lands and the ledger row is skipped.
+      if (!existing.termsVersion) return result;
+      await manager.insert(PolicyAcceptance, {
+        userId: id,
+        termsVersion: existing.termsVersion,
+        guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+        previousTermsVersion: existing.termsVersion,
+        previousGuidelinesVersion: existing.guidelinesVersion,
+        source: PolicyAcceptanceSource.Onboarding,
+        createdAt: now,
+      });
+      return result;
+    });
   }
 
   /**

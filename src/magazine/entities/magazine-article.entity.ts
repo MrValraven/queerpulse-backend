@@ -205,7 +205,9 @@ export class MagazineArticle {
    * have no query-builder equivalent.
    *
    * Added by `1794833600000-AddMagazineArticleSearchVector`; the GIN index
-   * that serves it is built CONCURRENTLY in `1794833610000-...Index`.
+   * that serves it is built CONCURRENTLY in `1794833610000-...Index`. The
+   * column is accent-folded: `1827500100000-FoldMagazineArticleSearchVector`
+   * rebuilt it and its GIN index over folded text (ENG-503).
    */
   @Column({
     type: 'tsvector',

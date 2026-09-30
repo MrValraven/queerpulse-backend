@@ -19,6 +19,8 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Readable } from 'node:stream';
 import { StorageService } from '../storage/storage.service';
+import { AccountDependenciesResponse } from './account-dependencies.response';
+import { AccountDependenciesService } from './account-dependencies.service';
 import { AccountService } from './account.service';
 import { ExportDownload, ExportEntry } from './export-archive';
 import {
@@ -70,6 +72,7 @@ export class AccountController {
     // the bucket at DOWNLOAD time — never carried in `data_export_job.data`.
     // See `streamZip`/`appendStoredEntry`.
     private readonly storage: StorageService,
+    private readonly accountDependencies: AccountDependenciesService,
   ) {}
 
   @ApiOperation({ summary: 'Deactivate (reversibly hide) the account.' })
@@ -123,6 +126,26 @@ export class AccountController {
     @CurrentUser() user: CurrentUserData,
   ): Promise<void> {
     await this.accountService.cancelDeletionRequest(user.userId);
+  }
+
+  // The ownership warning on the delete-account page. It lives here, with no
+  // ActiveMemberGuard, because a banned or suspended member may still reach
+  // that page, and the guarded `GET /me/communities` and `GET /listings/mine`
+  // answer them 403. See `AccountDependenciesService` for the selection rules.
+  @ApiOperation({
+    summary:
+      'List what erasure would strand: owned communities and live owned listings.',
+  })
+  @ApiOkResponse({
+    description:
+      'The owned communities ({ slug, name }) and live owned listings ({ ref, name }).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('dependencies')
+  getDependencies(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<AccountDependenciesResponse> {
+    return this.accountDependencies.forUser(user.userId);
   }
 
   @ApiOperation({ summary: 'Request a personal-data export job.' })

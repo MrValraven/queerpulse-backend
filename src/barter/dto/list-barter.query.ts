@@ -17,7 +17,7 @@ import { BarterCategory, BarterMode } from '../entities/barter-listing.entity';
  * facet is the "All" chip — there is no sentinel `'all'` value to validate,
  * which is why `category`/`mode` are plain optional enums.
  *
- * `q` is capped and escaped for `ILIKE` at the query site
+ * `q` is capped and escaped for the LIKE match at the query site
  * (`escapeLikeTerm`), so a member pasting `%` searches for a literal percent
  * sign instead of matching the whole board.
  */

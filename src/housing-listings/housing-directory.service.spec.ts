@@ -204,7 +204,7 @@ describe('HousingDirectoryService', () => {
   });
 
   describe('searchByText', () => {
-    it('searches live listings with an ILIKE pattern bounded by the limit', async () => {
+    it('searches live listings with an accent-folded pattern bounded by the limit', async () => {
       const builder = makeBuilder({ getMany: [makeListing()] });
       listings.createQueryBuilder.mockReturnValue(builder);
 

@@ -31,9 +31,10 @@ export class ListListingQueueQuery {
   @Max(MAX_PAGE)
   page?: number;
 
-  // Interpolated into three `ILIKE '%...%'` patterns (`listings.service.ts`),
-  // so an unbounded term is a cheap way to make Postgres scan hard. 120 matches
-  // the cap `SearchQuery.q` already uses.
+  // Interpolated into three `%...%` patterns (two accent-folded LIKEs and the
+  // ref's ILIKE, `listings.service.ts`), so an unbounded term is a cheap way
+  // to make Postgres scan hard. 120 matches the cap `SearchQuery.q` already
+  // uses.
   @IsOptional()
   @IsString()
   @MaxLength(120)

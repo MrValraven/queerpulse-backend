@@ -101,9 +101,10 @@ export class ListEventsQuery {
   @MaxLength(80)
   type?: string;
 
-  /** Free-text search over title, venue, neighbourhood and description. Runs
-   *  through the same ILIKE predicate (and the same trigram indexes) as the
-   *  cross-entity search in `EventsService.searchByText`. */
+  /** Free-text search over title, venue, neighbourhood and description. Uses
+   *  the same accent folding as `EventsService.searchByText`, over its own
+   *  four-column discovery haystack (`EVENT_DISCOVERY_SEARCH_COLUMNS`), backed
+   *  by `IDX_events_discovery_search_folded_trgm`. */
   @IsOptional()
   @IsString()
   @MaxLength(200)

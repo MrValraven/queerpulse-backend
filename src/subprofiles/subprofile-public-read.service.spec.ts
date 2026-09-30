@@ -19,6 +19,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { DIRECTORY_MAX_LIMIT } from './dto/list-directory.query';
 import {
   Subprofile,
@@ -210,6 +211,10 @@ function makeSocialCountsQueryBuilderStub(
   queryBuilder.getRawMany = jest.fn().mockResolvedValue(rawRows);
   return queryBuilder;
 }
+
+// The persona half of the directory search: display name and tagline as one
+// accent-folded haystack (mirrors `PERSONA_SEARCH_HAYSTACK` in the service).
+const PERSONA_SEARCH_PREDICATE = `${foldedHaystack('sp', ['display_name', 'tagline'])} LIKE ${foldedSearchTerm('term')}`;
 
 describe('SubprofilePublicReadService', () => {
   let service: SubprofilePublicReadService;
@@ -445,10 +450,10 @@ describe('SubprofilePublicReadService', () => {
       // pinning that here would only restate `search-text.ts` (which
       // `search-text.spec.ts` already pins against its own index migration).
       const searchCall = qb.andWhere.mock.calls.find((call) =>
-        call[0].includes('sp.displayName ILIKE :term'),
+        call[0].includes(PERSONA_SEARCH_PREDICATE),
       );
       expect(searchCall).toBeDefined();
-      expect(searchCall?.[0]).toContain('sp.tagline ILIKE :term');
+      expect(searchCall?.[0]).toContain(`${PERSONA_SEARCH_PREDICATE} ESCAPE`);
       expect(searchCall?.[1]).toMatchObject({ term: '%50\\% off\\_grid%' });
     });
 
@@ -460,7 +465,7 @@ describe('SubprofilePublicReadService', () => {
       await service.directory({ query: 'dm' }, 'viewer-1');
 
       const searchCall = qb.andWhere.mock.calls.find((call) =>
-        call[0].includes('sp.displayName ILIKE :term'),
+        call[0].includes(PERSONA_SEARCH_PREDICATE),
       );
       expect(searchCall).toBeDefined();
       expect(searchCall?.[0]).toContain('sp.kind IN (:...searchKinds)');
@@ -477,7 +482,7 @@ describe('SubprofilePublicReadService', () => {
       await service.directory({ query: 'de' }, 'viewer-1');
 
       const searchCall = qb.andWhere.mock.calls.find((call) =>
-        call[0].includes('sp.displayName ILIKE :term'),
+        call[0].includes(PERSONA_SEARCH_PREDICATE),
       );
       expect(searchCall).toBeDefined();
       expect(searchCall?.[0]).not.toContain('sp.kind IN (:...searchKinds)');
@@ -499,7 +504,7 @@ describe('SubprofilePublicReadService', () => {
         'owner.userId = sp.userId',
       );
       const searchCall = qb.andWhere.mock.calls.find((call) =>
-        call[0].includes('sp.displayName ILIKE :term'),
+        call[0].includes(PERSONA_SEARCH_PREDICATE),
       );
       expect(searchCall).toBeDefined();
       // THE anonymity rule: the owner branch only fires for a persona whose

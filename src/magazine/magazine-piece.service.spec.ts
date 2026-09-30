@@ -3256,7 +3256,7 @@ describe('MagazinePieceService', () => {
 
       // No TEXT filter — that is the point of an empty query. The
       // not-yet-published guard is a separate `andWhere` that always runs, so
-      // assert on the ILIKE pattern rather than on "no andWhere at all".
+      // assert the conditions are exactly that guard, with no folded LIKE.
       const articleConditions = (
         articleQueryBuilder.andWhere.mock.calls as [string, unknown?][]
       ).map(([condition]) => condition);

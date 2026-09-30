@@ -60,7 +60,14 @@ export interface AdminDsarRequestDTO {
   scopes: string[];
   details: string;
   context: string | null;
+  /** Null once the requester has been erased (ENG-499): the request survives
+   *  as a statutory record with no member attached. Also null when the
+   *  requester's profile cannot be resolved. */
   member: AdminDsarMemberDTO | null;
+  /** True once the requester has erased their account (`userId` is NULL).
+   *  Nobody is notified when such a request is closed, and the admin UI says
+   *  so. */
+  isRequesterErased: boolean;
   submittedAt: string;
   dueBy: string;
   respondedAt: string | null;
@@ -94,6 +101,7 @@ export function toAdminDsarRequestDTO(
     details: request.details,
     context: request.context,
     member: toAdminDsarMember(member),
+    isRequesterErased: request.userId === null,
     submittedAt: request.submittedAt.toISOString(),
     dueBy: request.dueBy.toISOString(),
     respondedAt: request.respondedAt ? request.respondedAt.toISOString() : null,

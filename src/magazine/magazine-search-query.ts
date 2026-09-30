@@ -23,18 +23,30 @@
  * The tokens are AND-ed, so more words narrow the result the way a search box
  * is expected to behave.
  *
+ * ACCENT FOLDING (ENG-503)
+ * `search_vector` folds every field with `foldedTextExpression` before the
+ * `english` parser sees it, so the lexemes it stores are plain ASCII where the
+ * source had Latin-1 diacritics. The reader's input is folded here with
+ * `foldSearchText`, the JS twin of that SQL fold (same character pairs,
+ * pinned by `search-text.spec.ts`), so "saude" finds "saúde" and "são" finds
+ * "Sao". The fold maps one letter to one letter, so it runs before the split
+ * and can add no `to_tsquery` operator. The input is NFC-normalised first: a
+ * keyboard or paste that sends "u" plus a combining acute would otherwise
+ * miss the fold, and the combining mark would split the word in two.
+ *
  * Returns `null` when the input holds nothing searchable (empty, whitespace,
  * or only punctuation). Callers must treat that as "no results", never as "no
  * filter" — dropping the predicate would answer a nonsense search with the
  * whole magazine.
  */
 
+import { foldSearchText } from '../search/search-text';
+
 /** Beyond this, extra words only slow the query down; nobody searches with 9. */
 const MAX_SEARCH_TOKENS = 8;
 
 export function toPrefixTsQuery(term: string): string | null {
-  const tokens = term
-    .toLowerCase()
+  const tokens = foldSearchText(term.normalize('NFC'))
     .split(/[^\p{L}\p{N}]+/u)
     .filter((token) => token.length > 0)
     .slice(0, MAX_SEARCH_TOKENS);

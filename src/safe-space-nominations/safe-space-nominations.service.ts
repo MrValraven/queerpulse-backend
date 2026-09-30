@@ -8,8 +8,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
+import { escapeLikeTerm } from '../common/like-escape';
 import { Listing, SafeSpaceStatus } from '../listings/entities/listing.entity';
 import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { AdminNominationsQuery } from './dto/admin-nominations.query';
 import { CreateSafeSpaceNominationDto } from './dto/create-safe-space-nomination.dto';
 import {
@@ -169,9 +171,12 @@ export class SafeSpaceNominationsService {
       builder.andWhere('nomination.listingId IS NOT NULL');
     }
     if (query.search) {
-      builder.andWhere('nomination.placeName ILIKE :search', {
-        search: `%${query.search.trim()}%`,
-      });
+      // Accent-folded so "Principe Real" finds "Príncipe Real", and escaped
+      // so a typed `%` or `_` matches literally.
+      builder.andWhere(
+        `${foldedHaystack('nomination', ['place_name'])} LIKE ${foldedSearchTerm('search')} ESCAPE '\\'`,
+        { search: `%${escapeLikeTerm(query.search.trim())}%` },
+      );
     }
 
     const [rows, total] = await builder.getManyAndCount();

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { escapeLikeTerm } from '../common/like-escape';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
@@ -22,6 +23,7 @@ import {
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -550,7 +552,11 @@ export class LandlordsService {
       qb.andWhere('LOWER(l.hood) = LOWER(:hood)', { hood: query.hood });
     }
     if (query.q) {
-      qb.andWhere('l.name ILIKE :q', { q: `%${query.q}%` });
+      // Accent-folded, and escaped so a typed `%` or `_` matches literally.
+      qb.andWhere(
+        `${foldedHaystack('l', ['name'])} LIKE ${foldedSearchTerm('q')} ESCAPE '\\'`,
+        { q: `%${escapeLikeTerm(query.q)}%` },
+      );
     }
     qb.orderBy('l.created_at', 'DESC');
 

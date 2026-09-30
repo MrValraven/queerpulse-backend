@@ -21,9 +21,13 @@ export class DsarRequest {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
+  // The member who filed the request. `ON DELETE SET NULL` as of
+  // `DsarRequestUserSetNullOnErasure1827500000000` (ENG-499): erasing the
+  // member keeps the record that a statutory request was received and
+  // answered, with a NULL requester. Null only after that erasure.
   @Index('IDX_dsar_request_user_id')
-  @Column({ type: 'uuid' })
-  userId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  userId!: string | null;
 
   @Index('UQ_dsar_request_reference', { unique: true })
   @Column({ type: 'varchar' })

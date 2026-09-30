@@ -18,7 +18,11 @@ import {
 import { Community } from '../communities/entities/community.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { Profile } from '../users/entities/profile.entity';
 import {
   AdminCommunityModeratorDTO,
@@ -38,11 +42,10 @@ const MODERATOR_ROLES = [RosterRole.Owner, RosterRole.Mod];
 export const MODERATOR_CANDIDATE_LIMIT = 25;
 
 /** What the picker's `q` matches: names and handle, folded like member search. */
-const MODERATOR_CANDIDATE_SEARCH_HAYSTACK = foldedHaystack('profile', [
-  'first_name',
-  'last_name',
-  'slug',
-]);
+const MODERATOR_CANDIDATE_SEARCH_HAYSTACK = foldedHaystack(
+  'profile',
+  PROFILE_NAME_SEARCH_COLUMNS,
+);
 
 /**
  * Write model behind the admin communities panel's moderator controls

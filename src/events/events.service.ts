@@ -12,6 +12,12 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  EVENT_DISCOVERY_SEARCH_COLUMNS,
+  EVENT_SEARCH_COLUMNS,
+  foldedHaystack,
+  foldedSearchTerm,
+} from '../search/search-text';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate } from '../common/pagination';
@@ -225,6 +231,18 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  *  the top of browse for two years does not. Mirrored client-side by
  *  `MAX_GATHERING_SPAN_DAYS` in the wizard's `createGathering.data.ts`. */
 const MAX_GATHERING_SPAN_DAYS = 14;
+
+// Global search's accent-folded haystack over a gathering's title, venue and
+// description, so "Joao" finds "João". Snake_case DB columns under the `e`
+// alias `searchByText` builds on.
+const EVENT_SEARCH_HAYSTACK = foldedHaystack('e', EVENT_SEARCH_COLUMNS);
+
+// The browse box's haystack: the same three columns plus `neighbourhood`, so
+// "Principe Real" typed into search finds a gathering in "Príncipe Real".
+const EVENT_DISCOVERY_SEARCH_HAYSTACK = foldedHaystack(
+  'e',
+  EVENT_DISCOVERY_SEARCH_COLUMNS,
+);
 
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on the
 // QueryFailedError or on the wrapped driverError depending on the path.
@@ -1528,10 +1546,10 @@ export class EventsService {
    * picked from a fixed list, and a substring match on a chosen value would
    * quietly widen the filter the member set.
    *
-   * `q` reuses `searchByText`'s ILIKE shape (and therefore the trigram
-   * indexes `AddSearchTrgmAndTagsIndexes1785700100000` already built on
-   * `title`/`venue`/`description`), plus `neighbourhood` so typing a
-   * neighbourhood name into the search box works the way a member expects.
+   * `q` reuses `searchByText`'s accent-folded haystack over
+   * `title`/`venue`/`description`, plus `neighbourhood` so typing a
+   * neighbourhood name into the search box works the way a member expects
+   * ("Principe Real" finds "Príncipe Real").
    *
    * `family` is an exact enum match on `gathering_family`, served by
    * `IDX_events_gathering_family` (migration `1817080000000`), partial on
@@ -1611,9 +1629,7 @@ export class EventsService {
     const term = options.q?.trim();
     if (term) {
       qb.andWhere(
-        '(e.title ILIKE :discoveryPattern OR e.venue ILIKE :discoveryPattern ' +
-          'OR e.neighbourhood ILIKE :discoveryPattern ' +
-          'OR e.description ILIKE :discoveryPattern)',
+        `${EVENT_DISCOVERY_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('discoveryPattern')} ESCAPE '\\'`,
         { discoveryPattern: `%${escapeLikeTerm(term)}%` },
       );
     }
@@ -1668,7 +1684,8 @@ export class EventsService {
   // Cross-entity global search (SearchService) — mirrors the 'upcoming'
   // branch's visibility (public/members, plus the viewer's own network/
   // community gatherings) but drops the `start_at >= now` restriction so past
-  // matches still surface. ILIKE over title / venue / description.
+  // matches still surface. Accent-folded match over title / venue /
+  // description.
   async searchByText(
     userId: string,
     term: string,
@@ -1682,7 +1699,7 @@ export class EventsService {
       .where('e.status = :status', { status: EventStatus.Published })
       .andWhere(visibilityClause, visibilityParams)
       .andWhere(
-        '(e.title ILIKE :pattern OR e.venue ILIKE :pattern OR e.description ILIKE :pattern)',
+        `${EVENT_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
         { pattern },
       );
     this.excludeModeratedEvents(searchQb);

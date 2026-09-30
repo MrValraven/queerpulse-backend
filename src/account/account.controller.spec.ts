@@ -6,6 +6,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { StorageService } from '../storage/storage.service';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
+import { AccountDependenciesService } from './account-dependencies.service';
 
 describe('AccountController', () => {
   let controller: AccountController;
@@ -55,6 +56,10 @@ describe('AccountController', () => {
       controllers: [AccountController],
       providers: [
         { provide: AccountService, useValue: service },
+        {
+          provide: AccountDependenciesService,
+          useValue: { forUser: jest.fn() },
+        },
         // Only `stored` entries reach the bucket, and every fixture below is
         // `text`, so this must never be called.
         { provide: StorageService, useValue: storage },

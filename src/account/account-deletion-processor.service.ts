@@ -406,6 +406,20 @@ export class AccountDeletionProcessorService {
       //     delete does, so each name stays reserved for the reclaim cooldown.
       await this.releaseErasedPersonaHandles(manager, userId);
 
+      // 2e. Data-subject requests (ENG-499). Step 3 keeps every `dsar_request`
+      //     row this member filed (the FK is `ON DELETE SET NULL`), because
+      //     the platform must keep its record of receiving and answering a
+      //     statutory request. That record needs no words of theirs, and the
+      //     delete-account page promises their data goes, so the member's own
+      //     free text is wiped here while `user_id` still names them:
+      //     `details` becomes '' (the column is NOT NULL) and `context`
+      //     becomes NULL. Reference, article, scopes, dates, status, outcome
+      //     note and resolver stay.
+      await manager.query(
+        `UPDATE "dsar_request" SET "details" = '', "context" = NULL WHERE "user_id" = $1`,
+        [userId],
+      );
+
       // 3. Hard-delete the user. Every other member-owned table carries an
       //    `ON DELETE CASCADE` FK to `users("id")` and goes with it — 70+ FKs
       //    across the schema, verified against `src/migrations`.
@@ -442,6 +456,16 @@ export class AccountDeletionProcessorService {
       //    `deletion_request` itself is the one table that must NOT cascade —
       //    its FK was dropped in the same migration so this erasure ledger
       //    survives the row it describes.
+      //
+      //    `dsar_request.user_id` is `ON DELETE SET NULL` as of
+      //    `DsarRequestUserSetNullOnErasure1827500000000` (ENG-499) for the
+      //    same reason: every data-subject request this member filed, an open
+      //    one still inside its 30-day deadline included, survives this
+      //    delete with a NULL requester, so the platform keeps its record of
+      //    receiving and answering it. Step 2e has already wiped the member's
+      //    own free text (`details`, `context`) from those rows, and nothing
+      //    deletes them. The admin DSAR queue shows them with a null `member`
+      //    and `isRequesterErased: true`.
       //
       //    UPDATE 2026-08-31. "Every other member-owned table carries an FK"
       //    was an assumption, and a deep scan found nine columns where it was

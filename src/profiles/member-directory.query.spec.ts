@@ -24,8 +24,13 @@ import {
   PROFILE_PUBLIC_SEARCH_COLUMNS,
   PROFILE_PUBLIC_SEARCH_FIELDS,
   foldedHaystack,
+  foldedSearchTerm,
   weightedSearchVector,
 } from '../search/search-text';
+
+/** The accent-folded neighbourhood match the hood filter and counts bind. */
+const locationMatches = (parameterName: string): string =>
+  `${foldedHaystack('p', ['location'])} LIKE ${foldedSearchTerm(parameterName)} ESCAPE '\\'`;
 
 /** Records every predicate applied, which is all these tests care about. */
 type WhereCall = [string, Record<string, unknown> | undefined];
@@ -87,7 +92,7 @@ describe('applyDirectoryFilters', () => {
   it.each<[DirectoryFacetGroup, string]>([
     ['identities', 'discoverable_identities'],
     ['openTo', 'open_to'],
-    ['hoods', 'p.location ILIKE :hood0'],
+    ['hoods', locationMatches('hood0')],
     ['disciplines', 'p.discipline && :disciplines'],
     ['professions', 'p.profession && :professions'],
     ['languages', 'p.languages && :languages'],
@@ -237,13 +242,13 @@ describe('applyDirectoryFilters', () => {
   it('matches a neighbourhood only where the card would show it', () => {
     const spy = qbSpy();
     applyDirectoryFilters(spy.qb, { hoods: 'Anjos,Arroios' });
-    const found = spy.calls.find(([text]) => text.includes('p.location'));
+    const found = spy.calls.find(([text]) => text.includes('"p"."location"'));
     expect(found).toBeDefined();
     const [predicate, parameters] = found!;
     expect(HOOD_VISIBLE_CLAUSE).toContain(`"p"."visibility" = 'open'`);
     expect(HOOD_VISIBLE_CLAUSE).toContain('"p"."hood_visible" = true');
     expect(predicate).toBe(
-      `(${HOOD_VISIBLE_CLAUSE} AND (p.location ILIKE :hood0 OR p.location ILIKE :hood1))`,
+      `(${HOOD_VISIBLE_CLAUSE} AND (${locationMatches('hood0')} OR ${locationMatches('hood1')}))`,
     );
     expect(parameters).toEqual({ hood0: '%Anjos%', hood1: '%Arroios%' });
   });
@@ -413,7 +418,7 @@ describe('countDirectoryFacets', () => {
     expect(spies.get('identities')!.parameters.facetOption0).toEqual(
       expect.arrayContaining(['Trans']),
     );
-    // Hoods bind an ILIKE pattern, the same substring test the filter uses.
+    // Hoods bind a LIKE pattern, the same folded substring test the filter uses.
     expect(spies.get('hoods')!.parameters.facetOption0).toBe(
       `%${NEIGHBOURHOODS[0]}%`,
     );

@@ -46,9 +46,9 @@ export const trimmedReason = ({ value }: { value: unknown }): unknown =>
  *
  * `<role id>: <reason>`, role first, so the shape stays readable next to the
  * rows written before this existed (which are the bare role id) and the audit
- * feed's `note ILIKE` search still finds a row by role name. Falls back to the
- * bare role id when no reason is supplied, which is only ever an internal
- * caller: the HTTP surface requires one.
+ * feed's accent-folded `note` search still finds a row by role name. Falls
+ * back to the bare role id when no reason is supplied, which is only ever an
+ * internal caller: the HTTP surface requires one.
  */
 export function staffRoleAuditNote(role: string, reason?: string): string {
   const trimmed = reason?.trim();

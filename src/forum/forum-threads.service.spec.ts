@@ -33,8 +33,20 @@ import {
   ForumThreadsService,
   forumThreadVisibleSql,
 } from './forum-threads.service';
+import {
+  FORUM_POST_SEARCH_COLUMNS,
+  FORUM_THREAD_SEARCH_COLUMNS,
+  foldedHaystack,
+  foldedSearchTerm,
+} from '../search/search-text';
 
 const GRINNING_FACE = '\u{1F600}';
+
+// The accent-folded `q` branches of the forum list filter: the thread title,
+// and the reply body inside the correlated EXISTS.
+const FOLDED_FORUM_SEARCH_PATTERN = foldedSearchTerm('forumSearchPattern');
+const FORUM_TITLE_SEARCH = `${foldedHaystack('t', FORUM_THREAD_SEARCH_COLUMNS)} LIKE ${FOLDED_FORUM_SEARCH_PATTERN}`;
+const FORUM_BODY_SEARCH = `${foldedHaystack('__search_post', FORUM_POST_SEARCH_COLUMNS)} LIKE ${FOLDED_FORUM_SEARCH_PATTERN}`;
 
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
 // configurable row list — mirrors `moderation.service.spec.ts`'s `qbStub`,
@@ -1241,7 +1253,7 @@ describe('ForumThreadsService', () => {
       );
 
       const searchCall = qb.andWhere.mock.calls.find(([sql]) =>
-        String(sql).includes('t.title ILIKE :forumSearchPattern'),
+        String(sql).includes(FORUM_TITLE_SEARCH),
       );
       expect(searchCall).toBeDefined();
       const sql = String(searchCall?.[0]);
@@ -1249,7 +1261,7 @@ describe('ForumThreadsService', () => {
       // once per matching reply and break the keyset page.
       expect(sql).toContain('EXISTS');
       expect(sql).toContain('"__search_post"."thread_id" = t.id');
-      expect(sql).toContain('"__search_post"."body" ILIKE :forumSearchPattern');
+      expect(sql).toContain(FORUM_BODY_SEARCH);
       // A tombstoned post keeps its body only so it can be restored, and a
       // moderated one was deliberately taken down. Either matching would turn
       // this filter into an oracle for what a removed post said.
@@ -1275,7 +1287,7 @@ describe('ForumThreadsService', () => {
       );
 
       const searchCall = qb.andWhere.mock.calls.find(([sql]) =>
-        String(sql).includes('t.title ILIKE :forumSearchPattern'),
+        String(sql).includes(FORUM_TITLE_SEARCH),
       );
       expect(searchCall?.[1]).toEqual(
         expect.objectContaining({
@@ -1318,7 +1330,7 @@ describe('ForumThreadsService', () => {
 
       expect(
         qb.andWhere.mock.calls.some(([sql]) =>
-          String(sql).includes('ILIKE :forumSearchPattern'),
+          String(sql).includes(FOLDED_FORUM_SEARCH_PATTERN),
         ),
       ).toBe(false);
       expect(qb.andWhere).not.toHaveBeenCalledWith(
@@ -1432,12 +1444,10 @@ describe('ForumThreadsService', () => {
       // a badge counting threads the list will not draw promises a row that
       // never arrives (C9/PRD-164).
       const searchCall = qb.andWhere.mock.calls.find(([sql]) =>
-        String(sql).includes('t.title ILIKE :forumSearchPattern'),
+        String(sql).includes(FORUM_TITLE_SEARCH),
       );
       expect(searchCall).toBeDefined();
-      expect(String(searchCall?.[0])).toContain(
-        '"__search_post"."body" ILIKE :forumSearchPattern',
-      );
+      expect(String(searchCall?.[0])).toContain(FORUM_BODY_SEARCH);
       expect(searchCall?.[1]).toEqual(
         expect.objectContaining({ forumSearchPattern: '%rent%' }),
       );

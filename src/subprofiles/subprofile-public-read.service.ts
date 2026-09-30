@@ -22,7 +22,12 @@ import {
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
-import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
+import {
+  foldedHaystack,
+  foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
+  SUBPROFILE_SEARCH_COLUMNS,
+} from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -99,11 +104,15 @@ const ANONYMOUS_VIEWER_ID = '00000000-0000-0000-0000-000000000000';
 // whether "Joao" finds "João". Columns are the DB's snake_case names, which is
 // what `qualifyColumn` quotes. Only the NAME columns: an owner's bio is not
 // something a persona should be findable by.
-const OWNER_SEARCH_HAYSTACK = foldedHaystack('owner', [
-  'first_name',
-  'last_name',
-  'slug',
-]);
+const OWNER_SEARCH_HAYSTACK = foldedHaystack(
+  'owner',
+  PROFILE_NAME_SEARCH_COLUMNS,
+);
+
+// The persona half of the same search, shared by `directory()` and
+// `searchByText()`: the persona's own display name and tagline as ONE
+// accent-folded blob, so "Principe" finds "Príncipe" and "sao" finds "São".
+const PERSONA_SEARCH_HAYSTACK = foldedHaystack('sp', SUBPROFILE_SEARCH_COLUMNS);
 
 // The public/card read surface for personas: the profile-nested list, the
 // by-handle + by-slug single fetches, the directory browse, cross-entity
@@ -1061,9 +1070,12 @@ export class SubprofilePublicReadService {
       // and "Joao"/"Ines" have to find "João"/"Inês". First name, last name and
       // profile slug are concatenated into ONE haystack, so a full name typed
       // as "ana silva" matches across the two columns rather than neither.
-      // The persona's own name/tagline keep their plain ILIKE: those two
-      // columns carry GIN trigram indexes built on the unfolded values, and
-      // folding them here would silently stop using them.
+      // The persona's own display name and tagline are folded the same way
+      // (`PERSONA_SEARCH_HAYSTACK`). A folded trigram index on that haystack
+      // exists (`IDX_subprofiles_search_folded_trgm`, added by
+      // `1827600000000-AddFoldedSearchTrgmIndexes`), but `directory()` cannot
+      // use it: the OR spans the joined owner profile, so the planner has to
+      // test every joined row.
       // A term that names a profession ("dm", "mestre de jogo", "cosplay")
       // also matches every persona of that kind, whatever it is called. The
       // kind column is covered by IDX_subprofiles_directory.
@@ -1071,11 +1083,11 @@ export class SubprofilePublicReadService {
       const kindBranch =
         searchKinds.length > 0 ? ' OR sp.kind IN (:...searchKinds)' : '';
       qb.andWhere(
-        '(sp.displayName ILIKE :term OR sp.tagline ILIKE :term' +
+        `(${PERSONA_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('term')} ESCAPE '\\'` +
           kindBranch +
           ' OR ' +
           `(sp.linkVisibility = :linkedForSearch AND ${OWNER_SEARCH_HAYSTACK} ` +
-          `LIKE ${foldedSearchTerm('ownerTerm')}))`,
+          `LIKE ${foldedSearchTerm('ownerTerm')} ESCAPE '\\'))`,
         {
           term,
           ownerTerm: term,
@@ -1195,7 +1207,8 @@ export class SubprofilePublicReadService {
 
   // Cross-entity global search (SearchService) — standalone personas only
   // (unlinked + published + open + handle-bearing), mirroring `directory`'s
-  // WHERE + block filter. ILIKE over displayName / tagline. Returns the public
+  // WHERE + block filter. Accent-folded LIKE over displayName / tagline
+  // (`PERSONA_SEARCH_HAYSTACK`). Returns the public
   // `handle` (the persona's /p/:handle identifier) — never the owner tie.
   async searchByText(
     viewerId: string,
@@ -1219,10 +1232,8 @@ export class SubprofilePublicReadService {
       // Personas redesign Phase 1b).
       .andWhere('sp.removedAt IS NULL')
       .andWhere(
-        '(sp.displayName ILIKE :pattern OR sp.tagline ILIKE :pattern)',
-        {
-          pattern,
-        },
+        `${PERSONA_SEARCH_HAYSTACK} LIKE ${foldedSearchTerm('pattern')} ESCAPE '\\'`,
+        { pattern },
       );
     // Hide personas of members blocked either way (mirrors `directory`). The
     // raw column reference must match the DB's snake_case name.

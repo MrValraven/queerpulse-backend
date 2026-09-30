@@ -363,7 +363,10 @@ export class MagazineService {
       // (title/dek/standfirst/tags + both body representations), served by
       // `IDX_magazine_article_search_vector`, a GIN index. `@@` and
       // `ts_rank_cd` have no query-builder equivalent, so this is raw SQL
-      // with the tsquery bound as a parameter.
+      // with the tsquery bound as a parameter. Both sides are accent-folded
+      // (ENG-503): the column in its generation expression
+      // (`1827500100000-FoldMagazineArticleSearchVector`), the tsquery in
+      // `toPrefixTsQuery`, so "saude" finds "saúde".
       qb.andWhere(
         `article.search_vector @@ to_tsquery('english', :searchQuery)`,
         { searchQuery },

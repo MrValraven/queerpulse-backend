@@ -27,6 +27,7 @@ import {
 } from '../common/cursor-pagination';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
+  FORUM_POST_SEARCH_COLUMNS,
   FORUM_THREAD_SEARCH_COLUMNS,
   FORUM_THREAD_SEARCH_FIELDS,
   foldedHaystack,
@@ -2856,9 +2857,15 @@ export class ForumThreadsService {
   //
   // Written as a correlated EXISTS rather than a join so it stacks cleanly onto
   // the keyset ORDER BY without multiplying thread rows per matching reply
-  // (mirroring `applyCommunityAccessFilter`). Backed by
-  // `IDX_forum_post_body_trgm` (see `AddForumThreadTopKeysetAndReplySearch`),
-  // since a leading-wildcard ILIKE is unservable by a btree.
+  // (mirroring `applyCommunityAccessFilter`).
+  //
+  // Both branches are accent-folded on both sides (the same `foldedHaystack`
+  // vocabulary as `searchByText`), so "saude" finds a thread titled "Saúde".
+  // The title haystack is the exact expression
+  // `IDX_forum_thread_search_folded_trgm` is built on. The reply-body branch
+  // is folded too, so `IDX_forum_post_body_trgm` (raw `body`, see
+  // `AddForumThreadTopKeysetAndReplySearch`) no longer serves it; the EXISTS
+  // is still narrowed to one thread's posts by `thread_id`.
   private applyTextAndTagFilters(
     qb: SelectQueryBuilder<ForumThread>,
     q: string | undefined,
@@ -2868,14 +2875,15 @@ export class ForumThreadsService {
     if (term) {
       // `escapeLikeTerm` neutralizes `%`/`_` so they match literally. One bound
       // parameter feeds both branches.
+      const foldedPattern = foldedSearchTerm('forumSearchPattern');
       qb.andWhere(
         `(
-          t.title ILIKE :forumSearchPattern
+          ${foldedHaystack('t', FORUM_THREAD_SEARCH_COLUMNS)} LIKE ${foldedPattern} ESCAPE '\\'
           OR EXISTS (
             SELECT 1 FROM "forum_post" "__search_post"
             WHERE "__search_post"."thread_id" = t.id
               AND "__search_post"."deleted_at" IS NULL
-              AND "__search_post"."body" ILIKE :forumSearchPattern
+              AND ${foldedHaystack('__search_post', FORUM_POST_SEARCH_COLUMNS)} LIKE ${foldedPattern} ESCAPE '\\'
               AND NOT EXISTS (
                 SELECT 1 FROM "content_moderation" "__search_post_moderation"
                 WHERE "__search_post_moderation"."subject_type" IN (:...forumSearchSubjectTypes)

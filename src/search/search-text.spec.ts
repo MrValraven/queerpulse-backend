@@ -1,14 +1,25 @@
 import { foldedTextExpression } from '../connections/connection-search';
 import {
+  COMMUNITY_SEARCH_COLUMNS,
+  EVENT_DISCOVERY_SEARCH_COLUMNS,
+  EVENT_SEARCH_COLUMNS,
   FORUM_POST_SEARCH_FIELDS,
   foldSearchText,
   FORUM_THREAD_SEARCH_COLUMNS,
   FORUM_THREAD_SEARCH_FIELDS,
+  HOUSING_LISTING_SEARCH_COLUMNS,
+  JOB_SEARCH_COLUMNS,
+  LISTING_DIRECTORY_SEARCH_COLUMNS,
+  LISTING_NAME_SEARCH_COLUMNS,
   PROFILE_BIO_COLUMNS,
+  PROFILE_NAME_SEARCH_COLUMNS,
   PROFILE_PUBLIC_SEARCH_COLUMNS,
   PROFILE_PUBLIC_SEARCH_FIELDS,
   PROFILE_SEARCH_COLUMNS,
   PROFILE_SEARCH_FIELDS,
+  RESOURCE_SEARCH_COLUMNS,
+  SUBPROFILE_SEARCH_COLUMNS,
+  foldedArrayElementMatch,
   foldedHaystack,
   foldedSearchQuery,
   foldedSearchTerm,
@@ -62,6 +73,56 @@ const FORUM_POST_VECTOR_AS_INDEXED =
   `setweight(to_tsvector('simple', translate(lower(coalesce("body", '')), ` +
   `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')), 'B')`;
 
+// The folded substring haystacks `1827600000000-AddFoldedSearchTrgmIndexes`
+// built its trigram indexes over, copied from that migration for the same
+// reason as the pins above.
+const COMMUNITIES_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("name", '') || ' ' || coalesce("tagline", '') || ' ' || ` +
+  `coalesce("purpose", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const EVENTS_DISCOVERY_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("title", '') || ' ' || coalesce("venue", '') || ' ' || ` +
+  `coalesce("neighbourhood", '') || ' ' || coalesce("description", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const EVENTS_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("title", '') || ' ' || coalesce("venue", '') || ' ' || ` +
+  `coalesce("description", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const JOBS_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("title", '') || ' ' || coalesce("desc", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const RESOURCES_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("title", '') || ' ' || coalesce("description", '') || ' ' || ` +
+  `coalesce("title_pt", '') || ' ' || coalesce("description_pt", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const HOUSING_LISTINGS_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("title", '') || ' ' || coalesce("blurb", '') || ' ' || ` +
+  `coalesce("city", '') || ' ' || coalesce("area", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const LISTINGS_DIRECTORY_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("name", '') || ' ' || coalesce("blurb", '') || ' ' || ` +
+  `coalesce("hood", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const LISTINGS_NAME_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("name", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const SUBPROFILES_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("display_name", '') || ' ' || coalesce("tagline", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
+const PROFILES_NAME_HAYSTACK_AS_INDEXED =
+  `translate(lower(coalesce("first_name", '') || ' ' || coalesce("last_name", '') || ' ' || ` +
+  `coalesce("slug", '')), ` +
+  `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy')`;
+
 describe('search-text expressions match the indexes that back them', () => {
   it('profiles tsvector', () => {
     expect(weightedSearchVector('', PROFILE_SEARCH_FIELDS)).toBe(
@@ -105,6 +166,44 @@ describe('search-text expressions match the indexes that back them', () => {
     );
   });
 
+  it.each([
+    ['communities', COMMUNITY_SEARCH_COLUMNS, COMMUNITIES_HAYSTACK_AS_INDEXED],
+    [
+      'events discovery',
+      EVENT_DISCOVERY_SEARCH_COLUMNS,
+      EVENTS_DISCOVERY_HAYSTACK_AS_INDEXED,
+    ],
+    ['events', EVENT_SEARCH_COLUMNS, EVENTS_HAYSTACK_AS_INDEXED],
+    ['jobs', JOB_SEARCH_COLUMNS, JOBS_HAYSTACK_AS_INDEXED],
+    ['resources', RESOURCE_SEARCH_COLUMNS, RESOURCES_HAYSTACK_AS_INDEXED],
+    [
+      'housing_listings',
+      HOUSING_LISTING_SEARCH_COLUMNS,
+      HOUSING_LISTINGS_HAYSTACK_AS_INDEXED,
+    ],
+    [
+      'listings directory',
+      LISTING_DIRECTORY_SEARCH_COLUMNS,
+      LISTINGS_DIRECTORY_HAYSTACK_AS_INDEXED,
+    ],
+    [
+      'listings name',
+      LISTING_NAME_SEARCH_COLUMNS,
+      LISTINGS_NAME_HAYSTACK_AS_INDEXED,
+    ],
+    ['subprofiles', SUBPROFILE_SEARCH_COLUMNS, SUBPROFILES_HAYSTACK_AS_INDEXED],
+    [
+      'profiles name and handle',
+      PROFILE_NAME_SEARCH_COLUMNS,
+      PROFILES_NAME_HAYSTACK_AS_INDEXED,
+    ],
+  ])(
+    '%s folded trigram haystack (1827600000000)',
+    (_label, columns, indexed) => {
+      expect(foldedHaystack('', columns)).toBe(indexed);
+    },
+  );
+
   it('an alias only qualifies the column references, leaving the shape intact', () => {
     const aliased = weightedSearchVector('p', FORUM_POST_SEARCH_FIELDS);
     expect(aliased).toBe(
@@ -131,6 +230,17 @@ describe('search-text query side', () => {
   it('ranks a full-text hit above a trigram-only near miss', () => {
     const rank = searchRankExpression('VEC', 'QRY', 'HAY', 'TERM');
     expect(rank).toBe('(4 * ts_rank(VEC, QRY) + similarity(HAY, TERM))');
+  });
+
+  it('matches a folded pattern against each element of a text array', () => {
+    expect(foldedArrayElementMatch('listing', 'tags', 'barterTerm')).toBe(
+      `EXISTS (SELECT 1 FROM unnest("listing"."tags") AS "__tag" ` +
+        `WHERE translate(lower("__tag"), ` +
+        `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy') ` +
+        `LIKE translate(lower(:barterTerm), ` +
+        `'áàâãäåçéèêëíìîïñóòôõöúùûüýÿ', 'aaaaaaceeeeiiiinooooouuuuyy') ` +
+        `ESCAPE '\\')`,
+    );
   });
 
   it('quotes a bare column for an index and an aliased one for a query', () => {

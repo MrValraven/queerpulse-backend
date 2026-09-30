@@ -236,9 +236,13 @@ export class AccountExportService {
     const [user, profile] = await Promise.all([
       // `addSelect('user.email')` re-includes the `select: false` email column —
       // the member's own email is core to the data-export archive they receive.
+      // ENG-495b: the inviter is joined for their id alone, so the archive
+      // records who invited the member and nothing of that person's profile.
       this.users
         .createQueryBuilder('user')
         .addSelect('user.email')
+        .leftJoin('user.invitedBy', 'inviter')
+        .addSelect('inviter.id')
         .where('user.id = :userId', { userId })
         .getOne(),
       this.profiles.findOne({ where: { userId } }),
@@ -252,6 +256,8 @@ export class AccountExportService {
       role: user.role,
       joinedAt: user.createdAt.toISOString(),
       activatedAt: user.activatedAt ? user.activatedAt.toISOString() : null,
+      onboardedAt: user.onboardedAt ? user.onboardedAt.toISOString() : null,
+      invitedByUserId: user.invitedBy ? user.invitedBy.id : null,
       ...(profile
         ? {
             name: `${profile.firstName} ${profile.lastName}`.trim(),
@@ -259,13 +265,17 @@ export class AccountExportService {
             lastName: profile.lastName,
             slug: profile.slug,
             pronouns: profile.pronouns,
+            pronunciation: profile.pronunciation,
             tagline: profile.tagline,
             bio: profile.bio,
+            bioPt: profile.bioPt,
             location: profile.location,
             avatarUrl: profile.avatarUrl,
             visibility: profile.visibility,
             identities: profile.identities,
+            discoverableIdentities: profile.discoverableIdentities,
             lookingFor: profile.lookingFor,
+            notHereFor: profile.notHereFor,
             tags: profile.tags,
             openTo: profile.openTo,
             now: profile.now,
