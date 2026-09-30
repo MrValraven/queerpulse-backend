@@ -210,6 +210,59 @@ export class StorageService {
   }
 
   /**
+   * Write bytes the SERVER produced (not a member's presigned PUT) under a
+   * fresh key of `kind` owned by `ownerUserId`, and return the key. Persona
+   * feed import uses it to keep its own copy of podcast art instead of
+   * hotlinking a third-party host.
+   *
+   * The same policy a presigned upload gets is enforced here, since there is
+   * no DTO in front of this: the content type must be one the kind accepts
+   * (its extension comes from the same table), the bytes must fit the kind's
+   * cap, and an image's magic bytes must match the declared type, so a key's
+   * extension can never lie about what `GET /files/*` will serve.
+   */
+  async putServerObject(
+    kind: UploadKind,
+    ownerUserId: string,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<string> {
+    const typeSpec = StorageService.contentTypeTableFor(kind)[contentType];
+    if (!typeSpec) {
+      throw new BadRequestException(`Unsupported content type: ${contentType}`);
+    }
+    const kindSpec = UPLOAD_KIND_SPECS[kind];
+    if (!kindSpec) {
+      throw new BadRequestException(`Unsupported upload kind: ${kind}`);
+    }
+    if (bytes.byteLength === 0 || bytes.byteLength > kindSpec.maxBytes) {
+      throw new BadRequestException(
+        `File too large for ${kind}: max ${kindSpec.maxBytes} bytes`,
+      );
+    }
+    if (
+      contentType.startsWith('image/') &&
+      !magicBytesMatchContentType(
+        bytes.subarray(0, MAGIC_BYTE_PREFIX_LENGTH),
+        contentType,
+      )
+    ) {
+      throw new BadRequestException('File content does not match its type');
+    }
+    const key = `${kindSpec.prefix}/${ownerUserId}/${randomUUID()}${typeSpec.extension}`;
+    await this.storageClient().send(
+      new PutObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: key,
+        Body: bytes,
+        ContentType: contentType,
+        ContentLength: bytes.byteLength,
+      }),
+    );
+    return key;
+  }
+
+  /**
    * Final fix F1 (C1): copies one stored object to a fresh key of the same
    * kind and extension owned by `ownerUserId`, inside the bucket, and returns
    * the new key. A member who forwards, as themselves, a photo or document a

@@ -3,6 +3,7 @@ import {
   BadRequestException,
   InternalServerErrorException,
 } from '@nestjs/common';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { StorageService } from './storage.service';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 
@@ -25,6 +26,78 @@ function buildService(
 }
 
 describe('StorageService', () => {
+  // Persona feed import: the server's own write path, used to keep a copy of
+  // podcast art instead of hotlinking it.
+  describe('putServerObject', () => {
+    const OWNER = '11111111-1111-4111-8111-111111111111';
+    const PNG = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0, 0, 0, 0,
+    ]);
+    let send: jest.SpiedFunction<S3Client['send']>;
+
+    beforeEach(() => {
+      send = jest
+        .spyOn(S3Client.prototype, 'send')
+        .mockResolvedValue({} as never);
+    });
+
+    afterEach(() => {
+      send.mockRestore();
+    });
+
+    it('writes the bytes under a fresh key of the kind, owned by the user', async () => {
+      const key = await buildService().putServerObject(
+        'work-image',
+        OWNER,
+        PNG,
+        'image/png',
+      );
+      expect(key).toMatch(new RegExp(`^work/${OWNER}/[0-9a-f-]{36}\\.png$`));
+      const [command] = send.mock.calls[0] as unknown as [PutObjectCommand];
+      expect(command).toBeInstanceOf(PutObjectCommand);
+      expect(command.input).toEqual(
+        expect.objectContaining({
+          Bucket: 'queerpulse-prod',
+          Key: key,
+          ContentType: 'image/png',
+          ContentLength: PNG.byteLength,
+          Body: PNG,
+        }),
+      );
+    });
+
+    it('refuses bytes whose magic does not match the declared type', async () => {
+      await expect(
+        buildService().putServerObject('work-image', OWNER, PNG, 'image/jpeg'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('refuses a type the kind does not accept, and an over-cap body', async () => {
+      await expect(
+        buildService().putServerObject(
+          'work-image',
+          OWNER,
+          new TextEncoder().encode('%PDF-1.7'),
+          'application/pdf',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      const tooBig = new Uint8Array(
+        UPLOAD_KIND_SPECS['work-image'].maxBytes + 1,
+      );
+      tooBig.set(PNG);
+      await expect(
+        buildService().putServerObject(
+          'work-image',
+          OWNER,
+          tooBig,
+          'image/png',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(send).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createPresignedUpload', () => {
     it('returns the key it was given, not a public URL', async () => {
       const service = buildService();

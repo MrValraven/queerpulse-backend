@@ -28,6 +28,7 @@ import { PlatformSettingsModule } from './platform-settings/platform-settings.mo
 import { ProfilesModule } from './profiles/profiles.module';
 import { PublicProfilesModule } from './public-profiles/public-profiles.module';
 import { SubprofilesModule } from './subprofiles/subprofiles.module';
+import { SubprofileFeedsModule } from './subprofiles/feeds/subprofile-feeds.module';
 import { HandlesModule } from './handles/handles.module';
 import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
@@ -263,6 +264,8 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     ProfilesModule,
     PublicProfilesModule,
     SubprofilesModule,
+    // Persona podcast-feed import (outbound fetches + scheduled sync).
+    SubprofileFeedsModule,
     HandlesModule,
     VouchModule,
     SafeSpaceNominationsModule,

@@ -512,6 +512,7 @@ const OWNER_FILTERS: [
       builder('(subprofile.userId = :userId OR coOwner.id IS NOT NULL)'),
       builder('(subprofile.userId = :userId OR coOwner.id IS NOT NULL)'),
       builder('(subprofile.userId = :userId OR coOwner.id IS NOT NULL)'),
+      builder('(subprofile.userId = :userId OR coOwner.id IS NOT NULL)'),
     ],
   ],
 ];

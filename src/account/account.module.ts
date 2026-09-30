@@ -192,6 +192,7 @@ import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { MagazinePayment } from '../magazine/entities/magazine-payment.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
 import { SubprofileSocialLink } from '../subprofiles/entities/subprofile-social-link.entity';
+import { SubprofileFeed } from '../subprofiles/entities/subprofile-feed.entity';
 import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affiliation.entity';
 
 @Module({
@@ -378,6 +379,7 @@ import { SubprofileAffiliation } from '../subprofiles/entities/subprofile-affili
       MagazinePayment,
       SubprofileItem,
       SubprofileSocialLink,
+      SubprofileFeed,
       SubprofileAffiliation,
       Affiliation,
       Ambassador,

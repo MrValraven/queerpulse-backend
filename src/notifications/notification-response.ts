@@ -363,6 +363,20 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'subprofileSlugOrHandle',
       'deepLink',
     ],
+    // Persona feed import: new podcast episodes are waiting for review. The
+    // recipient is a member of the persona, so its id and the feed's id are
+    // routes they already hold (the review list is
+    // `/subprofiles/:subprofileId/feeds/:feedId/entries`). `feedTitle` is the
+    // show's public channel title; `newItemCount` is a NUMBER the copy is
+    // CLDR-pluralised on. No episode title or description rides along.
+    [NotificationType.PersonaImportReady]: [
+      'subprofileId',
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'feedId',
+      'feedTitle',
+      'newItemCount',
+    ],
     [NotificationType.SubprofileDeleted]: ['subprofileName'],
     [NotificationType.SubprofileMemberRemoved]: ['subprofileName'],
     // The persona creator handoff (Phase 2, option A). `subprofileName` and
