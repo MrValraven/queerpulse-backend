@@ -83,7 +83,9 @@ export interface ListingDraftOwnerDTO extends MemberRef {
  * consent decisions and their personal bio, which even the listing moderation
  * queue withholds from staff (`toDirectoryModerationListingDTO`). Four fields
  * are read out of it here, each type-checked because the payload is opaque
- * client-written JSON, and nothing else from it leaves this mapper.
+ * client-written JSON, and nothing else from it leaves this mapper. Only
+ * `GET /admin/listing-drafts/:id` returns more, and only the business half
+ * (`AdminListingDraftDetailDTO`).
  */
 export interface AdminListingDraftDTO {
   id: string;
@@ -122,6 +124,75 @@ export function toAdminListingDraftDTO(
     createdAt: draft.createdAt.toISOString(),
     updatedAt: draft.updatedAt.toISOString(),
   };
+}
+
+/**
+ * The wizard-state keys that describe the BUSINESS, the only ones
+ * `GET /admin/listing-drafts/:id` hands back.
+ *
+ * An allow-list on purpose. The payload is opaque client-written JSON whose
+ * shape the frontend owns, so a deny-list would pass through any field the
+ * wizard grows later, including one about the member. With an allow-list a
+ * new field stays behind until someone decides it is about the business.
+ *
+ * Left behind, as the member's own answers that staff may not carry onto a
+ * team listing: the eight owner-personal fields (`rel`, `ownerName`,
+ * `ownerBio`, `visibility`, `linkToProfile`, `ownedBy`, `consentOuting`,
+ * `consentGuide`, see `OWNER_PERSONAL_LISTING_FIELDS`), `ownerRole` (omitted
+ * from the admin create body), the affirming pledge, and the queer-owned
+ * `badge` with its `evidence`: a queer-owned claim says the owner is queer,
+ * an outing risk exactly like `ownedBy`, and the member never confirmed it.
+ * Also the wizard-only state `path`, `managementRole` and `isStaffAuthored`.
+ */
+export const LISTING_DRAFT_BUSINESS_KEYS = [
+  'name',
+  'cats',
+  'hood',
+  'price',
+  'blurb',
+  'tagline',
+  'whatItIs',
+  'tags',
+  'goodFor',
+  'accessibility',
+  'services',
+  'pricingMode',
+  'menu',
+  'langs',
+  'online',
+  'address',
+  'geocoded',
+  'latitude',
+  'longitude',
+  'hours',
+  'hoursNote',
+  'hoursExceptions',
+  'social',
+  'photos',
+  'alt',
+] as const;
+
+/**
+ * `GET /admin/listing-drafts/:id`: the summary plus the business half of the
+ * member's wizard state, flattened out of the stored `{ draft, step }`
+ * envelope, for the console's "Finish as a team listing". It goes out as a
+ * team listing offered back to the member, who adds their own answers when
+ * they accept.
+ */
+export interface AdminListingDraftDetailDTO extends AdminListingDraftDTO {
+  payload: Record<string, unknown>;
+}
+
+export function toAdminListingDraftDetailDTO(
+  draft: ListingDraft,
+  ownerRef: MemberRef | null,
+): AdminListingDraftDetailDTO {
+  const wizardState = readWizardState(draft.payload);
+  const payload: Record<string, unknown> = {};
+  for (const key of LISTING_DRAFT_BUSINESS_KEYS) {
+    if (Object.hasOwn(wizardState, key)) payload[key] = wizardState[key];
+  }
+  return { ...toAdminListingDraftDTO(draft, ownerRef), payload };
 }
 
 export function toListingDraftSummaryDTO(

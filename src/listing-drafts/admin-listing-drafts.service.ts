@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
@@ -7,7 +7,9 @@ import { Profile } from '../users/entities/profile.entity';
 import { ListAdminListingDraftsQuery } from './dto/list-admin-listing-drafts.query';
 import { ListingDraft } from './entities/listing-draft.entity';
 import {
+  AdminListingDraftDetailDTO,
   AdminListingDraftDTO,
+  toAdminListingDraftDetailDTO,
   toAdminListingDraftDTO,
 } from './listing-draft-response';
 
@@ -53,5 +55,21 @@ export class AdminListingDraftsService {
         toAdminListingDraftDTO(row, refs.get(row.userId) ?? null),
       );
     });
+  }
+
+  /**
+   * `GET /admin/listing-drafts/:id` — one draft's summary plus the business
+   * half of its wizard state, for "Finish as a team listing". Read-only: the
+   * member's row is never written from here, so their own draft stays as they
+   * left it. A 404 once they have submitted or discarded it, since the row is
+   * deleted then.
+   */
+  async getOne(id: string): Promise<AdminListingDraftDetailDTO> {
+    const draft = await this.listingDrafts.findOne({ where: { id } });
+    if (!draft) throw new NotFoundException('Listing draft not found');
+    const refs = await new MemberLookup(this.profiles).byUserIds([
+      draft.userId,
+    ]);
+    return toAdminListingDraftDetailDTO(draft, refs.get(draft.userId) ?? null);
   }
 }
