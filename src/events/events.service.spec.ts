@@ -11,6 +11,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In, LessThanOrEqual, Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { AccessTier } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
   resetImageUrlBaseForTesting,
@@ -81,10 +82,11 @@ describe('EventsService', () => {
   let profiles: { find: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
   let membership: {
-    assertMemberBySlug: jest.Mock;
+    assertOwnerOrModBySlug: jest.Mock;
     isMember: jest.Mock;
     communityIdsForUser: jest.Mock;
     slugById: jest.Mock;
+    hostingRefById: jest.Mock;
   };
   let bookmarks: {
     isBookmarked: jest.Mock;
@@ -283,10 +285,11 @@ describe('EventsService', () => {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
     membership = {
-      assertMemberBySlug: jest.fn().mockResolvedValue('community-1'),
+      assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
       isMember: jest.fn().mockResolvedValue(false),
       communityIdsForUser: jest.fn().mockResolvedValue([]),
       slugById: jest.fn().mockResolvedValue(null),
+      hostingRefById: jest.fn().mockResolvedValue(null),
     };
     bookmarks = {
       isBookmarked: jest.fn().mockResolvedValue(false),
@@ -1078,16 +1081,16 @@ describe('EventsService', () => {
 
   // Fix round 2 (Task C): `update()` can now resolve/detach a community via
   // `communitySlug`, mirroring `create()`'s handling exactly — same
-  // authorization check (`assertMemberBySlug`), applied to the acting
+  // authorization check (`assertOwnerOrModBySlug`), applied to the acting
   // organizer (`userId`) rather than always `hostId`.
   describe('update communitySlug handling', () => {
     it('resolves a non-empty communitySlug via the SAME authorization create() uses', async () => {
       events.findOne.mockResolvedValue(editableEvent());
-      membership.assertMemberBySlug.mockResolvedValue('community-9');
+      membership.assertOwnerOrModBySlug.mockResolvedValue('community-9');
       const detail = await service.update('x', 'u1', {
         communitySlug: 'queer-devs',
       });
-      expect(membership.assertMemberBySlug).toHaveBeenCalledWith(
+      expect(membership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
         'queer-devs',
         'u1',
       );
@@ -1100,7 +1103,7 @@ describe('EventsService', () => {
         communityId: 'community-9',
       });
       const detail = await service.update('x', 'u1', { communitySlug: null });
-      expect(membership.assertMemberBySlug).not.toHaveBeenCalled();
+      expect(membership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
       expect(detail.communityId).toBeNull();
     });
 
@@ -1119,7 +1122,7 @@ describe('EventsService', () => {
         communityId: 'community-9',
       });
       const detail = await service.update('x', 'u1', { capacity: 3 });
-      expect(membership.assertMemberBySlug).not.toHaveBeenCalled();
+      expect(membership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
       expect(detail.communityId).toBe('community-9');
     });
 
@@ -1139,6 +1142,97 @@ describe('EventsService', () => {
       await expect(
         service.update('x', 'u1', { visibility: EventVisibility.Community }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('keeps the community it is already hosted with without re-checking standing', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        communityId: 'community-9',
+      });
+      membership.slugById.mockResolvedValue('queer-devs');
+      const detail = await service.update('x', 'u1', {
+        communitySlug: 'queer-devs',
+      });
+      expect(membership.assertOwnerOrModBySlug).not.toHaveBeenCalled();
+      expect(detail.communityId).toBe('community-9');
+    });
+
+    it('refuses a move to another community the organizer cannot speak for', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        communityId: 'community-9',
+      });
+      membership.slugById.mockResolvedValue('queer-devs');
+      membership.assertOwnerOrModBySlug.mockRejectedValue(
+        new ForbiddenException(),
+      );
+      await expect(
+        service.update('x', 'u1', { communitySlug: 'lisbon-hikers' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(membership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'lisbon-hikers',
+        'u1',
+      );
+    });
+  });
+
+  // `EventDetail.community`: the community a gathering is hosted with, shown
+  // on its page whatever its visibility, except a `private` community to a
+  // viewer outside it.
+  describe('getBySlug hosting community', () => {
+    const hostedEvent = () => ({
+      ...editableEvent(),
+      hostId: 'host',
+      communityId: 'community-9',
+    });
+    const ref = (accessTier: AccessTier) => ({
+      slug: 'queer-devs',
+      name: 'Queer Devs',
+      accessTier,
+    });
+
+    it('names a listed community to anyone who can see the gathering', async () => {
+      events.findOne.mockResolvedValue(hostedEvent());
+      membership.hostingRefById.mockResolvedValue(ref(AccessTier.Request));
+      const detail = await service.getBySlug('x', 'stranger');
+      expect(detail.community).toEqual(ref(AccessTier.Request));
+      expect(detail.communitySlug).toBe('queer-devs');
+      expect(detail.communityId).toBe('community-9');
+      expect(membership.isMember).not.toHaveBeenCalled();
+    });
+
+    it('withholds a private community, slug and id included, from an outsider', async () => {
+      events.findOne.mockResolvedValue(hostedEvent());
+      membership.hostingRefById.mockResolvedValue(ref(AccessTier.Private));
+      membership.isMember.mockResolvedValue(false);
+      const detail = await service.getBySlug('x', 'stranger');
+      expect(detail.community).toBeNull();
+      expect(detail.communitySlug).toBeNull();
+      expect(detail.communityId).toBeNull();
+    });
+
+    it('names a private community to its own members', async () => {
+      events.findOne.mockResolvedValue(hostedEvent());
+      membership.hostingRefById.mockResolvedValue(ref(AccessTier.Private));
+      membership.isMember.mockResolvedValue(true);
+      const detail = await service.getBySlug('x', 'member');
+      expect(detail.community).toEqual(ref(AccessTier.Private));
+      expect(membership.isMember).toHaveBeenCalledWith('community-9', 'member');
+    });
+
+    it('names a private community to the organizers, member or not', async () => {
+      events.findOne.mockResolvedValue(hostedEvent());
+      membership.hostingRefById.mockResolvedValue(ref(AccessTier.Private));
+      const detail = await service.getBySlug('x', 'host');
+      expect(detail.community).toEqual(ref(AccessTier.Private));
+      expect(detail.communityId).toBe('community-9');
+    });
+
+    it('carries no community for a gathering without one', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      const detail = await service.getBySlug('x', 'u1');
+      expect(detail.community).toBeNull();
+      expect(membership.hostingRefById).not.toHaveBeenCalled();
     });
   });
 
@@ -1755,6 +1849,34 @@ describe('EventsService', () => {
         access: false,
       });
       expect(detail.customRsvpQuestion).toBe('What should we cook?');
+    });
+
+    it('hosts a public gathering with a community only through the owner-or-mod check', async () => {
+      membership.assertOwnerOrModBySlug.mockResolvedValue('community-9');
+      await service.create('host-1', {
+        ...baseCreate,
+        communitySlug: 'queer-devs',
+      });
+      expect(membership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'host-1',
+      );
+      const created = events.create.mock.calls[0]![0];
+      expect(created.communityId).toBe('community-9');
+      expect(created.visibility).toBe(EventVisibility.Public);
+    });
+
+    it('refuses a host who cannot speak for the community', async () => {
+      membership.assertOwnerOrModBySlug.mockRejectedValue(
+        new ForbiddenException(),
+      );
+      await expect(
+        service.create('host-1', {
+          ...baseCreate,
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(events.create).not.toHaveBeenCalled();
     });
 
     it('stores empty care fields when the wizard sends none', async () => {

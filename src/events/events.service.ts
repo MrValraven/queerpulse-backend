@@ -33,6 +33,7 @@ import {
   SelectQueryBuilder,
 } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { AccessTier } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
   AttachableListingRef,
@@ -337,9 +338,13 @@ export class EventsService {
     const endAt = dto.endAt ? new Date(dto.endAt) : null;
     this.assertScheduleValid(startAt, endAt, { rejectPast: true });
 
+    // Hosting a gathering with a community puts the community's name on it
+    // ("with Queer Runners Lisboa"), whatever its `visibility`, so it takes
+    // standing to speak for the community: owner, co-owner or mod. A plain
+    // member gets a 403, an outsider of a private community the usual 404.
     let communityId: string | null = null;
     if (dto.communitySlug) {
-      communityId = await this.membership.assertMemberBySlug(
+      communityId = await this.membership.assertOwnerOrModBySlug(
         dto.communitySlug,
         hostId,
       );
@@ -715,19 +720,22 @@ export class EventsService {
     // exactly:
     //   - absent from the DTO -> leave `event.communityId` unchanged.
     //   - `null` or `''` -> explicit detach (`communityId = null`).
-    //   - a non-empty slug -> resolve via `assertMemberBySlug`, THE SAME
-    //     authorization `create()` uses (resolve slug -> community, 404 if
-    //     missing/archived, 403 if the caller isn't on its roster) — not a
-    //     weaker re-check. Authorized against `userId`, the acting
-    //     organizer already asserted above (host or co-host), mirroring
-    //     `create()`'s "the actor must themselves be on the target
-    //     community's roster" rule.
+    //   - the slug of the community it is ALREADY hosted with -> unchanged,
+    //     no re-check. A gathering filed before hosting needed staff standing
+    //     keeps its community, and a client re-sending the whole form (or a
+    //     `scope: 'future'` series edit) doesn't 403 its non-staff co-host.
+    //   - any other non-empty slug -> resolve via `assertOwnerOrModBySlug`,
+    //     THE SAME authorization `create()` uses (404 if missing/archived or
+    //     a private community the caller is outside of, 403 unless they own,
+    //     co-own or moderate it). Authorized against `userId`, the acting
+    //     organizer already asserted above (host or co-host).
     let communityId = event.communityId;
     if (dto.communitySlug !== undefined) {
-      communityId =
-        dto.communitySlug === null || dto.communitySlug === ''
-          ? null
-          : await this.membership.assertMemberBySlug(dto.communitySlug, userId);
+      communityId = await this.resolvePatchedCommunityId(
+        event,
+        dto.communitySlug,
+        userId,
+      );
     }
 
     // Community-only gatherings require a community — checked against the
@@ -2433,6 +2441,43 @@ export class EventsService {
     );
   }
 
+  /** `update()`'s community resolution; see the rules at its call site. */
+  private async resolvePatchedCommunityId(
+    event: Event,
+    communitySlug: string | null,
+    userId: string,
+  ): Promise<string | null> {
+    if (communitySlug === null || communitySlug === '') return null;
+    if (
+      event.communityId &&
+      (await this.membership.slugById(event.communityId)) === communitySlug
+    ) {
+      return event.communityId;
+    }
+    return this.membership.assertOwnerOrModBySlug(communitySlug, userId);
+  }
+
+  /**
+   * Whether this viewer must not learn which community a gathering is hosted
+   * with: true only for a `private` community when the viewer is neither one
+   * of the gathering's organizers nor on that community's roster (parent staff
+   * of a private space count, through `isMember`'s effective role). A private
+   * community's existence is withheld everywhere else, and a public gathering
+   * naming it would give it away. Costs one roster lookup, and only in that
+   * one case.
+   */
+  private async isHostingCommunityWithheld(
+    event: Event,
+    hostingCommunityRef: { accessTier: AccessTier } | null,
+    viewerId: string,
+    isOrganizer: boolean,
+  ): Promise<boolean> {
+    if (!event.communityId || !hostingCommunityRef) return false;
+    if (hostingCommunityRef.accessTier !== AccessTier.Private) return false;
+    if (isOrganizer) return false;
+    return !(await this.membership.isMember(event.communityId, viewerId));
+  }
+
   private async eventSeriesByIds(
     seriesIds: string[],
   ): Promise<Map<string, EventSeries>> {
@@ -2449,17 +2494,18 @@ export class EventsService {
     // First wave: these six lookups are all independent of one another — only
     // `profilesByUserIds` below depends on `cohostRows`'s ids, so it waits for
     // its own second wave instead of chaining behind every other await.
-    // `communitySlug` is a single-event lookup (this method builds one
-    // event's detail, never a list page), so riding along here costs nothing
-    // extra on the hot list/browse path — see `EventSummary.communityId` vs.
-    // `EventDetail.communitySlug`'s doc comments for why the split.
+    // The hosting community (`communitySlug` + `community`) is a single-event
+    // lookup (this method builds one event's detail, never a list page), so
+    // riding along here costs nothing extra on the hot list/browse path — see
+    // `EventSummary.communityId` vs. `EventDetail.communitySlug`'s doc
+    // comments for why the split.
     const [
       goingCount,
       waitlistCount,
       myRsvp,
       cohostRows,
       isBookmarked,
-      communitySlug,
+      hostingCommunityRef,
       crops,
       venueListing,
       series,
@@ -2480,7 +2526,7 @@ export class EventsService {
       }),
       this.bookmarks.isBookmarked(viewerId, event.id),
       event.communityId
-        ? this.membership.slugById(event.communityId)
+        ? this.membership.hostingRefById(event.communityId)
         : Promise.resolve(null),
       this.mediaCropService.getMany(
         event.coverImageUrl ? [event.coverImageUrl] : [],
@@ -2513,6 +2559,15 @@ export class EventsService {
       viewerId,
       isOrganizer,
     );
+    const isHostingCommunityWithheld = await this.isHostingCommunityWithheld(
+      event,
+      hostingCommunityRef,
+      viewerId,
+      isOrganizer,
+    );
+    const hostingCommunity = isHostingCommunityWithheld
+      ? null
+      : hostingCommunityRef;
 
     const summary = toEventSummary(
       event,
@@ -2578,7 +2633,11 @@ export class EventsService {
             ),
           )
         : [],
-      communitySlug,
+      // See `EventDetail.community` for the private-community rule. Withheld,
+      // the id goes too: it is on the summary spread above.
+      ...(isHostingCommunityWithheld ? { communityId: null } : {}),
+      communitySlug: hostingCommunity?.slug ?? null,
+      community: hostingCommunity,
       venueListing,
       // LOC-16. Organisers only, and only when there is (or was) a listed
       // venue to describe. See `EventDetail.venueAttachment`.

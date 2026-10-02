@@ -250,10 +250,11 @@ describe('EventsService venue confirmation (LOC-16)', () => {
         {
           provide: CommunityMembershipService,
           useValue: {
-            assertMemberBySlug: jest.fn().mockResolvedValue('community-1'),
+            assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
             isMember: jest.fn().mockResolvedValue(false),
             communityIdsForUser: jest.fn().mockResolvedValue([]),
             slugById: jest.fn().mockResolvedValue(null),
+            hostingRefById: jest.fn().mockResolvedValue(null),
           },
         },
         {
