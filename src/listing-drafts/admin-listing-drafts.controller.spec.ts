@@ -32,4 +32,14 @@ describe('AdminListingDraftsController', () => {
     await expect(controller.list({ page: 2 })).resolves.toBe(page);
     expect(list).toHaveBeenCalledWith({ page: 2 });
   });
+
+  it('GET :id delegates to the service with the draft id', async () => {
+    const detail = { id: 'd1', payload: {} };
+    const getOne = jest.fn().mockResolvedValue(detail);
+    const controller = new AdminListingDraftsController({
+      getOne,
+    } as unknown as AdminListingDraftsService);
+    await expect(controller.getOne('d1')).resolves.toBe(detail);
+    expect(getOne).toHaveBeenCalledWith('d1');
+  });
 });

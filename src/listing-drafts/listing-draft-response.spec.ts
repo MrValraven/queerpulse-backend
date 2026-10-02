@@ -2,6 +2,7 @@ import { MemberRef } from '../common/member-ref';
 import { ListingDraft } from './entities/listing-draft.entity';
 import {
   deriveListingDraftName,
+  toAdminListingDraftDetailDTO,
   toAdminListingDraftDTO,
 } from './listing-draft-response';
 
@@ -90,5 +91,99 @@ describe('toAdminListingDraftDTO', () => {
       step: 0,
       owner: null,
     });
+  });
+});
+
+describe('toAdminListingDraftDetailDTO', () => {
+  // Every answer about the member filled in, beside the business details.
+  const fullWizardPayload = {
+    step: 4,
+    draft: {
+      path: 'claim',
+      name: 'Tasca da Graça',
+      hood: 'Graça',
+      cats: ['food'],
+      blurb: 'Petiscos and a long table.',
+      social: { instagram: 'tascadagraca' },
+      badge: 'owned',
+      evidence: 'I am the owner and I am trans.',
+      rel: 'own',
+      ownerName: 'Marta Fonseca',
+      ownerRole: 'Co-founder',
+      ownerBio: 'Private bio',
+      visibility: 'anon',
+      linkToProfile: true,
+      ownedBy: ['women', 'trans'],
+      consentOuting: true,
+      consentGuide: true,
+      affirmingBaselineAccepted: true,
+      managementRole: 'owner',
+      isStaffAuthored: false,
+      someFutureField: 'not yet reviewed',
+    },
+  };
+
+  it('returns the summary and the business half, flattened out of the envelope', () => {
+    const dto = toAdminListingDraftDetailDTO(
+      draftRow(fullWizardPayload),
+      ownerRef,
+    );
+    expect(dto).toMatchObject({
+      id: 'draft-1',
+      name: 'Tasca da Graça',
+      step: 4,
+      owner: { userId: 'user-1', slug: 'marta' },
+    });
+    expect(dto.payload).toEqual({
+      name: 'Tasca da Graça',
+      hood: 'Graça',
+      cats: ['food'],
+      blurb: 'Petiscos and a long table.',
+      social: { instagram: 'tascadagraca' },
+    });
+  });
+
+  it('leaves every answer about the member, and any unreviewed key, behind', () => {
+    const serialised = JSON.stringify(
+      toAdminListingDraftDetailDTO(draftRow(fullWizardPayload), ownerRef)
+        .payload,
+    );
+    for (const leaked of [
+      'consent',
+      'Private bio',
+      'Marta Fonseca',
+      'Co-founder',
+      'owned',
+      'trans',
+      'evidence',
+      'affirming',
+      'visibility',
+      'linkToProfile',
+      'rel',
+      'managementRole',
+      'isStaffAuthored',
+      'someFutureField',
+      'path',
+    ]) {
+      expect(serialised).not.toContain(leaked);
+    }
+    expect(
+      JSON.stringify(
+        toAdminListingDraftDetailDTO(draftRow(fullWizardPayload), ownerRef),
+      ),
+    ).not.toContain('secret-token');
+  });
+
+  it('reads a flat payload and keeps an empty one empty', () => {
+    expect(
+      toAdminListingDraftDetailDTO(
+        draftRow({ name: 'Bar Flat', ownerBio: 'x' }),
+        null,
+      ).payload,
+    ).toEqual({ name: 'Bar Flat' });
+    expect(
+      toAdminListingDraftDetailDTO(draftRow({ step: 0, draft: {} }), null)
+        .payload,
+    ).toEqual({});
   });
 });

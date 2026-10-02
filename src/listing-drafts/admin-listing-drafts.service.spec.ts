@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { PAGE_SIZE } from '../common/pagination';
@@ -26,6 +27,7 @@ describe('AdminListingDraftsService', () => {
     getManyAndCount: jest.Mock;
   };
   let profiles: { find: jest.Mock };
+  let findOne: jest.Mock;
 
   beforeEach(async () => {
     queryBuilder = {
@@ -36,13 +38,17 @@ describe('AdminListingDraftsService', () => {
       getManyAndCount: jest.fn(),
     };
     profiles = { find: jest.fn() };
+    findOne = jest.fn();
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         AdminListingDraftsService,
         {
           provide: getRepositoryToken(ListingDraft),
-          useValue: { createQueryBuilder: jest.fn(() => queryBuilder) },
+          useValue: {
+            createQueryBuilder: jest.fn(() => queryBuilder),
+            findOne,
+          },
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
       ],
@@ -102,6 +108,49 @@ describe('AdminListingDraftsService', () => {
       path: 'suggest',
       step: 1,
       owner: { slug: 'marta', firstName: 'Marta' },
+    });
+  });
+
+  describe('getOne', () => {
+    it('returns the summary, the owner and only the business half', async () => {
+      findOne.mockResolvedValue({
+        ...draftRow('d1', 'user-1'),
+        payload: {
+          step: 2,
+          draft: { name: 'Tasca', hood: 'Graça', ownerBio: 'Private bio' },
+        },
+      });
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'marta',
+          firstName: 'Marta',
+          lastName: 'Fonseca',
+          pronouns: null,
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+
+      const result = await service.getOne('d1');
+
+      expect(findOne).toHaveBeenCalledWith({ where: { id: 'd1' } });
+      expect(result).toMatchObject({
+        id: 'd1',
+        name: 'Tasca',
+        step: 2,
+        owner: { userId: 'user-1', slug: 'marta' },
+        payload: { name: 'Tasca', hood: 'Graça' },
+      });
+      expect(result.payload).not.toHaveProperty('ownerBio');
+    });
+
+    it('404s once the draft is submitted or discarded', async () => {
+      findOne.mockResolvedValue(null);
+      await expect(service.getOne('gone')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(profiles.find).not.toHaveBeenCalled();
     });
   });
 });
