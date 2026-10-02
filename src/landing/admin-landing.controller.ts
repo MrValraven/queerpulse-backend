@@ -48,7 +48,7 @@ import { LandingService } from './landing.service';
  */
 @UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
-@StaffRoles('editorial')
+@StaffRoles('editorial', 'cultural_producer')
 @ApiTags('Admin — Landing')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })

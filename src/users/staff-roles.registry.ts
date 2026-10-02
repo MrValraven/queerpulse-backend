@@ -47,7 +47,9 @@ export type StaffRoleId =
   | 'resource_curator'
   | 'editorial'
   | 'communities'
-  | 'partnerships';
+  | 'partnerships'
+  | 'product_manager'
+  | 'cultural_producer';
 
 export interface StaffRoleDef {
   id: StaffRoleId;
@@ -65,8 +67,8 @@ export interface StaffRoleDef {
    * OTHER members' content or membership. Someone who can decline a housing
    * listing or spike a magazine piece is acting as the platform, and the member
    * on the other side of that decision deserves to know it without having to
-   * ask. Two roles are deliberately left unbadged, and a new role should have to
-   * clear the same bar rather than inherit a default:
+   * ask. Four roles are deliberately left unbadged, and a new role should have
+   * to clear the same bar rather than inherit a default:
    *
    *   - `magazine_writer` holds no power over anyone. Its own `grants` list says
    *     every read is scoped server-side to the caller's own work, so it never
@@ -80,6 +82,13 @@ export interface StaffRoleDef {
    *     whether they stay. Naming a QueerPulse Ambassador does reach a member,
    *     and it grants an honour and perks while holding no power over that
    *     member, so the grant still earns no public staff badge.
+   *   - `product_manager` reads aggregates (feature usage) and keeps the
+   *     roadmap board. Triaging a submitted idea is a decision about the idea,
+   *     not about the member who sent it: nothing it decides changes what that
+   *     member may post or whether they stay.
+   *   - `cultural_producer` keeps the platform's own public-face pages (the
+   *     landing slots and the press kit). It decides nothing about another
+   *     member's content or membership.
    *
    * Account tiers are a separate axis entirely: moderators and admins are on the
    * roster because of `User.role`, and never need a grant to be badged.
@@ -181,6 +190,25 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
       'Maintain the changemaker roster and its nominations (admin/changemakers, admin/changemaker-nominations): the nominee, the reason written for them, and the triage history',
       'NOT who nominated whom: a nomination is a private submission about a third party who never opted in and may not know they were named, so the pairing of the two names stays Moderator/Admin while the pitch itself is delegated',
       'Name and stand down QueerPulse Ambassadors (admin/ambassadors), with the reason kept internal, and take a moderator seat in their private circle',
+    ],
+  },
+  product_manager: {
+    id: 'product_manager',
+    hasPublicStaffBadge: false,
+    grants: [
+      'Run the roadmap board (admin/roadmap): items, dependencies, bulk edits, archiving, voter notifications, the team roster, the hero stats and the audit trail, exactly what a Moderator gets there',
+      'Triage member-submitted roadmap ideas: promote, merge or decline them',
+      'Read the feature usage panel (admin/feature-usage): reach and depth per feature as aggregates, never a member row',
+      'NOT the consolidated platform reports (admin/reports): they carry governance finance history, which no grant opens',
+    ],
+  },
+  cultural_producer: {
+    id: 'cultural_producer',
+    hasPublicStaffBadge: false,
+    grants: [
+      'Maintain the landing-page feature slots (admin/landing) and the press kit (admin/press-kit), alongside editorial',
+      'NOT a member directory: the landing picker only lists members who set an Open profile AND explicitly consented to being featured',
+      'NOT the editorial queues: story submissions, writer applications, commission interest and the film-club titles stay with editorial',
     ],
   },
 };

@@ -6,6 +6,7 @@ import { FeatureUsageDaily } from './entities/feature-usage-daily.entity';
 import { FeatureUsageFlushService } from './feature-usage-flush.service';
 import { FeatureUsageRetentionService } from './feature-usage-retention.service';
 import { FeatureUsageTallyService } from './feature-usage-tally.service';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 
 @Module({
   imports: [
@@ -25,7 +26,12 @@ import { FeatureUsageTallyService } from './feature-usage-tally.service';
     // entity to `FEATURE_DEPTH` (`feature-depth.ts`) therefore needs no
     // change in this file, as long as its home module is already imported in
     // `AppModule`.
-    TypeOrmModule.forFeature([FeatureUsageDaily]),
+    //
+    // `UserStaffRole` is the one exception: read-only, and only for
+    // `RolesOrStaffGuard` on `AdminFeatureUsageController`, which resolves the
+    // caller's `product_manager` grant when their account tier alone does not
+    // satisfy `@Roles(...)`. Same precedent as `LandingModule`.
+    TypeOrmModule.forFeature([FeatureUsageDaily, UserStaffRole]),
   ],
   controllers: [AdminFeatureUsageController],
   providers: [

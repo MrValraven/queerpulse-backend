@@ -4,6 +4,7 @@ import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admi
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { RoadmapItem } from './entities/roadmap-item.entity';
 import { RoadmapIdea } from './entities/roadmap-idea.entity';
 import { RoadmapVote } from './entities/roadmap-vote.entity';
@@ -37,6 +38,10 @@ import { AdminRoadmapController } from './admin-roadmap.controller';
       // registered directly in this module's own `forFeature` instead.
       Profile,
       CommunityMember,
+      // Read-only, and only for `RolesOrStaffGuard` on
+      // `AdminRoadmapController`: it resolves the caller's `product_manager`
+      // grant when their account tier alone does not satisfy `@Roles(...)`.
+      UserStaffRole,
     ]),
     // `NotificationsService` — tell a member their submitted idea's status
     // changed (published or dismissed).

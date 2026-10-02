@@ -256,10 +256,13 @@ export const ADMIN_QUEUE_REGISTRY: Record<AdminQueueKey, AdminQueueMeta> = {
     // `/admin/roadmap`, so a moderator who followed this deep link would be
     // bounced by the route gate. The registry mirrors what a staff member can
     // actually OPEN, not what the backend controller alone would allow, so
-    // the tier here is narrower than the controller's own guard.
+    // the tier here is narrower than the controller's own guard. The
+    // `product_manager` grant opens the controller through `RolesOrStaffGuard`
+    // and the frontend elevates the path for it, so its holders work this
+    // queue too.
     route: '/admin/roadmap',
     tier: UserRole.Admin,
-    capabilities: [],
+    capabilities: ['product_manager'],
   },
   [AdminQueueKey.GuideReviews]: {
     // Same access shape as `ResourceSuggestions`, and for the same reason.

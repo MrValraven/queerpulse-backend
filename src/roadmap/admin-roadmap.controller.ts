@@ -27,7 +27,8 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { Feature } from '../common/feature.decorator';
 import { RoadmapAdminService, RoadmapActor } from './roadmap-admin.service';
@@ -62,6 +63,11 @@ import { AuditQueryDto } from './dto/audit-query.dto';
  * admin surface in the repo (`AdminForumController`,
  * `AdminReadingGroupProposalsController`).
  *
+ * `RolesOrStaffGuard` rather than `RolesGuard` so the `product_manager` grant
+ * opens the board on its own. With the tier list unchanged, Moderators and
+ * Admins pass exactly as before; a grant holder gets the same board a
+ * Moderator does, no more.
+ *
  * Member voting/idea submission stays on `RoadmapController`; public reads
  * live in `RoadmapPublicController` (`ActiveMemberGuard` does not honor
  * `@Public()`).
@@ -81,11 +87,12 @@ import { AuditQueryDto } from './dto/audit-query.dto';
 @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
 @ApiForbiddenResponse({
   description:
-    'Caller is not an active member or lacks the admin/moderator role.',
+    'Caller is not an active member, or lacks the admin/moderator role and the product_manager staff grant.',
 })
 @Controller('admin/roadmap')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin, UserRole.Moderator)
+@StaffRoles('product_manager')
 export class AdminRoadmapController {
   constructor(private readonly adminService: RoadmapAdminService) {}
 
