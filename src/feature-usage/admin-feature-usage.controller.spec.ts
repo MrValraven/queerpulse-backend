@@ -2,12 +2,19 @@ import { AdminFeatureUsageController } from './admin-feature-usage.controller';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { FEATURE_KEY } from '../common/feature.decorator';
+import { STAFF_ROLES_KEY } from '../auth/decorators/staff-roles.decorator';
 
 describe('AdminFeatureUsageController', () => {
-  it('is admin-only', () => {
+  it('keeps admin as the only account tier', () => {
     const roles = Reflect.getMetadata('roles', AdminFeatureUsageController);
     expect(roles).toContain(UserRole.Admin);
     expect(Roles).toBeDefined();
+  });
+
+  it('opens to the product_manager grant and to no other', () => {
+    expect(
+      Reflect.getMetadata(STAFF_ROLES_KEY, AdminFeatureUsageController),
+    ).toEqual(['product_manager']);
   });
 
   it('carries no feature tag, so the panel never counts itself', () => {

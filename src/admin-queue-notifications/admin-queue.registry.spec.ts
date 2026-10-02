@@ -151,7 +151,7 @@ const EXPECTED: Record<
   [AdminQueueKey.RoadmapIdeas]: {
     route: '/admin/roadmap',
     tier: UserRole.Admin,
-    capabilities: [],
+    capabilities: ['product_manager'],
   },
   [AdminQueueKey.GuideReviews]: {
     route: '/admin/resource-guides',

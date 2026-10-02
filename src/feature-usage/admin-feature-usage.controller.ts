@@ -14,8 +14,9 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminFeatureUsageService } from './admin-feature-usage.service';
 
@@ -34,13 +35,20 @@ const MAXIMUM_RANGE_DAYS = 365;
  * never counts itself: tagging this controller would make every admin visit
  * inflate one of the numbers the panel reports. Mirrors `AdminOverviewController`:
  * deliberately NOT `@LockdownExempt()` since nothing here can lift a lockdown.
+ *
+ * Opened to the `product_manager` grant through `RolesOrStaffGuard`: every
+ * figure here is an aggregate per feature, so the panel serves no member row
+ * a grant holder could not otherwise see.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('product_manager')
 @ApiTags('Admin — Feature usage')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role or the product_manager staff grant.',
+})
 @Controller('admin/feature-usage')
 export class AdminFeatureUsageController {
   constructor(private readonly featureUsage: AdminFeatureUsageService) {}
