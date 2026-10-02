@@ -496,10 +496,9 @@ export class CommunityMembershipService {
 
   /**
    * Resolve a community id straight to its slug — a plain display lookup, no
-   * roster/archived check. Backs `EventDetail.communitySlug`
-   * (`EventsService.buildDetail`): the edit UI needs the slug (not just the
-   * id already on `EventSummary`/`EventDetail` as `communityId`) to offer the
-   * `community` audience-scope tier for an event that already has one.
+   * roster/archived check. Lets `EventsService.update` tell a re-sent
+   * `communitySlug` (the community the gathering is already hosted with) from
+   * a move to a different one, and backs forum and moderation slug lookups.
    * Returns `null` for an unknown id (shouldn't happen for a real
    * `event.communityId`, but this is a display convenience, not a guard, so
    * it fails soft rather than throwing).
@@ -510,6 +509,31 @@ export class CommunityMembershipService {
       select: { slug: true },
     });
     return community?.slug ?? null;
+  }
+
+  /**
+   * The display fields of the community a gathering is hosted with
+   * (`EventsService.buildDetail`'s `community`), or `null` for an unknown id.
+   * `accessTier` rides along so the caller can withhold a `private` community
+   * from a viewer outside it. Like `slugById`, a display convenience, not a
+   * guard: the caller applies that rule.
+   */
+  async hostingRefById(communityId: string): Promise<{
+    slug: string;
+    name: string;
+    accessTier: AccessTier;
+  } | null> {
+    const community = await this.communities.findOne({
+      where: { id: communityId },
+      select: { slug: true, name: true, accessTier: true },
+    });
+    return community
+      ? {
+          slug: community.slug,
+          name: community.name,
+          accessTier: community.accessTier,
+        }
+      : null;
   }
 
   /**

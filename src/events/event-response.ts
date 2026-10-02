@@ -3,6 +3,7 @@ import { toVisibleAvatarUrl } from '../common/member-ref';
 import { Paginated } from '../common/pagination';
 import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
+import type { AccessTier } from '../communities/entities/community.entity';
 import type { ListingAccessibilityAnswerMap } from '../listings/listing-accessibility';
 import { Profile } from '../users/entities/profile.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
@@ -190,6 +191,21 @@ export interface EventDetail extends EventSummary {
   // rows: doing so would require a join (or an extra batched lookup) on every
   // row of a hot browse/search page for a field only the edit flow needs.
   communitySlug: string | null;
+  // The community this gathering is hosted with, for the event page's "with
+  // <community>" line: its slug, display name and access tier. Independent of
+  // `visibility`, so a `public` gathering can carry one. Resolved in
+  // `EventsService.buildDetail` alongside `communitySlug`.
+  //
+  // PRIVATE COMMUNITIES: a `private` community withholds its existence from
+  // everybody off its roster, so for a viewer who is neither on that roster
+  // nor one of this gathering's organizers this is `null`, and so are
+  // `communitySlug` and `communityId`. A public gathering hosted by a private
+  // community stays readable; it just doesn't say by whom.
+  community: {
+    slug: string;
+    name: string;
+    accessTier: AccessTier;
+  } | null;
   // The linked venue's display name + public slug (or null when `listingId`
   // is null, or the listing is no longer live) — resolved via
   // `ListingLookupService.findLive` in `EventsService.buildDetail`, same
