@@ -535,6 +535,7 @@ describe('the resolver behavioural link', () => {
       profiles as never,
       {} as never, // participants, unused here
       {} as never, // preferences (Task 20's mailbox-list field), unused here
+      {} as never, // users, read only by the QueerPulse Team mailbox
     );
     const preferences = makePreferencesTable([]);
     const settingsService = new IdentityAttributionSettingsService(

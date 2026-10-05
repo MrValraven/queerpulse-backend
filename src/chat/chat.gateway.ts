@@ -2737,14 +2737,13 @@ export class ChatGateway
     if (!conversation) {
       return { shape: 'closed' };
     }
-    if (
-      conversation.kind === ConversationKind.Group ||
-      conversation.isOfficial
-    ) {
-      return {
-        shape: 'personal',
-        isGroup: conversation.kind === ConversationKind.Group,
-      };
+    // PRD-372: an official thread is read through its seats like any direct
+    // thread. Until its member first replies it seats the member alone and
+    // reads as personal below; once the QueerPulse Team is seated it is a
+    // mailbox thread, whose frames reach the member and every live staff
+    // seat with no block against them, and no departed one.
+    if (conversation.kind === ConversationKind.Group) {
+      return { shape: 'personal', isGroup: true };
     }
     const seats = await this.conversationParticipants.find({
       where: { conversationId },

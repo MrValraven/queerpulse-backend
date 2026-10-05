@@ -12,6 +12,7 @@ import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
 import { MessagesService } from './messages.service';
 import { MessagingCoreService } from './messaging-core.service';
+import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 
 /**
  * ENG-268: `MessagesService.purgeReleasedAttachmentBytes` (called only by
@@ -27,6 +28,16 @@ import { MessagingCoreService } from './messaging-core.service';
  * are real stand-ins; everything else `MessagesService` depends on but this
  * method never touches is a bare `{}`.
  */
+
+/** PRD-372: no thread in this suite is official, so the QueerPulse Team
+ *  seats are never touched; the id never matches a seat here. */
+function officialMailboxSeatsStub() {
+  return {
+    officialIdentityId: jest.fn().mockResolvedValue('official-identity'),
+    seatStaffForMemberReply: jest.fn(),
+  };
+}
+
 describe('MessagesService.purgeReleasedAttachmentBytes (ENG-268 / PRD-361)', () => {
   interface StillNeededQueryBuilder {
     withDeleted: jest.Mock;
@@ -80,6 +91,10 @@ describe('MessagesService.purgeReleasedAttachmentBytes (ENG-268 / PRD-361)', () 
         { provide: UsersService, useValue: {} },
         { provide: MentionNotificationService, useValue: {} },
         { provide: StorageService, useValue: storage },
+        {
+          provide: OfficialMailboxSeatsService,
+          useValue: officialMailboxSeatsStub(),
+        },
       ],
     }).compile();
     service = module.get(MessagesService);

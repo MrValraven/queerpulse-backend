@@ -168,6 +168,8 @@ function makeFixture(
     identities?: Row[];
     unreadRows?: Array<{ identityId: string; count: string }>;
     preferenceRows?: Row[];
+    /** `users` rows, for the QueerPulse Team mailbox's staff check. */
+    userRows?: Row[];
   } = {},
 ) {
   const listings = makeTable([
@@ -317,6 +319,7 @@ function makeFixture(
   );
   const participants = makeParticipants(options.unreadRows ?? []);
   const preferences = makeTable(options.preferenceRows ?? []);
+  const users = makeTable(options.userRows ?? []);
   const service = new IdentitiesService(
     identities as never,
     listings as never,
@@ -328,6 +331,7 @@ function makeFixture(
     profiles as never,
     participants as never,
     preferences as never,
+    users as never,
   );
   const tables = {
     identities,

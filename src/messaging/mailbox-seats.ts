@@ -671,7 +671,7 @@ export function mailboxThreadPredicate(
 /**
  * Task 13c fix round 1: SQL that holds when `userIdExpression`'s own seat in
  * the conversation `conversationIdExpression` is a mailbox (staff) seat of a
- * DIRECT, non-official thread and a block exists, in either direction,
+ * DIRECT thread and a block exists, in either direction,
  * between that user and a seat speaking for a different identity: the
  * database-side twin of `isStaffSeatExcludedByBlock`. Task 14a: reads and
  * writes compose it through `staffSeatExcludedFromMailboxPredicate`, beside
@@ -684,6 +684,10 @@ export function mailboxThreadPredicate(
  * identity, so a customer's block of a whole business takes every staff
  * seat of it out of that customer's threads. The two kinds of block are
  * separate `EXISTS` arms under one customer seat.
+ *
+ * PRD-372: an official thread's QueerPulse Team seats take the same rule.
+ * A member's block of one moderator takes that moderator, and no colleague,
+ * out of the member's official thread, as it would on a business thread.
  */
 export function blockedStaffSeatPredicate(
   conversationIdExpression: string,
@@ -702,7 +706,6 @@ export function blockedStaffSeatPredicate(
       AND "blocked_staff_seat"."user_id" = ${userIdExpression}
       AND "blocked_staff_identity"."kind" <> 'profile'
       AND "blocked_staff_conversation"."kind" <> 'group'
-      AND "blocked_staff_conversation"."is_official" = false
       AND (
         EXISTS (
           SELECT 1 FROM "blocks" "staff_customer_block"
@@ -726,7 +729,9 @@ export function blockedStaffSeatPredicate(
  * identity) of a DIRECT, non-official thread, and that customer holds an
  * `identity_blocks` row for the identity another seat of the thread speaks
  * for, a business, persona or company: the database-side twin of
- * `isCustomerSeatExcludedByIdentityBlock`. Reads and writes compose it
+ * `isCustomerSeatExcludedByIdentityBlock`. An official thread never
+ * matches: no block of the QueerPulse Team takes a member out of their own
+ * official thread, which is where the platform's safety notices reach them. Reads and writes compose it
  * through `seatExcludedFromMailboxPredicate`. The aliases are lowercase and
  * quoted at every reference, and it binds no parameter of its own.
  */
@@ -759,8 +764,9 @@ export function identityBlockedCustomerSeatPredicate(
 
 /**
  * Task 14a: SQL that holds when `userIdExpression`'s own seat in the
- * conversation `conversationIdExpression` is a staff seat of a DIRECT,
- * non-official thread that the staff member has left (`left_at` set on a
+ * conversation `conversationIdExpression` is a staff seat of a DIRECT
+ * thread (an official thread's QueerPulse Team seats included) that the
+ * staff member has left (`left_at` set on a
  * seat speaking for a business/persona/company identity): the
  * database-side twin of `isDepartedStaffSeat`. The aliases are lowercase
  * and quoted at every reference.
@@ -780,7 +786,6 @@ export function departedStaffSeatPredicate(
       AND "departed_staff_seat"."left_at" IS NOT NULL
       AND "departed_staff_identity"."kind" <> 'profile'
       AND "departed_staff_conversation"."kind" <> 'group'
-      AND "departed_staff_conversation"."is_official" = false
   )`;
 }
 

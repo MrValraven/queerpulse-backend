@@ -38,6 +38,7 @@ import { GroupInvitesService } from './group-invites.service';
 import { MessageRequestsService } from './message-requests.service';
 import { StorageService } from '../storage/storage.service';
 import { PreferencesService } from '../preferences/preferences.service';
+import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 
 /**
  * Minimal chainable stand-in for a TypeORM SelectQueryBuilder. Every builder
@@ -118,6 +119,15 @@ function emptyReactions(): { key: string; count: number; mine: boolean }[] {
     count: 0,
     mine: false,
   }));
+}
+
+/** PRD-372: no thread in this suite is official, so the QueerPulse Team
+ *  seats are never touched; the id never matches a seat here. */
+function officialMailboxSeatsStub() {
+  return {
+    officialIdentityId: jest.fn().mockResolvedValue('official-identity'),
+    seatStaffForMemberReply: jest.fn(),
+  };
 }
 
 describe('MessagingService', () => {
@@ -392,6 +402,10 @@ describe('MessagingService', () => {
           useValue: storage,
         },
         { provide: PreferencesService, useValue: preferences },
+        {
+          provide: OfficialMailboxSeatsService,
+          useValue: officialMailboxSeatsStub(),
+        },
       ],
     }).compile();
     service = module.get(MessagingService);

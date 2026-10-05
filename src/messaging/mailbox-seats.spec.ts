@@ -361,7 +361,7 @@ describe('Task 14a: a staff member who left the business', () => {
     );
   });
 
-  it('asks the departed predicate about the seat itself: set leftAt on a non-profile identity of a direct, non-official thread', () => {
+  it('asks the departed predicate about the seat itself: set leftAt on a non-profile identity of a direct thread, official ones included', () => {
     const departedSql = departedStaffSeatPredicate(
       'seat.conversation_id',
       ':userId',
@@ -380,9 +380,9 @@ describe('Task 14a: a staff member who left the business', () => {
     expect(departedSql).toContain(
       `"departed_staff_conversation"."kind" <> 'group'`,
     );
-    expect(departedSql).toContain(
-      `"departed_staff_conversation"."is_official" = false`,
-    );
+    // PRD-372: a QueerPulse Team seat in an official thread departs too, so
+    // a moderator who lost the role loses the thread.
+    expect(departedSql).not.toContain('is_official');
   });
 
   it('defines every quoted alias the departed predicate references', () => {

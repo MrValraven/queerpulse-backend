@@ -18,6 +18,7 @@ import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import {
   IdentityKind,
+  isOwnedIdentityKind,
   ownerColumnForKind,
 } from '../identities/entities/identity.entity';
 import { IdentitiesService } from '../identities/identities.service';
@@ -1557,7 +1558,14 @@ export class ReportsService {
       throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
     }
     const identity = await this.identities.getById(identityId);
-    if (!identity || identity.kind === IdentityKind.Profile) {
+    // The QueerPulse Team is the platform itself, not a business a member
+    // could report as a whole; its staff's individual messages stay
+    // reportable message by message.
+    if (
+      !identity ||
+      identity.kind === IdentityKind.Profile ||
+      !isOwnedIdentityKind(identity.kind)
+    ) {
       throw new NotFoundException(IDENTITY_NOT_FOUND_MESSAGE);
     }
     const ownerEntityId = identity[ownerColumnForKind(identity.kind)];

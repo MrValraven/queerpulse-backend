@@ -24,6 +24,7 @@ import {
   AdminMembersService,
   ADMIN_MEMBERS_PAGE_SIZE,
 } from './admin-members.service';
+import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = new Date('2026-07-21T12:00:00.000Z');
@@ -148,6 +149,7 @@ describe('AdminMembersService', () => {
   // ENG-457: losing the `partnerships` grant or the admin tier releases the
   // member's staff seat in the ambassadors circle.
   let ambassadorsService: { releaseStaffSeat: jest.Mock };
+  let officialMailboxSeats: { resyncStaff: jest.Mock };
 
   // The repos as seen through `manager.getRepository(...)` inside
   // `dataSource.transaction` — separate mocks from the top-level injected
@@ -204,6 +206,9 @@ describe('AdminMembersService', () => {
     usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
     ambassadorsService = {
       releaseStaffSeat: jest.fn().mockResolvedValue(undefined),
+    };
+    officialMailboxSeats = {
+      resyncStaff: jest.fn().mockResolvedValue(undefined),
     };
 
     transactionUsers = {
@@ -267,6 +272,10 @@ describe('AdminMembersService', () => {
         { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: dataSource },
         { provide: AmbassadorsService, useValue: ambassadorsService },
+        {
+          provide: OfficialMailboxSeatsService,
+          useValue: officialMailboxSeats,
+        },
       ],
     }).compile();
 
@@ -761,6 +770,54 @@ describe('AdminMembersService', () => {
       await service.updateRole('user-admin', 'ines-martins', UserRole.Admin);
 
       expect(ambassadorsService.releaseStaffSeat).not.toHaveBeenCalled();
+    });
+
+    it('re-seats the QueerPulse Team mailbox when a role changes (PRD-372)', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Member,
+        isSystem: false,
+      });
+
+      await service.updateRole(
+        'user-admin',
+        'ines-martins',
+        UserRole.Moderator,
+      );
+
+      expect(officialMailboxSeats.resyncStaff).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the QueerPulse Team mailbox alone for a no-op role change', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Moderator,
+        isSystem: false,
+      });
+
+      await service.updateRole(
+        'user-admin',
+        'ines-martins',
+        UserRole.Moderator,
+      );
+
+      expect(officialMailboxSeats.resyncStaff).not.toHaveBeenCalled();
+    });
+
+    it('keeps a committed role change when the mailbox resync fails', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        role: UserRole.Moderator,
+        isSystem: false,
+      });
+      officialMailboxSeats.resyncStaff.mockRejectedValue(new Error('down'));
+
+      await expect(
+        service.updateRole('user-admin', 'ines-martins', UserRole.Member),
+      ).resolves.toMatchObject({ role: UserRole.Member });
     });
   });
 });

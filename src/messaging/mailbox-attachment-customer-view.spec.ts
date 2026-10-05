@@ -726,6 +726,9 @@ describe('Final fix F1 (C3): the house account posts into official threads', () 
         resolveProfileIdentityId: jest
           .fn()
           .mockResolvedValue('identity-sender-profile'),
+        resolveOfficialIdentityId: jest
+          .fn()
+          .mockResolvedValue('identity-queerpulse-team'),
         assertMayActAs: jest.fn().mockResolvedValue(undefined),
       },
     });
@@ -775,6 +778,12 @@ describe('Final fix F1 (C3): the house account posts into official threads', () 
     expect(saved.map((message) => message.conversationId)).toEqual([
       'official-1',
       'official-2',
+    ]);
+    // The platform speaks as the QueerPulse Team, the identity its staff
+    // answer official threads as, never as the house account's own profile.
+    expect(saved.map((message) => message.senderIdentityId)).toEqual([
+      'identity-queerpulse-team',
+      'identity-queerpulse-team',
     ]);
   });
 

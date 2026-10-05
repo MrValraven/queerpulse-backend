@@ -18,13 +18,20 @@ import {
 } from '../subprofiles/entities/subprofile.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { countUnreadConversationsByIdentity } from '../messaging/unread-conversations-query';
+import {
+  OFFICIAL_MAILBOX_DISPLAY_NAME,
+  OFFICIAL_MAILBOX_STAFF_ROLES,
+} from '../official-messages/official-messages.constants';
 import { Profile } from '../users/entities/profile.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { MailboxSummaryDto, toMailboxSummary } from './dto/mailbox-summary.dto';
 import { IdentityStaffPreference } from './entities/identity-staff-preference.entity';
 import {
   Identity,
   IdentityKind,
   IdentityOwnerColumn,
+  isOwnedIdentityKind,
+  OwnedIdentityKind,
   ownerColumnForKind,
 } from './entities/identity.entity';
 
@@ -89,7 +96,7 @@ export interface StaffReadOptions {
 
 /** Task 15: one mailbox a member staffs, before its identity row is read. */
 interface StaffedMailbox {
-  kind: IdentityKind;
+  kind: OwnedIdentityKind;
   ownerEntityId: string;
   isOwner: boolean;
 }
@@ -100,7 +107,11 @@ const MAILBOX_KIND_ORDER: ReadonlyArray<IdentityKind> = [
   IdentityKind.Listing,
   IdentityKind.Subprofile,
   IdentityKind.Company,
+  IdentityKind.Official,
 ];
+
+/** Postgres `unique_violation`. */
+const UNIQUE_VIOLATION = '23505';
 
 /**
  * Owns two questions and nothing else: which humans may act for an identity,
@@ -109,6 +120,9 @@ const MAILBOX_KIND_ORDER: ReadonlyArray<IdentityKind> = [
  */
 @Injectable()
 export class IdentitiesService {
+  /** Resolved once per process; the QueerPulse Team row never changes. */
+  private officialIdentityId: string | null = null;
+
   constructor(
     @InjectRepository(Identity)
     private readonly identities: Repository<Identity>,
@@ -139,6 +153,10 @@ export class IdentitiesService {
     // `shouldAllowMyName` on every mailbox it lists, in one query.
     @InjectRepository(IdentityStaffPreference)
     private readonly preferences: Repository<IdentityStaffPreference>,
+    // Only the QueerPulse Team mailbox reads this: its staff are the active
+    // accounts holding a role in `OFFICIAL_MAILBOX_STAFF_ROLES`.
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
   ) {}
 
   async getById(identityId: string): Promise<Identity | null> {
@@ -267,6 +285,18 @@ export class IdentitiesService {
           : Promise.resolve([]),
       ]);
 
+    // The QueerPulse Team is the platform's own name, with no handle to
+    // route to and no avatar of its own (the client draws the app icon).
+    for (const identity of identities) {
+      if (identity.kind === IdentityKind.Official) {
+        result.set(identity.id, {
+          displayName: OFFICIAL_MAILBOX_DISPLAY_NAME,
+          handle: null,
+          avatarUrl: null,
+        });
+      }
+    }
+
     const profileByUserId = new Map(profileRows.map((p) => [p.userId, p]));
     for (const identity of profileIdentities) {
       const profile = profileByUserId.get(identity.userId);
@@ -330,12 +360,53 @@ export class IdentitiesService {
   }
 
   /**
+   * The one QueerPulse Team identity's id, resolved once per process (the row
+   * never changes). `AddOfficialMailboxIdentity1827900100000` inserts it; a
+   * database that never ran that migration's insert (a fresh test schema)
+   * gets it created here, and a concurrent first use loses the
+   * `UQ_identities_official` race and reads the winner back.
+   */
+  async resolveOfficialIdentityId(): Promise<string> {
+    if (this.officialIdentityId) {
+      return this.officialIdentityId;
+    }
+    const existing = await this.identities.findOne({
+      where: { kind: IdentityKind.Official },
+      select: { id: true },
+    });
+    if (existing) {
+      this.officialIdentityId = existing.id;
+      return existing.id;
+    }
+    try {
+      const created = await this.identities.save(
+        this.identities.create({ kind: IdentityKind.Official }),
+      );
+      this.officialIdentityId = created.id;
+      return created.id;
+    } catch (error) {
+      if (
+        !(error instanceof QueryFailedError) ||
+        (error.driverError as { code?: string })?.code !== UNIQUE_VIOLATION
+      ) {
+        throw error;
+      }
+      const winner = await this.identities.findOneOrFail({
+        where: { kind: IdentityKind.Official },
+        select: { id: true },
+      });
+      this.officialIdentityId = winner.id;
+      return winner.id;
+    }
+  }
+
+  /**
    * Get or create. Creation exists for things made before this table and for
    * the race where two requests touch a brand new listing at once, which the
    * partial unique index settles.
    */
   async ensureIdentityFor(
-    kind: IdentityKind,
+    kind: OwnedIdentityKind,
     ownerId: string,
   ): Promise<Identity> {
     const ownerColumn = ownerColumnForKind(kind);
@@ -406,6 +477,8 @@ export class IdentitiesService {
         return this.subprofileStaff(identity.subprofileId, options);
       case IdentityKind.Company:
         return this.companyStaff(identity.companyId, options);
+      case IdentityKind.Official:
+        return this.officialStaff(options);
     }
   }
 
@@ -430,7 +503,9 @@ export class IdentitiesService {
    */
   async ownerUserIdOf(identity: Identity): Promise<string | null> {
     switch (identity.kind) {
+      // The QueerPulse Team belongs to the platform: no one member owns it.
       case IdentityKind.Profile:
+      case IdentityKind.Official:
         return null;
       case IdentityKind.Listing: {
         if (!identity.listingId) {
@@ -671,7 +746,14 @@ export class IdentitiesService {
           .map((subprofile) => subprofile.id),
       ),
     );
-    const identityIds = resolvedMailboxes.map((mailbox) => mailbox.identityId);
+    // The QueerPulse Team mailbox, for the platform staff who answer it. It
+    // is described, counted and read for preferences with every other
+    // mailbox below, in the same queries.
+    const officialIdentity = await this.officialMailboxFor(userId);
+    const identityIds = [
+      ...resolvedMailboxes.map((mailbox) => mailbox.identityId),
+      ...(officialIdentity ? [officialIdentity.id] : []),
+    ];
     const [descriptionById, unreadCountById, ownPreferenceRows] =
       await Promise.all([
         this.describeIdentities(identityIds),
@@ -719,6 +801,22 @@ export class IdentitiesService {
             : null,
       });
     });
+    if (officialIdentity) {
+      summaries.push(
+        toMailboxSummary({
+          identityId: officialIdentity.id,
+          kind: IdentityKind.Official,
+          description: descriptionById.get(officialIdentity.id),
+          unreadCount: unreadCountById.get(officialIdentity.id) ?? 0,
+          isOwner: false,
+          isReadOnly: false,
+          shouldShowStaffNames: officialIdentity.shouldShowStaffNames,
+          shouldAllowMyName:
+            shouldAllowMyNameByIdentityId.get(officialIdentity.id) ?? true,
+          staffNamesLockedReason: null,
+        }),
+      );
+    }
     // The identity id breaks a tie between equal names, so the switcher keeps
     // one order across requests.
     return summaries.sort(
@@ -1009,6 +1107,9 @@ export class IdentitiesService {
       ),
     });
     for (const identity of identities) {
+      if (!isOwnedIdentityKind(identity.kind)) {
+        continue;
+      }
       const ownerEntityId = identity[ownerColumnForKind(identity.kind)];
       if (ownerEntityId) {
         identityByMailbox.set(
@@ -1108,6 +1209,51 @@ export class IdentitiesService {
         ? [creatorUserId]
         : [];
     return dedupe([...leadingUserIds, ...memberUserIds]);
+  }
+
+  /**
+   * The QueerPulse Team's staff: every active, non-system account holding a
+   * role in `OFFICIAL_MAILBOX_STAFF_ROLES`, ordered by id so every reader
+   * sees one order. No owner leads the list: the platform owns the mailbox.
+   * No lock is taken under `shouldLockStaffSource`: a role change is a
+   * single-row write with no roster to read half-way through.
+   */
+  private async officialStaff(
+    options: StaffReadOptions = {},
+  ): Promise<string[]> {
+    const usersRepository = options.manager
+      ? options.manager.getRepository(User)
+      : this.users;
+    const staff = await usersRepository.find({
+      where: {
+        role: In([...OFFICIAL_MAILBOX_STAFF_ROLES]),
+        status: UserStatus.Active,
+        isSystem: false,
+      },
+      select: { id: true },
+      order: { id: 'ASC' },
+    });
+    return staff.map((user) => user.id);
+  }
+
+  /** The QueerPulse Team identity row when `userId` staffs it, else null. */
+  private async officialMailboxFor(userId: string): Promise<Identity | null> {
+    const user = await this.users.findOne({
+      where: { id: userId },
+      select: { id: true, role: true, status: true, isSystem: true },
+    });
+    const isOfficialStaff =
+      !!user &&
+      !user.isSystem &&
+      user.status === UserStatus.Active &&
+      (OFFICIAL_MAILBOX_STAFF_ROLES as ReadonlyArray<string>).includes(
+        user.role,
+      );
+    if (!isOfficialStaff) {
+      return null;
+    }
+    const identityId = await this.resolveOfficialIdentityId();
+    return this.getById(identityId);
   }
 
   private async companyStaff(

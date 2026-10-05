@@ -695,6 +695,11 @@ export interface ConversationResponse {
   // coarsely; `muted` is this caller's per-conversation preference and is only
   // present where a participant row was already loaded (i.e. the list path).
   isOfficial?: boolean;
+  /** PRD-372: true on the member's own view of their official thread, which
+   *  they may reply in (the reply lands in the QueerPulse Team mailbox).
+   *  False on every other thread, the staff side of an official one
+   *  included; absent where no participant row was loaded. */
+  isOfficialReplyOpen?: boolean;
   muted?: boolean;
   /** When a TIMED mute (PRD-349: 8 hours / 1 week) expires, present only
    *  where a participant row was loaded (like `muted`). Null while `muted`

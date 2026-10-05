@@ -75,6 +75,14 @@ export class IdentityAttributionService {
     }
 
     const staff = await this.identities.staffUserIds(identity.id);
+    // The platform's own posts into an official thread go out as the
+    // QueerPulse Team from the house account, which is nobody's first name.
+    if (
+      identity.kind === IdentityKind.Official &&
+      !staff.includes(senderUserId)
+    ) {
+      return null;
+    }
     const isReaderStaff = staff.includes(readerUserId);
     if (isReaderStaff) {
       return senderFirstName;
@@ -152,6 +160,14 @@ export class IdentityAttributionService {
           return null;
         }
         const staff = staffByIdentityId.get(senderIdentityId) ?? [];
+        // See `resolveStaffFirstName`: a QueerPulse Team post by anyone not
+        // on its staff (the house account) names no one.
+        if (
+          identity.kind === IdentityKind.Official &&
+          !staff.includes(senderUserId)
+        ) {
+          return null;
+        }
         if (staff.includes(readerUserId)) {
           return senderFirstName;
         }

@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { maxLength } from 'class-validator';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
@@ -119,22 +120,19 @@ export const SYSTEM_MESSAGE_IMMUTABLE_CODE = 'SYSTEM_MESSAGE_IMMUTABLE';
 export const MESSAGE_KIND_NOT_EDITABLE_CODE = 'MESSAGE_KIND_NOT_EDITABLE';
 
 /**
- * PRD-372: an official thread only carries messages FROM the platform. The
- * member it belongs to reads it; they do not write into it.
+ * PRD-372: the refusal for a send into an official thread from a seat that
+ * may not write there.
  *
- * The server used to accept their send, on the reasoning that the client
- * severs the composer anyway. It did not reach anyone: the house account is
- * deliberately not a participant, so the reply fanned out to nobody, appeared
- * on no staff surface and no one was ever going to answer it. A member who got
- * past the severed composer (an outbox retry against a thread that became
- * official, a direct API call) wrote into a void and had every reason to
- * believe the platform had heard them.
+ * The member the thread belongs to MAY reply: their reply seats the
+ * QueerPulse Team's staff first (`OfficialMailboxSeatsService`), so it lands
+ * in the staff mailbox and is answered there. Before that mailbox existed the
+ * reply fanned out to nobody, which is why this refusal was introduced. Staff
+ * reply from their `official` seat, as the QueerPulse Team. Any other seat (a
+ * staff seat ended when its holder lost the role) is refused with this code.
  *
- * A coded 403 says so instead. The platform's OWN posting path is not caught
- * by it: `OfficialConversationsService` and `OfficialBroadcastsService` both
- * write through `MessagingCoreService.postMessage`, which is below this
- * method, and the house account is not a participant so it could never have
- * reached this far anyway.
+ * The platform's OWN posting path is not affected: `OfficialConversationsService`
+ * and `OfficialBroadcastsService` both write through
+ * `MessagingCoreService.postMessage`, below this method.
  */
 export const OFFICIAL_THREAD_READ_ONLY_CODE = 'OFFICIAL_THREAD_READ_ONLY';
 
@@ -248,6 +246,9 @@ export class MessagesService {
     private readonly usersService: UsersService,
     private readonly mentions: MentionNotificationService,
     private readonly storage: StorageService,
+    // PRD-372: a member's reply into their official thread seats the
+    // QueerPulse Team's staff first; see `sendMessageWithOutcome`.
+    private readonly officialMailboxSeats: OfficialMailboxSeatsService,
   ) {}
 
   /**
@@ -868,10 +869,11 @@ export class MessagesService {
         const isGroup = convo?.kind === ConversationKind.Group;
         return {
           conversationId,
-          otherParticipant:
-            isOfficial || isGroup
-              ? null
-              : listContext.renderCounterpart(conversationId),
+          // PRD-372: `renderCounterpart` answers null for the member's own
+          // official thread, and the member for a QueerPulse Team staff seat.
+          otherParticipant: isGroup
+            ? null
+            : listContext.renderCounterpart(conversationId),
           isOfficial,
           kind: isGroup ? 'group' : 'direct',
           title: isGroup ? (convo?.title ?? null) : null,
@@ -997,17 +999,28 @@ export class MessagesService {
     if (!convo) {
       throw new NotFoundException('Conversation not found');
     }
-    // PRD-372: the official thread is read-only for the member it belongs to.
-    // See `OFFICIAL_THREAD_READ_ONLY_CODE` for why an accepted-but-unheard
-    // reply was worse than a refusal, and why the platform's own posting path
-    // (`MessagingCoreService.postMessage`) is not caught here.
+    // PRD-372: who may write into an official thread. See
+    // `OFFICIAL_THREAD_READ_ONLY_CODE`. The member's reply seats the
+    // QueerPulse Team's staff BEFORE it is stored, so its live frame and its
+    // unread count reach them. A staff seat (the `official` identity) sends
+    // as the team; `postMessage` checks that its holder is still staff.
     if (convo.isOfficial) {
-      throw new ForbiddenException({
-        statusCode: 403,
-        error: 'Forbidden',
-        message: 'You cannot reply to this thread.',
-        code: OFFICIAL_THREAD_READ_ONLY_CODE,
-      });
+      const isMemberReply =
+        convo.officialMemberId === userId && !participant.leftAt;
+      const isStaffSeat =
+        participant.identityId ===
+          (await this.officialMailboxSeats.officialIdentityId()) &&
+        !participant.leftAt;
+      if (isMemberReply) {
+        await this.officialMailboxSeats.seatStaffForMemberReply(convo.id);
+      } else if (!isStaffSeat) {
+        throw new ForbiddenException({
+          statusCode: 403,
+          error: 'Forbidden',
+          message: 'You cannot reply to this thread.',
+          code: OFFICIAL_THREAD_READ_ONLY_CODE,
+        });
+      }
     }
     // A member who LEFT a group keeps read access to history but cannot post.
     if (convo.kind === ConversationKind.Group && participant.leftAt) {

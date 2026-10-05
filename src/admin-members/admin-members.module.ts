@@ -1,3 +1,4 @@
+import { IdentitiesModule } from '../identities/identities.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AmbassadorsModule } from '../ambassadors/ambassadors.module';
@@ -76,6 +77,10 @@ import { AdminMembersService } from './admin-members.service';
     // seat in the ambassadors circle. Nothing `AmbassadorsModule` imports
     // reaches this module, so this edge closes no cycle.
     AmbassadorsModule,
+    // `OfficialMailboxSeatsService` (PRD-372): a role change re-seats the
+    // QueerPulse Team mailbox. `IdentitiesModule` imports nothing beyond its
+    // own entities, so this edge closes no cycle.
+    IdentitiesModule,
   ],
   controllers: [
     AdminMembersController,

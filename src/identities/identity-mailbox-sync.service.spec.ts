@@ -2070,6 +2070,7 @@ function buildPersonaSweep(seeds: FakeParticipantRow[]) {
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
   const eventEmitter = { emit: jest.fn() };
   const service = new IdentityMailboxSyncService(

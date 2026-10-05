@@ -26,6 +26,7 @@ function makeService() {
     profiles as never,
     {} as never, // participants, unused here (Task 15's mailbox list)
     {} as never, // preferences, unused here (Task 20's attribution switches)
+    {} as never, // users, read only by the QueerPulse Team mailbox
   );
   return { service, identities, listings, subprofiles, companies, profiles };
 }
