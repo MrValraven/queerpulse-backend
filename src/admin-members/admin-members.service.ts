@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import {
@@ -153,6 +154,9 @@ export class AdminMembersService {
     private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
     private readonly ambassadors: AmbassadorsService,
+    // PRD-372: moderators and admins answer the QueerPulse Team mailbox, so a
+    // role change re-seats it (`OfficialMailboxSeatsService.resyncStaff`).
+    private readonly officialMailboxSeats: OfficialMailboxSeatsService,
   ) {}
 
   async list(query: ListAdminMembersQuery): Promise<AdminMemberListDTO> {
@@ -676,6 +680,7 @@ export class AdminMembersService {
       );
     }
 
+    let hasRoleChanged = false;
     const appliedRole = await this.dataSource.transaction(async (manager) => {
       const users = manager.getRepository(User);
       const targetUser = await users.findOne({
@@ -693,6 +698,7 @@ export class AdminMembersService {
       }
 
       const previousRole = targetUser.role;
+      hasRoleChanged = previousRole !== targetRole;
       if (previousRole === targetRole) {
         // Nothing changed — return without writing an audit row for a no-op.
         return previousRole;
@@ -735,6 +741,21 @@ export class AdminMembersService {
     // with no seat or who still holds the `partnerships` grant.
     if (appliedRole !== UserRole.Admin) {
       await this.ambassadors.releaseStaffSeat(targetUserId);
+    }
+    // PRD-372: the QueerPulse Team mailbox's staff are its moderators and
+    // admins, so a change into or out of either role re-seats it now rather
+    // than at the next hourly sweep. Best effort: the role change has already
+    // committed, and the sweep repairs whatever this misses.
+    if (hasRoleChanged) {
+      try {
+        await this.officialMailboxSeats.resyncStaff();
+      } catch (error) {
+        this.logger.error(
+          `QueerPulse Team mailbox resync after a role change failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
 
     return toAdminMemberRole({

@@ -996,10 +996,11 @@ export class MessageAnnotationsService {
         const isGroup = convo?.kind === ConversationKind.Group;
         return {
           conversationId,
-          otherParticipant:
-            isOfficial || isGroup
-              ? null
-              : listContext.renderCounterpart(conversationId),
+          // PRD-372: null for the member's own official thread, the member
+          // for a QueerPulse Team staff seat (`loadMessageListContext`).
+          otherParticipant: isGroup
+            ? null
+            : listContext.renderCounterpart(conversationId),
           isOfficial,
           kind: isGroup ? 'group' : 'direct',
           title: isGroup ? (convo?.title ?? null) : null,

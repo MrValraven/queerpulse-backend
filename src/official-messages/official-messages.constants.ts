@@ -1,3 +1,5 @@
+import { UserRole } from '../users/entities/user.entity';
+
 /**
  * PRD-372 constants for official conversations and broadcasts.
  *
@@ -42,3 +44,16 @@ export const OFFICIAL_BROADCAST_SENT_ACTION = 'official_broadcast_sent';
 export const OFFICIAL_RECIPIENT_NOT_FOUND_CODE = 'OFFICIAL_RECIPIENT_NOT_FOUND';
 export const OFFICIAL_BROADCAST_IDEMPOTENCY_CONFLICT_CODE =
   'OFFICIAL_BROADCAST_IDEMPOTENCY_CONFLICT';
+
+/**
+ * The QueerPulse Team mailbox: the one `official` identity members' replies
+ * to their official thread land in. Its staff are every active account
+ * holding one of these roles; the hourly mailbox sweep and every member reply
+ * reconcile its seats against that set. The display name is what a staff
+ * reply's sender and the staff switcher show.
+ */
+export const OFFICIAL_MAILBOX_STAFF_ROLES = [
+  UserRole.Admin,
+  UserRole.Moderator,
+] as const;
+export const OFFICIAL_MAILBOX_DISPLAY_NAME = 'QueerPulse Team';

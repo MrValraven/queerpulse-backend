@@ -1,4 +1,8 @@
-import { IdentityKind, ownerColumnForKind } from './identity.entity';
+import {
+  IdentityKind,
+  isOwnedIdentityKind,
+  ownerColumnForKind,
+} from './identity.entity';
 
 describe('ownerColumnForKind', () => {
   it('maps every kind to its own owner column', () => {
@@ -8,8 +12,15 @@ describe('ownerColumnForKind', () => {
     expect(ownerColumnForKind(IdentityKind.Company)).toBe('companyId');
   });
 
-  it('covers every enum member, so a new kind fails here first', () => {
-    const covered = Object.values(IdentityKind).map(ownerColumnForKind);
-    expect(new Set(covered).size).toBe(Object.values(IdentityKind).length);
+  it('covers every owned kind, so a new kind fails here first', () => {
+    const ownedKinds = Object.values(IdentityKind).filter(isOwnedIdentityKind);
+    const covered = ownedKinds.map(ownerColumnForKind);
+    expect(new Set(covered).size).toBe(ownedKinds.length);
+  });
+
+  it('leaves only the QueerPulse Team without an owner', () => {
+    expect(
+      Object.values(IdentityKind).filter((kind) => !isOwnedIdentityKind(kind)),
+    ).toEqual([IdentityKind.Official]);
   });
 });

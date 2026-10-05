@@ -255,6 +255,7 @@ describe('MessagesService.getMessages hide scoping (PRD-227)', () => {
       empty as never,
       empty as never,
       empty as never,
+      {} as never, // officialMailboxSeats, unused here
     );
   });
 

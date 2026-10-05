@@ -24,6 +24,7 @@ import {
 import { DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT } from './messaging.constants';
 import { MessagesService } from './messages.service';
 import { MessagingCoreService } from './messaging-core.service';
+import { OfficialMailboxSeatsService } from '../identities/official-mailbox-seats.service';
 
 /**
  * ENG-268: spec coverage for `MessagesService.searchMessages`'s scoping,
@@ -49,6 +50,16 @@ import { MessagingCoreService } from './messaging-core.service';
  * call site still inlines the fragment or has already been switched over to
  * the helper.
  */
+
+/** PRD-372: no thread in this suite is official, so the QueerPulse Team
+ *  seats are never touched; the id never matches a seat here. */
+function officialMailboxSeatsStub() {
+  return {
+    officialIdentityId: jest.fn().mockResolvedValue('official-identity'),
+    seatStaffForMemberReply: jest.fn(),
+  };
+}
+
 describe('MessagesService.searchMessages scoping (ENG-268 / ENG-252 / ENG-251)', () => {
   interface SearchQueryBuilder {
     where: jest.Mock;
@@ -188,6 +199,10 @@ describe('MessagesService.searchMessages scoping (ENG-268 / ENG-252 / ENG-251)',
         { provide: UsersService, useValue: {} },
         { provide: MentionNotificationService, useValue: {} },
         { provide: StorageService, useValue: {} },
+        {
+          provide: OfficialMailboxSeatsService,
+          useValue: officialMailboxSeatsStub(),
+        },
       ],
     }).compile();
     service = module.get(MessagesService);

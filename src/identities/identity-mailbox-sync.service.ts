@@ -165,10 +165,13 @@ export class IdentityMailboxSyncService {
     manager?: EntityManager,
     options?: { shouldDeferEmission?: boolean },
   ): Promise<MailboxSeatChanges> {
+    // Only business staffing paths call this; the QueerPulse Team's staff
+    // are seated by its own reply path and the hourly sweep.
     const seating = await this.seatAcrossMailbox(
       this.participantsRepository(manager),
       identityId,
       userId,
+      false,
     );
     const changes: MailboxSeatChanges = {
       endedSeats: [],
@@ -275,6 +278,8 @@ export class IdentityMailboxSyncService {
     options?: {
       shouldDeferEmission?: boolean;
       shouldLockStaffSource?: boolean;
+      /** See `resyncConversation`'s option of the same name. */
+      shouldSeatWithFullHistory?: boolean;
     },
   ): Promise<MailboxSeatChanges> {
     const participantsRepository = this.participantsRepository(manager);
@@ -309,6 +314,7 @@ export class IdentityMailboxSyncService {
         participantsRepository,
         identityId,
         userId,
+        options?.shouldSeatWithFullHistory ?? false,
       );
       if (seating.hasChangedSeats) {
         changes.staffingChanges.push({ identityId, userId, isStaff: true });
@@ -375,6 +381,12 @@ export class IdentityMailboxSyncService {
    * returns the changes), so a rolled-back resync announces nothing.
    * `MessageRequestsService.deliverEnquiryToIdentity` takes this second
    * form.
+   *
+   * `shouldSeatWithFullHistory` seats a new or returning staff member with
+   * no floor at all (`clearedAt` and `historyFloorAt` null) instead of now.
+   * Only the QueerPulse Team mailbox sets it: an official thread is the
+   * platform's own, so whoever answers it for the platform reads what the
+   * platform already said there, which is what the member is replying to.
    */
   async resyncConversation(
     identityId: string,
@@ -383,6 +395,7 @@ export class IdentityMailboxSyncService {
     options?: {
       shouldDeferEmission?: boolean;
       shouldLockStaffSource?: boolean;
+      shouldSeatWithFullHistory?: boolean;
     },
   ): Promise<MailboxSeatChanges> {
     if (options?.shouldLockStaffSource && !manager) {
@@ -392,7 +405,11 @@ export class IdentityMailboxSyncService {
             identityId,
             conversationId,
             transactionManager,
-            { shouldDeferEmission: true, shouldLockStaffSource: true },
+            {
+              shouldDeferEmission: true,
+              shouldLockStaffSource: true,
+              shouldSeatWithFullHistory: options.shouldSeatWithFullHistory,
+            },
           ),
       );
       // After the commit only, as the sweep does.
@@ -422,7 +439,10 @@ export class IdentityMailboxSyncService {
     );
     const now = new Date();
     let floorInstant: Date | undefined;
-    const readFloorInstant = async (): Promise<Date> => {
+    const readFloorInstant = async (): Promise<Date | null> => {
+      if (options?.shouldSeatWithFullHistory) {
+        return null;
+      }
       floorInstant ??= await this.seatFloorInstant(participantsRepository);
       return floorInstant;
     };
@@ -578,6 +598,7 @@ export class IdentityMailboxSyncService {
           this.resyncMailbox(identity.id, manager, {
             shouldDeferEmission: true,
             shouldLockStaffSource: true,
+            shouldSeatWithFullHistory: identity.kind === IdentityKind.Official,
           }),
         );
       } catch (error) {
@@ -772,6 +793,7 @@ export class IdentityMailboxSyncService {
     participantsRepository: Repository<ConversationParticipant>,
     identityId: string,
     userId: string,
+    shouldSeatWithFullHistory: boolean,
   ): Promise<MailboxSeating> {
     const mailboxSeats = await participantsRepository.find({
       where: { identityId },
@@ -809,7 +831,11 @@ export class IdentityMailboxSyncService {
     // Read once, and only when some seat is created or reactivated, so a
     // member already active everywhere costs no clock read.
     let floorInstant: Date | undefined;
-    const readFloorInstant = async (): Promise<Date> => {
+    // No floor at all for the QueerPulse Team (see `resyncConversation`).
+    const readFloorInstant = async (): Promise<Date | null> => {
+      if (shouldSeatWithFullHistory) {
+        return null;
+      }
       floorInstant ??= await this.seatFloorInstant(participantsRepository);
       return floorInstant;
     };

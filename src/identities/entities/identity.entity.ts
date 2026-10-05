@@ -9,12 +9,17 @@ import {
 /**
  * The kinds of thing that can hold a mailbox and appear as a message sender.
  * `Profile` is a member acting as themselves and every user has exactly one.
+ * `Official` is the platform's own QueerPulse Team: exactly one row, owned by
+ * no entity (every owner column null), whose mailbox holds the official
+ * threads members have replied in and whose staff are the platform's
+ * moderators and admins (`OFFICIAL_MAILBOX_STAFF_ROLES`).
  */
 export enum IdentityKind {
   Profile = 'profile',
   Subprofile = 'subprofile',
   Listing = 'listing',
   Company = 'company',
+  Official = 'official',
 }
 
 export type IdentityOwnerColumn =
@@ -66,7 +71,19 @@ export class Identity {
   createdAt!: Date;
 }
 
-export function ownerColumnForKind(kind: IdentityKind): IdentityOwnerColumn {
+/** Every kind whose identity row is owned by one entity row. `Official` is
+ *  the exception: the one QueerPulse Team identity belongs to the platform. */
+export type OwnedIdentityKind = Exclude<IdentityKind, IdentityKind.Official>;
+
+export function isOwnedIdentityKind(
+  kind: IdentityKind,
+): kind is OwnedIdentityKind {
+  return kind !== IdentityKind.Official;
+}
+
+export function ownerColumnForKind(
+  kind: OwnedIdentityKind,
+): IdentityOwnerColumn {
   switch (kind) {
     case IdentityKind.Profile:
       return 'userId';

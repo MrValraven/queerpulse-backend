@@ -347,6 +347,7 @@ describe('mailbox list filter (Task 24)', () => {
         {} as UsersService,
         {} as MentionNotificationService,
         {} as StorageService,
+        {} as never, // officialMailboxSeats, unused here
       );
     });
 

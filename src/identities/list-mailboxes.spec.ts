@@ -1,6 +1,7 @@
 import { FindOperator, QueryFailedError } from 'typeorm';
 import { ListingCoManagerStatus } from '../listings/entities/listing-co-manager.entity';
 import { seatExcludedFromMailboxPredicate } from '../messaging/mailbox-seats';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { IdentityKind } from './entities/identity.entity';
 import { IdentitiesService } from './identities.service';
 
@@ -168,6 +169,8 @@ function makeFixture(
     identities?: Row[];
     unreadRows?: Array<{ identityId: string; count: string }>;
     preferenceRows?: Row[];
+    /** `users` rows, for the QueerPulse Team mailbox's staff check. */
+    userRows?: Row[];
   } = {},
 ) {
   const listings = makeTable([
@@ -317,6 +320,7 @@ function makeFixture(
   );
   const participants = makeParticipants(options.unreadRows ?? []);
   const preferences = makeTable(options.preferenceRows ?? []);
+  const users = makeTable(options.userRows ?? []);
   const service = new IdentitiesService(
     identities as never,
     listings as never,
@@ -328,6 +332,7 @@ function makeFixture(
     profiles as never,
     participants as never,
     preferences as never,
+    users as never,
   );
   const tables = {
     identities,
@@ -451,6 +456,81 @@ describe('IdentitiesService.listMailboxesFor', () => {
     await expect(
       fixture.service.isAllowedToActAs(MEMBER_ID, 'drag-identity'),
     ).resolves.toBe(false);
+  });
+
+  describe('the QueerPulse Team mailbox (PRD-372)', () => {
+    const officialIdentity: Row = {
+      id: 'official-identity',
+      kind: IdentityKind.Official,
+      userId: null,
+      listingId: null,
+      subprofileId: null,
+      companyId: null,
+      shouldShowStaffNames: true,
+    };
+
+    function fixtureFor(user: Row) {
+      const fixture = makeFixture({
+        userRows: [user],
+        unreadRows: [{ identityId: 'official-identity', count: '3' }],
+      });
+      fixture.identities.rows.push(officialIdentity);
+      return fixture;
+    }
+
+    it.each([UserRole.Moderator, UserRole.Admin])(
+      'lists it last for an active %s, unread count included',
+      async (role) => {
+        const { service } = fixtureFor({
+          id: 'plain-user',
+          role,
+          status: UserStatus.Active,
+          isSystem: false,
+        });
+
+        const mailboxes = await service.listMailboxesFor('plain-user');
+
+        expect(mailboxes.map((mailbox) => mailbox.kind)).toEqual([
+          IdentityKind.Profile,
+          IdentityKind.Official,
+        ]);
+        expect(mailboxes[1]).toEqual(
+          expect.objectContaining({
+            identityId: 'official-identity',
+            displayName: 'QueerPulse Team',
+            isOwner: false,
+            isReadOnly: false,
+            unreadCount: 3,
+            shouldShowStaffNames: true,
+            shouldAllowMyName: true,
+          }),
+        );
+      },
+    );
+
+    it.each([
+      ['an ordinary member', UserRole.Member, UserStatus.Active, false],
+      [
+        'a suspended moderator',
+        UserRole.Moderator,
+        UserStatus.Suspended,
+        false,
+      ],
+      ['the house account', UserRole.Admin, UserStatus.Active, true],
+    ])('leaves it out for %s', async (_label, role, status, isSystem) => {
+      const { service } = fixtureFor({
+        id: 'plain-user',
+        role,
+        status,
+        isSystem,
+      });
+
+      const mailboxes = await service.listMailboxesFor('plain-user');
+
+      expect(mailboxes.map((mailbox) => mailbox.kind)).toEqual([
+        IdentityKind.Profile,
+      ]);
+    });
   });
 
   it('returns only the profile mailbox for a member who staffs nothing', async () => {

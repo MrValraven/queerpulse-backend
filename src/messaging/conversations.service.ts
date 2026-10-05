@@ -646,12 +646,26 @@ export class ConversationsService {
     const myPartByConvoId = new Map(
       myParts.map((myPart) => [myPart.conversationId, myPart]),
     );
+    // PRD-372: an official thread reads two ways. Its member sees the
+    // platform's own thread, with no single counterpart. A QueerPulse Team
+    // staff seat (the `official` identity) reads it as any other mailbox
+    // thread: the member is the customer, every field below follows the
+    // mailbox rules, and `mailboxIdentityId` names the team's mailbox.
+    const isMemberViewOfOfficial = (
+      convo: Conversation,
+      myPart: ConversationParticipant | undefined,
+    ): boolean =>
+      convo.isOfficial &&
+      (!myPart ||
+        identityKindById.get(myPart.identityId) !== IdentityKind.Official);
     const threadSeatsByConvoId = new Map<string, DirectThreadSeats>();
     for (const convo of convos) {
       const myPart = myPartByConvoId.get(convo.id);
       threadSeatsByConvoId.set(
         convo.id,
-        convo.kind === ConversationKind.Group || convo.isOfficial || !myPart
+        convo.kind === ConversationKind.Group ||
+          !myPart ||
+          isMemberViewOfOfficial(convo, myPart)
           ? NOT_A_DIRECT_THREAD
           : describeDirectThreadSeats(
               myPart.identityId,
@@ -711,6 +725,10 @@ export class ConversationsService {
         continue;
       }
       const isGroup = convo.kind === ConversationKind.Group;
+      // PRD-372: see `isMemberViewOfOfficial`. Everything below that names a
+      // counterpart reads this, not `convo.isOfficial`, so a staff seat gets
+      // the member as its counterpart.
+      const isOfficialView = isMemberViewOfOfficial(convo, part);
       const convoOthers = othersByConvo.get(convo.id) ?? [];
       // Task 13c: see `threadSeatsByConvoId` above. `NOT_A_DIRECT_THREAD`
       // for a group or official thread.
@@ -739,7 +757,7 @@ export class ConversationsService {
       // pre-filter in `listConversations` carries the same rules.
       if (
         !isGroup &&
-        !convo.isOfficial &&
+        !isOfficialView &&
         (mailboxIdentityId
           ? isSeatExcludedFromMailbox(
               part,
@@ -755,7 +773,7 @@ export class ConversationsService {
       // have no single "other participant" (the client shows the org identity
       // or the group title instead), so `first` stays undefined and
       // `otherParticipant` stays null.
-      const first = convo.isOfficial || isGroup ? undefined : convoOthers[0];
+      const first = isOfficialView || isGroup ? undefined : convoOthers[0];
       // Task 13c: `renderDirectCounterpart` (`mailbox-seats.ts`) renders the
       // header for every direct thread: the customer's own profile for a
       // STAFF caller (fix round 2 of Task 13b), the business itself for a
@@ -763,7 +781,7 @@ export class ConversationsService {
       // describes the whole business, so it names no staff member; per-message
       // attribution names the person who actually wrote.
       const otherParticipant: AuthorSummary | null =
-        convo.isOfficial || isGroup
+        isOfficialView || isGroup
           ? null
           : renderDirectCounterpart(
               threadSeats,
@@ -894,7 +912,7 @@ export class ConversationsService {
       const canSeeOtherReadState = otherReadStateSeats.length > 0;
       summaries.push({
         id: convo.id,
-        type: isGroup || convo.isOfficial ? 'group' : 'dm',
+        type: isGroup || isOfficialView ? 'group' : 'dm',
         otherParticipant,
         lastMessage: clearedLastMessage
           ? this.core.buildLastMessagePreview(
@@ -1006,6 +1024,9 @@ export class ConversationsService {
         members,
         memberPreview,
         isOfficial: convo.isOfficial,
+        // PRD-372: the member may answer their own official thread, which
+        // seats the QueerPulse Team (`MessagesService.sendMessageWithOutcome`).
+        isOfficialReplyOpen: isOfficialView && !part.leftAt,
         muted: part.muted,
         mutedUntil: part.mutedUntil?.toISOString() ?? null,
         // PRD-349: the caller's own mute MODE, alongside the ladder above.
@@ -1904,7 +1925,15 @@ export class ConversationsService {
     const convo = await this.conversations.findOne({
       where: { id: conversationId },
     });
-    if (convo && convo.kind !== ConversationKind.Group && !convo.isOfficial) {
+    // PRD-372: the member always joins their own official thread; a
+    // QueerPulse Team staff seat in it takes the mailbox rule below.
+    const isOfficialThreadMember =
+      !!convo?.isOfficial && convo.officialMemberId === userId;
+    if (
+      convo &&
+      convo.kind !== ConversationKind.Group &&
+      !isOfficialThreadMember
+    ) {
       // Task 13c: the same seat rule as the inbox and the send-time gate.
       // On a business mailbox thread only a STAFF member blocked either way
       // with the customer is refused (fix round 1); the customer and every

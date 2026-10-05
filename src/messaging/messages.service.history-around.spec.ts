@@ -144,6 +144,7 @@ describe('MessagesService.getMessages around a message (PRD-401)', () => {
       empty as never,
       empty as never,
       empty as never,
+      {} as never, // officialMailboxSeats, unused here
     );
   });
 

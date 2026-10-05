@@ -592,10 +592,12 @@ export class MessagingCoreService {
     if (!conversation) {
       return { shape: 'ownOnly' };
     }
-    if (
-      conversation.kind === ConversationKind.Group ||
-      conversation.isOfficial
-    ) {
+    // PRD-372: an official thread is read through its seats below like any
+    // direct thread. Its member reads the QueerPulse Team's staff reactions
+    // as the team (`customerOfMailbox`), never one moderator by name, and a
+    // staff seat reads individuals; one with no staff seat yet reads its
+    // member alone, as `individuals`.
+    if (conversation.kind === ConversationKind.Group) {
       return {
         shape: 'individuals',
         nameOptions: memberNameOptionsFor(conversation),
@@ -727,10 +729,7 @@ export class MessagingCoreService {
     }
     const counterpartByConversationId = new Map<string, AuthorSummary | null>();
     for (const conversation of conversations) {
-      if (
-        conversation.kind === ConversationKind.Group ||
-        conversation.isOfficial
-      ) {
+      if (conversation.kind === ConversationKind.Group) {
         continue;
       }
       const conversationSeats = seats.filter(
@@ -739,6 +738,17 @@ export class MessagingCoreService {
       const callerSeat = conversationSeats.find(
         (seat) => seat.userId === viewerId,
       );
+      // PRD-372: the member's own official thread has no single counterpart
+      // (the client files it under the QueerPulse Team); a QueerPulse Team
+      // staff seat files it under the member, as the inbox does.
+      if (
+        conversation.isOfficial &&
+        senderIdentityContext.identityKindById.get(
+          callerSeat?.identityId ?? '',
+        ) !== IdentityKind.Official
+      ) {
+        continue;
+      }
       const otherSeats = conversationSeats.filter(
         (seat) => seat.userId !== viewerId,
       );
@@ -1200,10 +1210,13 @@ export class MessagingCoreService {
   }
 
   /**
-   * Task 13e: for each DIRECT, non-official conversation in
-   * `conversationIds` where `viewerId` holds a seat, the business seat set
+   * Task 13e: for each DIRECT conversation in `conversationIds` where
+   * `viewerId` holds a seat, the business seat set
    * `businessSeatUserIdsForViewer` gives from that seat. Conversations with
    * an empty set are left out. Three batched queries whatever the count.
+   * PRD-372: an official thread counts too, so its member's reaction counts
+   * collapse the QueerPulse Team's staff into the team, the way a customer's
+   * collapse a business's staff.
    */
   async businessSeatUserIdsByConversation(
     conversationIds: string[],
@@ -1222,11 +1235,7 @@ export class MessagingCoreService {
         select: { id: true, kind: true, isOfficial: true },
       })
     )
-      .filter(
-        (conversation) =>
-          conversation.kind !== ConversationKind.Group &&
-          !conversation.isOfficial,
-      )
+      .filter((conversation) => conversation.kind !== ConversationKind.Group)
       .map((conversation) => conversation.id);
     if (!directConversationIds.length) {
       return businessUserIdsByConversation;
@@ -2095,10 +2104,13 @@ export class MessagingCoreService {
     const viewerSeatIdentityKind = viewerIdentityId
       ? senderIdentityContext.identityKindById.get(viewerIdentityId)
       : undefined;
+    // PRD-372: a QueerPulse Team staff seat in an official thread keeps the
+    // flag, so staff tell their own replies from a colleague's there too.
     const isGroupOrOfficialConversation =
       resolvedConversationKind === ConversationKind.Group ||
       (viewerSeatIdentityKind !== undefined &&
         viewerSeatIdentityKind !== IdentityKind.Profile &&
+        viewerSeatIdentityKind !== IdentityKind.Official &&
         (await this.isOfficialConversation(conversationId)));
     const viewerMessageContext = {
       viewerId,
@@ -2243,7 +2255,7 @@ export class MessagingCoreService {
     // questions `assertMaySendAs` answers must hold before anything below is
     // validated or persisted: this call sits before every other check in this
     // method precisely so a refused identity leaves no row behind.
-    const senderIdentityId =
+    let senderIdentityId =
       asIdentityId ??
       (await this.identities.resolveProfileIdentityId(senderId));
     // Final fix F1 (C3): the house account posts every official message and
@@ -2253,7 +2265,10 @@ export class MessagingCoreService {
     // with no chosen identity, by the house account itself, into an official
     // thread (`isHouseAccountOfficialSend`). The lookup runs only on that
     // refusal, so an ordinary send reads nothing more, and every other
-    // sender without a seat is still refused.
+    // sender without a seat is still refused. Such a post speaks as the
+    // QueerPulse Team, the identity its staff answer the thread as, so it
+    // sits on their side of the thread and the member reads it from the
+    // team as before.
     await this.assertMaySendAs(
       conversationId,
       senderId,
@@ -2264,6 +2279,7 @@ export class MessagingCoreService {
         isIdentityNotInConversationError(error) &&
         (await this.isHouseAccountOfficialSend(conversationId, senderId))
       ) {
+        senderIdentityId = await this.identities.resolveOfficialIdentityId();
         return;
       }
       throw error;

@@ -9,6 +9,7 @@ import { ConversationParticipant } from '../messaging/entities/conversation-part
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { IdentityBlock } from './entities/identity-block.entity';
 import { IdentityStaffPreference } from './entities/identity-staff-preference.entity';
 import { Identity } from './entities/identity.entity';
@@ -18,6 +19,7 @@ import { IdentityMailboxReconciliationService } from './identity-mailbox-reconci
 import { IdentityMailboxSyncService } from './identity-mailbox-sync.service';
 import { IdentitiesController } from './identities.controller';
 import { IdentitiesService } from './identities.service';
+import { OfficialMailboxSeatsService } from './official-mailbox-seats.service';
 
 @Module({
   imports: [
@@ -36,6 +38,9 @@ import { IdentitiesService } from './identities.service';
       // `IdentitiesService.describeIdentities` needs a `Profile`-kind
       // identity's own display fields and nothing else `UsersModule` offers.
       Profile,
+      // Entity only, like `Profile`: the QueerPulse Team mailbox's staff are
+      // read straight off `users.role` (`IdentitiesService.officialStaff`).
+      User,
       // Registered as entities only, never `MessagingModule` itself:
       // `MessagingModule` already imports `IdentitiesModule` (for
       // `MessagingCoreService`'s profile-identity resolution), so the reverse
@@ -58,12 +63,14 @@ import { IdentitiesService } from './identities.service';
     // The hourly `@Cron` safety net over `IdentityMailboxSyncService`'s
     // sweep. Not exported: nothing outside this module calls it.
     IdentityMailboxReconciliationService,
+    OfficialMailboxSeatsService,
   ],
   exports: [
     IdentitiesService,
     IdentityAttributionService,
     IdentityAttributionSettingsService,
     IdentityMailboxSyncService,
+    OfficialMailboxSeatsService,
   ],
 })
 export class IdentitiesModule {}

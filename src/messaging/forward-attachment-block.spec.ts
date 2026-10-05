@@ -243,14 +243,14 @@ const EXPECTED_EXCLUSION_CLAUSE = `NOT ${seatExcludedFromMailboxPredicate('messa
  */
 const LOAD_BEARING_EXCLUSION_FRAGMENTS = [
   // blockedStaffSeatPredicate: the person block, checked in both directions,
-  // and the guard that keeps the rule off group/official threads.
+  // and the guard that keeps the rule off group threads. PRD-372: official
+  // threads take it too, for their QueerPulse Team staff seats.
   '"staff_customer_block"."blocker_id" = "blocked_staff_seat"."user_id"',
   '"staff_customer_block"."blocked_id" = "blocking_customer_seat"."user_id"',
   '"staff_customer_block"."blocked_id" = "blocked_staff_seat"."user_id"',
   '"staff_customer_block"."blocker_id" = "blocking_customer_seat"."user_id"',
   `"blocked_staff_identity"."kind" <> 'profile'`,
   `"blocked_staff_conversation"."kind" <> 'group'`,
-  '"blocked_staff_conversation"."is_official" = false',
   '"staff_business_identity_block"."blocker_user_id" = "blocking_customer_seat"."user_id"',
   '"staff_business_identity_block"."identity_id" = "blocked_staff_seat"."identity_id"',
   // departedStaffSeatPredicate: the departure itself.
@@ -261,6 +261,9 @@ const LOAD_BEARING_EXCLUSION_FRAGMENTS = [
   `"identity_blocked_business_identity"."kind" <> 'profile'`,
   '"customer_business_identity_block"."blocker_user_id" = "identity_blocking_customer_seat"."user_id"',
   '"customer_business_identity_block"."identity_id" = "identity_blocked_business_seat"."identity_id"',
+  // PRD-372: no block of the QueerPulse Team takes a member out of their
+  // own official thread.
+  '"identity_blocking_customer_conversation"."is_official" = false',
 ] as const;
 
 /** Every user blocked either way with `userId`, as `blockedUserIds` reads it. */
