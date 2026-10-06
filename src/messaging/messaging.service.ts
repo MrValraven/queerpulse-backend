@@ -17,6 +17,10 @@ import {
 import { ConversationsService } from './conversations.service';
 import { GroupsService } from './groups.service';
 import { GroupInvitesService } from './group-invites.service';
+import {
+  GroupInviteLinkMaxUses,
+  GroupInviteLinkResponse,
+} from './group-invite-link-usage';
 import { MessageAnnotationsService } from './message-annotations.service';
 import {
   EnquiryContactability,
@@ -557,14 +561,16 @@ export class MessagingService {
   }
 
   /** PRD-358: `POST :id/invite-link` facade pass-through. PRD-400: the
-   *  response carries the new link's expiry too. */
+   *  response carries the new link's expiry, use cap and uses left too. */
   createOrRotateInviteLink(
     conversationId: string,
     actorUserId: string,
-  ): Promise<{ inviteToken: string; inviteTokenExpiresAt: string }> {
+    maxUses: GroupInviteLinkMaxUses | null = null,
+  ): Promise<GroupInviteLinkResponse> {
     return this.groupsService.createOrRotateInviteLink(
       conversationId,
       actorUserId,
+      maxUses,
     );
   }
 

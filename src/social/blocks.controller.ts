@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   Param,
+  ParseUUIDPipe,
   Post,
   Query,
   UseGuards,
@@ -67,6 +68,26 @@ export class BlocksController {
     @Body() dto?: BlockOptionsDto,
   ) {
     return this.social.blockMember(user.userId, slug, dto);
+  }
+
+  /** PRD-423: unblock by the block's own id, the one handle the block list
+   *  gives a block placed from inside a matched Go together chat. */
+  @Delete('by-id/:id')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Unblock by block id (your own blocks only)' })
+  @ApiOkResponse({
+    description:
+      'Block removed. `{ restoredStatus }`, as for `DELETE /blocks/:slug`.',
+  })
+  @ApiNotFoundResponse({ description: 'No block of yours with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  unblockById(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.social.unblockById(user.userId, id);
   }
 
   @Delete(':slug')

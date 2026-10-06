@@ -26,6 +26,7 @@ import {
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -50,6 +51,11 @@ import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity'
 import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
 import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
+import { Identity, IdentityKind } from '../identities/entities/identity.entity';
+import {
+  SubprofileInvite,
+  SubprofileInviteStatus,
+} from './entities/subprofile-invite.entity';
 import {
   eligibilityKey,
   SubprofileAffiliationEligibilityService,
@@ -94,6 +100,7 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     coverUrl: null,
     accent: null,
     availability: null,
+    availabilityUpdatedAt: null,
     ctaLabel: null,
     ctaUrl: null,
     linkVisibility: SubprofileLinkVisibility.Unlinked,
@@ -667,6 +674,17 @@ type ProfileOwnerFixture = Pick<
 
 describe('SubprofilesService', () => {
   let service: SubprofilesService;
+  // T17: re-homes unlinked persona images to persona-scoped keys. Defaults
+  // to "nothing to re-home" so every test that does not stage it is
+  // unaffected.
+  let personaImageKeys: {
+    rehomeForPersona: jest.Mock;
+    rehomeForPersonaWrite: jest.Mock;
+    rehomeUnlinkedPersona: jest.Mock;
+    isMemberOfKeyPersona: jest.Mock;
+    listKeysOf: jest.Mock;
+    deleteObjects: jest.Mock;
+  };
   let subprofiles: {
     // Every fixture fed to `find`/`findOne` in this file is either a
     // complete `makeSubprofile(...)` row or `null`/`[]`, so these carry the
@@ -1360,6 +1378,14 @@ describe('SubprofilesService', () => {
       listOptions: jest.fn().mockResolvedValue([]),
     };
 
+    personaImageKeys = {
+      rehomeForPersona: jest.fn().mockResolvedValue(new Map()),
+      rehomeForPersonaWrite: jest.fn().mockResolvedValue(new Map()),
+      rehomeUnlinkedPersona: jest.fn().mockResolvedValue(new Map()),
+      isMemberOfKeyPersona: jest.fn().mockResolvedValue(false),
+      listKeysOf: jest.fn().mockResolvedValue([]),
+      deleteObjects: jest.fn().mockResolvedValue(undefined),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SubprofilesService,
@@ -1427,6 +1453,7 @@ describe('SubprofilesService', () => {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
+        { provide: PersonaImageKeysService, useValue: personaImageKeys },
       ],
     }).compile();
     service = module.get(SubprofilesService);
@@ -2341,6 +2368,192 @@ describe('SubprofilesService', () => {
           { title: 'x', imageUrl: FOREIGN_KEY },
         ]),
       ).resolves.toBeDefined();
+    });
+  });
+
+  // T17: an unlinked persona's images live under persona-scoped keys
+  // (`persona/<uuid>/<uuid><ext>`) that carry no user id.
+  describe('persona-scoped image keys (T17)', () => {
+    const REQUESTER_ID = '11111111-1111-1111-1111-111111111111';
+    const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+    const OWN_UPLOAD = `avatars/${REQUESTER_ID}/${FILE_SEGMENT}.jpg`;
+    const PERSONA_KEY = `persona/${FILE_SEGMENT}/${FILE_SEGMENT}.jpg`;
+    const OTHER_PERSONA_KEY = `persona/${REQUESTER_ID}/${FILE_SEGMENT}.png`;
+    const FRESH_KEY = `persona/${REQUESTER_ID}/${REQUESTER_ID}.png`;
+
+    it('update re-homes a new avatar under the row lock, on the unlinked state it saves', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          userId: REQUESTER_ID,
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        }),
+      );
+      personaImageKeys.rehomeForPersona.mockResolvedValue(
+        new Map([[OWN_UPLOAD, PERSONA_KEY]]),
+      );
+
+      await service.update(REQUESTER_ID, 'sp-1', { avatarUrl: OWN_UPLOAD });
+
+      expect(personaImageKeys.rehomeForPersona).toHaveBeenCalledWith(
+        manager,
+        'sp-1',
+        [OWN_UPLOAD, null],
+        { isUnlinked: true },
+      );
+      const lockOrder = manager.findOne.mock.invocationCallOrder[0] ?? 0;
+      const rehomeOrder =
+        personaImageKeys.rehomeForPersona.mock.invocationCallOrder[0] ?? 0;
+      const saveOrder = manager.save.mock.invocationCallOrder[0] ?? 0;
+      expect(lockOrder).toBeLessThan(rehomeOrder);
+      expect(rehomeOrder).toBeLessThan(saveOrder);
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+      expect(saved.avatarUrl).toBe(PERSONA_KEY);
+    });
+
+    it('update asks for the linked scheme on a linked persona', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          userId: REQUESTER_ID,
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          handle: 'robin-nightform',
+        }),
+      );
+
+      await service.update(REQUESTER_ID, 'sp-1', { avatarUrl: OWN_UPLOAD });
+
+      expect(personaImageKeys.rehomeForPersona).toHaveBeenCalledWith(
+        manager,
+        'sp-1',
+        [OWN_UPLOAD, null],
+        { isUnlinked: false },
+      );
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+      expect(saved.avatarUrl).toBe(OWN_UPLOAD);
+    });
+
+    it('unlinking gives every image a fresh key in the switch transaction, under the fresh id', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+          handle: 'robin-nightform',
+        }),
+      );
+      // The service mutates `sp` (its id included) after the call, so the id
+      // is captured at call time.
+      const rehomedIds: string[] = [];
+      personaImageKeys.rehomeUnlinkedPersona.mockImplementation(
+        (_manager: unknown, persona: Subprofile) => {
+          rehomedIds.push(persona.id);
+          return Promise.resolve(new Map());
+        },
+      );
+
+      await service.update('user-1', 'sp-1', {
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+      });
+
+      expect(personaImageKeys.rehomeUnlinkedPersona).toHaveBeenCalledTimes(1);
+      const [rehomeManager, , mode] = personaImageKeys.rehomeUnlinkedPersona
+        .mock.calls[0] as [unknown, Subprofile, string];
+      expect(rehomeManager).toBe(manager);
+      expect(mode).toBe('unlink');
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+      expect(saved.id).not.toBe('sp-1');
+      expect(rehomedIds).toEqual([saved.id]);
+      const rehomeOrder =
+        personaImageKeys.rehomeUnlinkedPersona.mock.invocationCallOrder[0] ?? 0;
+      const saveOrder = manager.save.mock.invocationCallOrder[0] ?? 0;
+      expect(rehomeOrder).toBeLessThan(saveOrder);
+    });
+
+    it('replaceSection stores item images through the in-lock re-home', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          userId: REQUESTER_ID,
+          kind: SubprofileKind.Developer,
+        }),
+      );
+      manager.find.mockResolvedValue([]);
+      personaImageKeys.rehomeForPersonaWrite.mockResolvedValue(
+        new Map([[OWN_UPLOAD, PERSONA_KEY]]),
+      );
+
+      await service.replaceSection(REQUESTER_ID, 'sp-1', 'projects', [
+        { title: 'x', imageUrl: OWN_UPLOAD },
+      ]);
+
+      expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenCalledWith(
+        manager,
+        'sp-1',
+        [OWN_UPLOAD],
+      );
+      const [savedRows] = manager.save.mock.calls[0] as [SubprofileItem[]];
+      expect(savedRows[0]?.imageUrl).toBe(PERSONA_KEY);
+    });
+
+    it('update refuses a persona-scoped key of a persona the requester does not belong to', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ userId: REQUESTER_ID, avatarUrl: PERSONA_KEY }),
+      );
+      personaImageKeys.isMemberOfKeyPersona.mockResolvedValue(false);
+
+      await expect(
+        service.update(REQUESTER_ID, 'sp-1', { coverUrl: OTHER_PERSONA_KEY }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(personaImageKeys.isMemberOfKeyPersona).toHaveBeenCalledWith(
+        OTHER_PERSONA_KEY,
+        REQUESTER_ID,
+      );
+    });
+
+    // Copying your own persona: the other persona's key is accepted, then
+    // saved as a fresh key of this persona's own.
+    it("update accepts another persona's key from one of its members and saves a fresh copy", async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ userId: REQUESTER_ID }),
+      );
+      personaImageKeys.isMemberOfKeyPersona.mockResolvedValue(true);
+      personaImageKeys.rehomeForPersona.mockResolvedValue(
+        new Map([[OTHER_PERSONA_KEY, FRESH_KEY]]),
+      );
+
+      await service.update(REQUESTER_ID, 'sp-1', {
+        coverUrl: OTHER_PERSONA_KEY,
+      });
+
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
+      expect(saved.coverUrl).toBe(FRESH_KEY);
+    });
+
+    it('update allows re-saving the persona-scoped key already stored', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ userId: REQUESTER_ID, avatarUrl: PERSONA_KEY }),
+      );
+
+      await expect(
+        service.update(REQUESTER_ID, 'sp-1', { avatarUrl: PERSONA_KEY }),
+      ).resolves.toBeDefined();
+      expect(personaImageKeys.isMemberOfKeyPersona).not.toHaveBeenCalled();
+    });
+
+    it("remove deletes the persona's own images only after the delete commits", async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      personaImageKeys.listKeysOf.mockResolvedValue([PERSONA_KEY]);
+
+      await service.remove('user-1', 'sp-1');
+
+      expect(personaImageKeys.listKeysOf).toHaveBeenCalledWith(manager, 'sp-1');
+      expect(personaImageKeys.deleteObjects).toHaveBeenCalledWith([
+        PERSONA_KEY,
+      ]);
+      const listOrder =
+        personaImageKeys.listKeysOf.mock.invocationCallOrder[0] ?? 0;
+      const removeOrder = manager.remove.mock.invocationCallOrder[0] ?? 0;
+      const deleteOrder =
+        personaImageKeys.deleteObjects.mock.invocationCallOrder[0] ?? 0;
+      expect(listOrder).toBeLessThan(removeOrder);
+      expect(removeOrder).toBeLessThan(deleteOrder);
     });
   });
 
@@ -3882,6 +4095,93 @@ describe('SubprofilesService', () => {
       expect(saved.status).toBe(SubprofileStatus.Draft);
     });
 
+    // PRD-435: the therapist cards read this stamp to tell a fresh status
+    // from a stale one, so it moves with the availability or the therapist
+    // status and with nothing else.
+    describe('availability stamp', () => {
+      const earlierStamp = new Date('2026-03-01T09:00:00Z');
+      const therapistSkin = (status: string) =>
+        ({ therapist: { status } }) as unknown as SkinData;
+      const therapistPersona = () =>
+        makeSubprofile({
+          kind: SubprofileKind.Therapist,
+          availability: 'open_to_collabs',
+          skinData: therapistSkin('open'),
+          availabilityUpdatedAt: earlierStamp,
+        });
+      const savedRow = () => (manager.save.mock.calls[0] as [Subprofile])[0];
+
+      it('stamps the save time when the availability changes', async () => {
+        subprofiles.findOne.mockResolvedValue(therapistPersona());
+        const before = Date.now();
+        await service.update('user-1', 'sp-1', {
+          availability: 'booking',
+          skinData: therapistSkin('wait'),
+        });
+        const stamp = savedRow().availabilityUpdatedAt;
+        expect(stamp).toBeInstanceOf(Date);
+        expect(stamp!.getTime()).toBeGreaterThanOrEqual(before);
+      });
+
+      it('stamps the save time when only the therapist status changes', async () => {
+        subprofiles.findOne.mockResolvedValue(therapistPersona());
+        await service.update('user-1', 'sp-1', {
+          skinData: therapistSkin('closed'),
+        });
+        expect(savedRow().availabilityUpdatedAt).not.toEqual(earlierStamp);
+        expect(savedRow().availabilityUpdatedAt).toBeInstanceOf(Date);
+      });
+
+      it('keeps the stamp when an edit leaves the status alone', async () => {
+        subprofiles.findOne.mockResolvedValue(therapistPersona());
+        await service.update('user-1', 'sp-1', {
+          bio: 'A new bio',
+          skinData: therapistSkin('open'),
+        });
+        expect(savedRow().availabilityUpdatedAt).toEqual(earlierStamp);
+      });
+
+      it('stamps the save time when the owner confirms an unchanged status', async () => {
+        subprofiles.findOne.mockResolvedValue(therapistPersona());
+        const before = Date.now();
+        await service.update('user-1', 'sp-1', {
+          availability: 'open_to_collabs',
+          skinData: therapistSkin('open'),
+          confirmAvailability: true,
+        });
+        const stamp = savedRow().availabilityUpdatedAt;
+        expect(stamp).toBeInstanceOf(Date);
+        expect(stamp!.getTime()).toBeGreaterThanOrEqual(before);
+        expect(savedRow()).not.toHaveProperty('confirmAvailability');
+      });
+
+      it('keeps the stamp when an editor save resends an unchanged availability', async () => {
+        subprofiles.findOne.mockResolvedValue(therapistPersona());
+        await service.update('user-1', 'sp-1', {
+          bio: 'Another bio',
+          availability: 'open_to_collabs',
+        });
+        expect(savedRow().availabilityUpdatedAt).toEqual(earlierStamp);
+      });
+
+      it('keeps the committed stamp when the loaded copy is stale', async () => {
+        subprofiles.findOne.mockResolvedValue(therapistPersona());
+        const committedStamp = new Date('2026-09-30T08:00:00Z');
+        manager.findOne.mockImplementation((entity: unknown) =>
+          Promise.resolve(
+            entity === Subprofile
+              ? {
+                  ...therapistPersona(),
+                  availabilityUpdatedAt: committedStamp,
+                }
+              : null,
+          ),
+        );
+        await service.update('user-1', 'sp-1', { tagline: 'Still here' });
+        expect(savedRow().availabilityUpdatedAt).toEqual(committedStamp);
+      });
+    });
+
     // A link switch frees the old name WITHOUT forwarding, in either
     // direction: forwarding would tie a pseudonymous address to the member
     // behind it. A plain handle edit keeps forwarding, for both link kinds.
@@ -4537,6 +4837,296 @@ describe('SubprofilesService', () => {
         ).rejects.toBeInstanceOf(ForbiddenException);
 
         expect(manager.delete).not.toHaveBeenCalled();
+      });
+
+      // ENG-447: the pseudonymous persona answers under a fresh id, so no id
+      // the named persona exposed leads to it.
+      describe('the fresh id an unlink issues', () => {
+        const REKEY_SQL = `UPDATE "subprofiles" SET "id" = $1 WHERE "id" = $2`;
+        const UUID_PATTERN =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        const rekeyCallIndex = () =>
+          manager.query.mock.calls.findIndex(
+            ([sql]: unknown[]) => sql === REKEY_SQL,
+          );
+        const publishedLinkedPersona = () =>
+          makeSubprofile({
+            linkVisibility: SubprofileLinkVisibility.Linked,
+            status: SubprofileStatus.Published,
+            handle: 'robin-nightform',
+          });
+
+        it('moves the row to a new id after the cut, and saves and answers under it', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+
+          const view = await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          const freshId = savedSubprofile().id;
+          expect(freshId).not.toBe('sp-1');
+          expect(freshId).toMatch(UUID_PATTERN);
+          expect(view.id).toBe(freshId);
+          expect(manager.query).toHaveBeenCalledWith(REKEY_SQL, [
+            freshId,
+            'sp-1',
+          ]);
+          // The registry release and the cut name the old id, and both run
+          // before the re-key; the save comes after it.
+          expect(handlesService.release).toHaveBeenCalledWith(
+            manager,
+            'robin-nightform',
+            personaOwner,
+            { isForwarding: false },
+          );
+          expect(manager.delete).toHaveBeenCalledWith(SubprofileFollower, {
+            subprofileId: 'sp-1',
+          });
+          const rekeyOrder =
+            manager.query.mock.invocationCallOrder[rekeyCallIndex()] ?? 0;
+          const deleteOrder = manager.delete.mock.invocationCallOrder[0] ?? 0;
+          const saveOrder = manager.save.mock.invocationCallOrder[0] ?? 0;
+          expect(deleteOrder).toBeLessThan(rekeyOrder);
+          expect(rekeyOrder).toBeLessThan(saveOrder);
+        });
+
+        // An invitee knows the named persona; accepting would show them the
+        // pseudonymous one and its new id.
+        it('revokes the pending co-owner invites in the switch transaction', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          expect(manager.update).toHaveBeenCalledWith(
+            SubprofileInvite,
+            { subprofileId: 'sp-1', status: SubprofileInviteStatus.Pending },
+            {
+              status: SubprofileInviteStatus.Revoked,
+              respondedAt: expect.any(Date) as unknown,
+            },
+          );
+          const revokeOrder =
+            manager.update.mock.invocationCallOrder[
+              manager.update.mock.calls.findIndex(
+                ([entity]: unknown[]) => entity === SubprofileInvite,
+              )
+            ] ?? 0;
+          const rekeyOrder =
+            manager.query.mock.invocationCallOrder[rekeyCallIndex()] ?? 0;
+          expect(revokeOrder).toBeLessThan(rekeyOrder);
+        });
+
+        // The messaging identity goes the way a persona delete takes it: its
+        // seats and blocks cascade, and each correspondent's old thread shows
+        // the former-mailbox author. Deleted under the old id, before the
+        // re-key.
+        it('deletes the messaging identity before the re-key', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          expect(manager.delete).toHaveBeenCalledWith(Identity, {
+            kind: IdentityKind.Subprofile,
+            subprofileId: 'sp-1',
+          });
+          const identityDeleteOrder =
+            manager.delete.mock.invocationCallOrder[
+              manager.delete.mock.calls.findIndex(
+                ([entity]: unknown[]) => entity === Identity,
+              )
+            ] ?? 0;
+          const rekeyOrder =
+            manager.query.mock.invocationCallOrder[rekeyCallIndex()] ?? 0;
+          expect(identityDeleteOrder).toBeGreaterThan(0);
+          expect(identityDeleteOrder).toBeLessThan(rekeyOrder);
+        });
+
+        // A member's block of the persona identity must outlive the identity:
+        // it is carried to the persona before the identity row goes.
+        it('carries the blocks on the messaging identity to the persona before deleting it', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          const carryCallIndex = manager.query.mock.calls.findIndex(
+            ([sql]: unknown[]) =>
+              typeof sql === 'string' &&
+              sql.includes('UPDATE "identity_blocks"'),
+          );
+          expect(carryCallIndex).toBeGreaterThanOrEqual(0);
+          const carryCall = manager.query.mock.calls[carryCallIndex] as
+            unknown[] | undefined;
+          expect(carryCall?.[1]).toEqual(['sp-1']);
+          const carryOrder =
+            manager.query.mock.invocationCallOrder[carryCallIndex] ?? 0;
+          const identityDeleteOrder =
+            manager.delete.mock.invocationCallOrder[
+              manager.delete.mock.calls.findIndex(
+                ([entity]: unknown[]) => entity === Identity,
+              )
+            ] ?? 0;
+          expect(carryOrder).toBeLessThan(identityDeleteOrder);
+        });
+
+        it('keeps the messaging identity when the persona is linked or the unlink is refused', async () => {
+          subprofiles.findOne.mockResolvedValue(
+            completeUnlinked({
+              status: SubprofileStatus.Published,
+              handle: 'after-dark',
+            }),
+          );
+          stageCreatorProfileInTransaction('robin');
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          });
+
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+          manager.findOne.mockResolvedValue(
+            makeSubprofile({
+              userId: 'successor-1',
+              linkVisibility: SubprofileLinkVisibility.Linked,
+              status: SubprofileStatus.Published,
+              handle: 'robin-nightform',
+            }),
+          );
+          await expect(
+            service.update('user-1', 'sp-1', {
+              linkVisibility: SubprofileLinkVisibility.Unlinked,
+            }),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+
+          expect(manager.delete).not.toHaveBeenCalledWith(
+            Identity,
+            expect.anything(),
+          );
+        });
+
+        it('keeps the pending invites when the persona is linked or the unlink is refused', async () => {
+          subprofiles.findOne.mockResolvedValue(
+            completeUnlinked({
+              status: SubprofileStatus.Published,
+              handle: 'after-dark',
+            }),
+          );
+          stageCreatorProfileInTransaction('robin');
+          await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          });
+
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+          manager.findOne.mockResolvedValue(
+            makeSubprofile({
+              userId: 'successor-1',
+              linkVisibility: SubprofileLinkVisibility.Linked,
+              status: SubprofileStatus.Published,
+              handle: 'robin-nightform',
+            }),
+          );
+          await expect(
+            service.update('user-1', 'sp-1', {
+              linkVisibility: SubprofileLinkVisibility.Unlinked,
+            }),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+
+          expect(manager.update).not.toHaveBeenCalledWith(
+            SubprofileInvite,
+            expect.anything(),
+            expect.anything(),
+          );
+        });
+
+        it('leaves the old id resolving nothing and the new id resolving the persona', async () => {
+          // A one-table stand-in for `subprofiles`: the re-key moves the row
+          // from its old id to the new one, as the UPDATE does.
+          const rowsById = new Map<string, Subprofile>([
+            ['sp-1', publishedLinkedPersona()],
+          ]);
+          subprofiles.findOne.mockImplementation((options: unknown) => {
+            const { where } = options as { where: { id: string } };
+            const row = rowsById.get(where.id);
+            return Promise.resolve(row ? { ...row } : null);
+          });
+          manager.query.mockImplementation(
+            (sql: unknown, parameters?: unknown) => {
+              if (sql === REKEY_SQL) {
+                const [freshId, previousId] = parameters as [string, string];
+                const row = rowsById.get(previousId);
+                rowsById.delete(previousId);
+                if (row) {
+                  rowsById.set(freshId, { ...row, id: freshId });
+                }
+              }
+              return Promise.resolve(undefined);
+            },
+          );
+
+          const unlinked = await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+          });
+
+          await expect(
+            service.getOwnedDTO('user-1', 'sp-1'),
+          ).rejects.toBeInstanceOf(NotFoundException);
+          const reloaded = await service.getOwnedDTO('user-1', unlinked.id);
+          expect(reloaded.id).toBe(unlinked.id);
+          expect(unlinked.id).not.toBe('sp-1');
+        });
+
+        it('keeps the id when the persona is linked', async () => {
+          subprofiles.findOne.mockResolvedValue(
+            completeUnlinked({
+              status: SubprofileStatus.Published,
+              handle: 'after-dark',
+            }),
+          );
+          stageCreatorProfileInTransaction('robin');
+
+          const view = await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          });
+
+          expect(rekeyCallIndex()).toBe(-1);
+          expect(view.id).toBe('sp-1');
+        });
+
+        it('keeps the id on an edit that leaves an unlinked persona unlinked', async () => {
+          subprofiles.findOne.mockResolvedValue(completeUnlinked());
+
+          const view = await service.update('user-1', 'sp-1', {
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            tagline: 'Late sets, low light',
+          });
+
+          expect(rekeyCallIndex()).toBe(-1);
+          expect(view.id).toBe('sp-1');
+        });
+
+        it('keeps the old id when the unlink is refused', async () => {
+          subprofiles.findOne.mockResolvedValue(publishedLinkedPersona());
+          // A former creator: the lock refuses before anything is written.
+          manager.findOne.mockResolvedValue(
+            makeSubprofile({
+              userId: 'successor-1',
+              linkVisibility: SubprofileLinkVisibility.Linked,
+              status: SubprofileStatus.Published,
+              handle: 'robin-nightform',
+            }),
+          );
+
+          await expect(
+            service.update('user-1', 'sp-1', {
+              linkVisibility: SubprofileLinkVisibility.Unlinked,
+            }),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+
+          expect(rekeyCallIndex()).toBe(-1);
+        });
       });
 
       it('unlinked to linked keeps the followers and endorsements', async () => {

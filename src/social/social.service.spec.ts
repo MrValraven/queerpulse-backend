@@ -2,7 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull, Not } from 'typeorm';
 import {
   Connection,
   ConnectionStatus,
@@ -180,6 +180,130 @@ describe('SocialService', () => {
     });
   });
 
+  describe('listBlocks for a block placed in a matched Go together chat (PRD-423)', () => {
+    it('names that member by first name alone, with no slug, last name or avatar', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([
+        [
+          {
+            id: 'b2',
+            blockerId: 'me',
+            blockedId: 'them',
+            reason: null,
+            matchedConversationId: 'chat-1',
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          },
+        ],
+        1,
+      ]);
+      blocks.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'them',
+          slug: 'the-m',
+          firstName: 'The',
+          lastName: 'M',
+          pronouns: 'they/them',
+          avatarUrl: 'https://photos.example.com/them.jpg',
+          photoVisible: true,
+        },
+      ]);
+
+      const [block] = (await service.listBlocks('me')).items;
+
+      expect(block).toEqual({
+        id: 'b2',
+        member: {
+          slug: '',
+          firstName: 'The',
+          lastName: '',
+          pronouns: 'they/them',
+          avatarUrl: null,
+        },
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        reason: undefined,
+        isMatchedChatBlock: true,
+      });
+    });
+  });
+
+  describe('blockMember on a matched chat block (PRD-423)', () => {
+    it('turns a matched chat block into a plain one when blocked by slug', async () => {
+      stubSlugResolution({ them: 'them' });
+      blocks.findOneOrFail.mockResolvedValue({
+        id: 'b2',
+        blockerId: 'me',
+        blockedId: 'them',
+        reason: null,
+        matchedConversationId: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      await service.blockMember('me', 'them');
+
+      expect(manager.update).toHaveBeenCalledWith(
+        Block,
+        {
+          blockerId: 'me',
+          blockedId: 'them',
+          matchedConversationId: Not(IsNull()),
+        },
+        { matchedConversationId: null },
+      );
+    });
+
+    it('keeps the chat on a block placed by member key', async () => {
+      stubSlugResolution({ them: 'them' });
+      blocks.findOneOrFail.mockResolvedValue({
+        id: 'b2',
+        blockerId: 'me',
+        blockedId: 'them',
+        reason: null,
+        matchedConversationId: 'chat-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      await service.blockMember('me', 'them', undefined, {
+        matchedConversationId: 'chat-1',
+      });
+
+      expect(manager.update).not.toHaveBeenCalledWith(
+        Block,
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('unblockById (PRD-423)', () => {
+    it('unblocks the caller own block by its id', async () => {
+      Object.assign(blocks, {
+        findOne: jest.fn().mockResolvedValue({ id: 'b2', blockedId: 'them' }),
+      });
+
+      await expect(service.unblockById('me', 'b2')).resolves.toEqual({
+        restoredStatus: 'none',
+      });
+      expect(manager.delete).toHaveBeenCalledWith(Block, {
+        blockerId: 'me',
+        blockedId: 'them',
+      });
+    });
+
+    it('404s a block id the caller did not place', async () => {
+      const findOne = jest.fn().mockResolvedValue(null);
+      Object.assign(blocks, { findOne });
+
+      await expect(service.unblockById('me', 'b9')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'b9', blockerId: 'me' } }),
+      );
+      expect(manager.delete).not.toHaveBeenCalled();
+    });
+  });
+
   describe('blockMember', () => {
     it('404s an unknown slug', async () => {
       stubSlugResolution({});
@@ -337,13 +461,29 @@ describe('SocialService', () => {
       );
     });
 
-    it('deletes the block row for the caller and slug', async () => {
+    it('deletes the plain block row for the caller and slug', async () => {
       stubSlugResolution({ them: 'them' });
       await service.unblockMember('me', 'them');
       expect(manager.delete).toHaveBeenCalledWith(Block, {
         blockerId: 'me',
         blockedId: 'them',
+        matchedConversationId: IsNull(),
       });
+    });
+
+    it('PRD-423: answers a matched chat block exactly as no block, by slug', async () => {
+      stubSlugResolution({ them: 'them' });
+      // Only a matched chat block holds the pair, so the plain-only delete
+      // removes nothing.
+      manager.delete.mockResolvedValue({ affected: 0 });
+
+      await expect(service.unblockMember('me', 'them')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(eventEmitter.emit).not.toHaveBeenCalledWith(
+        'member.unblocked',
+        expect.anything(),
+      );
     });
 
     it('restores the connection edge this actor blocked (P1-3)', async () => {
@@ -418,8 +558,23 @@ describe('SocialService', () => {
       });
       expect(blocks.exist).toHaveBeenCalledTimes(1);
       expect(blocks.exist).toHaveBeenCalledWith({
-        where: { blockerId: 'me', blockedId: 'them' },
+        where: {
+          blockerId: 'me',
+          blockedId: 'them',
+          matchedConversationId: IsNull(),
+        },
       });
+    });
+
+    it('PRD-423: reads only plain blocks, so a matched chat block answers not-blocked', async () => {
+      stubSlugResolution({ them: 'them' });
+
+      await service.getBlockStatus('me', 'them');
+
+      const [{ where }] = blocks.exist.mock.calls[0] as [
+        { where: Record<string, unknown> },
+      ];
+      expect(where.matchedConversationId).toEqual(IsNull());
     });
 
     it('allows checking your own slug without erroring', async () => {

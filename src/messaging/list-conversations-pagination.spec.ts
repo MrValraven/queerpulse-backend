@@ -13,6 +13,7 @@ import {
   ConversationRole,
 } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
+import { matchedChatMemberKey } from './matched-member-key';
 import { MessagingCoreService } from './messaging-core.service';
 
 /**
@@ -241,6 +242,39 @@ describe('ConversationsService.listConversations (ENG-253)', () => {
       const page = await service.listConversations(USER_ID, {});
 
       expect(page.data[0]!.isGoTogetherChat).toBe(true);
+    });
+
+    // PRD-423 (opaque member keys): a matched chat tells the caller which
+    // per-chat key names them, and flags an unread `@key` mention of them.
+    it('carries the caller own member key on a matched chat row alone', async () => {
+      conversations.find.mockResolvedValueOnce([
+        { ...GROUP_CONVERSATION, isGoTogetherChat: true },
+      ]);
+      participants.createQueryBuilder.mockReturnValueOnce(
+        makeParticipantsQb([buildGroupParticipant({ draft: null })]),
+      );
+
+      const page = await service.listConversations(USER_ID, {});
+
+      expect(page.data[0]!.viewerMemberKey).toBe(
+        matchedChatMemberKey(GROUP_CONVERSATION_ID, USER_ID),
+      );
+      expect(core.hasUnreadMentionByConversation).toHaveBeenCalledWith(
+        [GROUP_CONVERSATION_ID],
+        USER_ID,
+        undefined,
+        [GROUP_CONVERSATION_ID],
+      );
+    });
+
+    it('carries no member key on an ordinary group row', async () => {
+      participants.createQueryBuilder.mockReturnValueOnce(
+        makeParticipantsQb([buildGroupParticipant({ draft: null })]),
+      );
+
+      const page = await service.listConversations(USER_ID, {});
+
+      expect(page.data[0]!.viewerMemberKey).toBeUndefined();
     });
 
     it('omits `draft` and sends a bounded `draftPreview` plus `hasDraft` instead', async () => {

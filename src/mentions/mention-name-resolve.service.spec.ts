@@ -6,6 +6,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
+import { matchedChatMemberKey } from '../messaging/matched-member-key';
 import { Profile } from '../users/entities/profile.entity';
 import { MentionNameResolveService } from './mention-name-resolve.service';
 
@@ -36,10 +37,14 @@ function buildService(options: {
   isGoTogetherChat?: boolean;
   seatUserIds: string[];
 }) {
+  let profileQueryCount = 0;
   const profileQuery = {
     innerJoin: () => profileQuery,
     where: () => profileQuery,
-    getMany: () => Promise.resolve(PROFILES),
+    getMany: () => {
+      profileQueryCount += 1;
+      return Promise.resolve(PROFILES);
+    },
   };
   const empty = { find: jest.fn().mockResolvedValue([]) };
   const conversations = {
@@ -67,7 +72,7 @@ function buildService(options: {
     conversations as unknown as Repository<Conversation>,
     participants as unknown as Repository<ConversationParticipant>,
   );
-  return { service, conversations };
+  return { service, conversations, profileQueries: () => profileQueryCount };
 }
 
 const REFS = ['member:ana-sousa', 'member:rui-lopes'];
@@ -77,30 +82,34 @@ function nameBySlug(resolved: { slug: string; name: string }[]) {
 }
 
 describe('MentionNameResolveService, matched Go together chats (PRD-423)', () => {
-  it('names a matched chat member by first name for a viewer seated in it', async () => {
-    const { service } = buildService({
+  it('resolves no slug member mention for a viewer seated in a matched chat, seated member or not', async () => {
+    const { service, profileQueries } = buildService({
       eventMatchGroupId: 'match-group-1',
       seatUserIds: [VIEWER_ID, ANA_ID],
     });
 
     const resolved = await service.resolve(VIEWER_ID, REFS, CONVERSATION_ID);
 
-    expect(nameBySlug(resolved)).toEqual({
-      'ana-sousa': 'Ana',
-      'rui-lopes': 'Rui Lopes',
-    });
+    // The chat answers nothing about a slug: no lookup runs at all.
+    expect(nameBySlug(resolved)).toEqual({});
+    expect(profileQueries()).toBe(0);
   });
 
-  it('keeps first names in a Go together chat whose group row is gone', async () => {
+  it('names a member by key in a Go together chat whose group row is gone', async () => {
+    const anaKey = matchedChatMemberKey(CONVERSATION_ID, ANA_ID);
     const { service } = buildService({
       eventMatchGroupId: null,
       isGoTogetherChat: true,
       seatUserIds: [VIEWER_ID, ANA_ID],
     });
 
-    const resolved = await service.resolve(VIEWER_ID, REFS, CONVERSATION_ID);
+    const resolved = await service.resolve(
+      VIEWER_ID,
+      [`member:${anaKey}`, 'member:ana-sousa'],
+      CONVERSATION_ID,
+    );
 
-    expect(nameBySlug(resolved)['ana-sousa']).toBe('Ana');
+    expect(nameBySlug(resolved)).toEqual({ [anaKey]: 'Ana' });
   });
 
   it('keeps full names in a normal group', async () => {
@@ -135,5 +144,70 @@ describe('MentionNameResolveService, matched Go together chats (PRD-423)', () =>
 
     expect(nameBySlug(resolved)['ana-sousa']).toBe('Ana Sousa');
     expect(conversations.findOne).not.toHaveBeenCalled();
+  });
+
+  describe('PRD-423 (opaque member keys)', () => {
+    const anaKey = matchedChatMemberKey(CONVERSATION_ID, ANA_ID);
+
+    it('names a member mentioned by their per-chat key, for a viewer seated in the chat', async () => {
+      const { service } = buildService({
+        eventMatchGroupId: 'match-group-1',
+        seatUserIds: [VIEWER_ID, ANA_ID],
+      });
+
+      const resolved = await service.resolve(
+        VIEWER_ID,
+        [`member:${anaKey}`],
+        CONVERSATION_ID,
+      );
+
+      expect(nameBySlug(resolved)[anaKey]).toBe('Ana');
+    });
+
+    it('leaves a key unresolved for a viewer who holds no seat', async () => {
+      const { service } = buildService({
+        eventMatchGroupId: 'match-group-1',
+        seatUserIds: [ANA_ID],
+      });
+
+      const resolved = await service.resolve(
+        VIEWER_ID,
+        [`member:${anaKey}`],
+        CONVERSATION_ID,
+      );
+
+      expect(nameBySlug(resolved)[anaKey]).toBeUndefined();
+    });
+
+    it('leaves a key minted for another chat unresolved', async () => {
+      const otherChatKey = matchedChatMemberKey('another-chat', ANA_ID);
+      const { service } = buildService({
+        eventMatchGroupId: 'match-group-1',
+        seatUserIds: [VIEWER_ID, ANA_ID],
+      });
+
+      const resolved = await service.resolve(
+        VIEWER_ID,
+        [`member:${otherChatKey}`],
+        CONVERSATION_ID,
+      );
+
+      expect(nameBySlug(resolved)[otherChatKey]).toBeUndefined();
+    });
+
+    it('leaves a key unresolved in a normal group', async () => {
+      const { service } = buildService({
+        eventMatchGroupId: null,
+        seatUserIds: [VIEWER_ID, ANA_ID],
+      });
+
+      const resolved = await service.resolve(
+        VIEWER_ID,
+        [`member:${anaKey}`],
+        CONVERSATION_ID,
+      );
+
+      expect(nameBySlug(resolved)[anaKey]).toBeUndefined();
+    });
   });
 });

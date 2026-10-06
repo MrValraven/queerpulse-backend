@@ -31,11 +31,17 @@ import { Message, MessageKind, SystemEvent } from './entities/message.entity';
 import {
   computeGroupLeftReason,
   ConversationResponse,
+  memberIdFor,
   memberNameOptionsFor,
   MessageResponse,
   requireAuthorSummary,
 } from './message-response';
 import { readGroupJoinHistoryFloor } from './group-join-history-floor';
+import {
+  GroupInviteLinkMaxUses,
+  GroupInviteLinkResponse,
+  inviteLinkUsageFields,
+} from './group-invite-link-usage';
 import {
   GROUP_INVITE_LINK_TTL_MS,
   MAX_GROUP_MEMBERS,
@@ -1255,12 +1261,15 @@ export class GroupsService {
    * PRD-400: every issue or rotation starts a fresh validity window of
    * `GROUP_INVITE_LINK_TTL_MS`, written in the same UPDATE as the token, and
    * the response carries that expiry so the panel can say when the link
-   * stops working.
+   * stops working. The same UPDATE writes the optional use cap (`maxUses`,
+   * null for unlimited) and resets the use count to 0, and the response
+   * carries the cap and the uses left.
    */
   async createOrRotateInviteLink(
     conversationId: string,
     actorUserId: string,
-  ): Promise<{ inviteToken: string; inviteTokenExpiresAt: string }> {
+    maxUses: GroupInviteLinkMaxUses | null = null,
+  ): Promise<GroupInviteLinkResponse> {
     await this.requireGroupRole(
       conversationId,
       actorUserId,
@@ -1272,7 +1281,12 @@ export class GroupsService {
     );
     await this.conversations.update(
       { id: conversationId },
-      { inviteToken, inviteTokenExpiresAt },
+      {
+        inviteToken,
+        inviteTokenExpiresAt,
+        inviteTokenMaxUses: maxUses,
+        inviteTokenUseCount: 0,
+      },
     );
     // Two concurrent rotations can both commit here, and only the LAST write
     // is actually live, so re-read rather than trust the token THIS call
@@ -1280,13 +1294,22 @@ export class GroupsService {
     // token that is really shareable) instead of one nobody can join with.
     const persisted = await this.conversations.findOne({
       where: { id: conversationId },
-      select: { inviteToken: true, inviteTokenExpiresAt: true },
+      select: {
+        inviteToken: true,
+        inviteTokenExpiresAt: true,
+        inviteTokenMaxUses: true,
+        inviteTokenUseCount: true,
+      },
     });
+    const usage = persisted
+      ? inviteLinkUsageFields(persisted, true)
+      : { inviteTokenMaxUses: maxUses, inviteTokenUsesLeft: maxUses };
     return {
       inviteToken: persisted?.inviteToken ?? inviteToken,
       inviteTokenExpiresAt: (
         persisted?.inviteTokenExpiresAt ?? inviteTokenExpiresAt
       ).toISOString(),
+      ...usage,
     };
   }
 
@@ -1893,6 +1916,8 @@ export class GroupsService {
       [convo.id],
       userId,
       profileByUser.get(userId)?.slug,
+      // PRD-423 (opaque member keys): a matched chat mentions by member key.
+      nameOptions.isMatchedGroup ? [convo.id] : [],
     );
     // PRD-353: an owner/admin of an active, non-dissolved group sees who has
     // been invited and not yet answered; everyone else gets `[]`, same gate
@@ -2001,6 +2026,10 @@ export class GroupsService {
       eventMatchGroupId: convo.eventMatchGroupId,
       // PRD-423: the durable Go together marker, outlives eventMatchGroupId.
       isGoTogetherChat: convo.isGoTogetherChat,
+      // PRD-423 (opaque member keys): how this chat names the caller.
+      ...(nameOptions.isMatchedGroup
+        ? { viewerMemberKey: memberIdFor(userId, nameOptions) }
+        : {}),
       leftReason: computeGroupLeftReason({
         leftAt: callerRow?.leftAt,
         removedAt: callerRow?.removedAt,
@@ -2023,6 +2052,15 @@ export class GroupsService {
           callerRow?.role === ConversationRole.Admin)
           ? (convo.inviteTokenExpiresAt?.toISOString() ?? null)
           : null,
+      // PRD-400 (use cap): the link's cap and uses left, under exactly the
+      // same rule as `inviteToken` above.
+      ...inviteLinkUsageFields(
+        convo,
+        !callerRow?.leftAt &&
+          !convo.dissolvedAt &&
+          (callerRow?.role === ConversationRole.Owner ||
+            callerRow?.role === ConversationRole.Admin),
+      ),
       // Owner/admin only, active, not dissolved (`canDissolve`/
       // `canTransferOwnership` are OWNER only: an admin can manage the
       // invite link but never end or hand off the group).

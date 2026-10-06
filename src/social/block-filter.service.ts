@@ -5,6 +5,10 @@ import { IdentityBlock } from '../identities/entities/identity-block.entity';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
 
+/** ENG-447: a block of an identity itself, or one carried to it from a
+ *  persona that went unlinked (see `BlockFilterService.identityBlockKind`). */
+export type IdentityBlockKind = 'direct' | 'carried';
+
 /**
  * Cross-cutting block/mute enforcement (spec §2). Exported from
  * `SocialModule` for other domains (messaging, connections, profiles/members
@@ -238,24 +242,66 @@ export class BlockFilterService {
    * blocks a member. A block of the identity's owner as a person lives in
    * `blocks` and never answers here, and a block of the identity leaves its
    * owner's own profile identity unblocked, since the two are separate
-   * relationships (see `IdentityBlock`).
+   * relationships (see `IdentityBlock`). A block the member placed on a
+   * persona before it went unlinked counts against the persona's current
+   * identity (ENG-447, `carriedIdentityBlocksAmong`).
    */
   async isIdentityBlocked(
     blockerUserId: string,
     identityId: string,
   ): Promise<boolean> {
-    return this.identityBlocks.exist({
+    const isDirectlyBlocked = await this.identityBlocks.exist({
       where: { blockerUserId, identityId },
     });
+    if (isDirectlyBlocked) return true;
+    const carried = await this.carriedIdentityBlocksAmong(
+      [blockerUserId],
+      [identityId],
+    );
+    return carried.length > 0;
   }
 
-  /** Task 14: every identity `blockerUserId` has blocked, in one query. */
-  async blockedIdentityIds(blockerUserId: string): Promise<string[]> {
-    const rows = await this.identityBlocks.find({
-      where: { blockerUserId },
-      select: { identityId: true },
+  /**
+   * ENG-447: which block, if any, `blockerUserId` holds against
+   * `identityId`: `direct` for a block of that identity, `carried` for one
+   * placed on a persona before it went unlinked that now holds against the
+   * identity the persona speaks through. Both refuse the same. A refusal
+   * that only a carried block causes must read to the blocker as a persona
+   * nobody answers for (`MessageRequestsService.identityEnquiryBlockedReason`):
+   * read as a block, it would tell anyone who blocked a named persona which
+   * pseudonym it became. A direct block wins when both hold.
+   */
+  async identityBlockKind(
+    blockerUserId: string,
+    identityId: string,
+  ): Promise<IdentityBlockKind | null> {
+    const isDirectlyBlocked = await this.identityBlocks.exist({
+      where: { blockerUserId, identityId },
     });
-    return rows.map((row) => row.identityId);
+    if (isDirectlyBlocked) return 'direct';
+    const carried = await this.carriedIdentityBlocksAmong(
+      [blockerUserId],
+      [identityId],
+    );
+    return carried.length > 0 ? 'carried' : null;
+  }
+
+  /** Task 14: every identity `blockerUserId` has blocked, in one query,
+   *  plus the current identity of each persona a carried block names. */
+  async blockedIdentityIds(blockerUserId: string): Promise<string[]> {
+    const [rows, carried] = await Promise.all([
+      this.identityBlocks.find({
+        where: { blockerUserId },
+        select: { identityId: true },
+      }),
+      this.carriedIdentityBlocksAmong([blockerUserId]),
+    ]);
+    return [
+      ...new Set([
+        ...rows.flatMap((row) => (row.identityId ? [row.identityId] : [])),
+        ...carried.map((row) => row.identityId),
+      ]),
+    ];
   }
 
   /**
@@ -264,6 +310,8 @@ export class BlockFilterService {
    * query however many threads asked. A caller that needs exact pairs keeps
    * the rows it asked for (`loadMailboxIdentityBlockKeys` in
    * `mailbox-seats.ts` does), since the cross product can return more.
+   * Carried blocks (ENG-447) answer as pairs with the persona's current
+   * identity.
    */
   async identityBlocksAmong(
     blockerUserIds: string[],
@@ -272,13 +320,53 @@ export class BlockFilterService {
     const uniqueBlockerUserIds = [...new Set(blockerUserIds)];
     const uniqueIdentityIds = [...new Set(identityIds)];
     if (!uniqueBlockerUserIds.length || !uniqueIdentityIds.length) return [];
-    const rows = await this.identityBlocks.find({
-      where: {
-        blockerUserId: In(uniqueBlockerUserIds),
-        identityId: In(uniqueIdentityIds),
-      },
-      select: { blockerUserId: true, identityId: true },
-    });
+    const [rows, carried] = await Promise.all([
+      this.identityBlocks.find({
+        where: {
+          blockerUserId: In(uniqueBlockerUserIds),
+          identityId: In(uniqueIdentityIds),
+        },
+        select: { blockerUserId: true, identityId: true },
+      }),
+      this.carriedIdentityBlocksAmong(uniqueBlockerUserIds, uniqueIdentityIds),
+    ]);
+    return [
+      ...rows.flatMap((row) =>
+        row.identityId
+          ? [{ blockerUserId: row.blockerUserId, identityId: row.identityId }]
+          : [],
+      ),
+      ...carried,
+    ];
+  }
+
+  /**
+   * ENG-447: the blocks carried across a persona going unlinked, as the
+   * pairs they enforce today. A carried row names the persona
+   * (`blocked_subprofile_id`), since the identity the member blocked was
+   * retired with the unlink, and it refuses the identity the persona speaks
+   * through now, exactly as a direct block of that identity would. With no
+   * `identityIds`, every current identity a carried block of the blockers
+   * reaches. A persona with no identity yet yields no pair: there is no
+   * mailbox to refuse until one is minted, and the pair appears the moment
+   * it is.
+   */
+  private async carriedIdentityBlocksAmong(
+    blockerUserIds: string[],
+    identityIds?: string[],
+  ): Promise<Array<{ blockerUserId: string; identityId: string }>> {
+    const rows: Array<{ blockerUserId: string; identityId: string }> =
+      await this.identityBlocks.query(
+        `SELECT "carried_block"."blocker_user_id" AS "blockerUserId",
+                "carried_identity"."id" AS "identityId"
+           FROM "identity_blocks" "carried_block"
+          INNER JOIN "identities" "carried_identity"
+             ON "carried_identity"."subprofile_id" = "carried_block"."blocked_subprofile_id"
+          WHERE "carried_block"."blocked_subprofile_id" IS NOT NULL
+            AND "carried_block"."blocker_user_id" = ANY($1::uuid[])
+            AND ($2::uuid[] IS NULL OR "carried_identity"."id" = ANY($2::uuid[]))`,
+        [blockerUserIds, identityIds ?? null],
+      );
     return rows.map((row) => ({
       blockerUserId: row.blockerUserId,
       identityId: row.identityId,

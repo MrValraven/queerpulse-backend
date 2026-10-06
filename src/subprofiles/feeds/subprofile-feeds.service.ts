@@ -14,6 +14,7 @@ import { isUniqueViolation } from '../../common/db-errors';
 import { runWithConcurrency } from '../../common/run-with-concurrency';
 import { NotificationType } from '../../notifications/entities/notification.entity';
 import { NotificationsService } from '../../notifications/notifications.service';
+import { PersonaImageKeysService } from '../../storage/persona-image-keys.service';
 import { StorageService } from '../../storage/storage.service';
 import { User, UserStatus } from '../../users/entities/user.entity';
 import { SubprofileFeedEntry } from '../entities/subprofile-feed-entry.entity';
@@ -26,7 +27,10 @@ import {
   SubprofileSection,
 } from '../entities/subprofile-item.entity';
 import { SubprofileMember } from '../entities/subprofile-member.entity';
-import { Subprofile } from '../entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+} from '../entities/subprofile.entity';
 import { isSectionAllowed } from '../subprofile-kinds';
 import { MAX_ITEMS_PER_SECTION } from '../subprofile-validation';
 import { SECTION_FULL_CODE, SubprofilesService } from '../subprofiles.service';
@@ -139,6 +143,9 @@ export class SubprofileFeedsService {
     private readonly notifications: NotificationsService,
     private readonly fetcher: SubprofileFeedFetcher,
     private readonly dataSource: DataSource,
+    // T17: art for an unlinked persona is stored under a persona-scoped key
+    // that names nobody, and registered to the persona.
+    private readonly personaImageKeys: PersonaImageKeysService,
   ) {}
 
   // ---- preview -------------------------------------------------------------
@@ -221,7 +228,13 @@ export class SubprofileFeedsService {
     // Show art is best-effort and fetched BEFORE the transaction: network I/O
     // never runs while a row lock is held.
     const imageKey = read.parsed.imageUrl
-      ? await this.storeArt(read.parsed.imageUrl, userId)
+      ? await this.storeArt(
+          read.parsed.imageUrl,
+          userId,
+          persona.linkVisibility === SubprofileLinkVisibility.Unlinked
+            ? subprofileId
+            : null,
+        )
       : null;
 
     const now = new Date();
@@ -235,6 +248,13 @@ export class SubprofileFeedsService {
           lock: { mode: 'pessimistic_write' },
         });
         await this.assertUnderFeedLimit(manager, subprofileId);
+        // T17: the art was stored for the link state read before this
+        // transaction; re-checked under the persona lock just taken.
+        const rehomedArt = await this.personaImageKeys.rehomeForPersonaWrite(
+          manager,
+          subprofileId,
+          [imageKey],
+        );
         const feed = await manager.save(
           manager.create(SubprofileFeed, {
             subprofileId,
@@ -243,7 +263,7 @@ export class SubprofileFeedsService {
             section,
             title: read.parsed.title,
             author: read.parsed.author,
-            imageKey,
+            imageKey: PersonaImageKeysService.applyRehome(rehomedArt, imageKey),
             autoPublish: dto.autoPublish ?? false,
             etag: read.etag,
             lastModified: read.lastModified,
@@ -456,6 +476,7 @@ export class SubprofileFeedsService {
       prepared,
       feed.imageKey,
       publisherUserId,
+      await this.unlinkedPersonaId(feed.subprofileId),
     );
     const preparedIds = prepared.map((entry) => entry.id);
 
@@ -562,13 +583,14 @@ export class SubprofileFeedsService {
       etag: read.etag,
       lastModified: read.lastModified,
     };
-    if (!feed.imageKey && read.parsed.imageUrl && actingUserId) {
-      const imageKey = await this.storeArt(read.parsed.imageUrl, actingUserId);
-      if (imageKey) {
-        patch.imageKey = imageKey;
-        feed.imageKey = imageKey;
-      }
-    }
+    const storedShowArtKey =
+      !feed.imageKey && read.parsed.imageUrl && actingUserId
+        ? await this.storeArt(
+            read.parsed.imageUrl,
+            actingUserId,
+            await this.unlinkedPersonaId(feed.subprofileId),
+          )
+        : null;
 
     const newEntryIds = await this.insertEntries(
       this.entries.manager,
@@ -577,6 +599,12 @@ export class SubprofileFeedsService {
       'pending',
     );
     await this.feeds.update({ id: feed.id }, patch);
+    if (storedShowArtKey) {
+      feed.imageKey = await this.saveShowArtUnderPersonaLock(
+        feed,
+        storedShowArtKey,
+      );
+    }
     if (!newEntryIds.length) return { newEntryCount: 0, newPendingCount: 0 };
 
     // Re-read the feed: the owner may have changed `autoPublish` or the
@@ -659,11 +687,12 @@ export class SubprofileFeedsService {
 
   /** Download each episode's art once (deduplicated by URL, capped per
    *  publish) and store our copy; an episode without usable art falls back
-   *  to the show art, else null. */
+   *  to the show art, else null. `unlinkedSubprofileId` as in `storeArt`. */
   private async storeEpisodeArt(
     entries: SubprofileFeedEntry[],
     showImageKey: string | null,
     ownerUserId: string,
+    unlinkedSubprofileId: string | null,
   ): Promise<Map<string, string | null>> {
     const uniqueUrls = [
       ...new Set(
@@ -673,7 +702,9 @@ export class SubprofileFeedsService {
       ),
     ].slice(0, MAX_ART_DOWNLOADS_PER_PUBLISH);
     const keys = await runWithConcurrency(
-      uniqueUrls.map((url) => () => this.storeArt(url, ownerUserId)),
+      uniqueUrls.map(
+        (url) => () => this.storeArt(url, ownerUserId, unlinkedSubprofileId),
+      ),
       ART_DOWNLOAD_CONCURRENCY,
     );
     const keyByUrl = new Map(
@@ -688,14 +719,36 @@ export class SubprofileFeedsService {
     );
   }
 
-  /** Our stored copy of one piece of remote art, or null. Never throws. */
+  /** Our stored copy of one piece of remote art, or null. Never throws.
+   *  T17: for an unlinked persona (`unlinkedSubprofileId` set) the copy is
+   *  stored under a persona-scoped key registered to it, so the art's URL
+   *  does not carry the member's id. The link state is read just before
+   *  this runs; items it reaches are re-checked under the persona lock
+   *  (`SubprofilesService.insertItemsAtTop`), and an unlink re-homes the
+   *  show art the feed holds. */
   private async storeArt(
     remoteUrl: string,
     ownerUserId: string,
+    unlinkedSubprofileId: string | null,
   ): Promise<string | null> {
     try {
       const image = await this.fetcher.fetchImage(remoteUrl);
       if (!image) return null;
+      if (unlinkedSubprofileId) {
+        const personaKey = await this.storage.putPersonaServerObject(
+          'work-image',
+          image.bytes,
+          image.contentType,
+        );
+        await this.personaImageKeys.registerKey(
+          this.dataSource.manager,
+          personaKey,
+          unlinkedSubprofileId,
+          ownerUserId,
+          'work-image',
+        );
+        return personaKey;
+      }
       return await this.storage.putServerObject(
         'work-image',
         ownerUserId,
@@ -706,6 +759,49 @@ export class SubprofileFeedsService {
       this.logger.warn(`Could not store podcast art: ${String(error)}`);
       return null;
     }
+  }
+
+  /**
+   * T17: writes a feed's show art under the persona row lock, after
+   * re-checking the persona's link state there. The art was stored for the
+   * state read before the download, and the persona may have been unlinked
+   * since: a member-scoped key is then copied to a persona-scoped one before
+   * it is written. Returns the key written.
+   */
+  private async saveShowArtUnderPersonaLock(
+    feed: SubprofileFeed,
+    storedKey: string,
+  ): Promise<string | null> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.findOne(Subprofile, {
+        where: { id: feed.subprofileId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const rehomedArt = await this.personaImageKeys.rehomeForPersonaWrite(
+        manager,
+        feed.subprofileId,
+        [storedKey],
+      );
+      const imageKey = PersonaImageKeysService.applyRehome(
+        rehomedArt,
+        storedKey,
+      );
+      await manager.update(SubprofileFeed, { id: feed.id }, { imageKey });
+      return imageKey;
+    });
+  }
+
+  /** `subprofileId` when that persona is unlinked, else null (T17). */
+  private async unlinkedPersonaId(
+    subprofileId: string,
+  ): Promise<string | null> {
+    const persona = await this.subprofiles.findOne({
+      where: { id: subprofileId },
+      select: { id: true, linkVisibility: true },
+    });
+    return persona?.linkVisibility === SubprofileLinkVisibility.Unlinked
+      ? subprofileId
+      : null;
   }
 
   /** The feed's creator, when a scheduled sync may act as them: still a

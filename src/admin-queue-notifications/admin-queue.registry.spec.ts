@@ -168,15 +168,20 @@ const EXPECTED: Record<
     tier: UserRole.Moderator,
     capabilities: ['housing_moderator'],
   },
+  [AdminQueueKey.SafetyInquiries]: {
+    route: '/admin/intakes',
+    tier: UserRole.Admin,
+    capabilities: [],
+  },
 };
 
 describe('ADMIN_QUEUE_REGISTRY', () => {
   it('covers every key exactly once', () => {
-    // 30 as of HousingGroupJoinRequests. The frontend mirror at
-    // adminQueueRoutes.ts carries the same 30 keys, and the two sides have to
+    // 31 as of SafetyInquiries (RES-F6). The frontend mirror at
+    // adminQueueRoutes.ts carries the same 31 keys, and the two sides have to
     // agree.
-    expect(ADMIN_QUEUE_KEYS).toHaveLength(30);
-    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(30);
+    expect(ADMIN_QUEUE_KEYS).toHaveLength(31);
+    expect(new Set(ADMIN_QUEUE_KEYS).size).toBe(31);
     expect(Object.keys(ADMIN_QUEUE_REGISTRY).sort()).toEqual(
       [...ADMIN_QUEUE_KEYS].sort(),
     );
@@ -211,6 +216,16 @@ describe('ADMIN_QUEUE_REGISTRY', () => {
     expect(
       ADMIN_QUEUE_REGISTRY[AdminQueueKey.SafeSpaceFlags].capabilities,
     ).toEqual([]);
+  });
+
+  it('gives safety inquiries their own queue on the inquiry inbox', () => {
+    // RES-F6. A safety concern used to ring on `Intakes`, which named it an
+    // intake form. Its own key keeps the label honest; the route and tier stay
+    // exactly the inbox's, because `InquiriesController` is admin-only.
+    expect(AdminQueueKey.SafetyInquiries).toBe('safety_inquiries');
+    expect(ADMIN_QUEUE_REGISTRY[AdminQueueKey.SafetyInquiries]).toEqual(
+      ADMIN_QUEUE_REGISTRY[AdminQueueKey.Intakes],
+    );
   });
 
   it('keeps the legal register admin-only', () => {

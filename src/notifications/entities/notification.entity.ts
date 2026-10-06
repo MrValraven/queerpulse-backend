@@ -1595,6 +1595,33 @@ export enum NotificationType {
    * See migration `AddSafeSpaceReviewNotificationType1829500400000`.
    */
   SafeSpaceReview = 'safe_space_review',
+  /**
+   * PRD-408. A forum thread's author credited this member as its co-author
+   * (`forum_thread.co_author_id`). Written by
+   * `ForumThreadsService.notifyCoAuthorOfCredit` as part of the thread's
+   * fan-out, so a scheduled or pending-review thread tells its co-author on
+   * the instant it becomes visible and the link always opens a thread they can
+   * read. The thread page carries the "remove my name" action, which is the
+   * member's opt-out.
+   *
+   * MEMBER-DRIVEN, WITH NO MUTE GATE. A block between the pair is refused at
+   * credit time and drops the credit later (`ForumCoAuthorBlockListener`), and
+   * the emit site holds the row to the thread's readers. It passes NO
+   * `actorId` argument to `create`, because that argument would only add the
+   * mute gate, and a mute must not silence the notice a member's opt-out
+   * depends on. The payload names the author (`actorId`) only when the byline
+   * shows them: an anonymous thread or a QueerPulse Official one leaves the
+   * key out and the row reads as "You were credited".
+   *
+   * ALWAYS DELIVERED: this row is how a member learns their name is on
+   * somebody else's thread, and the removal it points to depends on it. In-app
+   * only (no push).
+   *
+   * PAYLOAD: `{ source: 'forum', threadSlug, threadTitle, actorId? }`.
+   *
+   * See migration `AddForumCoAuthorCreditNotificationType1830000000000`.
+   */
+  ForumCoAuthorCredit = 'forum_co_author_credit',
 }
 
 @Entity('notifications')

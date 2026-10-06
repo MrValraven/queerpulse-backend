@@ -13,6 +13,7 @@ import { IdentitiesModule } from '../identities/identities.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
+import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
 import { Subprofile } from './entities/subprofile.entity';
 import { SubprofileAddressHistory } from './entities/subprofile-address-history.entity';
@@ -93,6 +94,10 @@ import { SubprofilesService } from './subprofiles.service';
     // module comment) instead of importing `SubprofilesModule`, so this edge
     // is one-directional and there is no cycle to break.
     NotificationsModule,
+    // T17: `PersonaImageKeysService` keeps an unlinked persona's images under
+    // persona-scoped keys. `StorageModule` imports nothing persona-side, so
+    // this edge is one-directional too.
+    StorageModule,
   ],
   controllers: [
     SubprofilesController,

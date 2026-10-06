@@ -21,6 +21,8 @@ import { IdentitiesService } from '../identities/identities.service';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { ConversationKind } from '../messaging/entities/conversation.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { MessageReactionKey } from '../messaging/entities/message-reaction.entity';
+import { matchedChatMemberKey } from '../messaging/matched-member-key';
 import { MessagingService } from '../messaging/messaging.service';
 import { MessagingCoreService } from '../messaging/messaging-core.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -1051,6 +1053,123 @@ describe('ChatGateway', () => {
       await gateway.handleRead(client as never, { conversationId: 'c1' });
       expect(messaging.markRead).toHaveBeenCalledWith('c1', 'u1', {
         upToMessageId: undefined,
+      });
+    });
+  });
+
+  // PRD-423 (opaque member keys): a matched Go together chat names every
+  // member by their per-chat key, so its live frames never carry a user id.
+  describe('matched Go together chat frames', () => {
+    const MATCHED_CHAT = 'matched-chat-1';
+    const typistKey = matchedChatMemberKey(MATCHED_CHAT, 'u1');
+
+    function seatInMatchedChat(isGoTogetherChat: boolean) {
+      conversationParticipants.manager.findOne.mockResolvedValue({
+        id: MATCHED_CHAT,
+        kind: ConversationKind.Group,
+        isOfficial: false,
+        isGoTogetherChat,
+        eventMatchGroupId: null,
+      });
+      conversationParticipants.find.mockResolvedValue([
+        { userId: 'u1', identityId: 'identity-u1', leftAt: null },
+        { userId: 'u2', identityId: 'identity-u2', leftAt: null },
+      ]);
+    }
+
+    async function typeInto(conversationId: string) {
+      const typingEmit = jest.fn();
+      const except = jest.fn().mockReturnValue({ emit: typingEmit });
+      const client = makeClient({
+        data: { userId: 'u1' },
+        rooms: new Set([conversationId]),
+        to: jest.fn().mockReturnValue({ except }),
+      });
+      await gateway.handleTyping(client as never, {
+        conversationId,
+        isTyping: true,
+      });
+      return typingEmit;
+    }
+
+    it("names the typist by their per-chat key, still excluding the typist's own devices", async () => {
+      seatInMatchedChat(true);
+
+      const typingEmit = await typeInto(MATCHED_CHAT);
+
+      expect(typingEmit).toHaveBeenCalledWith('typing', {
+        conversationId: MATCHED_CHAT,
+        userId: typistKey,
+        isTyping: true,
+      });
+    });
+
+    it('keeps the user id on a normal group typing frame', async () => {
+      seatInMatchedChat(false);
+
+      const typingEmit = await typeInto(MATCHED_CHAT);
+
+      expect(typingEmit).toHaveBeenCalledWith('typing', {
+        conversationId: MATCHED_CHAT,
+        userId: 'u1',
+        isTyping: true,
+      });
+    });
+
+    it('relays a read receipt under the reader key', async () => {
+      seatInMatchedChat(true);
+      namespaceTo.mockReturnValue({
+        emit: roomEmit,
+        except: jest.fn().mockReturnValue({ emit: roomEmit }),
+      });
+      const lastReadAt = new Date('2026-10-06T10:00:00.000Z');
+
+      await gateway.handleMessageRead({
+        conversationId: MATCHED_CHAT,
+        userId: 'u1',
+        lastReadAt,
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith('read', {
+        conversationId: MATCHED_CHAT,
+        userId: typistKey,
+        lastReadAt,
+      });
+    });
+
+    it('relays a delivered receipt under the recipient key', async () => {
+      seatInMatchedChat(true);
+      const deliveredAt = new Date('2026-10-06T10:00:00.000Z');
+
+      await gateway.handleMessageDelivered({
+        conversationId: MATCHED_CHAT,
+        userId: 'u1',
+        deliveredAt,
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith('message:delivered', {
+        conversationId: MATCHED_CHAT,
+        userId: typistKey,
+        deliveredAt,
+      });
+    });
+
+    it('relays a reaction under the reactor key', async () => {
+      seatInMatchedChat(true);
+      const reactions = [{ key: MessageReactionKey.Love, count: 1 }];
+
+      await gateway.handleMessageReaction({
+        conversationId: MATCHED_CHAT,
+        messageId: 'm1',
+        userId: 'u1',
+        reactions,
+      });
+
+      expect(roomEmit).toHaveBeenCalledWith('reaction', {
+        conversationId: MATCHED_CHAT,
+        messageId: 'm1',
+        userId: typistKey,
+        reactions,
       });
     });
   });

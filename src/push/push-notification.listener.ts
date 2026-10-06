@@ -49,9 +49,11 @@ const GO_TOGETHER_FEEDBACK_PATH = '/go-together/feedback';
  * `event-reminders.service.ts` respectively, so handling them here too would
  * double-send. Being absent from the switch is exactly how they are excluded.
  *
- * The backend stays language-neutral: every push sets an English `title`/`body`
- * fallback AND `l10n.titleKey`/`bodyKey` (+ resolved `params`) so the service
- * worker can localise (queerpulse/src/pushMessages.ts). Display strings (actor
+ * Every push sets an English `title`/`body` fallback AND
+ * `l10n.titleKey`/`bodyKey` (+ resolved `params`) so the service worker can
+ * localise (queerpulse/src/pushMessages.ts). `PushPreviewPrivacyService`
+ * renders the same keys in Portuguese for a `pt` member (PRD-325), so a new key
+ * also needs its PT value in `rich-push-copy.ts`. Display strings (actor
  * name, event title) are resolved best-effort for `params`; the whole handler is
  * wrapped in try/catch so a failed lookup degrades to the English fallback or
  * skips entirely — a push side effect must never throw back into the emitter.
@@ -349,7 +351,11 @@ export class PushNotificationListener {
         body: `${name} mentioned you.`,
         tag: `notification:${notification.id}`,
         data: { url: this.threadUrl(notification) },
-        ...this.iconOf(actor),
+        // PRD-423: a Go together chat mention carries no icon, since the
+        // stored avatar URL names the member's account.
+        ...(notification.payload?.isGoTogetherChat === true
+          ? {}
+          : this.iconOf(actor)),
         l10n: {
           titleKey: 'push:mention.title',
           bodyKey: 'push:mention.body',

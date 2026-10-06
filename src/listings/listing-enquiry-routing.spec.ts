@@ -105,7 +105,7 @@ function makeRouting(
     postMessage,
   });
   const blockFilter = {
-    isIdentityBlocked: jest.fn(() => Promise.resolve(false)),
+    identityBlockKind: jest.fn(() => Promise.resolve(null)),
     blockedUserIds: jest.fn((userId: string, candidateUserIds: string[]) =>
       Promise.resolve(
         new Set(

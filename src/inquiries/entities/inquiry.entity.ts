@@ -6,8 +6,16 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-/** Which marketing form produced the inquiry. */
-export const INQUIRY_KINDS = ['contact', 'partner'] as const;
+/**
+ * Which marketing form produced the inquiry. `listing_correction` (PRD-434) is
+ * a Contact message about a business directory listing, sent under the form's
+ * listing-correction topic, and carries that listing in `listingRef`.
+ */
+export const INQUIRY_KINDS = [
+  'contact',
+  'partner',
+  'listing_correction',
+] as const;
 
 export type InquiryKind = (typeof INQUIRY_KINDS)[number];
 
@@ -98,6 +106,17 @@ export class Inquiry {
    */
   @Column({ type: 'boolean', default: false })
   isPriority!: boolean;
+
+  /**
+   * PRD-434. The reference (`QPL-2026-0007`) of the directory listing a
+   * `listing_correction` is about; null on every other kind, and on a
+   * correction sent without one (a member who picked the topic by hand).
+   * Stored as the ref the member's link carried, with no foreign key: the
+   * listing can be deleted while the correction still waits, and the
+   * admin list resolves the ref to a live listing at read time.
+   */
+  @Column({ type: 'varchar', nullable: true })
+  listingRef!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -8,8 +8,11 @@ import {
 import { Request } from 'express';
 import { Observable } from 'rxjs';
 import { storageKeyFromImageUrl } from '../common/image-url';
-import { allowsSharedUploads } from './shared-upload-handlers';
-import { storageKeyOwnerId } from './storage-key';
+import {
+  allowsPersonaScopedKeys,
+  allowsSharedUploads,
+} from './shared-upload-handlers';
+import { isPersonaScopedKey, storageKeyOwnerId } from './storage-key';
 
 // This interceptor does two related things to every image-ish string in a
 // state-changing request body, in one walk:
@@ -63,6 +66,15 @@ const MAX_TRAVERSAL_DEPTH = 15;
 
 type BodyContainer = Record<string, unknown> | unknown[];
 
+// What the handling route may reference beyond the requester's own uploads.
+// Resolved once per request (the handler is fixed for the whole body walk).
+interface UploadAllowances {
+  /** The `SHARED_UPLOAD_HANDLERS` exemption, see `shared-upload-handlers.ts`. */
+  sharedUploads: boolean;
+  /** T17: a persona-scoped key, see `PERSONA_SCOPED_KEY_HANDLERS`. */
+  personaScopedKeys: boolean;
+}
+
 @Injectable()
 export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -84,29 +96,33 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
 
     // Resolved per REQUEST, not per string: the handler is fixed for the whole
     // body walk. Unknown handlers are not exempt (fail-closed).
-    const sharedUploadsAllowed = allowsSharedUploads(
-      // Read defensively: a hand-rolled `ExecutionContext` (unit tests, a
-      // future non-controller caller) may not implement these, and a missing
-      // name must fail CLOSED into the strict rule, never crash the request.
+    // Read defensively: a hand-rolled `ExecutionContext` (unit tests, a
+    // future non-controller caller) may not implement these, and a missing
+    // name must fail CLOSED into the strict rule while the request carries on.
+    const controllerName =
       typeof context.getClass === 'function'
         ? context.getClass()?.name
-        : undefined,
+        : undefined;
+    const handlerName =
       typeof context.getHandler === 'function'
         ? context.getHandler()?.name
-        : undefined,
-    );
+        : undefined;
+    const allowances: UploadAllowances = {
+      sharedUploads: allowsSharedUploads(controllerName, handlerName),
+      personaScopedKeys: allowsPersonaScopedKeys(controllerName, handlerName),
+    };
 
     if (typeof body === 'string') {
       // A top-level string body can't be rewritten in place (nothing owns the
       // reference), but it is still ownership-checked. `inspectString`'s
       // normalized result is discarded here — a foreign key throws in either
       // form.
-      this.inspectString(body, requesterUserId, sharedUploadsAllowed);
+      this.inspectString(body, requesterUserId, allowances);
     } else if (typeof body === 'object') {
       this.normalizeAndAssert(
         body as BodyContainer,
         requesterUserId,
-        sharedUploadsAllowed,
+        allowances,
         new Set(),
       );
     }
@@ -121,10 +137,23 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   private inspectString(
     value: string,
     requesterUserId: string | undefined,
-    sharedUploadsAllowed: boolean,
+    allowances: UploadAllowances,
   ): string {
     const normalized = storageKeyFromImageUrl(value);
     const arrivedAsResolvedUrl = normalized !== value;
+
+    // T17: a persona-scoped key names no uploader, so the ownership rule
+    // below cannot see it (`storageKeyOwnerId` is null for it, which would
+    // read as "not one of our keys" and wave it through). It is refused on
+    // every route except `PERSONA_SCOPED_KEY_HANDLERS`, each of which checks
+    // the requester against the key's persona itself. Bare and URL forms
+    // alike: those checks are exact, so the form does not matter there.
+    if (isPersonaScopedKey(normalized)) {
+      if (requesterUserId && allowances.personaScopedKeys) {
+        return normalized;
+      }
+      throw new ForbiddenException('Referenced upload does not belong to you');
+    }
 
     const ownerUserId = storageKeyOwnerId(normalized);
     if (ownerUserId === null) {
@@ -139,7 +168,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       // resolved URL, not a bare key an attacker guessed). See
       // `shared-upload-handlers.ts` — the service owns the unchanged-value
       // check for these.
-      if (arrivedAsResolvedUrl && sharedUploadsAllowed) {
+      if (arrivedAsResolvedUrl && allowances.sharedUploads) {
         return normalized;
       }
       throw new ForbiddenException('Referenced upload does not belong to you');
@@ -154,7 +183,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   private normalizeAndAssert(
     container: BodyContainer,
     requesterUserId: string | undefined,
-    sharedUploadsAllowed: boolean,
+    allowances: UploadAllowances,
     visited: Set<object>,
     depth = 0,
   ): void {
@@ -181,7 +210,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
         container[index] = this.processEntry(
           container[index],
           requesterUserId,
-          sharedUploadsAllowed,
+          allowances,
           visited,
           depth,
         );
@@ -192,7 +221,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       container[key] = this.processEntry(
         container[key],
         requesterUserId,
-        sharedUploadsAllowed,
+        allowances,
         visited,
         depth,
       );
@@ -204,18 +233,18 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   private processEntry(
     value: unknown,
     requesterUserId: string | undefined,
-    sharedUploadsAllowed: boolean,
+    allowances: UploadAllowances,
     visited: Set<object>,
     depth: number,
   ): unknown {
     if (typeof value === 'string') {
-      return this.inspectString(value, requesterUserId, sharedUploadsAllowed);
+      return this.inspectString(value, requesterUserId, allowances);
     }
     if (value !== null && typeof value === 'object') {
       this.normalizeAndAssert(
         value as BodyContainer,
         requesterUserId,
-        sharedUploadsAllowed,
+        allowances,
         visited,
         depth + 1,
       );

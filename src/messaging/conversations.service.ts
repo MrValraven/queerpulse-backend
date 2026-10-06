@@ -73,6 +73,7 @@ import {
   AuthorSummary,
   computeGroupLeftReason,
   ConversationResponse,
+  memberIdFor,
   memberNameOptionsFor,
   presentSenderIds,
   toAuthorSummary,
@@ -83,6 +84,7 @@ import {
   notModeratedMessagePredicate,
   withinLeftAtCeilingPredicate,
 } from './message-visibility-predicates';
+import { inviteLinkUsageFields } from './group-invite-link-usage';
 import { DEFAULT_LIMIT, MAX_LIMIT } from './messaging.constants';
 import { MessagingCoreService } from './messaging-core.service';
 import {
@@ -709,6 +711,10 @@ export class ConversationsService {
       convoIds,
       userId,
       profileByUser.get(userId)?.slug,
+      // PRD-423 (opaque member keys): a matched chat mentions by member key.
+      convos
+        .filter((convo) => memberNameOptionsFor(convo).isMatchedGroup)
+        .map((convo) => convo.id),
     );
 
     // Lazy-clear (PRD-349): an expired TIMED mute self-heals the instant this
@@ -1050,6 +1056,10 @@ export class ConversationsService {
         eventMatchGroupId: isGroup ? convo.eventMatchGroupId : null,
         // PRD-423: the durable Go together marker, outlives eventMatchGroupId.
         isGoTogetherChat: isGroup ? convo.isGoTogetherChat : false,
+        // PRD-423 (opaque member keys): how this chat names the caller.
+        ...(isGroup && nameOptions.isMatchedGroup
+          ? { viewerMemberKey: memberIdFor(userId, nameOptions) }
+          : {}),
         leftReason: isGroup
           ? computeGroupLeftReason({
               leftAt: part.leftAt,
@@ -1077,6 +1087,16 @@ export class ConversationsService {
             part.role === ConversationRole.Admin)
             ? (convo.inviteTokenExpiresAt?.toISOString() ?? null)
             : null,
+        // PRD-400 (use cap): the link's cap and uses left, under exactly the
+        // same rule as `inviteToken` above.
+        ...inviteLinkUsageFields(
+          convo,
+          isGroup &&
+            !part.leftAt &&
+            !convo.dissolvedAt &&
+            (part.role === ConversationRole.Owner ||
+              part.role === ConversationRole.Admin),
+        ),
         // Computed exactly like `GroupsService.toGroupConversationResponse`'s
         // matching fields: owner/admin only, active, not dissolved for
         // `canManageInviteLink`; owner only, active, not dissolved for the

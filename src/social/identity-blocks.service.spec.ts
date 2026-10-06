@@ -256,6 +256,79 @@ describe('Task 14: IdentityBlocksService', () => {
   });
 });
 
+// ENG-447: when a persona goes unlinked its identity is retired, and each
+// block on it is carried to the persona. The blocker's list keeps showing the
+// named persona they blocked, under the identity id they blocked, and never
+// the pseudonymous persona the block now refuses.
+describe('ENG-447: a block carried across a persona unlink', () => {
+  const RETIRED_PERSONA_IDENTITY = '0b0b0b0b-0000-4000-8000-000000000004';
+
+  function buildWithCarriedBlock() {
+    const built = build();
+    built.rows.push({
+      id: 'carried-block',
+      blockerUserId: CUSTOMER,
+      identityId: null,
+      blockedSubprofileId: 'persona-fresh-id',
+      retiredIdentityId: RETIRED_PERSONA_IDENTITY,
+      blockedNameSnapshot: 'Robin Nightform',
+      createdAt: new Date(Date.UTC(2026, 7, 1)),
+    });
+    return built;
+  }
+
+  it("lists the carried block under the named persona's name and the identity id the member blocked", async () => {
+    const { service, identities } = buildWithCarriedBlock();
+
+    const page = await service.listIdentityBlocks(CUSTOMER);
+
+    expect(page.items).toEqual([
+      {
+        id: 'carried-block',
+        identity: {
+          id: RETIRED_PERSONA_IDENTITY,
+          kind: IdentityKind.Subprofile,
+          displayName: 'Robin Nightform',
+          handle: null,
+          avatarUrl: null,
+        },
+        createdAt: new Date(Date.UTC(2026, 7, 1)),
+      },
+    ]);
+    // Nothing about the persona's current identity is read for the row.
+    expect(identities.getByIds).toHaveBeenCalledWith([]);
+    expect(identities.describeIdentities).toHaveBeenCalledWith([]);
+  });
+
+  it('lifts the carried block when the member unblocks the identity id the list shows', async () => {
+    const { service, rows } = buildWithCarriedBlock();
+
+    await service.unblockIdentity(CUSTOMER, RETIRED_PERSONA_IDENTITY);
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it("leaves another member's carried block in place", async () => {
+    const { service, rows } = buildWithCarriedBlock();
+
+    await service.unblockIdentity(OWNER, RETIRED_PERSONA_IDENTITY);
+
+    expect(rows).toHaveLength(1);
+  });
+
+  it('keeps a direct block of the persona current identity apart from the carried one', async () => {
+    const { service, rows } = buildWithCarriedBlock();
+
+    await service.blockIdentity(CUSTOMER, PERSONA_IDENTITY);
+    const page = await service.listIdentityBlocks(CUSTOMER);
+
+    expect(rows).toHaveLength(2);
+    expect(page.items.map((item) => item.identity.id).sort()).toEqual(
+      [PERSONA_IDENTITY, RETIRED_PERSONA_IDENTITY].sort(),
+    );
+  });
+});
+
 describe('Task 14 fix round 1: the identity-block routes', () => {
   function routePath(target: object): unknown {
     return Reflect.getMetadata(PATH_METADATA, target);

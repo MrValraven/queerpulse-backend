@@ -4,6 +4,11 @@ import { In, Repository } from 'typeorm';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { GENERIC_PUSH_COPY, type GenericPushCopy } from './generic-push-copy';
 import { PushService, type PushPayload } from './push.service';
+import {
+  RICH_PUSH_COPY_PT,
+  localizeRichPayload,
+  rendersIdentically,
+} from './rich-push-copy';
 
 /**
  * THE ONE PLACE A PUSH IS SPLIT BY LOCK-SCREEN PRIVACY (ID-13).
@@ -50,6 +55,12 @@ import { PushService, type PushPayload } from './push.service';
  * in the plain fields iOS prints. Anyone else, including a member with no row
  * or no stored language, gets the English fallback, and every engine that
  * runs the service worker still localises from the `l10n` keys either way.
+ *
+ * The rich payload follows the same split: a Portuguese member with previews
+ * on gets its title and body rendered from `RICH_PUSH_COPY_PT`, the backend
+ * copy of the service worker's Portuguese catalog, with the `l10n` keys left
+ * in place. A payload with nothing to translate (a DM's name and message
+ * text) is identical in both languages and goes out as one send.
  */
 @Injectable()
 export class PushPreviewPrivacyService {
@@ -80,6 +91,20 @@ export class PushPreviewPrivacyService {
       await this.recipientPreferences(recipientUserIds);
     const showing = new Set(showingUserIds);
     const portuguese = new Set(portugueseUserIds);
+    const portugueseRichPayload = localizeRichPayload(
+      richPayload,
+      RICH_PUSH_COPY_PT,
+    );
+    const hasPortugueseRichCopy = !rendersIdentically(
+      richPayload,
+      portugueseRichPayload,
+    );
+    const showingDefaultLanguageUserIds = hasPortugueseRichCopy
+      ? showingUserIds.filter((userId) => !portuguese.has(userId))
+      : showingUserIds;
+    const showingPortugueseUserIds = hasPortugueseRichCopy
+      ? showingUserIds.filter((userId) => portuguese.has(userId))
+      : [];
     const hidingUserIds = recipientUserIds.filter(
       (userId) => !showing.has(userId),
     );
@@ -90,34 +115,48 @@ export class PushPreviewPrivacyService {
       portuguese.has(userId),
     );
 
-    // One after the other, not concurrently. Every push in this module funnels
-    // through here, and `sendToUsers` caps its OWN fan-out at
-    // `MAX_CONCURRENT_PUSH_SENDS`, so running both at once put twice that many
-    // sockets and `last_used_at` writes in flight against a pool that defaults
-    // to 10 connections. The two recipient sets partition the batch, so
-    // sequencing costs at most one extra round of the cap, and that round is
-    // bounded by a single send (up to `PUSH_SEND_TIMEOUT_MS` if the smaller set
-    // happens to hold a hung endpoint). That is an acceptable trade here
-    // because this runs off the request path with nobody waiting, and it halves
-    // peak concurrency against the pool.
+    // One after the other. Every push in this module funnels through here,
+    // and `sendToUsers` caps its OWN fan-out at `MAX_CONCURRENT_PUSH_SENDS`,
+    // so running the sends at once put a multiple of that many sockets and
+    // `last_used_at` writes in flight against a pool that defaults to 10
+    // connections. The recipient groups (preview shown or hidden, each in
+    // English or Portuguese) partition the batch into up to four sequential
+    // sends, and each group past the first costs one more sequential round of
+    // the per-call cap. Each such round is bounded by a single send (up to
+    // `PUSH_SEND_TIMEOUT_MS` if that group happens to hold a hung endpoint).
+    // That is an acceptable trade here because this runs off the request
+    // path with nobody waiting, and peak concurrency stays at the cap however
+    // many groups the batch splits into.
     //
-    // Neither send may be skipped because the other threw, which the previous
-    // concurrent shape got for free by having both already started. Both run,
-    // then the first fault is rethrown so the caller still sees it.
-    // `sendToUsers` already swallows per-endpoint failures, so a rejection here
-    // is a database fault, not a delivery one.
+    // Every send runs even when an earlier one threw (the previous
+    // concurrent shape got this for free by having them all started at
+    // once). Once all have run, the first fault is rethrown so the caller
+    // still sees it. `sendToUsers` already swallows per-endpoint failures, so
+    // a rejection here is a database fault.
     //
-    // The Portuguese generic send runs only when someone needs it, so a batch
-    // with no Portuguese member hiding previews costs the same two sends as
-    // before the language column existed.
+    // The Portuguese sends run only when someone needs them, so a batch with
+    // no Portuguese member (or a rich payload with nothing to translate)
+    // costs the same two sends as before the language column existed.
     const sends = [
-      () => this.pushService.sendToUsers(showingUserIds, richPayload),
+      () =>
+        this.pushService.sendToUsers(
+          showingDefaultLanguageUserIds,
+          richPayload,
+        ),
       () =>
         this.pushService.sendToUsers(
           hidingDefaultLanguageUserIds,
           toGenericPayload(richPayload, genericCopy),
         ),
     ];
+    if (showingPortugueseUserIds.length > 0) {
+      sends.push(() =>
+        this.pushService.sendToUsers(
+          showingPortugueseUserIds,
+          portugueseRichPayload,
+        ),
+      );
+    }
     if (hidingPortugueseUserIds.length > 0) {
       sends.push(() =>
         this.pushService.sendToUsers(

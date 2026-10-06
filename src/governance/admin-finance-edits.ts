@@ -38,6 +38,10 @@ export interface FinanceEditResult<Value> {
   value: Value;
   audit: FinanceAuditEntry[];
   isChanged: boolean;
+  /** A money or count figure moved (a ledger amount, or a row added). Only
+   *  this restamps the public "figures entered on" date; a label, note or
+   *  prose change leaves it alone. */
+  isFigureChanged: boolean;
 }
 
 /** Cleaned text that must still say something once markup is stripped. */
@@ -70,7 +74,12 @@ export function applyLedgerEdits(
   edits: FinanceLedgerEditDto[] | undefined,
 ): FinanceEditResult<FinanceLine[]> {
   if (!edits || edits.length === 0) {
-    return { value: lines, audit: [], isChanged: false };
+    return {
+      value: lines,
+      audit: [],
+      isChanged: false,
+      isFigureChanged: false,
+    };
   }
   const appended = edits
     .filter((edit) => edit.index >= lines.length)
@@ -90,6 +99,7 @@ export function applyLedgerEdits(
 
   const audit: FinanceAuditEntry[] = [];
   let isChanged = false;
+  let isFigureChanged = false;
 
   const corrected = lines.map((line, index) => {
     const edit = edits.find((candidate) => candidate.index === index);
@@ -116,6 +126,7 @@ export function applyLedgerEdits(
       next.amount = edit.amount;
       next.source = FinanceMetricSource.Manual;
       isChanged = true;
+      isFigureChanged = true;
     }
     if (edit.note !== undefined && edit.note !== line.note) {
       next.note = toStoredPlainText(edit.note);
@@ -167,12 +178,22 @@ export function applyLedgerEdits(
       enabled: edit.enabled ?? true,
     };
   });
-  if (added.length > 0) isChanged = true;
+  if (added.length > 0) {
+    isChanged = true;
+    isFigureChanged = true;
+  }
 
-  return { value: [...corrected, ...added], audit, isChanged };
+  return {
+    value: [...corrected, ...added],
+    audit,
+    isChanged,
+    isFigureChanged,
+  };
 }
 
-/** A whole-section replacement: audited as one row holding both JSON snapshots. */
+/** A whole-section replacement: audited as one row holding both JSON
+ *  snapshots. The sections (stats, event notes, partners, reserve) are the
+ *  report's words and disclosures, so none of them counts as a figure. */
 function replaceSection<Value>(
   field: string,
   before: Value,
@@ -181,12 +202,18 @@ function replaceSection<Value>(
   const beforeJson = JSON.stringify(before);
   const afterJson = JSON.stringify(after);
   if (beforeJson === afterJson) {
-    return { value: before, audit: [], isChanged: false };
+    return {
+      value: before,
+      audit: [],
+      isChanged: false,
+      isFigureChanged: false,
+    };
   }
   return {
     value: after,
     audit: [{ field, oldValue: beforeJson, newValue: afterJson }],
     isChanged: true,
+    isFigureChanged: false,
   };
 }
 
@@ -220,18 +247,56 @@ export function replaceEventNotes(
   );
 }
 
+/**
+ * The disclosed partners, as a full replacement list. Each partner carries its
+ * restriction in one of two forms:
+ *
+ *  - `scope`, the words the admin typed. Sent whenever the admin edited the
+ *    restriction, and it always wins.
+ *  - `scopeKey` alone, for a partner whose translated restriction the admin
+ *    left as it was. The key is kept so every reader still sees the
+ *    restriction in their own language. Only a key the stored list already
+ *    carries is accepted: the public page resolves it through `t()`, so an
+ *    arbitrary key would print as raw text.
+ *
+ * Every saved partner is marked `manual`: an admin who saves the list with a
+ * seeded partner in it is confirming that partner, the same rule a seeded
+ * headline figure follows, so it reaches the public page.
+ */
 export function replacePartners(
   before: FinancePartner[] | null,
   submitted: FinancePartnerEditDto[],
 ): FinanceEditResult<FinancePartner[]> {
+  const storedScopeKeys = new Set(
+    (before ?? [])
+      .map((partner) => partner.scopeKey)
+      .filter((scopeKey): scopeKey is string => Boolean(scopeKey)),
+  );
   return replaceSection(
     'partners',
     before ?? [],
-    submitted.map((partner) => ({
-      name: requiredText(partner.name, 'A partner name'),
-      amount: partner.amount,
-      scope: requiredText(partner.scope, 'A partner restriction'),
-    })),
+    submitted.map((partner): FinancePartner => {
+      const name = requiredText(partner.name, 'A partner name');
+      if (partner.scope === undefined && partner.scopeKey !== undefined) {
+        if (!storedScopeKeys.has(partner.scopeKey)) {
+          throw new BadRequestException(
+            `Unknown partner restriction key: ${partner.scopeKey}`,
+          );
+        }
+        return {
+          name,
+          amount: partner.amount,
+          scopeKey: partner.scopeKey,
+          source: FinanceMetricSource.Manual,
+        };
+      }
+      return {
+        name,
+        amount: partner.amount,
+        scope: requiredText(partner.scope ?? '', 'A partner restriction'),
+        source: FinanceMetricSource.Manual,
+      };
+    }),
   );
 }
 

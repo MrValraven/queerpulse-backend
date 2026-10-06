@@ -12,6 +12,7 @@ import {
 } from '../../common/image-url';
 import { NotificationType } from '../../notifications/entities/notification.entity';
 import type { NotificationsService } from '../../notifications/notifications.service';
+import type { PersonaImageKeysService } from '../../storage/persona-image-keys.service';
 import type { StorageService } from '../../storage/storage.service';
 import { User, UserStatus } from '../../users/entities/user.entity';
 import { SubprofileFeedEntry } from '../entities/subprofile-feed-entry.entity';
@@ -21,7 +22,11 @@ import {
   SubprofileSection,
 } from '../entities/subprofile-item.entity';
 import { SubprofileMember } from '../entities/subprofile-member.entity';
-import { Subprofile, SubprofileKind } from '../entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileKind,
+  SubprofileLinkVisibility,
+} from '../entities/subprofile.entity';
 import type {
   SubprofilesService,
   TopInsertCandidate,
@@ -130,11 +135,18 @@ describe('SubprofileFeedsService', () => {
     getOwnedDTO: jest.Mock;
     insertItemsAtTop: jest.Mock;
   };
-  let storage: { putServerObject: jest.Mock };
+  let storage: {
+    putServerObject: jest.Mock;
+    putPersonaServerObject: jest.Mock;
+  };
+  let personaImageKeys: {
+    registerKey: jest.Mock;
+    rehomeForPersonaWrite: jest.Mock;
+  };
   let notifications: { createForRecipients: jest.Mock };
   let fetcher: { fetchFeed: jest.Mock; fetchImage: jest.Mock };
   let txManager: EntityManagerFake;
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; manager: EntityManagerFake };
   let service: SubprofileFeedsService;
   /** What the (fake) persona lock re-read returns as still pending. */
   let stillPendingUnderLock: ((ids: string[]) => string[]) | null;
@@ -310,6 +322,16 @@ describe('SubprofileFeedsService', () => {
           ).padStart(12, '0')}.png`,
         ),
       ),
+      putPersonaServerObject: jest
+        .fn()
+        .mockResolvedValue(
+          'persona/55555555-5555-4555-8555-555555555555/66666666-6666-4666-8666-666666666666.png',
+        ),
+    };
+    // Default: the in-lock re-check finds nothing to re-home.
+    personaImageKeys = {
+      registerKey: jest.fn().mockResolvedValue(undefined),
+      rehomeForPersonaWrite: jest.fn().mockResolvedValue(new Map()),
     };
     notifications = { createForRecipients: jest.fn().mockResolvedValue([]) };
     fetcher = {
@@ -324,6 +346,7 @@ describe('SubprofileFeedsService', () => {
         (run: (manager: EntityManagerFake) => Promise<unknown>) =>
           run(txManager),
       ),
+      manager: txManager,
     };
     service = new SubprofileFeedsService(
       feeds as unknown as Repository<SubprofileFeed>,
@@ -337,7 +360,62 @@ describe('SubprofileFeedsService', () => {
       notifications as unknown as NotificationsService,
       fetcher,
       dataSource as unknown as DataSource,
+      personaImageKeys as unknown as PersonaImageKeysService,
     );
+  });
+
+  // T17: an unlinked persona's art must not be stored under a key that
+  // carries the publishing member's id.
+  describe('art for an unlinked persona', () => {
+    it('stores episode art under a persona-scoped key registered to the persona', async () => {
+      subprofileRepo.findOne.mockResolvedValue({
+        ...makePersona(),
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+      });
+      entries.find.mockResolvedValue([
+        makeEntry('new', '2026-03-01T00:00:00Z', {
+          remoteImageUrl: 'https://cdn.example/art.jpg',
+        }),
+      ]);
+
+      await service.publishEntries(makeFeed(), CO_OWNER_ID, ['new'], 7);
+
+      expect(storage.putServerObject).not.toHaveBeenCalled();
+      expect(storage.putPersonaServerObject).toHaveBeenCalledWith(
+        'work-image',
+        expect.any(Uint8Array),
+        'image/png',
+      );
+      expect(personaImageKeys.registerKey).toHaveBeenCalledWith(
+        txManager,
+        'persona/55555555-5555-4555-8555-555555555555/66666666-6666-4666-8666-666666666666.png',
+        PERSONA_ID,
+        CO_OWNER_ID,
+        'work-image',
+      );
+    });
+
+    it('keeps the member-scoped key for a linked persona', async () => {
+      subprofileRepo.findOne.mockResolvedValue({
+        ...makePersona(),
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      });
+      entries.find.mockResolvedValue([
+        makeEntry('new', '2026-03-01T00:00:00Z', {
+          remoteImageUrl: 'https://cdn.example/art.jpg',
+        }),
+      ]);
+
+      await service.publishEntries(makeFeed(), CO_OWNER_ID, ['new'], 7);
+
+      expect(storage.putPersonaServerObject).not.toHaveBeenCalled();
+      expect(storage.putServerObject).toHaveBeenCalledWith(
+        'work-image',
+        CO_OWNER_ID,
+        expect.any(Uint8Array),
+        'image/png',
+      );
+    });
   });
 
   describe('publishEntries', () => {
@@ -830,11 +908,51 @@ describe('SubprofileFeedsService', () => {
         expect.any(Uint8Array),
         'image/png',
       );
-      const [, patch] = feeds.update.mock.calls[0] as [
-        unknown,
-        { imageKey?: string },
-      ];
-      expect(patch.imageKey).toMatch(new RegExp(`^work/${CO_OWNER_ID}/`));
+      // T17: written under the persona lock, after the in-lock re-check.
+      expect(txManager.findOne).toHaveBeenCalledWith(Subprofile, {
+        where: { id: PERSONA_ID },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(personaImageKeys.rehomeForPersonaWrite).toHaveBeenCalledWith(
+        txManager,
+        PERSONA_ID,
+        [expect.stringMatching(new RegExp(`^work/${CO_OWNER_ID}/`))],
+      );
+      const showArtUpdate = txManager.update.mock.calls.find(
+        ([entity]) => entity === SubprofileFeed,
+      ) as [unknown, unknown, { imageKey?: string }] | undefined;
+      expect(showArtUpdate?.[2].imageKey).toMatch(
+        new RegExp(`^work/${CO_OWNER_ID}/`),
+      );
+    });
+
+    // T17: the persona went unlinked while the art downloaded, so the
+    // in-lock re-check copies it to a persona-scoped key before the write.
+    it('writes the re-homed show art when the persona went unlinked meanwhile', async () => {
+      const personaKey =
+        'persona/77777777-7777-4777-8777-777777777777/88888888-8888-4888-8888-888888888888.png';
+      personaImageKeys.rehomeForPersonaWrite.mockImplementation(
+        (_manager: unknown, _id: string, [storedKey]: string[]) =>
+          Promise.resolve(new Map([[storedKey, personaKey]])),
+      );
+      fetcher.fetchFeed.mockResolvedValue({
+        notModified: false,
+        xml: rss('', '<itunes:image href="https://cdn.example/show.jpg"/>'),
+        finalUrl: 'https://feeds.example/show',
+        etag: null,
+        lastModified: null,
+      });
+
+      await service.syncFeed(
+        makeFeed({ imageKey: null }),
+        { kind: 'manual', userId: CO_OWNER_ID },
+        NOW,
+      );
+
+      const showArtUpdate = txManager.update.mock.calls.find(
+        ([entity]) => entity === SubprofileFeed,
+      ) as [unknown, unknown, { imageKey?: string }] | undefined;
+      expect(showArtUpdate?.[2].imageKey).toBe(personaKey);
     });
   });
 

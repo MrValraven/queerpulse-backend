@@ -281,6 +281,36 @@ describe('MagazineLifecycleService', () => {
       );
     });
 
+    it('puts the picked member on the piece and links their credit to their account', async () => {
+      // PRD-440: the desk's translator picker sends the member and their
+      // name together, so the job lands on them and the credit line links
+      // to their profile.
+      const original = makeOriginalPiece();
+      const article = makeOriginalArticle();
+      const { getSavedPiece } = wireOriginal(original, article);
+
+      const dto: CreateArticleTranslationDto = {
+        locale: 'pt',
+        translatorUserId: 'translator-1',
+        translatorByline: 'Rita Lopes',
+      };
+      await service.createTranslation('piece-1', dto, 'editor-1');
+
+      expect(getSavedPiece().writerId).toBe('translator-1');
+      expect(authors.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          name: 'Rita Lopes',
+          userId: 'translator-1',
+        }),
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'translator-1',
+        NotificationType.MagazinePieceCommissioned,
+        expect.anything(),
+        'editor-1',
+      );
+    });
+
     it('rings no bell when the translation opens with no translator assigned', async () => {
       const original = makeOriginalPiece();
       const article = makeOriginalArticle();

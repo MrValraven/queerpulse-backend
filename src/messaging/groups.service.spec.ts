@@ -933,6 +933,9 @@ describe('GroupsService, section 8 (Groups)', () => {
       expect(result).toEqual({
         inviteToken: 'the-actually-persisted-token',
         inviteTokenExpiresAt: expect.any(String),
+        // PRD-400 (use cap): an unlimited link reports no cap and no count.
+        inviteTokenMaxUses: null,
+        inviteTokenUsesLeft: null,
       });
     });
   });
@@ -1034,6 +1037,51 @@ describe('GroupsService, section 8 (Groups)', () => {
       );
       expect(result.inviteTokenExpiresAt).toBe(
         written.inviteTokenExpiresAt.toISOString(),
+      );
+    });
+
+    // PRD-400 (use cap): the cap is chosen at create or reset time.
+    it('createOrRotateInviteLink writes the use cap and resets the use count with the token', async () => {
+      conversations.findOne
+        .mockResolvedValueOnce(activeGroup())
+        .mockResolvedValueOnce({
+          ...activeGroup(),
+          inviteToken: 'fresh-token',
+          inviteTokenExpiresAt: new Date(Date.now() + 1000),
+          inviteTokenMaxUses: 5,
+          inviteTokenUseCount: 0,
+        });
+
+      const result = await service.createOrRotateInviteLink(
+        CONVERSATION_ID,
+        OWNER_ID,
+        5,
+      );
+
+      expect(conversations.update).toHaveBeenCalledWith(
+        { id: CONVERSATION_ID },
+        expect.objectContaining({
+          inviteToken: expect.any(String),
+          inviteTokenMaxUses: 5,
+          inviteTokenUseCount: 0,
+        }),
+      );
+      expect(result).toMatchObject({
+        inviteToken: 'fresh-token',
+        inviteTokenMaxUses: 5,
+        inviteTokenUsesLeft: 5,
+      });
+    });
+
+    it('createOrRotateInviteLink with no cap writes an unlimited link and still resets the count', async () => {
+      await service.createOrRotateInviteLink(CONVERSATION_ID, OWNER_ID);
+
+      expect(conversations.update).toHaveBeenCalledWith(
+        { id: CONVERSATION_ID },
+        expect.objectContaining({
+          inviteTokenMaxUses: null,
+          inviteTokenUseCount: 0,
+        }),
       );
     });
 

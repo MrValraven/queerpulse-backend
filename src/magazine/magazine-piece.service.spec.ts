@@ -1735,6 +1735,124 @@ describe('MagazinePieceService', () => {
       expect(result.standfirst).toBe('A new lede.');
     });
 
+    // ENG-460: a scheduled article goes live on its own, so a save may not
+    // reopen the readiness check it passed when it was scheduled.
+    describe('on a scheduled article', () => {
+      const SCHEDULED_ARTICLE: MagazineArticle = {
+        ...ARTICLE,
+        standfirst: 'A ready lede.',
+        publishedAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      };
+      const imageBlockWithAlt = (alt: string): ArticleBlock => ({
+        id: 'img-1',
+        kind: 'image',
+        alt,
+        caption: '',
+        credit: 'A credit',
+        rights: 'commissioned',
+        tint: 'coral',
+        crop: '16:9',
+        focal: { x: 0.5, y: 0.5 },
+      });
+
+      it('refuses a save that clears the standfirst with magazine_publish_not_ready and saves nothing', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({ ...SCHEDULED_ARTICLE });
+
+        const error = await service
+          .updateArticleDraft('piece-1', { standfirst: '' }, 'editor-1')
+          .then(
+            () => null,
+            (rejection: unknown) => rejection,
+          );
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).getResponse()).toMatchObject({
+          code: 'magazine_publish_not_ready',
+          openGateItems: ['The article needs a standfirst.'],
+        });
+        expect(articles.update).not.toHaveBeenCalled();
+        expect(articles.save).not.toHaveBeenCalled();
+        expect(pieceEvents.create).not.toHaveBeenCalled();
+      });
+
+      // The block validator already refuses an empty alt, so a
+      // whitespace-only alt is the one that reaches this check.
+      it('refuses a save that adds an image with a whitespace-only alt', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({ ...SCHEDULED_ARTICLE });
+
+        const error = await service
+          .updateArticleDraft(
+            'piece-1',
+            { blocks: [imageBlockWithAlt('   ')] },
+            'editor-1',
+          )
+          .then(
+            () => null,
+            (rejection: unknown) => rejection,
+          );
+
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect((error as BadRequestException).getResponse()).toMatchObject({
+          code: 'magazine_publish_not_ready',
+          openGateItems: ['Every image needs alt text.'],
+        });
+        expect(articles.save).not.toHaveBeenCalled();
+      });
+
+      it('saves an edit that keeps the article ready', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({ ...SCHEDULED_ARTICLE });
+
+        const result = await service.updateArticleDraft(
+          'piece-1',
+          {
+            standfirst: 'A sharper lede.',
+            blocks: [imageBlockWithAlt('A crowd cheering.')],
+          },
+          'editor-1',
+        );
+
+        expect(result.standfirst).toBe('A sharper lede.');
+        expect(articles.save).toHaveBeenCalled();
+      });
+
+      it('still saves a scheduled row that already carried a blocker, as long as the save adds none', async () => {
+        // A legacy row scheduled before the gate existed: refusing every save
+        // would leave nobody able to fix it.
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({
+          ...SCHEDULED_ARTICLE,
+          standfirst: '',
+        });
+
+        await service.updateArticleDraft(
+          'piece-1',
+          { blocks: [imageBlockWithAlt('A crowd cheering.')] },
+          'editor-1',
+        );
+
+        expect(articles.save).toHaveBeenCalled();
+      });
+
+      it('leaves an unscheduled draft freely editable', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({
+          ...SCHEDULED_ARTICLE,
+          publishedAt: null,
+        });
+
+        await service.updateArticleDraft(
+          'piece-1',
+          { standfirst: '' },
+          'editor-1',
+        );
+
+        expect(articles.save).toHaveBeenCalled();
+      });
+    });
+
     // M1 foreign-upload backstop: the article-draft handler keeps the
     // interceptor's shared-upload exemption, so the service must refuse a NEW
     // foreign storage key (social image or image-block src) while allowing an

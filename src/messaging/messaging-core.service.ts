@@ -53,6 +53,8 @@ import {
 import { parseMessageAttachmentReference } from '../storage/message-attachment-reference';
 import {
   messageAttachmentRouteStorageKey,
+  findViewableMessageAttachment,
+  isMatchedChatUploaderWithheld,
   viewableMessageAttachmentQuery,
   withMessageAttachmentRoute,
 } from '../storage/message-attachment-route';
@@ -90,6 +92,8 @@ import {
   ConversationMemberSummary,
   FORMER_IDENTITY_AUTHOR,
   FULL_MEMBER_NAMES,
+  matchedChatMemberNames,
+  memberIdFor,
   MemberNameOptions,
   memberNameOptionsFor,
   MessageResponse,
@@ -126,6 +130,8 @@ import {
 } from './viewer-render-classes';
 import { isEvidenceHoldActive } from './message-evidence-hold';
 import { groupJoinHistoryFloorCoversPredicate } from './group-join-history-floor';
+import { matchedChatMemberKey } from './matched-member-key';
+import { matchedChatMentionRendererFrom } from './matched-chat-mention-text';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
 import {
   claimUnclaimedConversation,
@@ -666,7 +672,7 @@ export class MessagingCoreService {
     >,
     messages: ReadonlyArray<
       Pick<Message, 'senderId' | 'senderIdentityId'> &
-        Partial<Pick<Message, 'id' | 'kind' | 'attachment'>>
+        Partial<Pick<Message, 'id' | 'kind' | 'attachment' | 'conversationId'>>
     >,
     viewerId: string,
   ): Promise<{
@@ -677,6 +683,16 @@ export class MessagingCoreService {
         'senderId' | 'senderIdentityId' | 'conversationId'
       >,
     ) => AuthorSummary;
+    /** PRD-423: `text` from `conversationId` with its `@<member key>`
+     *  mentions spelled `@FirstName` in a matched chat, unchanged anywhere
+     *  else. Render before windowing a snippet, so no token is cut. */
+    renderText: (conversationId: string, text: string) => string;
+    /** Minor 5 (PRD-423): `{ isSentByViewer }` for a hit in a matched chat,
+     *  where the client cannot tell its own key apart without a cached row;
+     *  empty elsewhere. */
+    isSentByViewer: (message: Pick<Message, 'senderId' | 'conversationId'>) => {
+      isSentByViewer?: boolean;
+    };
   }> {
     const conversationIds = conversations.map(
       (conversation) => conversation.id,
@@ -714,6 +730,17 @@ export class MessagingCoreService {
     const profileByUser = new Map(
       profiles.map((profile) => [profile.userId, profile]),
     );
+    // PRD-423: a hit from a matched Go together chat names its sender by
+    // first name and per-chat key, renders its image or document by
+    // reference, and spells its `@<member key>` mentions by first name, as
+    // the thread itself does.
+    const matchedGroupConversationIds = new Set(
+      conversations
+        .filter(
+          (conversation) => memberNameOptionsFor(conversation).isMatchedGroup,
+        )
+        .map((conversation) => conversation.id),
+    );
     for (const message of messages) {
       if (
         message.id !== undefined &&
@@ -728,9 +755,20 @@ export class MessagingCoreService {
             attachment: message.attachment,
           },
           senderIdentityContext.identityKindById,
+          {
+            isMatchedChat:
+              message.conversationId !== undefined &&
+              matchedGroupConversationIds.has(message.conversationId),
+          },
         ).attachment;
       }
     }
+    const renderMatchedChatText = matchedChatMentionRendererFrom(
+      seats.filter((seat) =>
+        matchedGroupConversationIds.has(seat.conversationId),
+      ),
+      profiles,
+    );
     const counterpartByConversationId = new Map<string, AuthorSummary | null>();
     for (const conversation of conversations) {
       if (conversation.kind === ConversationKind.Group) {
@@ -772,15 +810,6 @@ export class MessagingCoreService {
           : null,
       );
     }
-    // PRD-423: a hit from a matched Go together chat names its sender by
-    // first name, as the thread itself does.
-    const matchedGroupConversationIds = new Set(
-      conversations
-        .filter(
-          (conversation) => memberNameOptionsFor(conversation).isMatchedGroup,
-        )
-        .map((conversation) => conversation.id),
-    );
     return {
       renderCounterpart: (conversationId) =>
         counterpartByConversationId.get(conversationId) ?? null,
@@ -790,9 +819,14 @@ export class MessagingCoreService {
           profileByUser,
           senderIdentityContext,
           matchedGroupConversationIds.has(message.conversationId)
-            ? { isMatchedGroup: true }
+            ? matchedChatMemberNames(message.conversationId)
             : FULL_MEMBER_NAMES,
         ),
+      renderText: renderMatchedChatText,
+      isSentByViewer: (message) =>
+        matchedGroupConversationIds.has(message.conversationId)
+          ? { isSentByViewer: message.senderId === viewerId }
+          : {},
     };
   }
 
@@ -1074,6 +1108,9 @@ export class MessagingCoreService {
     convoIds: string[],
     userId: string,
     callerSlug: string | null | undefined,
+    // PRD-423 (opaque member keys): which of `convoIds` are matched Go
+    // together chats, where the caller is mentioned by their per-chat key.
+    matchedConversationIds: Iterable<string> = [],
   ): Promise<Map<string, boolean>> {
     if (!convoIds.length || !callerSlug) {
       return new Map();
@@ -1085,6 +1122,26 @@ export class MessagingCoreService {
     // "@samantha". Postgres `~` is case-SENSITIVE, matching the extractor's
     // own lowercase-only char class.
     const mentionPattern = `(^|\\s)@${callerSlug}([^a-z0-9-]|$)`;
+    // PRD-423 (opaque member keys): inside a matched Go together chat the
+    // `@` picker stores the caller's per-chat key, so each matched
+    // conversation also matches `@<key>`, scoped to that
+    // conversation alone (a key means nothing anywhere else).
+    const convoIdSet = new Set(convoIds);
+    const memberKeyConversationIds = [
+      ...new Set(matchedConversationIds),
+    ].filter((conversationId) => convoIdSet.has(conversationId));
+    const mentionText = `(CASE WHEN m.kind IN (:...mentionCaptionKinds)
+          THEN coalesce(m.attachment ->> 'caption', '')
+          ELSE m.body END)`;
+    const memberKeyParameters: Record<string, string> = {};
+    const memberKeyClauses = memberKeyConversationIds.map(
+      (conversationId, index) => {
+        memberKeyParameters[`memberKeyConversation${index}`] = conversationId;
+        memberKeyParameters[`memberKeyPattern${index}`] =
+          `(^|\\s)@${matchedChatMemberKey(conversationId, userId)}([^a-z0-9-]|$)`;
+        return `(m.conversation_id = :memberKeyConversation${index} AND ${mentionText} ~ :memberKeyPattern${index})`;
+      },
+    );
     const rows = await this.messages
       .createQueryBuilder('m')
       .select('m.conversation_id', 'conversationId')
@@ -1110,13 +1167,22 @@ export class MessagingCoreService {
       // captioned kind contributes its caption, since its `body` is only the
       // "Photo" / "Document" fallback label; every other message contributes
       // its body.
+      // PRD-423: a matched chat mentions the caller by key alone, so its
+      // messages never match the slug pattern.
       .andWhere(
-        `(CASE WHEN m.kind IN (:...mentionCaptionKinds)
-          THEN coalesce(m.attachment ->> 'caption', '')
-          ELSE m.body END) ~ :mentionPattern`,
+        `(${[
+          memberKeyConversationIds.length
+            ? `(m.conversation_id NOT IN (:...memberKeyConversationIds) AND ${mentionText} ~ :mentionPattern)`
+            : `${mentionText} ~ :mentionPattern`,
+          ...memberKeyClauses,
+        ].join(' OR ')})`,
         {
           mentionPattern,
           mentionCaptionKinds: [...CAPTIONED_MESSAGE_KINDS],
+          ...(memberKeyConversationIds.length
+            ? { memberKeyConversationIds }
+            : {}),
+          ...memberKeyParameters,
         },
       )
       .setParameter(
@@ -1328,12 +1394,16 @@ export class MessagingCoreService {
     // its message reference, exactly as the thread renders it. A group
     // caller passes no identity context, and every group sender speaks as
     // their own profile.
-    const previewAttachment = senderIdentityContext
-      ? withMessageAttachmentRoute(
-          message,
-          senderIdentityContext.identityKindById,
-        ).attachment
-      : message.attachment;
+    // PRD-423: a matched chat previews every image and document by
+    // reference, as its thread renders them.
+    const previewAttachment =
+      senderIdentityContext || nameOptions.isMatchedGroup
+        ? withMessageAttachmentRoute(
+            message,
+            senderIdentityContext?.identityKindById ?? new Map(),
+            { isMatchedChat: nameOptions.isMatchedGroup },
+          ).attachment
+        : message.attachment;
     return {
       id: message.id,
       conversationId,
@@ -1453,7 +1523,8 @@ export class MessagingCoreService {
           !isViewerRow &&
           (!viewerSharesReadReceipts || !subjectSharesReadReceipts);
         return {
-          id: participant.userId,
+          // PRD-423 (opaque member keys): the per-chat key in a matched chat.
+          id: memberIdFor(participant.userId, nameOptions),
           handle: summary.handle,
           name: summary.displayName,
           avatarUrl: summary.avatarUrl,
@@ -1501,7 +1572,8 @@ export class MessagingCoreService {
           nameOptions,
         );
         return {
-          id: participant.userId,
+          // PRD-423 (opaque member keys): the per-chat key in a matched chat.
+          id: memberIdFor(participant.userId, nameOptions),
           handle: summary.handle,
           name: summary.displayName,
           avatarUrl: summary.avatarUrl,
@@ -1875,6 +1947,8 @@ export class MessagingCoreService {
           withMessageAttachmentRoute(
             parent,
             senderIdentityContext.identityKindById,
+            // PRD-423: a matched chat quotes every image by reference.
+            { isMatchedChat: nameOptions.isMatchedGroup },
           ),
         ]),
     );
@@ -2094,6 +2168,9 @@ export class MessagingCoreService {
               withMessageAttachmentRoute(
                 m,
                 senderIdentityContext.identityKindById,
+                // PRD-423: a matched chat renders every image and document
+                // by reference, so no storage key names the uploader.
+                { isMatchedChat: nameOptions.isMatchedGroup },
               ).attachment,
             ),
         systemEvent:
@@ -2159,7 +2236,7 @@ export class MessagingCoreService {
     if (typeof conversationKind === 'object') {
       return {
         kind: conversationKind.kind,
-        nameOptions: memberNameOptionsFor(conversationKind),
+        nameOptions: memberNameOptionsFor(conversationKind, conversationId),
       };
     }
     if (
@@ -2174,7 +2251,7 @@ export class MessagingCoreService {
     });
     return {
       kind: conversationKind ?? conversation?.kind ?? null,
-      nameOptions: memberNameOptionsFor(conversation),
+      nameOptions: memberNameOptionsFor(conversation, conversationId),
     };
   }
 
@@ -2675,17 +2752,38 @@ export class MessagingCoreService {
     if (!parsedReference) {
       return null;
     }
-    const source = await viewableMessageAttachmentQuery(
-      this.messages,
-      parsedReference.messageId,
-      senderId,
-    )
-      .andWhere('message.kind = :forwardedKind', {
+    const found = await findViewableMessageAttachment(
+      viewableMessageAttachmentQuery(
+        this.messages,
+        parsedReference.messageId,
+        senderId,
+      ).andWhere('message.kind = :forwardedKind', {
         forwardedKind: attachmentKind,
-      })
-      .getOne();
-    const sourceKey = source ? messageAttachmentRouteStorageKey(source) : null;
+      }),
+    );
+    const sourceKey = found
+      ? messageAttachmentRouteStorageKey(found.message)
+      : null;
     if (!sourceKey) {
+      throw new ForbiddenException(
+        attachmentKind === MessageKind.Image
+          ? 'You may only attach an image you uploaded'
+          : 'You may only attach a document you uploaded',
+      );
+    }
+    // PRD-423: a source in a matched Go together chat is a member's own
+    // photo or document, which the reference route withholds while its
+    // uploader is suspended or banned (`isMatchedChatUploaderWithheld`), so
+    // its forward is refused exactly as its download is.
+    if (
+      found &&
+      (await isMatchedChatUploaderWithheld(this.messages.manager, {
+        isInMatchedChat: found.isInMatchedChat,
+        storageKey: sourceKey,
+        viewerId: senderId,
+        isStaffViewer: false,
+      }))
+    ) {
       throw new ForbiddenException(
         attachmentKind === MessageKind.Image
           ? 'You may only attach an image you uploaded'
@@ -2695,15 +2793,16 @@ export class MessagingCoreService {
     if (isSentAsMailboxIdentity || storageKeyOwnerId(sourceKey) === senderId) {
       return sourceKey;
     }
-    // Controller ruling after fix round N1: the uploader's account status is
-    // not read here. Every source this path accepts was sent as a business,
-    // persona or company (`viewableMessageAttachmentQuery`), whose bytes the
-    // reference route serves to this same member whatever the uploader's
-    // status, so refusing the copy would protect nothing and would tell the
-    // member that some staff member is suspended. A personal source never
-    // reaches this line: the query refuses it, and a key-based forward of it
-    // keeps the uploader's key, which the key route goes on withholding.
-    // A suspended forwarder is refused by the send path before this runs.
+    // Controller ruling after fix round N1: for a source sent as a business,
+    // persona or company the uploader's account status is not read here: the
+    // reference route serves those bytes to this same member whatever the
+    // uploader's status, so refusing the copy would protect nothing and would
+    // tell the member that some staff member is suspended. A matched chat
+    // source had its uploader checked just above, as its route checks it. Any
+    // other personal source never reaches this line: the query refuses it,
+    // and a key-based forward of it keeps the uploader's key, which the key
+    // route goes on withholding. A suspended forwarder is refused by the send
+    // path before this runs.
     if (!this.storage) {
       throw new InternalServerErrorException('Service temporarily unavailable');
     }
@@ -2842,6 +2941,12 @@ export class MessagingCoreService {
       // "clear chat" keeps its earlier allowance.
       .andWhere(
         `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
+      )
+      // PRD-400: a message at or before the sender's group JOIN floor is
+      // history they joined after and never saw, so it proves no access
+      // either.
+      .andWhere(
+        `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
       )
       .getCount();
     return accessibleCount > 0;

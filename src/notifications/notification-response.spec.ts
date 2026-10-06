@@ -336,11 +336,12 @@ describe('toNotificationResponse', () => {
       }),
       actorProfile(true),
     );
+    // The avatar too: its stored URL names the member's account.
     expect(response.actor).toEqual({
       slug: '',
       firstName: 'Ana',
       lastName: '',
-      avatarUrl: 'https://lh3.googleusercontent.com/a/ana.png',
+      avatarUrl: null,
     });
     expect(response.payload).not.toHaveProperty('isGoTogetherChat');
   });

@@ -121,6 +121,12 @@ describe('loadReachableMailboxSeats', () => {
   function blockFilterOver(
     blocks: Array<{ blockerId: string; blockedId: string }>,
     identityBlocks: Array<{ blockerUserId: string; identityId: string }> = [],
+    // ENG-447: blocks carried across a persona going unlinked, as the pairs
+    // with the persona's current identity the carried-block query answers.
+    carriedIdentityBlocks: Array<{
+      blockerUserId: string;
+      identityId: string;
+    }> = [],
   ): BlockFilterService {
     const matches = (expected: unknown, actual: string) =>
       expected instanceof FindOperator
@@ -153,6 +159,15 @@ describe('loadReachableMailboxSeats', () => {
             (identityBlock) =>
               matches(where.blockerUserId, identityBlock.blockerUserId) &&
               matches(where.identityId, identityBlock.identityId),
+          ),
+        ),
+      query: (_sql: string, parameters: [string[], string[] | null]) =>
+        Promise.resolve(
+          carriedIdentityBlocks.filter(
+            (carried) =>
+              parameters[0].includes(carried.blockerUserId) &&
+              (parameters[1] === null ||
+                parameters[1].includes(carried.identityId)),
           ),
         ),
     };
@@ -197,6 +212,20 @@ describe('loadReachableMailboxSeats', () => {
       partition,
       identityKindById,
       blockFilterOver(
+        [],
+        [{ blockerUserId: 'customer-1', identityId: MAILBOX_IDENTITY_ID }],
+      ),
+    );
+
+    expect(reachableSeats).toEqual({ customerSeat: undefined, staffSeats: [] });
+  });
+
+  it('ENG-447: reaches nobody once the block the customer placed on a persona was carried across its unlink to the identity it speaks through now', async () => {
+    const reachableSeats = await loadReachableMailboxSeats(
+      partition,
+      identityKindById,
+      blockFilterOver(
+        [],
         [],
         [{ blockerUserId: 'customer-1', identityId: MAILBOX_IDENTITY_ID }],
       ),
@@ -538,6 +567,30 @@ describe('Task 14: a customer who blocked the business as a whole', () => {
       );
       expect(staffSql).toContain(
         `"staff_business_identity_block"."identity_id" = "blocked_staff_seat"."identity_id"`,
+      );
+    });
+
+    // ENG-447: a block carried across a persona going unlinked names the
+    // persona, and holds for the identity it speaks through now, from both
+    // sides of the thread.
+    it('excludes both seats through a block carried across the persona going unlinked', () => {
+      const staffSql = blockedStaffSeatPredicate(
+        'seat.conversation_id',
+        'seat.user_id',
+      );
+      const customerSql = identityBlockedCustomerSeatPredicate(
+        'seat.conversation_id',
+        'seat.user_id',
+      );
+
+      expect(staffSql).toContain(
+        `"staff_carried_identity_block"."blocker_user_id" = "blocking_customer_seat"."user_id"`,
+      );
+      expect(staffSql).toContain(
+        `"staff_carried_identity_block"."blocked_subprofile_id" = "blocked_staff_identity"."subprofile_id"`,
+      );
+      expect(customerSql).toContain(
+        `"customer_business_identity_block"."blocked_subprofile_id" = "identity_blocked_business_identity"."subprofile_id"`,
       );
     });
 

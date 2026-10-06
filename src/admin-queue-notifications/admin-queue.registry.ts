@@ -77,6 +77,14 @@ export enum AdminQueueKey {
    * nobody until a steward happened to open the console.
    */
   HousingGroupJoinRequests = 'housing_group_join_requests',
+  /**
+   * RES-F6. A safety concern sent through the Contact form (PRD-452's
+   * priority inquiry). It used to ring on `Intakes`, so the bell called it an
+   * intake form and the console counted it nowhere. It shares
+   * /admin/intakes, where the inquiry inbox lives, under its own name and
+   * counter.
+   */
+  SafetyInquiries = 'safety_inquiries',
 }
 
 /** The lowest account tier that may work a queue. */
@@ -284,6 +292,14 @@ export const ADMIN_QUEUE_REGISTRY: Record<AdminQueueKey, AdminQueueMeta> = {
     route: '/admin/housing-groups',
     tier: UserRole.Moderator,
     capabilities: ['housing_moderator'],
+  },
+  [AdminQueueKey.SafetyInquiries]: {
+    // Exactly the inquiry inbox's own reach: `InquiriesController` is
+    // `@Roles(Admin)` alone and /admin/intakes is admin-only on the frontend,
+    // the same row as `Intakes` above.
+    route: '/admin/intakes',
+    tier: UserRole.Admin,
+    capabilities: [],
   },
 };
 

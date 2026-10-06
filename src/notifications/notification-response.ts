@@ -164,6 +164,12 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // a mutual "meet again", so the bell names them and block and mute apply.
   [NotificationType.GoTogetherPairInvite]: 'actorId',
   [NotificationType.GoTogetherMutual]: 'actorId',
+  // PRD-408. The thread author who credited this member as co-author. The
+  // emit site spreads `actorId` only when the byline names the author, so an
+  // anonymous or QueerPulse Official thread yields `null` here. The emit site
+  // passes no `actorId` argument to `create` (see the type's own doc), so a
+  // mute never silences this notice.
+  [NotificationType.ForumCoAuthorCredit]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -483,6 +489,10 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // the changemaker verdicts already forward. `threadSlug` needs no entry: it
     // rides in `COMMON_PAYLOAD_KEYS` and is what the deep link is built from.
     [NotificationType.ForumThreadReviewed]: ['decision', 'title', 'reviewNote'],
+    // PRD-408. The credited thread's own title, so the row says which thread.
+    // `source` and `threadSlug` ride in `COMMON_PAYLOAD_KEYS` and build the
+    // deep link to the thread, where the "remove my name" action lives.
+    [NotificationType.ForumCoAuthorCredit]: ['threadTitle'],
     // PRD-334. `conversationId` builds the `/messages?c=<conversationId>` deep
     // link (with `source: 'message'` from `COMMON_PAYLOAD_KEYS`), the same
     // opaque id `Mention` already forwards. `groupTitle` names the group in the
@@ -1008,10 +1018,12 @@ export function toNotificationResponse(
           // ENG-412: an actor who hid their photo shows no avatar on the bell,
           // the same `photoVisible` gate every profile surface applies
           // (`ListingsService`'s asker summary is the house pattern). Name
-          // and profile link stay.
-          avatarUrl: actorProfile.photoVisible
-            ? toImageUrl(actorProfile.avatarUrl)
-            : null,
+          // and profile link stay. PRD-423: a Go together chat mention shows
+          // none either, since the stored URL names the member's account.
+          avatarUrl:
+            actorProfile.photoVisible && !isGoTogetherChatMention
+              ? toImageUrl(actorProfile.avatarUrl)
+              : null,
         }
       : null,
   };

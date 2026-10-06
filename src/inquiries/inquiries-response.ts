@@ -14,6 +14,19 @@ export interface InquiryHandlerDTO {
 }
 
 /**
+ * PRD-434. The directory listing a `listing_correction` is about, resolved
+ * from its stored ref at read time. `isPublic` says whether the public page
+ * resolves (live and not hidden by its owner), so the console links there
+ * only when the page would open, and to the staff editor otherwise.
+ */
+export interface InquiryListingDTO {
+  ref: string;
+  name: string;
+  slug: string;
+  isPublic: boolean;
+}
+
+/**
  * Wire shape for an inquiry. Hand-mapped from the entity — never returned raw —
  * so a column added later can't leak. The public `POST` returns only an
  * acknowledgement id + status; the admin list returns the full row for triage.
@@ -29,6 +42,17 @@ export interface InquiryDTO {
   status: Inquiry['status'];
   /** PRD-452. A safety concern, sorted first while it waits. */
   isPriority: boolean;
+  /**
+   * PRD-434. The ref a `listing_correction` was sent about, as the member's
+   * link carried it; null on every other kind and on a correction sent
+   * without one.
+   */
+  listingRef: string | null;
+  /**
+   * PRD-434. `listingRef` resolved to the listing, or null when there is no
+   * ref or no listing has it any more (deleted since, or a mistyped link).
+   */
+  listing: InquiryListingDTO | null;
   /** ISO 8601 timestamp. */
   createdAt: string;
   /** ISO 8601 timestamp of the move to `handled`; null while `new`. */
@@ -77,6 +101,7 @@ export function toInquiryHandlerDTO(
 export function toInquiryDTO(
   inquiry: Inquiry,
   handler: MemberRef | null = null,
+  listing: InquiryListingDTO | null = null,
 ): InquiryDTO {
   return {
     id: inquiry.id,
@@ -88,6 +113,8 @@ export function toInquiryDTO(
     orgName: inquiry.orgName ?? undefined,
     status: inquiry.status,
     isPriority: inquiry.isPriority,
+    listingRef: inquiry.listingRef ?? null,
+    listing,
     createdAt: inquiry.createdAt.toISOString(),
     handledAt: inquiry.handledAt ? inquiry.handledAt.toISOString() : null,
     handledBy: toInquiryHandlerDTO(inquiry.handledById, handler),

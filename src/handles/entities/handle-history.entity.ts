@@ -64,7 +64,10 @@ export class HandleHistory {
   @Column({ type: 'uuid', nullable: true })
   previousOwnerSubprofileId!: string | null;
 
-  @ManyToOne(() => Subprofile, { onDelete: 'SET NULL' })
+  @ManyToOne(() => Subprofile, {
+    onDelete: 'SET NULL',
+    onUpdate: 'CASCADE',
+  })
   @JoinColumn({ name: 'previous_owner_subprofile_id' })
   previousOwnerSubprofile!: Subprofile | null;
 

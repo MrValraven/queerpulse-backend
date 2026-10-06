@@ -74,7 +74,12 @@ import {
   mailboxThreadPredicate,
   partitionMailboxThreadSeats,
 } from '../messaging/mailbox-seats';
-import type { MessageResponse } from '../messaging/message-response';
+import {
+  memberIdFor,
+  memberNameOptionsFor,
+  matchedChatMemberNames,
+  type MessageResponse,
+} from '../messaging/message-response';
 import { withJoinFlooredReplyQuote } from '../messaging/group-join-history-floor';
 import {
   MessageLike,
@@ -266,8 +271,11 @@ type ChatSocket = Socket<
  */
 type LiveThreadAudience =
   /** `isGroup` lets a relay scope PRD-354's group block filter to groups
-   *  from the kind this loader already read, with no second lookup. */
-  | { shape: 'personal'; isGroup: boolean }
+   *  from the kind this loader already read, with no second lookup.
+   *  `matchedConversationId` is set for a matched Go together chat
+   *  (PRD-423), whose frames name each member by their per-chat key
+   *  (`frameMemberRef`). */
+  | { shape: 'personal'; isGroup: boolean; matchedConversationId?: string }
   | { shape: 'closed' }
   | {
       shape: 'mailbox';
@@ -287,6 +295,28 @@ type MailboxLiveThreadAudience = Extract<
   LiveThreadAudience,
   { shape: 'mailbox' }
 >;
+
+/**
+ * PRD-423 (opaque member keys): the member reference a `personal` frame
+ * (`typing`, `read`, `message:delivered`, `reaction`) carries for `userId`.
+ * The user id itself, except in a matched Go together chat, where every
+ * member is named by their per-chat key: the same key the chat's roster,
+ * author summaries and system events carry, so the client still correlates
+ * the frame with a roster row and recognises its own frames by
+ * `viewerMemberKey`. The key is the same for every recipient, so the one
+ * room broadcast stays correct.
+ */
+function frameMemberRef(
+  audience: LiveThreadAudience | undefined,
+  userId: string,
+): string {
+  return audience?.shape === 'personal' && audience.matchedConversationId
+    ? memberIdFor(
+        userId,
+        matchedChatMemberNames(audience.matchedConversationId),
+      )
+    : userId;
+}
 
 /**
  * ENG-402: a group's seats, read once per relay, and the members blocked
@@ -1090,7 +1120,8 @@ export class ChatGateway
       ])
       .emit('typing', {
         conversationId: data.conversationId,
-        userId,
+        // PRD-423: the typist's per-chat key in a matched chat.
+        userId: frameMemberRef(audience, userId),
         isTyping: data.isTyping,
       });
   }
@@ -1688,7 +1719,11 @@ export class ChatGateway
       this.namespace
         ?.to(payload.conversationId)
         .except(excludedUserRooms)
-        .emit('read', payload);
+        .emit('read', {
+          ...payload,
+          // PRD-423: the reader's per-chat key in a matched chat.
+          userId: frameMemberRef(audience, payload.userId),
+        });
     } catch (err) {
       this.logger.error(
         `Failed to relay a read receipt: ${
@@ -1711,6 +1746,7 @@ export class ChatGateway
     // Task 13e: the same per-viewer relay as `read` on a mailbox thread,
     // see `relayMailboxReceipt`. Wrapped like `handleMessageRead`: the
     // watermark is already committed, so a failure costs a stale tick.
+    let personalAudience: LiveThreadAudience | undefined;
     try {
       const audience = await this.loadLiveThreadAudience(
         payload.conversationId,
@@ -1734,6 +1770,7 @@ export class ChatGateway
         );
         return;
       }
+      personalAudience = audience;
     } catch (err) {
       this.logger.error(
         `Failed to relay a delivered receipt: ${
@@ -1746,9 +1783,11 @@ export class ChatGateway
     // `userId` (the recipient who acked) + `deliveredAt` to advance its
     // one-check → two-check tick. `deliveredAt` is a Date here; socket.io
     // serialises it to an ISO string on the wire (as with `read`'s lastReadAt).
-    this.namespace
-      ?.to(payload.conversationId)
-      .emit('message:delivered', payload);
+    this.namespace?.to(payload.conversationId).emit('message:delivered', {
+      ...payload,
+      // PRD-423: the recipient's per-chat key in a matched chat.
+      userId: frameMemberRef(personalAudience, payload.userId),
+    });
   }
 
   @OnEvent(MESSAGE_REACTION)
@@ -1763,6 +1802,7 @@ export class ChatGateway
   ): Promise<void> {
     // Task 13e: staff see each colleague's reaction, and the customer sees
     // the business react once, see `relayMailboxReaction`.
+    let personalAudience: LiveThreadAudience | undefined;
     try {
       const audience = await this.loadLiveThreadAudience(
         payload.conversationId,
@@ -1784,6 +1824,7 @@ export class ChatGateway
         );
         return;
       }
+      personalAudience = audience;
     } catch (err) {
       this.logger.error(
         `Failed to relay a reaction: ${
@@ -1792,7 +1833,11 @@ export class ChatGateway
       );
       return;
     }
-    this.namespace?.to(payload.conversationId).emit('reaction', payload);
+    this.namespace?.to(payload.conversationId).emit('reaction', {
+      ...payload,
+      // PRD-423: the reactor's per-chat key in a matched chat.
+      userId: frameMemberRef(personalAudience, payload.userId),
+    });
   }
 
   @OnEvent(MESSAGE_DELETED)
@@ -2731,7 +2776,13 @@ export class ChatGateway
       Conversation,
       {
         where: { id: conversationId },
-        select: { id: true, kind: true, isOfficial: true },
+        select: {
+          id: true,
+          kind: true,
+          isOfficial: true,
+          isGoTogetherChat: true,
+          eventMatchGroupId: true,
+        },
       },
     );
     if (!conversation) {
@@ -2743,7 +2794,13 @@ export class ChatGateway
     // mailbox thread, whose frames reach the member and every live staff
     // seat with no block against them, and no departed one.
     if (conversation.kind === ConversationKind.Group) {
-      return { shape: 'personal', isGroup: true };
+      return memberNameOptionsFor(conversation, conversationId).isMatchedGroup
+        ? {
+            shape: 'personal',
+            isGroup: true,
+            matchedConversationId: conversationId,
+          }
+        : { shape: 'personal', isGroup: true };
     }
     const seats = await this.conversationParticipants.find({
       where: { conversationId },

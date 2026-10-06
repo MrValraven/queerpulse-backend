@@ -58,6 +58,7 @@ import {
   HousingGroupDTO,
   MyGroupJoinRequestDTO,
   MyGroupListingDTO,
+  isGroupListingBylined,
   PublicGroupListingDTO,
   toAdminGroupJoinRequestDTO,
   toAdminGroupListingDTO,
@@ -95,6 +96,15 @@ export type GroupMembershipStanding = 'pending' | 'declined' | 'none';
  * "you've already asked" or "you're already in" from the code alone.
  */
 export const GROUP_JOIN_ALREADY_REQUESTED_CODE = 'GROUP_JOIN_ALREADY_REQUESTED';
+
+/**
+ * LOC-F13. Emitted in the 409 body when a poster edits a room a moderator took
+ * down after a report. An edit lifts no report takedown, so the save would
+ * change text nobody can see; the poster's card hides Edit for the same rows
+ * and points to the appeal route. Same typed-body seam as the codes above.
+ */
+export const GROUP_LISTING_REPORT_TAKEDOWN_CODE =
+  'GROUP_LISTING_REPORT_TAKEDOWN';
 
 /** The caller's standing carried in that 409: a request still being read, or
  * an approved one. A declined member may apply again, so they never get it. */
@@ -274,12 +284,15 @@ export class HousingGroupsService {
     // PRD-443: the poster is named to signed-in readers only, in ONE batched
     // profile read for the whole page. An anonymous read stays a shape that
     // names nobody, which is what lets an open group's answer be cached.
+    // LOC-F2: only rooms posted through the form that names the poster are
+    // named, so an older room's poster is never even looked up.
     const posterIds =
       viewerId === null
         ? []
         : [
             ...new Set(
               listings
+                .filter(isGroupListingBylined)
                 .map((listing) => listing.postedByUserId)
                 .filter((userId): userId is string => Boolean(userId)),
             ),
@@ -889,6 +902,10 @@ export class HousingGroupsService {
         riskScore: assessment.score,
         riskReasons: assessment.reasons,
         postedByUserId: userId,
+        // LOC-F2: posted through the form that says the group page names the
+        // poster. Set here explicitly; the column default keeps rows from the
+        // old anonymous form unnamed.
+        isPosterNamed: true,
       }),
     );
     // Every listing lands in `review` straight away (there is no draft
@@ -1042,6 +1059,18 @@ export class HousingGroupsService {
       id,
       userId,
     );
+    // LOC-F13: a report takedown stands until a moderator or an appeal lifts
+    // it, so an edit is refused outright with a code the client can name.
+    const takedownStates = await this.reportTakedownStatesFor([listing.id]);
+    if (takedownStates.has(listing.id)) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        message:
+          'This room was taken down after a report, so it cannot be edited. You can appeal the decision or withdraw the room.',
+        code: GROUP_LISTING_REPORT_TAKEDOWN_CODE,
+      });
+    }
     const before = this.listingContentFingerprint(listing);
     Object.assign(listing, {
       ...(dto.title !== undefined ? { title: dto.title } : {}),
@@ -1082,7 +1111,8 @@ export class HousingGroupsService {
     }
     const saved = await this.listings.save(listing);
     // An edit lifts no report takedown, so the row the poster gets back has to
-    // keep saying the room is down.
+    // keep saying the room is down. The LOC-F13 refusal above covers a
+    // takedown that already stood; this read covers one that lands mid-edit.
     const moderationStates = await this.reportTakedownStatesFor([saved.id]);
     return toMyGroupListingDTO(
       saved,
@@ -1145,6 +1175,12 @@ export class HousingGroupsService {
       .andWhere('listing.id = :listingId', { listingId: id })
       .getOne();
     if (!listing) throw new NotFoundException('Listing not found');
+    // LOC-F2: a room posted through the old anonymous form names nobody, and an
+    // enquiry would name its poster through the thread it opens. The page
+    // offers no "Message" on such a room, so only a hand-made call lands here.
+    if (!isGroupListingBylined(listing)) {
+      throw new BadRequestException('This room does not take messages');
+    }
     const posterId = listing.postedByUserId;
     if (posterId === null) {
       throw new BadRequestException(

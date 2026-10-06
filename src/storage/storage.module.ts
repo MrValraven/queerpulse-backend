@@ -7,6 +7,8 @@ import { User } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { StorageMaintenanceService } from './storage-maintenance.service';
+import { PersonaStorageKey } from './entities/persona-storage-key.entity';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService } from './storage.service';
 import { UploadsController } from './uploads.controller';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
@@ -23,19 +25,22 @@ import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
   // `MessagingModule`, so no module cycle. `MediaReferencesModule` supplies the
   // `MediaReferenceResolver` the orphan sweep uses to answer "is this key
   // referenced by any image column?". `MediaCropsModule` supplies
-  // `MediaCropService` for `POST /uploads/crop`.
+  // `MediaCropService` for `POST /uploads/crop`. `PersonaStorageKey` (T17)
+  // records which persona each persona-scoped key belongs to, read by both
+  // controllers and written by `PersonaImageKeysService`.
   imports: [
-    TypeOrmModule.forFeature([User, Message]),
+    TypeOrmModule.forFeature([User, Message, PersonaStorageKey]),
     MediaCropsModule,
     MediaReferencesModule,
   ],
   controllers: [UploadsController, FilesController],
   providers: [
     StorageService,
+    PersonaImageKeysService,
     StorageMaintenanceService,
     UserPresignThrottlerGuard,
     OptionalJwtAuthGuard,
   ],
-  exports: [StorageService],
+  exports: [StorageService, PersonaImageKeysService],
 })
 export class StorageModule {}

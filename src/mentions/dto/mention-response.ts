@@ -111,9 +111,12 @@ export function toMentionResponse(
           lastName: isGoTogetherChatMention ? '' : actorProfile.lastName,
           // ENG-412: an actor who hid their photo shows no avatar here, the
           // same `photoVisible` gate the bell applies. Name and link stay.
-          avatarUrl: actorProfile.photoVisible
-            ? toImageUrl(actorProfile.avatarUrl)
-            : null,
+          // PRD-423: a Go together chat mention shows none either, since the
+          // stored URL names the member's account.
+          avatarUrl:
+            actorProfile.photoVisible && !isGoTogetherChatMention
+              ? toImageUrl(actorProfile.avatarUrl)
+              : null,
         }
       : null,
     source,

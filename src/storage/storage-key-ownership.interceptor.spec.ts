@@ -332,4 +332,95 @@ describe('StorageKeyOwnershipInterceptor', () => {
       });
     });
   });
+
+  // T17: a persona-scoped key names no uploader, so the ownership rule
+  // cannot see it; it is refused everywhere but the persona editor writes.
+  describe('persona-scoped keys', () => {
+    const PERSONA_KEY = `persona/${FILE_SEGMENT}/${FILE_SEGMENT}.jpg`;
+
+    it('refuses a persona-scoped key on a route outside the persona editor', () => {
+      const ctx = httpContext(
+        'PATCH',
+        { avatarUrl: PERSONA_KEY },
+        { userId: OWN_USER_ID },
+      );
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('refuses one even on a shared-upload handler that is not a persona write', () => {
+      const ctx = httpContext(
+        'PATCH',
+        { coverUrl: PERSONA_KEY },
+        { userId: OWN_USER_ID },
+        { controller: 'CommunitiesController', method: 'update' },
+      );
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('passes one to the persona editor write, which checks it against the persona', (done) => {
+      const body = { avatarUrl: PERSONA_KEY };
+      const ctx = httpContext(
+        'PATCH',
+        body,
+        { userId: OWN_USER_ID },
+        { controller: 'SubprofilesController', method: 'update' },
+      );
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        expect(body.avatarUrl).toBe(PERSONA_KEY);
+        done();
+      });
+    });
+
+    // The crop route checks persona membership itself.
+    it('passes one to the crop route, which checks the persona membership', (done) => {
+      const body = {
+        key: PERSONA_KEY,
+        crop: { x: 0, y: 0, width: 1, height: 1, aspect: '1:1' },
+      };
+      const ctx = httpContext(
+        'POST',
+        body,
+        { userId: OWN_USER_ID },
+        { controller: 'UploadsController', method: 'saveCrop' },
+      );
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        expect(body.key).toBe(PERSONA_KEY);
+        done();
+      });
+    });
+
+    // My uploads checks the registry uploader itself before deleting.
+    it('passes one to the My uploads delete route, which checks the uploader', (done) => {
+      const body = { key: PERSONA_KEY };
+      const ctx = httpContext(
+        'DELETE',
+        body,
+        { userId: OWN_USER_ID },
+        { controller: 'MyMediaController', method: 'remove' },
+      );
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        expect(body.key).toBe(PERSONA_KEY);
+        done();
+      });
+    });
+
+    it('refuses one from an anonymous caller even on the persona editor write', () => {
+      const ctx = httpContext(
+        'PUT',
+        { items: [{ imageUrl: PERSONA_KEY }] },
+        undefined,
+        { controller: 'SubprofilesController', method: 'replaceSection' },
+      );
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
+    });
+  });
 });

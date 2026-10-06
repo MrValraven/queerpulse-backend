@@ -19,6 +19,12 @@ export interface SearchResultDTO {
   sub: string;
   /** Member avatar URL, so the client can show a face instead of a generic icon. Member rows only. */
   avatarUrl?: string | null;
+  /**
+   * The topic's post count, so the client can phrase the subline in the
+   * member's language (PRD-327). Topic rows only. `sub` still carries the
+   * English "N posts" for clients that predate this field.
+   */
+  postCount?: number;
 }
 
 /**
@@ -177,5 +183,6 @@ export function topicToResult(row: TopicSearchRow): SearchResultDTO {
     // `description` is a multi-sentence paragraph (see `topic.entity.ts`),
     // too long for a result-card subline.
     sub: joinSub(`${row.totalPosts} posts`),
+    postCount: row.totalPosts,
   };
 }

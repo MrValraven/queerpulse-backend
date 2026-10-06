@@ -1,4 +1,6 @@
 import {
+  PERSONA_SCOPED_KIND_SPEC,
+  isPersonaScopedKey,
   isStorageKey,
   parseStorageKey,
   storageKeyOwnerId,
@@ -105,5 +107,38 @@ describe('storageKeyOwnerId', () => {
     ['an empty string', ''],
   ])('returns null for %s (a malformed key)', (_label, candidate) => {
     expect(storageKeyOwnerId(candidate)).toBeNull();
+  });
+});
+
+// T17: an unlinked persona's images live under `persona/<uuid>/<uuid><ext>`,
+// where neither segment names anyone.
+describe('persona-scoped keys', () => {
+  const PERSONA_KEY =
+    'persona/0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b/5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d.webp';
+
+  it('parses to the public persona-scoped spec', () => {
+    expect(parseStorageKey(PERSONA_KEY)).toBe(PERSONA_SCOPED_KIND_SPEC);
+    expect(PERSONA_SCOPED_KIND_SPEC.requiresSession).toBe(false);
+    expect(isStorageKey(PERSONA_KEY)).toBe(true);
+    expect(isPersonaScopedKey(PERSONA_KEY)).toBe(true);
+  });
+
+  it('has no owner segment', () => {
+    expect(storageKeyOwnerId(PERSONA_KEY)).toBeNull();
+  });
+
+  it('accepts images only', () => {
+    expect(isPersonaScopedKey(PERSONA_KEY.replace('.webp', '.pdf'))).toBe(
+      false,
+    );
+  });
+
+  it('is not confused with a user-scoped key', () => {
+    expect(isPersonaScopedKey(VALID_AVATAR_KEY)).toBe(false);
+    expect(
+      isPersonaScopedKey(
+        'persona-covers/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg',
+      ),
+    ).toBe(false);
   });
 });

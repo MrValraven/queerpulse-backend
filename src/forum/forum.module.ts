@@ -28,6 +28,7 @@ import { ForumThreadsService } from './forum-threads.service';
 import { ForumFundingService } from './forum-funding.service';
 import { FundingDeadlineReminderService } from './funding-deadline-reminder.service';
 import { FundingDeadlineChangedListener } from './funding-deadline-changed.listener';
+import { ForumCoAuthorBlockListener } from './forum-co-author-block.listener';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 
 @Module({
@@ -114,6 +115,8 @@ import { SavedItem } from '../saved/entities/saved-item.entity';
     ForumFundingService,
     FundingDeadlineReminderService,
     FundingDeadlineChangedListener,
+    // PRD-408: a block placed after a co-author credit drops that credit.
+    ForumCoAuthorBlockListener,
   ],
   exports: [
     ForumThreadsService,

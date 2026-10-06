@@ -296,7 +296,16 @@ export class GoTogetherGroupService {
       select: { userId: true, slug: true },
     });
     if (!profile) throw memberNotFound();
-    await this.social.blockMember(userId, profile.slug, options);
+    // PRD-423: the block remembers the matched chat the group talks in, so
+    // the block list names this member by first name alone, the only name
+    // the group ever showed.
+    const group = await this.groups.findOne({
+      where: { id: groupId },
+      select: { id: true, conversationId: true },
+    });
+    await this.social.blockMember(userId, profile.slug, options, {
+      matchedConversationId: group?.conversationId ?? null,
+    });
     try {
       await this.formation.moveAfterBlock(
         target.eventId,

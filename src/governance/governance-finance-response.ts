@@ -82,10 +82,25 @@ function shownLines(lines: FinanceLine[]): FinanceLine[] {
     }));
 }
 
-/** A partner reaches the public page only with the restriction an admin typed
- *  (`scope`). A partner carrying only an i18n `scopeKey` is a seeded row. */
+/** A partner reaches the public page once a person entered it: the admin typed
+ *  its restriction (`scope`), or saved it through the editor with its
+ *  translated `scopeKey` kept (`source: manual`). A partner carrying only an
+ *  i18n `scopeKey` and no marker is a seeded row. Hand-mapped, so the internal
+ *  `source` marker stays off the public response. */
 function enteredPartners(partners: FinancePartner[] | null): FinancePartner[] {
-  return (partners ?? []).filter((partner) => Boolean(partner.scope));
+  return (partners ?? [])
+    .filter(
+      (partner) =>
+        Boolean(partner.scope) ||
+        (Boolean(partner.scopeKey) &&
+          partner.source === FinanceMetricSource.Manual),
+    )
+    .map((partner) => ({
+      name: partner.name,
+      amount: partner.amount,
+      ...(partner.scopeKey ? { scopeKey: partner.scopeKey } : {}),
+      ...(partner.scope ? { scope: partner.scope } : {}),
+    }));
 }
 
 /** The "nothing published yet" response. */

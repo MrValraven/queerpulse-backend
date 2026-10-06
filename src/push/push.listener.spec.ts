@@ -8,6 +8,7 @@ import { ConversationKind } from '../messaging/entities/conversation.entity';
 import { MessageKind } from '../messaging/entities/message.entity';
 import { MessageCreatedEvent } from '../messaging/messaging.events';
 import { MessageView } from '../messaging/message-response';
+import { matchedChatMemberKey } from '../messaging/matched-member-key';
 import {
   PUSH_MIN_INTERVAL_MS,
   PUSH_QUIET_REPEAT_WINDOW_MS,
@@ -123,12 +124,17 @@ function build(opts: {
   // message body via `MemberLookup` (empty = no mention resolves to anyone,
   // which is what every non-mention test above relies on).
   mentionSlugUserIds?: Record<string, string>;
+  // PRD-423: a matched Go together chat, plus the first names its seats'
+  // profiles carry for rendering `@<member key>` mentions.
+  isGoTogetherChat?: boolean;
+  firstNameByUserId?: Record<string, string>;
 }) {
   const conversationKind = opts.conversationKind ?? ConversationKind.Direct;
   const conversationsRepo = {
     findOne: jest.fn().mockResolvedValue({
       id: 'conv-1',
       isOfficial: opts.isOfficial ?? false,
+      isGoTogetherChat: opts.isGoTogetherChat ?? false,
       kind: conversationKind,
       title:
         conversationKind === ConversationKind.Group
@@ -170,6 +176,8 @@ function build(opts: {
           return Promise.resolve(
             rows.map((participant) => ({
               identityId: `profile-identity-${participant.userId}`,
+              // PRD-423: the mention renderer groups seats by conversation.
+              conversationId: 'conv-1',
               ...participant,
             })),
           );
@@ -197,6 +205,13 @@ function build(opts: {
       where: jest.fn().mockReturnThis(),
       getMany: jest.fn().mockResolvedValue(mentionRows),
     }),
+    find: jest
+      .fn()
+      .mockResolvedValue(
+        Object.entries(opts.firstNameByUserId ?? {}).map(
+          ([userId, firstName]) => ({ userId, firstName }),
+        ),
+      ),
   };
   const presence = {
     isOnline: (userId: string) => opts.online.includes(userId),
@@ -292,6 +307,7 @@ function build(opts: {
   return {
     listener,
     push,
+    profilesRepo,
     participantsRepo,
     conversationsRepo,
     blockFilter,
@@ -1033,6 +1049,70 @@ describe('cold DM from a non-connection (ENG-232)', () => {
     const payload = sentPayload(push, 0);
     expect(payload.title).toBe('QueerPulse');
     expect(payload).not.toHaveProperty('icon');
+  });
+});
+
+describe('matched Go together chat mentions (PRD-423)', () => {
+  const recipientKey = matchedChatMemberKey('conv-1', 'recipient-1');
+
+  it('names a key mention by first name in the push and folds it for its member', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Picnic',
+      isGoTogetherChat: true,
+      firstNameByUserId: { 'recipient-1': 'Bea', 'recipient-2': 'Cy' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: `@${recipientKey} see you at noon` }),
+    );
+    const calls = push.sendToUsers.mock.calls as [string[], PushPayload][];
+    const mentionCall = calls.find(([userIds]) =>
+      userIds.includes('recipient-1'),
+    );
+    const plainCall = calls.find(([userIds]) =>
+      userIds.includes('recipient-2'),
+    );
+    expect(mentionCall?.[1].body).toBe(
+      'Alex mentioned you: @Bea see you at noon',
+    );
+    expect(plainCall?.[1].body).toBe('Alex: @Bea see you at noon');
+    expect(JSON.stringify(calls)).not.toContain(recipientKey);
+  });
+
+  it('sends no sender avatar icon in a matched chat', async () => {
+    const { listener, push } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Picnic',
+      isGoTogetherChat: true,
+      senderAvatarUrl: 'https://lh3.googleusercontent.com/a/alex.png',
+    });
+    await listener.handleMessageCreated(makeEvent({ body: 'see you' }));
+    const calls = push.sendToUsers.mock.calls as [string[], PushPayload][];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every(([, payload]) => !('icon' in payload))).toBe(true);
+  });
+
+  it('ignores a slug mention in a matched chat', async () => {
+    const { listener, push, profilesRepo } = build({
+      participants: GROUP_PARTICIPANTS,
+      online: [],
+      conversationKind: ConversationKind.Group,
+      groupTitle: 'Picnic',
+      isGoTogetherChat: true,
+      mentionSlugUserIds: { bea: 'recipient-1' },
+    });
+    await listener.handleMessageCreated(
+      makeEvent({ body: '@bea see you at noon' }),
+    );
+    expect(profilesRepo.createQueryBuilder).not.toHaveBeenCalled();
+    const calls = push.sendToUsers.mock.calls as [string[], PushPayload][];
+    expect(calls.every(([, payload]) => !payload.l10n?.params?.preview)).toBe(
+      true,
+    );
   });
 });
 

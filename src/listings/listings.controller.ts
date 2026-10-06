@@ -37,6 +37,7 @@ import { ListingClaimsService } from './listing-claims.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsService } from './listings.service';
+import { MySuggestedListingsService } from './my-suggested-listings.service';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -94,6 +95,9 @@ export class ListingsController {
     // LOC-16: the gatherings other members have attached to this venue, and
     // the owner's confirm/detach over them.
     private readonly listingVenueEventsService: ListingVenueEventsService,
+    // PRD-434: the places the caller suggested, which `mine` never returned
+    // because a suggestion is held by the platform.
+    private readonly mySuggestedListingsService: MySuggestedListingsService,
   ) {}
 
   @Post()
@@ -194,6 +198,31 @@ export class ListingsController {
   })
   listMyClaims(@CurrentUser() user: CurrentUserData) {
     return this.listingClaimsService.listMine(user.userId);
+  }
+
+  // PRD-434: the places the caller suggested for the directory (stored with
+  // `ownerId` null and the caller on `suggestedByUserId`), each with where it
+  // stands now. Two segments, like `claims/mine`, so it can never be read as
+  // the one-segment `:ref` route below, and no `:ref/<literal>` GET ends in
+  // `mine`.
+  @Get('suggestions/mine')
+  @ApiOperation({
+    summary: 'List the places the current member suggested for the directory',
+  })
+  @ApiOkResponse({
+    description:
+      'Paginated page of the caller’s suggestions, newest first, each with ' +
+      'its review state, who holds it now, and its public slug once it is ' +
+      'published.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listMySuggestions(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListMyListingsQuery,
+  ) {
+    return this.mySuggestedListingsService.listMine(user.userId, query.page);
   }
 
   // OWNER OR CO-MANAGER (`loadOwnedOrCoManagedOr404`). A co-manager's copy is

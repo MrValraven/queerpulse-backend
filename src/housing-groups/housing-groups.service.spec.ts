@@ -27,7 +27,10 @@ import {
   GroupListingStatus,
 } from './entities/group-listing.entity';
 import { HousingGroup } from './entities/housing-group.entity';
-import { HousingGroupsService } from './housing-groups.service';
+import {
+  GROUP_LISTING_REPORT_TAKEDOWN_CODE,
+  HousingGroupsService,
+} from './housing-groups.service';
 
 /**
  * Covers `createListing` (the admin-queue-notifications announce call, ENG
@@ -79,6 +82,7 @@ describe('HousingGroupsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     find: jest.Mock;
+    findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
     // `listMyListings` reads report takedowns off `content_moderation`
     // through the repository's own manager.
@@ -148,6 +152,7 @@ describe('HousingGroupsService', () => {
         }),
       ),
       find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
       createQueryBuilder: jest.fn(() => listingQuery),
       manager: { find: jest.fn().mockResolvedValue([]) },
     };
@@ -224,6 +229,17 @@ describe('HousingGroupsService', () => {
       expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
         AdminQueueKey.HousingGroupListings,
         'group-listing-1',
+      );
+    });
+
+    it('marks a new room as naming its poster (LOC-F2)', async () => {
+      await service.createListing('sunset-house', CREATE_DTO, 'member-1');
+
+      expect(listings.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          postedByUserId: 'member-1',
+          isPosterNamed: true,
+        }),
       );
     });
 
@@ -429,6 +445,13 @@ describe('HousingGroupsService', () => {
       priceEuros: 450,
       accessibilityInfo: 'Ground floor, no stairs.',
       postedByUserId: 'poster-1',
+      isPosterNamed: true,
+    };
+    // LOC-F2: posted through the old anonymous form.
+    const olderRoom = {
+      ...liveRoom,
+      id: 'group-listing-0',
+      isPosterNamed: false,
     };
     const posterProfile = {
       userId: 'poster-1',
@@ -468,6 +491,52 @@ describe('HousingGroupsService', () => {
         poster: { slug: 'rui', firstName: 'Rui' },
         isOwnListing: false,
       });
+    });
+
+    it('names nobody on a room posted through the old anonymous form', async () => {
+      listingQuery.getMany.mockResolvedValue([olderRoom]);
+
+      const read = await service.listVisibleListings(
+        'sunset-house',
+        'reader-1',
+      );
+
+      expect(read.listings[0]).toMatchObject({
+        id: 'group-listing-0',
+        poster: null,
+        isOwnListing: false,
+      });
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('names the poster of a new room beside an older room that stays unnamed', async () => {
+      listingQuery.getMany.mockResolvedValue([liveRoom, olderRoom]);
+      profiles.find.mockResolvedValue([posterProfile]);
+
+      const read = await service.listVisibleListings(
+        'sunset-house',
+        'reader-1',
+      );
+
+      expect(read.listings[0]).toMatchObject({
+        id: 'group-listing-1',
+        poster: { slug: 'rui' },
+      });
+      expect(read.listings[1]).toMatchObject({
+        id: 'group-listing-0',
+        poster: null,
+      });
+    });
+
+    it('still marks the poster their own older room', async () => {
+      listingQuery.getMany.mockResolvedValue([olderRoom]);
+
+      const read = await service.listVisibleListings(
+        'sunset-house',
+        'poster-1',
+      );
+
+      expect(read.listings[0]?.isOwnListing).toBe(true);
     });
 
     it('marks the reader their own room', async () => {
@@ -510,7 +579,11 @@ describe('HousingGroupsService', () => {
 
   describe('createListingEnquiry (PRD-443)', () => {
     const ENQUIRY = { body: 'Hello, is the room still free from March?' };
-    const liveRoom = { id: 'group-listing-1', postedByUserId: 'poster-1' };
+    const liveRoom = {
+      id: 'group-listing-1',
+      postedByUserId: 'poster-1',
+      isPosterNamed: true,
+    };
 
     it('delivers the message to the poster as an enquiry', async () => {
       listingQuery.getOne.mockResolvedValue(liveRoom);
@@ -577,6 +650,26 @@ describe('HousingGroupsService', () => {
           ENQUIRY,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('refuses a room posted through the old anonymous form, before any gate', async () => {
+      listingQuery.getOne.mockResolvedValue({
+        ...liveRoom,
+        isPosterNamed: false,
+      });
+
+      await expect(
+        service.createListingEnquiry(
+          'sunset-house',
+          'group-listing-1',
+          'reader-1',
+          ENQUIRY,
+        ),
+      ).rejects.toThrow(
+        new BadRequestException('This room does not take messages'),
+      );
+      expect(affirmingPledge.requireAccepted).not.toHaveBeenCalled();
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
@@ -673,6 +766,69 @@ describe('HousingGroupsService', () => {
 
       expect(rows).toEqual([]);
       expect(listings.manager.find).not.toHaveBeenCalled();
+    });
+  });
+
+  // LOC-F13: the poster's card hides Edit on a room taken down after a report,
+  // and the server refuses the same edit, since it would lift nothing.
+  describe('updateListing report takedowns (LOC-F13)', () => {
+    const postedRoom = {
+      id: 'group-listing-1',
+      groupId: 'group-1',
+      title: 'Room in a queer household',
+      description: 'A bright room.',
+      neighbourhood: 'Arroios',
+      priceEuros: 450,
+      accessibilityInfo: 'Ground floor.',
+      status: GroupListingStatus.Live,
+      hidden: false,
+      hiddenReason: null,
+      postedByUserId: 'member-1',
+      isPosterNamed: true,
+      decidedAt: null,
+      decidedBy: null,
+      decisionReason: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    it('refuses an edit to a room taken down after a report with a coded 409', async () => {
+      listings.findOne.mockResolvedValue({ ...postedRoom });
+      listings.manager.find.mockResolvedValue([
+        {
+          subjectId: 'group-listing-1',
+          hiddenAt: new Date('2026-02-01T00:00:00.000Z'),
+          removedAt: null,
+        },
+      ]);
+
+      const attempt = service.updateListing(
+        'sunset-house',
+        'group-listing-1',
+        { title: 'A new title' },
+        'member-1',
+      );
+
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toMatchObject({
+        response: { code: GROUP_LISTING_REPORT_TAKEDOWN_CODE },
+      });
+      expect(listings.save).not.toHaveBeenCalled();
+    });
+
+    it('saves an edit to a room with no report takedown', async () => {
+      listings.findOne.mockResolvedValue({ ...postedRoom });
+
+      const row = await service.updateListing(
+        'sunset-house',
+        'group-listing-1',
+        { title: 'A new title' },
+        'member-1',
+      );
+
+      expect(listings.save).toHaveBeenCalled();
+      expect(row.title).toBe('A new title');
+      expect(row.moderationState).toBeNull();
     });
   });
 

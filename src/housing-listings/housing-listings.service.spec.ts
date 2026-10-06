@@ -941,6 +941,27 @@ describe('HousingListingsService', () => {
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
+    it('answers a blocked pair with the detail read 404 before the pledge and step-up', async () => {
+      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+      messaging.enquiryContactability.mockResolvedValue({
+        canDeliver: false,
+        blockedReason: 'blocked',
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+
+      await expect(
+        service.createEnquiry('QPH-2026-0001', 'sender', { body: 'hi' }),
+      ).rejects.toThrow(new NotFoundException('Housing listing not found'));
+      expect(messaging.enquiryContactability).toHaveBeenCalledWith(
+        'sender',
+        'owner-1',
+      );
+      expect(affirmingPledge.requireAccepted).not.toHaveBeenCalled();
+      expect(verification.requireLevel).not.toHaveBeenCalled();
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
     it('delivers the enquiry to the lister and returns the conversation id', async () => {
       listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
 
@@ -992,6 +1013,20 @@ describe('HousingListingsService', () => {
         followUpAwaitsReply: false,
       });
       expect(messaging.enquiryContactability).not.toHaveBeenCalled();
+    });
+
+    it('answers a blocked pair with the detail read 404', async () => {
+      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+      messaging.enquiryContactability.mockResolvedValue({
+        canDeliver: false,
+        blockedReason: 'blocked',
+        replyRequiresConnection: false,
+        followUpAwaitsReply: false,
+      });
+
+      await expect(
+        service.getEnquiryContact('QPH-2026-0001', 'sender'),
+      ).rejects.toThrow(new NotFoundException('Housing listing not found'));
     });
 
     it('reports the messaging module’s reply-requires-connection and follow-up-awaits-reply answers for a real recipient', async () => {

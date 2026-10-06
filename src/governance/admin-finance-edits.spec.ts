@@ -39,6 +39,19 @@ describe('admin finance edits (PRD-447)', () => {
         },
       ]);
       expect(result.isChanged).toBe(true);
+      // A label is words, so the public "figures entered on" date stays put.
+      expect(result.isFigureChanged).toBe(false);
+    });
+
+    it('counts a corrected amount as a figure change', () => {
+      const result = applyLedgerEdits(
+        'income',
+        [line('Member contributions', '1840')],
+        [{ index: 0, amount: '2100' }],
+      );
+
+      expect(result.isChanged).toBe(true);
+      expect(result.isFigureChanged).toBe(true);
     });
 
     it('appends a row at the next index, sized against the largest amount', () => {
@@ -56,6 +69,7 @@ describe('admin finance edits (PRD-447)', () => {
         source: FinanceMetricSource.Manual,
         enabled: true,
       });
+      expect(result.isFigureChanged).toBe(true);
     });
 
     it('refuses an index past the next free one', () => {
@@ -102,9 +116,76 @@ describe('admin finance edits (PRD-447)', () => {
           name: 'A local foundation',
           amount: 400,
           scope: 'the wellbeing fund',
+          source: FinanceMetricSource.Manual,
         },
       ]);
       expect(result.audit[0]!.field).toBe('partners');
+      expect(result.isFigureChanged).toBe(false);
+    });
+
+    const keyedPartner = {
+      name: 'A named foundation',
+      amount: 400,
+      scopeKey: 'governance:sections.finances.partnerScope.mentalHealthFund',
+    };
+
+    it('keeps the translated scopeKey of a partner whose restriction the admin left alone', () => {
+      const result = replacePartners(
+        [keyedPartner],
+        [
+          {
+            name: 'A named foundation',
+            amount: 450,
+            scopeKey: keyedPartner.scopeKey,
+          },
+        ],
+      );
+
+      expect(result.value).toEqual([
+        {
+          name: 'A named foundation',
+          amount: 450,
+          scopeKey: keyedPartner.scopeKey,
+          source: FinanceMetricSource.Manual,
+        },
+      ]);
+    });
+
+    it('drops the key and stores the typed words when the admin edited the restriction', () => {
+      const result = replacePartners(
+        [keyedPartner],
+        [
+          {
+            name: 'A named foundation',
+            amount: 400,
+            scope: 'the wellbeing fund',
+          },
+        ],
+      );
+
+      expect(result.value).toEqual([
+        {
+          name: 'A named foundation',
+          amount: 400,
+          scope: 'the wellbeing fund',
+          source: FinanceMetricSource.Manual,
+        },
+      ]);
+    });
+
+    it('refuses a scopeKey the stored list does not carry', () => {
+      expect(() =>
+        replacePartners(
+          [keyedPartner],
+          [
+            {
+              name: 'A named foundation',
+              amount: 400,
+              scopeKey: 'governance:sections.finances.partnerScope.madeUp',
+            },
+          ],
+        ),
+      ).toThrow(BadRequestException);
     });
 
     it('strips markup from a stat tile before it reaches the public page', () => {

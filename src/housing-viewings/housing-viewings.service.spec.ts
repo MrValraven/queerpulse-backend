@@ -191,11 +191,11 @@ describe('HousingViewingsService', () => {
   // 1. Blocks on request
   // -------------------------------------------------------------------------
   describe('request', () => {
-    it('refuses a blocked pair with the enquiry path 403 before the pledge and step-up', async () => {
+    it('answers a blocked pair with the detail read 404 before the pledge and step-up', async () => {
       blockFilter.isBlockedEitherWay.mockResolvedValue(true);
 
       await expect(service.request('guest-1', requestDto)).rejects.toThrow(
-        new ForbiddenException('You cannot contact this member'),
+        new NotFoundException('Housing listing not found'),
       );
       expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
         'guest-1',
@@ -279,7 +279,7 @@ describe('HousingViewingsService', () => {
       expect(viewings.save).not.toHaveBeenCalled();
     });
 
-    it('refuses an answer across a block', async () => {
+    it('refuses an answer across a block with a 403, since both sides already hold the viewing', async () => {
       viewings.findOne.mockResolvedValue(viewing());
       blockFilter.isBlockedEitherWay.mockResolvedValue(true);
 

@@ -375,8 +375,9 @@ describe('ForumThreadsService', () => {
   let blockFilter: {
     excludeHidden: jest.Mock;
     isBlockedEitherWay: jest.Mock;
+    blockedUserIds: jest.Mock;
   };
-  let mentions: { notify: jest.Mock };
+  let mentions: { notify: jest.Mock; forumThreadAudience: jest.Mock };
   // DISC-5's topics reconciliation and the author's own review-verdict bell —
   // the two halves of the create fan-out that reach other members, hoisted so
   // the deferred-fan-out specs can assert on exactly when each one fires.
@@ -487,9 +488,18 @@ describe('ForumThreadsService', () => {
     blockFilter = {
       excludeHidden: jest.fn((qb: unknown) => qb),
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      // PRD-408: the byline's co-author block read. Default: no blocks.
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     // `create` fires a mention scan on the OP body; return no notified users.
-    mentions = { notify: jest.fn().mockResolvedValue(new Set<string>()) };
+    // `forumThreadAudience` holds the co-author credit notice to the thread's
+    // readers (PRD-408). Default: every candidate can read the thread.
+    mentions = {
+      notify: jest.fn().mockResolvedValue(new Set<string>()),
+      forumThreadAudience: jest.fn((_slug: string, userIds: string[]) =>
+        Promise.resolve(new Set(userIds)),
+      ),
+    };
     contentModeration = {
       statesForAnyType: jest.fn().mockResolvedValue(new Map<string, unknown>()),
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
@@ -3581,6 +3591,256 @@ describe('ForumThreadsService', () => {
         service.removeCoAuthor('hello-world', member),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(threads.update).not.toHaveBeenCalled();
+    });
+
+    // `MemberLookup.userIdForSlug` resolves the handle through a profile
+    // query builder: the handle names a real, active member.
+    const stubCoAuthorHandle = (): void => {
+      interface HandleQbStub {
+        innerJoin: jest.Mock;
+        where: jest.Mock;
+        getMany: jest.Mock;
+      }
+      const handleQb: HandleQbStub = {
+        innerJoin: jest.fn((): HandleQbStub => handleQb),
+        where: jest.fn((): HandleQbStub => handleQb),
+        getMany: jest.fn((): Promise<Profile[]> =>
+          Promise.resolve([baseProfile({ userId: 'bea-1', slug: 'bea' })]),
+        ),
+      };
+      Object.assign(profiles, { createQueryBuilder: jest.fn(() => handleQb) });
+    };
+
+    const coAuthorNoticeCalls = (): unknown[][] =>
+      (notifications.create.mock.calls as unknown[][]).filter(
+        ([, type]) => type === NotificationType.ForumCoAuthorCredit,
+      );
+
+    it('tells the credited member on create, naming the author', async () => {
+      stubCoAuthorHandle();
+
+      await service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        coAuthorHandle: 'bea',
+      });
+
+      expect(coAuthorNoticeCalls()).toHaveLength(1);
+      expect(notifications.create).toHaveBeenCalledWith(
+        'bea-1',
+        NotificationType.ForumCoAuthorCredit,
+        {
+          source: 'forum',
+          threadSlug: expect.any(String) as unknown,
+          threadTitle: 'A guide',
+          actorId: 'author-1',
+        },
+      );
+      // No `actorId` ARGUMENT: that would add the mute gate, and a mute must
+      // not silence the consent notice. The payload still names the author.
+      expect(coAuthorNoticeCalls()[0]).toHaveLength(3);
+      expect(mentions.forumThreadAudience).toHaveBeenCalledWith(
+        expect.any(String),
+        ['bea-1'],
+      );
+    });
+
+    it('tells nobody while the credited thread is still scheduled', async () => {
+      stubCoAuthorHandle();
+
+      await service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        coAuthorHandle: 'bea',
+        publishAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      });
+
+      expect(coAuthorNoticeCalls()).toHaveLength(0);
+    });
+
+    it('tells the co-author when a deferred thread goes live, leaving a masked author unnamed', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({
+          fannedOutAt: null,
+          coAuthorId: 'bea-1',
+          isAnonymous: true,
+        }),
+      );
+      // The claim `publishThread` issues: one affected row, so this read is
+      // the one that pays the fan-out.
+      interface UpdateQbStub {
+        update: jest.Mock;
+        set: jest.Mock;
+        where: jest.Mock;
+        execute: jest.Mock;
+      }
+      const claimQb: UpdateQbStub = {
+        update: jest.fn((): UpdateQbStub => claimQb),
+        set: jest.fn((): UpdateQbStub => claimQb),
+        where: jest.fn((): UpdateQbStub => claimQb),
+        execute: jest.fn(() => Promise.resolve({ affected: 1 })),
+      };
+      threads.createQueryBuilder.mockReturnValue(claimQb);
+
+      await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'bea-1',
+        NotificationType.ForumCoAuthorCredit,
+        {
+          source: 'forum',
+          threadSlug: 'hello-world',
+          threadTitle: 'Hello world',
+        },
+      );
+    });
+
+    it('refuses a co-author off a gated community roster with the unknown-handle message', async () => {
+      stubCoAuthorHandle();
+      membership.assertMemberBySlug.mockResolvedValue('community-1');
+      // `isCommunityHiddenFrom`: the community is gated and the co-author is
+      // not on its roster.
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(true),
+      );
+
+      const attempt = service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        communitySlug: 'lisbon-hikers',
+        coAuthorHandle: 'bea',
+      });
+
+      await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+      await expect(attempt).rejects.toThrow(
+        'No member with that handle to credit as co-author',
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('accepts a co-author off the roster when the thread is cross-posted', async () => {
+      stubCoAuthorHandle();
+      membership.assertMemberBySlug.mockResolvedValue('community-1');
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(true),
+      );
+
+      await service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        communitySlug: 'lisbon-hikers',
+        crossPosted: true,
+        coAuthorHandle: 'bea',
+      });
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts a co-author on the gated community roster', async () => {
+      stubCoAuthorHandle();
+      membership.assertMemberBySlug.mockResolvedValue('community-1');
+
+      await service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        communitySlug: 'lisbon-hikers',
+        coAuthorHandle: 'bea',
+      });
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells a co-author who cannot read the thread nothing', async () => {
+      stubCoAuthorHandle();
+      mentions.forumThreadAudience.mockResolvedValue(new Set<string>());
+
+      await service.create('author-1', {
+        title: 'A guide',
+        body: 'Body',
+        category: 'general',
+        coAuthorHandle: 'bea',
+      });
+
+      expect(coAuthorNoticeCalls()).toHaveLength(0);
+    });
+
+    it('a failed notice never fails the create', async () => {
+      stubCoAuthorHandle();
+      notifications.create.mockRejectedValue(new Error('enum label missing'));
+
+      await expect(
+        service.create('author-1', {
+          title: 'A guide',
+          body: 'Body',
+          category: 'general',
+          coAuthorHandle: 'bea',
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('leaves the co-author off the byline for a viewer with a block with them', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ coAuthorId: 'bea-1' }));
+      profiles.find.mockResolvedValue([
+        baseProfile(),
+        baseProfile({ userId: 'bea-1', slug: 'bea', firstName: 'Bea' }),
+      ]);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['bea-1']));
+
+      const res = await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
+        'bea-1',
+      ]);
+      expect(res.coAuthor).toBeNull();
+      expect(res.author.handle).toBe('ava');
+    });
+
+    it('shows the co-author to a viewer with no block', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ coAuthorId: 'bea-1' }));
+      profiles.find.mockResolvedValue([
+        baseProfile(),
+        baseProfile({ userId: 'bea-1', slug: 'bea', firstName: 'Bea' }),
+      ]);
+
+      const res = await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(res.coAuthor).toEqual(expect.objectContaining({ handle: 'bea' }));
+    });
+
+    it('filters co-authors across a page with ONE block read', async () => {
+      const qb = qbStub([
+        baseThread({ id: 'thread-1', slug: 'one', coAuthorId: 'bea-1' }),
+        baseThread({ id: 'thread-2', slug: 'two', coAuthorId: 'cai-1' }),
+        baseThread({ id: 'thread-3', slug: 'three' }),
+      ]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([
+        baseProfile(),
+        baseProfile({ userId: 'bea-1', slug: 'bea' }),
+        baseProfile({ userId: 'cai-1', slug: 'cai' }),
+      ]);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['bea-1']));
+
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledTimes(1);
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
+        'bea-1',
+        'cai-1',
+      ]);
+      expect(
+        page.data.map((thread) => thread.coAuthor?.handle ?? null),
+      ).toEqual([null, 'cai', null]);
     });
 
     it('404s removing a credit from a withdrawn thread', async () => {

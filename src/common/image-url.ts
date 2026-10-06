@@ -42,6 +42,23 @@ export function resetImageUrlBaseForTesting(): void {
   apiBaseUrl = null;
 }
 
+/**
+ * PRD-423: an absolute URL for a VERSION_NEUTRAL route of this API, built
+ * from the same base `toImageUrl` uses, for a server-minted image address
+ * that is no storage key (a matched Go together chat's member avatar route).
+ * `path` carries no leading slash. Fails like `toImageUrl` when the base was
+ * never wired.
+ */
+export function apiUrlFor(path: string): string {
+  if (!apiBaseUrl) {
+    logger.error(
+      'Image URL base is not configured: setImageUrlBase() was never called',
+    );
+    throw new InternalServerErrorException('Service temporarily unavailable');
+  }
+  return `${apiBaseUrl}/${path}`;
+}
+
 export function toImageUrl(value: string | null | undefined): string | null {
   if (!value) {
     return null;

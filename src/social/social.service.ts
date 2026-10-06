@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, IsNull, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import {
@@ -101,6 +101,11 @@ export class SocialService {
     actorId: string,
     slug: string,
     dto?: BlockOptionsDto,
+    // PRD-423: the matched Go together chat a block placed by member key or
+    // from the group sheet came from. A fresh block records it, so the
+    // block list names that row by first name alone (`toBlockDTO`). An
+    // existing block keeps what it already says.
+    context: { matchedConversationId?: string | null } = {},
   ): Promise<BlockDTO> {
     const blockedId = await this.resolveMutationTarget(actorId, slug);
     const { low, high } = this.orderedPair(actorId, blockedId);
@@ -110,9 +115,28 @@ export class SocialService {
         .createQueryBuilder()
         .insert()
         .into(Block)
-        .values({ blockerId: actorId, blockedId, reason: dto?.reason ?? null })
+        .values({
+          blockerId: actorId,
+          blockedId,
+          reason: dto?.reason ?? null,
+          matchedConversationId: context.matchedConversationId ?? null,
+        })
         .orIgnore()
         .execute();
+      // PRD-423: a block by slug on a pair that only a matched chat block
+      // holds turns that row into a plain one. The caller typed the slug, so
+      // the block list may name the member in full from now on.
+      if (!context.matchedConversationId) {
+        await manager.update(
+          Block,
+          {
+            blockerId: actorId,
+            blockedId,
+            matchedConversationId: Not(IsNull()),
+          },
+          { matchedConversationId: null },
+        );
+      }
 
       // PRD-363: the sever also stashes an `accepted`/`pending` status so the
       // blocker's unblock can put it back (see `block-restore.ts`).
@@ -213,6 +237,36 @@ export class SocialService {
    */
   async unblockMember(actorId: string, slug: string): Promise<UnblockResult> {
     const blockedId = await this.resolveMutationTarget(actorId, slug);
+    // PRD-423: by slug, plain blocks only. A block placed from inside a
+    // matched Go together chat answers exactly as no block at all (it is
+    // lifted by id), so a guessed slug cannot be tested against it.
+    return this.unblockResolved(actorId, blockedId, { isPlainOnly: true });
+  }
+
+  /**
+   * PRD-423: {@link unblockMember} for a block the actor addresses by its own
+   * row id, the one handle the block list gives a block placed from inside a
+   * matched Go together chat (which carries no slug). Owner-only: a row the
+   * actor did not place is the same 404 as no row at all.
+   */
+  async unblockById(actorId: string, blockId: string): Promise<UnblockResult> {
+    const row = await this.blocks.findOne({
+      where: { id: blockId, blockerId: actorId },
+      select: { id: true, blockedId: true },
+    });
+    if (!row) {
+      throw new NotFoundException('Block not found');
+    }
+    return this.unblockResolved(actorId, row.blockedId, {
+      isPlainOnly: false,
+    });
+  }
+
+  private async unblockResolved(
+    actorId: string,
+    blockedId: string,
+    options: { isPlainOnly: boolean },
+  ): Promise<UnblockResult> {
     const { low, high } = this.orderedPair(actorId, blockedId);
 
     const restoredStatus = await this.dataSource.transaction(
@@ -220,6 +274,7 @@ export class SocialService {
         const result = await manager.delete(Block, {
           blockerId: actorId,
           blockedId,
+          ...(options.isPlainOnly ? { matchedConversationId: IsNull() } : {}),
         });
         if (!result.affected) {
           throw new NotFoundException('Block not found');
@@ -253,8 +308,16 @@ export class SocialService {
    */
   async getBlockStatus(actorId: string, slug: string): Promise<BlockStatus> {
     const targetId = await this.resolveSlugStrict(slug);
+    // PRD-423: a block placed from inside a matched Go together chat reads
+    // as not-blocked here, so a guessed slug cannot be tested against the
+    // members the caller blocked by first name. The block itself is enforced
+    // everywhere as usual.
     const blocking = await this.blocks.exist({
-      where: { blockerId: actorId, blockedId: targetId },
+      where: {
+        blockerId: actorId,
+        blockedId: targetId,
+        matchedConversationId: IsNull(),
+      },
     });
     return { blocking };
   }

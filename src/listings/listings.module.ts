@@ -40,6 +40,7 @@ import { ListingOwnerOffersService } from './listing-owner-offers.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingOwnershipService } from './listing-ownership.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
+import { MySuggestedListingsService } from './my-suggested-listings.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
@@ -214,6 +215,9 @@ import { ListingsService } from './listings.service';
     // repository already registered above for `DirectoryService`, and reads
     // `Profile` through `UsersModule`'s re-exported `TypeOrmModule`.
     ListingVenueEventsService,
+    // PRD-434: the suggester's own "what came of the places I suggested"
+    // read. Reads `listings` alone through the repository registered above.
+    MySuggestedListingsService,
     DirectoryService,
   ],
   exports: [

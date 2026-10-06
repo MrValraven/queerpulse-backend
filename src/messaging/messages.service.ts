@@ -885,8 +885,14 @@ export class MessagesService {
     const hits = rows.map((m) => ({
       id: m.id,
       conversationId: m.conversationId,
-      snippet: buildSearchSnippet(searchHitText(m), query),
+      // PRD-423: a matched chat's `@<member key>` mentions are spelled by
+      // first name before the window is cut, so no token is split.
+      snippet: buildSearchSnippet(
+        listContext.renderText(m.conversationId, searchHitText(m)),
+        query,
+      ),
       sender: listContext.renderSender(m),
+      ...listContext.isSentByViewer(m),
       createdAt: m.createdAt.toISOString(),
       // Coordinator follow-up (ENG-251): `kind`/`attachment` ride the same
       // `Message` row this query already selected in full, no extra query or

@@ -16,6 +16,9 @@ import { Profile } from '../users/entities/profile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { Community } from '../communities/entities/community.entity';
 import { PAGE_SIZE, Paginated, normalizePage } from '../common/pagination';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { loadMatchedChatMentionRenderer } from '../messaging/matched-chat-mention-text';
+import { hasMatchedChatMentions } from '../messaging/matched-member-key';
 import {
   MentionResolvers,
   MentionResponse,
@@ -187,6 +190,52 @@ export class MentionsInboxService {
       staleExcerptNotificationIds,
     };
 
-    return rows.map((row) => toMentionResponse(row, resolvers));
+    const readableRows = await this.withReadableMatchedChatExcerpts(rows);
+    return readableRows.map((row) => toMentionResponse(row, resolvers));
+  }
+
+  /**
+   * PRD-423 (opaque member keys): a mention written in a matched Go together
+   * chat (`payload.isGoTogetherChat`) carries an excerpt whose `@` mentions
+   * are opaque per-chat keys. Those are spelled `@FirstName` here, for every
+   * such row on the page in two batched reads; the stored payload is never
+   * rewritten, and a page with no such excerpt reads nothing.
+   */
+  private async withReadableMatchedChatExcerpts(
+    rows: Notification[],
+  ): Promise<Notification[]> {
+    const matchedConversationIds = rows.flatMap((row) => {
+      const conversationId = row.payload?.conversationId;
+      const excerpt = row.payload?.excerpt;
+      return row.payload?.isGoTogetherChat === true &&
+        typeof conversationId === 'string' &&
+        typeof excerpt === 'string' &&
+        hasMatchedChatMentions(excerpt)
+        ? [conversationId]
+        : [];
+    });
+    if (!matchedConversationIds.length) return rows;
+    const render = await loadMatchedChatMentionRenderer(
+      {
+        participants: this.dataSource.getRepository(ConversationParticipant),
+        profiles: this.profiles,
+      },
+      matchedConversationIds,
+    );
+    return rows.map((row) => {
+      const conversationId = row.payload?.conversationId;
+      const excerpt = row.payload?.excerpt;
+      if (
+        row.payload?.isGoTogetherChat !== true ||
+        typeof conversationId !== 'string' ||
+        typeof excerpt !== 'string'
+      ) {
+        return row;
+      }
+      return {
+        ...row,
+        payload: { ...row.payload, excerpt: render(conversationId, excerpt) },
+      };
+    });
   }
 }

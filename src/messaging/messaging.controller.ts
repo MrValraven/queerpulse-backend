@@ -40,6 +40,7 @@ import { AddMembersDto } from './dto/add-members.dto';
 import { ChangeMemberRoleDto } from './dto/change-member-role.dto';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { CreateGroupConversationDto } from './dto/create-group.dto';
+import { CreateInviteLinkDto } from './dto/create-invite-link.dto';
 import { DeleteMessageDto } from './dto/delete-message.dto';
 import { EditMessageDto } from './dto/edit-message.dto';
 import { GetMessagesQuery } from './dto/get-messages.query';
@@ -63,6 +64,7 @@ import {
   MessageReactorsResponse,
   MessageResponse,
 } from './message-response';
+import { GroupInviteLinkResponse } from './group-invite-link-usage';
 import { MessagingService } from './messaging.service';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
@@ -338,7 +340,7 @@ export class ConversationsController {
   })
   @ApiGoneResponse({
     description:
-      'PRD-400: the link is past its 7-day window (`INVITE_LINK_EXPIRED`). A current member still gets the preview.',
+      'PRD-400: the link is past its 7-day window (`INVITE_LINK_EXPIRED`) or has seated as many people as its use cap allows (`INVITE_LINK_USED_UP`). A current member still gets the preview.',
   })
   previewGroupJoin(
     @Param('token', InviteTokenParamPipe) token: string,
@@ -366,7 +368,7 @@ export class ConversationsController {
   })
   @ApiGoneResponse({
     description:
-      'PRD-400: the link is past its 7-day window (`INVITE_LINK_EXPIRED`). A current member is still answered with their group.',
+      'PRD-400: the link is past its 7-day window (`INVITE_LINK_EXPIRED`) or has seated as many people as its use cap allows (`INVITE_LINK_USED_UP`). A current member is still answered with their group.',
   })
   joinGroupByToken(
     @Param('token', InviteTokenParamPipe) token: string,
@@ -530,7 +532,9 @@ export class ConversationsController {
    * Create or ROTATE the group's join-by-link token (PRD-358, owner/admin;
    * service re-checks). Rotating invalidates whichever token was live.
    * PRD-400: every issue or rotation is valid for 7 days, and the response
-   * says until when.
+   * says until when. The optional `maxUses` (1, 5 or 25; null or omitted for
+   * unlimited) caps how many people can join with the new link, and every
+   * issue or rotation starts its use count at 0.
    */
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post(':id/invite-link')
@@ -539,7 +543,11 @@ export class ConversationsController {
     summary: 'Create or rotate a group invite link (owner/admin only)',
   })
   @ApiOkResponse({
-    description: 'The new invite token and the ISO instant it expires.',
+    description:
+      'The new invite token, the ISO instant it expires, its use cap and the uses left.',
+  })
+  @ApiBadRequestResponse({
+    description: 'maxUses is not one of 1, 5, 25 or null.',
   })
   @ApiForbiddenResponse({
     description:
@@ -548,8 +556,13 @@ export class ConversationsController {
   createInviteLink(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
-  ): Promise<{ inviteToken: string; inviteTokenExpiresAt: string }> {
-    return this.messagingService.createOrRotateInviteLink(id, user.userId);
+    @Body() body: CreateInviteLinkDto,
+  ): Promise<GroupInviteLinkResponse> {
+    return this.messagingService.createOrRotateInviteLink(
+      id,
+      user.userId,
+      body?.maxUses ?? null,
+    );
   }
 
   /**

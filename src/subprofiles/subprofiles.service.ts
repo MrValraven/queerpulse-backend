@@ -23,10 +23,12 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { Identity, IdentityKind } from '../identities/entities/identity.entity';
 import { HandleOwner, HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
-import { storageKeyOwnerId } from '../storage/storage-key';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
+import { assertNoForeignUploadIntroducedForPersona } from '../storage/assert-no-foreign-upload';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
@@ -61,6 +63,10 @@ import {
   toRevisionDetail,
   toRevisionSummary,
 } from './dto/item-revision.response';
+import {
+  SubprofileInvite,
+  SubprofileInviteStatus,
+} from './entities/subprofile-invite.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileCreditsService } from './subprofile-credits.service';
@@ -70,6 +76,11 @@ import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileMembershipService } from './subprofile-membership.service';
 import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { isSectionAllowed } from './subprofile-kinds';
+import { availabilityUpdatedAtAfterSave } from './subprofile-availability-stamp';
+import {
+  carryIdentityBlocksToPersona,
+  issueFreshPersonaId,
+} from './subprofile-unlink-rekey';
 import {
   deriveLinkedPersonaHandle,
   handleIsKindName,
@@ -295,6 +306,10 @@ interface SubprofileEditSaveOptions extends SubprofileLockChecks {
   /** True for the PATCH editor write (ENG-451): the save stores the locked
    * row's `editVersion` plus 1. Every other save keeps the committed value. */
   shouldAdvanceEditVersion?: boolean;
+  /** True when the PATCH carries `confirmAvailability` (PRD-435): the owner
+   * confirmed the status as it stands, so the save stamps
+   * `availabilityUpdatedAt` even when nothing about the status changed. */
+  hasConfirmedAvailability?: boolean;
 }
 
 /** The typed code of the 409 an editor write gets when its
@@ -450,6 +465,9 @@ export class SubprofilesService {
     // Batched crop lookup for `avatarUrl`/`coverUrl`/item `imageUrl` — see
     // `MediaCropService.getMany` and `../media-crops/crop-response.ts`.
     private readonly mediaCropService: MediaCropService,
+    // T17: an unlinked persona's images live under persona-scoped keys that
+    // name nobody; every image write to one copies the upload there.
+    private readonly personaImageKeys: PersonaImageKeysService,
     // Emits `subprofile.deleted` so co-owners are notified when a creator
     // deletes a persona they share (Task 4). Globally available via
     // `EventEmitterModule` at the app root.
@@ -605,6 +623,7 @@ export class SubprofilesService {
       }
       // Snapshot the item's CURRENT (pre-restore) content first.
       await this.recordItemRevision(manager, item);
+      const imageBeforeRestore = item.imageUrl;
       // Apply ONLY the editable fields from the stored snapshot.
       // `editableSnapshot` is the allowlist: it never reads or writes
       // `id`/`subprofileId`/`position`/`createdAt`, so those identity and
@@ -612,6 +631,20 @@ export class SubprofilesService {
       Object.assign(
         item,
         editableSnapshot(revision.snapshot as unknown as EditableItemContent),
+      );
+      // T17: an unlink leaves stored revisions as they are, so a revision
+      // restored onto an unlinked persona may hold a member upload, or a
+      // key the persona showed while linked. Either gets a fresh
+      // persona-scoped copy here; the image the item already shows stays.
+      const rehomedImages = await this.personaImageKeys.rehomeForPersonaWrite(
+        manager,
+        subprofileId,
+        [item.imageUrl],
+        { shouldRefreshOwnKeys: true, keepValues: [imageBeforeRestore] },
+      );
+      item.imageUrl = PersonaImageKeysService.applyRehome(
+        rehomedImages,
+        item.imageUrl,
       );
       await manager.save(item);
       return advancedEditVersion;
@@ -918,22 +951,20 @@ export class SubprofilesService {
     requesterUserId: string,
     incoming: string | null | undefined,
     alreadyStored: readonly (string | null | undefined)[],
-  ): void {
-    if (!incoming) {
-      return;
-    }
+  ): Promise<void> {
     // The interceptor already collapsed any `/files/<key>` URL to its bare key
     // before this ran, so both sides of the comparison are canonical keys.
-    const ownerUserId = storageKeyOwnerId(incoming);
-    if (ownerUserId === null || ownerUserId === requesterUserId) {
-      return;
-    }
-    if (alreadyStored.includes(incoming)) {
-      return;
-    }
-    // Same wording as the interceptor's, and deliberately free of the owner's
-    // id — a 403 must not confirm who uploaded a key.
-    throw new ForbiddenException('Referenced upload does not belong to you');
+    // T17: a persona-scoped key names no uploader. It is allowed when this
+    // persona already stores it, or when it belongs to another persona the
+    // requester co-owns (copying a persona); the write then copies it to a
+    // key of this persona's own (`PersonaImageKeysService`).
+    return assertNoForeignUploadIntroducedForPersona(
+      requesterUserId,
+      incoming,
+      alreadyStored,
+      (storageKey, userId) =>
+        this.personaImageKeys.isMemberOfKeyPersona(storageKey, userId),
+    );
   }
 
   async update(
@@ -945,8 +976,12 @@ export class SubprofilesService {
     // Runs BEFORE any mutation: a collaborator may re-save the persona's
     // existing avatar/cover whoever uploaded it, but may not point either
     // field at a new upload that is not theirs.
-    this.assertNoForeignUploadIntroduced(userId, dto.avatarUrl, [sp.avatarUrl]);
-    this.assertNoForeignUploadIntroduced(userId, dto.coverUrl, [sp.coverUrl]);
+    await this.assertNoForeignUploadIntroduced(userId, dto.avatarUrl, [
+      sp.avatarUrl,
+    ]);
+    await this.assertNoForeignUploadIntroduced(userId, dto.coverUrl, [
+      sp.coverUrl,
+    ]);
     const prevLink = sp.linkVisibility;
     const prevHandle = sp.handle;
     const prevSlug = sp.slug;
@@ -958,8 +993,14 @@ export class SubprofilesService {
     const prevStatus = sp.status;
     // `expectedEditVersion` is the ENG-451 save precondition, checked under
     // the row lock by `lockCurrentSubprofile`. It is request-only, so it is
-    // kept out of `rest` and never assigned onto the entity.
-    const { linkVisibility, expectedEditVersion, ...rest } = dto;
+    // kept out of `rest` and never assigned onto the entity. So is
+    // `confirmAvailability` (PRD-435), which only reaches the save options.
+    const {
+      linkVisibility,
+      expectedEditVersion,
+      confirmAvailability,
+      ...rest
+    } = dto;
 
     if (
       rest.accent !== undefined &&
@@ -1153,6 +1194,7 @@ export class SubprofilesService {
       // raised by 1 on every successful PATCH, sent or not.
       expectedEditVersion,
       shouldAdvanceEditVersion: true,
+      hasConfirmedAvailability: confirmAvailability === true,
     };
 
     // --- Task 5: re-screen a published persona's identity text on edit -----
@@ -1194,6 +1236,9 @@ export class SubprofilesService {
     const typedRenamedHandle = shouldRenamePublishedHandle
       ? (sp.handle ?? null)
       : null;
+    // The id the request addressed. An unlink gives the row a fresh one in
+    // the transaction below (ENG-447), so each run starts from this one.
+    const loadedSubprofileId = sp.id;
     if (
       saveOptions.hasEditedLinkVisibility ||
       shouldDeriveLinkedDraftHandle ||
@@ -1202,6 +1247,7 @@ export class SubprofilesService {
       try {
         await this.retryLostDerivedHandleRace(() =>
           this.dataSource.transaction(async (m) => {
+            sp.id = loadedSubprofileId;
             // The persona row lock comes FIRST, before any handle row is
             // touched: every transaction here takes the persona row and then
             // the handle row, in that order, so two of them can never wait on
@@ -1245,6 +1291,18 @@ export class SubprofilesService {
             }
             if (isUnlinkingSwitch) {
               await this.cutTiesToNamedPersona(m, sp.id);
+              // ENG-447: the pseudonymous persona answers under a new id,
+              // so no id the named persona exposed leads to it. The save
+              // below and the response both use the new one.
+              sp.id = await issueFreshPersonaId(m, loadedSubprofileId);
+              // T17: every image the named persona showed moves to a fresh
+              // persona-scoped key, so no image URL carries the owner's id
+              // or matches an image the persona showed while linked.
+              await this.personaImageKeys.rehomeUnlinkedPersona(
+                m,
+                sp,
+                'unlink',
+              );
             }
             // Set when this run assigns `sp.handle` below, so the save keeps
             // that name over the committed one. Fresh per retry.
@@ -1456,12 +1514,21 @@ export class SubprofilesService {
       // Runs before the first write in this transaction.
       const storedItemImages = existingRows.map((row) => row.imageUrl);
       for (const item of items) {
-        this.assertNoForeignUploadIntroduced(
+        await this.assertNoForeignUploadIntroduced(
           userId,
           item.imageUrl,
           storedItemImages,
         );
       }
+      // T17: decided on the link state under the lock just taken. On an
+      // unlinked persona each member upload is copied to a persona-scoped
+      // key; on either kind, another persona's key gets a copy of its own.
+      const rehomedItemImages =
+        await this.personaImageKeys.rehomeForPersonaWrite(
+          manager,
+          id,
+          items.map((it) => it.imageUrl),
+        );
 
       const candidateFieldsByIndex: Omit<SubprofileItem, 'id' | 'createdAt'>[] =
         items.map((it, index) => ({
@@ -1471,7 +1538,11 @@ export class SubprofilesService {
           subtitle: it.subtitle ?? null,
           description: it.description ?? null,
           url: it.url ?? null,
-          imageUrl: it.imageUrl ?? null,
+          imageUrl:
+            PersonaImageKeysService.applyRehome(
+              rehomedItemImages,
+              it.imageUrl,
+            ) ?? null,
           date: it.date ?? null,
           meta: it.meta ?? null,
           tags: it.tags ?? [],
@@ -1679,6 +1750,13 @@ export class SubprofilesService {
         });
       }
       const accepted = candidates.slice(0, room);
+      // T17: imported art lands on an unlinked persona under a
+      // persona-scoped key, decided on the locked row.
+      const rehomedImages = await this.personaImageKeys.rehomeForPersonaWrite(
+        manager,
+        subprofileId,
+        accepted.map((candidate) => candidate.fields.imageUrl),
+      );
       // Make room at the top. Raw snake_case SQL: an aliasless update does
       // not map camelCase properties (see `replaceSection`'s spotlight
       // clear), and the increment has to be computed in SQL.
@@ -1694,7 +1772,10 @@ export class SubprofilesService {
           subtitle: candidate.fields.subtitle,
           description: candidate.fields.description,
           url: candidate.fields.url,
-          imageUrl: candidate.fields.imageUrl,
+          imageUrl: PersonaImageKeysService.applyRehome(
+            rehomedImages,
+            candidate.fields.imageUrl,
+          ),
           date: candidate.fields.date,
           meta: candidate.fields.meta,
           tags: [],
@@ -2261,10 +2342,20 @@ export class SubprofilesService {
       // (`1824710000000-KeepHandleHistoryOnPersonaDelete`). Read by owner, so
       // a registry row whose name drifted from `handle` is released too.
       await this.releaseRegistryHandlesBeforeDelete(manager, current.id);
+      // T17: the persona's own persona-scoped images, read before their
+      // registry rows cascade away with it, and deleted after the commit.
+      const personaStorageKeys = await this.personaImageKeys.listKeysOf(
+        manager,
+        current.id,
+      );
       // `subprofile_items` cascade via their FK on `subprofile_id`.
       await manager.remove(current);
-      return { coOwnerIds, displayName };
+      return { coOwnerIds, displayName, personaStorageKeys };
     });
+    // T17: only once the delete has committed, since a bucket delete cannot
+    // roll back. No other persona shows these keys: a persona copied from
+    // this one got copies of its own. Best-effort inside.
+    await this.personaImageKeys.deleteObjects(deleted.personaStorageKeys);
     // Emitted AFTER the commit: a listener must never observe a persona
     // that could still exist. Best-effort: the delete already committed, so a
     // notification failure must not surface as an error to the caller.
@@ -2610,6 +2701,39 @@ export class SubprofilesService {
     if (!options.hasEditedHandle) {
       sp.handle = current.handle;
     }
+    // PRD-435: the only writes of `availability` and `skinData` (the PATCH)
+    // save through here, so this is the one place the availability stamp
+    // moves. Compared with the locked row, so a stale copy keeps the
+    // committed stamp; an owner's explicit confirmation always stamps.
+    sp.availabilityUpdatedAt = availabilityUpdatedAtAfterSave(
+      current,
+      sp,
+      new Date(),
+      options.hasConfirmedAvailability === true,
+    );
+    // T17: the avatar and cover are re-homed here, under the row lock and on
+    // the link state this save writes, so the copy's registry row commits or
+    // rolls back with the save. An unlinked persona shows a member upload
+    // from a persona-scoped copy; either kind gets its own copy of another
+    // persona's key. The unlink has already given every image a fresh key
+    // (`rehomeUnlinkedPersona`), which this keeps. `sp.id` is the id being
+    // saved (the fresh one after an unlink).
+    const rehomedImages = await this.personaImageKeys.rehomeForPersona(
+      manager,
+      sp.id,
+      [sp.avatarUrl, sp.coverUrl],
+      {
+        isUnlinked: sp.linkVisibility === SubprofileLinkVisibility.Unlinked,
+      },
+    );
+    sp.avatarUrl = PersonaImageKeysService.applyRehome(
+      rehomedImages,
+      sp.avatarUrl,
+    );
+    sp.coverUrl = PersonaImageKeysService.applyRehome(
+      rehomedImages,
+      sp.coverUrl,
+    );
     await manager.save(sp);
   }
 
@@ -2910,9 +3034,28 @@ export class SubprofilesService {
    * carry a note written to the named owner), and every old nested
    * `/members/<creator>/<slug>` address recorded for it on a creator
    * transfer. Follower and endorsement counts are computed from these rows,
-   * so they read zero from the next request. Pending invites and co-owners
-   * stay: they are owners. Runs in the switch's transaction, so a refused
-   * switch keeps every row.
+   * so they read zero from the next request. Pending co-owner invites are
+   * revoked, as `SubprofileInvitesService.revoke` does: each was offered to
+   * someone who knows the named persona, and accepting one would show them
+   * the pseudonymous persona and its new id. A co-owner can invite them
+   * again afterwards. Co-owners stay: they are owners.
+   *
+   * The persona's messaging identity is deleted, as deleting the persona
+   * does through its cascade: its conversation seats and staff preferences go
+   * with it. Each correspondent keeps their thread, and the persona's past
+   * messages there render as the former-mailbox author
+   * (`messages.sender_identity_id` has no foreign key), so no old thread is
+   * re-headed with the pseudonymous persona. Every block a member placed on
+   * that identity is carried to the persona first
+   * (`carryIdentityBlocksToPersona`): it keeps refusing whichever identity
+   * the persona speaks through next, and the member's Blocked list keeps
+   * showing the named persona. The persona's next conversation mints a fresh
+   * identity for its new id (`IdentitiesService.ensureIdentityFor`), so a
+   * correspondent's old thread never counts as an existing conversation with
+   * it. Deleted here, ahead of the re-key, so the re-key has no identity row
+   * to carry along.
+   *
+   * Runs in the switch's transaction, so a refused switch keeps every row.
    */
   private async cutTiesToNamedPersona(
     manager: EntityManager,
@@ -2921,6 +3064,16 @@ export class SubprofilesService {
     await manager.delete(SubprofileFollower, { subprofileId });
     await manager.delete(SubprofileEndorsement, { subprofileId });
     await manager.delete(SubprofileAddressHistory, { subprofileId });
+    await manager.update(
+      SubprofileInvite,
+      { subprofileId, status: SubprofileInviteStatus.Pending },
+      { status: SubprofileInviteStatus.Revoked, respondedAt: new Date() },
+    );
+    await carryIdentityBlocksToPersona(manager, subprofileId);
+    await manager.delete(Identity, {
+      kind: IdentityKind.Subprofile,
+      subprofileId,
+    });
   }
 
   /**

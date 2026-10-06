@@ -15,6 +15,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { VolunteerOpportunityTeam } from './entities/volunteer-opportunity-team.entity';
 import {
   OpportunityCause,
@@ -52,6 +53,7 @@ const qbStub = () => {
   qb.getRawMany = jest.fn().mockResolvedValue([]);
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  qb.getExists = jest.fn().mockResolvedValue(false);
   qb.execute = jest.fn().mockResolvedValue({ affected: 0 });
   return qb;
 };
@@ -68,8 +70,10 @@ describe('VolunteeringService', () => {
   };
   let team: {
     find: jest.Mock;
+    exists: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let signups: {
     count: jest.Mock;
@@ -132,8 +136,10 @@ describe('VolunteeringService', () => {
     };
     team = {
       find: jest.fn().mockResolvedValue([]),
+      exists: jest.fn().mockResolvedValue(false),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) => Promise.resolve(v)),
+      createQueryBuilder: jest.fn(() => qbStub()),
     };
     signups = {
       count: jest.fn().mockResolvedValue(0),
@@ -668,6 +674,71 @@ describe('VolunteeringService', () => {
       expect(team.find).not.toHaveBeenCalled();
       expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
       expect(blockFilter.blockedUserIds).not.toHaveBeenCalled();
+    });
+
+    it('tells an anonymous reader a team exists without naming anyone', async () => {
+      const activeTeamQuery = qbStub();
+      const getExists = jest.fn().mockResolvedValue(true);
+      activeTeamQuery.getExists = getExists;
+      team.createQueryBuilder.mockReturnValue(activeTeamQuery);
+
+      const detail = await service.getBySlug('mentor-qyc', null);
+
+      expect(detail.hasTeam).toBe(true);
+      expect(detail.team).toEqual([]);
+      expect(activeTeamQuery.where).toHaveBeenCalledWith(
+        expect.stringContaining('"opportunity_id" = :opportunityId'),
+        { opportunityId: 'opp-1' },
+      );
+      expect(getExists).toHaveBeenCalledTimes(1);
+    });
+
+    it('counts only active teammates toward an anonymous hasTeam, through the users join', async () => {
+      // A suspended, deactivated or erasure-grace teammate fails the join,
+      // so a team of only those answers false.
+      const activeTeamQuery = qbStub();
+      team.createQueryBuilder.mockReturnValue(activeTeamQuery);
+
+      const detail = await service.getBySlug('mentor-qyc', null);
+
+      expect(activeTeamQuery.innerJoin).toHaveBeenCalledWith(
+        User,
+        'team_user',
+        expect.stringContaining('"team_user"."status" = :active'),
+        { active: UserStatus.Active },
+      );
+      expect(detail.hasTeam).toBe(false);
+      expect(team.exists).not.toHaveBeenCalled();
+    });
+
+    it('reports hasTeam false to an anonymous reader when the opportunity has no team', async () => {
+      const detail = await service.getBySlug('mentor-qyc', null);
+
+      expect(detail.hasTeam).toBe(false);
+    });
+
+    it('reports hasTeam false to a signed-in viewer when no teammate is active', async () => {
+      // Only the poster comes back from the active-user join.
+      activeProfilesGetMany.mockResolvedValue([
+        profileRow('poster-1', 'poster'),
+      ]);
+
+      const detail = await service.getBySlug('mentor-qyc', 'viewer-1');
+
+      expect(detail.team).toEqual([]);
+      expect(detail.hasTeam).toBe(false);
+    });
+
+    it('reports hasTeam from the team rows to a signed-in viewer, even when every teammate is hidden', async () => {
+      blockFilter.blockedUserIds.mockResolvedValue(
+        new Set(['teammate-1', 'teammate-2']),
+      );
+
+      const detail = await service.getBySlug('mentor-qyc', 'viewer-1');
+
+      expect(detail.team).toEqual([]);
+      expect(detail.hasTeam).toBe(true);
+      expect(team.exists).not.toHaveBeenCalled();
     });
 
     it('names the poster and every teammate to a signed-in viewer with no blocks', async () => {

@@ -13,6 +13,8 @@ import { Community } from '../communities/entities/community.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { matchedChatMemberKey } from '../messaging/matched-member-key';
 import { MentionsInboxService } from './mentions-inbox.service';
 
 const now = new Date('2026-08-05T10:00:00.000Z');
@@ -73,7 +75,10 @@ function build() {
   const contentModeration = { find: jest.fn().mockResolvedValue([]) };
   // The parents of the spaces on the page, read through the DataSource.
   const parentCommunities = { find: jest.fn().mockResolvedValue([]) };
+  // PRD-423: the seats of a matched chat whose excerpt names a member key.
+  const conversationParticipants = { find: jest.fn().mockResolvedValue([]) };
   const repositoryByEntity = new Map<unknown, unknown>([
+    [ConversationParticipant, conversationParticipants],
     [ForumPost, forumPosts],
     [CommunityPost, communityPosts],
     [CommunityPostReply, communityReplies],
@@ -106,10 +111,48 @@ function build() {
     messages,
     contentModeration,
     parentCommunities,
+    conversationParticipants,
   };
 }
 
 describe('MentionsInboxService', () => {
+  describe('list, matched Go together chat excerpts (PRD-423)', () => {
+    const CHAT_ID = '55555555-5555-4555-8555-555555555551';
+
+    it('spells a stored member key by first name, leaving the stored payload as it was', async () => {
+      const {
+        service,
+        notifications,
+        messages,
+        profiles,
+        conversationParticipants,
+      } = build();
+      const beaKey = matchedChatMemberKey(CHAT_ID, 'user-bea');
+      const payload = {
+        source: 'message',
+        conversationId: CHAT_ID,
+        messageId: MESSAGE_ID,
+        isGoTogetherChat: true,
+        excerpt: `@${beaKey} see you at noon`,
+      };
+      notifications.find.mockResolvedValue([mentionRow('n-matched', payload)]);
+      messages.find.mockResolvedValue([
+        { id: MESSAGE_ID, deletedAt: null, editedAt: null },
+      ]);
+      conversationParticipants.find.mockResolvedValue([
+        { conversationId: CHAT_ID, userId: 'user-bea' },
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'user-bea', firstName: 'Bea' },
+      ]);
+
+      const result = await service.list('me', {});
+
+      expect(result.items[0]!.excerpt).toBe('@Bea see you at noon');
+      expect(payload.excerpt).toBe(`@${beaKey} see you at noon`);
+    });
+  });
+
   describe('list', () => {
     it('scopes to the caller and to Mention rows, with the canonical page envelope', async () => {
       const { service, notifications } = build();

@@ -41,6 +41,7 @@ import {
   CoopJoinRequest,
   JoinRequestStatus,
 } from '../housing/entities/coop-join-request.entity';
+import { Inquiry } from '../inquiries/entities/inquiry.entity';
 import { IntakeSubmission } from '../intakes/entities/intake-submission.entity';
 import {
   Landlord,
@@ -591,6 +592,22 @@ export const ADMIN_REGISTRY_QUEUE_COUNTERS: Record<
     // has missed no date, and inventing one would be a deadline the platform
     // never set.
     deadline: (column) => ({ sql: column('reviewDueOn'), parameters: {} }),
+  }),
+
+  [AdminQueueKey.SafetyInquiries]: queueCounter({
+    entity: Inquiry,
+    waitingSince: 'createdAt',
+    // RES-F6. A Contact message stored as priority (a safety concern) that
+    // nobody has marked handled. The same predicate the inbox sorts first on,
+    // so the count and the top of the list agree.
+    waiting: (column) => ({
+      sql:
+        `${column('isPriority')} = true ` +
+        `AND ${column('status')} = :inquiryNewStatus`,
+      parameters: { inquiryNewStatus: 'new' },
+    }),
+    // No deadline. The Contact page promises a safety message is read first,
+    // and that ordering is the promise; no turnaround in hours was published.
   }),
 };
 

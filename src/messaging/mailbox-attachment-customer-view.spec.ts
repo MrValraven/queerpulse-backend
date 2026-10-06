@@ -512,6 +512,8 @@ describe('Final fix F1 (C1): forwarding a business attachment', () => {
     isSourceVisible: boolean;
     senderIdentityKind: IdentityKind;
     sourceOwnerStatus?: UserStatus;
+    // PRD-423: the source sits in a matched Go together chat.
+    isSourceInMatchedChat?: boolean;
   }) {
     const core = Object.create(
       MessagingCoreService.prototype,
@@ -523,12 +525,29 @@ describe('Final fix F1 (C1): forwarding a business attachment', () => {
     sourceQuery.getOne = jest
       .fn()
       .mockResolvedValue(options.isSourceVisible ? staffImage() : null);
+    // PRD-423: the viewability query also reads the matched chat flag.
+    sourceQuery.addSelect = jest.fn(() => sourceQuery);
+    sourceQuery.getRawAndEntities = jest.fn().mockResolvedValue(
+      options.isSourceVisible
+        ? {
+            entities: [staffImage()],
+            raw: [{ is_in_matched_chat: !!options.isSourceInMatchedChat }],
+          }
+        : { entities: [], raw: [] },
+    );
     // `senderCanForwardAttachment`'s key-based check of the kept key.
     sourceQuery.getCount = jest.fn().mockResolvedValue(1);
     const messages = {
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((entity: unknown) => entity),
       createQueryBuilder: jest.fn(() => sourceQuery),
+      // PRD-423: the matched chat uploader rule reads the uploader.
+      manager: {
+        findOne: jest.fn().mockResolvedValue({
+          id: STAFF_ID,
+          status: options.sourceOwnerStatus ?? UserStatus.Active,
+        }),
+      },
     };
     const storage = {
       copyObjectToOwner: jest.fn().mockResolvedValue(COPIED_KEY),
@@ -665,6 +684,54 @@ describe('Final fix F1 (C1): forwarding a business attachment', () => {
       CUSTOMER_ID,
     );
     expect((persisted[0]?.attachment as { url: string }).url).toBe(COPIED_KEY);
+  });
+
+  it('PRD-423: refuses to forward a matched chat photo whose uploader is suspended, as its download is refused', async () => {
+    const { core, storage, persisted } = buildSendingCore({
+      isSourceVisible: true,
+      senderIdentityKind: IdentityKind.Profile,
+      sourceOwnerStatus: UserStatus.Suspended,
+      isSourceInMatchedChat: true,
+    });
+
+    await expect(
+      core.postMessage(
+        'personal-conversation',
+        CUSTOMER_ID,
+        '',
+        undefined,
+        undefined,
+        true,
+        'image',
+        forwardedAttachment,
+      ),
+    ).rejects.toThrow(ForbiddenException);
+    expect(storage.copyObjectToOwner).not.toHaveBeenCalled();
+    expect(persisted).toHaveLength(0);
+  });
+
+  it('PRD-423: copies a matched chat photo of an active uploader into the forward', async () => {
+    const { core, storage } = buildSendingCore({
+      isSourceVisible: true,
+      senderIdentityKind: IdentityKind.Profile,
+      isSourceInMatchedChat: true,
+    });
+
+    await core.postMessage(
+      'personal-conversation',
+      CUSTOMER_ID,
+      '',
+      undefined,
+      undefined,
+      true,
+      'image',
+      forwardedAttachment,
+    );
+
+    expect(storage.copyObjectToOwner).toHaveBeenCalledWith(
+      STAFF_IMAGE_KEY,
+      CUSTOMER_ID,
+    );
   });
 
   it('refuses a forward of a message the sender cannot see', async () => {

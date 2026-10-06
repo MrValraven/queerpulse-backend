@@ -138,13 +138,15 @@ export class HousingViewingsService {
       );
     }
     // ENG-468. A viewing request delivers a note to the lister and can unlock
-    // their address, so a block either way refuses it with the same 403 the
-    // enquiry path gives (`MessageRequestsService`). Checked before the pledge
-    // and step-up so a blocked pair is never walked through either.
+    // their address, so a block either way refuses it. LOC-F1: the refusal is
+    // the same 404 the public detail read gives a blocked pair
+    // (`HousingDirectoryService.detail`, ENG-470), so the response never
+    // confirms the home exists. Checked before the pledge and step-up so a
+    // blocked pair is never walked through either.
     if (
       await this.blockFilter.isBlockedEitherWay(requesterId, listing.ownerId)
     ) {
-      throw new ForbiddenException('You cannot contact this member');
+      throw new NotFoundException('Housing listing not found');
     }
     // Baseline gate: arranging to view someone's home is the most direct
     // contact action in the module (it delivers the requester's note to the
@@ -696,7 +698,9 @@ export class HousingViewingsService {
 
   /** ENG-468. A block either way between the two participants freezes the
    * viewing for both: the block listener cancels it, and this refuses any
-   * answer that races in before the listener runs. */
+   * answer that races in before the listener runs. Both sides already hold
+   * this viewing (it lists in their own `listMine`), so the 403 reveals no
+   * home they could not already see; LOC-F1's 404 covers the request only. */
   private async assertNotBlocked(viewing: HousingViewing): Promise<void> {
     if (
       await this.blockFilter.isBlockedEitherWay(

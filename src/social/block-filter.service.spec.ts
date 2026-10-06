@@ -13,7 +13,10 @@ describe('BlockFilterService', () => {
   // Task 14: `identity_blocks` rows, read by a stand-in that evaluates the
   // `where` it is given, `In(...)` included, over this list.
   let identityBlockRows: Array<{ blockerUserId: string; identityId: string }>;
-  let identityBlocks: { exist: jest.Mock; find: jest.Mock };
+  let identityBlocks: { exist: jest.Mock; find: jest.Mock; query: jest.Mock };
+  // ENG-447: blocks carried across a persona going unlinked, as the pairs
+  // with the persona's current identity the carried-block query answers.
+  let carriedBlockPairs: Array<{ blockerUserId: string; identityId: string }>;
 
   beforeEach(async () => {
     blocks = {
@@ -22,6 +25,7 @@ describe('BlockFilterService', () => {
     };
     mutes = { exist: jest.fn().mockResolvedValue(false) };
     identityBlockRows = [];
+    carriedBlockPairs = [];
     const matchesValue = (expected: unknown, actual: string) =>
       expected instanceof FindOperator
         ? (expected.value as string[]).includes(actual)
@@ -38,6 +42,19 @@ describe('BlockFilterService', () => {
       ),
       find: jest.fn(({ where }: { where: Record<string, unknown> }) =>
         Promise.resolve(matchingRows(where)),
+      ),
+      query: jest.fn(
+        (
+          _sql: string,
+          [blockerUserIds, identityIds]: [string[], string[] | null],
+        ) =>
+          Promise.resolve(
+            carriedBlockPairs.filter(
+              (pair) =>
+                blockerUserIds.includes(pair.blockerUserId) &&
+                (identityIds === null || identityIds.includes(pair.identityId)),
+            ),
+          ),
       ),
     };
 
@@ -184,6 +201,98 @@ describe('BlockFilterService', () => {
         service.blockedAgainstAnyOf(['candidate-a'], []),
       ).resolves.toEqual(new Set());
       expect(blocks.find).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ENG-447: a member's block of a persona is carried to the persona when
+  // it goes unlinked, and refuses the identity it speaks through now.
+  describe('ENG-447: identity blocks carried across a persona unlink', () => {
+    const CUSTOMER = 'customer-user';
+    const NEXT_PERSONA_IDENTITY = 'next-persona-identity';
+
+    it('is true for the persona identity a carried block reaches', async () => {
+      carriedBlockPairs = [
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ];
+
+      await expect(
+        service.isIdentityBlocked(CUSTOMER, NEXT_PERSONA_IDENTITY),
+      ).resolves.toBe(true);
+    });
+
+    it('reads the carried block for the persona current identity, through the persona id', async () => {
+      await service.isIdentityBlocked(CUSTOMER, NEXT_PERSONA_IDENTITY);
+
+      const [sql, parameters] = identityBlocks.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(sql).toContain(
+        '"carried_identity"."subprofile_id" = "carried_block"."blocked_subprofile_id"',
+      );
+      expect(parameters).toEqual([[CUSTOMER], [NEXT_PERSONA_IDENTITY]]);
+    });
+
+    it('is false for anyone the carried block does not name as blocker', async () => {
+      carriedBlockPairs = [
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ];
+
+      await expect(
+        service.isIdentityBlocked('someone-else', NEXT_PERSONA_IDENTITY),
+      ).resolves.toBe(false);
+    });
+
+    it('answers carried pairs among many blockers and identities, beside the direct ones', async () => {
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: 'business-identity' },
+      ];
+      carriedBlockPairs = [
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ];
+
+      await expect(
+        service.identityBlocksAmong(
+          [CUSTOMER],
+          ['business-identity', NEXT_PERSONA_IDENTITY],
+        ),
+      ).resolves.toEqual([
+        { blockerUserId: CUSTOMER, identityId: 'business-identity' },
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ]);
+    });
+
+    // Fix round 3: a refusal only a carried block causes must read to the
+    // blocker as a persona nobody answers for, so callers need to tell the
+    // two kinds apart.
+    it('tells a carried block from a direct one, and a direct block wins', async () => {
+      carriedBlockPairs = [
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ];
+
+      await expect(
+        service.identityBlockKind(CUSTOMER, NEXT_PERSONA_IDENTITY),
+      ).resolves.toBe('carried');
+
+      identityBlockRows = [
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ];
+      await expect(
+        service.identityBlockKind(CUSTOMER, NEXT_PERSONA_IDENTITY),
+      ).resolves.toBe('direct');
+      await expect(
+        service.identityBlockKind('someone-else', NEXT_PERSONA_IDENTITY),
+      ).resolves.toBeNull();
+    });
+
+    it('lists the persona current identity among the identities the member blocked', async () => {
+      carriedBlockPairs = [
+        { blockerUserId: CUSTOMER, identityId: NEXT_PERSONA_IDENTITY },
+      ];
+
+      await expect(service.blockedIdentityIds(CUSTOMER)).resolves.toEqual([
+        NEXT_PERSONA_IDENTITY,
+      ]);
     });
   });
 

@@ -17,7 +17,8 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
 import { SaveCropDto } from './dto/save-crop.dto';
-import { storageKeyOwnerId } from './storage-key';
+import { isPersonaScopedKey, storageKeyOwnerId } from './storage-key';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService, PresignedUpload } from './storage.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
 import { UserRole } from '../users/entities/user.entity';
@@ -48,6 +49,7 @@ export class UploadsController {
   constructor(
     private readonly storage: StorageService,
     private readonly mediaCropService: MediaCropService,
+    private readonly personaImageKeys: PersonaImageKeysService,
   ) {}
 
   // pending-ok: avatar upload supports editing your own draft profile.
@@ -141,7 +143,8 @@ export class UploadsController {
   // Persists the reframe crop chosen for an already-uploaded image, keyed by
   // storage key. `storageKeyOwnerId` decodes the owner embedded in the key
   // itself (see storage-key.ts) so this can't be spoofed by passing someone
-  // else's key.
+  // else's key. A persona-scoped key is checked against its persona's
+  // members instead.
   @Post('crop')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Save (or clear) the crop for an uploaded image' })
@@ -157,6 +160,20 @@ export class UploadsController {
     @CurrentUser() user: CurrentUserData,
     @Body() body: SaveCropDto,
   ): Promise<void> {
+    // T17: a persona-scoped key names no uploader. It belongs to the persona
+    // `persona_storage_keys` records for it, so any member of that persona
+    // may reframe it. The crop row keeps the caller as its owner.
+    if (isPersonaScopedKey(body.key)) {
+      const isMember = await this.personaImageKeys.isMemberOfKeyPersona(
+        body.key,
+        user.userId,
+      );
+      if (!isMember) {
+        throw new ForbiddenException();
+      }
+      await this.mediaCropService.upsert(body.key, user.userId, body.crop);
+      return;
+    }
     const ownerId = storageKeyOwnerId(body.key);
     if (ownerId === null || ownerId !== user.userId) {
       throw new ForbiddenException();

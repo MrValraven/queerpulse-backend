@@ -67,8 +67,8 @@ export enum AdminExtraQueueKey {
 }
 
 /**
- * Who can work each of the three, in the same shape `ADMIN_QUEUE_REGISTRY`
- * uses, so one access predicate covers all thirty-one queues.
+ * Who can work each of the four, in the same shape `ADMIN_QUEUE_REGISTRY`
+ * uses, so one access predicate covers all thirty-five queues.
  *
  * Each tier below is read off the controller that actually serves the queue and
  * the frontend gate that decides whether the deep link opens, exactly as the

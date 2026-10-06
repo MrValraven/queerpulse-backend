@@ -53,12 +53,64 @@ const SPECS_BY_PREFIX = new Map<string, UploadKindSpec>(
 );
 
 /**
+ * The prefix of a PERSONA-SCOPED key: `persona/<uuid>/<uuid><ext>`.
+ *
+ * Every other key embeds its uploader's user id as the middle segment, and
+ * `toImageUrl` publishes the key as `/files/<key>`. On an unlinked
+ * (pseudonymous) persona that segment would tie the persona to the person
+ * behind it: the same id appears in their own member avatar URL. So an
+ * unlinked persona's images live under this prefix, where both segments are
+ * random and say nothing about who uploaded the bytes or which persona holds
+ * them. The two-segment shape is kept so a persona key parses, routes and
+ * splits like every other key.
+ *
+ * Nothing presigns under this prefix: it is not an `UploadKind`, so the
+ * upload routes never mint one. The server writes these keys itself, by
+ * copying a member's own upload (`StorageService.copyObjectToPersonaScope`)
+ * or by storing server-fetched art (`StorageService.putPersonaServerObject`),
+ * and records each one in `persona_storage_keys`, which is what authorizes
+ * and serves it.
+ */
+export const PERSONA_SCOPED_PREFIX = 'persona';
+
+/**
+ * The read policy of a persona-scoped key. Public like the three kinds a
+ * persona image comes from (`avatar`, `persona-cover`, `work-image`): a
+ * published persona page is reachable signed out and by link unfurlers.
+ * 10 MB is the largest of those three caps.
+ */
+export const PERSONA_SCOPED_KIND_SPEC: UploadKindSpec = {
+  prefix: PERSONA_SCOPED_PREFIX,
+  maxBytes: 10 * 1024 * 1024,
+  requiresSession: false,
+};
+
+// Images only: a persona holds avatars, covers and item images.
+const PERSONA_SCOPED_KEY_PATTERN = new RegExp(
+  `^${escapeForRegex(PERSONA_SCOPED_PREFIX)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${IMAGE_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+);
+
+/** Whether a value is a persona-scoped key (`persona/<uuid>/<uuid><ext>`). */
+export function isPersonaScopedKey(value: string): boolean {
+  return typeof value === 'string' && PERSONA_SCOPED_KEY_PATTERN.test(value);
+}
+
+/** Whether an image extension (`.jpg`) may end a persona-scoped key. */
+export function isPersonaScopedExtension(extension: string): boolean {
+  return IMAGE_EXTENSIONS.includes(extension);
+}
+
+/**
  * Resolves a storage key to the upload kind that owns it, or `null` when the
- * value is not a well-formed key for a known kind.
+ * value is not a well-formed key for a known kind. A persona-scoped key
+ * resolves to `PERSONA_SCOPED_KIND_SPEC`.
  */
 export function parseStorageKey(value: string): UploadKindSpec | null {
   if (typeof value !== 'string') {
     return null;
+  }
+  if (PERSONA_SCOPED_KEY_PATTERN.test(value)) {
+    return PERSONA_SCOPED_KIND_SPEC;
   }
   const match = STORAGE_KEY_PATTERN.exec(value);
   if (!match) {
@@ -82,6 +134,10 @@ export function isStorageKey(value: string): boolean {
  * well-formed key. Reuses `STORAGE_KEY_PATTERN` — the sole authority on what a
  * key looks like — rather than a second hand-rolled pattern, so this can never
  * accept something `parseStorageKey` would reject (or vice versa).
+ *
+ * A persona-scoped key has no owner segment and resolves to `null` here.
+ * A caller doing an ownership check must therefore test
+ * `isPersonaScopedKey` first: `null` alone reads as "not one of our keys".
  */
 export function storageKeyOwnerId(value: string): string | null {
   if (typeof value !== 'string') {

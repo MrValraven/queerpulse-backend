@@ -71,6 +71,14 @@ export function toGroupListingDTO(listing: GroupListing): GroupListingDTO {
   };
 }
 
+/** LOC-F2: true when the room was posted through the form that tells the
+ *  poster the group page names them (`GroupListing.isPosterNamed`), so the
+ *  page may name its poster and take enquiries about it. A room posted
+ *  through the old anonymous form keeps naming nobody. */
+export function isGroupListingBylined(listing: GroupListing): boolean {
+  return listing.isPosterNamed;
+}
+
 /**
  * A visible room as the group page reads it (PRD-443): the public fields plus
  * who posted it, so a reader has someone to message about the room.
@@ -78,8 +86,11 @@ export function toGroupListingDTO(listing: GroupListing): GroupListingDTO {
  * `poster` is the member behind `postedByUserId` resolved to a `MemberRef`,
  * and it is filled only for a signed-in reader. An anonymous answer on an open
  * group is the one shape a shared cache may hold, so it carries `poster: null`
- * and `isOwnListing: false` and names nobody. `isOwnListing` tells the poster
- * their own room apart, so the page offers no "Message" on it.
+ * and `isOwnListing: false` and names nobody. A room posted through the old
+ * anonymous form (`isPosterNamed` false) also carries `poster: null` for every
+ * reader.
+ * `isOwnListing` tells the poster their own room apart, so the page offers no
+ * "Message" on it.
  */
 export interface PublicGroupListingDTO extends GroupListingDTO {
   poster: MemberRef | null;
@@ -93,7 +104,8 @@ export function toPublicGroupListingDTO(
 ): PublicGroupListingDTO {
   return {
     ...toGroupListingDTO(listing),
-    poster: viewerId === null ? null : poster,
+    poster:
+      viewerId === null || !isGroupListingBylined(listing) ? null : poster,
     isOwnListing:
       viewerId !== null &&
       listing.postedByUserId !== null &&

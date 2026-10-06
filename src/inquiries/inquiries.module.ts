@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
+import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { InquiriesController } from './inquiries.controller';
 import { InquiriesService } from './inquiries.service';
@@ -21,6 +22,10 @@ import { Inquiry } from './entities/inquiry.entity';
       // display name through the shared `MemberLookup` without pulling
       // `ProfilesService` (and its module graph) into this small module.
       Profile,
+      // Read-only too (PRD-434): resolves a listing correction's stored ref to
+      // the listing for the admin row's link, without importing
+      // `ListingsModule` and its graph.
+      Listing,
     ]),
   ],
   controllers: [InquiriesController],

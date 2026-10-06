@@ -32,7 +32,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
 import { BlockFilterService } from '../social/block-filter.service';
-import { UserRole, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityRef,
@@ -1238,6 +1238,7 @@ export class VolunteeringService {
       community,
       spotsFilled,
       members.team,
+      members.hasTeam,
       members.poster,
       canReviewApplicants,
       // Edit and close stay poster-only, exactly as `update()`/`close()`
@@ -1256,7 +1257,7 @@ export class VolunteeringService {
    * sit on top of the plain profile lookup:
    *
    *  - An anonymous reader is named nobody: `team` comes back empty and
-   *    `poster` null, without a query. This is the closed list the community
+   *    `poster` null, without a member query. This is the closed list the community
    *    public teaser serves (`PublicCommunityResponse`: no member names, slugs
    *    or avatars on the anonymous variant), and the page needs neither field
    *    signed out, since contacting the poster is a member action.
@@ -1271,12 +1272,37 @@ export class VolunteeringService {
    *
    * One team read, then two queries for the whole set (active profiles and
    * blocks) run side by side.
+   *
+   * `hasTeam` reports whether the team holds any ACTIVE member, for every
+   * reader, through the same `status = active` rule that names them. It names
+   * nobody, and it lets the signed-out page offer its "see who's in" prompt
+   * whenever there is a team to see. A teammate in a block with the viewer
+   * still counts, since the flag names nobody. The anonymous branch answers
+   * it with one EXISTS query joined to `users`.
    */
   private async visibleMembersFor(
     opportunity: VolunteerOpportunity,
     viewerId: string | null,
-  ): Promise<{ poster: MemberRef | null; team: MemberRef[] }> {
-    if (viewerId === null) return { poster: null, team: [] };
+  ): Promise<{
+    poster: MemberRef | null;
+    team: MemberRef[];
+    hasTeam: boolean;
+  }> {
+    if (viewerId === null) {
+      const hasTeam = await this.team
+        .createQueryBuilder('team_row')
+        .innerJoin(
+          User,
+          'team_user',
+          '"team_user"."id" = "team_row"."user_id" AND "team_user"."status" = :active',
+          { active: UserStatus.Active },
+        )
+        .where('"team_row"."opportunity_id" = :opportunityId', {
+          opportunityId: opportunity.id,
+        })
+        .getExists();
+      return { poster: null, team: [], hasTeam };
+    }
 
     const teamRows = await this.team.find({
       where: { opportunityId: opportunity.id },
@@ -1288,7 +1314,9 @@ export class VolunteeringService {
         ...teamUserIds,
       ]),
     ];
-    if (!candidateIds.length) return { poster: null, team: [] };
+    if (!candidateIds.length) {
+      return { poster: null, team: [], hasTeam: false };
+    }
 
     const [activeProfiles, blockedIds] = await Promise.all([
       this.profiles
@@ -1301,6 +1329,10 @@ export class VolunteeringService {
       this.blockFilter.blockedUserIds(viewerId, candidateIds),
     ]);
 
+    const activeUserIds = new Set(
+      activeProfiles.map((profile) => profile.userId),
+    );
+    const hasTeam = teamUserIds.some((userId) => activeUserIds.has(userId));
     const refByUserId = new Map<string, MemberRef>();
     for (const profile of activeProfiles) {
       if (blockedIds.has(profile.userId)) continue;
@@ -1314,6 +1346,7 @@ export class VolunteeringService {
       team: teamUserIds
         .map((userId) => refByUserId.get(userId))
         .filter((ref): ref is MemberRef => !!ref),
+      hasTeam,
     };
   }
 

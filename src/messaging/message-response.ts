@@ -1,8 +1,13 @@
 import type { CursorPage } from '../common/cursor-pagination';
 import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
+import { isStorageKey } from '../storage/storage-key';
 import { truncateCharacters } from '../common/text-characters';
 import { readableMessageBody } from './legacy-message-body';
+import {
+  matchedChatAvatarUrl,
+  matchedChatMemberKey,
+} from './matched-member-key';
 import type { CropRect } from '../media-crops/crop-rect';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import type { SubprofileKind } from '../subprofiles/subprofile-kinds';
@@ -305,7 +310,8 @@ export interface MessageResponse {
     actorName: string;
     targetName: string | null;
     /** The actor's profile handle (slug), or null if unresolved. Public, so
-     *  safe on a broadcast copy that omits `actorIsMe`. */
+     *  safe on a broadcast copy that omits `actorIsMe`. In a matched Go
+     *  together chat it is the actor's per-chat member key (PRD-423). */
     actorHandle: string | null;
     /** The target's profile handle (slug), or null when the event carries no
      *  target or it is unresolved. */
@@ -360,8 +366,12 @@ export type MessageHistoryPage = CursorPage<MessageResponse>;
  * empty `members` array — the counterpart is `otherParticipant` as before.
  */
 export interface ConversationMemberSummary {
+  /** The member's user id, or their per-chat member key in a matched Go
+   *  together chat (PRD-423), where it also keys the live frames
+   *  (`typing`, `read`, `message:delivered`, `reaction`). */
   id: string;
-  /** Profile handle (slug) — the member's profile link + avatar tint seed. */
+  /** Profile handle (slug): the member's profile link + avatar tint seed.
+   *  The per-chat member key in a matched Go together chat (PRD-423). */
   handle: string;
   name: string;
   avatarUrl: string | null;
@@ -432,10 +442,13 @@ export function buildSystemEvent(
       ? requireAuthorSummary(profile, nameOptions).displayName
       : 'Member';
   };
+  // PRD-423 (opaque member keys): a matched chat's pill carries the per-chat
+  // key, the same key its author summaries carry, so a broadcast copy still
+  // tells "is this me" against `viewerMemberKey`.
   const handleOf = (userId: string | undefined): string | null => {
     if (!userId) return null;
     const profile = profileByUser.get(userId);
-    return profile ? profile.slug : null;
+    return profile ? memberHandleFor(profile, nameOptions) || null : null;
   };
   return {
     type: event.type,
@@ -817,6 +830,11 @@ export interface ConversationResponse {
    * reopen it. Always false for DMs.
    */
   isGoTogetherChat: boolean;
+  /** PRD-423 (opaque member keys): THIS caller's own per-chat member key in a
+   *  matched Go together chat, the value every author summary, roster row,
+   *  system event and live frame of the chat names them by, so the client
+   *  can tell its own messages and frames apart. Absent everywhere else. */
+  viewerMemberKey?: string;
   /**
    * DES-227: why THIS caller can no longer act as a member here, or null while
    * they still can. `'left'` (voluntary), `'removed'` (an owner/admin acted),
@@ -837,6 +855,15 @@ export interface ConversationResponse {
    *  `inviteToken` and null whenever it is null. Optional so a DM response
    *  builder need not name it. */
   inviteTokenExpiresAt?: string | null;
+  /** PRD-400 (use cap): the live link's cap (null for unlimited), see
+   *  `GroupInviteLinkUsage` (`group-invite-link-usage.ts`). Surfaced under
+   *  exactly the same rule as `inviteToken`. Optional so a DM response
+   *  builder need not name it. */
+  inviteTokenMaxUses?: number | null;
+  /** PRD-400 (use cap): how many more people can join with the live link
+   *  (null for unlimited, 0 once used up). Same rule and optionality as
+   *  `inviteTokenMaxUses`. */
+  inviteTokenUsesLeft?: number | null;
   /** SERVER-AUTHORITATIVE: whether THIS caller may create/rotate/disable the
    *  invite link (`POST`/`DELETE :id/invite-link`). True only for an
    *  owner/admin of an active, non-dissolved group. Optional/absent for DMs,
@@ -986,6 +1013,10 @@ export interface MessageSearchHit {
   /** The resolved media attachment, mirroring `MessageResponse.attachment`;
    *  null for a plain-text hit. */
   attachment: GifAttachment | DocumentAttachment | StickerAttachment | null;
+  /** PRD-423: whether THIS caller sent the hit, present only for a hit in a
+   *  matched Go together chat, whose sender handle is a per-chat key the
+   *  client may hold no cached row to recognise. Absent everywhere else. */
+  isSentByViewer?: boolean;
 }
 
 /**
@@ -1162,6 +1193,14 @@ export function presentSenderIds(
  */
 export interface MemberNameOptions {
   isMatchedGroup: boolean;
+  /** PRD-423 (opaque member keys): the matched chat these names are shown
+   *  in. Every member reference the chat hands out (an author's `handle`, a
+   *  roster row's `id` and `handle`, a system event's actor and target
+   *  handles) is then that member's opaque per-chat key
+   *  (`matched-member-key.ts`). Set by `memberNameOptionsFor` and
+   *  `matchedChatMemberNames`; a matched spelling built without it hands
+   *  out an empty reference, so a slug can never slip through. */
+  matchedConversationId?: string;
 }
 
 /** The {@link MemberNameOptions} of every conversation outside a matched
@@ -1176,13 +1215,57 @@ export const FULL_MEMBER_NAMES: MemberNameOptions = { isMatchedGroup: false };
  *  so a caller that renders a matched chat must select `isGoTogetherChat`. */
 export function memberNameOptionsFor(
   conversation:
-    | { isGoTogetherChat?: boolean; eventMatchGroupId?: string | null }
+    | {
+        id?: string;
+        isGoTogetherChat?: boolean;
+        eventMatchGroupId?: string | null;
+      }
     | null
     | undefined,
+  conversationId: string | undefined = conversation?.id,
 ): MemberNameOptions {
-  return conversation?.isGoTogetherChat || conversation?.eventMatchGroupId
-    ? { isMatchedGroup: true }
-    : FULL_MEMBER_NAMES;
+  if (!conversation?.isGoTogetherChat && !conversation?.eventMatchGroupId) {
+    return FULL_MEMBER_NAMES;
+  }
+  return conversationId
+    ? matchedChatMemberNames(conversationId)
+    : { isMatchedGroup: true };
+}
+
+/** PRD-423: the {@link MemberNameOptions} of matched Go together chat
+ *  `conversationId`, for a caller that already knows the chat is one. */
+export function matchedChatMemberNames(
+  conversationId: string,
+): MemberNameOptions {
+  return { isMatchedGroup: true, matchedConversationId: conversationId };
+}
+
+/**
+ * PRD-423 (opaque member keys): the reference `userId` is known by in the
+ * conversation `options` spell names for. Outside a matched chat that is
+ * the user id itself; inside one it is the member's per-chat key, see
+ * {@link MemberNameOptions.matchedConversationId}.
+ */
+export function memberIdFor(
+  userId: string,
+  options: MemberNameOptions = FULL_MEMBER_NAMES,
+): string {
+  if (!options.isMatchedGroup) return userId;
+  return options.matchedConversationId
+    ? matchedChatMemberKey(options.matchedConversationId, userId)
+    : '';
+}
+
+/** PRD-423 (opaque member keys): the public handle a member is shown under
+ *  in the conversation `options` spell names for. Their profile slug
+ *  outside a matched chat, their per-chat key inside one. */
+export function memberHandleFor(
+  profile: Pick<Profile, 'slug' | 'userId'>,
+  options: MemberNameOptions = FULL_MEMBER_NAMES,
+): string {
+  return options.isMatchedGroup
+    ? memberIdFor(profile.userId, options)
+    : profile.slug;
 }
 
 /** PRD-423: the one spelling of a member's name in messaging, see
@@ -1201,7 +1284,8 @@ function authorSummaryFrom(
   options: MemberNameOptions,
 ): AuthorSummary {
   return {
-    handle: profile.slug,
+    // PRD-423 (opaque member keys): the per-chat key in a matched chat.
+    handle: memberHandleFor(profile, options),
     displayName: displayNameFor(profile, options),
     // Every messaging caller loads the full `Profile` entity (no `select`),
     // so the column is always present here.
@@ -1210,8 +1294,38 @@ function authorSummaryFrom(
     // not an exemption from "Show your photo": the member hid their face from
     // the feed and the forum with the same switch, and a conversation they may
     // have opened before things went wrong is the last place it should persist.
-    avatarUrl: toVisibleAvatarUrl(profile),
+    avatarUrl: memberAvatarUrlFor(profile, options),
   };
+}
+
+/**
+ * PRD-423 (opaque member keys): a member's visible avatar as the conversation
+ * `options` spell names for. Outside a matched chat, the resolved URL as
+ * always. Inside one, the conversation-scoped avatar route
+ * (`matchedChatAvatarUrl`), so neither a storage key naming the user id nor
+ * a provider URL reaches the other members; null when the matched spelling
+ * carries no conversation id, or the photo is hidden.
+ */
+export function memberAvatarUrlFor(
+  profile: Pick<Profile, 'userId' | 'avatarUrl' | 'photoVisible'>,
+  options: MemberNameOptions = FULL_MEMBER_NAMES,
+): string | null {
+  if (!options.isMatchedGroup) return toVisibleAvatarUrl(profile);
+  const storedAvatar = profile.avatarUrl;
+  if (
+    !options.matchedConversationId ||
+    !profile.photoVisible ||
+    !storedAvatar ||
+    // Only a value `toImageUrl` would serve: a storage key or https URL.
+    !(isStorageKey(storedAvatar) || storedAvatar.startsWith('https://'))
+  ) {
+    return null;
+  }
+  return matchedChatAvatarUrl(
+    options.matchedConversationId,
+    profile.userId,
+    storedAvatar,
+  );
 }
 
 /** Maps a `Profile` to an `AuthorSummary`, or `null` when there isn't one.

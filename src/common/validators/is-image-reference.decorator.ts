@@ -51,7 +51,7 @@ const ALLOWED_IMAGE_HOSTS = [
  * images.unsplash.com` and `https://images.unsplash.com@evil.example/pixel`
  * both contain a trusted host as a substring, and neither is served by one.
  */
-function isAllowedExternalImage(value: string): boolean {
+export function isAllowedExternalImage(value: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(value);

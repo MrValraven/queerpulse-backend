@@ -567,6 +567,12 @@ export class HousingListingsService {
         'You cannot send an enquiry on your own listing',
       );
     }
+    // LOC-F1: a block either way answers the same 404 the public detail read
+    // gives a blocked pair (`HousingDirectoryService.detail`, ENG-470), so the
+    // response never confirms the home exists. Asked of messaging, the one
+    // place that decides who may cold-contact whom, and checked before the
+    // pledge and step-up so a blocked member is never walked through either.
+    await this.assertListerReachable(fromUserId, listerId);
     // Baseline gate: reaching out about a home requires the affirming pledge.
     await this.affirmingPledge.requireAccepted(fromUserId);
     // Step-up gate: reaching out about a home needs a phone-verified account.
@@ -606,10 +612,30 @@ export class HousingListingsService {
       fromUserId,
       listerId,
     );
+    // LOC-F1: the same 404 `createEnquiry` and the detail read give a
+    // blocked pair.
+    if (contactability.blockedReason === 'blocked') {
+      throw new NotFoundException('Housing listing not found');
+    }
     return {
       replyRequiresConnection: contactability.replyRequiresConnection,
       followUpAwaitsReply: contactability.followUpAwaitsReply,
     };
+  }
+
+  /** LOC-F1: 404s the enquiry path for a pair with a block either way,
+   *  exactly as `HousingDirectoryService.detail` hides the home from them. */
+  private async assertListerReachable(
+    fromUserId: string,
+    listerId: string,
+  ): Promise<void> {
+    const contactability = await this.messaging.enquiryContactability(
+      fromUserId,
+      listerId,
+    );
+    if (contactability.blockedReason === 'blocked') {
+      throw new NotFoundException('Housing listing not found');
+    }
   }
 
   /**

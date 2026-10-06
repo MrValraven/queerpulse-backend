@@ -15,6 +15,7 @@ import {
 } from './admin-finance-changes';
 import {
   FinanceAuditEntry,
+  FinanceEditResult,
   applyLedgerEdits,
   replaceEventNotes,
   replacePartners,
@@ -161,7 +162,7 @@ export class GovernanceFinanceService {
         );
       }
 
-      await manager.save(
+      const opened = await manager.save(
         manager.create(GovernanceFinanceReport, {
           quarter: dto.quarter,
           stats: [],
@@ -173,7 +174,7 @@ export class GovernanceFinanceService {
           publishedAt: new Date(),
         }),
       );
-      await this.saveAudit(manager, actorId, null, [
+      await this.saveAudit(manager, actorId, opened.id, null, [
         { field: 'quarter', oldValue: null, newValue: dto.quarter },
       ]);
     });
@@ -206,8 +207,13 @@ export class GovernanceFinanceService {
    * produces no history and does not stamp an editor.
    *
    * Editing a figure flips its provenance to `manual` and stamps
-   * `metricsEditedBy`/`At`. `surplus` is never edited directly: whenever either
-   * total changes it is recomputed from `incomeTotal - expenseTotal` (its
+   * `metricsEditedBy`/`At`. Only a FIGURE does that: a headline scalar, or a
+   * ledger amount (a row added included). `metricsEditedAt` is the public
+   * "figures entered on" date, so a save that only touches words (ledger
+   * labels and notes, a row switched off, stat tiles, event notes, partners,
+   * the reserve) is written and audited but leaves the date and the editor
+   * badge alone. `surplus` is never edited directly: whenever either total
+   * changes it is recomputed from `incomeTotal - expenseTotal` (its
    * provenance stays the constant `computed`).
    */
   async updateAdminFinances(
@@ -225,6 +231,7 @@ export class GovernanceFinanceService {
 
       const auditRows: GovernanceFinanceChange[] = [];
       let changed = false;
+      let isFigureChanged = false;
 
       for (const field of SCALAR_FIELDS) {
         const submitted = dto[field.key];
@@ -242,6 +249,7 @@ export class GovernanceFinanceService {
         auditRows.push(
           manager.create(GovernanceFinanceChange, {
             actorId,
+            reportId: report.id,
             field: field.key,
             oldValue: previous === null ? null : String(previous),
             newValue: String(submitted),
@@ -251,16 +259,14 @@ export class GovernanceFinanceService {
         report[field.key] = submitted;
         report[field.sourceKey] = FinanceMetricSource.Manual;
         changed = true;
+        isFigureChanged = true;
       }
 
       const auditEntries: FinanceAuditEntry[] = [];
-      const take = <Value>(result: {
-        value: Value;
-        audit: FinanceAuditEntry[];
-        isChanged: boolean;
-      }): Value => {
+      const take = <Value>(result: FinanceEditResult<Value>): Value => {
         auditEntries.push(...result.audit);
         if (result.isChanged) changed = true;
+        if (result.isFigureChanged) isFigureChanged = true;
         return result.value;
       };
 
@@ -294,21 +300,30 @@ export class GovernanceFinanceService {
 
       if (!changed) return;
 
-      report.metricsEditedBy = actorId;
-      report.metricsEditedAt = new Date();
+      if (isFigureChanged) {
+        report.metricsEditedBy = actorId;
+        report.metricsEditedAt = new Date();
+      }
       await manager.save(report);
       if (auditRows.length > 0) await manager.save(auditRows);
-      await this.saveAudit(manager, actorId, dto.note ?? null, auditEntries);
+      await this.saveAudit(
+        manager,
+        actorId,
+        report.id,
+        dto.note ?? null,
+        auditEntries,
+      );
     });
 
     return this.getAdminFinances();
   }
 
   /** Writes one `governance_finance_changes` row per entry, inside the
-   *  caller's transaction. */
+   *  caller's transaction, each naming the report it changed. */
   private async saveAudit(
     manager: EntityManager,
     actorId: string,
+    reportId: string,
     note: string | null,
     entries: FinanceAuditEntry[],
   ): Promise<void> {
@@ -317,6 +332,7 @@ export class GovernanceFinanceService {
       entries.map((entry) =>
         manager.create(GovernanceFinanceChange, {
           actorId,
+          reportId,
           field: entry.field,
           oldValue: entry.oldValue,
           newValue: entry.newValue,

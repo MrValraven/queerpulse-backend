@@ -4,6 +4,7 @@ import { ContentModerationModule } from '../content-moderation/content-moderatio
 import { UsersModule } from '../users/users.module';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewingsModule } from '../housing-viewings/housing-viewings.module';
+import { SocialModule } from '../social/social.module';
 import { SubmissionsModule } from '../submissions/submissions.module';
 import { HousingReview } from './entities/housing-review.entity';
 import { HousingReviewsController } from './housing-reviews.controller';
@@ -30,6 +31,10 @@ import { HousingReviewsService } from './housing-reviews.service';
     // right of reply uses. Plain import, no `forwardRef`: `SubmissionsModule`
     // pulls in `NotificationsModule` only, which never reaches back here.
     SubmissionsModule,
+    // LOC-F1: exports BlockFilterService, so the public reviews block 404s a
+    // blocked pair like the detail read. No cycle: `SocialModule` imports only
+    // users, reports and identities.
+    SocialModule,
   ],
   controllers: [HousingReviewsController],
   providers: [HousingReviewsService],

@@ -13,6 +13,7 @@ import {
   GroupInvitesService,
   INVITE_LINK_EXPIRED_CODE,
   INVITE_LINK_INVALID_CODE,
+  INVITE_LINK_USED_UP_CODE,
   INVITE_NOT_FOUND_CODE,
   REMOVED_FROM_GROUP_CODE,
 } from './group-invites.service';
@@ -62,6 +63,17 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
     findOne: jest.Mock;
     count: jest.Mock;
     query: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  /** PRD-400 (use cap): the in-transaction conditional UPDATE's chain. Its
+   *  `execute` answers `{ affected: 1 }` (a use taken) unless a test models
+   *  the row itself. */
+  let useCountUpdate: {
+    update: jest.Mock;
+    set: jest.Mock;
+    where: jest.Mock;
+    andWhere: jest.Mock;
+    execute: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let eventEmitter: { emit: jest.Mock };
@@ -172,7 +184,17 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
       // reads the conversation under a row lock and re-counts the active
       // roster. Defaults keep every existing seat-path test under the cap;
       // individual tests override `count` to exercise the race.
-      findOne: jest.fn().mockResolvedValue({ id: CONVERSATION_ID }),
+      //
+      // `joinByToken` also re-reads the caller's own seat under that lock
+      // (default: no seat yet), and `consumeInviteLinkUse` re-reads the
+      // token after a 0-row UPDATE (default: the same live token).
+      findOne: jest.fn((entity: unknown) =>
+        Promise.resolve(
+          entity === ConversationParticipant
+            ? null
+            : { id: CONVERSATION_ID, inviteToken: 'tok123' },
+        ),
+      ),
       count: jest.fn().mockResolvedValue(0),
       // PRD-400: `readGroupJoinHistoryFloor`'s clock reading for a new seat.
       query: jest
@@ -180,6 +202,16 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
         .mockResolvedValue([
           { floorInstant: new Date('2026-01-31T23:59:59.999Z') },
         ]),
+      // PRD-400 (use cap): `consumeInviteLinkUse`'s conditional UPDATE.
+      createQueryBuilder: jest.fn(() => useCountUpdate),
+    };
+    const returnsUseCountUpdate = () => useCountUpdate;
+    useCountUpdate = {
+      update: jest.fn(returnsUseCountUpdate),
+      set: jest.fn(returnsUseCountUpdate),
+      where: jest.fn(returnsUseCountUpdate),
+      andWhere: jest.fn(returnsUseCountUpdate),
+      execute: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     dataSource = {
       transaction: jest.fn(
@@ -766,6 +798,236 @@ describe('GroupInvitesService (messaging scan section 8)', () => {
 
       expect(result).toBeDefined();
       expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // PRD-400 (use cap, user decision): a link can seat at most 1, 5 or 25
+  // newcomers; null means unlimited.
+  describe('PRD-400: invite link use cap', () => {
+    const SECOND_INVITEE_ID = '20000000-0000-4000-8000-000000000003';
+
+    const cappedGroup = (maxUses: number, useCount: number) => ({
+      ...activeGroup(),
+      inviteTokenMaxUses: maxUses,
+      inviteTokenUseCount: useCount,
+    });
+
+    const savedMemberSeats = () =>
+      manager.save.mock.calls
+        .map(([entity]) => entity as { role?: string; userId?: string })
+        .filter((entity) => entity.role === ConversationRole.Member);
+
+    it('takes one use in the seating transaction with a conditional UPDATE on the same token', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 2));
+
+      await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(useCountUpdate.update).toHaveBeenCalledWith(Conversation);
+      expect(useCountUpdate.where).toHaveBeenCalledWith(
+        expect.stringContaining('"id"'),
+        { conversationId: CONVERSATION_ID },
+      );
+      expect(useCountUpdate.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"invite_token"'),
+        { token: 'tok123' },
+      );
+      expect(useCountUpdate.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '"invite_token_use_count" < "invite_token_max_uses"',
+        ),
+      );
+      expect(useCountUpdate.execute).toHaveBeenCalledTimes(1);
+      expect(savedMemberSeats()).toHaveLength(1);
+    });
+
+    it('counts a join through an unlimited link too', async () => {
+      await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(useCountUpdate.execute).toHaveBeenCalledTimes(1);
+      expect(savedMemberSeats()).toHaveLength(1);
+    });
+
+    it('410s INVITE_LINK_USED_UP previewing a used-up link as a newcomer', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 5));
+
+      await expect(
+        service.previewByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 410,
+        response: expect.objectContaining({ code: INVITE_LINK_USED_UP_CODE }),
+      });
+    });
+
+    it('410s INVITE_LINK_USED_UP joining by a used-up link, seating nobody', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(1, 1));
+
+      await expect(
+        service.joinByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 410,
+        response: expect.objectContaining({ code: INVITE_LINK_USED_UP_CODE }),
+      });
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(savedMemberSeats()).toHaveLength(0);
+    });
+
+    it('refuses INVITE_LINK_USED_UP when the conditional UPDATE matches no row, seating nobody', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 4));
+      useCountUpdate.execute.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.joinByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 410,
+        response: expect.objectContaining({ code: INVITE_LINK_USED_UP_CODE }),
+      });
+      expect(savedMemberSeats()).toHaveLength(0);
+      expect(core.buildPostResult).not.toHaveBeenCalled();
+    });
+
+    it('404s INVITE_LINK_INVALID when the link was rotated mid-join, seating nobody', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 2));
+      useCountUpdate.execute.mockResolvedValue({ affected: 0 });
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === ConversationParticipant
+            ? null
+            : { id: CONVERSATION_ID, inviteToken: 'rotated-token' },
+        ),
+      );
+
+      await expect(
+        service.joinByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 404,
+        response: expect.objectContaining({ code: INVITE_LINK_INVALID_CODE }),
+      });
+      expect(savedMemberSeats()).toHaveLength(0);
+      expect(core.buildPostResult).not.toHaveBeenCalled();
+    });
+
+    it('404s INVITE_LINK_INVALID when the link was turned off mid-join', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 2));
+      useCountUpdate.execute.mockResolvedValue({ affected: 0 });
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === ConversationParticipant
+            ? null
+            : { id: CONVERSATION_ID, inviteToken: null },
+        ),
+      );
+
+      await expect(
+        service.joinByToken('tok123', INVITEE_ID),
+      ).rejects.toMatchObject({
+        status: 404,
+        response: expect.objectContaining({ code: INVITE_LINK_INVALID_CODE }),
+      });
+      expect(savedMemberSeats()).toHaveLength(0);
+    });
+
+    it('takes no second use when a returning former member double-submits', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 2));
+      // Both submits read the old left seat before either transaction runs.
+      participants.findOne.mockResolvedValue({
+        id: 'seat-1',
+        clearedAt: null,
+        leftAt: new Date('2026-01-20T00:00:00.000Z'),
+        removedAt: null,
+      });
+      // Stands in for the locked row: left until the first transaction
+      // reactivates it, active for the second.
+      const seat: { id: string; leftAt: Date | null } = {
+        id: 'seat-1',
+        leftAt: new Date('2026-01-20T00:00:00.000Z'),
+      };
+      manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === ConversationParticipant
+            ? { ...seat }
+            : { id: CONVERSATION_ID, inviteToken: 'tok123' },
+        ),
+      );
+      manager.update.mockImplementation((entity: unknown) => {
+        if (entity === ConversationParticipant) {
+          seat.leftAt = null;
+        }
+        return Promise.resolve({ affected: 1 });
+      });
+
+      const first = await service.joinByToken('tok123', INVITEE_ID);
+      const second = await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
+      expect(useCountUpdate.execute).toHaveBeenCalledTimes(1);
+      const reactivations = manager.update.mock.calls.filter(
+        ([entity]) => entity === ConversationParticipant,
+      );
+      expect(reactivations).toHaveLength(1);
+      const joinPills = manager.save.mock.calls.filter(
+        ([entity]) =>
+          (entity as { systemEvent?: { type?: string } }).systemEvent?.type ===
+          'member_joined',
+      );
+      expect(joinPills).toHaveLength(1);
+    });
+
+    it('lets only one of two concurrent joins take the last use', async () => {
+      // Both callers read the row before either transaction runs, so both
+      // pass the fast pre-check with one use left. The stub below stands in
+      // for Postgres: the conditional UPDATE only matches while the count is
+      // under the cap, and each match takes one use.
+      conversations.findOne.mockResolvedValue(cappedGroup(5, 4));
+      const row = { useCount: 4, maxUses: 5 };
+      useCountUpdate.execute.mockImplementation(() => {
+        if (row.useCount < row.maxUses) {
+          row.useCount += 1;
+          return Promise.resolve({ affected: 1 });
+        }
+        return Promise.resolve({ affected: 0 });
+      });
+
+      const results = await Promise.allSettled([
+        service.joinByToken('tok123', INVITEE_ID),
+        service.joinByToken('tok123', SECOND_INVITEE_ID),
+      ]);
+
+      const fulfilled = results.filter(
+        (result) => result.status === 'fulfilled',
+      );
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toMatchObject({
+        status: 410,
+        response: expect.objectContaining({ code: INVITE_LINK_USED_UP_CODE }),
+      });
+      expect(row.useCount).toBe(5);
+      expect(savedMemberSeats()).toHaveLength(1);
+    });
+
+    it('takes no use when a member already seated taps the link again', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(1, 1));
+      participants.findOne.mockResolvedValue({ leftAt: null });
+
+      const result = await service.joinByToken('tok123', INVITEE_ID);
+
+      expect(result).toBeDefined();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(useCountUpdate.execute).not.toHaveBeenCalled();
+    });
+
+    it('still previews a used-up link for a current member', async () => {
+      conversations.findOne.mockResolvedValue(cappedGroup(1, 1));
+      participants.findOne.mockResolvedValue({ leftAt: null, removedAt: null });
+
+      const result = await service.previewByToken('tok123', INVITEE_ID);
+
+      expect(result).toMatchObject({ isMember: true });
     });
   });
 

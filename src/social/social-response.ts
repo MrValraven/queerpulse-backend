@@ -1,7 +1,7 @@
 import { MemberRef } from '../common/member-ref';
 import type { RestoredConnectionStatus } from '../connections/entities/connection.entity';
 import type { IdentityBlock } from '../identities/entities/identity-block.entity';
-import type { IdentityKind } from '../identities/entities/identity.entity';
+import { IdentityKind } from '../identities/entities/identity.entity';
 import type { IdentityDescription } from '../identities/identities.service';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
@@ -24,6 +24,12 @@ export interface BlockDTO {
   member: MemberRef;
   createdAt: Date;
   reason?: string;
+  /** PRD-423: true for a block placed from inside a matched Go together
+   *  chat. `member` then carries the first name and pronouns alone, the
+   *  only name the blocker ever had, and the row is
+   *  unblocked by its `id` (`DELETE /blocks/by-id/:id`). Absent on every
+   *  ordinary block. */
+  isMatchedChatBlock?: true;
 }
 
 /** `MuteDTO` (social.api.ts) — a member the actor has muted. */
@@ -64,6 +70,21 @@ export function toBlockDTO(
   row: Block,
   member: MemberRef | undefined,
 ): BlockDTO {
+  if (row.matchedConversationId) {
+    // PRD-423: the first name and pronouns the matched chat showed, and
+    // nothing that leads back to the person.
+    return {
+      id: row.id,
+      member: {
+        ...EMPTY_MEMBER_REF,
+        firstName: member?.firstName.trim() ?? '',
+        pronouns: member?.pronouns ?? null,
+      },
+      createdAt: row.createdAt,
+      reason: row.reason ?? undefined,
+      isMatchedChatBlock: true,
+    };
+  }
   return {
     id: row.id,
     member: member ?? EMPTY_MEMBER_REF,
@@ -106,11 +127,34 @@ export function toIdentityBlockDTO(
   return {
     id: row.id,
     identity: {
-      id: row.identityId,
+      id: row.identityId ?? row.retiredIdentityId ?? '',
       kind: kind ?? null,
       displayName: description?.displayName ?? null,
       handle: description?.handle ?? null,
       avatarUrl: description?.avatarUrl ?? null,
+    },
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * ENG-447: a block carried across a persona going unlinked, as the member's
+ * Blocked list shows it: under the retired identity's id (the one they
+ * blocked, and the one unblock takes) and the named persona's name from the
+ * snapshot. No handle and no avatar: both would be the pseudonymous
+ * persona's, and nothing on this row may lead to it.
+ */
+export function toCarriedIdentityBlockDTO(
+  row: IdentityBlock,
+): IdentityBlockDTO {
+  return {
+    id: row.id,
+    identity: {
+      id: row.retiredIdentityId ?? '',
+      kind: IdentityKind.Subprofile,
+      displayName: row.blockedNameSnapshot,
+      handle: null,
+      avatarUrl: null,
     },
     createdAt: row.createdAt,
   };

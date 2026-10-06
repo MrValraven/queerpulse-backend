@@ -30,11 +30,16 @@ import {
   ConversationResponse,
   GroupInviteSummary,
   GroupJoinPreview,
+  memberIdFor,
   memberNameOptionsFor,
   MessageResponse,
   requireAuthorSummary,
 } from './message-response';
 import { readGroupJoinHistoryFloor } from './group-join-history-floor';
+import {
+  inviteLinkUsageFields,
+  isInviteLinkUsedUp,
+} from './group-invite-link-usage';
 import { MAX_GROUP_MEMBERS } from './messaging.constants';
 import {
   CONVERSATION_CREATED,
@@ -64,6 +69,11 @@ export const INVITE_LINK_INVALID_CODE = 'INVITE_LINK_INVALID';
  *  `inviteTokenExpiresAt` has passed. 410 Gone, so the join page can tell the
  *  person to ask the group for a fresh link. */
 export const INVITE_LINK_EXPIRED_CODE = 'INVITE_LINK_EXPIRED';
+/** PRD-400 (use cap): the link's token matched a live group but it has
+ *  already seated as many newcomers as its `inviteTokenMaxUses` allows. Same
+ *  410 Gone shape as `INVITE_LINK_EXPIRED`, with its own code so the join
+ *  page can say the link is used up. */
+export const INVITE_LINK_USED_UP_CODE = 'INVITE_LINK_USED_UP';
 export const REMOVED_FROM_GROUP_CODE = 'REMOVED_FROM_GROUP';
 
 /**
@@ -508,11 +518,12 @@ export class GroupInvitesService {
       });
     }
     const isMember = callerRow != null && callerRow.leftAt == null;
-    // PRD-400: an expired link shows nothing about the group to a newcomer.
-    // A current member still gets the preview, which carries them into the
-    // group they already belong to.
+    // PRD-400: an expired or used-up link shows nothing about the group to
+    // a newcomer. A current member still gets the preview, which carries
+    // them into the group they already belong to.
     if (!isMember) {
       this.assertInviteLinkNotExpired(convo);
+      this.assertInviteLinkHasUsesLeft(convo);
     }
     return {
       conversationId: convo.id,
@@ -568,10 +579,13 @@ export class GroupInvitesService {
       );
       return this.buildGroupConversationResponse(convo, userId);
     }
-    // PRD-400: past its 7-day window the link seats nobody new. Checked
-    // after the already-active branch above, so a member who taps an old
-    // link still lands in their group.
+    // PRD-400: past its 7-day window, or once its use cap is reached, the
+    // link seats nobody new. Checked after the already-active branch above,
+    // so a member who taps an old link still lands in their group and
+    // consumes no use. The use check here is only a fast fail: the
+    // conditional UPDATE inside the transaction below is what decides.
     this.assertInviteLinkNotExpired(convo);
+    this.assertInviteLinkHasUsesLeft(convo);
     // Reads `removedAt`, NOT `removedBy`: `removedBy` carries an `ON DELETE
     // SET NULL` foreign key to the remover's own account, so it goes quietly
     // NULL once that account is deleted, and this gate would otherwise let a
@@ -614,6 +628,27 @@ export class GroupInvitesService {
         where: { id: convo.id },
         lock: { mode: 'pessimistic_write' },
       });
+      // PRD-400 (use cap): a double-submitted join (two taps, or a returning
+      // former member's retry) can pass the unlocked already-active check
+      // above twice. Under the lock, the second one sees the seat the first
+      // committed and lands in the group like any already-active member,
+      // taking no second use.
+      const lockedCallerRow = await manager.findOne(ConversationParticipant, {
+        where: { conversationId: convo.id, userId },
+        select: { id: true, leftAt: true },
+      });
+      if (lockedCallerRow && lockedCallerRow.leftAt == null) {
+        await manager.update(
+          GroupInvite,
+          {
+            conversationId: convo.id,
+            inviteeId: userId,
+            status: GroupInviteStatus.Pending,
+          },
+          { status: GroupInviteStatus.Accepted, respondedAt: new Date() },
+        );
+        return null;
+      }
       const activeCountNow = await manager.count(ConversationParticipant, {
         where: { conversationId: convo.id, leftAt: IsNull() },
       });
@@ -624,6 +659,9 @@ export class GroupInvitesService {
           code: GROUP_FULL_CODE,
         });
       }
+      // PRD-400 (use cap): take this join's use before seating, in the same
+      // transaction, so a refused use leaves no seat behind.
+      await this.consumeInviteLinkUse(manager, convo.id, token);
       const joinerIdentityId =
         await this.identities.resolveProfileIdentityId(userId);
       await this.seatParticipant(
@@ -653,6 +691,10 @@ export class GroupInvitesService {
         'link',
       );
     });
+    if (!systemMessage) {
+      // Already seated by a concurrent join of the caller's own.
+      return this.buildGroupConversationResponse(convo, userId);
+    }
     await this.broadcastPill(systemMessage);
     this.emitBestEffort(CONVERSATION_CREATED, {
       conversationId: convo.id,
@@ -677,6 +719,71 @@ export class GroupInvitesService {
         code: INVITE_LINK_EXPIRED_CODE,
       });
     }
+  }
+
+  /**
+   * PRD-400 (use cap): refuse a join-by-link token that has already seated
+   * as many newcomers as its `inviteTokenMaxUses` allows, with the same 410
+   * shape as an expired link and its own code `INVITE_LINK_USED_UP`. An
+   * unlimited link (NULL cap) always passes.
+   */
+  private assertInviteLinkHasUsesLeft(convo: Conversation): void {
+    if (isInviteLinkUsedUp(convo)) {
+      throw this.inviteLinkUsedUpError();
+    }
+  }
+
+  private inviteLinkUsedUpError(): GoneException {
+    return new GoneException({
+      statusCode: 410,
+      message: 'This invite link has been used up',
+      code: INVITE_LINK_USED_UP_CODE,
+    });
+  }
+
+  /**
+   * PRD-400 (use cap): take one use of the link inside the transaction that
+   * seats the joiner. A single conditional UPDATE increments the count only
+   * while the same token is still live and under its cap (an unlimited link
+   * always matches), so two concurrent joins racing for the last use can
+   * never both succeed: the loser's UPDATE matches no row, and its
+   * `INVITE_LINK_USED_UP` throw rolls its own transaction back, seat and
+   * all. Matching on the token too means a link rotated mid-join never has
+   * a use taken from its fresh count. When the UPDATE matches no row, the
+   * token is re-read through the same manager: a link rotated or turned off
+   * mid-join answers the 404 `INVITE_LINK_INVALID` every other dead token
+   * gets, and only a still-live token reports `INVITE_LINK_USED_UP`.
+   */
+  private async consumeInviteLinkUse(
+    manager: EntityManager,
+    conversationId: string,
+    token: string,
+  ): Promise<void> {
+    const result = await manager
+      .createQueryBuilder()
+      .update(Conversation)
+      .set({ inviteTokenUseCount: () => '"invite_token_use_count" + 1' })
+      .where('"id" = :conversationId', { conversationId })
+      .andWhere('"invite_token" = :token', { token })
+      .andWhere(
+        '("invite_token_max_uses" IS NULL OR "invite_token_use_count" < "invite_token_max_uses")',
+      )
+      .execute();
+    if (result.affected) {
+      return;
+    }
+    const currentConversation = await manager.findOne(Conversation, {
+      where: { id: conversationId },
+      select: { id: true, inviteToken: true },
+    });
+    if (currentConversation?.inviteToken !== token) {
+      throw new NotFoundException({
+        statusCode: 404,
+        message: 'That invite link is no longer valid',
+        code: INVITE_LINK_INVALID_CODE,
+      });
+    }
+    throw this.inviteLinkUsedUpError();
   }
 
   /**
@@ -949,6 +1056,8 @@ export class GroupInvitesService {
       [convo.id],
       userId,
       profileByUser.get(userId)?.slug,
+      // PRD-423 (opaque member keys): a matched chat mentions by member key.
+      nameOptions.isMatchedGroup ? [convo.id] : [],
     );
     const isOwnerOrAdmin =
       callerRow?.role === ConversationRole.Owner ||
@@ -1014,6 +1123,10 @@ export class GroupInvitesService {
       eventMatchGroupId: convo.eventMatchGroupId,
       // PRD-423: the durable Go together marker, outlives eventMatchGroupId.
       isGoTogetherChat: convo.isGoTogetherChat,
+      // PRD-423 (opaque member keys): how this chat names the caller.
+      ...(nameOptions.isMatchedGroup
+        ? { viewerMemberKey: memberIdFor(userId, nameOptions) }
+        : {}),
       leftReason: computeGroupLeftReason({
         leftAt: callerRow?.leftAt,
         removedAt: callerRow?.removedAt,
@@ -1030,6 +1143,12 @@ export class GroupInvitesService {
         convo.inviteToken
           ? (convo.inviteTokenExpiresAt?.toISOString() ?? null)
           : null,
+      // PRD-400 (use cap): the link's cap and uses left, under exactly the
+      // same rule as `inviteToken` above.
+      ...inviteLinkUsageFields(
+        convo,
+        !callerRow?.leftAt && !convo.dissolvedAt && isOwnerOrAdmin,
+      ),
       canManageInviteLink:
         !hasCallerLeft && !convo.dissolvedAt && isOwnerOrAdmin,
       canTransferOwnership:

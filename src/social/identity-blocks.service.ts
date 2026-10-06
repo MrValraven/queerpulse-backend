@@ -11,7 +11,11 @@ import { IdentityBlock } from '../identities/entities/identity-block.entity';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { IdentitiesService } from '../identities/identities.service';
 import { IDENTITY_BLOCKED, IdentityBlockedEvent } from './social.events';
-import { IdentityBlockDTO, toIdentityBlockDTO } from './social-response';
+import {
+  IdentityBlockDTO,
+  toCarriedIdentityBlockDTO,
+  toIdentityBlockDTO,
+} from './social-response';
 
 /**
  * Task 14: a member blocking a whole business, persona or company. The rule
@@ -46,7 +50,12 @@ export class IdentityBlocksService {
       .orderBy('identity_block.createdAt', 'DESC')
       .addOrderBy('identity_block.id', 'DESC');
     return paginate(queryBuilder, normalizePage(page), async (rows) => {
-      const identityIds = rows.map((row) => row.identityId);
+      // A carried block (ENG-447) names no live identity: it reads from its
+      // own snapshot, so the persona's current identity is never looked up
+      // for it.
+      const identityIds = rows.flatMap((row) =>
+        row.identityId ? [row.identityId] : [],
+      );
       const [blockedIdentities, descriptionById] = await Promise.all([
         this.identities.getByIds(identityIds),
         this.identities.describeIdentities(identityIds),
@@ -55,11 +64,13 @@ export class IdentityBlocksService {
         blockedIdentities.map((identity) => [identity.id, identity.kind]),
       );
       return rows.map((row) =>
-        toIdentityBlockDTO(
-          row,
-          kindById.get(row.identityId),
-          descriptionById.get(row.identityId),
-        ),
+        row.identityId
+          ? toIdentityBlockDTO(
+              row,
+              kindById.get(row.identityId),
+              descriptionById.get(row.identityId),
+            )
+          : toCarriedIdentityBlockDTO(row),
       );
     });
   }
@@ -127,9 +138,15 @@ export class IdentityBlocksService {
 
   /** Idempotent: lifting a block that does not exist succeeds as well. The
    *  threads come back on their next read, since every check reads the
-   *  table at request time. */
+   *  table at request time. `identityId` is the id the Blocked list showed:
+   *  for a block carried across a persona going unlinked (ENG-447) that is
+   *  the retired identity's, and lifting it lifts the carried block. */
   async unblockIdentity(userId: string, identityId: string): Promise<void> {
     await this.identityBlocks.delete({ blockerUserId: userId, identityId });
+    await this.identityBlocks.delete({
+      blockerUserId: userId,
+      retiredIdentityId: identityId,
+    });
   }
 
   /** A listener's failure never fails a block that has been written.

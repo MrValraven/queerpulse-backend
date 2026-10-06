@@ -34,6 +34,11 @@ import {
   MessageCreatedEvent,
 } from '../messaging/messaging.events';
 import {
+  hasMatchedChatMentions,
+  resolveMatchedChatMemberKeys,
+} from '../messaging/matched-member-key';
+import { loadMatchedChatMentionRenderer } from '../messaging/matched-chat-mention-text';
+import {
   memberNameOptionsFor,
   requireAuthorSummary,
   type AuthorSummary,
@@ -413,8 +418,15 @@ export class PushMessageListener {
             senderProfile,
             memberNameOptionsFor(conversation),
           ).displayName;
-      const messageCopy = buildMessagePushCopy(
+      // PRD-423: a matched Go together chat stores a mention as an opaque
+      // `@<member key>`; the push names it `@FirstName`. The stored body,
+      // and the mention fold below, keep the key.
+      const copyMessage = await this.withReadableMatchedChatMentions(
+        conversation,
         message,
+      );
+      const messageCopy = buildMessagePushCopy(
+        copyMessage,
         conversation,
         senderName,
       );
@@ -435,7 +447,11 @@ export class PushMessageListener {
       );
       const mentionCopy =
         mentionedPushableUserIds.size > 0
-          ? buildGroupMentionPushCopy(message, messageCopy.title, senderName)
+          ? buildGroupMentionPushCopy(
+              copyMessage,
+              messageCopy.title,
+              senderName,
+            )
           : undefined;
       // Every lookup happens BEFORE the pacing reservation below, so the
       // decide-and-record step runs with no await in between and two messages
@@ -471,9 +487,12 @@ export class PushMessageListener {
         mailboxSenderAuthors?.businessAuthor.avatarUrl ?? null;
       // ENG-412: a sender who hid their photo sends no icon, the same
       // `photoVisible` gate the bell and the mentions inbox apply.
+      // PRD-423: a matched Go together chat sends no icon, since the stored
+      // avatar URL names the sender's account to the other members.
       const rawSenderAvatar = mailboxSenderAuthors
         ? mailboxAvatarUrl && storageKeyFromImageUrl(mailboxAvatarUrl)
-        : senderProfile?.photoVisible
+        : senderProfile?.photoVisible &&
+            !memberNameOptionsFor(conversation).isMatchedGroup
           ? senderProfile.avatarUrl
           : undefined;
       const senderAvatar =
@@ -1000,6 +1019,43 @@ export class PushMessageListener {
   }
 
   /**
+   * PRD-423 (opaque member keys): `message` with every `@<member key>` in its
+   * body or caption spelled `@FirstName`, for push copy alone. Unchanged,
+   * with no read at all, outside a matched Go together chat or when the text
+   * carries no key.
+   */
+  private async withReadableMatchedChatMentions(
+    conversation: Conversation,
+    message: MessageView,
+  ): Promise<MessageView> {
+    if (
+      !memberNameOptionsFor(conversation).isMatchedGroup ||
+      !hasMatchedChatMentions(messageMentionText(message))
+    ) {
+      return message;
+    }
+    const render = await loadMatchedChatMentionRenderer(
+      { participants: this.participants, profiles: this.profiles },
+      [conversation.id],
+    );
+    const attachment = message.attachment;
+    const caption =
+      attachment &&
+      'caption' in attachment &&
+      typeof attachment.caption === 'string'
+        ? attachment.caption
+        : null;
+    return {
+      ...message,
+      body: render(conversation.id, message.body),
+      attachment:
+        attachment && caption !== null
+          ? { ...attachment, caption: render(conversation.id, caption) }
+          : attachment,
+    };
+  }
+
+  /**
    * The subset of `conversation`'s CURRENT participants (mirrors
    * `MentionNotificationService.recipientsAllowedForSource`'s own
    * message-source restriction: excludes anyone who left) that `message`
@@ -1016,10 +1072,28 @@ export class PushMessageListener {
   ): Promise<Set<string>> {
     const slugs = extractMentions(messageMentionText(message)).members;
     if (slugs.length === 0) return new Set();
-    const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(slugs);
-    const candidateUserIds = Array.from(new Set(bySlug.values())).filter(
-      (userId) => userId !== message.senderId,
-    );
+    // PRD-423 (opaque member keys): a matched Go together chat stores a
+    // mention as the member's per-chat key, resolved among its own seats,
+    // and a slug mention there names nobody.
+    const isMatchedChat = memberNameOptionsFor(conversation).isMatchedGroup;
+    const bySlug = isMatchedChat
+      ? new Map<string, string>()
+      : await new MemberLookup(this.profiles).userIdsForSlugs(slugs);
+    const byMemberKey = isMatchedChat
+      ? resolveMatchedChatMemberKeys(
+          conversation.id,
+          (
+            await this.participants.find({
+              where: { conversationId: conversation.id },
+              select: { userId: true },
+            })
+          ).map((seat) => seat.userId),
+          slugs,
+        )
+      : new Map<string, string>();
+    const candidateUserIds = Array.from(
+      new Set([...bySlug.values(), ...byMemberKey.values()]),
+    ).filter((userId) => userId !== message.senderId);
     if (candidateUserIds.length === 0) return new Set();
     const rows = await this.participants.find({
       where: {

@@ -93,3 +93,46 @@ export function allowsSharedUploads(
   }
   return SHARED_UPLOAD_HANDLERS.has(`${controllerName}.${handlerName}`);
 }
+
+/**
+ * T17: the handlers that may carry a PERSONA-SCOPED key
+ * (`persona/<uuid>/<uuid><ext>`) in their body.
+ *
+ * Such a key names no uploader, so the interceptor cannot apply its "you
+ * may only reference keys you uploaded" rule to it. It refuses one
+ * everywhere except the handlers below, each of which makes the decision
+ * itself:
+ * - The two persona editor writes re-send the persona's stored images on
+ *   every save, and a persona copied from another one sends that persona's
+ *   images. `SubprofilesService` allows a persona-scoped key only when the
+ *   persona already stores it or the requester co-owns the persona the key
+ *   belongs to (`assertNoForeignUploadIntroducedForPersona`), and saves the
+ *   second kind as a fresh copy of its own.
+ * - `UploadsController.saveCrop` reframes a persona image. The controller
+ *   checks the requester co-owns the key's persona
+ *   (`PersonaImageKeysService.isMemberOfKeyPersona`) before it saves.
+ * - `MyMediaController.remove` deletes one of the caller's own uploads.
+ *   `MyMediaService.deleteMine` accepts a persona-scoped key only when its
+ *   registry row names the caller as the uploader, and only once nothing
+ *   references it.
+ *
+ * A new handler belongs here only with a check of the same strength.
+ */
+export const PERSONA_SCOPED_KEY_HANDLERS: ReadonlySet<string> = new Set([
+  'SubprofilesController.update',
+  'SubprofilesController.replaceSection',
+  'UploadsController.saveCrop',
+  'MyMediaController.remove',
+]);
+
+/** Whether this controller+handler pair may carry a persona-scoped key.
+ *  Unknown pairs may not. */
+export function allowsPersonaScopedKeys(
+  controllerName: string | undefined,
+  handlerName: string | undefined,
+): boolean {
+  if (!controllerName || !handlerName) {
+    return false;
+  }
+  return PERSONA_SCOPED_KEY_HANDLERS.has(`${controllerName}.${handlerName}`);
+}

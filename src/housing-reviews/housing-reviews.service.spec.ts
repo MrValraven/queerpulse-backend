@@ -10,6 +10,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewingStatus } from '../housing-viewings/entities/housing-viewing.entity';
 import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -73,6 +74,7 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
   };
   let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
   let reviewReplyNotifier: { notifyReviewReplied: jest.Mock };
+  let blockFilter: { isBlockedEitherWay: jest.Mock };
 
   const REVEAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   const NOW = new Date('2026-06-01T12:00:00.000Z');
@@ -115,6 +117,8 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
         slug: 'benfica-room',
         title: 'Sunny room in Benfica',
         ownerId: 'lister-1',
+        filledAt: null,
+        expiresAt: new Date(NOW.getTime() + REVEAL_WINDOW_MS),
       }),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
@@ -129,6 +133,7 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
     reviewReplyNotifier = {
       notifyReviewReplied: jest.fn().mockResolvedValue(undefined),
     };
+    blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -139,6 +144,7 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
         { provide: HousingViewingsService, useValue: viewings },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: ReviewReplyNotifier, useValue: reviewReplyNotifier },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
 
@@ -1011,11 +1017,71 @@ describe('HousingReviewsService (PRD-47 lister reply)', () => {
         slug: 'benfica-room',
         title: 'Sunny room in Benfica',
         ownerId: null,
+        filledAt: null,
+        expiresAt: new Date(NOW.getTime() + REVEAL_WINDOW_MS),
       });
 
       await expect(
         service.forListing('benfica-room', null),
       ).resolves.toMatchObject({ isViewerTheLister: false });
+    });
+
+    // LOC-F1: the reviews read withholds exactly what the detail read does.
+    const filledListing = {
+      id: 'listing-1',
+      slug: 'benfica-room',
+      title: 'Sunny room in Benfica',
+      ownerId: 'lister-1',
+      filledAt: new Date(NOW.getTime() - 60_000),
+      expiresAt: new Date(NOW.getTime() + REVEAL_WINDOW_MS),
+    };
+
+    it('404s a filled home for everyone but its owner', async () => {
+      listings.findOne.mockResolvedValue(filledListing);
+
+      await expect(
+        service.forListing('benfica-room', 'guest-1'),
+      ).rejects.toThrow(new NotFoundException('Housing listing not found'));
+      await expect(
+        service.forListing('benfica-room', 'lister-1'),
+      ).resolves.toMatchObject({ isViewerTheLister: true });
+    });
+
+    it('404s an expired home for an anonymous reader', async () => {
+      listings.findOne.mockResolvedValue({
+        ...filledListing,
+        filledAt: null,
+        expiresAt: new Date(NOW.getTime() - 60_000),
+      });
+
+      await expect(service.forListing('benfica-room', null)).rejects.toThrow(
+        new NotFoundException('Housing listing not found'),
+      );
+    });
+
+    it('404s a blocked pair with the detail read answer', async () => {
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.forListing('benfica-room', 'guest-1'),
+      ).rejects.toThrow(new NotFoundException('Housing listing not found'));
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+        'guest-1',
+        'lister-1',
+      );
+      expect(reviews.find).not.toHaveBeenCalled();
+    });
+
+    it('skips the block check for the owner and for an anonymous reader', async () => {
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.forListing('benfica-room', 'lister-1'),
+      ).resolves.toMatchObject({ isViewerTheLister: true });
+      await expect(
+        service.forListing('benfica-room', null),
+      ).resolves.toMatchObject({ isViewerTheLister: false });
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
     });
   });
 });

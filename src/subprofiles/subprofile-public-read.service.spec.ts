@@ -60,6 +60,7 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     coverUrl: null,
     accent: null,
     availability: null,
+    availabilityUpdatedAt: null,
     ctaLabel: null,
     ctaUrl: null,
     linkVisibility: SubprofileLinkVisibility.Unlinked,

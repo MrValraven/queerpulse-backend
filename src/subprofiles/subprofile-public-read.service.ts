@@ -1018,6 +1018,8 @@ export class SubprofilePublicReadService {
         'sp.tagline',
         'sp.accent',
         'sp.availability',
+        // PRD-435: the therapist cards say how fresh the status is.
+        'sp.availabilityUpdatedAt',
         // Inc2 Task A: the directory now includes linked personas too, so the
         // card needs to route them to `/members/:ownerSlug/:slug` — `slug` +
         // `linkVisibility` feed `toCardDTO`, `userId` keys the batched

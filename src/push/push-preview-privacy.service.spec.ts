@@ -184,7 +184,8 @@ describe('PushPreviewPrivacyService.sendSplitByPreviewPreference (ID-13)', () =>
     expect(pushService.sendToUsers).toHaveBeenCalledTimes(3);
     const [richSend, englishSend, portugueseSend] = pushService.sendToUsers.mock
       .calls as [string[], PushPayload][];
-    // The rich payload is never rewritten: the service worker localises it.
+    // This DM payload's keys have no catalog entry, so its Portuguese render
+    // is the English one and the showing member shares the single rich send.
     expect(richSend).toEqual([['showing-pt'], richPayload]);
     expect(englishSend?.[0]).toEqual(['hiding-en', 'without-row']);
     expect(englishSend?.[1].body).toBe('You have a new message.');
@@ -197,6 +198,68 @@ describe('PushPreviewPrivacyService.sendSplitByPreviewPreference (ID-13)', () =>
         bodyKey: GENERIC_PUSH_COPY.message.bodyKey,
       },
     });
+  });
+
+  it('sends the Portuguese rich copy to a showing member whose language is pt, keeping the l10n keys (PRD-325)', async () => {
+    preferences.find.mockResolvedValue([
+      { userId: 'showing-pt', hidePushPreviews: false, language: 'pt' },
+      { userId: 'showing-en', hidePushPreviews: false, language: 'en' },
+      { userId: 'showing-no-language', hidePushPreviews: false },
+    ]);
+    const richPayload = makeRichPayload({
+      title: 'Connection accepted',
+      body: `${SENDER_NAME} accepted your connection request.`,
+      actions: undefined,
+      l10n: {
+        titleKey: 'push:connection.accepted.title',
+        bodyKey: 'push:connection.accepted.body',
+        params: { name: SENDER_NAME },
+      },
+    });
+
+    await service.sendSplitByPreviewPreference(
+      ['showing-pt', 'showing-en', 'showing-no-language'],
+      richPayload,
+    );
+
+    expect(pushService.sendToUsers).toHaveBeenCalledTimes(3);
+    const [englishRichSend, genericSend, portugueseRichSend] = pushService
+      .sendToUsers.mock.calls as [string[], PushPayload][];
+    expect(englishRichSend).toEqual([
+      ['showing-en', 'showing-no-language'],
+      richPayload,
+    ]);
+    expect(genericSend?.[0]).toEqual([]);
+    expect(portugueseRichSend?.[0]).toEqual(['showing-pt']);
+    expect(portugueseRichSend?.[1]).toEqual({
+      ...richPayload,
+      title: 'Conexão aceite',
+      body: `${SENDER_NAME} aceitou o teu pedido de conexão.`,
+    });
+  });
+
+  it('sends no Portuguese rich batch when no showing member stored pt', async () => {
+    preferences.find.mockResolvedValue([
+      { userId: 'showing-en', hidePushPreviews: false, language: 'en' },
+      { userId: 'hiding-pt', hidePushPreviews: true, language: 'pt' },
+    ]);
+    const richPayload = makeRichPayload({
+      l10n: {
+        titleKey: 'push:mention.title',
+        bodyKey: 'push:mention.body',
+        params: { name: SENDER_NAME },
+      },
+    });
+
+    await service.sendSplitByPreviewPreference(
+      ['showing-en', 'hiding-pt'],
+      richPayload,
+    );
+
+    const sentUserIds = (
+      pushService.sendToUsers.mock.calls as [string[], PushPayload][]
+    ).map(([userIds]) => userIds);
+    expect(sentUserIds).toEqual([['showing-en'], [], ['hiding-pt']]);
   });
 
   it('leaves timestamp and renotify off the locked payload when the rich one has neither', async () => {

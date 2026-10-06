@@ -24,6 +24,13 @@ export class GovernanceFinanceChange {
   @Column({ type: 'uuid', nullable: true })
   actorId!: string | null;
 
+  /** The `governance_finance_report` this change was made on. Null on rows
+   *  written before the column existed (they never recorded it), and
+   *  `ON DELETE SET NULL` like `actorId`, so a row outlives its report. */
+  @Index('IDX_governance_finance_changes_report_id')
+  @Column({ type: 'uuid', nullable: true })
+  reportId!: string | null;
+
   /** The figure that changed: a scalar key (`mrr`, `sustainerCount`,
    *  `solidarityRate`, `incomeTotal`, `expenseTotal`) or a ledger row
    *  addressed as `income[0]` / `expense[2]`. */

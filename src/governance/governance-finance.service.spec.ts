@@ -203,6 +203,31 @@ describe('GovernanceFinanceService', () => {
       ]);
     });
 
+    it('publishes a keyed partner an admin saved, keeping its translation key', async () => {
+      const [seededPartner] = governanceFinanceReportSeed.partners;
+      repo.find.mockResolvedValue([
+        makeReport({
+          ...enteredSources,
+          partners: [
+            { ...seededPartner!, source: FinanceMetricSource.Manual },
+            ...governanceFinanceReportSeed.partners.slice(1),
+          ],
+        }),
+      ]);
+
+      const result = await service.getFinances();
+
+      // The internal `source` marker stays off the public response, and the
+      // still-seeded partners stay off the page.
+      expect(result.partners).toEqual([
+        {
+          name: seededPartner!.name,
+          amount: seededPartner!.amount,
+          scopeKey: seededPartner!.scopeKey,
+        },
+      ]);
+    });
+
     it('keeps a partner whose restriction an admin typed', async () => {
       repo.find.mockResolvedValue([
         makeReport({
@@ -329,6 +354,72 @@ describe('GovernanceFinanceService', () => {
 
       expect(manager.save).not.toHaveBeenCalled();
     });
+
+    it('records the report id on every audit row', async () => {
+      const report = makeReport({ mrr: 1840 });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances(
+        { mrr: 2100, eventNotes: [{ title: 'Hosts keep it all', body: '' }] },
+        'admin-1',
+      );
+
+      expect(manager.create).toHaveBeenCalledWith(
+        GovernanceFinanceChange,
+        expect.objectContaining({ field: 'mrr', reportId: 'r1' }),
+      );
+      expect(manager.create).toHaveBeenCalledWith(
+        GovernanceFinanceChange,
+        expect.objectContaining({ field: 'eventNotes', reportId: 'r1' }),
+      );
+    });
+
+    it('stamps the figures-entered date when a figure changes', async () => {
+      const report = makeReport({ mrr: 1840 });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances({ mrr: 2100 }, 'admin-1');
+
+      expect(report.metricsEditedBy).toBe('admin-1');
+      expect(report.metricsEditedAt).toBeInstanceOf(Date);
+    });
+
+    it('leaves the figures-entered date alone on a prose-only save', async () => {
+      const enteredAt = new Date('2026-10-02T09:30:00.000Z');
+      const report = makeReport({
+        ...enteredSources,
+        metricsEditedBy: 'admin-0',
+        metricsEditedAt: enteredAt,
+      });
+      manager.find.mockResolvedValue([report]);
+      repo.find.mockResolvedValue([report]);
+
+      await service.updateAdminFinances(
+        {
+          stats: [
+            { n: '€4,150', l: 'Total expenditure', trend: '', up: false },
+          ],
+          eventNotes: [{ title: 'Hosts keep it all', body: '' }],
+          partners: [
+            {
+              name: 'A local foundation',
+              amount: 400,
+              scope: 'the wellbeing fund',
+            },
+          ],
+          reserve: { current: 100, target: 1000 },
+        },
+        'admin-1',
+      );
+
+      // The words are saved and audited, but the public date and the editor
+      // badge still point at the last figure entry.
+      expect(manager.save).toHaveBeenCalledWith(report);
+      expect(report.metricsEditedAt).toBe(enteredAt);
+      expect(report.metricsEditedBy).toBe('admin-0');
+    });
   });
 
   describe('openQuarter', () => {
@@ -356,6 +447,22 @@ describe('GovernanceFinanceService', () => {
           income: [],
           expense: [],
         }),
+      );
+    });
+
+    it('records the new report id on the quarter-opened audit row', async () => {
+      manager.findOne.mockResolvedValue(null);
+      manager.find.mockResolvedValue([makeReport(enteredSources)]);
+      repo.find.mockResolvedValue([]);
+      manager.save.mockImplementationOnce((row: object) =>
+        Promise.resolve({ ...row, id: 'r2' }),
+      );
+
+      await service.openQuarter({ quarter: '2026-Q3' }, 'admin-1');
+
+      expect(manager.create).toHaveBeenCalledWith(
+        GovernanceFinanceChange,
+        expect.objectContaining({ field: 'quarter', reportId: 'r2' }),
       );
     });
 

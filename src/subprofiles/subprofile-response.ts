@@ -170,7 +170,10 @@ export function restrictedAccessBody(
 
 // Public view — owner identity is stripped when the persona is `unlinked`.
 export interface SubprofilePublicView {
-  id: string; // non-identifying uuid; safe to expose for linked + unlinked
+  // A non-identifying uuid, safe to expose for linked and unlinked personas:
+  // an unlink gives the row a fresh one (ENG-447, `issueFreshPersonaId`), so
+  // the id a named persona showed never leads to its pseudonymous page.
+  id: string;
   kind: SubprofileKind;
   slug: string;
   handle: string | null;
@@ -185,6 +188,10 @@ export interface SubprofilePublicView {
   coverCrop?: CropRect;
   accent: string | null;
   availability: string | null;
+  /** PRD-435: when `availability` or the therapist status last changed (ISO
+   *  string), so a card can show how fresh the status is. Null when the
+   *  persona never stated either. */
+  availabilityUpdatedAt: string | null;
   ctaLabel: string | null;
   ctaUrl: string | null;
   linkVisibility: SubprofileLinkVisibility;
@@ -240,6 +247,8 @@ export interface SubprofileCardView {
   tagline: string | null;
   accent: string | null;
   availability: string | null;
+  /** PRD-435: see `SubprofilePublicView.availabilityUpdatedAt`. */
+  availabilityUpdatedAt: string | null;
   socialCount: number;
   tags: string[];
   // Personas redesign Phase 4 (design plan Decision §3): batched from
@@ -448,6 +457,14 @@ export function toSubprofileDTO(
   };
 }
 
+/** The availability stamp as an ISO string. A row built in memory before
+ *  its insert, or projected without the column, carries no value yet. */
+function availabilityUpdatedAtOf(subprofile: Subprofile): string | null {
+  return subprofile.availabilityUpdatedAt
+    ? subprofile.availabilityUpdatedAt.toISOString()
+    : null;
+}
+
 export function toPublicDTO(
   subprofile: Subprofile,
   items: SubprofileItem[],
@@ -480,6 +497,7 @@ export function toPublicDTO(
     coverCrop: cropFor(subprofile.coverUrl, crops),
     accent: subprofile.accent,
     availability: subprofile.availability,
+    availabilityUpdatedAt: availabilityUpdatedAtOf(subprofile),
     ctaLabel: subprofile.ctaLabel,
     ctaUrl: subprofile.ctaUrl,
     linkVisibility: subprofile.linkVisibility,
@@ -561,6 +579,7 @@ export function toCardDTO(
     tagline: subprofile.tagline,
     accent: subprofile.accent,
     availability: subprofile.availability,
+    availabilityUpdatedAt: availabilityUpdatedAtOf(subprofile),
     socialCount,
     tags,
     followerCount,

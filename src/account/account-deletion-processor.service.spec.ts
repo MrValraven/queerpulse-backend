@@ -17,6 +17,7 @@ import { User } from '../users/entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { releaseHandleWithin } from '../handles/handles.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { PersonaStorageKey } from '../storage/entities/persona-storage-key.entity';
 
 // Step 2d releases erased personas' handles through the registry's own
 // release. Partial mock: every other export stays real.
@@ -86,6 +87,13 @@ describe('AccountDeletionProcessorService storage erasure', () => {
   let failingEntities: Set<unknown>;
   /** Rows the stubbed `event_photos` repository reports as still referencing. */
   let eventPhotoRows: Array<{ id: string; storageKey: string }>;
+  /** T17: the persona-scoped keys the registry says this member uploaded. */
+  let personaRegistryRows: Array<{ storageKey: string }>;
+  /** T17: persona rows the stubbed `subprofiles` repository reports as still
+   *  showing an image (a persona handed over to a co-owner). */
+  let personaRows: Array<Record<string, unknown>>;
+  /** T17: the registry repository's delete, per erased persona key. */
+  let personaRegistryDelete: jest.Mock;
 
   const dueRequest = (): DeletionRequest =>
     ({
@@ -110,6 +118,9 @@ describe('AccountDeletionProcessorService storage erasure', () => {
   beforeEach(() => {
     failingEntities = new Set();
     eventPhotoRows = [{ id: 'photo-1', storageKey: GATHERING_PHOTO_KEY }];
+    personaRegistryRows = [];
+    personaRows = [];
+    personaRegistryDelete = jest.fn().mockResolvedValue({ affected: 1 });
 
     // One chainable stub covering both query builders the transaction uses: the
     // `addSelect('user.email')` read and the suppression `insert().orIgnore()`.
@@ -164,7 +175,16 @@ describe('AccountDeletionProcessorService storage erasure', () => {
           metadata: { tableName: 'stub_table' },
           find: jest
             .fn()
-            .mockResolvedValue(entity === EventPhoto ? eventPhotoRows : []),
+            .mockResolvedValue(
+              entity === EventPhoto
+                ? eventPhotoRows
+                : entity === PersonaStorageKey
+                  ? personaRegistryRows
+                  : entity === Subprofile
+                    ? personaRows
+                    : [],
+            ),
+          delete: personaRegistryDelete,
           createQueryBuilder: jest.fn().mockReturnValue(arrayQueryBuilder),
         };
       }),
@@ -239,6 +259,67 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       await service.processDueDeletions();
 
       expect(deletedKeys()).toContain(GATHERING_PHOTO_KEY);
+    });
+  });
+
+  // T17: an unlinked persona's images live under `persona/<uuid>/<uuid><ext>`,
+  // which the per-prefix listing cannot find; the registry names their
+  // uploader until the user row goes.
+  describe('persona-scoped images the member uploaded', () => {
+    const SEGMENT = '0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b';
+    const UNUSED_PERSONA_KEY = `persona/${SEGMENT}/5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d.jpg`;
+    const SHOWN_PERSONA_KEY = `persona/${SEGMENT}/6b5c4d3e-2f1a-4b0c-9d8e-7f6a5b4c3d2e.png`;
+
+    beforeEach(() => {
+      personaRegistryRows = [
+        { storageKey: UNUSED_PERSONA_KEY },
+        { storageKey: SHOWN_PERSONA_KEY },
+      ];
+    });
+
+    it('reads them before the transaction, while the uploader column still names the member', async () => {
+      await service.processDueDeletions();
+
+      const registryRead = (dataSource.getRepository.mock.calls as unknown[][])
+        .map(([entity], index) => ({ entity, index }))
+        .find(({ entity }) => entity === PersonaStorageKey);
+      expect(registryRead).toBeDefined();
+      const readOrder =
+        dataSource.getRepository.mock.invocationCallOrder[
+          registryRead?.index ?? -1
+        ] ?? -1;
+      expect(readOrder).toBeLessThan(firstCallOrder(dataSource.transaction));
+    });
+
+    it('erases the ones nothing shows, with their registry rows, and keeps one a handed-over persona still shows', async () => {
+      personaRows = [
+        {
+          id: 'persona-1',
+          avatarUrl: SHOWN_PERSONA_KEY,
+          displayName: 'Nightform',
+          handle: 'nightform',
+        },
+      ];
+
+      await service.processDueDeletions();
+
+      expect(deletedKeys()).toContain(UNUSED_PERSONA_KEY);
+      expect(deletedKeys()).not.toContain(SHOWN_PERSONA_KEY);
+      expect(personaRegistryDelete).toHaveBeenCalledWith({
+        storageKey: UNUSED_PERSONA_KEY,
+      });
+      expect(personaRegistryDelete).not.toHaveBeenCalledWith({
+        storageKey: SHOWN_PERSONA_KEY,
+      });
+    });
+
+    it('deletes none of them when the reference check degraded', async () => {
+      failingEntities.add(Profile);
+
+      await service.processDueDeletions();
+
+      expect(deletedKeys()).not.toContain(UNUSED_PERSONA_KEY);
+      expect(personaRegistryDelete).not.toHaveBeenCalled();
     });
   });
 

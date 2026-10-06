@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, HttpException } from '@nestjs/common';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { MessageRequestsService } from './message-requests.service';
@@ -21,6 +21,9 @@ function makeChain(
   options: {
     staff?: string[];
     identityBlocked?: boolean;
+    /** ENG-447: the member's block of a persona, carried across its unlink
+     *  to the identity it speaks through now. */
+    identityBlockCarried?: boolean;
     personBlockedUserIds?: string[];
     suspendedUserIds?: string[];
     existingConversations?: SavedRow[];
@@ -83,8 +86,14 @@ function makeChain(
     postMessage,
   });
   const blockFilter = {
-    isIdentityBlocked: jest.fn(() =>
-      Promise.resolve(Boolean(options.identityBlocked)),
+    identityBlockKind: jest.fn(() =>
+      Promise.resolve(
+        options.identityBlocked
+          ? 'direct'
+          : options.identityBlockCarried
+            ? 'carried'
+            : null,
+      ),
     ),
     blockedUserIds: jest.fn((userId: string, candidateUserIds: string[]) =>
       Promise.resolve(
@@ -515,5 +524,70 @@ describe('identityEnquiryContactability', () => {
     await expect(
       service.identityEnquiryContactability('customer-user', BUSINESS),
     ).resolves.toMatchObject({ canDeliver: true, blockedReason: null });
+  });
+});
+
+// ENG-447: a block carried from a persona that went unlinked refuses exactly
+// as before, and reads to the blocker the way a mailbox nobody answers for
+// does. Read as a block, it would tell anyone who blocked a named persona
+// which pseudonym it became.
+describe('a block carried across a persona unlink', () => {
+  /** Every answer the member can see: the read and the send's refusal. */
+  async function memberViewOf(chain: ReturnType<typeof makeChain>) {
+    const contactability = await chain.service.identityEnquiryContactability(
+      'customer-user',
+      BUSINESS,
+    );
+    const refusal: unknown = await chain.service
+      .deliverEnquiryToIdentity('customer-user', BUSINESS, 'A question here.')
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    return {
+      contactability,
+      refusal:
+        refusal instanceof HttpException
+          ? { status: refusal.getStatus(), body: refusal.getResponse() }
+          : refusal,
+    };
+  }
+
+  it('reads to the blocker exactly as a mailbox nobody answers for', async () => {
+    const carriedView = await memberViewOf(
+      makeChain({ identityBlockCarried: true }),
+    );
+    const unansweredView = await memberViewOf(makeChain({ staff: [] }));
+
+    expect(carriedView).toEqual(unansweredView);
+    expect(carriedView.contactability).toMatchObject({
+      canDeliver: false,
+      blockedReason: 'IDENTITY_HAS_NO_STAFF',
+    });
+  });
+
+  it('opens no thread and posts nothing', async () => {
+    const chain = makeChain({ identityBlockCarried: true });
+
+    await expect(
+      chain.service.deliverEnquiryToIdentity(
+        'customer-user',
+        BUSINESS,
+        'A question here.',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'IDENTITY_HAS_NO_STAFF' } });
+    expect(chain.postMessage).not.toHaveBeenCalled();
+    expect(chain.savedConversations).toHaveLength(0);
+  });
+
+  it('keeps the direct block answer when the member also blocked the current identity', async () => {
+    const { service } = makeChain({
+      identityBlocked: true,
+      identityBlockCarried: true,
+    });
+
+    await expect(
+      service.identityEnquiryContactability('customer-user', BUSINESS),
+    ).resolves.toMatchObject({ canDeliver: false, blockedReason: 'blocked' });
   });
 });

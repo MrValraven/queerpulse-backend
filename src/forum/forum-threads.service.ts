@@ -982,7 +982,7 @@ export class ForumThreadsService {
       );
     }
     const [byline, op] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
     ]);
     // The role gate above already proved the caller is a moderator.
@@ -1056,7 +1056,7 @@ export class ForumThreadsService {
       );
     }
     const [byline, op] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
     ]);
     // The role gate above already proved the caller is a moderator.
@@ -1119,7 +1119,7 @@ export class ForumThreadsService {
       );
     }
     const [byline, op] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
     ]);
     return toForumThreadResponse(
@@ -1267,7 +1267,7 @@ export class ForumThreadsService {
       includeUnpublished: viewerIsModerator,
     });
     const [byline, op, isSubscribed, unreadByThread] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, viewerId),
       this.resolveOp(thread.id, viewerId, viewerIsModerator),
       this.subscriptions.isSubscribed(thread.id, viewerId),
       // Read BEFORE the member's own `POST /threads/:slug/read` lands, which is
@@ -1420,6 +1420,7 @@ export class ForumThreadsService {
     const coAuthorId = await this.resolveCoAuthorId(
       input.coAuthorHandle,
       authorId,
+      { communityId, crossPosted },
     );
     // No `publishAt` means publish now. The column has no database default on
     // purpose (a `DEFAULT now()` would silently publish a scheduled thread the
@@ -1501,7 +1502,7 @@ export class ForumThreadsService {
       await this.runThreadFanOut(thread, input.body);
     }
     const [byline, polls, photoRows] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, authorId),
       // Read back rather than rebuilt from `resolvedPoll`/`photos`: the echo
       // then carries the ids the client needs to vote and the ordering the
       // database actually stored, instead of a hand-assembled copy that could
@@ -1703,6 +1704,10 @@ export class ForumThreadsService {
     if (isForumWide) {
       await this.topicPostLink.linkThread(thread, body);
     }
+    // PRD-408. The credited co-author hears about the credit here, with the
+    // rest of the announcement, so a scheduled or pending thread names nobody
+    // before it is visible. Never throws (see `notifyCoAuthorOfCredit`).
+    await this.notifyCoAuthorOfCredit(thread, isAuthorMasked);
     // No body, nothing to have mentioned anybody in. Guarded rather than left
     // to `extractMentions` returning nothing, so the intent is on the page.
     // An erased author's opening post went with their account, so a null
@@ -1718,6 +1723,58 @@ export class ForumThreadsService {
       threadSlug: thread.slug,
       ...(isForumWide ? { excerpt: truncateCharacters(body, 140) } : {}),
     });
+  }
+
+  /**
+   * PRD-408. Tells the member credited as the thread's co-author that their
+   * name is now on it, with a link to the thread, where the "remove my name"
+   * action lives. The notice is the consent step: there is no acceptance
+   * before the credit shows, and removing the name is the opt-out.
+   *
+   * Held to the thread's audience (`forumThreadAudience`): a co-author who
+   * cannot open the thread (a block either way with the author, or a gated
+   * roster `create` would already have refused) gets no row, so the title
+   * never reaches somebody the thread would 404 for. Blocks are covered there
+   * and in `resolveCoAuthorId`, so `create` gets NO `actorId` argument: that
+   * argument would only add the mute gate, and a mute must not silence the
+   * one notice that tells a member their name is on somebody's thread. The
+   * payload still carries `actorId` so the row names the author, except on a
+   * masked byline (anonymous or QueerPulse Official), the same rule the
+   * mention fan-out above follows.
+   *
+   * Best-effort and NEVER THROWS: it runs after the thread has committed, on
+   * the create path and on the read path that pays a deferred fan-out.
+   */
+  private async notifyCoAuthorOfCredit(
+    thread: ForumThread,
+    isAuthorMasked: boolean,
+  ): Promise<void> {
+    const { authorId, coAuthorId } = thread;
+    if (authorId === null || coAuthorId === null || coAuthorId === authorId) {
+      return;
+    }
+    try {
+      const audience = await this.mentions.forumThreadAudience(thread.slug, [
+        coAuthorId,
+      ]);
+      if (!audience.has(coAuthorId)) return;
+      await this.notifications.create(
+        coAuthorId,
+        NotificationType.ForumCoAuthorCredit,
+        {
+          source: 'forum',
+          threadSlug: thread.slug,
+          threadTitle: thread.title,
+          ...(isAuthorMasked ? {} : { actorId: authorId }),
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Co-author credit notice failed for forum thread ${thread.slug}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**
@@ -1962,7 +2019,7 @@ export class ForumThreadsService {
     }
     await this.notifyAuthorOfReview(thread, approve, note);
     const [byline, op] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
     ]);
     return toForumThreadResponse(
@@ -2438,7 +2495,7 @@ export class ForumThreadsService {
       this.funding.emitDeadlineChanged(thread, preparedFunding, user.userId);
     }
 
-    const byline = await this.bylineRefs(thread);
+    const byline = await this.bylineRefs(thread, user.userId);
     // `opPost` (oldest post) is the OP; reuse it rather than a second lookup.
     const myVote = opPost
       ? ((
@@ -2507,7 +2564,7 @@ export class ForumThreadsService {
     });
     await this.funding.endAsk(thread, user.userId, reason, new Date());
     const [byline, op, isSubscribed] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModerator),
       this.subscriptions.isSubscribed(thread.id, user.userId),
     ]);
@@ -2643,7 +2700,7 @@ export class ForumThreadsService {
     }
 
     const [byline, op, isSubscribed] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
       this.subscriptions.isSubscribed(thread.id, user.userId),
     ]);
@@ -2711,7 +2768,7 @@ export class ForumThreadsService {
     await this.threads.save(thread);
 
     const [byline, op, isSubscribed] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
       this.subscriptions.isSubscribed(thread.id, user.userId),
     ]);
@@ -2755,7 +2812,7 @@ export class ForumThreadsService {
     }
 
     const [byline, op] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
     ]);
     return toForumThreadResponse(
@@ -2815,7 +2872,7 @@ export class ForumThreadsService {
     }
 
     const [byline, op, isSubscribed] = await Promise.all([
-      this.bylineRefs(thread),
+      this.bylineRefs(thread, user.userId),
       this.resolveOp(thread.id, user.userId, isModeratorRole(user.role)),
       this.subscriptions.isSubscribed(thread.id, user.userId),
     ]);
@@ -3069,6 +3126,7 @@ export class ForumThreadsService {
   private async resolveCoAuthorId(
     handle: string | undefined,
     authorId: string,
+    readGate: { communityId: string | null; crossPosted: boolean },
   ): Promise<string | null> {
     const normalized = handle?.trim();
     if (!normalized) return null;
@@ -3092,6 +3150,22 @@ export class ForumThreadsService {
     if (coAuthorId === authorId) {
       throw new BadRequestException(
         'You are already credited on this thread, so you cannot be its co-author',
+      );
+    }
+    // A co-author who could not open the thread (a gated community or space
+    // they are off the roster of) would carry their name on it with no way to
+    // see it or take it off, and the credit notice holds itself to the same
+    // readers. The gate is `assertVisibleOr404`'s own community check,
+    // cross-posting included. It reads like an unknown handle for the same
+    // reason a block does: a distinct message would let the author probe who
+    // is on which roster.
+    if (
+      readGate.communityId !== null &&
+      !readGate.crossPosted &&
+      (await this.isCommunityHiddenFrom(readGate.communityId, coAuthorId))
+    ) {
+      throw new BadRequestException(
+        'No member with that handle to credit as co-author',
       );
     }
     return coAuthorId;
@@ -3149,21 +3223,34 @@ export class ForumThreadsService {
    * one `MemberLookup` call, one place where a byline is assembled, and no echo
    * that can quietly forget the co-author. The batched page mapper
    * (`toThreadResponses`) does the same job across a whole page.
+   *
+   * PRD-408: the co-author half is dropped for a viewer who has a block with
+   * that co-author, in either direction, the same severance every forum read
+   * applies to authors. The block read runs beside the profile read and only
+   * when the thread has a co-author, so an ordinary thread costs nothing more.
    */
   private async bylineRefs(
     thread: ForumThread,
+    viewerId: string,
   ): Promise<{ author: MemberRef | null; coAuthor: MemberRef | null }> {
     // A null author (erased, ENG-494) resolves to no ref, so the response
     // mapper renders `UNKNOWN_AUTHOR`.
     const ids = [thread.authorId, thread.coAuthorId].filter(
       (userId): userId is string => userId !== null,
     );
-    const refs = await new MemberLookup(this.profiles).byUserIds(ids);
+    const [refs, blockedCoAuthorIds] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds(ids),
+      // An empty viewer (a caller with nobody signed in) has no blocks.
+      thread.coAuthorId && viewerId
+        ? this.blockFilter.blockedUserIds(viewerId, [thread.coAuthorId])
+        : Promise.resolve(new Set<string>()),
+    ]);
     return {
       author: thread.authorId ? (refs.get(thread.authorId) ?? null) : null,
-      coAuthor: thread.coAuthorId
-        ? (refs.get(thread.coAuthorId) ?? null)
-        : null,
+      coAuthor:
+        thread.coAuthorId && !blockedCoAuthorIds.has(thread.coAuthorId)
+          ? (refs.get(thread.coAuthorId) ?? null)
+          : null,
     };
   }
 
@@ -3743,6 +3830,17 @@ export class ForumThreadsService {
       ),
     ];
     const threadIds = rows.map((t) => t.id);
+    // PRD-408: the page's co-authors, for ONE block read beside the profile
+    // read. A co-author the viewer has a block with (either direction) is
+    // left off that thread's byline; empty for a page with no co-written
+    // thread, which skips the read altogether.
+    const coAuthorIds = [
+      ...new Set(
+        rows
+          .map((t) => t.coAuthorId)
+          .filter((userId): userId is string => userId !== null),
+      ),
+    ];
 
     const [
       authors,
@@ -3751,6 +3849,7 @@ export class ForumThreadsService {
       unreadByThread,
       pollByThread,
       fundingByThread,
+      blockedCoAuthorIds,
     ] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
       this.posts.find({ where: { isOp: true, threadId: In(threadIds) } }),
@@ -3772,6 +3871,11 @@ export class ForumThreadsService {
       ),
       // Funding & Grants: one `thread_id IN (...)` read for the page.
       this.funding.rowsByThread(threadIds),
+      // `listRecentByCommunity` maps with an empty viewer, which has no
+      // blocks and must not reach a uuid column as ''.
+      viewerId && coAuthorIds.length
+        ? this.blockFilter.blockedUserIds(viewerId, coAuthorIds)
+        : Promise.resolve(new Set<string>()),
     ]);
     const opByThread = new Map(opPosts.map((post) => [post.threadId, post]));
 
@@ -3812,9 +3916,12 @@ export class ForumThreadsService {
         // Absent from the map = no watermark for this viewer on this thread,
         // which is `null` (no unread information), never 0.
         unreadByThread.get(t.id) ?? null,
-        // Resolved out of the same batch as the author above; null both when
-        // the thread has no co-author and when that member has no profile.
-        t.coAuthorId ? (authors.get(t.coAuthorId) ?? null) : null,
+        // Resolved out of the same batch as the author above; null when the
+        // thread has no co-author, when that member has no profile, and when
+        // the viewer has a block with them (PRD-408).
+        t.coAuthorId && !blockedCoAuthorIds.has(t.coAuthorId)
+          ? (authors.get(t.coAuthorId) ?? null)
+          : null,
         op ? (photosByPost.get(op.id) ?? []) : [],
         // Absent from the map = this thread carries no poll, which is nearly
         // every thread.

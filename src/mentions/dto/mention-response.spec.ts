@@ -60,6 +60,30 @@ describe('toMentionResponse, Go together chats (PRD-423)', () => {
     });
   });
 
+  it('shows no avatar for a Go together chat mention, whose URL names the account', () => {
+    const response = toMentionResponse(
+      mentionRow({
+        source: 'message',
+        conversationId: 'conversation-1',
+        isGoTogetherChat: true,
+      }),
+      {
+        ...RESOLVERS,
+        profileByUserId: new Map([
+          [
+            ANA.userId,
+            {
+              ...ANA,
+              avatarUrl: 'https://lh3.googleusercontent.com/a/ana.png',
+            },
+          ],
+        ]),
+      },
+    );
+
+    expect(response.actor?.avatarUrl).toBeNull();
+  });
+
   it('keeps the full name and link for a mention in an ordinary chat', () => {
     const response = toMentionResponse(
       mentionRow({ source: 'message', conversationId: 'conversation-1' }),

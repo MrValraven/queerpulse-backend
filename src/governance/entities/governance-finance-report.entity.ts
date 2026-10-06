@@ -90,6 +90,10 @@ export interface FinancePartner {
   amount: number;
   scopeKey?: string;
   scope?: string;
+  /** `manual` once an admin saved this partner through the Finances editor,
+   *  which publishes it even while it keeps its translated `scopeKey`. Absent
+   *  on seeded rows and on rows saved before the marker existed. */
+  source?: FinanceMetricSource;
 }
 
 /**

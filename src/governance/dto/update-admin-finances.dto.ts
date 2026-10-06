@@ -9,8 +9,10 @@ import {
   IsString,
   Max,
   MaxLength,
+  Matches,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -86,7 +88,10 @@ export class FinanceEventNoteEditDto {
 }
 
 /** One disclosed restricted-grant partner. `scope` is the admin's own words
- *  for what the money is restricted to ("the Mental Health Fund"). */
+ *  for what the money is restricted to ("the Mental Health Fund"). For a
+ *  partner whose translated restriction the admin left untouched, the editor
+ *  sends its `scopeKey`, so the key survives the save (`replacePartners`).
+ *  One of the two is required. */
 export class FinancePartnerEditDto {
   @IsString()
   @MinLength(1)
@@ -97,10 +102,20 @@ export class FinancePartnerEditDto {
   @Min(0)
   amount!: number;
 
+  // Required unless a `scopeKey` stands in for it; checked whenever it is sent.
+  @ValidateIf(
+    (partner: FinancePartnerEditDto) =>
+      partner.scopeKey === undefined || partner.scope !== undefined,
+  )
   @IsString()
   @MinLength(1)
   @MaxLength(120)
-  scope!: string;
+  scope?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^governance:sections\.finances\.partnerScope\.[A-Za-z0-9]+$/)
+  scopeKey?: string;
 }
 
 /** The operational reserve: what is held and what the target is, in euros. */

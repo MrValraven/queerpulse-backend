@@ -10,7 +10,8 @@ import {
   UPLOAD_KINDS,
   UploadKind,
 } from '../storage/upload-kinds';
-import { storageKeyOwnerId } from '../storage/storage-key';
+import { isPersonaScopedKey, storageKeyOwnerId } from '../storage/storage-key';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { MyMediaItem, MyMediaListResponse } from './dto/my-media-item.dto';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import type { MediaReference } from '../media-references/media-reference.types';
@@ -24,6 +25,9 @@ export class MyMediaService {
     private readonly storage: StorageService,
     private readonly references: MediaReferenceResolver,
     private readonly mediaCrops: MediaCropService,
+    // T17: images the caller uploaded to an unlinked persona live under
+    // persona-scoped keys that no per-member prefix reaches.
+    private readonly personaImageKeys: PersonaImageKeysService,
   ) {}
 
   async listMine(userId: string): Promise<MyMediaListResponse> {
@@ -53,6 +57,20 @@ export class MyMediaService {
         }
         continuationToken = page.nextContinuationToken ?? undefined;
       } while (continuationToken);
+    }
+    // T17: plus the persona-scoped images the registry records as the
+    // caller's. Labelled with the kind the bytes were first stored as; a
+    // row that does not know it reads as a work image, the kind a persona
+    // item image has.
+    for (const object of await this.personaImageKeys.listObjectsUploadedBy(
+      userId,
+    )) {
+      listed.push({
+        key: object.key,
+        kind: object.uploadKind ?? 'work-image',
+        size: object.size,
+        lastModified: object.lastModified,
+      });
     }
 
     const listedKeys = listed.map((entry) => entry.key);
@@ -107,7 +125,13 @@ export class MyMediaService {
     // storageKeyOwnerId returns null for any malformed/unknown key, so this one
     // check covers both "not a valid key" and "not yours". Stays FIRST: a
     // caller must never learn where somebody else's upload is referenced.
-    if (storageKeyOwnerId(key) !== userId) {
+    // T17: a persona-scoped key names no uploader; its registry row does.
+    const isPersonaScoped = isPersonaScopedKey(key);
+    const uploaderUserId = isPersonaScoped
+      ? ((await this.personaImageKeys.findRegistration(key))?.uploadedById ??
+        null)
+      : storageKeyOwnerId(key);
+    if (uploaderUserId !== userId) {
       throw new ForbiddenException('That upload is not yours to delete.');
     }
 
@@ -130,5 +154,8 @@ export class MyMediaService {
     }
 
     await this.storage.deleteObjectByReference(key);
+    if (isPersonaScoped) {
+      await this.personaImageKeys.unregister([key]);
+    }
   }
 }

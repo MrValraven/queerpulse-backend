@@ -17,7 +17,12 @@ import {
   UPLOAD_KIND_SPECS,
 } from '../storage/upload-kinds';
 import { IMAGE_UPLOAD_TYPES } from '../storage/upload-content-types';
-import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
+import {
+  PERSONA_SCOPED_PREFIX,
+  parseStorageKey,
+  storageKeyOwnerId,
+} from '../storage/storage-key';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
@@ -82,11 +87,15 @@ const MAX_LIMIT = 200;
  *  Private message prefixes are left out: DM attachments are served only to
  *  conversation participants (`PRIVATE_MESSAGE_PREFIXES`), so the console never
  *  lists, signs, inspects or deletes them. */
-const KNOWN_PREFIXES: ReadonlySet<string> = new Set(
-  Object.values(UPLOAD_KIND_SPECS)
+const KNOWN_PREFIXES: ReadonlySet<string> = new Set([
+  ...Object.values(UPLOAD_KIND_SPECS)
     .map((spec) => spec.prefix)
     .filter((prefix) => !PRIVATE_MESSAGE_PREFIXES.has(prefix)),
-);
+  // T17: unlinked persona images (`persona/<uuid>/<uuid><ext>`). Not an
+  // upload kind (nothing presigns under it), but staff browse and moderate
+  // it like the rest.
+  PERSONA_SCOPED_PREFIX,
+]);
 
 /** `KNOWN_PREFIXES` in lexical order: the order the "All" browse walks them,
  *  which matches the order a whole-bucket listing would have shown them. */
@@ -113,6 +122,8 @@ export class AdminMediaService {
     private readonly profiles: Repository<Profile>,
     private readonly references: MediaReferenceResolver,
     private readonly modAudit: ModAuditService,
+    // T17: a persona-scoped key names no uploader; its registry row does.
+    private readonly personaImageKeys: PersonaImageKeysService,
   ) {}
 
   /** Resolve a kind name to its storage prefix (with trailing slash), or
@@ -152,15 +163,18 @@ export class AdminMediaService {
       (object) => !isPrivateMessageKey(object.key),
     );
 
-    const uploaderById = await this.resolveUploaders(
+    const uploaderIdByKey = await this.uploaderIdsFor(
       objects.map((object) => object.key),
     );
+    const uploaderById = await this.resolveUploaders([
+      ...new Set(uploaderIdByKey.values()),
+    ]);
     const { references: referencesByKey, degraded } =
       await this.references.resolve(objects.map((object) => object.key));
 
     const mapped: AdminMediaObjectDTO[] = await Promise.all(
       objects.map(async (object) => {
-        const uploaderId = storageKeyOwnerId(object.key);
+        const uploaderId = uploaderIdByKey.get(object.key) ?? null;
         return {
           key: object.key,
           size: object.size,
@@ -272,7 +286,14 @@ export class AdminMediaService {
     objects: StoredObject[];
     nextContinuationToken: string | null;
   }> {
-    const objects = await this.storage.listUserObjects(uploaderId);
+    // T17: plus the persona-scoped images the registry records as theirs,
+    // which no per-member prefix reaches.
+    const objects: StoredObject[] = [
+      ...(await this.storage.listUserObjects(uploaderId)),
+      ...(await this.personaImageKeys.listObjectsUploadedBy(uploaderId)).map(
+        ({ key, size, lastModified }) => ({ key, size, lastModified }),
+      ),
+    ];
     objects.sort((first, second) => {
       const firstTime = first.lastModified ? Date.parse(first.lastModified) : 0;
       const secondTime = second.lastModified
@@ -388,6 +409,7 @@ export class AdminMediaService {
         key,
       );
       await this.storage.deleteObjectByKey(key);
+      await this.personaImageKeys.forgetDeletedKeys([key]);
       return;
     }
 
@@ -405,19 +427,29 @@ export class AdminMediaService {
     }
 
     await this.storage.deleteObjectByKey(key);
+    // T17: a persona-scoped key's registry row (and any crop on it) goes
+    // with the object, so `GET /files/*` 404s it.
+    await this.personaImageKeys.forgetDeletedKeys([key]);
+  }
+
+  /** The uploader of each key on this page: the key's own segment for a
+   *  member-scoped key, the registry row (one batched read) for a
+   *  persona-scoped one (T17). Keys with no known uploader are absent. */
+  private async uploaderIdsFor(keys: string[]): Promise<Map<string, string>> {
+    const uploaderIdByKey = await this.personaImageKeys.uploaderIdsFor(keys);
+    for (const key of keys) {
+      const ownerId = storageKeyOwnerId(key);
+      if (ownerId !== null) {
+        uploaderIdByKey.set(key, ownerId);
+      }
+    }
+    return uploaderIdByKey;
   }
 
   /** One batched profile lookup for every distinct owner id on this page. */
   private async resolveUploaders(
-    keys: string[],
+    ownerIds: string[],
   ): Promise<Map<string, AdminMediaUploaderDTO>> {
-    const ownerIds = [
-      ...new Set(
-        keys
-          .map((key) => storageKeyOwnerId(key))
-          .filter((id): id is string => id !== null),
-      ),
-    ];
     if (ownerIds.length === 0) {
       return new Map();
     }

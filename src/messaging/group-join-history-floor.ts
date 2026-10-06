@@ -67,6 +67,26 @@ export function groupJoinHistoryFloorCoversPredicate(
 }
 
 /**
+ * PRD-400: the in-memory twin of `groupJoinHistoryFloorCoversPredicate`, kept
+ * beside the SQL so the two change together. It holds for a GROUP seat with a
+ * join floor when `createdAt` sits at or before that floor. The spec
+ * stand-ins of the attachment routes model the SQL with it.
+ */
+export function isCoveredByGroupJoinHistoryFloor(
+  createdAt: Date,
+  seat: {
+    historyFloorAt: Date | null | undefined;
+    isGroupConversation: boolean;
+  },
+): boolean {
+  return (
+    seat.isGroupConversation &&
+    seat.historyFloorAt != null &&
+    createdAt.getTime() <= seat.historyFloorAt.getTime()
+  );
+}
+
+/**
  * PRD-400: `response` as a member whose join floor covers its reply parent
  * reads it. The quote becomes the missing-parent quote `buildReplyTo` renders
  * when the parent is not in its map (`deleted`, no snippet, sender name,

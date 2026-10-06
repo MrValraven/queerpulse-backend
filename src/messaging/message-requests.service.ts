@@ -462,15 +462,22 @@ export class MessageRequestsService {
     fromUserId: string,
     toIdentityId: string,
   ): Promise<IdentityEnquiryBlockedReason | null> {
-    const [isIdentityBlocked, contact] = await Promise.all([
-      this.blockFilter.isIdentityBlocked(fromUserId, toIdentityId),
+    const [identityBlockKind, contact] = await Promise.all([
+      this.blockFilter.identityBlockKind(fromUserId, toIdentityId),
       this.core.evaluateIdentityContact(fromUserId, toIdentityId),
     ]);
-    if (isIdentityBlocked) {
+    if (identityBlockKind === 'direct') {
       return 'blocked';
     }
     if (contact.refusal) {
       return contact.refusal;
+    }
+    // ENG-447: a block carried from a persona that went unlinked refuses as
+    // a persona nobody answers for, the answer anyone gets from such a
+    // persona. Read as a block, it would tell the member which pseudonym the
+    // persona they blocked became.
+    if (identityBlockKind === 'carried') {
+      return 'IDENTITY_HAS_NO_STAFF';
     }
     const blockedStaffUserIds = await this.blockFilter.blockedUserIds(
       fromUserId,

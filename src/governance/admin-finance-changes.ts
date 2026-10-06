@@ -8,6 +8,9 @@ import { GovernanceFinanceChange } from './entities/governance-finance-change.en
 export interface AdminFinanceChangeDTO {
   id: string;
   actor: MemberRef | null;
+  /** The report the change was made on; null on rows from before it was
+   *  recorded. */
+  reportId: string | null;
   field: string;
   oldValue: string | null;
   newValue: string | null;
@@ -22,6 +25,7 @@ export function toAdminFinanceChange(
   return {
     id: change.id,
     actor,
+    reportId: change.reportId,
     field: change.field,
     oldValue: change.oldValue,
     newValue: change.newValue,

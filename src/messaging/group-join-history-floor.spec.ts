@@ -1,6 +1,7 @@
 import { EntityManager } from 'typeorm';
 import {
   groupJoinHistoryFloorCoversPredicate,
+  isCoveredByGroupJoinHistoryFloor,
   readGroupJoinHistoryFloor,
   withJoinFlooredReplyQuote,
 } from './group-join-history-floor';
@@ -53,6 +54,48 @@ describe('group join history floor (PRD-400)', () => {
       expect(
         groupJoinHistoryFloorCoversPredicate('parent.created_at', 'seat'),
       ).not.toContain('cleared_at');
+    });
+  });
+
+  describe('isCoveredByGroupJoinHistoryFloor', () => {
+    const joinFloor = new Date('2026-03-01T10:00:00.122Z');
+
+    it('covers a row at or before the floor of a group seat', () => {
+      const groupSeat = {
+        historyFloorAt: joinFloor,
+        isGroupConversation: true,
+      };
+
+      expect(isCoveredByGroupJoinHistoryFloor(joinFloor, groupSeat)).toBe(true);
+      expect(
+        isCoveredByGroupJoinHistoryFloor(
+          new Date('2026-03-01T09:00:00.000Z'),
+          groupSeat,
+        ),
+      ).toBe(true);
+      expect(
+        isCoveredByGroupJoinHistoryFloor(
+          new Date('2026-03-01T10:00:00.123Z'),
+          groupSeat,
+        ),
+      ).toBe(false);
+    });
+
+    it('covers nothing for a seat with no floor or a direct thread seat', () => {
+      const earlier = new Date('2026-03-01T09:00:00.000Z');
+
+      expect(
+        isCoveredByGroupJoinHistoryFloor(earlier, {
+          historyFloorAt: null,
+          isGroupConversation: true,
+        }),
+      ).toBe(false);
+      expect(
+        isCoveredByGroupJoinHistoryFloor(earlier, {
+          historyFloorAt: joinFloor,
+          isGroupConversation: false,
+        }),
+      ).toBe(false);
     });
   });
 

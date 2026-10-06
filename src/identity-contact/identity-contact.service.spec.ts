@@ -41,6 +41,9 @@ function makeContact(
     companyStaff?: string[];
     extraStaff?: Record<string, string[]>;
     identityBlocked?: boolean;
+    /** ENG-447: the member's block of the persona before it went unlinked,
+     *  carried to the identity it speaks through now. */
+    identityBlockCarried?: boolean;
     coldMessageRows?: Array<{ conversationId: string; createdAt: Date }>;
     listingEnquiryRows?: Array<{ listingId: string; createdAt: Date }>;
     personBlockedUserIds?: string[];
@@ -136,8 +139,14 @@ function makeContact(
   });
   const personBlockedUserIds = options.personBlockedUserIds ?? [];
   const blockFilter = {
-    isIdentityBlocked: jest.fn(() =>
-      Promise.resolve(Boolean(options.identityBlocked)),
+    identityBlockKind: jest.fn(() =>
+      Promise.resolve(
+        options.identityBlocked
+          ? 'direct'
+          : options.identityBlockCarried
+            ? 'carried'
+            : null,
+      ),
     ),
     blockedUserIds: jest.fn((userId: string, candidateUserIds: string[]) =>
       Promise.resolve(
@@ -281,6 +290,83 @@ describe('persona contact', () => {
       'customer-user',
       'Are you taking bookings for December?',
     );
+  });
+
+  // ENG-447: an unlink deletes the persona's identity, and the next contact
+  // mints a fresh one (`PERSONA_IDENTITY` here). A thread the member had with
+  // the named persona sits on the retired identity's pair key, so it is no
+  // existing conversation with the pseudonymous persona.
+  it('treats a thread with the retired identity as no conversation, and opens a new one on the first message', async () => {
+    const retiredPairKey = ['profile-customer-user', 'retired-persona-identity']
+      .sort()
+      .join(':');
+    const { personaController, savedConversations } = makeContact({
+      existingConversations: [
+        {
+          id: 'named-persona-thread',
+          pairKey: retiredPairKey,
+          initiatorUserId: 'customer-user',
+          openedAt: new Date(),
+        },
+      ],
+    });
+
+    await expect(
+      personaController.getContact(customer, PERSONA_ID),
+    ).resolves.toMatchObject({
+      canMessage: true,
+      existingConversationId: null,
+    });
+    const sent = await personaController.send(customer, PERSONA_ID, {
+      body: 'Are you taking bookings for December?',
+    });
+
+    expect(sent.conversationId).not.toBe('named-persona-thread');
+    expect(savedConversations.map(({ pairKey }) => pairKey)).toEqual([
+      retiredPairKey,
+      ['profile-customer-user', PERSONA_IDENTITY].sort().join(':'),
+    ]);
+  });
+
+  // ENG-447 fix round 3: a block carried from the named persona refuses the
+  // pseudonym as before, and the blocker sees what anyone sees of a persona
+  // nobody answers for. Read as a block, it would tell anyone who blocked
+  // the named persona which pseudonym it became.
+  it('shows the blocker of the named persona exactly what a persona nobody answers for shows', async () => {
+    const memberViewOf = async (
+      contact: ReturnType<typeof makeContact>,
+    ): Promise<unknown> => {
+      const panel = await contact.personaController.getContact(
+        customer,
+        PERSONA_ID,
+      );
+      const refusal: unknown = await contact.personaController
+        .send(customer, PERSONA_ID, { body: 'Are you taking bookings?' })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      return {
+        panel,
+        refusal:
+          refusal instanceof HttpException
+            ? { status: refusal.getStatus(), body: refusal.getResponse() }
+            : refusal,
+      };
+    };
+
+    const carried = makeContact({ identityBlockCarried: true });
+    const carriedView = await memberViewOf(carried);
+    const unansweredView = await memberViewOf(
+      makeContact({ extraStaff: { [PERSONA_IDENTITY]: [] } }),
+    );
+
+    expect(carriedView).toEqual(unansweredView);
+    expect(carriedView).toMatchObject({
+      panel: { canMessage: false, unavailableReason: 'unstaffed' },
+      refusal: { body: { code: 'IDENTITY_HAS_NO_STAFF' } },
+    });
+    expect(carried.postMessage).not.toHaveBeenCalled();
   });
 
   it('never names the humans behind the persona in either answer', async () => {

@@ -437,6 +437,31 @@ describe('BlocksExportContributor', () => {
     });
   });
 
+  it('PRD-423: exports a matched chat block with no user id', async () => {
+    const contributor = new BlocksExportContributor(
+      repositoryWith<Block>({
+        find: jest.fn().mockResolvedValue([
+          {
+            id: 'block-3',
+            blockerId: 'user-1',
+            blockedId: 'other-3',
+            reason: null,
+            matchedConversationId: 'chat-1',
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          },
+        ]),
+      }),
+      repositoryWith<IdentityBlock>({ find: jest.fn().mockResolvedValue([]) }),
+    );
+
+    const [block] = (await contributor.buildContribution('user-1')) as Array<
+      Record<string, unknown>
+    >;
+
+    expect(block).not.toHaveProperty('blockedUserId');
+    expect(block!.isMatchedChatBlock).toBe(true);
+  });
+
   it('merges member and identity blocks into one createdAt ASC list', async () => {
     const contributor = new BlocksExportContributor(
       repositoryWith<Block>({
@@ -494,6 +519,37 @@ describe('BlocksExportContributor', () => {
       },
     ]);
   });
+
+  // ENG-447: a block carried across a persona going unlinked exports as the
+  // member's Blocked list shows it.
+  it('exports a carried identity block under the retired identity and the named persona name', async () => {
+    const contributor = new BlocksExportContributor(
+      repositoryWith<Block>({ find: jest.fn().mockResolvedValue([]) }),
+      repositoryWith<IdentityBlock>({
+        find: jest.fn().mockResolvedValue([
+          {
+            id: 'carried-block-1',
+            blockerUserId: 'user-1',
+            identityId: null,
+            blockedSubprofileId: 'persona-1',
+            retiredIdentityId: 'retired-identity-1',
+            blockedNameSnapshot: 'Robin Nightform',
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+          },
+        ]),
+      }),
+    );
+
+    await expect(contributor.buildContribution('user-1')).resolves.toEqual([
+      {
+        type: 'identity',
+        id: 'carried-block-1',
+        identityId: 'retired-identity-1',
+        blockedName: 'Robin Nightform',
+        createdAt: '2026-02-01T00:00:00.000Z',
+      },
+    ]);
+  });
 });
 
 describe('ReportsFiledExportContributor', () => {
@@ -538,6 +594,38 @@ describe('ReportsFiledExportContributor', () => {
       where: { reporterId: 'user-1' },
       order: { createdAt: 'ASC' },
     });
+  });
+
+  it('PRD-423: names no user id for a member the reporter shares a matched chat with', async () => {
+    const memberReport = {
+      ...reportRow,
+      id: 'report-2',
+      subjectType: ReportSubjectType.Member,
+      subjectId: 'user-matched',
+    } as Report;
+    const plainMemberReport = {
+      ...reportRow,
+      id: 'report-3',
+      subjectType: ReportSubjectType.Member,
+      subjectId: 'user-known',
+    } as Report;
+    const query = jest.fn().mockResolvedValue([{ userId: 'user-matched' }]);
+    const contributor = new ReportsFiledExportContributor({
+      find: jest.fn().mockResolvedValue([memberReport, plainMemberReport]),
+      manager: { query },
+    } as unknown as Repository<Report>);
+
+    const [matched, plain] = (await contributor.buildContribution(
+      'user-1',
+    )) as Array<Record<string, unknown>>;
+
+    expect(matched).not.toHaveProperty('subjectId');
+    expect(matched!.isMatchedChatReport).toBe(true);
+    expect(plain!.subjectId).toBe('user-known');
+    expect(query).toHaveBeenCalledWith(expect.any(String), [
+      'user-1',
+      ['user-matched', 'user-known'],
+    ]);
   });
 
   it("exports the member's side and leaves out the moderation record", async () => {

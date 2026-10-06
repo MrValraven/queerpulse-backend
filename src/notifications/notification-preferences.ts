@@ -358,6 +358,12 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // queue. It arrives at most once per open escalation, so there is no volume
     // here for a switch to control.
     NotificationType.BanEvasionEscalationRaised,
+    // PRD-408. Somebody put this member's name on their forum thread as its
+    // co-author. A consent notice: it is how the member learns their name is
+    // on somebody else's words, and the "remove my name" action it links to
+    // is their opt-out, so a volume switch that silenced it would leave the
+    // credit standing unseen. It arrives once per credited thread.
+    NotificationType.ForumCoAuthorCredit,
 
     // 2. Account lifecycle.
     NotificationType.PromotedToMember,

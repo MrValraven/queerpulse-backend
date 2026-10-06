@@ -7,6 +7,7 @@ import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Report } from '../reports/entities/report.entity';
+import { ReportsModule } from '../reports/reports.module';
 import { MessageEvidenceHoldSweepService } from './message-evidence-hold-sweep.service';
 import { PreferencesModule } from '../preferences/preferences.module';
 import { SocialModule } from '../social/social.module';
@@ -33,6 +34,9 @@ import {
   MessageRequestController,
 } from './messaging.controller';
 import { MessagingCoreService } from './messaging-core.service';
+import { MatchedChatAvatarController } from './matched-chat-avatar.controller';
+import { MatchedChatMembersController } from './matched-chat-members.controller';
+import { MatchedChatMembersService } from './matched-chat-members.service';
 import { MessagingService } from './messaging.service';
 
 /**
@@ -110,8 +114,19 @@ import { MessagingService } from './messaging.service';
     // send's `stickerId` at write time. No cycle: `StickersModule` imports
     // nothing from `MessagingModule`.
     StickersModule,
+    // Exports `ReportsService`, which `MatchedChatMembersService` files a
+    // matched chat member report through (PRD-423). No cycle: `ReportsModule`
+    // imports only `StorageModule` and `IdentitiesModule` from the app.
+    ReportsModule,
   ],
-  controllers: [ConversationsController, MessageRequestController],
+  controllers: [
+    ConversationsController,
+    MessageRequestController,
+    // PRD-423: member actions addressed by a matched chat's member key.
+    MatchedChatMembersController,
+    // PRD-423: a matched chat member's avatar, streamed by member key.
+    MatchedChatAvatarController,
+  ],
   providers: [
     MessagingCoreService,
     ConversationsService,
@@ -128,6 +143,8 @@ import { MessagingService } from './messaging.service';
     ConversationMediaService,
     // PRD-361: hourly release of expired evidence holds on deleted messages.
     MessageEvidenceHoldSweepService,
+    // PRD-423: resolves a matched chat's member keys for its member actions.
+    MatchedChatMembersService,
   ],
   exports: [
     MessagingService,

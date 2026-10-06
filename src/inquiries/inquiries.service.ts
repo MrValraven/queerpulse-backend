@@ -1,10 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { normalizePage, paginate } from '../common/pagination';
+import { Listing, ListingStatus } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateInquiryDto } from './dto/create-inquiry.dto';
 import { ListInquiriesQuery } from './dto/list-inquiries.query';
@@ -12,6 +13,7 @@ import {
   InquiryAckDTO,
   InquiryDTO,
   InquiryListDTO,
+  InquiryListingDTO,
   toInquiryAckDTO,
   toInquiryDTO,
 } from './inquiries-response';
@@ -32,7 +34,13 @@ import {
  * with `isPriority`, which sorts it above every other waiting inquiry, and its
  * arrival rings the staff bell through the admin-queue registry, so the
  * Contact page's promise that safety messages are read first is something the
- * inbox actually does.
+ * inbox actually does. It rings on its own `safety_inquiries` queue, so the
+ * bell names it as a safety message and the console counts it apart from the
+ * intake forms.
+ *
+ * A `listing_correction` (PRD-434) is a Contact message about one directory
+ * listing. It stores the listing's ref, and the admin list resolves that ref
+ * to the listing so staff can open it from the row.
  */
 @Injectable()
 export class InquiriesService {
@@ -41,6 +49,10 @@ export class InquiriesService {
     private readonly inquiries: Repository<Inquiry>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    // PRD-434. Read-only: resolves a correction's stored ref to the listing
+    // for the admin row's link.
+    @InjectRepository(Listing)
+    private readonly listings: Repository<Listing>,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
@@ -49,11 +61,15 @@ export class InquiriesService {
    * triage list.
    *
    * A Contact message whose `topic` is in `PRIORITY_INQUIRY_TOPICS` is stored
-   * as priority and announced on the `intakes` queue, the bell row that deep
-   * links to /admin/intakes where this inbox lives, and reaches the same
+   * as priority and announced on the `safety_inquiries` queue, whose bell row
+   * deep links to /admin/intakes where this inbox lives, and reaches the same
    * admin tier the list's own guard allows. The announce runs after the save
    * commits and is best effort (it catches and logs), so a bell failure never
    * fails the sender's submit.
+   *
+   * `listingRef` is kept only on a `listing_correction`; any other kind drops
+   * it, so a stray field can never make a press request look like a listing
+   * correction in the console.
    */
   async create(dto: CreateInquiryDto): Promise<InquiryAckDTO> {
     const isPriority =
@@ -70,12 +86,14 @@ export class InquiriesService {
         orgName: dto.orgName ?? null,
         status: 'new',
         isPriority,
+        listingRef:
+          dto.kind === 'listing_correction' ? (dto.listingRef ?? null) : null,
       }),
     );
 
     if (isPriority) {
       await this.adminQueueNotifications.announce(
-        AdminQueueKey.Intakes,
+        AdminQueueKey.SafetyInquiries,
         inquiry.id,
       );
     }
@@ -94,6 +112,41 @@ export class InquiriesService {
     const ids = [...new Set(handlerIds.filter((id): id is string => !!id))];
     if (ids.length === 0) return new Map<string, MemberRef>();
     return new MemberLookup(this.profiles).byUserIds(ids);
+  }
+
+  /**
+   * Batch-resolve the listing refs on a page of corrections (PRD-434). ONE
+   * query for the whole page, and none when the page carries no ref. A ref
+   * that no listing has any more simply does not resolve.
+   */
+  private async resolveListings(
+    listingRefs: (string | null)[],
+  ): Promise<Map<string, InquiryListingDTO>> {
+    const refs = [
+      ...new Set(listingRefs.filter((ref): ref is string => !!ref)),
+    ];
+    if (refs.length === 0) return new Map<string, InquiryListingDTO>();
+    const rows = await this.listings.find({
+      where: { ref: In(refs) },
+      select: {
+        ref: true,
+        name: true,
+        slug: true,
+        status: true,
+        isHiddenByOwner: true,
+      },
+    });
+    return new Map(
+      rows.map((row) => [
+        row.ref,
+        {
+          ref: row.ref,
+          name: row.name,
+          slug: row.slug,
+          isPublic: row.status === ListingStatus.Live && !row.isHiddenByOwner,
+        },
+      ]),
+    );
   }
 
   /**
@@ -132,13 +185,15 @@ export class InquiriesService {
 
     const [pageResult, unhandledCount] = await Promise.all([
       paginate(queryBuilder, page, async (rows) => {
-        const refs = await this.resolveHandlers(
-          rows.map((row) => row.handledById),
-        );
+        const [refs, listings] = await Promise.all([
+          this.resolveHandlers(rows.map((row) => row.handledById)),
+          this.resolveListings(rows.map((row) => row.listingRef)),
+        ]);
         return rows.map((row) =>
           toInquiryDTO(
             row,
             row.handledById ? (refs.get(row.handledById) ?? null) : null,
+            row.listingRef ? (listings.get(row.listingRef) ?? null) : null,
           ),
         );
       }),
@@ -192,10 +247,14 @@ export class InquiriesService {
     inquiry.status = status;
 
     const saved = await this.inquiries.save(inquiry);
-    const refs = await this.resolveHandlers([saved.handledById]);
+    const [refs, listings] = await Promise.all([
+      this.resolveHandlers([saved.handledById]),
+      this.resolveListings([saved.listingRef]),
+    ]);
     return toInquiryDTO(
       saved,
       saved.handledById ? (refs.get(saved.handledById) ?? null) : null,
+      saved.listingRef ? (listings.get(saved.listingRef) ?? null) : null,
     );
   }
 }

@@ -75,10 +75,12 @@ export interface PushPayload {
   vibrate?: number[];
   requireInteraction?: boolean;
   silent?: boolean;
-  // Optional localization hint. The backend stays language-neutral — `title`/
-  // `body` above are always the English fallback a sender must still set. The
-  // service worker resolves `titleKey`/`bodyKey` against its bundled EN/PT
-  // catalog (queerpulse/src/pushMessages.ts) in the recipient's language,
+  // Optional localization hint. A sender sets `title`/`body` above as the
+  // English fallback. `PushPreviewPrivacyService` renders them in Portuguese
+  // for a `pt` member from the same keys (`rich-push-copy.ts`, PRD-325), since
+  // iOS prints the plain fields as sent. The service worker resolves
+  // `titleKey`/`bodyKey` against its bundled EN/PT catalog
+  // (queerpulse/src/pushMessages.ts) in the recipient's language,
   // interpolating `params`, and falls back to plain title/body otherwise.
   // Field shape MUST match the frontend `DirectMessagePush.l10n` exactly
   // (lockstep contract) or the SW validator drops it silently.

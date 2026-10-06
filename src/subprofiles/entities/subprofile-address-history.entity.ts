@@ -48,7 +48,10 @@ export class SubprofileAddressHistory {
   @Column({ type: 'uuid' })
   subprofileId!: string;
 
-  @ManyToOne(() => Subprofile, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Subprofile, {
+    onDelete: 'CASCADE',
+    onUpdate: 'CASCADE',
+  })
   @JoinColumn({ name: 'subprofile_id' })
   subprofile!: Subprofile;
 

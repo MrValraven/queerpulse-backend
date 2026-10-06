@@ -7,6 +7,10 @@ import { User } from '../users/entities/user.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Message } from '../messaging/entities/message.entity';
 import {
+  groupJoinHistoryFloorCoversPredicate,
+  isCoveredByGroupJoinHistoryFloor,
+} from '../messaging/group-join-history-floor';
+import {
   describeDirectThreadSeats,
   isCoveredByMailboxStaffFloor,
   isSeatExcludedFromMailbox,
@@ -15,6 +19,7 @@ import {
   seatExcludedFromMailboxPredicate,
 } from '../messaging/mailbox-seats';
 import { FilesController } from './files.controller';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService } from './storage.service';
 
 const PRESIGNED_DOWNLOAD =
@@ -32,6 +37,8 @@ const MESSAGE_DOCUMENT_KEY = `message-documents/${USER_SEGMENT}/${FILE_SEGMENT}.
 
 const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
 const EXPECTED_HISTORY_FLOOR_CLAUSE = `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
+// PRD-400: the requester's group join floor.
+const EXPECTED_JOIN_FLOOR_CLAUSE = `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
 // ENG-401: the requester's `leftAt` read ceiling, pinned as literal SQL.
 const EXPECTED_LEFT_AT_CEILING_CLAUSE =
   '(participant.left_at IS NULL OR message.created_at <= participant.left_at)';
@@ -57,6 +64,7 @@ describe('FilesController', () => {
     getExists: jest.Mock;
   };
   let messages: { createQueryBuilder: jest.Mock };
+  let personaImageKeys: { findServingRegistration: jest.Mock };
   let response: { redirect: jest.Mock; setHeader: jest.Mock };
 
   beforeEach(() => {
@@ -92,10 +100,15 @@ describe('FilesController', () => {
       createQueryBuilder: jest.fn().mockReturnValue(messageQueryBuilder),
     };
     response = { redirect: jest.fn(), setHeader: jest.fn() };
+    // Default: no persona-scoped key is registered.
+    personaImageKeys = {
+      findServingRegistration: jest.fn().mockResolvedValue(null),
+    };
     controller = new FilesController(
       storage as unknown as StorageService,
       users as unknown as Repository<User>,
       messages as unknown as Repository<Message>,
+      personaImageKeys as unknown as PersonaImageKeysService,
     );
   });
 
@@ -363,6 +376,14 @@ describe('FilesController', () => {
           } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {
             // Task 13h: no seat in this fixture holds a history floor.
             rows = rows.filter(({ seat }) => seat.historyFloorAt == null);
+          } else if (clause === EXPECTED_JOIN_FLOOR_CLAUSE) {
+            rows = rows.filter(
+              ({ attachment, seat }) =>
+                !isCoveredByGroupJoinHistoryFloor(attachment.createdAt, {
+                  historyFloorAt: seat.historyFloorAt,
+                  isGroupConversation: groupThreadIds.has(seat.conversationId),
+                }),
+            );
           } else {
             throw new Error(`Unrecognised participant clause: ${clause}`);
           }
@@ -592,6 +613,15 @@ describe('FilesController', () => {
                   isOfficialConversation: false,
                 }),
             );
+          } else if (clause === EXPECTED_JOIN_FLOOR_CLAUSE) {
+            // PRD-400: both threads here are direct, so no join floor applies.
+            rows = rows.filter(
+              ({ attachment, seat }) =>
+                !isCoveredByGroupJoinHistoryFloor(attachment.createdAt, {
+                  historyFloorAt: seat.historyFloorAt,
+                  isGroupConversation: false,
+                }),
+            );
           } else {
             throw new Error(`Unrecognised participant clause: ${clause}`);
           }
@@ -670,6 +700,195 @@ describe('FilesController', () => {
       expect(EXPECTED_HISTORY_FLOOR_CLAUSE).toContain(
         `"floor_staff_identity"."kind" <> 'profile'`,
       );
+    });
+  });
+
+  // PRD-400: a member who took a seat in an existing group reads it from the
+  // moment they joined, and the bytes follow the history. A photo or document
+  // posted at or before the seat's join floor (`history_floor_at` on a group
+  // seat) is refused exactly as a non-participant is, and a later one is
+  // served. A "clear chat" writes `cleared_at` alone, so it keeps its access.
+  // The stand-in answers the join floor clause through its in-memory twin
+  // (`isCoveredByGroupJoinHistoryFloor`) and throws on any clause it does not
+  // know.
+  describe('message attachments below a group join floor (PRD-400)', () => {
+    // The uploader of every attachment below. The key route admits an
+    // uploader before the participant query, so the seats under test are
+    // other members'.
+    const UPLOADER = 'eeeeeeee-0000-4000-8000-000000000001';
+    const FOUNDER = 'eeeeeeee-0000-4000-8000-000000000002';
+    const LATE_JOINER = 'eeeeeeee-0000-4000-8000-000000000003';
+    const JOIN_FLOOR = new Date('2026-09-15T12:00:00.000Z');
+    const LATER_CLEAR = new Date('2026-09-15T15:00:00.000Z');
+    const PRE_JOIN_IMAGE_KEY = `message-images/${UPLOADER}/ffffffff-0000-4000-8000-000000000001.jpg`;
+    const PRE_JOIN_DOCUMENT_KEY = `message-documents/${UPLOADER}/ffffffff-0000-4000-8000-000000000002.pdf`;
+    const POST_JOIN_IMAGE_KEY = `message-images/${UPLOADER}/ffffffff-0000-4000-8000-000000000003.jpg`;
+    const attachments = [
+      {
+        url: PRE_JOIN_IMAGE_KEY,
+        createdAt: new Date('2026-09-15T11:00:00.000Z'),
+      },
+      {
+        url: PRE_JOIN_DOCUMENT_KEY,
+        createdAt: new Date('2026-09-15T11:30:00.000Z'),
+      },
+      {
+        url: POST_JOIN_IMAGE_KEY,
+        createdAt: new Date('2026-09-15T13:00:00.000Z'),
+      },
+    ];
+    let seats: Array<{
+      userId: string;
+      clearedAt: Date | null;
+      historyFloorAt: Date | null;
+    }>;
+
+    function seatOf(userId: string) {
+      return seats.find((seat) => seat.userId === userId)!;
+    }
+
+    beforeEach(() => {
+      seats = [
+        // Seated when the group was created: no join floor.
+        { userId: UPLOADER, clearedAt: null, historyFloorAt: null },
+        { userId: FOUNDER, clearedAt: null, historyFloorAt: null },
+        // Seated later: the join floor sits in both columns.
+        {
+          userId: LATE_JOINER,
+          clearedAt: JOIN_FLOOR,
+          historyFloorAt: JOIN_FLOOR,
+        },
+      ];
+      const parameters: Record<string, unknown> = {};
+      const clauses: string[] = [];
+      const record = (clause: string, clauseParameters?: object) => {
+        clauses.push(clause);
+        Object.assign(parameters, clauseParameters);
+        return messageQueryBuilder;
+      };
+      messageQueryBuilder.innerJoin.mockImplementation(
+        (
+          _table: string,
+          _alias: string,
+          _condition: string,
+          joinParameters?: object,
+        ) => {
+          Object.assign(parameters, joinParameters);
+          return messageQueryBuilder;
+        },
+      );
+      messageQueryBuilder.where.mockImplementation(record);
+      messageQueryBuilder.andWhere.mockImplementation(record);
+      messageQueryBuilder.getExists.mockImplementation(() => {
+        const userId = parameters.userId as string;
+        const attachmentForms = parameters.attachmentForms as string[];
+        let rows = attachments.flatMap((attachment) =>
+          seats
+            .filter((seat) => seat.userId === userId)
+            .map((seat) => ({ attachment, seat })),
+        );
+        for (const clause of clauses) {
+          if (
+            clause === "message.attachment ->> 'url' IN (:...attachmentForms)"
+          ) {
+            rows = rows.filter(({ attachment }) =>
+              attachmentForms.includes(attachment.url),
+            );
+          } else if (
+            clause === 'message.deletedAt IS NULL' ||
+            clause === 'message.attachment IS NOT NULL' ||
+            // Groups are outside the mailbox seat rules.
+            clause ===
+              `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':userId')}` ||
+            // No seat in this fixture has left the group.
+            clause === EXPECTED_LEFT_AT_CEILING_CLAUSE
+          ) {
+            continue;
+          } else if (clause === EXPECTED_HISTORY_FLOOR_CLAUSE) {
+            rows = rows.filter(
+              ({ attachment, seat }) =>
+                !isCoveredByMailboxStaffFloor(attachment.createdAt, {
+                  historyFloorAt: seat.historyFloorAt,
+                  identityKind: IdentityKind.Profile,
+                  isGroupConversation: true,
+                  isOfficialConversation: false,
+                }),
+            );
+          } else if (clause === EXPECTED_JOIN_FLOOR_CLAUSE) {
+            rows = rows.filter(
+              ({ attachment, seat }) =>
+                !isCoveredByGroupJoinHistoryFloor(attachment.createdAt, {
+                  historyFloorAt: seat.historyFloorAt,
+                  isGroupConversation: true,
+                }),
+            );
+          } else {
+            throw new Error(`Unrecognised participant clause: ${clause}`);
+          }
+        }
+        return Promise.resolve(rows.length > 0);
+      });
+    });
+
+    it('refuses a late joiner a photo posted before they joined, as a non-participant is refused', async () => {
+      await expect(
+        serve(PRE_JOIN_IMAGE_KEY, { userId: LATE_JOINER }),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('refuses a late joiner a document posted before they joined', async () => {
+      await expect(
+        serve(PRE_JOIN_DOCUMENT_KEY, { userId: LATE_JOINER }),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.openObjectStream).not.toHaveBeenCalled();
+    });
+
+    it('serves the late joiner a photo posted after they joined', async () => {
+      await serve(POST_JOIN_IMAGE_KEY, { userId: LATE_JOINER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('serves the pre-join photo to a member seated when the group began', async () => {
+      await serve(PRE_JOIN_IMAGE_KEY, { userId: FOUNDER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('still serves a founding member who cleared the chat the photo the clear covers', async () => {
+      seatOf(FOUNDER).clearedAt = LATER_CLEAR;
+
+      await serve(PRE_JOIN_IMAGE_KEY, { userId: FOUNDER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('keeps the join floor in place after the late joiner clears the chat, and serves what came after it', async () => {
+      seatOf(LATE_JOINER).clearedAt = LATER_CLEAR;
+
+      await expect(
+        serve(PRE_JOIN_IMAGE_KEY, { userId: LATE_JOINER }),
+      ).rejects.toThrow(NotFoundException);
+      await serve(POST_JOIN_IMAGE_KEY, { userId: LATE_JOINER });
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('carries the group-scoped join floor as an inclusive comparison in SQL on the requester seat', async () => {
+      await serve(POST_JOIN_IMAGE_KEY, { userId: LATE_JOINER });
+
+      const clauses = messageQueryBuilder.andWhere.mock.calls.map(
+        (call: unknown[]) => call[0] as string,
+      );
+      expect(clauses).toContain(EXPECTED_JOIN_FLOOR_CLAUSE);
+      expect(EXPECTED_JOIN_FLOOR_CLAUSE).toContain(
+        'message.created_at <= participant.history_floor_at',
+      );
+      expect(EXPECTED_JOIN_FLOOR_CLAUSE).toContain(
+        '"join_floor_group"."id" = participant.conversation_id',
+      );
+      expect(EXPECTED_JOIN_FLOOR_CLAUSE).not.toContain('cleared_at');
     });
   });
 
@@ -831,6 +1050,56 @@ describe('FilesController', () => {
         'Cache-Control',
         'private, no-store',
       );
+    });
+  });
+
+  // T17: an unlinked persona's images live under `persona/<uuid>/<uuid><ext>`,
+  // which names nobody; the registry row stands in for the owner segment.
+  describe('persona-scoped keys', () => {
+    const PERSONA_KEY = `persona/${FILE_SEGMENT}/${FILE_SEGMENT}.jpg`;
+
+    it('redirects a registered key without a session, from one registry read', async () => {
+      personaImageKeys.findServingRegistration.mockResolvedValue({
+        uploadedById: USER_SEGMENT,
+        uploaderStatus: 'active',
+      });
+
+      await serve(PERSONA_KEY, null);
+
+      expect(personaImageKeys.findServingRegistration).toHaveBeenCalledWith(
+        PERSONA_KEY,
+      );
+      expect(users.findOne).not.toHaveBeenCalled();
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('404s a key no persona holds', async () => {
+      await expect(serve(PERSONA_KEY, LOGGED_IN)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it("404s to other members while the key's uploader is suspended", async () => {
+      personaImageKeys.findServingRegistration.mockResolvedValue({
+        uploadedById: USER_SEGMENT,
+        uploaderStatus: 'suspended',
+      });
+
+      await expect(serve(PERSONA_KEY, OTHER_MEMBER)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('still serves the suspended uploader their own image', async () => {
+      personaImageKeys.findServingRegistration.mockResolvedValue({
+        uploadedById: USER_SEGMENT,
+        uploaderStatus: 'suspended',
+      });
+
+      await serve(PERSONA_KEY, LOGGED_IN);
+
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
   });
 });

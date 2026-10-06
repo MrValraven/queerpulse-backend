@@ -477,6 +477,27 @@ describe('IdentitiesService.ensureIdentityFor', () => {
     expect(identities.save).toHaveBeenCalledTimes(1);
   });
 
+  // ENG-447: an unlink deletes the persona's identity and gives the persona
+  // a new id, so its next conversation mints a fresh identity for that id.
+  it('mints a fresh persona identity under the new persona id after an unlink retired the old one', async () => {
+    const { service, identities } = makeService();
+    identities.findOne.mockResolvedValue(null);
+    identities.save.mockImplementation((row: Record<string, unknown>) =>
+      Promise.resolve({ ...row, id: 'identity-fresh' }),
+    );
+
+    await expect(
+      service.ensureIdentityFor(IdentityKind.Subprofile, 'persona-fresh'),
+    ).resolves.toMatchObject({
+      id: 'identity-fresh',
+      kind: IdentityKind.Subprofile,
+      subprofileId: 'persona-fresh',
+    });
+    expect(identities.findOne).toHaveBeenCalledWith({
+      where: { subprofileId: 'persona-fresh' },
+    });
+  });
+
   it('re-queries and returns the winner when the save loses a unique-index race', async () => {
     const { service, identities } = makeService();
     identities.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({

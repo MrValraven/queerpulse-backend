@@ -24,7 +24,13 @@ import {
   LISTING_MENU_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
-import { isStorageKey, parseStorageKey } from './storage-key';
+import {
+  PERSONA_SCOPED_PREFIX,
+  isPersonaScopedExtension,
+  isPersonaScopedKey,
+  isStorageKey,
+  parseStorageKey,
+} from './storage-key';
 import {
   MAGIC_BYTE_PREFIX_LENGTH,
   attachmentContentDispositionForStorageKey,
@@ -274,7 +280,10 @@ export class StorageService {
     ownerUserId: string,
   ): Promise<string> {
     const kindSpec = parseStorageKey(sourceKey);
-    if (!kindSpec) {
+    // A persona-scoped key names no owner, and minting `persona/<userId>/…`
+    // from it would put a member's id under the one prefix that must never
+    // carry one.
+    if (!kindSpec || isPersonaScopedKey(sourceKey)) {
       throw new BadRequestException('Invalid storage key');
     }
     const extension = sourceKey.slice(sourceKey.lastIndexOf('.'));
@@ -290,6 +299,117 @@ export class StorageService {
       }),
     );
     return key;
+  }
+
+  /**
+   * T17: copies a member's own upload to a fresh PERSONA-SCOPED key
+   * (`persona/<uuid>/<uuid><ext>`, see `PERSONA_SCOPED_PREFIX`) inside the
+   * bucket and returns the new key. An unlinked persona's images live under
+   * that prefix so no published URL carries the uploader's user id. The
+   * source object is left in place: the caller decides what still points at
+   * it. Only an image key may be copied, since a persona holds images only.
+   * Throws when the source object is missing (`NoSuchKey`), which
+   * `isMissingObjectError` recognises.
+   *
+   * A persona-scoped SOURCE is accepted only with
+   * `allowsPersonaScopedSource`: the unlink gives every image a fresh key,
+   * including ones the persona showed while it was linked, and a persona
+   * copied from another persona never shares a key with it. Everywhere else
+   * a persona-scoped key is already where it belongs.
+   */
+  async copyObjectToPersonaScope(
+    sourceKey: string,
+    options: { allowsPersonaScopedSource?: boolean } = {},
+  ): Promise<string> {
+    const extension = sourceKey.slice(sourceKey.lastIndexOf('.'));
+    if (
+      !parseStorageKey(sourceKey) ||
+      (isPersonaScopedKey(sourceKey) && !options.allowsPersonaScopedSource) ||
+      !isPersonaScopedExtension(extension)
+    ) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const key = StorageService.mintPersonaScopedKey(extension);
+    const bucket = this.requireConfig('storage.bucket');
+    // A parsed key holds only lowercase prefixes, hex, dashes and a dot, so
+    // `CopySource` needs no URL encoding.
+    await this.storageClient().send(
+      new CopyObjectCommand({
+        Bucket: bucket,
+        CopySource: `${bucket}/${sourceKey}`,
+        Key: key,
+      }),
+    );
+    return key;
+  }
+
+  /**
+   * T17: `putServerObject` for an unlinked persona. The same policy applies
+   * (the kind's content types, byte cap and magic bytes), and the bytes land
+   * under a fresh persona-scoped key that names nobody. Persona feed import
+   * uses it for show and episode art.
+   */
+  async putPersonaServerObject(
+    kind: UploadKind,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<string> {
+    const typeSpec = StorageService.contentTypeTableFor(kind)[contentType];
+    if (!typeSpec || !isPersonaScopedExtension(typeSpec.extension)) {
+      throw new BadRequestException(`Unsupported content type: ${contentType}`);
+    }
+    const kindSpec = UPLOAD_KIND_SPECS[kind];
+    if (!kindSpec) {
+      throw new BadRequestException(`Unsupported upload kind: ${kind}`);
+    }
+    if (bytes.byteLength === 0 || bytes.byteLength > kindSpec.maxBytes) {
+      throw new BadRequestException(
+        `File too large for ${kind}: max ${kindSpec.maxBytes} bytes`,
+      );
+    }
+    if (
+      !magicBytesMatchContentType(
+        bytes.subarray(0, MAGIC_BYTE_PREFIX_LENGTH),
+        contentType,
+      )
+    ) {
+      throw new BadRequestException('File content does not match its type');
+    }
+    const key = StorageService.mintPersonaScopedKey(typeSpec.extension);
+    await this.storageClient().send(
+      new PutObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: key,
+        Body: bytes,
+        ContentType: contentType,
+        ContentLength: bytes.byteLength,
+      }),
+    );
+    return key;
+  }
+
+  /** Whether a bucket call failed because the object does not exist. */
+  static isMissingObjectError(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null) {
+      return false;
+    }
+    const candidate = error as {
+      name?: unknown;
+      Code?: unknown;
+      $metadata?: { httpStatusCode?: unknown };
+    };
+    return (
+      candidate.name === 'NoSuchKey' ||
+      candidate.name === 'NotFound' ||
+      candidate.Code === 'NoSuchKey' ||
+      candidate.$metadata?.httpStatusCode === 404
+    );
+  }
+
+  // Both segments random: the key says nothing about who uploaded the bytes
+  // or which persona holds them.
+  private static mintPersonaScopedKey(extension: string): string {
+    return `${PERSONA_SCOPED_PREFIX}/${randomUUID()}/${randomUUID()}${extension}`;
   }
 
   /**
@@ -559,6 +679,36 @@ export class StorageService {
         ? (response.NextContinuationToken ?? null)
         : null,
     };
+  }
+
+  /**
+   * T17: size and last-modified of ONE object, in the shape a bucket listing
+   * gives (`StoredObject`), or null when the object does not exist. A
+   * persona-scoped key cannot be listed by its uploader's prefix, so My
+   * uploads, the Art. 20 export and the admin console's uploader view read
+   * each registered one this way.
+   */
+  async describeObject(key: string): Promise<StoredObject | null> {
+    try {
+      const response = await this.storageClient().send(
+        new HeadObjectCommand({
+          Bucket: this.requireConfig('storage.bucket'),
+          Key: key,
+        }),
+      );
+      return {
+        key,
+        size: response.ContentLength ?? 0,
+        lastModified: response.LastModified
+          ? response.LastModified.toISOString()
+          : null,
+      };
+    } catch (error) {
+      if (StorageService.isMissingObjectError(error)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**

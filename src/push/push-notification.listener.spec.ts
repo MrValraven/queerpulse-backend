@@ -326,6 +326,32 @@ describe('PushNotificationListener', () => {
     expect(payload.l10n?.params).toEqual({ name: 'Ana' });
   });
 
+  it('sends no avatar icon for a Go together chat mention (PRD-423)', async () => {
+    const { listener, push } = build({
+      actorProfile: ACTOR,
+      conversationRow: {
+        id: 'conv-1',
+        eventMatchGroupId: 'group-1',
+        isGoTogetherChat: true,
+      },
+    });
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'message',
+          conversationId: 'conv-1',
+          isGoTogetherChat: true,
+        }),
+      ),
+    );
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload).not.toHaveProperty('icon');
+  });
+
   it('keeps the first name once the matched group row is gone (PRD-423)', async () => {
     const { listener, push } = build({
       actorProfile: ACTOR,

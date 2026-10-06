@@ -164,6 +164,13 @@ export class EnvironmentVariables {
   // write-once.
   @IsOptional() @IsString() BAN_EVASION_PEPPER?: string;
 
+  // PRD-423: the HMAC secret behind a matched Go together chat's opaque
+  // member keys (`messaging/matched-member-key.ts`). Optional: unset derives
+  // the keys from JWT_ACCESS_SECRET. Setting it decouples the keys from JWT
+  // rotation; changing it re-keys every matched chat, so earlier `@` mention
+  // tokens then render as raw text.
+  @IsOptional() @IsString() @MinLength(32) MATCHED_MEMBER_KEY_SECRET?: string;
+
   @IsOptional()
   @IsNumber()
   @Min(0)

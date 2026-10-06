@@ -31,6 +31,8 @@ import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
 import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { User } from '../users/entities/user.entity';
+import { PersonaStorageKey } from '../storage/entities/persona-storage-key.entity';
+import { isPersonaScopedKey } from '../storage/storage-key';
 import {
   EmailSuppression,
   hashSuppressedEmail,
@@ -324,6 +326,18 @@ export class AccountDeletionProcessorService {
     //     the request stays parked in `processing` before anything is deleted.
     await this.subprofileMembership.handOverCreatedPersonasFor(userId);
 
+    // 0d. T17: the persona-scoped images this member uploaded
+    //     (`persona/<uuid>/<uuid><ext>`). Their keys name nobody, so the
+    //     per-prefix listing step 4 uses cannot find them, and the registry
+    //     column that records the uploader is set null with the user row in
+    //     step 3. Read them now; step 4 erases the ones nothing references.
+    const personaStorageKeys = (
+      await this.dataSource.getRepository(PersonaStorageKey).find({
+        where: { uploadedById: userId },
+        select: { storageKey: true },
+      })
+    ).map((row) => row.storageKey);
+
     await this.dataSource.transaction(async (manager) => {
       // `addSelect('user.email')` re-includes the `select: false` email column:
       // the suppression row is keyed on `hashSuppressedEmail(user.email)`, so an
@@ -563,7 +577,7 @@ export class AccountDeletionProcessorService {
     //    item an operator (or the nightly orphan sweep) can clear. Correctness
     //    is unaffected.
     try {
-      await this.eraseUnreferencedStorageObjects(userId);
+      await this.eraseUnreferencedStorageObjects(userId, personaStorageKeys);
     } catch (err) {
       this.logger.error(
         `Storage object erasure failed for account ${userId} (DB erasure already committed): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
@@ -838,8 +852,21 @@ export class AccountDeletionProcessorService {
    * Per-object failures are counted rather than thrown, so one unhappy key
    * cannot leave the rest of a member's uploads behind.
    */
-  private async eraseUnreferencedStorageObjects(userId: string): Promise<void> {
-    const objects = await this.storage.listUserObjects(userId);
+  private async eraseUnreferencedStorageObjects(
+    userId: string,
+    personaStorageKeys: readonly string[] = [],
+  ): Promise<void> {
+    // T17: the member's persona-scoped images (read in step 0d) go through
+    // the same reference gate: one a handed-over persona still shows is
+    // kept, the rest are deleted with their registry rows.
+    const objects = [
+      ...(await this.storage.listUserObjects(userId)),
+      ...personaStorageKeys.map((key) => ({
+        key,
+        size: 0,
+        lastModified: null,
+      })),
+    ];
     if (objects.length === 0) {
       return;
     }
@@ -872,6 +899,11 @@ export class AccountDeletionProcessorService {
         }
         try {
           await this.storage.deleteObjectByKey(object.key);
+          if (isPersonaScopedKey(object.key)) {
+            await this.dataSource
+              .getRepository(PersonaStorageKey)
+              .delete({ storageKey: object.key });
+          }
           deletedCount += 1;
         } catch (err) {
           failedCount += 1;

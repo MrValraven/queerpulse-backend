@@ -30,6 +30,16 @@ export class Block {
   @Column({ type: 'text', nullable: true })
   reason!: string | null;
 
+  /**
+   * PRD-423: the matched Go together chat this block was placed from, by
+   * per-chat member key or from the group sheet; null for every ordinary
+   * block. The blocker knew that member by first name alone, so the block
+   * list names such a row by first name, with no slug, and unblocks it by
+   * id. No foreign key, so a deleted chat leaves the row anonymous.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  matchedConversationId!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

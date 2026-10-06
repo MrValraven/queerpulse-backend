@@ -8,6 +8,7 @@ import { messageMentionText } from '../common/mentions';
 import { MessageKind } from '../messaging/entities/message.entity';
 import { MessagesService } from '../messaging/messages.service';
 import type { MessageResponse } from '../messaging/message-response';
+import { matchedChatMemberKey } from '../messaging/matched-member-key';
 
 // ENG-400: a mention written inside a DM or group reaches only the
 // conversation's current participants, for every entity kind. The
@@ -56,8 +57,9 @@ function build(participantUserIds: string[]) {
   };
   const conversationParticipants = {
     find: jest.fn(
-      ({ where }: { where: { userId: FindOperator<string[]> } }) => {
-        const requestedUserIds = where.userId.value;
+      ({ where }: { where: { userId?: FindOperator<string[]> } }) => {
+        // PRD-423: the member-key lookup reads every seat, with no filter.
+        const requestedUserIds = where.userId?.value ?? participantUserIds;
         return Promise.resolve(
           participantUserIds
             .filter((userId) => requestedUserIds.includes(userId))
@@ -144,7 +146,7 @@ describe('MentionNotificationService.notify inside a conversation (ENG-400)', ()
     expect(notified).toEqual(new Set());
     // Every entity recipient went through the participant check.
     const [findArguments] = conversationParticipants.find.mock.calls[0]!;
-    expect(new Set(findArguments.where.userId.value)).toEqual(
+    expect(new Set(findArguments.where.userId?.value)).toEqual(
       new Set([
         'user-owner',
         'user-mod',
@@ -211,6 +213,58 @@ describe('MentionNotificationService.notify inside a conversation (ENG-400)', ()
       { ...messagePayload, entityKind: 'member', entityRef: 'owner' },
       'author-1',
     );
+  });
+
+  describe('PRD-423 (opaque member keys)', () => {
+    const matchedPayload = { ...messagePayload, isGoTogetherChat: true };
+    const anaKey = matchedChatMemberKey('conversation-1', 'user-ana');
+
+    it("notifies the seated member a matched chat's `@key` names", async () => {
+      const { service, notifications } = build(['author-1', 'user-ana']);
+
+      await service.notify(`see you @${anaKey}`, 'author-1', matchedPayload);
+
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['user-ana'],
+        NotificationType.Mention,
+        { ...matchedPayload, entityKind: 'member', entityRef: anaKey },
+        'author-1',
+      );
+    });
+
+    it('notifies nobody for a slug mention in a matched chat, and looks no slug up', async () => {
+      const { service, notifiedRecipients, userIdsForSlugs } = build([
+        'author-1',
+        'user-ana',
+      ]);
+      userIdsForSlugs.mockResolvedValue(new Map([['ana-sousa', 'user-ana']]));
+
+      await service.notify('see you @ana-sousa', 'author-1', matchedPayload);
+
+      expect(userIdsForSlugs).not.toHaveBeenCalled();
+      expect(notifiedRecipients()).toEqual([]);
+    });
+
+    it('resolves no key outside a matched chat', async () => {
+      const { service, notifiedRecipients } = build(['author-1', 'user-ana']);
+
+      await service.notify(`see you @${anaKey}`, 'author-1', messagePayload);
+
+      expect(notifiedRecipients()).toEqual([]);
+    });
+
+    it('resolves no key minted for another chat', async () => {
+      const { service, notifiedRecipients } = build(['author-1', 'user-ana']);
+      const otherChatKey = matchedChatMemberKey('conversation-2', 'user-ana');
+
+      await service.notify(
+        `see you @${otherChatKey}`,
+        'author-1',
+        matchedPayload,
+      );
+
+      expect(notifiedRecipients()).toEqual([]);
+    });
   });
 
   it('leaves a community-post entity mention unrestricted by conversation seats', async () => {

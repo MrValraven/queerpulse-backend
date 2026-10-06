@@ -134,8 +134,8 @@ export class VolunteeringController {
     description:
       'The opportunity detail. `isPoster` and `mySignup` are both false for ' +
       'an anonymous caller, who also gets an empty `team` and a null ' +
-      '`poster`. A signed-in caller is named only active members in no ' +
-      'block with them.',
+      '`poster`; `hasTeam` still says whether a team exists. A signed-in ' +
+      'caller is named only active members in no block with them.',
   })
   @ApiNotFoundResponse({ description: 'No opportunity with that slug.' })
   get(

@@ -57,7 +57,10 @@ export class Handle {
   @Column({ type: 'uuid', nullable: true })
   subprofileId!: string | null;
 
-  @ManyToOne(() => Subprofile, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Subprofile, {
+    onDelete: 'CASCADE',
+    onUpdate: 'CASCADE',
+  })
   @JoinColumn({ name: 'subprofile_id' })
   subprofile!: Subprofile | null;
 

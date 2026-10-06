@@ -28,10 +28,17 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 // so gating on `Suspended` covers both — there is no separate `Banned` status.
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
-import { parseStorageKey, storageKeyOwnerId } from './storage-key';
+import {
+  PERSONA_SCOPED_KIND_SPEC,
+  parseStorageKey,
+  storageKeyOwnerId,
+} from './storage-key';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 import { parseMessageAttachmentReference } from './message-attachment-reference';
 import {
+  findViewableMessageAttachment,
+  isMatchedChatUploaderWithheld,
   messageAttachmentRouteStorageKey,
   viewableMessageAttachmentQuery,
 } from './message-attachment-route';
@@ -41,6 +48,7 @@ import {
   inlineContentDispositionForStorageKey,
 } from './served-object';
 import { Message } from '../messaging/entities/message.entity';
+import { groupJoinHistoryFloorCoversPredicate } from '../messaging/group-join-history-floor';
 import {
   mailboxStaffHistoryFloorCoversPredicate,
   seatExcludedFromMailboxPredicate,
@@ -105,6 +113,9 @@ export class FilesController {
     // — a direct repository query, NOT an import of `MessagingModule`, so no
     // module cycle is introduced.
     @InjectRepository(Message) private readonly messages: Repository<Message>,
+    // T17: a persona-scoped key names no owner; its registry row says which
+    // persona holds it and whose upload it was.
+    private readonly personaImageKeys: PersonaImageKeysService,
   ) {}
 
   // Per-process memo of keys that have already passed the magic-byte check
@@ -192,6 +203,14 @@ export class FilesController {
         .andWhere(
           `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
         )
+        // PRD-400: a member who took a seat in an existing group reads it
+        // from the moment they joined, so a photo or document posted at or
+        // before their join floor is refused with the same 404. The floor is
+        // the seat's `history_floor_at`, which a later "clear chat" never
+        // moves, so clearing the chat still keeps its access.
+        .andWhere(
+          `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
+        )
         .getExists()
     );
   }
@@ -237,6 +256,35 @@ export class FilesController {
   }
 
   private readonly logger = new Logger(FilesController.name);
+
+  // T17: a persona-scoped key (`persona/<uuid>/<uuid><ext>`) is served only
+  // while `persona_storage_keys` names it: a copy whose transaction rolled
+  // back, or one whose persona was deleted, 404s like an unknown key. The
+  // suspension rule every user-scoped key gets from its middle segment is
+  // applied to the uploader the row records, with the same exemptions (the
+  // uploader and platform staff) and the same 404.
+  private async assertServablePersonaKey(
+    storageKey: string,
+    user: CurrentUserData | null,
+  ): Promise<void> {
+    // One read: the registry row joined to its uploader's status.
+    const registration =
+      await this.personaImageKeys.findServingRegistration(storageKey);
+    if (!registration) {
+      throw new NotFoundException();
+    }
+    const uploaderUserId = registration.uploadedById;
+    if (
+      !uploaderUserId ||
+      uploaderUserId === user?.userId ||
+      FilesController.isStaffViewer(user)
+    ) {
+      return;
+    }
+    if (registration.uploaderStatus === UserStatus.Suspended) {
+      throw new NotFoundException();
+    }
+  }
 
   // A missing object surfaces as `NoSuchKey` from GetObject and `NotFound` from
   // HeadObject; the SDK's `$metadata.httpStatusCode` covers both shapes.
@@ -371,17 +419,22 @@ export class FilesController {
   // never receives the storage key, which names the staff member who uploaded
   // it. The requester must be able to see that message
   // (`viewableMessageAttachmentQuery`: a seat in its conversation, the mailbox
-  // seat rules and the staff history floor), and every refusal is the same 404
-  // an unresolvable key gets. No session is a 401, as for every session-gated
-  // kind.
+  // seat rules, the staff history floor and the group join floor), and every
+  // refusal is the same 404 an unresolvable key gets. No session is a 401, as
+  // for every session-gated kind.
   //
   // The bytes are streamed through this service for an image as well as a
   // document. A 302 to a presigned GET would put the bucket key, owner segment
   // included, in the redirect's `Location`, which the browser exposes to the
-  // page and its developer tools. The uploader's account status is not
-  // consulted: the business sent the photo, and withholding it for one staff
-  // member's suspension would show the customer which of the business's
-  // photos came from the same person. A moderator takes a message down
+  // page and its developer tools. For a business, persona or company reply
+  // the uploader's account status is not consulted: the business sent the
+  // photo, and withholding it for one staff member's suspension would show
+  // the customer which of the business's photos came from the same person.
+  // PRD-423: a matched Go together chat renders every member's own photo or
+  // document by reference too, and there the bytes are the member's own
+  // media, so a suspended or banned uploader's are withheld from everyone
+  // but the uploader and platform staff, as the key route withholds them
+  // (`isMatchedChatUploaderWithheld`). A moderator takes a message down
   // through message moderation, which blanks the attachment on every read.
   private async serveMessageAttachment(
     messageId: string,
@@ -392,15 +445,24 @@ export class FilesController {
     if (!user) {
       throw new UnauthorizedException();
     }
-    const message = await viewableMessageAttachmentQuery(
-      this.messages,
-      messageId,
-      user.userId,
-    ).getOne();
-    const storageKey = message
-      ? messageAttachmentRouteStorageKey(message)
+    const found = await findViewableMessageAttachment(
+      viewableMessageAttachmentQuery(this.messages, messageId, user.userId),
+    );
+    const storageKey = found
+      ? messageAttachmentRouteStorageKey(found.message)
       : null;
     if (!storageKey) {
+      throw new NotFoundException();
+    }
+    if (
+      found &&
+      (await isMatchedChatUploaderWithheld(this.messages.manager, {
+        isInMatchedChat: found.isInMatchedChat,
+        storageKey,
+        viewerId: user.userId,
+        isStaffViewer: FilesController.isStaffViewer(user),
+      }))
+    ) {
       throw new NotFoundException();
     }
     await this.assertServableBytes(storageKey);
@@ -591,6 +653,11 @@ export class FilesController {
         // photos are linked to an event.
         throw new NotFoundException();
       }
+    }
+    // T17: a persona-scoped key carries no owner segment, so the checks the
+    // segment drives below are made from its registry row instead.
+    if (kindSpec === PERSONA_SCOPED_KIND_SPEC) {
+      await this.assertServablePersonaKey(storageKey, user);
     }
     // Suspension media safety: a suspended/banned member's media must not keep
     // serving to ordinary viewers. Every key embeds its owner's userId

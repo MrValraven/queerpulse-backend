@@ -11,6 +11,7 @@ import {
 } from '../common/image-url';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import { Message, MessageKind } from '../messaging/entities/message.entity';
+import { groupJoinHistoryFloorCoversPredicate } from '../messaging/group-join-history-floor';
 import {
   mailboxStaffHistoryFloorCoversPredicate,
   seatExcludedFromMailboxPredicate,
@@ -19,8 +20,9 @@ import {
   MESSAGE_SUBJECT_TYPE,
   notModeratedMessagePredicate,
 } from '../messaging/message-visibility-predicates';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import {
   messageAttachmentReference,
   parseMessageAttachmentReference,
@@ -161,6 +163,34 @@ describe('withMessageAttachmentRoute', () => {
     expect(withMessageAttachmentRoute(sticker, IDENTITY_KINDS)).toBe(sticker);
   });
 
+  it('PRD-423: renders any image or document in a matched chat by reference, whoever sent it', () => {
+    const personal = row({ senderIdentityId: PROFILE_IDENTITY_ID });
+    const document = row({
+      senderIdentityId: PROFILE_IDENTITY_ID,
+      kind: MessageKind.Document,
+      attachment: documentAttachment,
+    });
+    const gif = row({ kind: MessageKind.Gif });
+
+    expect(
+      withMessageAttachmentRoute(personal, IDENTITY_KINDS, {
+        isMatchedChat: true,
+      }).attachment,
+    ).toEqual({
+      ...imageAttachment,
+      url: `messages/${MESSAGE_ID}/0`,
+      previewUrl: `messages/${MESSAGE_ID}/0`,
+    });
+    expect(
+      withMessageAttachmentRoute(document, IDENTITY_KINDS, {
+        isMatchedChat: true,
+      }).attachment,
+    ).toEqual({ ...documentAttachment, url: `messages/${MESSAGE_ID}/0` });
+    expect(
+      withMessageAttachmentRoute(gif, IDENTITY_KINDS, { isMatchedChat: true }),
+    ).toBe(gif);
+  });
+
   it('serves the stored key of the claimed kind only', () => {
     expect(
       messageAttachmentRouteStorageKey({
@@ -196,12 +226,18 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
     where: jest.Mock;
     andWhere: jest.Mock;
     getOne: jest.Mock;
+    addSelect: jest.Mock;
+    getRawAndEntities: jest.Mock;
     select: jest.Mock;
     orderBy: jest.Mock;
     limit: jest.Mock;
     getRawOne: jest.Mock;
   };
   let controller: FilesController;
+  let managerFindOne: jest.Mock;
+  // PRD-423: the matched chat flag the viewability query reads alongside
+  // the message (`findViewableMessageAttachment`).
+  let isInMatchedChat: boolean;
 
   beforeEach(() => {
     (
@@ -223,18 +259,44 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
       getOne: jest.fn().mockResolvedValue(null),
+      addSelect: jest.fn().mockReturnThis(),
+      // Reads whatever `getOne` is set to resolve, plus the matched flag.
+      getRawAndEntities: jest.fn(async () => {
+        const message: unknown = await messageQuery.getOne();
+        return message
+          ? {
+              entities: [message],
+              raw: [{ is_in_matched_chat: isInMatchedChat }],
+            }
+          : { entities: [], raw: [] };
+      }),
       // The document download's display-name lookup.
       select: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       limit: jest.fn().mockReturnThis(),
       getRawOne: jest.fn().mockResolvedValue({ fileName: 'menu.pdf' }),
     };
+    isInMatchedChat = false;
+    managerFindOne = jest.fn((entity: unknown) =>
+      Promise.resolve(
+        entity === User
+          ? { id: STAFF_ID, status: UserStatus.Active }
+          : { id: 'conversation-1', isGoTogetherChat: false },
+      ),
+    );
     controller = new FilesController(
       storage as unknown as StorageService,
       users as unknown as Repository<User>,
       {
         createQueryBuilder: jest.fn().mockReturnValue(messageQuery),
+        // PRD-423: the matched chat uploader rule reads the conversation and
+        // the uploader through the manager. An ordinary thread by default.
+        manager: { findOne: managerFindOne },
       } as unknown as Repository<Message>,
+      // T17: no persona-scoped key is served here.
+      {
+        findServingRegistration: jest.fn().mockResolvedValue(null),
+      } as unknown as PersonaImageKeysService,
     );
   });
 
@@ -292,7 +354,7 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
     expect(storage.openObjectStream).not.toHaveBeenCalled();
   });
 
-  it('asks for that one message under the seat rules and the staff history floor', async () => {
+  it('asks for that one message under the seat rules, the staff history floor and the group join floor', async () => {
     const { response } = streamingResponse();
 
     await serveReference({ userId: VIEWER_ID }, response).catch(() => null);
@@ -309,6 +371,11 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
     expect(clauses).toContain(
       `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
     );
+    // PRD-400: a member who joined a group later reaches only what was
+    // posted after they joined.
+    expect(clauses).toContain(
+      `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
+    );
     // ENG-401: a member who left reaches only what was posted before they left.
     expect(clauses).toContain(
       '(participant.left_at IS NULL OR message.created_at <= participant.left_at)',
@@ -318,15 +385,18 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
       notModeratedMessagePredicate('message'),
       { messageSubjectType: MESSAGE_SUBJECT_TYPE },
     );
-    expect(clauses).toContain('message.sender_identity_id IS NOT NULL');
-    expect(
-      clauses.some(
-        (clause) =>
-          clause.includes('"attachment_sender_identity"') &&
-          clause.includes(`"kind" = 'profile'`) &&
-          clause.trim().startsWith('NOT EXISTS'),
-      ),
-    ).toBe(true);
+    // PRD-423: a message in a matched Go together chat qualifies too, in
+    // the same clause, since its readers render every attachment by
+    // reference.
+    const ownerClause = clauses.find((clause) =>
+      clause.includes('"attachment_sender_identity"'),
+    );
+    expect(ownerClause).toContain('message.sender_identity_id IS NOT NULL');
+    expect(ownerClause).toContain(`"kind" = 'profile'`);
+    expect(ownerClause).toContain('NOT EXISTS');
+    expect(ownerClause).toContain('"attachment_matched_chat"');
+    expect(ownerClause).toContain('"is_go_together_chat"');
+    expect(ownerClause).toContain(' OR EXISTS');
     expect(messageQuery.innerJoin).toHaveBeenCalledWith(
       'conversation_participants',
       'participant',
@@ -357,6 +427,61 @@ describe('FilesController: GET /files/messages/:messageId/0', () => {
     expect(JSON.stringify(headers)).not.toContain(STAFF_ID);
     // The uploader's account status is not consulted, see the route's doc.
     expect(users.findOne).not.toHaveBeenCalled();
+  });
+
+  describe('PRD-423: a matched Go together chat attachment', () => {
+    const matchedChatImage = {
+      id: MESSAGE_ID,
+      conversationId: 'conversation-1',
+      kind: MessageKind.Image,
+      attachment: imageAttachment,
+    };
+
+    function seatInMatchedChat(uploaderStatus: UserStatus) {
+      isInMatchedChat = true;
+      managerFindOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(
+          entity === User ? { id: STAFF_ID, status: uploaderStatus } : null,
+        ),
+      );
+      messageQuery.getOne.mockResolvedValue(matchedChatImage);
+    }
+
+    it('reads nothing more for a message outside a matched chat', async () => {
+      messageQuery.getOne.mockResolvedValue(matchedChatImage);
+      const { response } = streamingResponse();
+
+      await serveReference({ userId: VIEWER_ID }, response);
+
+      // The flag rides the viewability query itself.
+      expect(messageQuery.addSelect).toHaveBeenCalledWith(
+        expect.stringContaining('"attachment_matched_chat"'),
+        'is_in_matched_chat',
+      );
+      expect(managerFindOne).not.toHaveBeenCalled();
+    });
+
+    it('withholds a suspended or banned uploader photo, as the key route does', async () => {
+      seatInMatchedChat(UserStatus.Suspended);
+      const { response } = streamingResponse();
+
+      await expect(
+        serveReference({ userId: VIEWER_ID }, response),
+      ).rejects.toThrow(NotFoundException);
+      expect(storage.openObjectStream).not.toHaveBeenCalled();
+    });
+
+    it('serves an active uploader photo, and a suspended one to the uploader themself', async () => {
+      seatInMatchedChat(UserStatus.Active);
+      const first = streamingResponse();
+      await serveReference({ userId: VIEWER_ID }, first.response);
+      expect(first.body().toString()).toBe('image-bytes');
+
+      seatInMatchedChat(UserStatus.Suspended);
+      const second = streamingResponse();
+      await serveReference({ userId: STAFF_ID }, second.response);
+      expect(second.body().toString()).toBe('image-bytes');
+    });
   });
 
   it('signs an attachment disposition for the Save button', async () => {

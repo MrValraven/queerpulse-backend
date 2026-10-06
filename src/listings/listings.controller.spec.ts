@@ -12,6 +12,7 @@ import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
+import { MySuggestedListingsService } from './my-suggested-listings.service';
 
 describe('ListingsController', () => {
   let controller: ListingsController;
@@ -35,6 +36,7 @@ describe('ListingsController', () => {
     answerPublicQuestionAsModerator: jest.Mock;
   };
   let ownerPendingService: { getPendingForOwner: jest.Mock };
+  let mySuggestedListingsService: { listMine: jest.Mock };
 
   const user: CurrentUserData = {
     userId: 'owner-1',
@@ -61,6 +63,7 @@ describe('ListingsController', () => {
       answerPublicQuestionAsModerator: jest.fn(),
     };
     ownerPendingService = { getPendingForOwner: jest.fn() };
+    mySuggestedListingsService = { listMine: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ListingsController, AdminListingsController],
       providers: [
@@ -72,6 +75,10 @@ describe('ListingsController', () => {
           useValue: ownerPendingService,
         },
         { provide: ListingVenueEventsService, useValue: {} },
+        {
+          provide: MySuggestedListingsService,
+          useValue: mySuggestedListingsService,
+        },
       ],
     })
       .overrideGuard(ActiveMemberGuard)
@@ -105,6 +112,19 @@ describe('ListingsController', () => {
       2,
     );
     expect(result).toBe(history);
+  });
+
+  it('GET /suggestions/mine scopes the suggestions read to the caller', async () => {
+    const page = { items: [], total: 0, page: 3, pageSize: 20 };
+    mySuggestedListingsService.listMine.mockResolvedValue(page);
+
+    const result = await controller.listMySuggestions(user, { page: 3 });
+
+    expect(mySuggestedListingsService.listMine).toHaveBeenCalledWith(
+      'owner-1',
+      3,
+    );
+    expect(result).toBe(page);
   });
 
   it('GET /:ref/pending scopes the pending read to the caller as owner', async () => {

@@ -23,9 +23,12 @@ import {
   buildReplyTo,
   buildSystemEvent,
   displayNameFor,
+  matchedChatMemberNames,
+  memberIdFor,
   memberNameOptionsFor,
   requireAuthorSummary,
 } from './message-response';
+import { matchedChatMemberKey } from './matched-member-key';
 import { MessagingCoreService } from './messaging-core.service';
 
 /**
@@ -394,6 +397,170 @@ describe('PRD-423: matched Go together chats show first names only', () => {
 
       expect(matchedPreview.sender.displayName).toBe('Ana');
       expect(normalPreview.sender.displayName).toBe('Ana Sousa');
+    });
+  });
+
+  describe('PRD-423 (opaque member keys)', () => {
+    const anaKey = matchedChatMemberKey(CONVERSATION_ID, ANA_ID);
+    const beaKey = matchedChatMemberKey(CONVERSATION_ID, BEA_ID);
+    const MATCHED_CHAT_NAMES = matchedChatMemberNames(CONVERSATION_ID);
+    const leakedIdentifiers = /ana-sousa|bea-lopes|ana-1|bea-1/;
+
+    it('carries the conversation id whenever the row it reads has one', () => {
+      expect(
+        memberNameOptionsFor({
+          id: CONVERSATION_ID,
+          isGoTogetherChat: true,
+        }),
+      ).toEqual(MATCHED_CHAT_NAMES);
+      expect(
+        memberNameOptionsFor({ isGoTogetherChat: true }, CONVERSATION_ID),
+      ).toEqual(MATCHED_CHAT_NAMES);
+      expect(
+        memberNameOptionsFor({ id: CONVERSATION_ID, isGoTogetherChat: false }),
+      ).toBe(NORMAL_GROUP_NAMES);
+    });
+
+    it('names a member by their per-chat key in a matched chat and by their user id elsewhere', () => {
+      expect(memberIdFor(ANA_ID, MATCHED_CHAT_NAMES)).toBe(anaKey);
+      expect(memberIdFor(ANA_ID, NORMAL_GROUP_NAMES)).toBe(ANA_ID);
+      expect(memberIdFor(ANA_ID)).toBe(ANA_ID);
+      // A matched spelling with no conversation id hands out nothing.
+      expect(memberIdFor(ANA_ID, MATCHED_NAMES)).toBe('');
+      expect(requireAuthorSummary(ANA_PROFILE, MATCHED_NAMES).handle).toBe('');
+    });
+
+    it('hands out member keys alone on every author, quote and pill of a matched thread', async () => {
+      const responses = await readThreadAs(BEA_ID, MATCH_GROUP_ID);
+      const [anaMessage, beaReply, removalPill] = responses;
+
+      expect(anaMessage!.sender.handle).toBe(anaKey);
+      expect(beaReply!.sender.handle).toBe(beaKey);
+      expect(removalPill!.systemEvent?.actorHandle).toBe(anaKey);
+      expect(removalPill!.systemEvent?.targetHandle).toBe(beaKey);
+      expect(JSON.stringify(responses)).not.toMatch(leakedIdentifiers);
+    });
+
+    it('keeps slugs in a normal group', async () => {
+      const [anaMessage, , removalPill] = await readThreadAs(BEA_ID, null);
+
+      expect(anaMessage!.sender.handle).toBe('ana-sousa');
+      expect(removalPill!.systemEvent?.actorHandle).toBe('ana-sousa');
+      expect(removalPill!.systemEvent?.targetHandle).toBe('bea-lopes');
+    });
+
+    it('gives every viewer the same key for one member, so one broadcast serves the room', async () => {
+      const [asSeenByBea] = await readThreadAs(BEA_ID, MATCH_GROUP_ID);
+      const [asSeenByAna] = await readThreadAs(ANA_ID, MATCH_GROUP_ID);
+
+      expect(asSeenByBea!.sender.handle).toBe(asSeenByAna!.sender.handle);
+    });
+
+    it('keys a matched chat roster and avatar preview in id and handle alike', () => {
+      const core = buildCore(MATCH_GROUP_ID);
+      const members = core.buildMemberSummaries(
+        SEATS,
+        PROFILE_BY_USER,
+        BEA_ID,
+        new Map<string, MessagingPrivacyDTO>(),
+        MATCHED_CHAT_NAMES,
+      );
+      const preview = core.buildMemberPreview(
+        SEATS,
+        PROFILE_BY_USER,
+        MATCHED_CHAT_NAMES,
+      );
+
+      expect(members.map((member) => [member.id, member.handle])).toEqual([
+        [anaKey, anaKey],
+        [beaKey, beaKey],
+      ]);
+      expect(preview.map((member) => [member.id, member.handle])).toEqual([
+        [anaKey, anaKey],
+        [beaKey, beaKey],
+      ]);
+      expect(JSON.stringify([members, preview])).not.toMatch(leakedIdentifiers);
+    });
+
+    it('keeps user ids and slugs on a normal group roster', () => {
+      const core = buildCore(null);
+      const members = core.buildMemberSummaries(
+        SEATS,
+        PROFILE_BY_USER,
+        BEA_ID,
+        new Map<string, MessagingPrivacyDTO>(),
+        NORMAL_GROUP_NAMES,
+      );
+
+      expect(members.map((member) => [member.id, member.handle])).toEqual([
+        [ANA_ID, 'ana-sousa'],
+        [BEA_ID, 'bea-lopes'],
+      ]);
+    });
+
+    it('previews a matched chat inbox line under the sender key', () => {
+      const core = buildCore(MATCH_GROUP_ID);
+      const matchedPreview = core.buildLastMessagePreview(
+        ANA_MESSAGE,
+        CONVERSATION_ID,
+        PROFILE_BY_USER,
+        [],
+        BEA_ID,
+        undefined,
+        undefined,
+        MATCHED_CHAT_NAMES,
+      );
+
+      expect(matchedPreview.sender.handle).toBe(anaKey);
+    });
+
+    it("flags an unread mention by the caller's key, scoped to that matched chat", async () => {
+      const where: string[] = [];
+      const parameters: Record<string, unknown> = {};
+      const query: Record<string, jest.Mock> = {};
+      const record = (clause: string, values?: Record<string, unknown>) => {
+        where.push(clause);
+        Object.assign(parameters, values);
+        return query;
+      };
+      Object.assign(query, {
+        select: jest.fn(() => query),
+        innerJoin: jest.fn(() => query),
+        where: jest.fn(record),
+        andWhere: jest.fn(record),
+        setParameter: jest.fn(() => query),
+        groupBy: jest.fn(() => query),
+        getRawMany: jest.fn().mockResolvedValue([]),
+      });
+      const core = buildCore(MATCH_GROUP_ID);
+      (
+        core as unknown as { messages: { createQueryBuilder: jest.Mock } }
+      ).messages.createQueryBuilder = jest.fn(() => query);
+
+      await core.hasUnreadMentionByConversation(
+        [CONVERSATION_ID, 'other-conversation'],
+        BEA_ID,
+        'bea-lopes',
+        [CONVERSATION_ID],
+      );
+
+      expect(parameters.memberKeyConversation0).toBe(CONVERSATION_ID);
+      // The slug pattern skips the matched chat: keys alone mention there.
+      expect(parameters.memberKeyConversationIds).toEqual([CONVERSATION_ID]);
+      expect(
+        where.some((clause) =>
+          clause.includes(
+            'm.conversation_id NOT IN (:...memberKeyConversationIds)',
+          ),
+        ),
+      ).toBe(true);
+      expect(parameters.memberKeyPattern0).toContain(`@${beaKey}`);
+      expect(parameters.memberKeyConversation1).toBeUndefined();
+      expect(
+        where.some((clause) =>
+          clause.includes('m.conversation_id = :memberKeyConversation0'),
+        ),
+      ).toBe(true);
     });
   });
 });

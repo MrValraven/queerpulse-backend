@@ -11,7 +11,7 @@ import {
 } from '../housing-viewings/entities/housing-viewing.entity';
 import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
 import { IdentityBlock } from '../identities/entities/identity-block.entity';
-import { Report } from '../reports/entities/report.entity';
+import { Report, ReportSubjectType } from '../reports/entities/report.entity';
 import { Block } from '../social/entities/block.entity';
 import { DataExportContribution } from './data-export-contributor';
 
@@ -263,17 +263,28 @@ export class BlocksExportContributor implements DataExportContribution {
       }),
     ]);
     const merged = [
+      // PRD-423: a block placed from inside a matched Go together chat
+      // exports as the Blocked list shows it, naming nobody: the member only
+      // ever knew that person by first name, so no user id rides along.
       ...memberBlocks.map((block) => ({
         type: 'member' as const,
         id: block.id,
-        blockedUserId: block.blockedId,
+        ...(block.matchedConversationId
+          ? { isMatchedChatBlock: true as const }
+          : { blockedUserId: block.blockedId }),
         reason: block.reason,
         createdAt: block.createdAt,
       })),
+      // A block carried across a persona going unlinked (ENG-447) exports
+      // as the member's Blocked list shows it: the retired identity's id and
+      // the named persona's name.
       ...identityBlocks.map((block) => ({
         type: 'identity' as const,
         id: block.id,
-        identityId: block.identityId,
+        identityId: block.identityId ?? block.retiredIdentityId,
+        ...(block.blockedNameSnapshot
+          ? { blockedName: block.blockedNameSnapshot }
+          : {}),
         createdAt: block.createdAt,
       })),
     ];
@@ -329,10 +340,18 @@ export class ReportsFiledExportContributor implements DataExportContribution {
       where: { reporterId: userId },
       order: { createdAt: 'ASC' },
     });
+    const matchedChatMemberIds = await this.matchedChatMemberIds(userId, rows);
     return rows.map((report) => ({
       id: report.id,
       subjectType: report.subjectType,
-      subjectId: report.subjectId,
+      // PRD-423: a member the reporter shares a matched Go together chat
+      // with is someone they may only know by first name (a report filed by
+      // member key, or from the group sheet), so the archive names no user
+      // id for them.
+      ...(report.subjectType === ReportSubjectType.Member &&
+      matchedChatMemberIds.has(report.subjectId)
+        ? { isMatchedChatReport: true as const }
+        : { subjectId: report.subjectId }),
       reasonCode: report.reasonCode,
       detail: report.detail,
       evidence: reporterEvidenceOf(report.evidence),
@@ -341,6 +360,37 @@ export class ReportsFiledExportContributor implements DataExportContribution {
       createdAt: report.createdAt.toISOString(),
       resolvedAt: isoOrNull(report.resolvedAt),
     }));
+  }
+
+  /** PRD-423: which of the member subjects of `rows` hold a seat in a
+   *  matched Go together chat the reporter holds one in too. One query, and
+   *  none when the archive reports no member. */
+  private async matchedChatMemberIds(
+    userId: string,
+    rows: Report[],
+  ): Promise<Set<string>> {
+    const memberSubjectIds = [
+      ...new Set(
+        rows
+          .filter((report) => report.subjectType === ReportSubjectType.Member)
+          .map((report) => report.subjectId),
+      ),
+    ];
+    if (!memberSubjectIds.length) return new Set();
+    const shared: Array<{ userId: string }> = await this.reports.manager.query(
+      `SELECT DISTINCT "other_seat"."user_id"::text AS "userId"
+         FROM "conversation_participants" "own_seat"
+         JOIN "conversation_participants" "other_seat"
+           ON "other_seat"."conversation_id" = "own_seat"."conversation_id"
+         JOIN "conversations" "matched_chat"
+           ON "matched_chat"."id" = "own_seat"."conversation_id"
+        WHERE "own_seat"."user_id" = $1
+          AND "other_seat"."user_id"::text = ANY($2)
+          AND ("matched_chat"."is_go_together_chat"
+            OR "matched_chat"."event_match_group_id" IS NOT NULL)`,
+      [userId, memberSubjectIds],
+    );
+    return new Set(shared.map((row) => row.userId));
   }
 }
 

@@ -13,6 +13,8 @@ import {
   UPLOAD_KIND_SPECS,
 } from '../storage/upload-kinds';
 import { encodeBrowseCursor } from './admin-media-browse-cursor';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
+import { PERSONA_SCOPED_PREFIX } from '../storage/storage-key';
 
 const ownerId = '11111111-1111-1111-1111-111111111111';
 const actorId = '22222222-2222-2222-2222-222222222222';
@@ -21,15 +23,24 @@ const communityAvatarKey = `community-avatars/${ownerId}/66666666-6666-6666-6666
 const messageImageKey = `message-images/${ownerId}/44444444-4444-4444-4444-444444444444.jpg`;
 const messageDocumentKey = `message-documents/${ownerId}/55555555-5555-5555-5555-555555555555.pdf`;
 
-const publicPrefixes = Object.values(UPLOAD_KIND_SPECS)
-  .map((spec) => spec.prefix)
-  .filter((prefix) => !PRIVATE_MESSAGE_PREFIXES.has(prefix));
+const publicPrefixes = [
+  ...Object.values(UPLOAD_KIND_SPECS)
+    .map((spec) => spec.prefix)
+    .filter((prefix) => !PRIVATE_MESSAGE_PREFIXES.has(prefix)),
+  // T17: unlinked persona images.
+  PERSONA_SCOPED_PREFIX,
+];
+const personaKey =
+  'persona/77777777-7777-4777-8777-777777777777/88888888-8888-4888-8888-888888888888.jpg';
 
 function storedObject(key: string) {
   return { key, size: 10, lastModified: '2026-01-01T00:00:00.000Z' };
 }
 
-async function makeService(storageOverrides: Record<string, jest.Mock> = {}) {
+async function makeService(
+  storageOverrides: Record<string, jest.Mock> = {},
+  personaOverrides: Record<string, jest.Mock> = {},
+) {
   const storage = {
     listObjects: jest
       .fn()
@@ -54,6 +65,13 @@ async function makeService(storageOverrides: Record<string, jest.Mock> = {}) {
   };
   const modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
   const profiles = { find: jest.fn().mockResolvedValue([]) };
+  // T17: no persona-scoped keys unless a test stages some.
+  const personaImageKeys = {
+    listObjectsUploadedBy: jest.fn().mockResolvedValue([]),
+    uploaderIdsFor: jest.fn().mockResolvedValue(new Map<string, string>()),
+    forgetDeletedKeys: jest.fn().mockResolvedValue(undefined),
+    ...personaOverrides,
+  };
 
   const moduleRef = await Test.createTestingModule({
     providers: [
@@ -62,6 +80,7 @@ async function makeService(storageOverrides: Record<string, jest.Mock> = {}) {
       { provide: MediaReferenceResolver, useValue: references },
       { provide: ModAuditService, useValue: modAudit },
       { provide: getRepositoryToken(Profile), useValue: profiles },
+      { provide: PersonaImageKeysService, useValue: personaImageKeys },
     ],
   }).compile();
 
@@ -70,6 +89,8 @@ async function makeService(storageOverrides: Record<string, jest.Mock> = {}) {
     storage,
     references,
     modAudit,
+    profiles,
+    personaImageKeys,
   };
 }
 
@@ -247,6 +268,43 @@ describe('AdminMediaService.list', () => {
     );
   });
 
+  // T17: a persona-scoped key names no uploader, so the uploader view adds
+  // the registry's rows and the uploader column reads the registry.
+  it('adds the persona-scoped images the registry records to the per-uploader view, named by the registry', async () => {
+    const { service, profiles, personaImageKeys } = await makeService(
+      {
+        listUserObjects: jest.fn().mockResolvedValue([storedObject(avatarKey)]),
+      },
+      {
+        listObjectsUploadedBy: jest
+          .fn()
+          .mockResolvedValue([
+            { ...storedObject(personaKey), uploadKind: 'avatar' },
+          ]),
+        uploaderIdsFor: jest
+          .fn()
+          .mockResolvedValue(new Map([[personaKey, ownerId]])),
+      },
+    );
+    profiles.find.mockResolvedValue([
+      { userId: ownerId, firstName: 'Robin', lastName: 'Vale', slug: 'robin' },
+    ]);
+
+    const response = await service.list({ uploaderId: ownerId });
+
+    expect(personaImageKeys.listObjectsUploadedBy).toHaveBeenCalledWith(
+      ownerId,
+    );
+    const personaRow = response.objects.find(
+      (object) => object.key === personaKey,
+    );
+    expect(personaRow?.uploaderId).toBe(ownerId);
+    expect(personaRow?.uploader?.handle).toBe('robin');
+    expect(response.objects.map((object) => object.key).sort()).toEqual(
+      [avatarKey, personaKey].sort(),
+    );
+  });
+
   it.each(['message-images', 'message-documents'])(
     'rejects the %s prefix filter as an unknown kind',
     async (prefix) => {
@@ -284,6 +342,30 @@ describe('AdminMediaService.head', () => {
 });
 
 describe('AdminMediaService.delete', () => {
+  // T17: a persona-scoped key is served only while its registry row exists,
+  // so the row (and any crop) goes with the object.
+  it.each([
+    ['an unforced', false],
+    ['a forced', true],
+  ])(
+    'forgets a persona-scoped key after %s delete of its object',
+    async (_label, force) => {
+      const { service, storage, personaImageKeys } = await makeService();
+
+      await service.delete(personaKey, actorId, force);
+
+      expect(storage.deleteObjectByKey).toHaveBeenCalledWith(personaKey);
+      expect(personaImageKeys.forgetDeletedKeys).toHaveBeenCalledWith([
+        personaKey,
+      ]);
+      expect(
+        storage.deleteObjectByKey.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        personaImageKeys.forgetDeletedKeys.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
+
   it('writes a media_force_delete audit row naming the actor before a forced delete', async () => {
     const { service, storage, modAudit } = await makeService();
 

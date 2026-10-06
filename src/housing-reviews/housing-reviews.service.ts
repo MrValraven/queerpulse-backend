@@ -12,6 +12,7 @@ import { MemberLookup, MemberRef } from '../common/member-ref';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   HousingListing,
@@ -86,6 +87,9 @@ export class HousingReviewsService {
     // row. Shared on purpose — this surface does not get a bespoke
     // notification type of its own.
     private readonly reviewReplyNotifier: ReviewReplyNotifier,
+    // LOC-F1: the public reviews block hides a home from a blocked pair with
+    // the same 404 the detail read gives (`HousingDirectoryService.detail`).
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async submit(
@@ -582,6 +586,25 @@ export class HousingReviewsService {
       slug,
     );
     if (listingModeration.hidden || listingModeration.removed) {
+      throw new NotFoundException('Housing listing not found');
+    }
+    // LOC-F1: the rest of the detail read's withhold, compared the same way,
+    // so the reviews read never confirms a home its detail page hides. A
+    // filled or expired home 404s for everyone except its owner, and a block
+    // either way between viewer and lister 404s too.
+    const isOwner =
+      listing.ownerId !== null && listing.ownerId === viewerUserId;
+    const isWithheld =
+      listing.filledAt !== null || listing.expiresAt.getTime() < Date.now();
+    if (!isOwner && isWithheld) {
+      throw new NotFoundException('Housing listing not found');
+    }
+    if (
+      !isOwner &&
+      viewerUserId !== null &&
+      listing.ownerId !== null &&
+      (await this.blockFilter.isBlockedEitherWay(viewerUserId, listing.ownerId))
+    ) {
       throw new NotFoundException('Housing listing not found');
     }
     // Pair-completeness is counted over ALL of the listing's reviews in one

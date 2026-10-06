@@ -275,6 +275,10 @@ export class HousingGroupsController {
   @ApiOkResponse({ description: 'The updated listing.' })
   @ApiNotFoundResponse({ description: 'No such group or listing.' })
   @ApiForbiddenResponse({ description: 'Only the poster can edit a listing.' })
+  @ApiConflictResponse({
+    description:
+      'The room was taken down after a report (code GROUP_LISTING_REPORT_TAKEDOWN); an edit would lift nothing.',
+  })
   updateListing(
     @Param('slug') slug: string,
     @Param('id', ParseUUIDPipe) id: string,
@@ -319,7 +323,8 @@ export class HousingGroupsController {
     description: 'No such group, or the room is not on the group page.',
   })
   @ApiBadRequestResponse({
-    description: 'The room is your own, or has no poster left to contact.',
+    description:
+      'The room is your own, has no poster left to contact, or was posted through the old anonymous form.',
   })
   @ApiForbiddenResponse({
     description:

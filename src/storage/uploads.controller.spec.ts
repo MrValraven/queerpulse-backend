@@ -4,6 +4,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService, PresignedUpload } from './storage.service';
 import { ALLOWED_IMAGE_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
@@ -27,6 +28,7 @@ describe('UploadsController', () => {
   let controller: UploadsController;
   let storage: { presignImageUpload: jest.Mock };
   let mediaCropService: { upsert: jest.Mock };
+  let personaImageKeys: { isMemberOfKeyPersona: jest.Mock };
 
   beforeEach(() => {
     storage = {
@@ -35,9 +37,13 @@ describe('UploadsController', () => {
     mediaCropService = {
       upsert: jest.fn().mockResolvedValue(undefined),
     };
+    personaImageKeys = {
+      isMemberOfKeyPersona: jest.fn().mockResolvedValue(false),
+    };
     controller = new UploadsController(
       storage as unknown as StorageService,
       mediaCropService as unknown as MediaCropService,
+      personaImageKeys as unknown as PersonaImageKeysService,
     );
   });
 
@@ -225,6 +231,49 @@ describe('UploadsController', () => {
         contentType: 'image/png',
       });
       expect(await validate(dto)).not.toHaveLength(0);
+    });
+  });
+
+  // T17: a persona-scoped key names no uploader, so the crop route checks the
+  // members of the persona it belongs to.
+  describe('saveCrop on a persona-scoped key', () => {
+    const personaKey =
+      'persona/0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b/5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d.jpg';
+    const crop = { x: 0.1, y: 0.1, width: 0.5, height: 0.5, aspect: '1:1' };
+
+    it('saves the crop for a member of the persona, owned by the caller', async () => {
+      personaImageKeys.isMemberOfKeyPersona.mockResolvedValue(true);
+
+      await controller.saveCrop(user, { key: personaKey, crop });
+
+      expect(personaImageKeys.isMemberOfKeyPersona).toHaveBeenCalledWith(
+        personaKey,
+        'user-1',
+      );
+      expect(mediaCropService.upsert).toHaveBeenCalledWith(
+        personaKey,
+        'user-1',
+        crop,
+      );
+    });
+
+    it('refuses a caller who is not a member of the persona', async () => {
+      personaImageKeys.isMemberOfKeyPersona.mockResolvedValue(false);
+
+      await expect(
+        controller.saveCrop(user, { key: personaKey, crop }),
+      ).rejects.toThrow('Forbidden');
+      expect(mediaCropService.upsert).not.toHaveBeenCalled();
+    });
+
+    it('keeps the uploader rule for a user-scoped key', async () => {
+      await expect(
+        controller.saveCrop(user, {
+          key: 'avatars/0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b/5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d.jpg',
+          crop,
+        }),
+      ).rejects.toThrow('Forbidden');
+      expect(personaImageKeys.isMemberOfKeyPersona).not.toHaveBeenCalled();
     });
   });
 });

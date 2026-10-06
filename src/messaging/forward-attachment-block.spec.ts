@@ -27,6 +27,10 @@ import {
   NO_MAILBOX_IDENTITY_BLOCKS,
   seatExcludedFromMailboxPredicate,
 } from './mailbox-seats';
+import {
+  groupJoinHistoryFloorCoversPredicate,
+  isCoveredByGroupJoinHistoryFloor,
+} from './group-join-history-floor';
 import { MessagingCoreService } from './messaging-core.service';
 
 /**
@@ -227,6 +231,10 @@ const EXPECTED_HISTORY_FLOOR_CLAUSE = `NOT ${mailboxStaffHistoryFloorCoversPredi
 
 const EXPECTED_EXCLUSION_CLAUSE = `NOT ${seatExcludedFromMailboxPredicate('message.conversation_id', ':senderId')}`;
 
+/** PRD-400: the group join floor clause, so a member cannot forward an
+ *  attachment from group history they joined after. */
+const EXPECTED_JOIN_FLOOR_CLAUSE = `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`;
+
 /**
  * CW-20 (task-13g-review.md finding M1): `EXPECTED_EXCLUSION_CLAUSE` above is
  * built by calling the very same production function the query builder
@@ -253,6 +261,9 @@ const LOAD_BEARING_EXCLUSION_FRAGMENTS = [
   `"blocked_staff_conversation"."kind" <> 'group'`,
   '"staff_business_identity_block"."blocker_user_id" = "blocking_customer_seat"."user_id"',
   '"staff_business_identity_block"."identity_id" = "blocked_staff_seat"."identity_id"',
+  // ENG-447: a block carried across a persona going unlinked holds for the
+  // identity the persona speaks through now.
+  '"staff_carried_identity_block"."blocked_subprofile_id" = "blocked_staff_identity"."subprofile_id"',
   // departedStaffSeatPredicate: the departure itself.
   '"departed_staff_seat"."left_at" IS NOT NULL',
   // identityBlockedCustomerSeatPredicate: the customer's own block of the
@@ -261,6 +272,7 @@ const LOAD_BEARING_EXCLUSION_FRAGMENTS = [
   `"identity_blocked_business_identity"."kind" <> 'profile'`,
   '"customer_business_identity_block"."blocker_user_id" = "identity_blocking_customer_seat"."user_id"',
   '"customer_business_identity_block"."identity_id" = "identity_blocked_business_seat"."identity_id"',
+  '"customer_business_identity_block"."blocked_subprofile_id" = "identity_blocked_business_identity"."subprofile_id"',
   // PRD-372: no block of the QueerPulse Team takes a member out of their
   // own official thread.
   '"identity_blocking_customer_conversation"."is_official" = false',
@@ -363,6 +375,15 @@ function buildForwardFixtureQuery(blockPairs: ReadonlyArray<[string, string]>) {
                 identityKind: identityKindById.get(seat.identityId),
                 isGroupConversation: seat.conversationId === LEFT_GROUP,
                 isOfficialConversation: false,
+              }),
+          );
+        } else if (clause === EXPECTED_JOIN_FLOOR_CLAUSE) {
+          rows = rows.filter(
+            ({ message, seat }) =>
+              !message.createdAt ||
+              !isCoveredByGroupJoinHistoryFloor(message.createdAt, {
+                historyFloorAt: seat.historyFloorAt,
+                isGroupConversation: seat.conversationId === LEFT_GROUP,
               }),
           );
         } else {
@@ -563,6 +584,14 @@ describe('Task 13g G1: forwarding an attachment applies the block rule and the d
 
     expect(clauses).toContain(EXPECTED_EXCLUSION_CLAUSE);
     expect(parameters.senderId).toBe(COLLEAGUE);
+  });
+
+  it("PRD-400: holds the forward to the sender's group join floor", async () => {
+    const { service, clauses } = build();
+
+    await forwardImage(service, FRIEND, groupImageKey);
+
+    expect(clauses).toContain(EXPECTED_JOIN_FLOOR_CLAUSE);
   });
 
   it("Task 13h: refuses a co-manager forwarding a customer's photo from before their history floor", async () => {

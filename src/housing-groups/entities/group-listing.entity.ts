@@ -124,6 +124,13 @@ export class GroupListing {
   @Column({ type: 'uuid', nullable: true })
   postedByUserId!: string | null;
 
+  // LOC-F2. True when the room was posted through the form that tells the
+  // poster the group page names them and lets readers message them (PRD-443).
+  // The column default stays false, so a room posted through the old
+  // anonymous form keeps naming nobody; `createListing` sets it explicitly.
+  @Column({ type: 'boolean', default: false })
+  isPosterNamed!: boolean;
+
   // The pre-publication decision's audit trail (LOC-19). Until these existed
   // the review recorded only its outcome (`status`), so a poster asking "why
   // was my room not published?" had no answer and the next moderator to open

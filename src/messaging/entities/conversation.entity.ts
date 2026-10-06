@@ -157,6 +157,28 @@ export class Conversation {
   inviteTokenExpiresAt!: Date | null;
 
   /**
+   * PRD-400 (use cap): how many people may join through the live
+   * `inviteToken`, one of `GROUP_INVITE_LINK_MAX_USES_OPTIONS`. NULL means
+   * unlimited. Written together with the token by
+   * `GroupsService.createOrRotateInviteLink`, which also resets
+   * `inviteTokenUseCount` to 0. Migration
+   * `1830040000000-AddGroupInviteTokenUseCap`.
+   */
+  @Column({ type: 'int', nullable: true })
+  inviteTokenMaxUses!: number | null;
+
+  /**
+   * PRD-400 (use cap): how many people have joined through the live
+   * `inviteToken` since it was issued or rotated. `GroupInvitesService.
+   * joinByToken` increments it with a conditional UPDATE in the same
+   * transaction that seats the joiner, so two concurrent joins can never
+   * both take the last use. An already-seated member tapping the link again
+   * consumes nothing.
+   */
+  @Column({ type: 'int', default: 0 })
+  inviteTokenUseCount!: number;
+
+  /**
    * PRD-357: when this group's owner ended it (or the last leaver did, with no
    * successor to hand it to). NULL means active. Once set the group is
    * read-only: every write route refuses with `GROUP_DISSOLVED`, enforced in

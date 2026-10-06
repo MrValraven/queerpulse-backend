@@ -34,6 +34,7 @@ import { SavedItem } from '../saved/entities/saved-item.entity';
 import { Message } from '../messaging/entities/message.entity';
 import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportunity.entity';
 import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
@@ -968,11 +969,17 @@ export class MediaExportContributor implements DataExportContribution {
   constructor(
     private readonly storage: StorageService,
     @InjectRepository(Message) private readonly messages: Repository<Message>,
+    // T17: images the member uploaded to an unlinked persona live under
+    // persona-scoped keys no prefix listing reaches.
+    private readonly personaImageKeys: PersonaImageKeysService,
   ) {}
 
   async buildContribution(userId: string): Promise<ExportMediaContribution> {
     try {
-      const objects = await this.storage.listUserObjects(userId);
+      const objects = [
+        ...(await this.storage.listUserObjects(userId)),
+        ...(await this.personaImageKeys.listObjectsUploadedBy(userId)),
+      ];
       const messageIdByStorageKey = await this.messageIdsForStorageKeys(
         userId,
         objects.map((object) => object.key),

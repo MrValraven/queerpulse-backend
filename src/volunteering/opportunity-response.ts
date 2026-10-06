@@ -78,6 +78,12 @@ export interface OpportunityDetailDTO extends OpportunityCardDTO {
    * for an anonymous reader (`VolunteeringService.visibleMembersFor`).
    */
   team: MemberRef[];
+  /**
+   * True when the opportunity has at least one teammate on record, for every
+   * reader. It names nobody, so an anonymous reader (whose `team` is empty)
+   * can still be offered the "see who's in" sign-in prompt.
+   */
+  hasTeam: boolean;
   applyRole: string;
   /** Same three rules as `team`: null when anonymous, inactive or blocked. */
   poster: MemberRef | null;
@@ -162,6 +168,7 @@ export function toOpportunityDetail(
   community: CommunityRef | null,
   spotsFilled: number,
   team: MemberRef[],
+  hasTeam: boolean,
   poster: MemberRef | null,
   canReviewApplicants: boolean,
   canEditOpportunity: boolean,
@@ -175,6 +182,7 @@ export function toOpportunityDetail(
     goodFor: opportunity.detail.goodFor,
     teamIntro: opportunity.detail.teamIntro,
     team,
+    hasTeam,
     applyRole: opportunity.applyRole,
     poster,
     canReviewApplicants,

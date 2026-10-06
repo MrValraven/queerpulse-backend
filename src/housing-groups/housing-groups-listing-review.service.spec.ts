@@ -50,6 +50,7 @@ function makeListing(overrides: Partial<GroupListing> = {}): GroupListing {
     hidden: false,
     hiddenReason: null,
     postedByUserId: 'member-9',
+    isPosterNamed: true,
     decidedAt: null,
     decidedBy: null,
     decisionReason: null,

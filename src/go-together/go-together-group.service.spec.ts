@@ -532,10 +532,13 @@ describe('GoTogetherGroupService', () => {
       );
 
       expect(result).toBeUndefined();
+      // PRD-423: the block remembers the group's matched chat, so the block
+      // list names the member by first name alone.
       expect(social.blockMember).toHaveBeenCalledWith(
         'user-1',
         'cris',
         options,
+        { matchedConversationId: 'conversation-1' },
       );
     });
 

@@ -1018,12 +1018,21 @@ export class MessageAnnotationsService {
       const snippet =
         attachment && isStickerAttachment(attachment)
           ? attachment.label
-          : truncateCharacters(readableMessageBody(m.kind, m.body), 160);
+          : truncateCharacters(
+              // PRD-423: a matched chat's `@<member key>` mentions are
+              // spelled by first name before the cut.
+              listContext.renderText(
+                m.conversationId,
+                readableMessageBody(m.kind, m.body),
+              ),
+              160,
+            );
       return {
         id: m.id,
         conversationId: m.conversationId,
         snippet,
         sender: listContext.renderSender(m),
+        ...listContext.isSentByViewer(m),
         createdAt: m.createdAt.toISOString(),
         starredAt: starredAtById.get(m.id) ?? m.createdAt.toISOString(),
         // Coordinator follow-up (ENG-251): `kind`/`attachment` ride the same

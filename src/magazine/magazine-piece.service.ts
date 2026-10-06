@@ -663,6 +663,8 @@ export class MagazinePieceService {
       ...(blocks !== undefined ? { blocks } : {}),
     };
 
+    this.assertScheduledArticleStaysReady(article, patch);
+
     // The slug is server-generated and read-only in the editor (ArticleMetaRail)
     // — it's derived from the title, never typed directly. It's seeded once,
     // lazily, from whatever title existed the first time the editor opened
@@ -924,6 +926,45 @@ export class MagazinePieceService {
         message: 'This piece is behind its care gate and cannot be published.',
         code: 'magazine_care_gate_open',
         openGateItems,
+      });
+    }
+  }
+
+  /**
+   * ENG-460 for a SCHEDULED article (a future `publishedAt`): it goes live on
+   * its own at that instant, on the strength of the readiness check it passed
+   * when it was scheduled, so a draft save may not reopen that check. A save
+   * that would ADD a blocker (clearing the standfirst, or giving an image a
+   * whitespace-only alt, the one alt case the block validator lets through)
+   * is refused with the same 400 `magazine_publish_not_ready` shape the
+   * publish paths use, carrying the new blockers so the editor can say what
+   * to put back.
+   *
+   * Only new blockers count: a legacy row scheduled before the gate existed
+   * may already carry one, and refusing every save would leave nobody able to
+   * fix it. Drafts and live articles are untouched.
+   */
+  private assertScheduledArticleStaysReady(
+    article: MagazineArticle,
+    patch: Partial<MagazineArticle>,
+  ): void {
+    const isScheduled =
+      article.publishedAt !== null &&
+      article.publishedAt.getTime() > Date.now();
+    if (!isScheduled) return;
+    if (patch.standfirst === undefined && patch.blocks === undefined) return;
+
+    const currentBlockers = new Set(articlePublishBlockers(article));
+    const nextArticle: MagazineArticle = { ...article, ...patch };
+    const introducedBlockers = articlePublishBlockers(nextArticle).filter(
+      (blocker) => !currentBlockers.has(blocker),
+    );
+    if (introducedBlockers.length > 0) {
+      throw new BadRequestException({
+        message:
+          'This piece is scheduled to publish, so its article has to stay ready. Put this back or unpublish it from the piece record first.',
+        code: 'magazine_publish_not_ready',
+        openGateItems: introducedBlockers,
       });
     }
   }

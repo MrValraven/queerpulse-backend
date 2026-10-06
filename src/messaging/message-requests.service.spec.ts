@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import { MessageRequestsService } from './message-requests.service';
 
 /**
@@ -238,5 +239,62 @@ describe('MessageRequestsService.messageRequest connected branch (ENG-407)', () 
     expect(result.connectionRequestId).toBe('conn-1');
     expect(result.message).toBeNull();
     expect(messagesService.sendMessageWithOutcome).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * LOC-F1: the housing enquiry path asks `enquiryContactability` first and
+ * answers a blocked pair with the housing detail read's 404, before the pledge
+ * and step-up. That relies on this method naming a block either way as
+ * `blocked`. Every other `deliverEnquiry` caller keeps the 403.
+ */
+describe('MessageRequestsService enquiry block contract (LOC-F1)', () => {
+  let service: MessageRequestsService;
+  let blockFilter: { isBlockedEitherWay: jest.Mock };
+  let connections: {
+    areConnected: jest.Mock;
+    assertRequestsNotPaused: jest.Mock;
+  };
+  let core: { getOrCreateConversation: jest.Mock; postMessage: jest.Mock };
+
+  beforeEach(() => {
+    blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(true) };
+    connections = {
+      areConnected: jest.fn().mockResolvedValue(false),
+      assertRequestsNotPaused: jest.fn().mockResolvedValue(undefined),
+    };
+    core = {
+      getOrCreateConversation: jest.fn(),
+      postMessage: jest.fn(),
+    };
+    service = new MessageRequestsService(
+      {} as never, // profiles repository, unused by these paths
+      core as never,
+      connections as never,
+      blockFilter as never,
+      {} as never, // IdentityMailboxSyncService, unused by these paths
+      {} as never, // users repository, unused by these paths
+      {} as never, // MessagesService, unused by these paths
+    );
+  });
+
+  it('names a block either way as blocked so a domain can answer it its own way', async () => {
+    const result = await service.enquiryContactability('me', 'them');
+
+    expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
+    expect(result).toEqual({
+      canDeliver: false,
+      blockedReason: 'blocked',
+      replyRequiresConnection: false,
+      followUpAwaitsReply: false,
+    });
+  });
+
+  it('keeps the 403 on deliverEnquiry for every other caller', async () => {
+    await expect(service.deliverEnquiry('me', 'them', 'hi')).rejects.toThrow(
+      new ForbiddenException('You cannot contact this member'),
+    );
+    expect(core.getOrCreateConversation).not.toHaveBeenCalled();
+    expect(core.postMessage).not.toHaveBeenCalled();
   });
 });

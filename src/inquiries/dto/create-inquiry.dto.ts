@@ -4,6 +4,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
 } from 'class-validator';
 import { INQUIRY_KINDS, InquiryKind } from '../entities/inquiry.entity';
@@ -11,7 +12,8 @@ import { INQUIRY_KINDS, InquiryKind } from '../entities/inquiry.entity';
 /**
  * Body for `POST /inquiries` — a public marketing-form submission. Validated
  * with `whitelist`/`forbidNonWhitelisted` (global pipe), so unknown fields are
- * rejected. `kind` decides which form it came from; `orgName`/`subject` are
+ * rejected. `kind` decides which form it came from (or, for
+ * `listing_correction`, which Contact topic); `orgName`/`subject` are
  * optional because the Contact form has no organisation and either form may
  * omit a topic. Lengths are capped to keep a public, unauthenticated endpoint
  * from accepting unbounded text.
@@ -55,4 +57,16 @@ export class CreateInquiryDto {
   @IsString()
   @MaxLength(160)
   orgName?: string;
+
+  /**
+   * PRD-434. The directory listing a `listing_correction` is about, as the
+   * reference the "Suggest a correction" link carried (`QPL-2026-0007`).
+   * Same loose pattern as the frontend's `listingRefFromParam`: letters,
+   * digits and hyphens, so a future prefix still passes. Stored only on a
+   * `listing_correction`; any other kind drops it.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9-]{3,40}$/)
+  listingRef?: string;
 }

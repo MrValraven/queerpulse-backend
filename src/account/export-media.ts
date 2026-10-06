@@ -1,4 +1,8 @@
 import { toBareKey } from '../storage/bare-key';
+import {
+  PERSONA_SCOPED_PREFIX,
+  isPersonaScopedKey,
+} from '../storage/storage-key';
 import { UPLOAD_KIND_SPECS, UploadKind } from '../storage/upload-kinds';
 
 /**
@@ -135,6 +139,13 @@ export function uploadKindForStorageKey(key: string): UploadKind | null {
 }
 
 /**
+ * T17: the `media/` folder for the images a member uploaded to an unlinked
+ * persona. Their keys (`persona/<uuid>/<uuid><ext>`) carry no user id, so
+ * they are found through the uploader `persona_storage_keys` records.
+ */
+export const PERSONA_EXPORT_FOLDER = `${PERSONA_SCOPED_PREFIX}-images`;
+
+/**
  * The name an object gets inside the zip's `media/` folder: `<prefix>/<file>`,
  * i.e. the storage key with the member's own user-id segment removed. Every
  * object in the export belongs to the one member, so that segment carries no
@@ -145,6 +156,11 @@ export function uploadKindForStorageKey(key: string): UploadKind | null {
  */
 export function mediaEntryNameForKey(key: string): string {
   const segments = key.split('/').filter((segment) => segment.length > 0);
+  // T17: a persona-scoped key (`persona/<uuid>/<uuid><ext>`) gets its own
+  // folder, named for what it holds.
+  if (isPersonaScopedKey(key)) {
+    return `${PERSONA_EXPORT_FOLDER}/${segments[segments.length - 1] ?? 'file'}`;
+  }
   if (segments.length <= 1) {
     return segments[0] ?? 'file';
   }
@@ -162,7 +178,14 @@ export function mediaEntryNameForKey(key: string): string {
  * and therefore the same subset when the ceiling bites.
  */
 export function planExportMedia(
-  objects: { key: string; size: number; lastModified: string | null }[],
+  objects: {
+    key: string;
+    size: number;
+    lastModified: string | null;
+    /** T17: the kind when the key's prefix cannot say (a persona-scoped key
+     *  records it in its registry row). */
+    uploadKind?: UploadKind | null;
+  }[],
   /** Bare storage key -> the member's message id carrying it (PRD-370), from
    *  ONE batched lookup in `MediaExportContributor`. Keys not in the map get
    *  `messageId: null` when they are message uploads, and no field otherwise. */
@@ -198,7 +221,7 @@ export function planExportMedia(
     }
     usedNames.add(name);
 
-    const uploadKind = uploadKindForStorageKey(object.key);
+    const uploadKind = object.uploadKind ?? uploadKindForStorageKey(object.key);
     const isMessageUpload =
       uploadKind === 'message-image' || uploadKind === 'message-document';
     const file: ExportMediaFile = {

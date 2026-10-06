@@ -7,7 +7,10 @@ import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Identity, IdentityKind } from '../identities/entities/identity.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
-import { Conversation } from '../messaging/entities/conversation.entity';
+import {
+  Conversation,
+  ConversationKind,
+} from '../messaging/entities/conversation.entity';
 import { Message, MessageKind } from '../messaging/entities/message.entity';
 import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates';
 import { MessagingCoreService } from '../messaging/messaging-core.service';
@@ -15,6 +18,7 @@ import { Block } from '../social/entities/block.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
+import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService } from './storage.service';
 
 /**
@@ -25,6 +29,9 @@ import { StorageService } from './storage.service';
  * customer, a departed co-manager, a co-manager asking for a message before
  * their history floor, and a stranger get the same 404. A co-manager whose
  * own "clear chat" covers a message, with no history floor, still gets it.
+ * PRD-400: in a group, a member who joined later gets the same 404 for a
+ * photo posted before their join floor, on the reference route and the key
+ * route alike, while a member whose own "clear chat" covers it still gets it.
  *
  * It runs against a real database and is skipped unless
  * `MESSAGE_ATTACHMENT_ROUTE_DATABASE_URL` names one. It builds the schema
@@ -45,6 +52,7 @@ const BLOCKED_COLLEAGUE = '10000000-0000-4000-8000-000000000005';
 const CLEARING_COLLEAGUE = '10000000-0000-4000-8000-000000000006';
 const CUSTOMER = '10000000-0000-4000-8000-000000000011';
 const STRANGER = '10000000-0000-4000-8000-000000000012';
+const LATE_JOINER = '10000000-0000-4000-8000-000000000013';
 const ALL_USERS = [
   OWNER,
   LIVE_COLLEAGUE,
@@ -54,9 +62,13 @@ const ALL_USERS = [
   CLEARING_COLLEAGUE,
   CUSTOMER,
   STRANGER,
+  LATE_JOINER,
 ];
 const CAFE_IDENTITY_ID = '20000000-0000-4000-8000-000000000001';
 const CONVERSATION_ID = '40000000-0000-4000-8000-000000000001';
+// PRD-400: a group the owner speaks in as a persona.
+const PERSONA_IDENTITY_ID = '20000000-0000-4000-8000-000000000002';
+const GROUP_CONVERSATION_ID = '40000000-0000-4000-8000-000000000002';
 const PRE_FLOOR_IMAGE_ID = '50000000-0000-4000-8000-000000000001';
 const POST_FLOOR_IMAGE_ID = '50000000-0000-4000-8000-000000000002';
 const POST_FLOOR_DOCUMENT_ID = '50000000-0000-4000-8000-000000000003';
@@ -66,6 +78,12 @@ const DELETED_IMAGE_ID = '50000000-0000-4000-8000-000000000004';
 const REMOVED_IMAGE_ID = '50000000-0000-4000-8000-000000000005';
 const HIDDEN_IMAGE_ID = '50000000-0000-4000-8000-000000000006';
 const PERSONAL_IMAGE_ID = '50000000-0000-4000-8000-000000000007';
+// PRD-400: group photos on either side of the late joiner's join floor, two
+// sent as the persona (the reference route) and one sent as the owner
+// themself (the key route).
+const PRE_JOIN_GROUP_IMAGE_ID = '50000000-0000-4000-8000-000000000008';
+const POST_JOIN_GROUP_IMAGE_ID = '50000000-0000-4000-8000-000000000009';
+const PRE_JOIN_PERSONAL_GROUP_IMAGE_ID = '50000000-0000-4000-8000-000000000010';
 
 const HOUR_MS = 60 * 60 * 1000;
 const BASE_TIME = new Date('2026-09-01T09:00:00.000Z').getTime();
@@ -97,17 +115,27 @@ async function seedFixture(dataSource: DataSource): Promise<void> {
   );
   await dataSource.getRepository(Identity).insert([
     { id: CAFE_IDENTITY_ID, kind: IdentityKind.Listing },
+    { id: PERSONA_IDENTITY_ID, kind: IdentityKind.Subprofile },
     ...ALL_USERS.map((userId) => ({
       id: profileIdentityIdOf(userId),
       kind: IdentityKind.Profile,
       userId,
     })),
   ]);
-  await dataSource.getRepository(Conversation).insert({
-    id: CONVERSATION_ID,
-    createdAt: atHour(0),
-    openedAt: atHour(0),
-  });
+  await dataSource.getRepository(Conversation).insert([
+    {
+      id: CONVERSATION_ID,
+      createdAt: atHour(0),
+      openedAt: atHour(0),
+    },
+    {
+      id: GROUP_CONVERSATION_ID,
+      kind: ConversationKind.Group,
+      title: 'Book club',
+      createdAt: atHour(0),
+      openedAt: atHour(0),
+    },
+  ]);
   await dataSource.getRepository(ConversationParticipant).insert([
     {
       conversationId: CONVERSATION_ID,
@@ -147,6 +175,30 @@ async function seedFixture(dataSource: DataSource): Promise<void> {
       conversationId: CONVERSATION_ID,
       userId: BLOCKED_COLLEAGUE,
       identityId: CAFE_IDENTITY_ID,
+    },
+    // PRD-400: the owner and the customer were seated when the group began,
+    // and the customer later cleared the chat. The late joiner's seat holds
+    // the join floor in both columns, as `readGroupJoinHistoryFloor`'s
+    // callers write it.
+    // A synthetic persona seat: production seats only profile identities in
+    // groups. It exists here to drive the reference route.
+    {
+      conversationId: GROUP_CONVERSATION_ID,
+      userId: OWNER,
+      identityId: PERSONA_IDENTITY_ID,
+    },
+    {
+      conversationId: GROUP_CONVERSATION_ID,
+      userId: CUSTOMER,
+      identityId: profileIdentityIdOf(CUSTOMER),
+      clearedAt: atHour(6),
+    },
+    {
+      conversationId: GROUP_CONVERSATION_ID,
+      userId: LATE_JOINER,
+      identityId: profileIdentityIdOf(LATE_JOINER),
+      clearedAt: atHour(3),
+      historyFloorAt: atHour(3),
     },
   ]);
   await dataSource
@@ -190,6 +242,21 @@ async function seedFixture(dataSource: DataSource): Promise<void> {
     { ...imageMessage(DELETED_IMAGE_ID, 5, 4), deletedAt: atHour(7) },
     imageMessage(REMOVED_IMAGE_ID, 5, 5),
     imageMessage(HIDDEN_IMAGE_ID, 5, 6),
+    {
+      ...imageMessage(PRE_JOIN_GROUP_IMAGE_ID, 2, 8),
+      conversationId: GROUP_CONVERSATION_ID,
+      senderIdentityId: PERSONA_IDENTITY_ID,
+    },
+    {
+      ...imageMessage(POST_JOIN_GROUP_IMAGE_ID, 5, 9),
+      conversationId: GROUP_CONVERSATION_ID,
+      senderIdentityId: PERSONA_IDENTITY_ID,
+    },
+    {
+      ...imageMessage(PRE_JOIN_PERSONAL_GROUP_IMAGE_ID, 2, 10),
+      conversationId: GROUP_CONVERSATION_ID,
+      senderIdentityId: profileIdentityIdOf(OWNER),
+    },
     {
       ...imageMessage(PERSONAL_IMAGE_ID, 5, 7),
       senderId: CUSTOMER,
@@ -236,7 +303,10 @@ describeWithDatabase(
   () => {
     let dataSource: DataSource;
     let controller: FilesController;
-    let storage: { openObjectStream: jest.Mock };
+    let storage: {
+      openObjectStream: jest.Mock;
+      createPresignedDownload: jest.Mock;
+    };
 
     beforeAll(async () => {
       const databaseName = new URL(DATABASE_URL!).pathname.replace(/^\//, '');
@@ -269,6 +339,9 @@ describeWithDatabase(
         openObjectStream: jest.fn((key: string) =>
           Promise.resolve(Readable.from([Buffer.from(`bytes of ${key}`)])),
         ),
+        createPresignedDownload: jest.fn((key: string) =>
+          Promise.resolve(`presigned ${key}`),
+        ),
       };
       controller = new FilesController(
         {
@@ -277,6 +350,10 @@ describeWithDatabase(
         } as unknown as StorageService,
         dataSource.getRepository(User),
         dataSource.getRepository(Message),
+        // T17: no persona-scoped key is served here.
+        {
+          findServingRegistration: jest.fn().mockResolvedValue(null),
+        } as unknown as PersonaImageKeysService,
       );
     });
 
@@ -333,6 +410,48 @@ describeWithDatabase(
       await expect(
         fetchAs(CLEARING_COLLEAGUE, PRE_FLOOR_IMAGE_ID),
       ).resolves.toBe(`bytes of ${ownerKey('message-images', 1, '.jpg')}`);
+    });
+
+    it('refuses a group member who joined later a photo posted before they joined, which a founding member still gets', async () => {
+      await expect(
+        fetchAs(LATE_JOINER, PRE_JOIN_GROUP_IMAGE_ID),
+      ).rejects.toThrow(NotFoundException);
+      await expect(fetchAs(OWNER, PRE_JOIN_GROUP_IMAGE_ID)).resolves.toBe(
+        `bytes of ${ownerKey('message-images', 8, '.jpg')}`,
+      );
+    });
+
+    it('serves a group member who joined later a photo posted after they joined', async () => {
+      await expect(
+        fetchAs(LATE_JOINER, POST_JOIN_GROUP_IMAGE_ID),
+      ).resolves.toBe(`bytes of ${ownerKey('message-images', 9, '.jpg')}`);
+    });
+
+    it('serves a founding group member a pre-join photo their own clear chat covers', async () => {
+      await expect(fetchAs(CUSTOMER, PRE_JOIN_GROUP_IMAGE_ID)).resolves.toBe(
+        `bytes of ${ownerKey('message-images', 8, '.jpg')}`,
+      );
+    });
+
+    it('applies the group join floor on the key route too', async () => {
+      const storageKey = ownerKey('message-images', 10, '.jpg');
+      async function redirectAs(userId: string) {
+        const { response } = streamingResponse();
+        await controller.serve(
+          storageKey.split('/'),
+          { userId, email: `${userId}@example.test` } as never,
+          response as unknown as Response,
+        );
+        return response.redirect;
+      }
+
+      await expect(redirectAs(LATE_JOINER)).rejects.toThrow(NotFoundException);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+      const customerRedirect = await redirectAs(CUSTOMER);
+      expect(customerRedirect).toHaveBeenCalledWith(
+        302,
+        `presigned ${storageKey}`,
+      );
     });
 
     it.each([

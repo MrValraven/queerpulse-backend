@@ -1,4 +1,4 @@
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import { EntityManager, Repository, SelectQueryBuilder } from 'typeorm';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import {
   DocumentAttachment,
@@ -9,6 +9,8 @@ import {
   StickerAttachment,
 } from '../messaging/entities/message.entity';
 import { primaryMessageAttachmentStorageKey } from '../messaging/message-evidence-hold';
+import { User, UserStatus } from '../users/entities/user.entity';
+import { groupJoinHistoryFloorCoversPredicate } from '../messaging/group-join-history-floor';
 import {
   mailboxStaffHistoryFloorCoversPredicate,
   seatExcludedFromMailboxPredicate,
@@ -19,7 +21,7 @@ import {
   withinLeftAtCeilingPredicate,
 } from '../messaging/message-visibility-predicates';
 import { messageAttachmentReference } from './message-attachment-reference';
-import { parseStorageKey } from './storage-key';
+import { parseStorageKey, storageKeyOwnerId } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 
 // Final fix F1 (C1): which attachments are served by message, and who may
@@ -62,13 +64,18 @@ export function isSentAsMailboxIdentity(
 export function withMessageAttachmentRoute<Row extends MessageAttachmentRow>(
   message: Row,
   identityKindById: ReadonlyMap<string, IdentityKind>,
+  // PRD-423: an image or document in a matched Go together chat renders by
+  // reference whoever sent it, since its storage key names the uploader's
+  // user id, which a matched chat never hands the other members.
+  options: { isMatchedChat?: boolean } = {},
 ): Row {
   const attachment = message.attachment;
   if (
     !attachment ||
     (message.kind !== MessageKind.Image &&
       message.kind !== MessageKind.Document) ||
-    !isSentAsMailboxIdentity(message, identityKindById)
+    (!options.isMatchedChat &&
+      !isSentAsMailboxIdentity(message, identityKindById))
   ) {
     return message;
   }
@@ -117,14 +124,22 @@ export function messageAttachmentRouteStorageKey(
  * soft-deleted message is excluded. The attachment route and the forward of
  * a referenced attachment both read it, so the two never disagree.
  *
+ * PRD-400: a member who took a seat in an existing group reads it from the
+ * moment they joined, so a message at or before that seat's join floor
+ * (`groupJoinHistoryFloorCoversPredicate`) is refused too, as the key route
+ * refuses it. A member's own "clear chat" writes `cleared_at` alone and keeps
+ * its access, as before.
+ *
  * Fix round N1: two more rules. A message a moderator hid or removed
  * (`notModeratedMessagePredicate`, the takedown clause every message
  * listing composes) is refused, since the thread renders it without its
  * attachment. And only a message sent as a business, persona or company
  * qualifies, the one case the readers render by reference
  * (`isSentAsMailboxIdentity`): its `sender_identity_id` is set and names no
- * `profile` identity, a deleted business included. A personal message keeps
- * the key route, with that route's suspended-uploader rule.
+ * `profile` identity, a deleted business included. PRD-423: so does any
+ * message in a matched Go together chat, which the readers render by
+ * reference too. Any other personal message keeps the key route, with that
+ * route's suspended-uploader rule.
  */
 export function viewableMessageAttachmentQuery(
   messages: Repository<Message>,
@@ -161,15 +176,92 @@ export function viewableMessageAttachmentQuery(
     .andWhere(
       `NOT ${mailboxStaffHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
     )
+    .andWhere(
+      `NOT ${groupJoinHistoryFloorCoversPredicate('message.created_at', 'participant')}`,
+    )
     .andWhere(notModeratedMessagePredicate('message'), {
       messageSubjectType: MESSAGE_SUBJECT_TYPE,
     })
-    .andWhere('message.sender_identity_id IS NOT NULL')
-    .andWhere(
-      `NOT EXISTS (
+    .andWhere(`(${SENT_AS_MAILBOX_IDENTITY_SQL} OR ${IN_MATCHED_CHAT_SQL})`);
+}
+
+/** The message was sent as a business, persona or company: its
+ *  `sender_identity_id` is set and names no `profile` identity, a deleted
+ *  business included. */
+const SENT_AS_MAILBOX_IDENTITY_SQL = `(message.sender_identity_id IS NOT NULL
+      AND NOT EXISTS (
         SELECT 1 FROM "identities" "attachment_sender_identity"
         WHERE "attachment_sender_identity"."id" = message.sender_identity_id
           AND "attachment_sender_identity"."kind" = 'profile'
-      )`,
-    );
+      ))`;
+
+/** PRD-423: the message sits in a matched Go together chat, whose readers
+ *  render every image and document by reference
+ *  (`withMessageAttachmentRoute`'s `isMatchedChat`). The durable flag
+ *  decides, with a live group link counting too, as `memberNameOptionsFor`
+ *  reads it. */
+const IN_MATCHED_CHAT_SQL = `EXISTS (
+        SELECT 1 FROM "conversations" "attachment_matched_chat"
+        WHERE "attachment_matched_chat"."id" = message.conversation_id
+          AND ("attachment_matched_chat"."is_go_together_chat"
+            OR "attachment_matched_chat"."event_match_group_id" IS NOT NULL)
+      )`;
+
+/**
+ * PRD-423 (opaque member keys): whether the bytes of a matched Go together
+ * chat attachment at `storageKey` are withheld from `viewerId` because their
+ * uploader is suspended or banned. A matched chat renders a member's own
+ * photo or document by reference (`withMessageAttachmentRoute`'s
+ * `isMatchedChat`), so the reference route, and a forward of the reference,
+ * apply the rule the key route (`GET /files/*`) applies to that member's
+ * media: withheld from everyone but the uploader and platform staff. A
+ * mailbox reply keeps the reference route's own rule (the business sent it,
+ * and no staff member's suspension shows). `isInMatchedChat` comes from the
+ * same query that found the message (`findViewableMessageAttachment`), so
+ * any other conversation answers false with no read at all.
+ */
+export async function isMatchedChatUploaderWithheld(
+  manager: Pick<EntityManager, 'findOne'>,
+  input: {
+    isInMatchedChat: boolean;
+    storageKey: string;
+    viewerId: string;
+    isStaffViewer: boolean;
+  },
+): Promise<boolean> {
+  if (!input.isInMatchedChat) return false;
+  const uploaderId = storageKeyOwnerId(input.storageKey);
+  if (!uploaderId || uploaderId === input.viewerId || input.isStaffViewer) {
+    return false;
+  }
+  const uploader = await manager.findOne(User, {
+    where: { id: uploaderId },
+    select: { id: true, status: true },
+  });
+  return uploader?.status === UserStatus.Suspended;
+}
+
+/** The raw column `findViewableMessageAttachment` reads the matched chat
+ *  flag from. */
+const IS_IN_MATCHED_CHAT_ALIAS = 'is_in_matched_chat';
+
+/**
+ * PRD-423: the one message `query` (a `viewableMessageAttachmentQuery`)
+ * finds, with whether it sits in a matched Go together chat, read in the
+ * same query through the clause the viewability rule already evaluates
+ * (`IN_MATCHED_CHAT_SQL`). Null when the requester may not see it.
+ */
+export async function findViewableMessageAttachment(
+  query: SelectQueryBuilder<Message>,
+): Promise<{ message: Message; isInMatchedChat: boolean } | null> {
+  const { entities, raw } = await query
+    .addSelect(IN_MATCHED_CHAT_SQL, IS_IN_MATCHED_CHAT_ALIAS)
+    .getRawAndEntities();
+  const message = entities[0];
+  if (!message) return null;
+  const row = raw[0] as Record<string, unknown> | undefined;
+  return {
+    message,
+    isInMatchedChat: row?.[IS_IN_MATCHED_CHAT_ALIAS] === true,
+  };
 }

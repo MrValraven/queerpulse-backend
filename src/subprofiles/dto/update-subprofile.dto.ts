@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
@@ -100,4 +101,16 @@ export class UpdateSubprofileDTO {
   @IsInt()
   @Min(0)
   expectedEditVersion?: number;
+
+  // PRD-435, request-only: the owner confirms the persona's availability and
+  // therapist status as they stand, so `availabilityUpdatedAt` is stamped
+  // even when neither value changes. Never lands on the persona.
+  @ApiPropertyOptional({
+    type: Boolean,
+    description:
+      'True when the owner confirms the current availability and therapist status. Stamps availabilityUpdatedAt even when neither changes.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  confirmAvailability?: boolean;
 }

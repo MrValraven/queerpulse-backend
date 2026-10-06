@@ -23,6 +23,10 @@ import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { seatExcludedFromMailboxPredicate } from '../messaging/mailbox-seats';
+import {
+  isMatchedChatMemberKey,
+  resolveMatchedChatMemberKeys,
+} from '../messaging/matched-member-key';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole } from '../users/entities/user.entity';
@@ -194,14 +198,39 @@ export class MentionNotificationService {
       const groups: MentionGroup[] = [];
 
       if (mentions.members.length) {
-        const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
-          mentions.members,
-        );
+        // PRD-423: a matched Go together chat mentions its members by key
+        // alone. A slug typed there notifies nobody, so a guessed slug can
+        // never be tested against the chat's roster.
+        const isGoTogetherMessage =
+          payloadBase.source === 'message' &&
+          payloadBase.isGoTogetherChat === true;
+        const bySlug = isGoTogetherMessage
+          ? new Map<string, string>()
+          : await new MemberLookup(this.profiles).userIdsForSlugs(
+              mentions.members,
+            );
         // Source restriction (community roster, forum thread audience or
         // conversation participants) runs once over every group below, in
         // `restrictGroupsToSource`.
         for (const [slug, userId] of bySlug) {
           groups.push({ kind: 'member', ref: slug, recipients: [userId] });
+        }
+        // PRD-423 (opaque member keys): in a matched Go together chat the
+        // `@` picker stores a member's per-chat key, resolved here among the
+        // chat's own seats. The source restriction below still holds every
+        // recipient to the chat's current participants.
+        for (const [
+          memberKey,
+          userId,
+        ] of await this.matchedChatMemberKeyUserIds(
+          payloadBase,
+          mentions.members,
+        )) {
+          groups.push({
+            kind: 'member',
+            ref: memberKey,
+            recipients: [userId],
+          });
         }
       }
       if (mentions.communities.length) {
@@ -517,6 +546,39 @@ export class MentionNotificationService {
         allowedUserIds.has(userId),
       ),
     }));
+  }
+
+  /**
+   * PRD-423 (opaque member keys): the user behind each per-chat member key
+   * among `mentionRefs`, for a mention written inside a matched Go together
+   * chat (`payloadBase.isGoTogetherChat`, set by `MessagesService` on such a
+   * send). Every seat of the conversation is a candidate; the source
+   * restriction narrows that to its current participants afterwards. Empty
+   * for any other source, so a key-shaped ref elsewhere names nobody.
+   */
+  private async matchedChatMemberKeyUserIds(
+    payloadBase: Record<string, unknown>,
+    mentionRefs: string[],
+  ): Promise<Map<string, string>> {
+    const conversationId = payloadBase.conversationId;
+    if (
+      payloadBase.source !== 'message' ||
+      payloadBase.isGoTogetherChat !== true ||
+      typeof conversationId !== 'string' ||
+      !conversationId ||
+      !mentionRefs.some((ref) => isMatchedChatMemberKey(ref))
+    ) {
+      return new Map();
+    }
+    const seats = await this.conversationParticipants.find({
+      where: { conversationId },
+      select: { userId: true },
+    });
+    return resolveMatchedChatMemberKeys(
+      conversationId,
+      seats.map((seat) => seat.userId),
+      mentionRefs,
+    );
   }
 
   /**

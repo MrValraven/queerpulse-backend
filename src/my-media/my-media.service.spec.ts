@@ -9,12 +9,36 @@ import { StorageService } from '../storage/storage.service';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { MediaReference } from '../media-references/media-reference.types';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 
 /** No upload in these suites has a saved crop. */
 const noCrops = {
   provide: MediaCropService,
   useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
 };
+
+/** T17: the persona-scoped registry. No persona images unless a test stages
+ *  some. */
+let personaImageKeys: {
+  listObjectsUploadedBy: jest.Mock;
+  findRegistration: jest.Mock;
+  unregister: jest.Mock;
+};
+const personaKeysProvider = () => ({
+  provide: PersonaImageKeysService,
+  useValue: personaImageKeys,
+});
+
+beforeEach(() => {
+  personaImageKeys = {
+    listObjectsUploadedBy: jest.fn().mockResolvedValue([]),
+    findRegistration: jest.fn().mockResolvedValue(null),
+    unregister: jest.fn().mockResolvedValue(undefined),
+  };
+});
+
+const PERSONA_KEY =
+  'persona/77777777-7777-4777-8777-777777777777/88888888-8888-4888-8888-888888888888.jpg';
 
 describe('MyMediaService.listMine', () => {
   const userId = '11111111-1111-1111-1111-111111111111';
@@ -35,6 +59,7 @@ describe('MyMediaService.listMine', () => {
           useValue: { resolve: resolveReferences },
         },
         noCrops,
+        personaKeysProvider(),
       ],
     }).compile();
   }
@@ -222,6 +247,7 @@ describe('MyMediaService.deleteMine', () => {
           useValue: { resolve: resolveReferences },
         },
         noCrops,
+        personaKeysProvider(),
       ],
     }).compile();
   }
@@ -308,5 +334,131 @@ describe('MyMediaService.deleteMine', () => {
       ForbiddenException,
     );
     expect(resolveReferences).not.toHaveBeenCalled();
+  });
+});
+
+// T17: images the caller uploaded to an unlinked persona live under keys
+// that name nobody; the registry records them as the caller's.
+describe('MyMediaService persona-scoped uploads', () => {
+  const userId = '11111111-1111-1111-1111-111111111111';
+  const otherId = '22222222-2222-2222-2222-222222222222';
+
+  function makeService(
+    deleteObjectByReference: jest.Mock = jest.fn().mockResolvedValue(true),
+    resolveReferences: jest.Mock = jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>(),
+      degraded: false,
+    }),
+  ) {
+    return Test.createTestingModule({
+      providers: [
+        MyMediaService,
+        {
+          provide: StorageService,
+          useValue: {
+            listObjects: jest
+              .fn()
+              .mockResolvedValue({ objects: [], nextContinuationToken: null }),
+            deleteObjectByReference,
+          },
+        },
+        {
+          provide: MediaReferenceResolver,
+          useValue: { resolve: resolveReferences },
+        },
+        noCrops,
+        personaKeysProvider(),
+      ],
+    }).compile();
+  }
+
+  it('lists them with the kind the registry records', async () => {
+    personaImageKeys.listObjectsUploadedBy.mockResolvedValue([
+      {
+        key: PERSONA_KEY,
+        size: 7,
+        lastModified: '2026-02-01T00:00:00.000Z',
+        uploadKind: 'persona-cover',
+      },
+    ]);
+    const service = (await makeService()).get(MyMediaService);
+
+    const response = await service.listMine(userId);
+
+    expect(personaImageKeys.listObjectsUploadedBy).toHaveBeenCalledWith(userId);
+    expect(response.items).toEqual([
+      expect.objectContaining({
+        key: PERSONA_KEY,
+        kind: 'persona-cover',
+        fileUrl: `/files/${PERSONA_KEY}`,
+      }),
+    ]);
+  });
+
+  it('deletes one the caller uploaded that nothing shows, with its registry row', async () => {
+    personaImageKeys.findRegistration.mockResolvedValue({
+      storageKey: PERSONA_KEY,
+      uploadedById: userId,
+    });
+    const deleteObjectByReference = jest.fn().mockResolvedValue(true);
+    const service = (await makeService(deleteObjectByReference)).get(
+      MyMediaService,
+    );
+
+    await service.deleteMine(userId, PERSONA_KEY);
+
+    expect(deleteObjectByReference).toHaveBeenCalledWith(PERSONA_KEY);
+    expect(personaImageKeys.unregister).toHaveBeenCalledWith([PERSONA_KEY]);
+  });
+
+  it('refuses one somebody else uploaded', async () => {
+    personaImageKeys.findRegistration.mockResolvedValue({
+      storageKey: PERSONA_KEY,
+      uploadedById: otherId,
+    });
+    const deleteObjectByReference = jest.fn();
+    const service = (await makeService(deleteObjectByReference)).get(
+      MyMediaService,
+    );
+
+    await expect(
+      service.deleteMine(userId, PERSONA_KEY),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(deleteObjectByReference).not.toHaveBeenCalled();
+  });
+
+  it('keeps one a persona still shows', async () => {
+    personaImageKeys.findRegistration.mockResolvedValue({
+      storageKey: PERSONA_KEY,
+      uploadedById: userId,
+    });
+    const deleteObjectByReference = jest.fn();
+    const service = (
+      await makeService(
+        deleteObjectByReference,
+        jest.fn().mockResolvedValue({
+          references: new Map<string, MediaReference[]>([
+            [
+              PERSONA_KEY,
+              [
+                {
+                  type: 'persona-cover',
+                  entityId: 'persona-1',
+                  label: 'Nightform',
+                  slug: 'nightform',
+                },
+              ],
+            ],
+          ]),
+          degraded: false,
+        }),
+      )
+    ).get(MyMediaService);
+
+    await expect(
+      service.deleteMine(userId, PERSONA_KEY),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(deleteObjectByReference).not.toHaveBeenCalled();
+    expect(personaImageKeys.unregister).not.toHaveBeenCalled();
   });
 });

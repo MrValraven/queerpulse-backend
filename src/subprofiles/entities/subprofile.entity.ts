@@ -494,6 +494,14 @@ export class Subprofile {
   @Column({ type: 'varchar', nullable: true })
   availability!: string | null; // AVAILABILITY_KEYS
 
+  // PRD-435: when `availability` or the therapist status
+  // (`skinData.therapist.status`) last changed, so directory cards can say
+  // how fresh a status is and stop trusting an old one. Stamped by
+  // `availabilityUpdatedAtAfterSave` when either value changes or the owner
+  // confirms them. Null until one of those happens (no backfill).
+  @Column({ type: 'timestamptz', nullable: true })
+  availabilityUpdatedAt!: Date | null;
+
   @Column({ type: 'varchar', nullable: true })
   ctaLabel!: string | null;
 

@@ -685,7 +685,9 @@ export function mailboxThreadPredicate(
  * `identity_blocks` row for the staff seat's own identity, the mailbox
  * identity, so a customer's block of a whole business takes every staff
  * seat of it out of that customer's threads. The two kinds of block are
- * separate `EXISTS` arms under one customer seat.
+ * separate `EXISTS` arms under one customer seat. A block carried across a
+ * persona going unlinked (ENG-447) is a third arm: it names the persona, and
+ * holds for the identity the persona speaks through now.
  *
  * PRD-372: an official thread's QueerPulse Team seats take the same rule.
  * A member's block of one moderator takes that moderator, and no colleague,
@@ -721,6 +723,11 @@ export function blockedStaffSeatPredicate(
           WHERE "staff_business_identity_block"."blocker_user_id" = "blocking_customer_seat"."user_id"
             AND "staff_business_identity_block"."identity_id" = "blocked_staff_seat"."identity_id"
         )
+        OR EXISTS (
+          SELECT 1 FROM "identity_blocks" "staff_carried_identity_block"
+          WHERE "staff_carried_identity_block"."blocker_user_id" = "blocking_customer_seat"."user_id"
+            AND "staff_carried_identity_block"."blocked_subprofile_id" = "blocked_staff_identity"."subprofile_id"
+        )
       )
   )`;
 }
@@ -730,8 +737,9 @@ export function blockedStaffSeatPredicate(
  * conversation `conversationIdExpression` is the CUSTOMER seat (a `profile`
  * identity) of a DIRECT, non-official thread, and that customer holds an
  * `identity_blocks` row for the identity another seat of the thread speaks
- * for, a business, persona or company: the database-side twin of
- * `isCustomerSeatExcludedByIdentityBlock`. An official thread never
+ * for, a business, persona or company, or a block carried across that
+ * persona going unlinked (ENG-447, naming the persona): the database-side
+ * twin of `isCustomerSeatExcludedByIdentityBlock`. An official thread never
  * matches: no block of the QueerPulse Team takes a member out of their own
  * official thread, which is where the platform's safety notices reach them. Reads and writes compose it
  * through `seatExcludedFromMailboxPredicate`. The aliases are lowercase and
@@ -754,7 +762,10 @@ export function identityBlockedCustomerSeatPredicate(
       ON "identity_blocked_business_identity"."id" = "identity_blocked_business_seat"."identity_id"
     INNER JOIN "identity_blocks" "customer_business_identity_block"
       ON "customer_business_identity_block"."blocker_user_id" = "identity_blocking_customer_seat"."user_id"
-      AND "customer_business_identity_block"."identity_id" = "identity_blocked_business_seat"."identity_id"
+      AND (
+        "customer_business_identity_block"."identity_id" = "identity_blocked_business_seat"."identity_id"
+        OR "customer_business_identity_block"."blocked_subprofile_id" = "identity_blocked_business_identity"."subprofile_id"
+      )
     WHERE "identity_blocking_customer_seat"."conversation_id" = ${conversationIdExpression}
       AND "identity_blocking_customer_seat"."user_id" = ${userIdExpression}
       AND "identity_blocking_customer_identity"."kind" = 'profile'
