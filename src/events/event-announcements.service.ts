@@ -10,6 +10,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
+  areAttendeeCountsWithheld,
   EventAnnouncementView,
   toEventAnnouncementView,
 } from './event-response';
@@ -122,6 +123,12 @@ export class EventAnnouncementsService {
    * find the door code again at the door). A passer-by gets a 403 rather than
    * a silently empty list, so the frontend never renders "no announcements"
    * at somebody who simply has not RSVPed.
+   *
+   * Each row's `recipientCount` is the fan-out to every live RSVP, so it
+   * follows the host's "Show attendee count" toggle exactly as the detail's
+   * copy does (`areAttendeeCountsWithheld`): null for a reader who is not an
+   * organiser when the count is hidden. One organiser check above settles it
+   * for the whole list.
    */
   async list(slug: string, viewerId: string): Promise<EventAnnouncementView[]> {
     const event = await this.loadEventOr404(slug);
@@ -146,12 +153,16 @@ export class EventAnnouncementsService {
     const authorByUserId = new Map(
       authors.map((profile) => [profile.userId, profile]),
     );
-    return rows.map((row) =>
-      toEventAnnouncementView(
+    const isCountWithheld = areAttendeeCountsWithheld(event, isOrganizer);
+    return rows.map((row) => {
+      const announcement = toEventAnnouncementView(
         row,
         row.authorId ? authorByUserId.get(row.authorId) : undefined,
-      ),
-    );
+      );
+      return isCountWithheld
+        ? { ...announcement, recipientCount: null }
+        : announcement;
+    });
   }
 
   // --- internals ---

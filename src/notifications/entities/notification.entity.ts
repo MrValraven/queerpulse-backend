@@ -234,6 +234,13 @@ export enum NotificationType {
   // like any member-driven type. See migration
   // `AddEventCohostInviteNotificationType1790500000000`.
   EventCohostInvite = 'event_cohost_invite',
+  // Lineup invites (2026-10-06). `EventLineupInvite` reaches the invited
+  // member, actor = the organizer who invited them. The two replies reach
+  // that organizer (or the host when the inviter's account is gone), actor =
+  // the performer. See migration `AddLineupNotificationTypes1830100100000`.
+  EventLineupInvite = 'event_lineup_invite',
+  EventLineupAccepted = 'event_lineup_accepted',
+  EventLineupDeclined = 'event_lineup_declined',
   // Sent to a magazine writer applicant when an admin approves or declines
   // their application (SDD 2026-08-18 "magazine writer applications").
   // System-driven — no actor — payload carries `{ reviewNote }`. See
@@ -965,7 +972,10 @@ export enum NotificationType {
    *
    * Payload carries `{ source: 'event', eventSlug, title, seatsRemaining }`.
    * `seatsRemaining` is a NUMBER, which the frontend mirrors onto `count` for
-   * CLDR pluralisation, exactly like `AccountDeletionFinalWarning`. See
+   * CLDR pluralisation, exactly like `AccountDeletionFinalWarning`. It is left
+   * out when the host turned `Event.showAttendeeCount` off, since capacity is
+   * public and the seats left would give back the headcount; the frontend then
+   * renders the flat "nearly full" line. See
    * migration `AddEventNearlyFullNotification1796020000000`.
    */
   EventNearlyFull = 'event_nearly_full',

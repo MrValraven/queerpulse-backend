@@ -8,7 +8,6 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
-  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -20,16 +19,17 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
+import { ChangeLineupRoleDto } from './dto/change-lineup-role.dto';
 import { CheckInDto } from './dto/check-in.dto';
 import { CohostDto } from './dto/cohost.dto';
 import { CreateCohostInviteDto } from './dto/create-cohost-invite.dto';
 import { CreateEventAnnouncementDto } from './dto/create-event-announcement.dto';
 import { CreateEventBanDto } from './dto/create-event-ban.dto';
 import { CreateEventDto } from './dto/create-event.dto';
+import { CreateLineupInviteDto } from './dto/create-lineup-invite.dto';
 import { InviteEventDto } from './dto/invite-event.dto';
 import { ListAttendeesQuery } from './dto/list-attendees.query';
 import { ListEventsQuery } from './dto/list-events.query';
-import { PutLineupDto } from './dto/put-lineup.dto';
 import { RespondCohostInviteDto } from './dto/respond-cohost-invite.dto';
 import { RespondEventInviteDto } from './dto/respond-event-invite.dto';
 import { RsvpDto } from './dto/rsvp.dto';
@@ -42,6 +42,7 @@ import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
+import { EventLineupService } from './event-lineup.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
 import {
@@ -76,6 +77,7 @@ export class EventsController {
     private readonly eventAnnouncementsService: EventAnnouncementsService,
     private readonly eventBansService: EventBansService,
     private readonly eventCheckInService: EventCheckInService,
+    private readonly eventLineupService: EventLineupService,
   ) {}
 
   @Get()
@@ -470,25 +472,93 @@ export class EventsController {
     return this.eventCohostInvitesService.createInvite(slug, user.userId, dto);
   }
 
-  @Put(':slug/lineup')
+  @Post(':slug/lineup')
   @UseGuards(NotRestrictedGuard)
+  // Each invite lands in someone's bell, so a burst of them is rate-limited
+  // the same way the announcements fan-out below is.
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({
     summary:
-      'Replace an event\'s lineup ("who performed") — host/co-host only.',
+      'Invite a connection, or someone going, onto an event lineup (host/co-host only).',
   })
-  @ApiOkResponse({ description: 'The replaced lineup.' })
+  @ApiCreatedResponse({ description: 'The lineup with the new pending row.' })
+  @ApiBadRequestResponse({
+    description: 'Inviting yourself, or the lineup is at its cap.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'Not an organizer, or the member is neither a connection nor going.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No such event, or the member is missing or inactive.',
+  })
+  @ApiConflictResponse({
+    description: 'The member is already on the lineup or invited.',
+  })
+  inviteToLineup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateLineupInviteDto,
+  ) {
+    return this.eventLineupService.invite(slug, user.userId, dto);
+  }
+
+  // Declared before the `:memberSlug` routes. It is a POST, so it never
+  // shares a method with them, and a member whose slug is "leave" stays
+  // reachable through PATCH and DELETE.
+  @Post(':slug/lineup/leave')
+  @ApiOperation({ summary: 'Take yourself off an event lineup you accepted.' })
+  @ApiOkResponse({ description: 'You are off the lineup.' })
+  @ApiNotFoundResponse({ description: 'You are not on this lineup.' })
+  leaveLineup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.eventLineupService.leave(slug, user.userId);
+  }
+
+  @Patch(':slug/lineup/:memberSlug')
+  // The role is free text shown publicly on the lineup, so a restricted
+  // member cannot set it.
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: "Change a lineup member's role (host/co-host only).",
+  })
+  @ApiOkResponse({ description: 'The updated lineup.' })
   @ApiForbiddenResponse({
     description: 'Only the host or a co-host can do that.',
   })
-  @ApiNotFoundResponse({
-    description: 'No event with that slug, or a member slug was not found.',
-  })
-  putLineup(
+  @ApiNotFoundResponse({ description: 'No such event, member or lineup row.' })
+  changeLineupRole(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Body() dto: PutLineupDto,
+    @Param('memberSlug') memberSlug: string,
+    @Body() dto: ChangeLineupRoleDto,
   ) {
-    return this.eventsService.replaceLineup(slug, user.userId, dto.entries);
+    return this.eventLineupService.changeRole(
+      slug,
+      user.userId,
+      memberSlug,
+      dto.role,
+    );
+  }
+
+  @Delete(':slug/lineup/:memberSlug')
+  @ApiOperation({
+    summary:
+      'Remove someone from a lineup or withdraw their invite (host/co-host only).',
+  })
+  @ApiOkResponse({ description: 'The updated lineup.' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No such event, member or lineup row.' })
+  removeFromLineup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('memberSlug') memberSlug: string,
+  ) {
+    return this.eventLineupService.remove(slug, user.userId, memberSlug);
   }
 
   // ── Host announcements (LOC-06) ─────────────────────────────────────────
@@ -667,14 +737,14 @@ export class EventsController {
   @Get(':slug/lineup')
   @ApiOperation({
     summary:
-      "Get an event's lineup, plus the caller's own entry if they're on it.",
+      "Get an event's lineup (accepted rows, or every row for organizers), plus the caller's own entry.",
   })
   @ApiOkResponse({ description: "The lineup and the viewer's own entry." })
   @ApiNotFoundResponse({
     description: 'No event with that slug, or not visible to you.',
   })
   getLineup(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.eventsService.getLineup(slug, user.userId);
+    return this.eventLineupService.getLineup(slug, user.userId);
   }
 }
 
@@ -757,5 +827,56 @@ export class EventCohostInvitesController {
     @Body() dto: RespondCohostInviteDto,
   ) {
     return this.eventCohostInvitesService.respond(id, user.userId, dto.action);
+  }
+}
+
+@Feature('events')
+@ApiTags('Events')
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
+@Controller('event-lineup-invites')
+@UseGuards(ActiveMemberGuard)
+export class EventLineupInvitesController {
+  constructor(private readonly eventLineupService: EventLineupService) {}
+
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a lineup invite (the invited member only).' })
+  @ApiOkResponse({ description: 'The invite, its gathering and inviter.' })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  get(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.eventLineupService.getInvite(id, user.userId);
+  }
+
+  @Post(':id/accept')
+  @ApiOperation({ summary: 'Accept a lineup invite.' })
+  @ApiOkResponse({ description: 'The invite id and its new status.' })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({
+    description: 'This invite has already been answered.',
+  })
+  accept(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.eventLineupService.respond(id, user.userId, 'accepted');
+  }
+
+  @Post(':id/decline')
+  @ApiOperation({ summary: 'Decline a lineup invite.' })
+  @ApiOkResponse({ description: 'The invite id and its new status.' })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({
+    description: 'This invite has already been answered.',
+  })
+  decline(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.eventLineupService.respond(id, user.userId, 'declined');
   }
 }

@@ -14,8 +14,11 @@ export interface CohostInviteEventSummaryView {
   timezone: string;
   venue: string | null;
   isOnline: boolean;
-  goingCount: number;
-  waitlistCount: number;
+  /** Null when the host hid the attendee count and the viewer is not an
+   *  organiser (`areAttendeeCountsWithheld`). An invitee is not an organiser
+   *  until they accept, and can still read the invite after it closes. */
+  goingCount: number | null;
+  waitlistCount: number | null;
 }
 
 export interface CohostInviteInviterView {
@@ -39,10 +42,10 @@ export interface CohostInviteDetailView {
   inviter: CohostInviteInviterView;
 }
 
-function toCohostInviteEventSummaryView(
+export function toCohostInviteEventSummaryView(
   event: Event,
-  goingCount: number,
-  waitlistCount: number,
+  goingCount: number | null,
+  waitlistCount: number | null,
 ): CohostInviteEventSummaryView {
   return {
     slug: event.slug,
@@ -57,7 +60,7 @@ function toCohostInviteEventSummaryView(
   };
 }
 
-function toCohostInviteInviterView(
+export function toCohostInviteInviterView(
   inviter: Profile,
   hostedEventsCount: number,
   mutualConnectionsCount: number,
@@ -76,8 +79,8 @@ export function toCohostInviteDetailView(
   invite: EventCohostInvite,
   event: Event,
   inviter: Profile,
-  goingCount: number,
-  waitlistCount: number,
+  goingCount: number | null,
+  waitlistCount: number | null,
   hostedEventsCount: number,
   mutualConnectionsCount: number,
 ): CohostInviteDetailView {

@@ -67,17 +67,22 @@ export function isEnteredByPeople(report: GovernanceFinanceReport): boolean {
 
 /**
  * The ledger as the public page gets it. A row an admin switched off is left
- * out. Every row also loses its line-item breakdown and total label: no admin
- * path writes those, so whatever they hold came from the seed (named funders,
- * real vendors, an invented member count). The row's own label, amount and
- * note are what the governance team entered.
+ * out. A row keeps its line-item breakdown only once an admin saved it in the
+ * Finances editor (`itemsSource: manual`); a seeded breakdown is emptied,
+ * since it came from the seed (named funders, real vendors, an invented member
+ * count). Every row loses its total label, which the page writes itself from
+ * the item count. The row's own label, amount and note are what the
+ * governance team entered.
  */
 function shownLines(lines: FinanceLine[]): FinanceLine[] {
   return lines
     .filter((line) => line.enabled !== false)
     .map((line) => ({
       ...line,
-      items: [],
+      items:
+        line.itemsSource === FinanceMetricSource.Manual
+          ? (line.items ?? [])
+          : [],
       total: { label: '', amount: line.total?.amount ?? line.amount },
     }));
 }

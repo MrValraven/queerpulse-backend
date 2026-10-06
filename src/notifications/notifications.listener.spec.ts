@@ -269,6 +269,58 @@ describe('NotificationsListener', () => {
     );
   });
 
+  it('notifies the invitee of a lineup invite with the deep-link payload', async () => {
+    await listener.onEventLineupInvited({
+      entryId: 'entry-1',
+      eventId: 'event-1',
+      eventSlug: 'drag-brunch',
+      inviterId: 'host-user',
+      inviteeId: 'dj-user',
+      role: 'dj',
+    });
+    expect(notifications.create).toHaveBeenCalledWith(
+      'dj-user',
+      NotificationType.EventLineupInvite,
+      {
+        actorId: 'host-user',
+        source: 'lineup_invite',
+        eventSlug: 'drag-brunch',
+        inviteId: 'entry-1',
+        role: 'dj',
+      },
+      'host-user',
+    );
+  });
+
+  it.each([
+    ['accepted', NotificationType.EventLineupAccepted],
+    ['declined', NotificationType.EventLineupDeclined],
+  ] as const)(
+    'notifies the inviter when a lineup invite is %s',
+    async (outcome, expectedType) => {
+      await listener.onEventLineupAnswered({
+        entryId: 'entry-1',
+        eventId: 'event-1',
+        eventSlug: 'drag-brunch',
+        performerId: 'dj-user',
+        recipientId: 'host-user',
+        role: 'dj',
+        outcome,
+      });
+      expect(notifications.create).toHaveBeenCalledWith(
+        'host-user',
+        expectedType,
+        {
+          actorId: 'dj-user',
+          source: 'lineup_reply',
+          eventSlug: 'drag-brunch',
+          role: 'dj',
+        },
+        'dj-user',
+      );
+    },
+  );
+
   describe('onSubprofileCreatorChanged', () => {
     it('notifies the successor with isYou true and the other members with isYou false, no actor', async () => {
       profiles.findOne.mockResolvedValue({

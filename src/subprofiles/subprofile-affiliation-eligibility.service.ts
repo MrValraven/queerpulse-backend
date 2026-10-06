@@ -8,7 +8,10 @@ import {
   Community,
 } from '../communities/entities/community.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
-import { EventLineupEntry } from '../events/entities/event-lineup-entry.entity';
+import {
+  EventLineupEntry,
+  EventLineupEntryStatus,
+} from '../events/entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import {
   Event,
@@ -69,7 +72,7 @@ export function hasQualifyingOwner(
 // be saved or shown while at least one of the persona's owners actually does:
 //
 //   community: a `community_members` row, any roster role.
-//   event:     going. The host, a co-host, a lineup entry, or an RSVP whose
+//   event:     going. The host, a co-host, an accepted lineup entry, or an RSVP whose
 //              status is `going`. Maybe, waitlisted and cancelled RSVPs do
 //              not count (a host removal also lands on `cancelled`).
 //
@@ -146,8 +149,8 @@ export class SubprofileAffiliationEligibilityService {
   // Which of `ownerIds` qualify for which of the given targets, as a set of
   // `eligibilityKey`s. Hosting is read off the event rows the caller already
   // loaded; the other four signals are ONE query each (community members,
-  // co-hosts, lineup entries, going RSVPs), whatever the number of owners or
-  // targets. Check a persona with `hasQualifyingOwner`.
+  // co-hosts, accepted lineup entries, going RSVPs), whatever the number of
+  // owners or targets. Check a persona with `hasQualifyingOwner`.
   async eligibleTargetKeys(
     ownerIds: string[],
     eventRows: Pick<Event, 'id' | 'hostId'>[],
@@ -186,7 +189,11 @@ export class SubprofileAffiliationEligibilityService {
           : Promise.resolve([]),
         eventIds.length
           ? this.eventLineupEntries.find({
-              where: { eventId: In(eventIds), userId: In(distinctOwnerIds) },
+              where: {
+                eventId: In(eventIds),
+                userId: In(distinctOwnerIds),
+                status: EventLineupEntryStatus.Accepted,
+              },
               select: { eventId: true, userId: true },
             })
           : Promise.resolve([]),
@@ -228,11 +235,11 @@ export class SubprofileAffiliationEligibilityService {
   //
   // Communities are ONE query, qualification an `EXISTS` keyed by community
   // id and user. Events are four candidate-id lookups keyed by the requester
-  // (host, co-host, lineup entry, going RSVP), unioned in memory, then ONE
-  // events query over those ids. Every filter sits inside the final queries,
-  // so the cap counts only options the picker can use. Communities come
-  // alphabetically by name, then upcoming events soonest first, then past
-  // events newest first.
+  // (host, co-host, accepted lineup entry, going RSVP), unioned in memory,
+  // then ONE events query over those ids. Every filter sits inside the final
+  // queries, so the cap counts only options the picker can use. Communities
+  // come alphabetically by name, then upcoming events soonest first, then
+  // past events newest first.
   async listOptions(
     requesterId: string,
     personaUserId: string,
@@ -312,7 +319,10 @@ export class SubprofileAffiliationEligibilityService {
           select: { eventId: true },
         }),
         this.eventLineupEntries.find({
-          where: { userId: requesterId },
+          where: {
+            userId: requesterId,
+            status: EventLineupEntryStatus.Accepted,
+          },
           select: { eventId: true },
         }),
         this.eventRsvps.find({

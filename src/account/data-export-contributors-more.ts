@@ -1154,7 +1154,7 @@ export class EventPreferencesExportContributor implements DataExportContribution
  *  - `rsvpDetails`   what they told the host with each RSVP: guests, access
  *                    and dietary needs, pronouns and their custom answer.
  *  - `bookmark`, `cohost`, `lineup`   events they bookmarked, co-host, or
- *                    appear on the lineup of.
+ *                    are invited to or on the lineup of.
  *  - `invite`, `cohostInvite`   invites they sent and received, the other
  *                    person by id. A received co-host invite leaves out the
  *                    inviter's message, which stays in the inviter's archive.
@@ -1245,6 +1245,7 @@ export class EventParticipationExportContributor implements DataExportContributi
         type: 'lineup' as const,
         eventId: entry.eventId,
         role: entry.role,
+        status: entry.status,
         createdAt: entry.createdAt.toISOString(),
       })),
       ...invites.map((invite) => {

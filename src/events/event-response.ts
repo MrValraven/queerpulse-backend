@@ -19,7 +19,10 @@ import {
   type RsvpCutoff,
   type RsvpQuestions,
 } from './gathering-extras';
-import { EventLineupEntry } from './entities/event-lineup-entry.entity';
+import {
+  EventLineupEntry,
+  EventLineupEntryStatus,
+} from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventSeries } from './entities/event-series.entity';
 
@@ -47,7 +50,13 @@ export interface EventSummary {
   // How many MEMBERS hold a 'going' RSVP. This is a headcount of people who
   // pressed the button, and it is what the "N going" line has always meant.
   // It is NOT the seat count: see `seatsTaken`.
-  goingCount: number;
+  //
+  // `null` whenever the host turned `Event.showAttendeeCount` off, for every
+  // viewer who is not one of the gathering's organisers (the host or a
+  // co-host), on list rows and on the detail alike
+  // (`withholdHiddenAttendeeCounts`). A client renders nothing for null:
+  // "0 going" would be a false figure.
+  goingCount: number | null;
   // How many SEATS those RSVPs actually occupy: one per going member, plus
   // every extra guest they declared (`event_rsvps.guest_count`). This is the
   // number capacity is measured against, and the number "spots left" must be
@@ -56,11 +65,15 @@ export interface EventSummary {
   // Until LOC-07 there was no such number: capacity compared itself against
   // the row count, so a 20-seat gathering where ten members each brought a
   // plus-one reported ten free seats while thirty people arrived.
-  seatsTaken: number;
+  //
+  // Withheld with `goingCount` above, under the same rule: with `capacity`
+  // public, a seat tally would hand back the headcount the host hid.
+  seatsTaken: number | null;
   // Whether the event is at capacity — `capacity !== null && seatsTaken >=
   // capacity`. Unlimited-capacity events (`capacity === null`) are never full.
   // Derived here so the FE's RSVP control can flip to "Join the waitlist"
-  // without recomputing the rule client-side.
+  // without recomputing the rule client-side. Always computed from the real
+  // seats, even on a row whose tallies are withheld: "full" states no figure.
   isFull: boolean;
   myRsvpStatus: RsvpStatus | null;
   // Whether the viewer has bookmarked ("saved") this event. Computed in batch
@@ -162,6 +175,19 @@ export interface CreatedEventDetail extends EventDetail {
   occurrenceSlugs: string[];
 }
 
+/**
+ * An `EventSummary` with both tallies present, as `toEventSummary` builds it.
+ * Every route that serves one (each list row, and the detail) passes it
+ * through `withholdHiddenAttendeeCounts` on its way out.
+ */
+export interface CountedEventSummary extends Omit<
+  EventSummary,
+  'goingCount' | 'seatsTaken'
+> {
+  goingCount: number;
+  seatsTaken: number;
+}
+
 export interface EventDetail extends EventSummary {
   description: string;
   /**
@@ -242,7 +268,10 @@ export interface EventDetail extends EventSummary {
   host: EventOrganizerView | null;
   cohosts: EventOrganizerView[];
   isOrganizer: boolean;
-  waitlistCount: number;
+  /** How many members hold a waitlisted RSVP. `null` under the same rule as
+   *  `goingCount` (`areAttendeeCountsWithheld`), the way
+   *  `EventsService.attendees` withholds its own waitlist tally. */
+  waitlistCount: number | null;
   myWaitlistPosition: number | null;
   /** Manage-dashboard "Show attendee count" toggle (`Event.showAttendeeCount`).
    *  Detail-only (not on `EventSummary`/browse cards — see
@@ -388,8 +417,11 @@ export interface EventAnnouncementView {
    *  erased. */
   author: EventOrganizerView | null;
   /** How many members the fan-out reached at send time. Organiser-facing
-   *  detail; an attendee simply ignores it. */
-  recipientCount: number;
+   *  detail; an attendee simply ignores it. `null` on the detail's copy when
+   *  the host hid the attendee count from this viewer
+   *  (`areAttendeeCountsWithheld`): the fan-out is every live RSVP, so the
+   *  figure would hand back the headcount the host hid. */
+  recipientCount: number | null;
 }
 
 export function toEventAnnouncementView(
@@ -568,19 +600,21 @@ export interface AttendeesPageDTO extends Paginated<AttendeeView> {
   checkedInCount: number | null;
 }
 
-// `GET/PUT /events/:slug/lineup` — the "who performed" credit list (Personas
-// Phase 5, Moment 5). `name` mirrors `EndorserView`'s shape (a single
-// display string, not `firstName`/`lastName`), since the lineup is a public
-// credit list, not an organizer-management view.
+// `GET /events/:slug/lineup` and the organizer writes: the "who performed"
+// list. Organizers get every row with its status; everyone else gets accepted
+// rows only (`EventLineupService.buildLineupDTO`). `name` mirrors
+// `EndorserView`'s single display string.
 export interface EventLineupEntryView {
+  id: string;
   slug: string;
   name: string;
   avatarUrl: string | null;
   role: string;
+  status: EventLineupEntryStatus;
 }
 
-// `viewerEntry` is the caller's own row (or null) — lets the FE cheaply ask
-// "am I on the bill, and what role" without scanning `entries`.
+// `viewerEntry` is the caller's own row in any status, or null, so the
+// gathering page can show a pending invite or "you're on the lineup".
 export interface EventLineupDTO {
   entries: EventLineupEntryView[];
   viewerEntry: EventLineupEntryView | null;
@@ -592,6 +626,7 @@ export function toLineupEntryView(
 ): EventLineupEntryView | null {
   if (!profile) return null;
   return {
+    id: entry.id,
     slug: profile.slug,
     name: `${profile.firstName} ${profile.lastName}`.trim(),
     // Deliberately OUTSIDE the `photoVisible` gate, unlike every other mapper
@@ -602,6 +637,7 @@ export function toLineupEntryView(
     // Decided with the gatherings owner alongside ENG-152.
     avatarUrl: toImageUrl(profile.avatarUrl),
     role: entry.role,
+    status: entry.status,
   };
 }
 
@@ -641,7 +677,7 @@ export function toEventSummary(
   // behaves exactly as this function did before LOC-07, rather than silently
   // reporting zero seats taken.
   seatsTaken: number = goingCount,
-): EventSummary {
+): CountedEventSummary {
   return {
     slug: e.slug,
     title: e.title,
@@ -673,6 +709,40 @@ export function toEventSummary(
     host,
     series: toEventSeriesView(e, series),
   };
+}
+
+/**
+ * Whether this viewer is denied the gathering's attendee tallies: true when the
+ * host turned `Event.showAttendeeCount` off and the viewer is not one of its
+ * organisers. The caller decides `isOrganizerViewing` (the host or an accepted
+ * co-host), so a list page can answer it from one batched co-host lookup.
+ */
+export function areAttendeeCountsWithheld(
+  event: Pick<Event, 'showAttendeeCount'>,
+  isOrganizerViewing: boolean,
+): boolean {
+  return !event.showAttendeeCount && !isOrganizerViewing;
+}
+
+/**
+ * The gate on the going tallies (`Event.showAttendeeCount`), applied to every
+ * list row and to the detail. A host who turned the count off gets
+ * `goingCount` and `seatsTaken` back as null for every viewer who is not an
+ * organiser; the host and co-hosts keep the real numbers, since the toggle
+ * only governs what others see. `isFull` stays as computed, since a boolean
+ * names no figure.
+ *
+ * `community-public.service.ts`'s `toUpcomingGathering` honours the same flag
+ * more strictly: that public page serves no organiser view, so it withholds
+ * the count from everybody, the host included.
+ */
+export function withholdHiddenAttendeeCounts(
+  event: Event,
+  summary: CountedEventSummary,
+  isOrganizerViewing: boolean,
+): EventSummary {
+  if (!areAttendeeCountsWithheld(event, isOrganizerViewing)) return summary;
+  return { ...summary, goingCount: null, seatsTaken: null };
 }
 
 /**

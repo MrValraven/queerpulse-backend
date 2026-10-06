@@ -16,6 +16,26 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+/** One item in a ledger row's breakdown ("Hosting · €15/mo · 45"). `period` is
+ *  the optional detail beside the name and may be empty. `amount` is a plain
+ *  number with up to two decimals ("15", "1840.5"); the service sums the
+ *  items in cents into the row's amount. */
+export class FinanceLineItemEditDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  name!: string;
+
+  @IsString()
+  @MaxLength(40)
+  period!: string;
+
+  @IsString()
+  @MaxLength(15)
+  @Matches(/^\d+(\.\d{1,2})?$/)
+  amount!: string;
+}
+
 /**
  * One correction to a single income/expense ledger row, addressed by its
  * position in the array. `amount` is the pre-formatted display string the row
@@ -26,7 +46,12 @@ import {
  *
  * PRD-447: `label` renames the row. An `index` one past the last row (then the
  * next one, and so on) appends a new row; an appended row needs a `label` and
- * an `amount`, which the service checks.
+ * either an `amount` or a non-empty `items` list, which the service checks.
+ *
+ * `items` is the row's full breakdown (Hosting, AI tools, ...), replacing the
+ * stored one whole; `[]` clears it. While the list holds items the service
+ * sets the row's `amount` to their sum and ignores any `amount` sent beside
+ * it. Saving a breakdown marks it `manual`, which publishes it.
  */
 export class FinanceLedgerEditDto {
   @IsInt()
@@ -52,6 +77,13 @@ export class FinanceLedgerEditDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => FinanceLineItemEditDto)
+  items?: FinanceLineItemEditDto[];
 }
 
 /** One public stat tile ("€4,150 · Total expenditure · Within budget"). Plain

@@ -107,6 +107,13 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // whose gathering just changed and who said so (LOC-06).
   [NotificationType.EventAnnouncement]: 'actorId',
   [NotificationType.VolunteerApplicationReceived]: 'actorId',
+  // Lineup invites. The organizer who sent the invite, resolved for the
+  // performer's bell, and the performer who answered, resolved for the
+  // organizer's bell. Each emit site passes the same id as `create`'s
+  // `actorId` argument, so block and mute apply either way.
+  [NotificationType.EventLineupInvite]: 'actorId',
+  [NotificationType.EventLineupAccepted]: 'actorId',
+  [NotificationType.EventLineupDeclined]: 'actorId',
   // The voucher, resolved for the bell + push. An ANONYMOUS safe-space vouch
   // omits `voucherId` from the payload entirely (the emit site only spreads it
   // for a named vouch), so this yields `null` and the row/push read as
@@ -229,7 +236,9 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.ConnectionRequest]: ['connectionId'],
     // PRD-18, "last few spots". The gathering's own public title for the copy,
     // and how many seats are left. `seatsRemaining` is a NUMBER the copy is
-    // CLDR-pluralised on. `source` + `eventSlug` ride in COMMON_PAYLOAD_KEYS
+    // CLDR-pluralised on, and it is absent when the host hid the attendee
+    // count (`Event.showAttendeeCount`), since with a public capacity it
+    // spells out the seats taken. `source` + `eventSlug` ride in COMMON_PAYLOAD_KEYS
     // and are what the deep link is built from. Nothing about who is attending
     // rides along: a roster is read on the gathering's own page, under the
     // member's own authentication.
@@ -321,6 +330,13 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     ],
     [NotificationType.EventUpdated]: ['changes', 'title'],
     [NotificationType.EventCohostInvite]: ['title'],
+    // Lineup invites. `role` is the craft the organizer picked, for the copy:
+    // the client offers a closed set of labels while the server accepts any
+    // short label. The invite deep link uses
+    // `inviteId` (the lineup row id) from COMMON_PAYLOAD_KEYS.
+    [NotificationType.EventLineupInvite]: ['role'],
+    [NotificationType.EventLineupAccepted]: ['role'],
+    [NotificationType.EventLineupDeclined]: ['role'],
     // LOC-06, a host's announcement to the people coming. `title` is the
     // GATHERING's own title (announcements have none of their own), and every
     // recipient holds a live RSVP or a standing invite to it, so they already

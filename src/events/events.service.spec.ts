@@ -28,8 +28,7 @@ import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
-import { EventLineupEntry } from './entities/event-lineup-entry.entity';
-import { EventRsvp } from './entities/event-rsvp.entity';
+import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventSeries } from './entities/event-series.entity';
 import { EVENT_DELETING } from './event.events';
@@ -69,7 +68,6 @@ describe('EventsService', () => {
     manager: { query: jest.Mock };
   };
   let invites: { exists: jest.Mock };
-  let lineupEntries: { find: jest.Mock };
   // Recurrence: `create` writes one `EventSeries` row and hangs the generated
   // occurrences off it. No test here creates a series, so the default is a
   // repository nothing has written to.
@@ -267,7 +265,6 @@ describe('EventsService', () => {
       manager: { query: jest.fn().mockResolvedValue([]) },
     };
     invites = { exists: jest.fn().mockResolvedValue(false) };
-    lineupEntries = { find: jest.fn().mockResolvedValue([]) };
     eventSeries = {
       create: jest.fn((entity: unknown) => entity),
       save: jest.fn((entity: object) =>
@@ -326,10 +323,6 @@ describe('EventsService', () => {
         { provide: getRepositoryToken(EventCohost), useValue: cohosts },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvps },
         { provide: getRepositoryToken(EventInvite), useValue: invites },
-        {
-          provide: getRepositoryToken(EventLineupEntry),
-          useValue: lineupEntries,
-        },
         { provide: getRepositoryToken(EventSeries), useValue: eventSeries },
         // Host announcements (LOC-06) ride along on an event's detail. No
         // fixture here posts one, so the detail carries an empty list.
@@ -649,6 +642,82 @@ describe('EventsService', () => {
       await service.getBySlug('party', 'host-1');
 
       expect(rosterVisibilityCalls(qb)).toHaveLength(0);
+    });
+  });
+
+  // `Event.showAttendeeCount` on the DETAIL (`buildDetail`), under the same
+  // rule as the list rows: a viewer who is not an organiser reads null
+  // tallies on the wire, and so does every other figure that would hand the
+  // headcount back. `isFull` stays real. The host and co-hosts keep every
+  // number.
+  describe('detail honours a hidden going count', () => {
+    const hiddenCountEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      cost: null,
+      visibility: EventVisibility.Public,
+      capacity: 4,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
+      showAttendeeCount: false,
+    };
+
+    // Three members going, one with a plus-one (four seats against a
+    // capacity of four), and two on the waitlist.
+    beforeEach(() => {
+      events.findOne.mockResolvedValue(hiddenCountEvent);
+      rsvps.count.mockImplementation(
+        ({ where }: { where: { status: RsvpStatus } }) =>
+          Promise.resolve(where.status === RsvpStatus.Waitlisted ? 2 : 3),
+      );
+      rsvps.createQueryBuilder.mockImplementation(() => {
+        const qb = attendeesQbStub();
+        qb.getRawOne!.mockResolvedValue({
+          goingCount: '3',
+          seatsTaken: '4',
+          waitlistCount: '2',
+          checkedInCount: '0',
+        });
+        return qb;
+      });
+    });
+
+    it('withholds the tallies from a viewer who is not an organiser', async () => {
+      const detail = await service.getBySlug('party', 'stranger-1');
+
+      expect(detail.isOrganizer).toBe(false);
+      expect(detail.goingCount).toBeNull();
+      expect(detail.seatsTaken).toBeNull();
+      expect(detail.waitlistCount).toBeNull();
+      expect(detail.isFull).toBe(true);
+    });
+
+    it('gives a co-host the real tallies', async () => {
+      cohosts.exists.mockResolvedValue(true);
+      cohosts.find.mockResolvedValue([{ eventId: 'e1', userId: 'cohost-1' }]);
+
+      const detail = await service.getBySlug('party', 'cohost-1');
+
+      expect(detail.isOrganizer).toBe(true);
+      expect(detail.goingCount).toBe(3);
+      expect(detail.seatsTaken).toBe(4);
+      expect(detail.waitlistCount).toBe(2);
+      expect(detail.isFull).toBe(true);
+    });
+
+    it('gives every viewer the real tallies when the count is shown', async () => {
+      events.findOne.mockResolvedValue({
+        ...hiddenCountEvent,
+        showAttendeeCount: true,
+      });
+
+      const detail = await service.getBySlug('party', 'stranger-1');
+
+      expect(detail.goingCount).toBe(3);
+      expect(detail.seatsTaken).toBe(4);
+      expect(detail.waitlistCount).toBe(2);
     });
   });
 
@@ -2170,6 +2239,163 @@ describe('EventsService', () => {
       ]);
     });
   });
+
+  // `Event.showAttendeeCount` on the LIST path (`summarize`). A host who turned
+  // the count off (the `care` family's default) hid "3 going" from every
+  // card, so a browse row must carry neither the headcount nor the seat tally
+  // for anyone who is not an organiser. The host and co-hosts keep the real
+  // numbers, the co-hosts through one batched co-host lookup per page.
+  // `isFull` is a boolean and still states whether the gathering is full. The
+  // `hosting` branch is the fixture's main way in because it reads its rows
+  // from `events.find`; every list branch funnels through the same
+  // `summarize`. `hosting` already holds the viewer's co-host roster and
+  // hands it to `summarize`, so the batched lookup is exercised through
+  // `saved` (rows from `bookmarks.listSaved`).
+  describe('list rows honour a hidden going count', () => {
+    const HOST_ID = 'host-1';
+    const COHOST_ID = 'cohost-1';
+    const VIEWER_ID = 'viewer-1';
+
+    const listedGathering = (overrides: Partial<Event>): Event =>
+      ({
+        id: 'listed-1',
+        slug: 'listed-gathering',
+        title: 'Listed gathering',
+        hostId: HOST_ID,
+        startAt: new Date(Date.now() + 3_600_000),
+        endAt: null,
+        timezone: 'Europe/Lisbon',
+        venue: null,
+        isOnline: false,
+        coverImageUrl: null,
+        visibility: EventVisibility.Public,
+        status: EventStatus.Published,
+        capacity: 4,
+        communityId: null,
+        listingId: null,
+        neighbourhood: null,
+        eventType: null,
+        gatheringFamily: GatheringFamily.Care,
+        formatDetails: {},
+        cost: null,
+        themes: [],
+        costKind: null,
+        seriesId: null,
+        seriesIndex: null,
+        showAttendeeCount: true,
+        ...overrides,
+      }) as unknown as Event;
+
+    // `summarize`'s one grouped tally: three members going, one of them with
+    // a plus-one, so four seats taken against a capacity of four.
+    const goingTallyQueryBuilder = () => {
+      const queryBuilder: Record<string, jest.Mock> = {};
+      for (const method of [
+        'select',
+        'addSelect',
+        'where',
+        'andWhere',
+        'groupBy',
+      ]) {
+        queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+      }
+      queryBuilder.getRawMany = jest
+        .fn()
+        .mockResolvedValue([{ eventId: 'listed-1', count: '3', seats: '4' }]);
+      return queryBuilder;
+    };
+
+    const listedRowFor = async (
+      viewerId: string,
+      overrides: Partial<Event>,
+      filter: 'hosting' | 'saved' = 'hosting',
+    ) => {
+      events.find.mockResolvedValue([listedGathering(overrides)]);
+      bookmarks.listSaved.mockResolvedValue([listedGathering(overrides)]);
+      rsvps.createQueryBuilder.mockImplementation(goingTallyQueryBuilder);
+      const rows = await service.list(viewerId, filter, 1);
+      expect(rows).toHaveLength(1);
+      return rows[0]!;
+    };
+
+    it('withholds both tallies from a viewer who is not the host when the count is hidden', async () => {
+      const row = await listedRowFor(VIEWER_ID, { showAttendeeCount: false });
+      expect(row.goingCount).toBeNull();
+      expect(row.seatsTaken).toBeNull();
+      expect(row.isFull).toBe(true);
+    });
+
+    it('gives the host the real tallies on a gathering whose count is hidden', async () => {
+      const row = await listedRowFor(HOST_ID, { showAttendeeCount: false });
+      expect(row.goingCount).toBe(3);
+      expect(row.seatsTaken).toBe(4);
+      expect(row.isFull).toBe(true);
+    });
+
+    it('gives a co-host the real tallies on a gathering whose count is hidden', async () => {
+      cohosts.find.mockResolvedValue([
+        { eventId: 'listed-1', userId: COHOST_ID },
+      ]);
+      const row = await listedRowFor(
+        COHOST_ID,
+        { showAttendeeCount: false },
+        'saved',
+      );
+      expect(row.goingCount).toBe(3);
+      expect(row.seatsTaken).toBe(4);
+      expect(row.isFull).toBe(true);
+      // ONE batched lookup for the whole page, scoped to the hidden rows.
+      expect(cohosts.find).toHaveBeenCalledTimes(1);
+      expect(cohosts.find).toHaveBeenCalledWith({
+        where: { eventId: In(['listed-1']), userId: COHOST_ID },
+      });
+    });
+
+    it('reuses the hosting roster for a co-host and asks once', async () => {
+      cohosts.find.mockResolvedValue([
+        { eventId: 'listed-1', userId: COHOST_ID },
+      ]);
+      const row = await listedRowFor(COHOST_ID, { showAttendeeCount: false });
+      expect(row.goingCount).toBe(3);
+      expect(row.seatsTaken).toBe(4);
+      // The only read is the `hosting` branch's own roster.
+      expect(cohosts.find).toHaveBeenCalledTimes(1);
+      expect(cohosts.find).toHaveBeenCalledWith({
+        where: { userId: COHOST_ID },
+      });
+    });
+
+    it('withholds the tallies on the hosting list from a viewer outside the roster', async () => {
+      cohosts.find.mockResolvedValue([
+        { eventId: 'another-event', userId: VIEWER_ID },
+      ]);
+      const row = await listedRowFor(VIEWER_ID, { showAttendeeCount: false });
+      expect(row.goingCount).toBeNull();
+      expect(row.seatsTaken).toBeNull();
+      expect(cohosts.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks nothing about co-hosts when no row on the page hides its count', async () => {
+      await listedRowFor(VIEWER_ID, { showAttendeeCount: true }, 'saved');
+      expect(cohosts.find).not.toHaveBeenCalled();
+    });
+
+    it('gives every viewer the real tallies when the count is shown', async () => {
+      const row = await listedRowFor(VIEWER_ID, { showAttendeeCount: true });
+      expect(row.goingCount).toBe(3);
+      expect(row.seatsTaken).toBe(4);
+      expect(row.isFull).toBe(true);
+    });
+
+    it('withholds the tallies when the host erased their account', async () => {
+      const row = await listedRowFor(VIEWER_ID, {
+        hostId: null,
+        showAttendeeCount: false,
+      });
+      expect(row.goingCount).toBeNull();
+      expect(row.seatsTaken).toBeNull();
+    });
+  });
 });
 
 describe('EventsService.addCohostByUserId', () => {
@@ -2212,7 +2438,6 @@ describe('EventsService.addCohostByUserId', () => {
       cohosts as unknown as Repository<EventCohost>,
       {} as unknown as Repository<EventRsvp>,
       {} as unknown as Repository<EventInvite>,
-      {} as unknown as Repository<EventLineupEntry>,
       {} as unknown as Repository<EventSeries>,
       {} as unknown as Repository<EventAnnouncement>,
       {} as unknown as Repository<Profile>,

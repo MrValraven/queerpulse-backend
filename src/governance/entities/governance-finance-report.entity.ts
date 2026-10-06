@@ -60,6 +60,11 @@ export interface FinanceLine {
    *  — an admin turns a row off when it doesn't apply to this org (e.g. no
    *  partner support this quarter) rather than deleting its history. */
   enabled?: boolean;
+  /** Provenance of this row's `items` breakdown. `manual` once an admin saved
+   *  it through the Finances editor, which publishes it on the Governance
+   *  page. Absent on seeded breakdowns, read as
+   *  {@link FinanceMetricSource.Seeded}, and those stay on the admin tab. */
+  itemsSource?: FinanceMetricSource;
 }
 
 /** One "how event finances work" bullet, e.g. `["Hosts keep 100% of ticket

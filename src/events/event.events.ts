@@ -53,6 +53,34 @@ export interface EventCohostInvitedEvent {
   inviteeId: string;
 }
 
+export const EVENT_LINEUP_INVITED = 'event.lineup_invited';
+
+/** An organizer invited a member onto an event's lineup (2026-10-06). */
+export interface EventLineupInvitedEvent {
+  entryId: string;
+  eventId: string;
+  eventSlug: string;
+  inviterId: string;
+  inviteeId: string;
+  role: string;
+}
+
+export const EVENT_LINEUP_ANSWERED = 'event.lineup_answered';
+
+/**
+ * A member accepted or declined a lineup invite. `recipientId` is the
+ * organizer who invited them, or the host when that account is gone.
+ */
+export interface EventLineupAnsweredEvent {
+  entryId: string;
+  eventId: string;
+  eventSlug: string;
+  performerId: string;
+  recipientId: string;
+  role: string;
+  outcome: 'accepted' | 'declined';
+}
+
 export const EVENT_DELETING = 'event.deleting';
 
 /**

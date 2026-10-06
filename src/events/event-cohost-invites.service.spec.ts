@@ -234,6 +234,8 @@ describe('EventCohostInvitesService', () => {
         timezone: 'Europe/Lisbon',
         venue: 'Park',
         isOnline: false,
+        hostId: 'host-1',
+        showAttendeeCount: true,
       });
       profiles.findOne.mockResolvedValue({
         userId: 'host-1',
@@ -255,6 +257,120 @@ describe('EventCohostInvitesService', () => {
       expect(result.event.goingCount).toBe(22);
       expect(result.event.waitlistCount).toBe(4);
       expect(result.status).toBe(EventCohostInviteStatus.Pending);
+    });
+
+    describe('when the host hid the attendee count', () => {
+      const hiddenCountEvent = {
+        id: 'e1',
+        slug: 'pride-picnic',
+        title: 'Pride Picnic',
+        startAt: new Date('2026-09-01T18:00:00Z'),
+        endAt: null,
+        timezone: 'Europe/Lisbon',
+        venue: 'Park',
+        isOnline: false,
+        hostId: 'host-1',
+        showAttendeeCount: false,
+      };
+      const inviteRow = (
+        overrides: Partial<{ inviterId: string; status: string }> = {},
+      ) => ({
+        id: 'inv-1',
+        eventId: 'e1',
+        inviterId: 'host-1',
+        inviteeId: 'u2',
+        role: 'greeter',
+        commitment: 'light',
+        message: null,
+        replyByDate: null,
+        status: EventCohostInviteStatus.Pending,
+        createdAt: new Date('2026-08-01T00:00:00Z'),
+        ...overrides,
+      });
+
+      beforeEach(() => {
+        events.findOne.mockResolvedValue(hiddenCountEvent);
+        profiles.findOne.mockResolvedValue({
+          userId: 'host-1',
+          slug: 'anika',
+          firstName: 'Anika',
+          lastName: 'Kovac',
+          avatarUrl: null,
+        });
+        rsvps.count.mockResolvedValueOnce(22).mockResolvedValueOnce(4);
+      });
+
+      it('withholds both tallies from the pending invitee', async () => {
+        invites.findOne.mockResolvedValue(inviteRow());
+        eventsService.isOrganizer.mockResolvedValue(false);
+
+        const result = await service.getById('inv-1', 'u2');
+
+        expect(result.event.goingCount).toBeNull();
+        expect(result.event.waitlistCount).toBeNull();
+        expect(rsvps.count).not.toHaveBeenCalled();
+        expect(eventsService.isOrganizer).toHaveBeenCalledTimes(1);
+        expect(eventsService.isOrganizer).toHaveBeenCalledWith('e1', 'u2');
+      });
+
+      it('keeps withholding them after the invitee declined', async () => {
+        invites.findOne.mockResolvedValue(
+          inviteRow({ status: EventCohostInviteStatus.Declined }),
+        );
+        eventsService.isOrganizer.mockResolvedValue(false);
+
+        const result = await service.getById('inv-1', 'u2');
+
+        expect(result.event.goingCount).toBeNull();
+        expect(result.event.waitlistCount).toBeNull();
+      });
+
+      it('shows the real tallies to the host without an organiser lookup', async () => {
+        invites.findOne.mockResolvedValue(inviteRow());
+
+        const result = await service.getById('inv-1', 'host-1');
+
+        expect(result.event.goingCount).toBe(22);
+        expect(result.event.waitlistCount).toBe(4);
+        expect(eventsService.isOrganizer).not.toHaveBeenCalled();
+      });
+
+      it('shows the real tallies to a co-host who sent the invite', async () => {
+        invites.findOne.mockResolvedValue(inviteRow({ inviterId: 'cohost-1' }));
+        eventsService.isOrganizer.mockResolvedValue(true);
+
+        const result = await service.getById('inv-1', 'cohost-1');
+
+        expect(result.event.goingCount).toBe(22);
+        expect(result.event.waitlistCount).toBe(4);
+        expect(eventsService.isOrganizer).toHaveBeenCalledWith(
+          'e1',
+          'cohost-1',
+        );
+      });
+    });
+
+    it('skips the organiser lookup when the count is public', async () => {
+      invites.findOne.mockResolvedValue({
+        id: 'inv-1',
+        eventId: 'e1',
+        inviterId: 'host-1',
+        inviteeId: 'u2',
+        status: EventCohostInviteStatus.Pending,
+      });
+      events.findOne.mockResolvedValue({
+        id: 'e1',
+        hostId: 'host-1',
+        showAttendeeCount: true,
+      });
+      profiles.findOne.mockResolvedValue({ userId: 'host-1', slug: 'anika' });
+      rsvps.count.mockResolvedValueOnce(9).mockResolvedValueOnce(1);
+
+      const result = await service.getById('inv-1', 'u2');
+
+      expect(result.event.goingCount).toBe(9);
+      expect(result.event.waitlistCount).toBe(1);
+      expect(eventsService.isOrganizer).not.toHaveBeenCalled();
     });
   });
 

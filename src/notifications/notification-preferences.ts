@@ -110,6 +110,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   [NotificationType.EventRsvp]: NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventCohostInvite]:
     NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventLineupInvite]:
+    NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventLineupAccepted]:
+    NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventLineupDeclined]:
+    NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventNearlyFull]:
     NotificationPreferenceCategory.EventCapacity,
   // Go together. The pair invite is an invitation; the group lifecycle is the

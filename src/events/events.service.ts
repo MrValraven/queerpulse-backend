@@ -58,20 +58,20 @@ import type {
   RecurrenceEndType,
 } from './dto/recurrence.dto';
 import {
+  areAttendeeCountsWithheld,
   AttendeesPageDTO,
   CreatedEventDetail,
   EventDetail,
-  EventLineupDTO,
   EventOrganizerView,
   EventSummary,
   toAttendeeView,
   toEventAnnouncementView,
   toEventSummary,
   toEventVenueAttachmentView,
-  toLineupEntryView,
   toOrganizerView,
   toEventCareFields,
   toRsvpDetailsView,
+  withholdHiddenAttendeeCounts,
 } from './event-response';
 import {
   DEFAULT_RSVP_QUESTIONS,
@@ -87,7 +87,6 @@ import { EventBookmarksService } from './event-bookmarks.service';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
-import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { isAttendanceCleared } from './event-attendance-window';
 import {
@@ -137,11 +136,6 @@ interface AppliedEventUpdate {
    *  other notification here: an ask that cannot be un-sent must not describe
    *  a write that rolled back. `null` when there is nothing to ask. */
   venueOwnerToNotify: AttachableListingRef | null;
-}
-
-export interface LineupEntryInput {
-  memberSlug: string;
-  role: string;
 }
 
 export interface CreateEventInput {
@@ -215,11 +209,6 @@ export type EventListFilter =
 
 const PAGE_SIZE = 20;
 
-// Generous cap on a single "who performed" lineup — mirrors
-// `ReplaceAffiliationsDTO`'s `ArrayMaxSize` shape (validated again here so a
-// caller can't route around the DTO cap by calling the service directly).
-const MAX_LINEUP_ENTRIES = 50;
-
 // Hard cap on how many `Event` rows one series creates up front (a year of
 // weekly occurrences). Keeps the "generate everything now, no cron job"
 // design (see `EventSeries`'s class doc) bounded regardless of how far out
@@ -271,8 +260,6 @@ export class EventsService {
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
     @InjectRepository(EventInvite)
     private readonly invites: Repository<EventInvite>,
-    @InjectRepository(EventLineupEntry)
-    private readonly lineupEntries: Repository<EventLineupEntry>,
     @InjectRepository(EventSeries)
     private readonly eventSeries: Repository<EventSeries>,
     // Host announcements (LOC-06) — read here so an event's detail can carry
@@ -1412,10 +1399,14 @@ export class EventsService {
     const now = new Date();
     const skip = (page - 1) * PAGE_SIZE;
     let events: Event[];
+    // Set only by the 'hosting' branch, which already reads every co-host row
+    // the viewer holds, so `summarize` can skip asking again.
+    let knownCohostedIds: ReadonlySet<string> | undefined;
 
     if (filter === 'hosting') {
       const cohosted = await this.cohosts.find({ where: { userId } });
       const ids = cohosted.map((c) => c.eventId);
+      knownCohostedIds = new Set(ids);
       // Applied to BOTH arms of the OR: bounding only the hosted arm would let
       // every future co-hosted date back onto the page. An unparseable `to`
       // leaves the list unbounded, the same way `applyDiscoveryFilters`
@@ -1568,7 +1559,7 @@ export class EventsService {
         .getMany();
     }
 
-    return this.summarize(events, userId);
+    return this.summarize(events, userId, knownCohostedIds);
   }
 
   /**
@@ -1821,95 +1812,6 @@ export class EventsService {
       });
     }
     return { ok: true };
-  }
-
-  /**
-   * Host/co-host-only replace-all of an event's lineup ("who performed").
-   * Mirrors `SubprofilesService.replaceAffiliations`'s shape: resolve +
-   * validate every target BEFORE writing anything (batched, one `IN` query,
-   * not a `findOne` per entry), then delete-and-recreate inside one
-   * transaction so a caller never observes a partially-replaced lineup.
-   * Duplicate `memberSlug`s in the same call collapse to one row (last role
-   * wins) rather than tripping the `UNIQUE(event_id, user_id)` constraint.
-   */
-  async replaceLineup(
-    slug: string,
-    actorId: string,
-    entries: LineupEntryInput[],
-  ): Promise<EventLineupDTO> {
-    const event = await this.loadEventOr404(slug);
-    await this.assertOrganizer(event.id, actorId);
-
-    if (entries.length > MAX_LINEUP_ENTRIES) {
-      throw new BadRequestException(
-        `A lineup can have at most ${MAX_LINEUP_ENTRIES} entries`,
-      );
-    }
-
-    const memberSlugs = [...new Set(entries.map((entry) => entry.memberSlug))];
-    const profiles = memberSlugs.length
-      ? await this.profiles.find({ where: { slug: In(memberSlugs) } })
-      : [];
-    const profileBySlug = new Map(profiles.map((p) => [p.slug, p]));
-
-    for (const entry of entries) {
-      if (!profileBySlug.has(entry.memberSlug)) {
-        throw new NotFoundException(`Member not found: ${entry.memberSlug}`);
-      }
-    }
-
-    const rowsByUserId = new Map<string, { userId: string; role: string }>();
-    for (const entry of entries) {
-      const profile = profileBySlug.get(entry.memberSlug);
-      if (!profile) continue; // unreachable — validated above
-      rowsByUserId.set(profile.userId, {
-        userId: profile.userId,
-        role: entry.role,
-      });
-    }
-
-    await this.lineupEntries.manager.transaction(async (manager) => {
-      await manager.delete(EventLineupEntry, { eventId: event.id });
-      const rows = [...rowsByUserId.values()].map((row) =>
-        manager.create(EventLineupEntry, {
-          eventId: event.id,
-          userId: row.userId,
-          role: row.role,
-        }),
-      );
-      if (rows.length) {
-        await manager.save(rows);
-      }
-    });
-
-    return this.buildLineupDTO(event.id, actorId);
-  }
-
-  // Same visibility gate as `attendees` — a draft/invite-only/taken-down
-  // event 404s for a non-organizer viewer rather than leaking its lineup.
-  async getLineup(slug: string, viewerId: string): Promise<EventLineupDTO> {
-    const event = await this.loadEventOr404(slug);
-    await this.assertCanView(event, viewerId);
-    return this.buildLineupDTO(event.id, viewerId);
-  }
-
-  private async buildLineupDTO(
-    eventId: string,
-    viewerId: string,
-  ): Promise<EventLineupDTO> {
-    const rows = await this.lineupEntries.find({
-      where: { eventId },
-      order: { createdAt: 'ASC' },
-    });
-    const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
-    const entries = rows
-      .map((row) => toLineupEntryView(row, profiles.get(row.userId)))
-      .filter((view): view is NonNullable<typeof view> => view !== null);
-    const viewerRow = rows.find((row) => row.userId === viewerId);
-    const viewerEntry = viewerRow
-      ? toLineupEntryView(viewerRow, profiles.get(viewerRow.userId))
-      : null;
-    return { entries, viewerEntry };
   }
 
   /**
@@ -2288,24 +2190,11 @@ export class EventsService {
     return this.cohosts.exists({ where: { eventId, userId } });
   }
 
-  // --- internals ---
-
-  private async assertOrganizer(
-    eventId: string,
-    userId: string,
-  ): Promise<void> {
-    if (!(await this.isOrganizer(eventId, userId))) {
-      throw new ForbiddenException('Only the host or a co-host can do that');
-    }
-  }
-
+  // Public for EventLineupService.getLineup.
   // Enforces read visibility and returns whether the viewer is an organizer (so
   // callers can reuse the fact without a second lookup). Non-viewable events are
   // reported as 404 rather than 403 so their existence isn't leaked.
-  private async assertCanView(
-    event: Event,
-    viewerId: string,
-  ): Promise<boolean> {
+  async assertCanView(event: Event, viewerId: string): Promise<boolean> {
     const isOrganizer = await this.isOrganizer(event.id, viewerId);
     // A moderator takedown 404s the detail for everyone but an organizer — same
     // "don't leak existence" posture as the draft/invite-only gates below.
@@ -2331,6 +2220,17 @@ export class EventsService {
     // must not again become) two places that can drift.
     await this.audienceGate.assertViewable(event, viewerId, isOrganizer);
     return isOrganizer;
+  }
+
+  // --- internals ---
+
+  private async assertOrganizer(
+    eventId: string,
+    userId: string,
+  ): Promise<void> {
+    if (!(await this.isOrganizer(eventId, userId))) {
+      throw new ForbiddenException('Only the host or a co-host can do that');
+    }
   }
 
   private assertScheduleValid(
@@ -2394,9 +2294,15 @@ export class EventsService {
     return event;
   }
 
+  /**
+   * `knownCohostedIds`: every event the viewer co-hosts, when the caller has
+   * already loaded the viewer's full co-host roster (the 'hosting' list). It
+   * skips the batched co-host lookup below. Omitted, the lookup runs.
+   */
   private async summarize(
     events: Event[],
     userId: string,
+    knownCohostedIds?: ReadonlySet<string>,
   ): Promise<EventSummary[]> {
     if (!events.length) return [];
     const eventIds = events.map((e) => e.id);
@@ -2452,18 +2358,51 @@ export class EventsService {
       events.flatMap((e) => (e.seriesId ? [e.seriesId] : [])),
     );
 
+    // ...and ONE batched lookup of which of those events the viewer co-hosts,
+    // asked only about the events whose host hid the going count and that the
+    // viewer does not host (the only rows whose tallies it can change). Never
+    // a per-event query, and none at all when the caller already holds the
+    // viewer's co-host roster.
+    const cohostedIds =
+      knownCohostedIds ?? (await this.cohostedEventIdsAmong(events, userId));
+
+    // A host who hid the going count hid it from every list too: the card
+    // carries null tallies for anyone who is not an organiser. The host and
+    // co-hosts keep the real numbers, matching what the detail shows them.
+    // See `withholdHiddenAttendeeCounts`.
     return events.map((e) =>
-      toEventSummary(
+      withholdHiddenAttendeeCounts(
         e,
-        goingByEvent.get(e.id) ?? 0,
-        myRsvpByEvent.get(e.id) ?? null,
-        bookmarkedIds.has(e.id),
-        crops,
-        toOrganizerView(actorFromLookup(hostProfiles, e.hostId)),
-        e.seriesId ? seriesById.get(e.seriesId) : undefined,
-        seatsByEvent.get(e.id) ?? 0,
+        toEventSummary(
+          e,
+          goingByEvent.get(e.id) ?? 0,
+          myRsvpByEvent.get(e.id) ?? null,
+          bookmarkedIds.has(e.id),
+          crops,
+          toOrganizerView(actorFromLookup(hostProfiles, e.hostId)),
+          e.seriesId ? seriesById.get(e.seriesId) : undefined,
+          seatsByEvent.get(e.id) ?? 0,
+        ),
+        (e.hostId !== null && e.hostId === userId) || cohostedIds.has(e.id),
       ),
     );
+  }
+
+  /** `summarize`'s co-host lookup: which of `events` the viewer co-hosts,
+   *  asked only about rows whose host hid the going count and that the viewer
+   *  does not host. One IN-query, or none when no row qualifies. */
+  private async cohostedEventIdsAmong(
+    events: Event[],
+    userId: string,
+  ): Promise<ReadonlySet<string>> {
+    const cohostCheckIds = events
+      .filter((event) => !event.showAttendeeCount && event.hostId !== userId)
+      .map((event) => event.id);
+    if (!cohostCheckIds.length) return new Set<string>();
+    const rows = await this.cohosts.find({
+      where: { eventId: In(cohostCheckIds), userId },
+    });
+    return new Set(rows.map((row) => row.eventId));
   }
 
   /** `update()`'s community resolution; see the rules at its call site. */
@@ -2594,15 +2533,25 @@ export class EventsService {
       ? null
       : hostingCommunityRef;
 
-    const summary = toEventSummary(
+    // The host's "Show attendee count" toggle governs the detail exactly as
+    // it governs every list row: a viewer who is not an organiser gets null
+    // tallies (`isFull` stays real), and so does every other figure that
+    // would hand the headcount back (the waitlist tally, each announcement's
+    // fan-out size). Organisers, co-hosts included, keep every number.
+    const isCountWithheld = areAttendeeCountsWithheld(event, isOrganizer);
+    const summary = withholdHiddenAttendeeCounts(
       event,
-      goingCount,
-      myRsvp ?? null,
-      isBookmarked,
-      crops,
-      null,
-      series ?? undefined,
-      seatCounts.seatsTaken,
+      toEventSummary(
+        event,
+        goingCount,
+        myRsvp ?? null,
+        isBookmarked,
+        crops,
+        null,
+        series ?? undefined,
+        seatCounts.seatsTaken,
+      ),
+      isOrganizer,
     );
 
     // ADDRESS PRIVACY (LOC-04). The exact door goes to an organiser or to
@@ -2651,12 +2600,15 @@ export class EventsService {
       accessibilityNote: event.accessibilityNote ?? '',
       ...toEventCareFields(event),
       announcements: seesAnnouncements
-        ? announcementRows.map((row) =>
-            toEventAnnouncementView(
+        ? announcementRows.map((row) => {
+            const announcement = toEventAnnouncementView(
               row,
               row.authorId ? announcementAuthors.get(row.authorId) : undefined,
-            ),
-          )
+            );
+            return isCountWithheld
+              ? { ...announcement, recipientCount: null }
+              : announcement;
+          })
         : [],
       // See `EventDetail.community` for the private-community rule. Withheld,
       // the id goes too: it is on the summary spread above.
@@ -2674,7 +2626,7 @@ export class EventsService {
         .map((c) => toOrganizerView(profiles.get(c.userId)))
         .filter((v): v is NonNullable<typeof v> => v !== null),
       isOrganizer,
-      waitlistCount,
+      waitlistCount: isCountWithheld ? null : waitlistCount,
       myWaitlistPosition: myRsvp?.waitlistPosition ?? null,
       showAttendeeCount: event.showAttendeeCount,
       allowWaitlist: event.allowWaitlist,

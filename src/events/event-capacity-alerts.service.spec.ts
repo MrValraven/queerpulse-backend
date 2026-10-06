@@ -20,6 +20,7 @@ function baseEvent(overrides: Record<string, unknown> = {}) {
     endAt: null,
     capacity: 20,
     nearlyFullNotifiedAt: null,
+    showAttendeeCount: true,
     ...overrides,
   };
 }
@@ -93,6 +94,27 @@ describe('EventCapacityAlertsService', () => {
       title: 'Queer Book Club',
       seatsRemaining: 2,
     });
+  });
+
+  // A host who hid the attendee count: with a public capacity the remaining
+  // seats would spell out the seats taken, so the alert goes without them.
+  it('still alerts but leaves out seatsRemaining when the host hid the count', async () => {
+    const { service, notifications } = build({
+      event: baseEvent({ showAttendeeCount: false }),
+      seats: 18,
+    });
+    await service.onSeatsChanged('event-1');
+    expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
+    const [recipients, type, payload] = notifications.createForRecipients.mock
+      .calls[0] as [string[], NotificationType, Record<string, unknown>];
+    expect(recipients.sort()).toEqual(['maybe-1', 'saver-1']);
+    expect(type).toBe(NotificationType.EventNearlyFull);
+    expect(payload).toEqual({
+      source: 'event',
+      eventSlug: 'queer-book-club',
+      title: 'Queer Book Club',
+    });
+    expect(payload).not.toHaveProperty('seatsRemaining');
   });
 
   it('never tells somebody who already holds a seat or a waitlist place', async () => {

@@ -4,7 +4,10 @@ import { In } from 'typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
-import { EventLineupEntry } from '../events/entities/event-lineup-entry.entity';
+import {
+  EventLineupEntry,
+  EventLineupEntryStatus,
+} from '../events/entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -186,6 +189,22 @@ describe('SubprofileAffiliationEligibilityService', () => {
       ).toBe(true);
     });
 
+    it('counts only accepted lineup rows toward event eligibility', async () => {
+      await service.eligibleTargetKeys(
+        ['owner-1'],
+        [{ id: 'event-1', hostId: null }],
+        [],
+      );
+
+      expect(eventLineupEntries.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: EventLineupEntryStatus.Accepted,
+          }),
+        }),
+      );
+    });
+
     it('runs no query when there are no owners', async () => {
       await expect(
         service.eligibleTargetKeys([], [{ id: 'event-1', hostId: null }], []),
@@ -210,6 +229,25 @@ describe('SubprofileAffiliationEligibilityService', () => {
       startAt: new Date('2026-06-28T12:00:00.000Z'),
       hostId: 'someone',
     };
+
+    it('counts only accepted lineup rows when listing event options', async () => {
+      communities.createQueryBuilder.mockReturnValue(makeQueryBuilderStub([]));
+      events.createQueryBuilder.mockReturnValue(makeQueryBuilderStub([]));
+      events.find.mockResolvedValue([]);
+      eventCohosts.find.mockResolvedValue([]);
+      eventLineupEntries.find.mockResolvedValue([]);
+      eventRsvps.find.mockResolvedValue([]);
+
+      await service.listOptions('owner-1', 'owner-1');
+
+      expect(eventLineupEntries.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: EventLineupEntryStatus.Accepted,
+          }),
+        }),
+      );
+    });
 
     it('returns the requester communities then events, hand-mapped, capped and ordered upcoming first', async () => {
       const communityQuery = makeQueryBuilderStub([bookClubRow]);
@@ -249,7 +287,7 @@ describe('SubprofileAffiliationEligibilityService', () => {
         select: { eventId: true },
       });
       expect(eventLineupEntries.find).toHaveBeenCalledWith({
-        where: { userId: 'owner-1' },
+        where: { userId: 'owner-1', status: EventLineupEntryStatus.Accepted },
         select: { eventId: true },
       });
       expect(eventRsvps.find).toHaveBeenCalledWith({

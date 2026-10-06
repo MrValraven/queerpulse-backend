@@ -11,10 +11,14 @@ import {
 import {
   EVENT_COHOST_INVITED,
   EVENT_INVITED,
+  EVENT_LINEUP_ANSWERED,
+  EVENT_LINEUP_INVITED,
   EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
   EventCohostInvitedEvent,
   EventInvitedEvent,
+  EventLineupAnsweredEvent,
+  EventLineupInvitedEvent,
   EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from '../events/event.events';
@@ -160,6 +164,45 @@ export class NotificationsListener {
         inviteId: e.inviteId,
       },
       e.inviterId,
+    );
+  }
+
+  // Lineup invites (2026-10-06). `source: 'lineup_invite'` routes the row to
+  // the invite page (`/gatherings/:slug/lineup-invite/:inviteId`) on the
+  // client; `inviteId` is the lineup row id. `actorId` names the inviting
+  // organizer through `ACTOR_PAYLOAD_KEY` and stays off the client payload.
+  @OnEvent(EVENT_LINEUP_INVITED)
+  async onEventLineupInvited(e: EventLineupInvitedEvent): Promise<void> {
+    await this.notifications.create(
+      e.inviteeId,
+      NotificationType.EventLineupInvite,
+      {
+        actorId: e.inviterId,
+        source: 'lineup_invite',
+        eventSlug: e.eventSlug,
+        inviteId: e.entryId,
+        role: e.role,
+      },
+      e.inviterId,
+    );
+  }
+
+  // The performer's answer reaches the organizer who invited them, with the
+  // performer as actor, and opens the gathering's Manage page.
+  @OnEvent(EVENT_LINEUP_ANSWERED)
+  async onEventLineupAnswered(e: EventLineupAnsweredEvent): Promise<void> {
+    await this.notifications.create(
+      e.recipientId,
+      e.outcome === 'accepted'
+        ? NotificationType.EventLineupAccepted
+        : NotificationType.EventLineupDeclined,
+      {
+        actorId: e.performerId,
+        source: 'lineup_reply',
+        eventSlug: e.eventSlug,
+        role: e.role,
+      },
+      e.performerId,
     );
   }
 

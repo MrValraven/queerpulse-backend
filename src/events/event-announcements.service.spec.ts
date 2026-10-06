@@ -21,10 +21,10 @@ describe('EventAnnouncementsService', () => {
   let service: EventAnnouncementsService;
   let events: { findOne: jest.Mock };
   let cohosts: { exists: jest.Mock };
-  let rsvps: { find: jest.Mock };
-  let invites: { find: jest.Mock };
-  let announcements: { create: jest.Mock; save: jest.Mock };
-  let profiles: { findOne: jest.Mock };
+  let rsvps: { find: jest.Mock; exists: jest.Mock };
+  let invites: { find: jest.Mock; exists: jest.Mock };
+  let announcements: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  let profiles: { findOne: jest.Mock; find: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
 
   beforeEach(async () => {
@@ -32,9 +32,11 @@ describe('EventAnnouncementsService', () => {
     cohosts = { exists: jest.fn().mockResolvedValue(false) };
     rsvps = {
       find: jest.fn().mockResolvedValue([{ userId: 'guest-1' }]),
+      exists: jest.fn().mockResolvedValue(false),
     };
     invites = {
       find: jest.fn().mockResolvedValue([{ inviteeId: 'guest-2' }]),
+      exists: jest.fn().mockResolvedValue(false),
     };
     announcements = {
       create: jest.fn((row: Partial<EventAnnouncement>) => row),
@@ -45,8 +47,12 @@ describe('EventAnnouncementsService', () => {
           ...row,
         } as EventAnnouncement),
       ),
+      find: jest.fn().mockResolvedValue([]),
     };
-    profiles = { findOne: jest.fn().mockResolvedValue(null) };
+    profiles = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+    };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
     };
@@ -94,6 +100,70 @@ describe('EventAnnouncementsService', () => {
       await service.create('queer-book-club', 'host-1', 'We moved upstairs.');
 
       expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+  });
+
+  // `recipientCount` is the fan-out to every live RSVP, so it follows the
+  // host's "Show attendee count" toggle the way the detail's copy does: null
+  // for a reader who is not an organiser when the count is hidden. The host
+  // and co-hosts keep the figure.
+  describe('list honours a hidden attendee count', () => {
+    const sentAnnouncement = {
+      id: 'announcement-1',
+      eventId: 'event-1',
+      authorId: 'host-1',
+      body: 'We moved upstairs.',
+      recipientCount: 12,
+      createdAt: new Date('2026-09-29T12:00:00.000Z'),
+    } as EventAnnouncement;
+
+    beforeEach(() => {
+      events.findOne.mockResolvedValue({
+        ...gathering,
+        showAttendeeCount: false,
+      });
+      announcements.find.mockResolvedValue([sentAnnouncement]);
+    });
+
+    it('withholds the fan-out size from an attendee who is not an organiser', async () => {
+      rsvps.exists.mockResolvedValue(true);
+
+      const rows = await service.list('queer-book-club', 'guest-1');
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.recipientCount).toBeNull();
+      expect(rows[0]!.body).toBe('We moved upstairs.');
+    });
+
+    it('gives the host the fan-out size', async () => {
+      const rows = await service.list('queer-book-club', 'host-1');
+
+      expect(rows[0]!.recipientCount).toBe(12);
+    });
+
+    it('gives a co-host the fan-out size, settled by one organiser check', async () => {
+      cohosts.exists.mockResolvedValue(true);
+      announcements.find.mockResolvedValue([
+        sentAnnouncement,
+        { ...sentAnnouncement, id: 'announcement-2', recipientCount: 9 },
+      ]);
+
+      const rows = await service.list('queer-book-club', 'cohost-1');
+
+      expect(rows.map((row) => row.recipientCount)).toEqual([12, 9]);
+      expect(cohosts.exists).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives an attendee the fan-out size when the count is shown', async () => {
+      events.findOne.mockResolvedValue({
+        ...gathering,
+        showAttendeeCount: true,
+      });
+      rsvps.exists.mockResolvedValue(true);
+
+      const rows = await service.list('queer-book-club', 'guest-1');
+
+      expect(rows[0]!.recipientCount).toBe(12);
     });
   });
 });

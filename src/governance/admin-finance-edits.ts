@@ -3,6 +3,7 @@ import { toStoredPlainText } from '../communities/community-plain-text';
 import {
   FinanceEventNote,
   FinanceLine,
+  FinanceLineItem,
   FinanceMetricSource,
   FinancePartner,
   FinanceReserve,
@@ -11,6 +12,7 @@ import {
 import {
   FinanceEventNoteEditDto,
   FinanceLedgerEditDto,
+  FinanceLineItemEditDto,
   FinancePartnerEditDto,
   FinanceReserveEditDto,
   FinanceStatEditDto,
@@ -59,11 +61,61 @@ function amountValue(amount: string): number {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+/** An amount ("1840.5", or a seeded "€1,840") in whole cents (184050). */
+function toCents(amount: string): number {
+  return Math.round(amountValue(amount) * 100);
+}
+
+/** Cents back to the canonical plain amount the editor sends ("1840.5"). */
+function toCanonicalAmount(cents: number): string {
+  return String(Math.round(cents) / 100);
+}
+
+/** The breakdown as it is stored: cleaned names and periods, canonical amounts. */
+function cleanLineItems(items: FinanceLineItemEditDto[]): FinanceLineItem[] {
+  return items.map((item) => ({
+    name: requiredText(item.name, 'A line item name'),
+    period: toStoredPlainText(item.period),
+    amount: toCanonicalAmount(toCents(item.amount)),
+  }));
+}
+
+/** The items' total, summed in cents so "0.1" and "0.2" make "0.3". */
+function sumLineItems(items: FinanceLineItem[]): string {
+  return toCanonicalAmount(
+    items.reduce((cents, item) => cents + toCents(item.amount), 0),
+  );
+}
+
+/** A breakdown's audit value: "3 items · 120", or "0 items" when empty. */
+function summarizeLineItems(items: FinanceLineItem[]): string {
+  if (items.length === 0) return '0 items';
+  const countLabel = items.length === 1 ? '1 item' : `${items.length} items`;
+  return `${countLabel} · ${sumLineItems(items)}`;
+}
+
+/** A stored breakdown in the key order {@link cleanLineItems} writes, so two
+ *  breakdowns compare equal as JSON whenever their items match. */
+function storedLineItems(line: FinanceLine): FinanceLineItem[] {
+  return (line.items ?? []).map(({ name, period, amount }) => ({
+    name,
+    period,
+    amount,
+  }));
+}
+
 /**
  * Applies index-addressed edits to one ledger. Edits at an existing index
  * correct that row; edits at `lines.length`, `lines.length + 1`, ... append new
  * rows in that order. Any other index is a 400, so a stale form can never
  * write past a gap.
+ *
+ * An edit carrying `items` replaces the row's breakdown whole and marks it
+ * `manual`, so the public page shows it. While the breakdown holds items the
+ * row's amount is their sum, recomputed here in cents and written over any
+ * `amount` sent beside it; `[]` clears the breakdown and leaves the amount.
+ * Saving a still-seeded breakdown unchanged is a person confirming it, the
+ * same rule a seeded headline figure follows.
  *
  * The array is rebuilt with fresh row objects: TypeORM's dirty check compares
  * the loaded jsonb by reference, so an in-place mutation would not persist.
@@ -90,9 +142,23 @@ export function applyLedgerEdits(
         `No ${kind} ledger row at index ${edit.index}`,
       );
     }
-    if (edit.label === undefined || edit.amount === undefined) {
+    const hasItems = (edit.items?.length ?? 0) > 0;
+    if (edit.label === undefined || (edit.amount === undefined && !hasItems)) {
       throw new BadRequestException(
-        `A new ${kind} ledger row needs a label and an amount`,
+        `A new ${kind} ledger row needs a label and an amount or line items`,
+      );
+    }
+  });
+  edits.forEach((edit) => {
+    const line = lines[edit.index];
+    if (!line || edit.items !== undefined || edit.amount === undefined) return;
+    const hasManualBreakdown =
+      line.itemsSource === FinanceMetricSource.Manual &&
+      (line.items?.length ?? 0) > 0;
+    // A manual breakdown totals its row, so a typed amount sent without items comes from a stale form.
+    if (hasManualBreakdown && toCents(edit.amount) !== toCents(line.amount)) {
+      throw new BadRequestException(
+        'The amount on this ledger row is the sum of its breakdown items. Reload to see the latest breakdown.',
       );
     }
   });
@@ -117,16 +183,50 @@ export function applyLedgerEdits(
         isChanged = true;
       }
     }
-    if (edit.amount !== undefined && edit.amount !== line.amount) {
+    let isBreakdownSaved = false;
+    let itemsSum: string | undefined;
+    if (edit.items !== undefined) {
+      const items = cleanLineItems(edit.items);
+      const storedItems = storedLineItems(line);
+      const isBreakdownChanged =
+        JSON.stringify(items) !== JSON.stringify(storedItems);
+      const isSeededConfirmed =
+        items.length > 0 && line.itemsSource !== FinanceMetricSource.Manual;
+      if (isBreakdownChanged || isSeededConfirmed) {
+        audit.push({
+          field: `${kind}[${index}].items`,
+          oldValue: summarizeLineItems(storedItems),
+          newValue: summarizeLineItems(items),
+        });
+        next.items = items;
+        next.itemsSource = FinanceMetricSource.Manual;
+        isBreakdownSaved = true;
+        isChanged = true;
+      }
+      if (items.length > 0) itemsSum = sumLineItems(items);
+    }
+    // A row with a breakdown totals itself, so its sum wins over a typed amount.
+    // A row keeping its saved breakdown keeps its stored sum: the check above
+    // already refused a different figure, so only a respelling reaches here.
+    const isKeepingManualBreakdown =
+      edit.items === undefined &&
+      line.itemsSource === FinanceMetricSource.Manual &&
+      (line.items?.length ?? 0) > 0;
+    const amount =
+      itemsSum ?? (isKeepingManualBreakdown ? undefined : edit.amount);
+    if (amount !== undefined && amount !== line.amount) {
       audit.push({
         field: `${kind}[${index}]`,
         oldValue: line.amount,
-        newValue: edit.amount,
+        newValue: amount,
       });
-      next.amount = edit.amount;
+      next.amount = amount;
       next.source = FinanceMetricSource.Manual;
       isChanged = true;
       isFigureChanged = true;
+    }
+    if (isBreakdownSaved) {
+      next.total = { label: '', amount: next.amount };
     }
     if (edit.note !== undefined && edit.note !== line.note) {
       next.note = toStoredPlainText(edit.note);
@@ -144,15 +244,20 @@ export function applyLedgerEdits(
     return next;
   });
 
+  // A new row with a breakdown totals itself, like a corrected one.
+  const appendedRows = appended.map((edit) => {
+    const items = edit.items === undefined ? [] : cleanLineItems(edit.items);
+    const amount = items.length > 0 ? sumLineItems(items) : edit.amount!;
+    return { edit, items, amount };
+  });
   // An appended row's bar is sized against the largest amount in the ledger,
   // the same reading the seeded rows' curated `width` gives.
   const largestAmount = Math.max(
     0,
     ...corrected.map((line) => amountValue(line.amount)),
-    ...appended.map((edit) => amountValue(edit.amount!)),
+    ...appendedRows.map((row) => amountValue(row.amount)),
   );
-  const added = appended.map((edit): FinanceLine => {
-    const amount = edit.amount!;
+  const added = appendedRows.map(({ edit, items, amount }): FinanceLine => {
     const label = requiredText(edit.label!, 'A ledger label');
     audit.push({
       field: `${kind}[${edit.index}]`,
@@ -164,6 +269,13 @@ export function applyLedgerEdits(
       oldValue: null,
       newValue: label,
     });
+    if (items.length > 0) {
+      audit.push({
+        field: `${kind}[${edit.index}].items`,
+        oldValue: null,
+        newValue: summarizeLineItems(items),
+      });
+    }
     return {
       label,
       amount,
@@ -172,10 +284,13 @@ export function applyLedgerEdits(
         largestAmount > 0
           ? Math.round((amountValue(amount) / largestAmount) * 100)
           : 0,
-      items: [],
+      items,
       total: { label: '', amount },
       source: FinanceMetricSource.Manual,
       enabled: edit.enabled ?? true,
+      ...(edit.items === undefined
+        ? {}
+        : { itemsSource: FinanceMetricSource.Manual }),
     };
   });
   if (added.length > 0) {

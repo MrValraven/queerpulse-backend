@@ -17,6 +17,7 @@ import { UsersModule } from '../users/users.module';
 import {
   EventCohostInvitesController,
   EventInvitesController,
+  EventLineupInvitesController,
   EventsController,
 } from './events.controller';
 import { EventPhotosController } from './event-photos.controller';
@@ -41,6 +42,7 @@ import { EventCapacityAlertsService } from './event-capacity-alerts.service';
 import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
+import { EventLineupService } from './event-lineup.service';
 import { EventPhotosService } from './event-photos.service';
 import { EventReminderPreferencesService } from './event-reminder-preferences.service';
 import { EventAttendanceRetentionService } from './event-attendance-retention.service';
@@ -119,6 +121,7 @@ import { RsvpService } from './rsvp.service';
     EventsController,
     EventInvitesController,
     EventCohostInvitesController,
+    EventLineupInvitesController,
     EventPhotosController,
     EventReminderPreferencesController,
   ],
@@ -132,6 +135,7 @@ import { RsvpService } from './rsvp.service';
     RsvpService,
     EventInvitesService,
     EventCohostInvitesService,
+    EventLineupService,
     EventRemindersService,
     // Daily cron clearing attendance detail on gatherings that ended over the
     // retention window ago. Needs no controller and is exported to nobody: it

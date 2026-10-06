@@ -140,7 +140,11 @@ export class EventCapacityAlertsService {
           source: 'event',
           eventSlug: event.slug,
           title: event.title,
-          seatsRemaining,
+          // A host who hid the attendee count still gets the alert sent, but
+          // without the figure: with a public `capacity`, `seatsRemaining`
+          // gives away `seatsTaken` to members who are not organisers. The
+          // client reads a missing count as the "almost full" variant.
+          ...(event.showAttendeeCount ? { seatsRemaining } : {}),
         },
       );
     } catch (error) {

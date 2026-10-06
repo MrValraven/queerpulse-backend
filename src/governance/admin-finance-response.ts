@@ -74,14 +74,19 @@ export interface AdminFinanceResponseDTO {
   history: AdminFinanceHistoryPoint[];
 }
 
-/** Fills a concrete `source` and `enabled` on every ledger row so the
- *  frontend never has to treat them as optional: rows seeded before
- *  provenance tracking read `seeded`, and rows never toggled read enabled. */
+/** Fills a concrete `source`, `enabled`, `items` and `itemsSource` on every
+ *  ledger row so the frontend never has to treat them as optional: rows seeded
+ *  before provenance tracking read `seeded`, rows never toggled read enabled,
+ *  and a breakdown no admin has saved reads `seeded`. The editor gets the
+ *  stored breakdown whatever its provenance; only the public response hides
+ *  the seeded ones. */
 function withLineSource(lines: FinanceLine[]): FinanceLine[] {
   return lines.map((line) => ({
     ...line,
     source: line.source ?? FinanceMetricSource.Seeded,
     enabled: line.enabled ?? true,
+    items: line.items ?? [],
+    itemsSource: line.itemsSource ?? FinanceMetricSource.Seeded,
   }));
 }
 

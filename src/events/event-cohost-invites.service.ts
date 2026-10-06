@@ -23,6 +23,7 @@ import {
 } from './entities/event-cohost-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus } from './entities/event.entity';
+import { areAttendeeCountsWithheld } from './event-response';
 import { EVENT_COHOST_INVITED, EventCohostInvitedEvent } from './event.events';
 import { EventsService } from './events.service';
 
@@ -126,6 +127,10 @@ export class EventCohostInvitesService {
     if (!event) {
       throw new NotFoundException('Event not found');
     }
+    const isCountWithheld = await this.isAttendeeCountWithheldFor(
+      event,
+      viewerId,
+    );
     const [
       inviter,
       goingCount,
@@ -134,12 +139,16 @@ export class EventCohostInvitesService {
       hostedEventsCount,
     ] = await Promise.all([
       this.profiles.findOne({ where: { userId: invite.inviterId } }),
-      this.rsvps.count({
-        where: { eventId: event.id, status: RsvpStatus.Going },
-      }),
-      this.rsvps.count({
-        where: { eventId: event.id, status: RsvpStatus.Waitlisted },
-      }),
+      isCountWithheld
+        ? null
+        : this.rsvps.count({
+            where: { eventId: event.id, status: RsvpStatus.Going },
+          }),
+      isCountWithheld
+        ? null
+        : this.rsvps.count({
+            where: { eventId: event.id, status: RsvpStatus.Waitlisted },
+          }),
       this.connectionsService.mutualCountsByUserIds(invite.inviteeId, [
         invite.inviterId,
       ]),
@@ -198,5 +207,22 @@ export class EventCohostInvitesService {
       return persisted;
     });
     return { id: saved.id, status: saved.status };
+  }
+
+  // --- internals ---
+
+  /** The `Event.showAttendeeCount` gate for the invite detail. The invitee is
+   *  not an organiser until they accept, and still reads the invite after a
+   *  decline, expiry or revoke, so a hidden tally stays hidden from them. The
+   *  organiser lookup runs only when the host hid the count. */
+  private async isAttendeeCountWithheldFor(
+    event: Event,
+    viewerId: string,
+  ): Promise<boolean> {
+    if (event.showAttendeeCount) return false;
+    const isOrganizerViewing =
+      event.hostId === viewerId ||
+      (await this.eventsService.isOrganizer(event.id, viewerId));
+    return areAttendeeCountsWithheld(event, isOrganizerViewing);
   }
 }

@@ -155,17 +155,21 @@ export interface FeedItem extends FeedItemSignals {
    */
   excerpt?: string | null;
   /**
-   * `article` (PRD-107) enrichment, undefined for every other item type. The
-   * card needs the magazine's own furniture: the kicker or section the piece
-   * runs under, the byline credit, the read time and the lead art, none of
-   * which the shared `title`/`summary`/`actor` triple can carry, because a
-   * magazine byline is a `magazine_author` row rather than a member account.
+   * `article` (PRD-107) enrichment. `kicker`, `section`, `readMinutes`,
+   * `locale` and `byline` stay undefined for every other item type, and
+   * `imageUrl` is also set on `gathering` items. The card needs the
+   * magazine's own furniture: the kicker or section the piece runs under,
+   * the byline credit, the read time and the lead art, none of which the
+   * shared `title`/`summary`/`actor` triple can carry, because a magazine
+   * byline is a `magazine_author` row rather than a member account.
    */
   kicker?: string;
   section?: string;
   readMinutes?: number;
-  /** The piece's lead art, falling back to its social-share image, or null
-   *  when the desk set neither. Same precedence `MagazineFrontService` uses. */
+  /** Set on `article` and `gathering` items. For an `article`, the piece's
+   *  lead art, falling back to its social-share image (same precedence
+   *  `MagazineFrontService` uses). For a `gathering`, the event's cover
+   *  photo. Null when none is set. */
   imageUrl?: string | null;
   /** The language of the row the card is actually showing, so a Portuguese
    *  reader served the English original can be told so. */
@@ -381,6 +385,7 @@ export function eventToFeedItem(
     summary: truncate(event.description),
     link: `/gatherings/${event.slug}`,
     actor: toAuthorSummary(host),
+    imageUrl: toImageUrl(event.coverImageUrl),
   };
 }
 

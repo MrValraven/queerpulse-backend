@@ -7,14 +7,16 @@ import {
   Unique,
 } from 'typeorm';
 
-// A host-tagged "who performed" credit on an event — one row per (event,
-// member). Backs `PUT/GET /events/:slug/lineup` (Personas Phase 5, Moment 5:
-// the post-gathering persona nudge). `role` is a free-ish craft/role label
-// the host assigns ("dj"/"chef"/"performing"/...) — deliberately NOT an enum
-// or FK to `SubprofileKind`, since a host may tag someone whose craft isn't
-// (yet) a recognised persona kind. `UQ_event_lineup_entries (event_id,
-// user_id)` makes a replace-all write idempotent per member and mirrors
-// `event_cohosts`/`event_bookmarks`'s composite-unique shape.
+export enum EventLineupEntryStatus {
+  Pending = 'pending',
+  Accepted = 'accepted',
+  Declined = 'declined',
+}
+
+// One member's place on an event's lineup ("who performed"), one row per
+// (event, member). An organizer invites; the member accepts or declines
+// (`EventLineupService`). Only accepted rows are public. `role` stays a
+// free-ish craft label (see the note on `role` below).
 @Entity('event_lineup_entries')
 @Unique('UQ_event_lineup_entries', ['eventId', 'userId'])
 export class EventLineupEntry {
@@ -28,8 +30,27 @@ export class EventLineupEntry {
   @Column({ type: 'uuid' })
   userId!: string;
 
+  // Free-ish craft label ("dj", "chef", ...). Deliberately no enum or FK to
+  // `SubprofileKind`: a host may credit a craft that is no persona kind yet.
   @Column({ type: 'varchar', length: 40 })
   role!: string;
+
+  @Column({
+    type: 'enum',
+    enum: EventLineupEntryStatus,
+    enumName: 'event_lineup_entries_status_enum',
+    default: EventLineupEntryStatus.Pending,
+  })
+  status!: EventLineupEntryStatus;
+
+  // The organizer who sent the invite. Null for rows written before invites
+  // existed, and after the inviter's account is erased (ON DELETE SET NULL).
+  @Index('IDX_event_lineup_entries_invited_by_id')
+  @Column({ type: 'uuid', nullable: true })
+  invitedById!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  respondedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
