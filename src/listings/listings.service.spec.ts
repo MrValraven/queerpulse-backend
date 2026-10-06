@@ -134,7 +134,6 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   whatItIs: [],
   tags: [],
   goodFor: [],
-  ownerIdentities: [],
   langs: [],
   online: false,
   address: '',
@@ -490,8 +489,9 @@ describe('ListingsService', () => {
       expect(result.ownedBy).toEqual([]);
     });
 
-    // A suggester cannot declare the owner's gender identity for them, so the
-    // suggest path blanks it with the other owner-personal answers.
+    // A suggester cannot declare the owner's gender or racial identity for
+    // them, so the suggest path blanks it with the other owner-personal
+    // answers.
     it('stores none of a suggester’s ownedBy', async () => {
       const result = await service.create('member-1', {
         name: 'Lux Café',
@@ -578,24 +578,6 @@ describe('ListingsService', () => {
             ownerName: '',
             visibility: '',
             linkToProfile: false,
-          }),
-        );
-      });
-
-      // Final fix wave item #1: a suggestion stays platform-held until the
-      // business claims it, so an identity tag the suggester sends must
-      // never land on the stored row.
-      it('stores no owner identity tags on a suggestion, even when the DTO carries them', async () => {
-        await service.create('member-1', {
-          name: 'Lux Café',
-          path: 'suggest',
-          ownerIdentities: ['women', 'trans'],
-        } as CreateListingDto);
-
-        const row = savedRow();
-        expect(row).toEqual(
-          expect.objectContaining({
-            ownerIdentities: [],
           }),
         );
       });
@@ -800,30 +782,6 @@ describe('ListingsService', () => {
         email: 'a@b.com',
         phone: '+351123',
       });
-    });
-
-    it('replaces the owner identity tags wholesale, an empty list clearing them', async () => {
-      listings.findOne.mockResolvedValue(
-        baseListing({ ownerId: 'owner-1', ownerIdentities: ['women'] }),
-      );
-
-      const dto = await service.update('QPL-2026-0001', 'owner-1', {
-        ownerIdentities: [],
-      });
-
-      expect(dto.ownerIdentities).toEqual([]);
-    });
-
-    it('stores the owner identity tags in canonical order', async () => {
-      listings.findOne.mockResolvedValue(
-        baseListing({ ownerId: 'owner-1', ownerIdentities: ['women'] }),
-      );
-
-      const dto = await service.update('QPL-2026-0001', 'owner-1', {
-        ownerIdentities: ['trans', 'women'],
-      });
-
-      expect(dto.ownerIdentities).toEqual(['women', 'trans']);
     });
 
     // Regression test: `changedListingFields` used to compare jsonb columns

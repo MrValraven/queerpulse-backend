@@ -366,14 +366,6 @@ export class Listing {
   goodFor!: string[];
 
   /**
-   * "Who runs it" tags (`LISTING_OWNER_IDENTITY_SLUGS`), self-declared and
-   * optional, stored in canonical order. Filtered client-side by the Local
-   * directory, so no index.
-   */
-  @Column({ type: 'text', array: true, default: '{}' })
-  ownerIdentities!: string[];
-
-  /**
    * The venue's answers to the canonical accessibility questions
    * (`LISTING_ACCESSIBILITY_QUESTION_SLUGS`), one answer per slug.
    *
@@ -535,11 +527,11 @@ export class Listing {
 
   /**
    * Who owns and runs the business, as the OWNER declares it: any of
-   * `LISTING_OWNED_BY_VALUES` (`women`, `trans`, `nonbinary`), each at most
-   * once, in canonical order. Empty when the owner declared none.
+   * `LISTING_OWNED_BY_VALUES` (`women`, `trans`, `nonbinary`, `bipoc`), each
+   * at most once, in canonical order. Empty when the owner declared none.
    *
    * Self-declared and never moderator-verified. OWNER-PERSONAL: every tag
-   * discloses the owner's gender identity, so it is one of
+   * discloses the owner's gender or racial identity, so it is one of
    * `OWNER_PERSONAL_LISTING_FIELDS` (co-managers neither read nor write it, a
    * suggestion and a staff-authored listing never store it, and a handover
    * clears it). Public on the directory card and detail once set, and the

@@ -79,7 +79,6 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   whatItIs: [],
   tags: [],
   goodFor: [],
-  ownerIdentities: [],
   langs: [],
   online: false,
   address: '',
@@ -401,9 +400,9 @@ describe('listing co-manager permission boundary', () => {
       expect(result.managementRole).toBe(ListingManagementRole.CoManager);
     });
 
-    // Every value discloses the owner's gender identity, so a co-manager can
-    // neither set nor clear it, and a valid value is refused as firmly as a
-    // bogus one.
+    // Every value discloses the owner's gender or racial identity, so a
+    // co-manager can neither set nor clear it, and a valid value is refused
+    // as firmly as a bogus one.
     it.each([[['women']], [[]]])(
       'rejects a co-manager PATCH carrying ownedBy %j with 403 and saves nothing',
       async (ownedBy) => {

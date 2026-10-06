@@ -41,7 +41,8 @@ describe.each([
     [['women']],
     [['trans']],
     [['nonbinary']],
-    [['women', 'trans', 'nonbinary']],
+    [['bipoc']],
+    [['women', 'trans', 'nonbinary', 'bipoc']],
   ])('accepts %j', async (value) => {
     expect(await ownedByErrors(dtoClass, value)).toHaveLength(0);
   });
@@ -113,9 +114,9 @@ describe('ListListingDirectoryQuery owned', () => {
 
   it('de-duplicates and sorts into canonical order', async () => {
     const query = await run({
-      owned: ['nonbinary,women', 'women', ' trans '],
+      owned: ['bipoc,nonbinary,women', 'women', ' trans '],
     });
-    expect(query.owned).toEqual(['women', 'trans', 'nonbinary']);
+    expect(query.owned).toEqual(['women', 'trans', 'nonbinary', 'bipoc']);
   });
 
   it('leaves `owned` unset when it is absent', async () => {
@@ -132,6 +133,7 @@ describe('ListListingDirectoryQuery owned', () => {
   it.each([
     'queer',
     'WOMEN',
+    'BIPOC',
     'women,queer',
     'women,non-binary',
     ['women', 'queer'],

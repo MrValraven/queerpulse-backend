@@ -3,15 +3,16 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
  * `listings.owned_by`: who owns and runs the business, as the owner declares
- * it. Any of `women`, `trans` and `nonbinary` (`LISTING_OWNED_BY_VALUES`),
- * stored as `text[]` like `cats`, `tags` and `langs` beside it.
+ * it. Any of `women`, `trans`, `nonbinary` and `bipoc`
+ * (`LISTING_OWNED_BY_VALUES`), stored as `text[]` like `cats`, `tags` and
+ * `langs` beside it.
  *
  * SELF-DECLARED, NOT VERIFIED. Unlike `queer_owned_verified` there is no
  * moderator confirmation behind it and no provenance columns beside it.
  *
- * OWNER-PERSONAL. Each value discloses the owner's gender identity, so the
- * application treats the column like `owner_name` and `consent_outing`: only
- * the owner writes it, and a handover clears it.
+ * OWNER-PERSONAL. Each value discloses the owner's gender or racial identity,
+ * so the application treats the column like `owner_name` and
+ * `consent_outing`: only the owner writes it, and a handover clears it.
  *
  * NOT NULL DEFAULT '{}', with no backfill. No owner has declared anything yet,
  * and an empty array is what every existing listing has said so far. The

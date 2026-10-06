@@ -133,7 +133,7 @@ export class ListListingDirectoryQuery {
 
   /**
    * Who owns the business, as its owner declared it (`LISTING_OWNED_BY_VALUES`:
-   * `women`, `trans`, `nonbinary`). Repeatable, and also accepted
+   * `women`, `trans`, `nonbinary`, `bipoc`). Repeatable, and also accepted
    * comma-joined, like `access`. Several values are an OR: a listing matches
    * when its `ownedBy` holds ANY of them, because someone looking for
    * businesses run by women or by trans people wants both sets.

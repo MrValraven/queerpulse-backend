@@ -1,16 +1,19 @@
 /**
  * The ownership-identity tags a listing's OWNER may declare about who owns and
- * runs the business: women (cis and trans), trans people, non-binary people.
- * Stored on `Listing.ownedBy`, written by `CreateListingDto` /
- * `UpdateListingDto`, and filtered on by the directory's `owned=` query, so all
- * three read this one list.
+ * runs the business: women (cis and trans), trans people, non-binary people,
+ * and BIPOC people (Black, Indigenous and people of colour). Stored on
+ * `Listing.ownedBy`, written by `CreateListingDto` / `UpdateListingDto`, and
+ * filtered on by the directory's `owned=` query, so all three read this one
+ * list.
  *
  * SELF-DECLARED, NEVER VERIFIED. Unlike the queer-owned badge there is no
  * moderator confirmation behind any of these, so no surface may present one as
  * checked.
  *
- * OWNER-PERSONAL. Each tag discloses the gender identity of the person who owns
- * the business, which is an outing risk, so `ownedBy` is one of
+ * OWNER-PERSONAL. Each tag discloses something about the person who owns the
+ * business: their gender identity (`women`, `trans`, `nonbinary`), which is an
+ * outing risk, or their racial or ethnic identity (`bipoc`). That disclosure
+ * is the owner's alone to make, so `ownedBy` is one of
  * `OWNER_PERSONAL_LISTING_FIELDS`: only the owner writes it, a co-manager
  * neither sees nor sends it, a suggestion and a staff-authored listing never
  * store it, and it leaves with the owner on a handover.
@@ -18,7 +21,12 @@
  * The ORDER here is the canonical order: stored values and the parsed query
  * are both sorted into it, so the same set always reads the same way.
  */
-export const LISTING_OWNED_BY_VALUES = ['women', 'trans', 'nonbinary'] as const;
+export const LISTING_OWNED_BY_VALUES = [
+  'women',
+  'trans',
+  'nonbinary',
+  'bipoc',
+] as const;
 
 export type ListingOwnedBy = (typeof LISTING_OWNED_BY_VALUES)[number];
 

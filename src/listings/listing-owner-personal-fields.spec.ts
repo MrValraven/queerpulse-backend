@@ -139,7 +139,7 @@ describe('toManagedListingDTO', () => {
     expect(managed.managementRole).toBe(ListingManagementRole.CoManager);
     expect('ownerName' in managed).toBe(false);
     expect('ownerBio' in managed).toBe(false);
-    // Who owns the business discloses the owner's gender identity.
+    // Who owns the business discloses the owner's gender or racial identity.
     expect('ownedBy' in managed).toBe(false);
     expect(managed.name).toBe('Lux Café');
   });

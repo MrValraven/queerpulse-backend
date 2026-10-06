@@ -28,9 +28,9 @@ import { ListingDTO } from './listing-response';
  * And one more for the owner's own identity:
  *
  *  - `ownedBy` says who owns and runs the business (`women`, `trans`,
- *    `nonbinary`). Every value discloses the owner's gender identity, which
- *    is an outing risk, so only the owner may set or see it on the management
- *    side. A handover clears it too (`ListingOwnershipService`), because it
+ *    `nonbinary`, `bipoc`). Every value discloses the owner's gender or
+ *    racial identity, and the gender values are an outing risk, so only the
+ *    owner may set or see it on the management side. A handover clears it too (`ListingOwnershipService`), because it
  *    describes the previous owner rather than the business, and a suggestion
  *    or a staff-authored listing never stores it. Once the owner sets it, it
  *    is public on the directory card and detail by the owner's own choice.

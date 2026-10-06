@@ -13,7 +13,7 @@ import { CreateListingOwnerOfferDto } from './create-listing-owner-offer.dto';
  * admin cannot truthfully answer any of them on a business's behalf. The
  * owner supplies them after accepting, in the editor they land in. That
  * includes `ownedBy`: who owns the business is the owner's own disclosure
- * about their gender identity, never staff's to make for them.
+ * about their gender or racial identity, never staff's to make for them.
  *
  * Omission is the enforcement: the global `forbidNonWhitelisted`
  * ValidationPipe rejects a body that carries any of them, so an admin who
