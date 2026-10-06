@@ -166,7 +166,7 @@ describe('PressKitService', () => {
         }) as Partial<Community>,
       });
       expect(events.count).toHaveBeenCalledWith({
-        where: { status: 'published' },
+        where: { status: 'published', startAt: expect.anything() as unknown },
       });
       expect(safeSpaceNominations.count).toHaveBeenCalledWith({
         where: { status: 'approved' },

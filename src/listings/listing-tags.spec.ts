@@ -76,6 +76,22 @@ describe('resolveListingTagsOrThrow', () => {
     ]);
   });
 
+  it('accepts an online-only tag and a place-only tag on one listing', () => {
+    expect(resolveListingTagsOrThrow(['mb way', 'Terrace'], [])).toEqual([
+      'MB WAY',
+      'Terrace',
+    ]);
+  });
+
+  it('accepts a tag from every online-only group', () => {
+    expect(
+      resolveListingTagsOrThrow(
+        ['Ships worldwide', 'PayPal', 'Free first call'],
+        [],
+      ),
+    ).toEqual(['Ships worldwide', 'PayPal', 'Free first call']);
+  });
+
   it('throws a 400 naming each unknown tag', () => {
     const attempt = () =>
       resolveListingTagsOrThrow(['Terrace', 'Dog-friendly', 'Rooftop'], []);
@@ -92,19 +108,67 @@ describe('LISTING_TAG_GROUPS', () => {
     expect(overlongTags).toEqual([]);
   });
 
-  it('holds each tag once across all groups, compared case-insensitively', () => {
+  it('holds each tag once across all options, compared case-insensitively', () => {
     const lowercaseTags = LISTING_TAG_OPTIONS.map((tag) => tag.toLowerCase());
 
     expect(new Set(lowercaseTags).size).toBe(lowercaseTags.length);
+  });
+
+  it('holds each tag once within each list, compared case-insensitively', () => {
+    const listsWithRepeats = LISTING_TAG_GROUPS.flatMap((group) =>
+      [group.tags, group.onlineTags].filter(
+        (tagList) =>
+          new Set(tagList.map((tag) => tag.toLowerCase())).size !==
+          tagList.length,
+      ),
+    );
+
+    expect(listsWithRepeats).toEqual([]);
+  });
+
+  it('keeps each tag inside one group, whether offered to places or online', () => {
+    const groupIdByLowercaseTag = new Map<string, string>();
+    const tagsInTwoGroups: string[] = [];
+    for (const group of LISTING_TAG_GROUPS) {
+      for (const tag of new Set([...group.tags, ...group.onlineTags])) {
+        const lowercaseTag = tag.toLowerCase();
+        const earlierGroupId = groupIdByLowercaseTag.get(lowercaseTag);
+        if (earlierGroupId !== undefined && earlierGroupId !== group.id) {
+          tagsInTwoGroups.push(tag);
+        }
+        groupIdByLowercaseTag.set(lowercaseTag, group.id);
+      }
+    }
+
+    expect(tagsInTwoGroups).toEqual([]);
+  });
+
+  it('gives every group at least one tag in one of its lists', () => {
+    const emptyGroupIds = LISTING_TAG_GROUPS.filter(
+      (group) => group.tags.length === 0 && group.onlineTags.length === 0,
+    ).map((group) => group.id);
+
+    expect(emptyGroupIds).toEqual([]);
   });
 
   it('stores no tag with surrounding whitespace', () => {
     expect(LISTING_TAG_OPTIONS.filter((tag) => tag !== tag.trim())).toEqual([]);
   });
 
-  it('flattens into LISTING_TAG_OPTIONS in group order', () => {
+  it('collects place and online tags into LISTING_TAG_OPTIONS once each, in group order', () => {
+    expect(LISTING_TAG_OPTIONS).toEqual([
+      ...new Set(
+        LISTING_TAG_GROUPS.flatMap((group) => [
+          ...group.tags,
+          ...group.onlineTags,
+        ]),
+      ),
+    ]);
+  });
+
+  it('offers both place-only and online-only tags as options', () => {
     expect(LISTING_TAG_OPTIONS).toEqual(
-      LISTING_TAG_GROUPS.flatMap((group) => [...group.tags]),
+      expect.arrayContaining(['Terrace', 'DJ nights', 'MB WAY', 'Gift cards']),
     );
   });
 });

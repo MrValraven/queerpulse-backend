@@ -197,7 +197,17 @@ export class GovernanceOverviewService {
     if (!overview) {
       throw new NotFoundException('Governance overview not found');
     }
-    overview.health = await this.withLiveActiveMemberCount(overview.health);
+    // PRD-448. The "Community health" tiles are public only once someone on
+    // the governance team has saved them on the Policy tab. The seeded tiles
+    // were invented figures, and a tile nobody entered says nothing true, so
+    // until then the public page gets an empty list and renders its
+    // "nothing published yet" line.
+    const isHealthEntered = await this.changes.exists({
+      where: { section: OverviewSection.Health },
+    });
+    overview.health = isHealthEntered
+      ? await this.withLiveActiveMemberCount(overview.health)
+      : [];
     const seats = await this.resolveCouncilSeats(overview.council);
     return toGovernanceOverviewResponse(
       overview,

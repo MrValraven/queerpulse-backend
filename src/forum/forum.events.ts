@@ -23,3 +23,24 @@ export interface ForumThreadCreatedEvent {
   threadSlug: string;
   title: string;
 }
+
+export const FORUM_FUNDING_DEADLINE_CHANGED = 'forum.funding_deadline_changed';
+
+/**
+ * An open call's deadline moved. Emitted by
+ * `ForumFundingService.emitDeadlineChanged` after the edit committed, so a
+ * listener never reacts to a rolled-back write. Consumed by
+ * `FundingDeadlineChangedListener` (P3), which tells the members who saved
+ * the thread. Ids and the thread's own title only; no member-authored body.
+ */
+export interface ForumFundingDeadlineChangedEvent {
+  threadId: string;
+  threadSlug: string;
+  threadTitle: string;
+  /** The thread's author, or null once they erased their account. */
+  authorId: string | null;
+  /** Whoever made the edit (the author or a moderator). */
+  editorId: string;
+  /** ISO 8601, or null when the call became rolling. */
+  deadline: string | null;
+}

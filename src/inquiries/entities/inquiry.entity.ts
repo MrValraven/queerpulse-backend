@@ -17,6 +17,14 @@ export const INQUIRY_STATUSES = ['new', 'handled'] as const;
 export type InquiryStatus = (typeof INQUIRY_STATUSES)[number];
 
 /**
+ * PRD-452. The Contact form topics that go to the front of the triage list
+ * and announce to staff on arrival. The topic vocabulary itself is the
+ * frontend's (`ContactPage`'s `TOPICS`); the form sends the topic id
+ * alongside the translated subject label, and only these ids raise priority.
+ */
+export const PRIORITY_INQUIRY_TOPICS: readonly string[] = ['safety'];
+
+/**
  * A message left through one of the public marketing forms — the Contact page
  * (`kind = 'contact'`) or the For-Organisations partnership form
  * (`kind = 'partner'`). Rows are written by anonymous visitors (the `POST` is
@@ -81,6 +89,15 @@ export class Inquiry {
   /** When it was moved to `handled`; null while it is `new`. */
   @Column({ type: 'timestamptz', nullable: true })
   handledAt!: Date | null;
+
+  /**
+   * PRD-452. True for a Contact message sent under a topic in
+   * {@link PRIORITY_INQUIRY_TOPICS} (a safety concern). While it is `new` it
+   * sorts above every other waiting inquiry, and its arrival is announced to
+   * the staff who work the inbox. Set once on create and never edited.
+   */
+  @Column({ type: 'boolean', default: false })
+  isPriority!: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

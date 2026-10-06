@@ -1487,9 +1487,10 @@ export class ConnectionsService {
    * somebody was shown "Say hello" on that person's profile and had the send
    * refused, because the only relationship signal the app had was "connected or
    * not". `incoming` carries the connection id as well as the slug, so the
-   * profile can answer the request where it is read.
+   * profile can answer the request where it is read, plus the request's note
+   * and reason, so the requester's own words can be read there too.
    *
-   * ONE query, uncapped, selecting four columns. Uncapped because a truncated
+   * ONE query, uncapped, selecting six columns. Uncapped because a truncated
    * set here is a wrong answer rather than a short list: the one relationship
    * that fell off the end is exactly the one whose profile would then offer the
    * wrong action. A member's accepted-plus-pending edge count is small by
@@ -1514,6 +1515,8 @@ export class ConnectionsService {
         status: true,
         requesterId: true,
         addresseeId: true,
+        requestMessage: true,
+        requestReason: true,
       },
     });
     if (rows.length === 0) {
@@ -1538,7 +1541,12 @@ export class ConnectionsService {
       if (row.status === ConnectionStatus.Accepted) {
         connected.push(slug);
       } else if (row.addresseeId === userId) {
-        incoming.push({ slug, connectionId: row.id });
+        incoming.push({
+          slug,
+          connectionId: row.id,
+          requestMessage: row.requestMessage ?? null,
+          requestReason: row.requestReason ?? null,
+        });
       } else {
         sent.push(slug);
       }

@@ -1533,6 +1533,24 @@ export enum NotificationType {
   ListingSuggestionSentBack = 'listing_suggestion_sent_back',
   ListingSuggestionRemoved = 'listing_suggestion_removed',
   /**
+   * Funding & Grants (design spec 2026-10-05).
+   *
+   * `FundingDeadlineSoon`: a member saved an open call and it closes in 7 days
+   * or tomorrow, by Lisbon calendar day (`FundingDeadlineReminderService`, a
+   * daily 09:00 Lisbon sweep). Payload
+   * `{ source: 'forum', threadSlug, threadTitle, deadline, stage: '7d' | '1d' }`.
+   *
+   * `FundingDeadlineChanged`: a call the member saved moved its deadline
+   * (`FundingDeadlineChangedListener`). Payload
+   * `{ source: 'forum', threadSlug, threadTitle, deadline }`.
+   *
+   * No actor on either: the call's own clock is speaking. In-app only.
+   *
+   * See migration `AddFundingNotificationTypes1828600200000`.
+   */
+  FundingDeadlineSoon = 'funding_deadline_soon',
+  FundingDeadlineChanged = 'funding_deadline_changed',
+  /**
    * A persona's connected podcast feed brought in new episodes that are
    * waiting for review (persona feed import). Written to EVERY member of the
    * persona (creator and accepted co-owners) by the scheduled sync in
@@ -1555,6 +1573,28 @@ export enum NotificationType {
    * See migration `AddPersonaImportReadyNotificationType1827800200000`.
    */
   PersonaImportReady = 'persona_import_ready',
+  /**
+   * DES-417. Every step of the safe-space review process, told to the member
+   * it concerns: a nominator whose nomination was acknowledged, declined or
+   * awarded; a venue owner whose badge was awarded, paused or restored; a
+   * member whose flag opened a review or was resolved; and moderators when
+   * the review queue runs past its deadlines. Written only by
+   * `SafeSpaceNotifierService.tell`.
+   *
+   * Payload `{ source: 'safe-space', action, audience, placeName?, reason?,
+   * listingSlug? }`. `action` is a `SafeSpaceNotificationActionCode`,
+   * `audience` (`nominator` | `owner` | `flagger` | `staff`) picks the
+   * sentence, and the frontend writes every word of the copy in the member's
+   * own language from those codes.
+   *
+   * NO ACTOR, which is what keeps a flagger anonymous to the owner. Always
+   * delivered (group 4, a decision on something you asked for or own).
+   * These rows used to ride on `ModerationOutcome` with an English sentence,
+   * which made a nomination thank-you read like a sanction.
+   *
+   * See migration `AddSafeSpaceReviewNotificationType1829500400000`.
+   */
+  SafeSpaceReview = 'safe_space_review',
 }
 
 @Entity('notifications')

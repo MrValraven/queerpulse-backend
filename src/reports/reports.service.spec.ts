@@ -13,6 +13,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
+import { GroupListing } from '../housing-groups/entities/group-listing.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { IdentitiesService } from '../identities/identities.service';
 import {
@@ -57,6 +58,9 @@ describe('ReportsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     count: jest.Mock;
+    // The housing-group room snapshot reads `group_listings` through the
+    // report repository's own manager. No other case here consults it.
+    manager: { findOne: jest.Mock };
   };
   let messages: {
     findOne: jest.Mock;
@@ -98,6 +102,7 @@ describe('ReportsService', () => {
       // genuinely new insert. Zero is "this member has filed nothing lately",
       // which is what every pre-existing case in this file assumes.
       count: jest.fn().mockResolvedValue(0),
+      manager: { findOne: jest.fn().mockResolvedValue(null) },
       save: jest.fn((r: unknown) =>
         Promise.resolve({
           id: 'report-1',
@@ -991,6 +996,86 @@ describe('ReportsService', () => {
               }) as unknown,
             ],
           }),
+        );
+      });
+    });
+
+    // PRD-443: a reported housing-group room is snapshotted at filing time,
+    // because `removeListing` hard-deletes the row and would otherwise take
+    // the evidence with it.
+    describe('housing-group room report', () => {
+      const LISTING_ID = 'b1c2d3e4-1111-4222-8333-444455556666';
+
+      it('snapshots the room, its group and its poster into evidence', async () => {
+        reports.manager.findOne.mockResolvedValue({
+          id: LISTING_ID,
+          groupId: 'group-1',
+          group: { slug: 'lisbon-trans-housing', name: 'Lisbon trans housing' },
+          title: 'Sunny room in Arroios',
+          description: 'Pay the deposit by wire before the viewing.',
+          neighbourhood: 'Arroios',
+          priceEuros: 480,
+          accessibilityInfo: 'Third floor, stairs only.',
+          postedByUserId: 'poster-1',
+          createdAt: new Date('2026-09-01T10:00:00.000Z'),
+        });
+
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.GroupListing,
+          subjectId: LISTING_ID,
+          reasonCode: 'housing_scam',
+        });
+
+        expect(reports.manager.findOne).toHaveBeenCalledWith(GroupListing, {
+          where: { id: LISTING_ID },
+          relations: { group: true },
+        });
+        expect(reports.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            evidence: [
+              expect.objectContaining({
+                type: 'group-listing-snapshot',
+                listingId: LISTING_ID,
+                groupId: 'group-1',
+                groupSlug: 'lisbon-trans-housing',
+                groupName: 'Lisbon trans housing',
+                title: 'Sunny room in Arroios',
+                description: 'Pay the deposit by wire before the viewing.',
+                neighbourhood: 'Arroios',
+                priceEuros: 480,
+                accessibilityInfo: 'Third floor, stairs only.',
+                posterId: 'poster-1',
+                listedAt: '2026-09-01T10:00:00.000Z',
+              }) as unknown,
+            ],
+          }),
+        );
+      });
+
+      it('files without a snapshot when the id names no room', async () => {
+        reports.manager.findOne.mockResolvedValue(null);
+
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.GroupListing,
+          subjectId: LISTING_ID,
+          reasonCode: 'housing_scam',
+        });
+
+        expect(reports.save).toHaveBeenCalledWith(
+          expect.objectContaining({ evidence: null }),
+        );
+      });
+
+      it('skips the lookup for a subject id that is not a uuid', async () => {
+        await service.create('reporter-1', {
+          subjectType: ReportSubjectType.GroupListing,
+          subjectId: 'not-a-uuid',
+          reasonCode: 'housing_scam',
+        });
+
+        expect(reports.manager.findOne).not.toHaveBeenCalled();
+        expect(reports.save).toHaveBeenCalledWith(
+          expect.objectContaining({ evidence: null }),
         );
       });
     });

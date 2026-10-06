@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -26,12 +27,23 @@ import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import { ForumThreadFunding } from './entities/forum-thread-funding.entity';
+import { CreateThreadFundingDto } from './dto/create-thread-funding.dto';
+import {
+  ASK_AUTO_END_MS,
+  CALL_CLOSING_WINDOW_MS,
+  ResolvedFundingFields,
+  fundingException,
+} from './forum-funding';
+import { ForumFundingService } from './forum-funding.service';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { FORUM_THREAD_CREATED } from './forum.events';
 import {
   FORUM_THREAD_VISIBLE_SQL,
   ForumThreadsService,
+  forumOpNotTakenDownSql,
   forumThreadVisibleSql,
+  isThreadPublished,
 } from './forum-threads.service';
 import {
   FORUM_POST_SEARCH_COLUMNS,
@@ -78,6 +90,10 @@ interface QbStub {
   getCount: jest.Mock<Promise<number>, []>;
   getMany: jest.Mock<Promise<ForumThread[]>, []>;
   getRawMany: jest.Mock<Promise<unknown[]>, []>;
+  // Funding & Grants: the funding views and the duplicate lookup join the
+  // side table, and the lookup reads one row.
+  innerJoin: jest.Mock<QbStub, unknown[]>;
+  getOne: jest.Mock<Promise<ForumThread | null>, []>;
 }
 
 function qbStub(rows: ForumThread[] = []): QbStub {
@@ -96,6 +112,8 @@ function qbStub(rows: ForumThread[] = []): QbStub {
     getCount: jest.fn<Promise<number>, []>(),
     getMany: jest.fn<Promise<ForumThread[]>, []>(),
     getRawMany: jest.fn<Promise<unknown[]>, []>(),
+    innerJoin: jest.fn<QbStub, unknown[]>(),
+    getOne: jest.fn<Promise<ForumThread | null>, []>(),
   };
   qb.where.mockReturnValue(qb);
   qb.andWhere.mockReturnValue(qb);
@@ -113,6 +131,8 @@ function qbStub(rows: ForumThread[] = []): QbStub {
   qb.getCount.mockResolvedValue(0);
   qb.getMany.mockResolvedValue(rows);
   qb.getRawMany.mockResolvedValue([]);
+  qb.innerJoin.mockReturnValue(qb);
+  qb.getOne.mockResolvedValue(rows[0] ?? null);
   return qb;
 }
 
@@ -259,6 +279,70 @@ const baseProfile = (overrides: Partial<Profile> = {}): Profile =>
     ...overrides,
   }) as Profile;
 
+// Funding & Grants: the code a coded funding error carries, or undefined.
+async function fundingCodeOf(
+  promise: Promise<unknown>,
+): Promise<string | undefined> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof HttpException) {
+      return (error.getResponse() as { code?: string }).code;
+    }
+    throw error;
+  }
+  return undefined;
+}
+
+const callFunding: CreateThreadFundingDto = {
+  linkUrl: 'https://www.gulbenkian.pt/bolsas/arte-queer',
+  funderName: 'Fundação Gulbenkian',
+  deadline: '2026-12-01T23:59:00.000Z',
+  eligibility: ['individuals'],
+  scope: 'national',
+};
+
+const resolvedCall: ResolvedFundingFields = {
+  kind: 'call',
+  linkUrl: 'https://www.gulbenkian.pt/bolsas/arte-queer',
+  linkHost: 'gulbenkian.pt',
+  linkKey: 'gulbenkian.pt/bolsas/arte-queer',
+  funderName: 'Fundação Gulbenkian',
+  amountMin: null,
+  amountMax: null,
+  deadline: new Date('2026-12-01T23:59:00.000Z'),
+  eligibility: ['individuals'],
+  scope: 'national',
+  goalAmount: null,
+  askPurpose: null,
+  beneficiary: null,
+  endsAt: null,
+};
+
+// A call closing in three days, so the mapped view reads `closing`.
+const makeFundingRow = (
+  overrides: Partial<ForumThreadFunding> = {},
+): ForumThreadFunding => ({
+  threadId: 'thread-1',
+  linkUrl: 'https://www.gulbenkian.pt/bolsas/arte-queer',
+  linkKey: 'gulbenkian.pt/bolsas/arte-queer',
+  updatedAt: new Date('2026-10-01T10:00:00.000Z'),
+  funderName: 'Fundação Gulbenkian',
+  amountMin: null,
+  amountMax: 5000,
+  deadline: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+  eligibility: ['individuals'],
+  scope: 'national',
+  goalAmount: null,
+  askPurpose: null,
+  beneficiary: null,
+  endsAt: null,
+  endedAt: null,
+  endedReason: null,
+  approvedAt: null,
+  ...overrides,
+});
+
 describe('ForumThreadsService', () => {
   let service: ForumThreadsService;
   let threads: {
@@ -334,6 +418,24 @@ describe('ForumThreadsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     getRepository: jest.Mock;
+  };
+  // Funding & Grants: the side-table service, stubbed so a thread with no
+  // funding behaves exactly as before (no row, no errors).
+  let funding: {
+    resolveForCreate: jest.Mock;
+    insertForThread: jest.Mock;
+    rowsByThread: jest.Mock;
+    prepareEdit: jest.Mock;
+    saveEdit: jest.Mock;
+    emitDeadlineChanged: jest.Mock;
+    assertCanPostAsk: jest.Mock;
+    assertAskLimit: jest.Mock;
+    assertAskTextAllowed: jest.Mock;
+    sendBackToReview: jest.Mock;
+    onOpBodyEdit: jest.Mock;
+    markAskApproved: jest.Mock;
+    endAsk: jest.Mock;
+    reviewFactsFor: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -465,6 +567,23 @@ describe('ForumThreadsService', () => {
       isOwnerOrMod: jest.fn().mockResolvedValue(false),
     };
 
+    funding = {
+      resolveForCreate: jest.fn().mockReturnValue(null),
+      insertForThread: jest.fn(),
+      rowsByThread: jest.fn().mockResolvedValue(new Map()),
+      prepareEdit: jest.fn(),
+      saveEdit: jest.fn().mockResolvedValue(undefined),
+      emitDeadlineChanged: jest.fn(),
+      assertCanPostAsk: jest.fn().mockResolvedValue(undefined),
+      assertAskLimit: jest.fn().mockResolvedValue(undefined),
+      assertAskTextAllowed: jest.fn(),
+      sendBackToReview: jest.fn().mockResolvedValue(false),
+      onOpBodyEdit: jest.fn().mockResolvedValue(undefined),
+      markAskApproved: jest.fn().mockResolvedValue(undefined),
+      endAsk: jest.fn(),
+      reviewFactsFor: jest.fn().mockResolvedValue(new Map()),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ForumThreadsService,
@@ -496,6 +615,8 @@ describe('ForumThreadsService', () => {
         },
         // The author's word on a moderator's review verdict.
         { provide: NotificationsService, useValue: notifications },
+        // Funding & Grants: calls and fundraisers live in a side table.
+        { provide: ForumFundingService, useValue: funding },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -1033,6 +1154,66 @@ describe('ForumThreadsService', () => {
         displayName: 'Ava Lee',
         avatarUrl: null,
       });
+    });
+
+    // P0 (Funding & Grants spec): the composer offers anonymity in six
+    // categories, and the server used to honour three, publishing a legal or
+    // relationships question under the author's name without a word.
+    it.each([
+      'health',
+      'housing',
+      'trans',
+      'legal',
+      'relationships',
+      'funding',
+    ])('keeps an anonymous post in %s anonymous', async (category) => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const response = await service.create('author-1', {
+        title: 'Asking quietly',
+        body: 'A question I would rather not sign',
+        category,
+        isAnonymous: true,
+      });
+
+      expect(response.isAnonymous).toBe(true);
+      expect(response.author).toEqual({
+        handle: '',
+        displayName: 'Anonymous member',
+        avatarUrl: null,
+      });
+    });
+
+    it('stores a legal-category anonymous post as anonymous whatever its case', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.create('author-1', {
+        title: 'Name change paperwork',
+        body: 'How long did yours take at the Conservatória?',
+        category: 'Legal',
+        isAnonymous: true,
+      });
+
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      expect(threadsRepositoryInTransaction.save).toHaveBeenCalledWith(
+        expect.objectContaining({ isAnonymous: true, category: 'Legal' }),
+      );
+    });
+
+    it('still signs an anonymous request in a general category', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const response = await service.create('author-1', {
+        title: 'Best coffee in Arroios',
+        body: 'Asking for a friend',
+        category: 'general',
+        isAnonymous: true,
+      });
+
+      expect(response.isAnonymous).toBe(false);
+      expect(response.author.displayName).toBe('Ava Lee');
     });
   });
 
@@ -3574,6 +3755,1319 @@ describe('ForumThreadsService', () => {
           (call: unknown[]) => call[0] === Community,
         ),
       ).toBe(false);
+    });
+  });
+
+  describe('funding: open calls (P2)', () => {
+    it('resolves the funding object up front and inserts it inside the create transaction', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedCall);
+      funding.insertForThread.mockResolvedValue(makeFundingRow());
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const response = await service.create('author-1', {
+        title: 'Arts grant',
+        body: 'Applications close in December',
+        category: 'funding',
+        kind: 'call',
+        funding: callFunding,
+      });
+
+      expect(funding.resolveForCreate).toHaveBeenCalledWith({
+        kind: 'call',
+        category: 'funding',
+        title: 'Arts grant',
+        body: 'Applications close in December',
+        isAnonymous: false,
+        funding: callFunding,
+      });
+      expect(funding.insertForThread).toHaveBeenCalledWith(
+        manager,
+        'thread-1',
+        resolvedCall,
+        expect.any(Date),
+      );
+      expect(response.funding).toEqual(
+        expect.objectContaining({
+          linkHost: 'gulbenkian.pt',
+          funderName: 'Fundação Gulbenkian',
+          callState: 'closing',
+          askState: null,
+        }),
+      );
+    });
+
+    it('puts the server-owned open-call tag first on a call', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedCall);
+      funding.insertForThread.mockResolvedValue(makeFundingRow());
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.create('author-1', {
+        title: 'Arts grant',
+        body: 'Applications close in December',
+        category: 'funding',
+        kind: 'call',
+        tags: ['grants', 'fund', 'arts', 'lisbon', 'film'],
+        funding: callFunding,
+      });
+
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      expect(threadsRepositoryInTransaction.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tags: ['open-call', 'grants', 'fund', 'arts', 'lisbon'],
+        }),
+      );
+    });
+
+    it('strips open-call from every other kind', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.create('author-1', {
+        title: 'Where do people find arts grants?',
+        body: 'Any tips for a first application?',
+        category: 'funding',
+        kind: 'question',
+        tags: ['open-call', 'grants'],
+      });
+
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      expect(threadsRepositoryInTransaction.save).toHaveBeenCalledWith(
+        expect.objectContaining({ tags: ['grants'] }),
+      );
+      expect(funding.insertForThread).not.toHaveBeenCalled();
+    });
+
+    it('refuses a call before any insert when the funding rules reject it', async () => {
+      funding.resolveForCreate.mockImplementation(() => {
+        throw fundingException('funding_kind_category_mismatch');
+      });
+
+      expect(
+        await fundingCodeOf(
+          service.create('author-1', {
+            title: 'Arts grant',
+            body: 'Applications close in December',
+            category: 'activism',
+            kind: 'call',
+            funding: callFunding,
+          }),
+        ),
+      ).toBe('funding_kind_category_mismatch');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses to move a call out of the funding category, for a moderator too', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'call', category: 'funding' }),
+      );
+
+      expect(
+        await fundingCodeOf(
+          service.updateThread(
+            'hello-world',
+            moderator,
+            undefined,
+            undefined,
+            'activism',
+          ),
+        ),
+      ).toBe('funding_kind_category_mismatch');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('lets a moderator file an ordinary thread under funding', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await service.updateThread(
+        'hello-world',
+        moderator,
+        undefined,
+        undefined,
+        'funding',
+      );
+
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ category: 'funding' }),
+      );
+    });
+
+    it('replaces the funding details inside the edit transaction and announces a moved deadline after it commits', async () => {
+      const thread = baseThread({
+        kind: 'call',
+        category: 'funding',
+        authorId: 'member-1',
+      });
+      threads.findOne.mockResolvedValue(thread);
+      const prepared = {
+        threadId: 'thread-1',
+        resolved: resolvedCall,
+        previousDeadline: new Date('2026-11-01T23:59:00.000Z'),
+        isDeadlineChanged: true,
+      };
+      funding.prepareEdit.mockResolvedValue(prepared);
+      funding.rowsByThread.mockResolvedValue(
+        new Map([['thread-1', makeFundingRow()]]),
+      );
+      const writeOrder: string[] = [];
+      funding.saveEdit.mockImplementation(() => {
+        writeOrder.push('saveEdit');
+        return Promise.resolve();
+      });
+      funding.emitDeadlineChanged.mockImplementation(() => {
+        writeOrder.push('emitDeadlineChanged');
+      });
+
+      const response = await service.updateThread(
+        'hello-world',
+        member,
+        undefined,
+        undefined,
+        undefined,
+        callFunding,
+      );
+
+      expect(funding.prepareEdit).toHaveBeenCalledWith(thread, callFunding);
+      expect(funding.saveEdit).toHaveBeenCalledWith(manager, prepared);
+      expect(funding.emitDeadlineChanged).toHaveBeenCalledWith(
+        thread,
+        prepared,
+        'member-1',
+      );
+      expect(writeOrder).toEqual(['saveEdit', 'emitDeadlineChanged']);
+      expect(response.funding?.funderName).toBe('Fundação Gulbenkian');
+    });
+
+    it('refuses a funding edit from a member who neither wrote nor moderates the thread', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'call', category: 'funding' }),
+      );
+
+      await expect(
+        service.updateThread(
+          'hello-world',
+          member,
+          undefined,
+          undefined,
+          undefined,
+          callFunding,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(funding.prepareEdit).not.toHaveBeenCalled();
+    });
+
+    it('maps the funding row on the detail read', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'call', category: 'funding' }),
+      );
+      funding.rowsByThread.mockResolvedValue(
+        new Map([['thread-1', makeFundingRow()]]),
+      );
+
+      const response = await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(funding.rowsByThread).toHaveBeenCalledWith(['thread-1']);
+      expect(response.funding?.callState).toBe('closing');
+    });
+
+    it('reads a whole page of funding rows in one batch', async () => {
+      threads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({ kind: 'call', category: 'funding' }),
+          baseThread({ id: 'thread-2', slug: 'second' }),
+        ]),
+      );
+      funding.rowsByThread.mockResolvedValue(
+        new Map([['thread-1', makeFundingRow()]]),
+      );
+
+      const page = await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+      );
+
+      expect(funding.rowsByThread).toHaveBeenCalledTimes(1);
+      expect(funding.rowsByThread).toHaveBeenCalledWith([
+        'thread-1',
+        'thread-2',
+      ]);
+      expect(page.data[0]?.funding).not.toBeNull();
+      expect(page.data[1]?.funding).toBeNull();
+    });
+  });
+
+  describe('funding views and lookup (P2)', () => {
+    function andWhereSql(qb: QbStub): string[] {
+      return qb.andWhere.mock.calls.map((call) => String(call[0]));
+    }
+
+    function andWhereParameters(qb: QbStub): Record<string, unknown> {
+      return Object.assign(
+        {},
+        ...qb.andWhere.mock.calls.map(
+          (call) => (call[1] ?? {}) as Record<string, unknown>,
+        ),
+      ) as Record<string, unknown>;
+    }
+
+    it('lists open calls by deadline with rolling calls last, pinned ones included, capped at 100', async () => {
+      const qb = qbStub([baseThread({ kind: 'call', category: 'funding' })]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'open' },
+      );
+
+      expect(qb.innerJoin).toHaveBeenCalledWith(
+        ForumThreadFunding,
+        'funding',
+        '"funding"."thread_id" = "t"."id"',
+      );
+      expect(andWhereSql(qb)).not.toContain('t.is_pinned = false');
+      expect(andWhereSql(qb)).toContain('"t"."kind" = :fundingKind');
+      expect(andWhereParameters(qb)).toEqual(
+        expect.objectContaining({ fundingKind: 'call' }),
+      );
+      expect(
+        andWhereSql(qb).some((sql) =>
+          sql.includes('"funding"."deadline" >= :fundingNow'),
+        ),
+      ).toBe(true);
+      expect(qb.orderBy).toHaveBeenCalledWith(
+        '"funding"."deadline"',
+        'ASC',
+        'NULLS LAST',
+      );
+      expect(qb.limit).toHaveBeenCalledWith(101);
+      expect(page.pageInfo).toEqual({ nextCursor: null, hasMore: false });
+      expect(page.data).toHaveLength(1);
+    });
+
+    it('lists calls closing within seven days', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'closing' },
+      );
+
+      const parameters = andWhereParameters(qb);
+      const fundingNow = parameters.fundingNow as Date;
+      const closingUntil = parameters.closingUntil as Date;
+      expect(closingUntil.getTime() - fundingNow.getTime()).toBe(
+        CALL_CLOSING_WINDOW_MS,
+      );
+      expect(qb.orderBy).toHaveBeenCalledWith('"funding"."deadline"', 'ASC');
+    });
+
+    it('lists approved, live fundraisers newest approval first and ignores call filters', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'asks', eligibility: ['students'], scope: 'eu' },
+      );
+
+      expect(andWhereSql(qb)).toEqual(
+        expect.arrayContaining([
+          '"t"."kind" = :fundingKind',
+          '"t"."review_state" = :approvedReview',
+          '"t"."author_id" IS NOT NULL',
+          '"funding"."ended_at" IS NULL',
+        ]),
+      );
+      expect(andWhereParameters(qb)).toEqual(
+        expect.objectContaining({
+          fundingKind: 'ask',
+          approvedReview: 'approved',
+        }),
+      );
+      expect(andWhereSql(qb).some((sql) => sql.includes('eligibility'))).toBe(
+        false,
+      );
+      expect(qb.orderBy).toHaveBeenCalledWith(
+        '"funding"."approved_at"',
+        'DESC',
+        'NULLS LAST',
+      );
+    });
+
+    it.each(['open', 'closing', 'asks'] as const)(
+      'leaves a %s row out when a moderator took its opening post down',
+      async (view) => {
+        const qb = qbStub([]);
+        threads.createQueryBuilder.mockReturnValue(qb);
+
+        await service.list(
+          'viewer-1',
+          'funding',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { view },
+        );
+
+        const takedownSql = forumOpNotTakenDownSql('"t"');
+        expect(andWhereSql(qb)).toContain(takedownSql);
+        expect(takedownSql).toContain('NOT EXISTS');
+        expect(takedownSql).toContain('"op"."thread_id" = "t"."id"');
+        expect(takedownSql).toContain('"op"."is_op" = true');
+        expect(takedownSql).toContain(
+          '"moderation"."subject_type" IN (\'post\', \'reply\')',
+        );
+        expect(takedownSql).toContain(
+          '("moderation"."hidden_at" IS NOT NULL OR "moderation"."removed_at" IS NOT NULL)',
+        );
+      },
+    );
+
+    it('narrows open calls by eligibility (any of) and scope', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'open', eligibility: ['students', 'collectives'], scope: 'eu' },
+      );
+
+      expect(andWhereSql(qb)).toEqual(
+        expect.arrayContaining([
+          '"funding"."eligibility" && CAST(:fundingEligibility AS text[])',
+          '"funding"."scope" = :fundingScope',
+        ]),
+      );
+      expect(andWhereParameters(qb)).toEqual(
+        expect.objectContaining({
+          fundingEligibility: ['students', 'collectives'],
+          fundingScope: 'eu',
+        }),
+      );
+    });
+
+    it('says there is more when the cap is exceeded', async () => {
+      const qb = qbStub(
+        Array.from({ length: 101 }, (_, index) =>
+          baseThread({ id: `thread-${index}`, slug: `call-${index}` }),
+        ),
+      );
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'open' },
+      );
+
+      expect(page.data).toHaveLength(100);
+      expect(page.pageInfo).toEqual({ nextCursor: null, hasMore: true });
+    });
+
+    it('lists the discussion view through the ordinary cursor', async () => {
+      const qb = qbStub([baseThread({ category: 'funding' })]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'discussion' },
+      );
+
+      expect(qb.innerJoin).not.toHaveBeenCalled();
+      expect(andWhereSql(qb)).toContain('t.is_pinned = false');
+      expect(
+        andWhereSql(qb).some((sql) =>
+          sql.includes('NOT EXISTS (SELECT 1 FROM "forum_thread_funding"'),
+        ),
+      ).toBe(true);
+    });
+
+    it('ignores a funding view outside the funding category', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        'activism',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'open' },
+      );
+
+      expect(qb.innerJoin).not.toHaveBeenCalled();
+      expect(andWhereSql(qb)).toContain('t.is_pinned = false');
+    });
+
+    it('finds the newest visible open call for a tracking-tagged spelling of its link', async () => {
+      const qb = qbStub([
+        baseThread({
+          kind: 'call',
+          category: 'funding',
+          slug: 'arts-grant',
+          title: 'Arts grant',
+        }),
+      ]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      funding.rowsByThread.mockResolvedValue(
+        new Map([
+          [
+            'thread-1',
+            makeFundingRow({ deadline: new Date('2026-12-01T23:59:00.000Z') }),
+          ],
+        ]),
+      );
+
+      const match = await service.findOpenCallByLink(
+        'viewer-1',
+        'https://www.Gulbenkian.pt/bolsas/arte-queer/?utm_source=newsletter#apply',
+      );
+
+      expect(andWhereParameters(qb)).toEqual(
+        expect.objectContaining({
+          fundingLinkKey: 'gulbenkian.pt/bolsas/arte-queer',
+        }),
+      );
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"t"."author_id"',
+      );
+      accessTierGateCall(qb);
+      expect(andWhereSql(qb)).toEqual(
+        expect.arrayContaining([
+          't.deleted_at IS NULL',
+          FORUM_THREAD_VISIBLE_SQL,
+          forumOpNotTakenDownSql('"t"'),
+        ]),
+      );
+      expect(match).toEqual({
+        slug: 'arts-grant',
+        title: 'Arts grant',
+        deadline: '2026-12-01T23:59:00.000Z',
+      });
+    });
+
+    it('answers null without a query for a link that is not https', async () => {
+      expect(
+        await service.findOpenCallByLink('viewer-1', 'http://gulbenkian.pt/x'),
+      ).toBeNull();
+      expect(threads.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('answers null when no visible open call uses the link', async () => {
+      threads.createQueryBuilder.mockReturnValue(qbStub([]));
+
+      expect(
+        await service.findOpenCallByLink(
+          'viewer-1',
+          'https://www.gulbenkian.pt/bolsas/arte-queer',
+        ),
+      ).toBeNull();
+      expect(funding.rowsByThread).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('funding: fundraisers (P4)', () => {
+    const askRowOverrides: Partial<ForumThreadFunding> = {
+      linkUrl: 'https://www.gofundme.com/f/help-ana',
+      linkKey: 'gofundme.com/f/help-ana',
+      funderName: null,
+      amountMax: null,
+      deadline: null,
+      eligibility: [],
+      scope: null,
+      goalAmount: 1200,
+      askPurpose: 'healthcare',
+      beneficiary: 'self',
+    };
+    const resolvedAsk: ResolvedFundingFields = {
+      ...resolvedCall,
+      kind: 'ask',
+      linkUrl: 'https://www.gofundme.com/f/help-ana',
+      linkHost: 'gofundme.com',
+      linkKey: 'gofundme.com/f/help-ana',
+      funderName: null,
+      deadline: null,
+      eligibility: [],
+      scope: null,
+      goalAmount: 1200,
+      askPurpose: 'healthcare',
+      beneficiary: 'self',
+    };
+    const askFunding: CreateThreadFundingDto = {
+      linkUrl: 'https://www.gofundme.com/f/help-ana',
+      goalAmount: 1200,
+      askPurpose: 'healthcare',
+      beneficiary: 'self',
+    };
+    const storedOpBody = 'Everything is explained on the GoFundMe page.';
+    const storedOp = {
+      id: 'post-1',
+      threadId: 'thread-1',
+      authorId: 'member-1',
+      body: storedOpBody,
+      isOp: true,
+      editedAt: null,
+      deletedAt: null,
+    };
+
+    function andWhereSql(qb: QbStub): string[] {
+      return qb.andWhere.mock.calls.map((call) => String(call[0]));
+    }
+
+    function andWhereParameters(qb: QbStub): Record<string, unknown> {
+      return Object.assign(
+        {},
+        ...qb.andWhere.mock.calls.map(
+          (call) => (call[1] ?? {}) as Record<string, unknown>,
+        ),
+      ) as Record<string, unknown>;
+    }
+
+    it('holds every new ask for review and defers its announcement', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedAsk);
+      funding.insertForThread.mockResolvedValue(
+        makeFundingRow(askRowOverrides),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const response = await service.create('author-1', {
+        title: 'Help with surgery costs',
+        body: storedOpBody,
+        category: 'funding',
+        kind: 'ask',
+        funding: askFunding,
+        submitForReview: false,
+      });
+
+      expect(funding.assertCanPostAsk).toHaveBeenCalledWith('author-1');
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      expect(threadsRepositoryInTransaction.save).toHaveBeenCalledWith(
+        expect.objectContaining({ reviewState: 'pending', fannedOutAt: null }),
+      );
+      expect(funding.assertAskLimit).toHaveBeenCalledWith(
+        manager,
+        'author-1',
+        'thread-1',
+        expect.any(Date),
+      );
+      expect(topicPostLink.linkThread).not.toHaveBeenCalled();
+      expect(response.reviewState).toBe('pending');
+      expect(response.funding?.askState).toBe('pending');
+    });
+
+    it('coerces the official byline off an ask, even for an admin', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedAsk);
+      funding.insertForThread.mockResolvedValue(
+        makeFundingRow(askRowOverrides),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const response = await service.create(
+        'author-1',
+        {
+          title: 'Help with surgery costs',
+          body: storedOpBody,
+          category: 'funding',
+          kind: 'ask',
+          funding: askFunding,
+          isOfficial: true,
+        },
+        false,
+        true,
+      );
+
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      expect(threadsRepositoryInTransaction.save).toHaveBeenCalledWith(
+        expect.objectContaining({ isOfficial: false }),
+      );
+      expect(response.author).toEqual(
+        expect.objectContaining({ handle: 'ava', displayName: 'Ava Lee' }),
+      );
+    });
+
+    it('refuses the official byline on an ask with a coded 400 and writes nothing', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'ask', category: 'funding', isOfficial: false }),
+      );
+
+      expect(
+        await fundingCodeOf(service.setOfficial('hello-world', admin, true)),
+      ).toBe('funding_ask_not_anonymous');
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+
+    it('still lets an admin clear the official byline on an ask', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'ask', category: 'funding', isOfficial: true }),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.setOfficial('hello-world', admin, false);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isOfficial).toBe(false);
+    });
+
+    it('counts the limit on the create transaction after the pending insert, at the default isolation level', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedAsk);
+      funding.insertForThread.mockResolvedValue(
+        makeFundingRow(askRowOverrides),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.create('author-1', {
+        title: 'Help with surgery costs',
+        body: storedOpBody,
+        category: 'funding',
+        kind: 'ask',
+        funding: askFunding,
+      });
+
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      const [threadInsertOrder] =
+        threadsRepositoryInTransaction.save.mock.invocationCallOrder;
+      const [fundingInsertOrder] =
+        funding.insertForThread.mock.invocationCallOrder;
+      const [limitCheckOrder] = funding.assertAskLimit.mock.invocationCallOrder;
+      expect(threadInsertOrder).toBeLessThan(limitCheckOrder ?? 0);
+      expect(fundingInsertOrder).toBeLessThan(limitCheckOrder ?? 0);
+      // The callback alone, with no isolation level: Postgres's READ COMMITTED
+      // default, which the advisory-lock count depends on.
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      const transactionArguments = dataSource.transaction.mock
+        .calls[0] as unknown[];
+      expect(transactionArguments).toHaveLength(1);
+      expect(typeof transactionArguments[0]).toBe('function');
+    });
+
+    it('lets the limit refusal escape the create transaction', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedAsk);
+      funding.insertForThread.mockResolvedValue(
+        makeFundingRow(askRowOverrides),
+      );
+      funding.assertAskLimit.mockRejectedValue(
+        fundingException('funding_ask_limit_reached'),
+      );
+
+      expect(
+        await fundingCodeOf(
+          service.create('author-1', {
+            title: 'Help with surgery costs',
+            body: storedOpBody,
+            category: 'funding',
+            kind: 'ask',
+            funding: askFunding,
+          }),
+        ),
+      ).toBe('funding_ask_limit_reached');
+      expect(subscriptions.subscribeQuietly).not.toHaveBeenCalled();
+    });
+
+    it('refuses a poster below phone level before anything is written', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedAsk);
+      funding.assertCanPostAsk.mockRejectedValue(
+        fundingException('funding_ask_verification_required'),
+      );
+
+      expect(
+        await fundingCodeOf(
+          service.create('author-1', {
+            title: 'Help with surgery costs',
+            body: storedOpBody,
+            category: 'funding',
+            kind: 'ask',
+            funding: askFunding,
+          }),
+        ),
+      ).toBe('funding_ask_verification_required');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('leaves calls and ordinary threads free of the ask gates', async () => {
+      funding.resolveForCreate.mockReturnValue(resolvedCall);
+      funding.insertForThread.mockResolvedValue(makeFundingRow());
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.create('author-1', {
+        title: 'Arts grant',
+        body: 'Applications close in December',
+        category: 'funding',
+        kind: 'call',
+        funding: callFunding,
+      });
+
+      expect(funding.assertCanPostAsk).not.toHaveBeenCalled();
+      expect(funding.assertAskLimit).not.toHaveBeenCalled();
+    });
+
+    it('stamps the approval date on the approving transaction', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({
+          kind: 'ask',
+          category: 'funding',
+          reviewState: 'pending',
+        }),
+      );
+
+      const response = await service.reviewThread(
+        'hello-world',
+        moderator,
+        true,
+      );
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'thread-1', reviewState: 'approved' }),
+      );
+      expect(funding.markAskApproved).toHaveBeenCalledWith(
+        manager,
+        'thread-1',
+        expect.any(Date),
+      );
+      const [verdictSaveOrder] = manager.save.mock.invocationCallOrder;
+      const [approvalDateOrder] =
+        funding.markAskApproved.mock.invocationCallOrder;
+      expect(verdictSaveOrder).toBeLessThan(approvalDateOrder ?? 0);
+      // The verdict no longer goes through the bare repository, outside the
+      // transaction.
+      expect(threads.save).not.toHaveBeenCalled();
+      expect(response.reviewState).toBe('approved');
+    });
+
+    it('stamps nothing on a rejection or on another kind', async () => {
+      threads.findOne
+        .mockResolvedValueOnce(
+          baseThread({
+            kind: 'ask',
+            category: 'funding',
+            reviewState: 'pending',
+          }),
+        )
+        .mockResolvedValueOnce(
+          baseThread({ kind: 'guide', reviewState: 'pending' }),
+        );
+
+      await service.reviewThread('hello-world', moderator, false);
+      await service.reviewThread('hello-world', moderator, true);
+
+      expect(funding.markAskApproved).not.toHaveBeenCalled();
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ reviewState: 'rejected' }),
+      );
+    });
+
+    it('sends an approved ask back to review when its author edits the tags, and the echo says so', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'member-1',
+        reviewState: 'approved',
+      });
+      threads.findOne.mockResolvedValue(thread);
+      funding.sendBackToReview.mockImplementation(
+        (_manager: unknown, target: ForumThread) => {
+          target.reviewState = 'pending';
+          return Promise.resolve(true);
+        },
+      );
+
+      const response = await service.updateThread(
+        'hello-world',
+        member,
+        undefined,
+        ['surgery'],
+      );
+
+      expect(funding.sendBackToReview).toHaveBeenCalledWith(
+        manager,
+        thread,
+        false,
+      );
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({ reviewState: 'pending' }),
+      );
+      expect(response.reviewState).toBe('pending');
+      expect(response.isPublished).toBe(false);
+      expect(isThreadPublished(thread)).toBe(false);
+    });
+
+    it('sends an approved ask back to review when its author edits the title', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'member-1',
+        reviewState: 'approved',
+      });
+      threads.findOne.mockResolvedValue(thread);
+      posts.findOne.mockResolvedValue({ ...storedOp });
+
+      await service.updateThread(
+        'hello-world',
+        member,
+        'Help with surgery costs in November',
+      );
+
+      expect(funding.sendBackToReview).toHaveBeenCalledWith(
+        manager,
+        thread,
+        false,
+      );
+    });
+
+    it('sends an approved ask back to review when its author edits the funding details, after the new details are written', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'member-1',
+        reviewState: 'approved',
+      });
+      threads.findOne.mockResolvedValue(thread);
+      const prepared = {
+        threadId: 'thread-1',
+        resolved: resolvedAsk,
+        previousDeadline: null,
+        isDeadlineChanged: false,
+      };
+      funding.prepareEdit.mockResolvedValue(prepared);
+
+      await service.updateThread(
+        'hello-world',
+        member,
+        undefined,
+        undefined,
+        undefined,
+        askFunding,
+      );
+
+      expect(funding.sendBackToReview).toHaveBeenCalledWith(
+        manager,
+        thread,
+        false,
+      );
+      const [fundingWriteOrder] = funding.saveEdit.mock.invocationCallOrder;
+      const [sendBackOrder] = funding.sendBackToReview.mock.invocationCallOrder;
+      expect(fundingWriteOrder).toBeLessThan(sendBackOrder ?? 0);
+    });
+
+    it('tells the funding rules when a moderator made the edit, without asking the moderator for phone level', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        reviewState: 'approved',
+      });
+      threads.findOne.mockResolvedValue(thread);
+
+      await service.updateThread('hello-world', moderator, undefined, [
+        'surgery',
+      ]);
+
+      expect(funding.sendBackToReview).toHaveBeenCalledWith(
+        manager,
+        thread,
+        true,
+      );
+      expect(funding.assertCanPostAsk).not.toHaveBeenCalled();
+    });
+
+    it('treats a moderator editing their own ask as its author', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'mod-1',
+        reviewState: 'approved',
+      });
+      threads.findOne.mockResolvedValue(thread);
+
+      await service.updateThread('hello-world', moderator, undefined, [
+        'surgery',
+      ]);
+
+      expect(funding.sendBackToReview).toHaveBeenCalledWith(
+        manager,
+        thread,
+        false,
+      );
+    });
+
+    it('keeps an approved ask live when its author resends the stored tags', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'member-1',
+        reviewState: 'approved',
+        tags: ['surgery', 'lisbon'],
+      });
+      threads.findOne.mockResolvedValue(thread);
+
+      // Different spelling, same stored set once normalised.
+      await service.updateThread('hello-world', member, undefined, [
+        'Surgery',
+        '#lisbon',
+      ]);
+
+      expect(funding.sendBackToReview).not.toHaveBeenCalled();
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reviewState: 'approved',
+          tags: ['surgery', 'lisbon'],
+        }),
+      );
+    });
+
+    it('sends an approved ask back to review when its author reorders the tags', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'member-1',
+        reviewState: 'approved',
+        tags: ['surgery', 'lisbon'],
+      });
+      threads.findOne.mockResolvedValue(thread);
+
+      await service.updateThread('hello-world', member, undefined, [
+        'lisbon',
+        'surgery',
+      ]);
+
+      expect(funding.sendBackToReview).toHaveBeenCalledWith(
+        manager,
+        thread,
+        false,
+      );
+    });
+
+    it('holds a new ask title to the payment-details rule before writing', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({
+          kind: 'ask',
+          category: 'funding',
+          authorId: 'member-1',
+          reviewState: 'approved',
+        }),
+      );
+      posts.findOne.mockResolvedValue({ ...storedOp });
+      funding.assertAskTextAllowed.mockImplementation(() => {
+        throw fundingException('funding_payment_details_in_body');
+      });
+
+      expect(
+        await fundingCodeOf(
+          service.updateThread('hello-world', member, 'MB Way 912 345 678'),
+        ),
+      ).toBe('funding_payment_details_in_body');
+      expect(funding.assertAskTextAllowed).toHaveBeenCalledWith(
+        'ask',
+        'MB Way 912 345 678',
+        storedOpBody,
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(funding.sendBackToReview).not.toHaveBeenCalled();
+    });
+
+    it('blanks the funding details in the edit echo when a moderator hid the opening post', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'call', category: 'funding', authorId: 'member-1' }),
+      );
+      posts.findOne.mockResolvedValue({ ...storedOp, id: 'op-1' });
+      funding.rowsByThread.mockResolvedValue(
+        new Map([['thread-1', makeFundingRow()]]),
+      );
+      contentModeration.statesForAnyType.mockResolvedValue(
+        new Map([['op-1', { hidden: true, removed: false }]]),
+      );
+
+      const response = await service.updateThread(
+        'hello-world',
+        member,
+        undefined,
+        ['grants'],
+      );
+
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledWith(
+        ['post', 'reply'],
+        ['op-1'],
+      );
+      expect(response.funding).toBeNull();
+      expect(response.excerpt).toBeNull();
+    });
+
+    it('keeps the funding details in the edit echo when the opening post is untouched by moderation', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'call', category: 'funding', authorId: 'member-1' }),
+      );
+      posts.findOne.mockResolvedValue({ ...storedOp, id: 'op-1' });
+      funding.rowsByThread.mockResolvedValue(
+        new Map([['thread-1', makeFundingRow()]]),
+      );
+
+      const response = await service.updateThread(
+        'hello-world',
+        member,
+        undefined,
+        ['grants'],
+      );
+
+      expect(response.funding?.callState).toBe('closing');
+    });
+
+    it('drops a sent open-call tag before the five-tag cap on an ordinary thread', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.create('author-1', {
+        title: 'Where do people find arts grants?',
+        body: 'Any tips for a first application?',
+        category: 'funding',
+        kind: 'question',
+        tags: ['open-call', 'grants', 'arts', 'lisbon', 'film', 'music'],
+      });
+
+      const threadsRepositoryInTransaction = manager.getRepository(
+        ForumThread,
+      ) as { save: jest.Mock };
+      expect(threadsRepositoryInTransaction.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tags: ['grants', 'arts', 'lisbon', 'film', 'music'],
+        }),
+      );
+    });
+
+    it('drops a sent open-call tag before the cap on a tag edit too', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ category: 'funding', authorId: 'member-1' }),
+      );
+
+      await service.updateThread('hello-world', member, undefined, [
+        '#Open-Call',
+        'grants',
+        'arts',
+        'lisbon',
+        'film',
+        'music',
+      ]);
+
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tags: ['grants', 'arts', 'lisbon', 'film', 'music'],
+        }),
+      );
+    });
+
+    it('still puts open-call first on a call when the member sent it too', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ kind: 'call', category: 'funding', authorId: 'member-1' }),
+      );
+
+      await service.updateThread('hello-world', member, undefined, [
+        'grants',
+        'open-call',
+        'arts',
+        'lisbon',
+        'film',
+        'music',
+      ]);
+
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tags: ['open-call', 'grants', 'arts', 'lisbon', 'film'],
+        }),
+      );
+    });
+
+    it('ends the fundraiser for its author through the funding service', async () => {
+      const thread = baseThread({
+        kind: 'ask',
+        category: 'funding',
+        authorId: 'member-1',
+        reviewState: 'approved',
+      });
+      threads.findOne.mockResolvedValue(thread);
+      const endedRow = makeFundingRow({
+        ...askRowOverrides,
+        endedAt: new Date('2026-10-05T09:00:00.000Z'),
+        endedReason: 'goal_reached',
+      });
+      funding.endAsk.mockResolvedValue(endedRow);
+      funding.rowsByThread.mockResolvedValue(new Map([['thread-1', endedRow]]));
+      // A fundraiser with no opening post maps no funding at all, so the
+      // echo needs its OP like every real one has.
+      posts.findOne.mockResolvedValue({ ...storedOp });
+
+      const response = await service.endFundingAsk(
+        'hello-world',
+        member,
+        'goal_reached',
+      );
+
+      expect(funding.endAsk).toHaveBeenCalledWith(
+        thread,
+        'member-1',
+        'goal_reached',
+        expect.any(Date),
+      );
+      expect(response.funding).toEqual(
+        expect.objectContaining({
+          askState: 'ended',
+          endedReason: 'goal_reached',
+        }),
+      );
+    });
+
+    it('passes an opening-post edit to the funding rules', async () => {
+      await service.applyOpBodyEditRules(
+        manager as never,
+        'thread-1',
+        'Updated: the clinic confirmed the date.',
+        false,
+      );
+
+      expect(funding.onOpBodyEdit).toHaveBeenCalledWith(
+        manager,
+        'thread-1',
+        'Updated: the clinic confirmed the date.',
+        false,
+      );
+    });
+
+    it('puts fundraiser facts on review-queue rows and null on the rest, an erased author included', async () => {
+      const facts = {
+        linkHost: 'gofundme.com',
+        posterVerificationLevel: 'phone',
+        posterAccountAgeDays: 40,
+      };
+      const rows = [
+        baseThread({ kind: 'ask', reviewState: 'pending' }),
+        baseThread({ id: 'thread-2', slug: 'second', reviewState: 'pending' }),
+        baseThread({
+          id: 'thread-3',
+          slug: 'third',
+          kind: 'ask',
+          authorId: null,
+          reviewState: 'pending',
+        }),
+      ];
+      threads.createQueryBuilder.mockReturnValue(qbStub(rows));
+      // The funding service leaves the erased author's ask out of the map.
+      funding.reviewFactsFor.mockResolvedValue(new Map([['thread-1', facts]]));
+
+      const page = await service.listPendingReview(moderator, undefined, 20);
+
+      expect(funding.reviewFactsFor).toHaveBeenCalledTimes(1);
+      expect(page.data.map((row) => [row.id, row.fundingReview])).toEqual([
+        ['thread-1', facts],
+        ['thread-2', null],
+        ['thread-3', null],
+      ]);
+    });
+
+    it('lists running asks with the deriveAskState boundaries, an undated approval included, and never a withdrawn one', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'mod-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        // A moderator's builder keeps withdrawn threads, so the asks branch
+        // has to drop them itself.
+        true,
+        { view: 'asks' },
+      );
+
+      expect(andWhereSql(qb)).toContain('"t"."deleted_at" IS NULL');
+      expect(andWhereSql(qb)).toContain(
+        '("funding"."ends_at" >= :fundingNow OR ("funding"."ends_at" IS NULL AND ("funding"."approved_at" IS NULL OR "funding"."approved_at" >= :askAutoEndAfter)))',
+      );
+      const parameters = andWhereParameters(qb);
+      const fundingNow = parameters.fundingNow as Date;
+      const askAutoEndAfter = parameters.askAutoEndAfter as Date;
+      expect(fundingNow.getTime() - askAutoEndAfter.getTime()).toBe(
+        ASK_AUTO_END_MS,
+      );
+    });
+
+    it('keeps a rolling call open up to and including the 183rd day', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        'funding',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { view: 'open' },
+      );
+
+      expect(andWhereSql(qb)).toContain(
+        '(("funding"."deadline" IS NULL AND "funding"."updated_at" >= :rollingFreshAfter) OR "funding"."deadline" >= :fundingNow)',
+      );
     });
   });
 });

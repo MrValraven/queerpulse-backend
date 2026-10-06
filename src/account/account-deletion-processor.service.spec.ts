@@ -456,6 +456,45 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       expect(sweepParams).toEqual([[WITHDRAWN_THREAD_ID]]);
     });
 
+    // Funding & Grants: step 0b's removal of a surviving fundraiser's donate
+    // link runs isolated, so the transaction repeats it while `author_id`
+    // still names the member, before the user delete blanks it.
+    it("deletes the member's fundraiser funding rows inside the transaction, before the user delete", async () => {
+      await service.processDueDeletions();
+
+      const queryCalls = manager.query.mock.calls as Array<[string, unknown[]]>;
+      const fundingIndex = queryCalls.findIndex(([sql]) =>
+        sql.includes('DELETE FROM "forum_thread_funding"'),
+      );
+      expect(fundingIndex).toBeGreaterThanOrEqual(0);
+
+      const [fundingSql, fundingParams] = queryCalls[fundingIndex]!;
+      expect(fundingSql).toContain('USING "forum_thread" AS "t"');
+      expect(fundingSql).toContain('"funding"."thread_id" = "t"."id"');
+      expect(fundingSql).toContain('"t"."author_id" = $1');
+      expect(fundingSql).toContain(`"t"."kind" = 'ask'`);
+      expect(fundingParams).toEqual([USER_ID]);
+      expect(manager.query.mock.invocationCallOrder[fundingIndex]).toBeLessThan(
+        firstCallOrder(manager.delete),
+      );
+    });
+
+    it('leaves the request parked when the fundraiser funding deletion fails', async () => {
+      manager.query.mockImplementation((sql: string) =>
+        sql.includes('DELETE FROM "forum_thread_funding"')
+          ? Promise.reject(new Error('funding delete failed'))
+          : Promise.resolve([]),
+      );
+
+      await service.processDueDeletions();
+
+      expect(manager.delete).not.toHaveBeenCalledWith(User, { id: USER_ID });
+      expect(deletionRequests.update).not.toHaveBeenCalledWith(
+        { id: REQUEST_ID },
+        expect.objectContaining({ status: DeletionRequestStatus.Erased }),
+      );
+    });
+
     it('leaves the request parked when the forum thread sweep fails', async () => {
       manager.query.mockImplementation((sql: string) =>
         sql.includes('DELETE FROM "forum_thread"')

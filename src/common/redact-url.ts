@@ -12,8 +12,8 @@
  * access or Sentry access was account-creation access. The OAuth authorization
  * `?code=` and the OAuth `?state=` (which itself carries the invite code, see
  * `auth/oauth-state.ts`) are exactly the same shape of problem, as are the
- * opaque `?token=` values behind the public newsletter-confirm and
- * join-request-status pages.
+ * opaque `?token=` values behind the public join-request-status
+ * page.
  *
  * WHY REDACT NARROWLY rather than dropping the query wholesale: the reason we
  * log the URL at all is to be able to read an incident back afterwards, and a
@@ -50,10 +50,11 @@ export const REDACTED_QUERY_VALUE = '[redacted]';
  *   code           Google's authorization code on the same callback. Single
  *                  use and short lived, and still exchangeable for a session
  *                  by whoever reads the log first.
- *   token          the newsletter confirm/unsubscribe token
- *                  (`newsletter.controller.ts`) and the applicant's
- *                  `GET /join-requests/status?token=` credential. Also the
- *                  Mux playback tokens we build into stream URLs.
+ *   token          the applicant's `GET /join-requests/status?token=`
+ *                  credential. Also the Mux playback tokens we build into
+ *                  stream URLs. (The newsletter confirm and unsubscribe
+ *                  routes that once used it were removed on 2026-10-06; the
+ *                  redaction stays because the other callers need it.)
  *   access_token / refresh_token / id_token / secret / password / api_key /
  *   apikey         not currently emitted by any route here. They cost nothing
  *                  to list and cover an OAuth or webhook URL from a provider

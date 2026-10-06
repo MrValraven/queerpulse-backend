@@ -73,8 +73,13 @@ export interface OpportunityDetailDTO extends OpportunityCardDTO {
   commitments: OpportunityCommitment[];
   goodFor: string[];
   teamIntro: string | null;
+  /**
+   * ENG-474. Active teammates who are in no block with the viewer, and empty
+   * for an anonymous reader (`VolunteeringService.visibleMembersFor`).
+   */
   team: MemberRef[];
   applyRole: string;
+  /** Same three rules as `team`: null when anonymous, inactive or blocked. */
   poster: MemberRef | null;
   /**
    * The applicant-review tier, resolved exactly as

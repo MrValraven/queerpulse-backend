@@ -79,14 +79,17 @@ export interface FinanceReserve {
   target: number;
 }
 
-/** One disclosed restricted-grant partner ("Fundação Calouste Gulbenkian —
- *  €400 · Mental Health Fund"). `name`/`amount` are non-translatable data;
- *  `scopeKey` is the i18n key for the restriction description. Mirrors the
- *  frontend's `FinancePartner` shape. */
+/** One disclosed restricted-grant partner ("A named foundation · €400 ·
+ *  Mental Health Fund"). `name`/`amount` are non-translatable data. The
+ *  restriction arrives in one of two forms: `scopeKey`, an i18n key the
+ *  frontend resolves (the original seeded rows), or `scope`, the plain words an
+ *  admin typed in the Finances editor (PRD-447). Mirrors the frontend's
+ *  `FinancePartner` shape. */
 export interface FinancePartner {
   name: string;
   amount: number;
-  scopeKey: string;
+  scopeKey?: string;
+  scope?: string;
 }
 
 /**

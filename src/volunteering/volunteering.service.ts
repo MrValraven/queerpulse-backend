@@ -31,7 +31,8 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
-import { UserRole } from '../users/entities/user.entity';
+import { BlockFilterService } from '../social/block-filter.service';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityRef,
@@ -235,6 +236,9 @@ export class VolunteeringService {
     // `volunteering` subject withholds the opportunity from ordinary members'
     // read paths. Mirrors `JobsService`'s identical injection.
     private readonly contentModeration: ContentModerationService,
+    // ENG-474. Drops the poster and teammates who sit in a block with the
+    // viewer from the public detail (`visibleMembersFor`).
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   // Drops any opportunity under a `volunteering` takedown (hidden OR removed)
@@ -1195,18 +1199,14 @@ export class VolunteeringService {
   ): Promise<OpportunityDetailDTO> {
     const [
       spotsFilled,
-      teamRows,
-      posterProfile,
+      members,
       mySignup,
       partnerRefs,
       communityRefs,
       canReviewApplicants,
     ] = await Promise.all([
       this.spotsFilledFor(opportunity.id),
-      this.team.find({ where: { opportunityId: opportunity.id } }),
-      opportunity.posterId === null
-        ? null
-        : this.profiles.findOne({ where: { userId: opportunity.posterId } }),
+      this.visibleMembersFor(opportunity, viewerId),
       viewerId === null
         ? false
         : this.signups.exists({
@@ -1225,15 +1225,6 @@ export class VolunteeringService {
       this.canManageApplicants(opportunity, viewerId),
     ]);
 
-    const teamRefs = teamRows.length
-      ? await new MemberLookup(this.profiles).byUserIds(
-          teamRows.map((t) => t.userId),
-        )
-      : new Map<string, MemberRef>();
-    const team = teamRows
-      .map((t) => teamRefs.get(t.userId))
-      .filter((ref): ref is MemberRef => !!ref);
-
     const partner = opportunity.partnerId
       ? (partnerRefs.get(opportunity.partnerId) ?? null)
       : null;
@@ -1246,8 +1237,8 @@ export class VolunteeringService {
       partner,
       community,
       spotsFilled,
-      team,
-      toMemberRef(posterProfile),
+      members.team,
+      members.poster,
       canReviewApplicants,
       // Edit and close stay poster-only, exactly as `update()`/`close()`
       // guard them. `viewerId !== null` is load-bearing: `posterId` is
@@ -1257,6 +1248,73 @@ export class VolunteeringService {
       viewerId !== null && opportunity.posterId === viewerId,
       mySignup,
     );
+  }
+
+  /**
+   * ENG-474. The poster and the "Who's already in" team, as the detail may
+   * name them to this viewer. The read is public and indexed, so three rules
+   * sit on top of the plain profile lookup:
+   *
+   *  - An anonymous reader is named nobody: `team` comes back empty and
+   *    `poster` null, without a query. This is the closed list the community
+   *    public teaser serves (`PublicCommunityResponse`: no member names, slugs
+   *    or avatars on the anonymous variant), and the page needs neither field
+   *    signed out, since contacting the poster is a member action.
+   *  - Only ACTIVE accounts are named. Suspended (banned), deactivated and
+   *    erasure-grace accounts drop out through the same `u.status = active`
+   *    join `MemberLookup.userIdsForSlugs` uses, and an erased member has no
+   *    profile left to join.
+   *  - A member in a block with the viewer, in either direction, drops out
+   *    through `BlockFilterService.blockedUserIds`, which never reports the
+   *    viewer as blocked from themselves, so a poster still sees their own
+   *    name.
+   *
+   * One team read, then two queries for the whole set (active profiles and
+   * blocks) run side by side.
+   */
+  private async visibleMembersFor(
+    opportunity: VolunteerOpportunity,
+    viewerId: string | null,
+  ): Promise<{ poster: MemberRef | null; team: MemberRef[] }> {
+    if (viewerId === null) return { poster: null, team: [] };
+
+    const teamRows = await this.team.find({
+      where: { opportunityId: opportunity.id },
+    });
+    const teamUserIds = teamRows.map((row) => row.userId);
+    const candidateIds = [
+      ...new Set([
+        ...(opportunity.posterId ? [opportunity.posterId] : []),
+        ...teamUserIds,
+      ]),
+    ];
+    if (!candidateIds.length) return { poster: null, team: [] };
+
+    const [activeProfiles, blockedIds] = await Promise.all([
+      this.profiles
+        .createQueryBuilder('p')
+        .innerJoin('p.user', 'u', 'u.status = :active', {
+          active: UserStatus.Active,
+        })
+        .where('p.userId IN (:...candidateIds)', { candidateIds })
+        .getMany(),
+      this.blockFilter.blockedUserIds(viewerId, candidateIds),
+    ]);
+
+    const refByUserId = new Map<string, MemberRef>();
+    for (const profile of activeProfiles) {
+      if (blockedIds.has(profile.userId)) continue;
+      const ref = toMemberRef(profile);
+      if (ref) refByUserId.set(profile.userId, ref);
+    }
+    return {
+      poster: opportunity.posterId
+        ? (refByUserId.get(opportunity.posterId) ?? null)
+        : null,
+      team: teamUserIds
+        .map((userId) => refByUserId.get(userId))
+        .filter((ref): ref is MemberRef => !!ref),
+    };
   }
 
   /**

@@ -11,6 +11,11 @@ export enum LandingSection {
   Member = 'member',
   Community = 'community',
   Changemaker = 'changemaker',
+  // A public, upcoming gathering (`events` row) and a published magazine
+  // story (`magazine_article` row). `section` is a varchar(20), so adding a
+  // value needs no migration.
+  Gathering = 'gathering',
+  Story = 'story',
 }
 
 export type LandingCopy =
@@ -20,7 +25,8 @@ export type LandingCopy =
 
 /**
  * An admin-curated feature slot on the live landing page — a member quote, a
- * community blurb, or a changemaker highlight. `targetId` points at the
+ * community blurb, a changemaker highlight, or a gathering or story with an
+ * optional short kicker line. `targetId` points at the
  * featured entity's id (its meaning depends on `section`); `copy` is the
  * admin-authored text shown alongside it, shape-validated per section by
  * `validateLandingCopy`.

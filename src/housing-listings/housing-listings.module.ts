@@ -8,6 +8,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { HousingViewingsModule } from '../housing-viewings/housing-viewings.module';
 import { MessagingModule } from '../messaging/messaging.module';
+import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
@@ -19,6 +20,7 @@ import { HousingListingsController } from './housing-listings.controller';
 import { HousingListingModerationService } from './housing-listing-moderation.service';
 import { HousingListingsService } from './housing-listings.service';
 import { HousingListingExpirySweeperService } from './housing-listing-expiry-sweeper.service';
+import { HousingListingGeocodeRetryService } from './housing-listing-geocode-retry.service';
 import { HousingListing } from './entities/housing-listing.entity';
 
 @Module({
@@ -59,8 +61,17 @@ import { HousingListing } from './entities/housing-listing.entity';
     // `NotificationsModule` imports nothing that reaches back into housing.
     NotificationsModule,
     // Exports HousingViewingsService — the address-privacy gate ALSO unlocks the
-    // exact point/address to an enquirer with a lister-accepted viewing.
+    // exact point/address to an enquirer with a lister-accepted viewing, and
+    // deleting or filling a listing cancels its open viewings
+    // (`closeOpenForListing`). The expiry sweep calls off the requested viewings
+    // on the homes it hides (`closeRequestedForListings`, PRD-444). No cycle:
+    // `HousingViewingsModule` registers its own read-only `HousingListing`
+    // repository and never imports this module.
     HousingViewingsModule,
+    // Exports BlockFilterService (ENG-470): browse, search and detail hide the
+    // homes of a member blocked either way (and, on browse and search, muted).
+    // No cycle: `SocialModule` imports only users, reports and identities.
+    SocialModule,
     // `AdminQueueNotificationsService`: tells the housing-listing queue's
     // reviewers when `create` lands a new listing in review.
     AdminQueueNotificationsModule,
@@ -81,6 +92,9 @@ import { HousingListing } from './entities/housing-listing.entity';
     // module. `ScheduleModule.forRoot()` is already wired app-wide in
     // `app.module.ts`.
     HousingListingExpirySweeperService,
+    // ENG-469 hourly retry of private-address geocodes that failed at save
+    // time. A background job, registered the same way as the sweep above.
+    HousingListingGeocodeRetryService,
   ],
   // HousingDirectoryService is exported for the cross-entity SearchModule
   // (public LIVE-listing search); the owner-mutation HousingListingsService

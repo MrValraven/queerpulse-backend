@@ -14,7 +14,9 @@ import {
   toStoredPlainText,
   toStoredPlainTextOrNull,
 } from '../communities/community-plain-text';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { GeocodeService } from '../geocode/geocode.service';
+import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -38,7 +40,23 @@ import {
   toHousingListingDTO,
 } from './housing-listing-response';
 import { HousingListerLookup } from './housing-lister-lookup';
+import { geocodeListingAddress } from './housing-listing-geocode';
 import { assessHousingRisk, HousingRiskAssessment } from './housing-risk';
+
+/** The content-moderation subject a housing listing is reported and taken down
+ * under, keyed by its slug. Same value as `HousingDirectoryService.SUBJECT_TYPE`. */
+const HOUSING_MODERATION_SUBJECT_TYPE = 'housing';
+
+/**
+ * PRD-444. True when the listing's current `filledAt` was stamped by the expiry
+ * sweep. `HousingListingExpirySweeperService` writes `sweptAt` in the same
+ * UPDATE, and every owner path that writes or resets `filledAt` clears it, so
+ * the marker holds for an owner who filled an already-expired listing and for
+ * a sweep fill a moderator re-approved with a fresh `expiresAt`.
+ */
+function isHiddenByExpiry(listing: Pick<HousingListing, 'sweptAt'>): boolean {
+  return listing.sweptAt != null;
+}
 
 // Postgres unique-violation SQLSTATE. Mirrors the file-local helper each
 // service (`ListingsService`, `CompaniesService`) keeps by convention.
@@ -111,7 +129,10 @@ function applyUpdate(
   Object.assign(listing, {
     ...(dto.type !== undefined ? { type: dto.type } : {}),
     ...(dto.addressLine !== undefined ? { addressLine: nextAddressLine } : {}),
-    ...(isAddressChanged ? { latitude: null, longitude: null } : {}),
+    // ENG-469: a new address earns a fresh set of geocode retries.
+    ...(isAddressChanged
+      ? { latitude: null, longitude: null, geocodeAttempts: 0 }
+      : {}),
     ...(dto.title !== undefined ? { title: toStoredPlainText(dto.title) } : {}),
     ...(dto.blurb !== undefined ? { blurb: toStoredPlainText(dto.blurb) } : {}),
     ...(location !== null
@@ -294,6 +315,11 @@ export class HousingListingsService {
     // address-privacy gate. Used strictly off the request path — see
     // `scheduleAddressGeocode`.
     private readonly geocode: GeocodeService,
+    // ENG-466 / ENG-467: deleting or filling a home cancels its open viewings
+    // and tells each requester (`closeOpenForListing`).
+    private readonly viewings: HousingViewingsService,
+    // ENG-471: the enquiry path refuses a listing under a moderator takedown.
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   private readonly logger = new Logger(HousingListingsService.name);
@@ -419,27 +445,66 @@ export class HousingListingsService {
     return this.buildDTO(saved);
   }
 
+  /**
+   * ENG-466: a soft delete. The `housing_viewings` and `housing_reviews`
+   * foreign keys cascade on a hard delete, so `remove` used to erase every
+   * viewing and every review of the home along with it. The row now stays
+   * with `deletedAt` set, every TypeORM read skips it, and the owner's open
+   * viewings are cancelled with a bell to each requester.
+   *
+   * The private location goes with the delete: `addressLine`, `latitude` and
+   * `longitude` are nulled in the SAME write that sets `deletedAt`, so the row
+   * that stays behind holds what the hard delete used to leave of the address,
+   * which is nothing. One UPDATE keeps the two from ever landing apart, and
+   * an in-flight geocode cannot write a pin back: its write is keyed on the
+   * address this one clears.
+   */
   async remove(ref: string, userId: string): Promise<void> {
     const listing = await this.loadOwnedOr404(ref, userId);
-    await this.listings.remove(listing);
+    await this.listings.update(
+      { id: listing.id },
+      {
+        addressLine: null,
+        latitude: null,
+        longitude: null,
+        deletedAt: new Date(),
+      },
+    );
+    await this.viewings.closeOpenForListing(listing.id, userId);
   }
 
   /** Owner self-service "found a place" (HSG-1) — withholds the listing from
    * public browse (see `HousingDirectoryService.browse`) without touching the
-   * moderation `status` or deleting anything. Reversible via `markAvailable`. */
+   * moderation `status` or deleting anything. Reversible via `markAvailable`.
+   *
+   * ENG-467: also cancels the listing's open viewings (requested or accepted)
+   * and tells each requester, so nobody travels to see a home that is gone. */
   async markFilled(ref: string, userId: string): Promise<HousingListingDTO> {
     const listing = await this.loadOwnedOr404(ref, userId);
     listing.filledAt = new Date();
+    // An owner fill replaces a sweep fill: the home is filled because they
+    // said so, and `extend` must leave it hidden.
+    listing.sweptAt = null;
     const saved = await this.listings.save(listing);
+    await this.viewings.closeOpenForListing(listing.id, userId);
     return this.buildDTO(saved);
   }
 
   /** Reverses `markFilled`/an auto-expiry. If the listing's `expiresAt` has
    * already passed, also refreshes it — otherwise the next daily sweep would
-   * immediately re-mark it filled, silently undoing the owner's action. */
+   * immediately re-mark it filled, silently undoing the owner's action.
+   *
+   * ENG-467: undoing an owner fill is a RELIST, stamped in `relistedAt`, so a
+   * completed viewing from the previous tenancy stops unlocking the exact
+   * address. Undoing a fill the expiry sweep made is a renewal of the same
+   * search and leaves `relistedAt` alone, the same as `extend`. */
   async markAvailable(ref: string, userId: string): Promise<HousingListingDTO> {
     const listing = await this.loadOwnedOr404(ref, userId);
+    if (listing.filledAt !== null && !isHiddenByExpiry(listing)) {
+      listing.relistedAt = new Date();
+    }
     listing.filledAt = null;
+    listing.sweptAt = null;
     if (listing.expiresAt.getTime() <= Date.now()) {
       listing.expiresAt = computeExpiry();
       // A fresh term earns its own warning (PRD-244). Without this the listing
@@ -452,9 +517,14 @@ export class HousingListingsService {
   }
 
   /** Owner self-service "renew" (HSG-3) — refreshes `expiresAt` to a fresh
-   * `DEFAULT_LISTING_LIFETIME_DAYS`-day window. Deliberately does not touch
-   * `filledAt`: extending a listing the owner marked filled on purpose
-   * shouldn't silently un-hide it from browse — call `markAvailable` for that.
+   * `DEFAULT_LISTING_LIFETIME_DAYS`-day window. Leaves an owner's own fill in
+   * place: extending a listing the owner marked filled on purpose shouldn't
+   * silently un-hide it from browse; `markAvailable` is the way back.
+   *
+   * PRD-444: a `filledAt` the expiry SWEEP wrote is cleared, though. That fill
+   * only meant "the term ran out", so renewing the term is exactly what brings
+   * the home back, and keeping it left an extended listing showing "Filled"
+   * and hidden from browse. `relistedAt` stays as it is: nobody moved in.
    *
    * Clears `expiryWarningSentAt` (PRD-244): the new term earns its own
    * warning, so an owner who extends is told again when THAT window runs down.
@@ -462,6 +532,10 @@ export class HousingListingsService {
    * exact failure the marker column would otherwise cause. */
   async extend(ref: string, userId: string): Promise<HousingListingDTO> {
     const listing = await this.loadOwnedOr404(ref, userId);
+    if (isHiddenByExpiry(listing)) {
+      listing.filledAt = null;
+      listing.sweptAt = null;
+    }
     listing.expiresAt = computeExpiry();
     listing.expiryWarningSentAt = null;
     const saved = await this.listings.save(listing);
@@ -538,12 +612,32 @@ export class HousingListingsService {
     };
   }
 
-  /** Loads a listing that must be publicly live (used by the enquiry flow). */
+  /**
+   * Loads a listing a member can still contact about (used by the enquiry
+   * flow): live, and also on the board. ENG-471: a filled, expired or
+   * taken-down home 404s here exactly as it does on the public detail read,
+   * so a stale tab or an old link cannot start a conversation about a home
+   * nobody can see. A soft-deleted listing is skipped by `findOne` itself.
+   */
   async loadLiveOr404(ref: string): Promise<HousingListing> {
     const listing = await this.listings.findOne({
       where: { ref, status: HousingListingStatus.Live },
     });
     if (!listing) {
+      throw new NotFoundException('Housing listing not found');
+    }
+    // The same withhold `HousingDirectoryService.detail` applies, compared the
+    // same way, so a home is contactable exactly while its detail page shows.
+    const isOffTheBoard =
+      listing.filledAt !== null || listing.expiresAt.getTime() < Date.now();
+    if (isOffTheBoard) {
+      throw new NotFoundException('Housing listing not found');
+    }
+    const moderation = await this.contentModeration.stateFor(
+      HOUSING_MODERATION_SUBJECT_TYPE,
+      listing.slug,
+    );
+    if (moderation.hidden || moderation.removed) {
       throw new NotFoundException('Housing listing not found');
     }
     return listing;
@@ -590,37 +684,32 @@ export class HousingListingsService {
    * Every failure is swallowed with a warning: an unplaceable address, a
    * geocoder timeout, a saturated queue and a lost race with a concurrent edit
    * all leave the row with null coordinates, which the read side already
-   * renders honestly as area precision (`toHousingListingDTO`).
+   * renders honestly as area precision (`toHousingListingDTO`). ENG-469: a
+   * failure also counts one `geocodeAttempts`, and
+   * `HousingListingGeocodeRetryService` tries again hourly until the count
+   * reaches its cap.
    *
-   * The final write is conditional on the address STILL being the one that was
-   * geocoded, so a lister who corrects their address while a lookup is in
-   * flight cannot have the older result land on top of the newer address.
+   * The write itself lives in `geocodeListingAddress`, conditional on the
+   * address STILL being the one that was geocoded, so a lister who corrects
+   * their address while a lookup is in flight cannot have the older result
+   * land on top of the newer address.
    */
   private scheduleAddressGeocode(listing: HousingListing): void {
     const addressLine = listing.addressLine;
     if (addressLine === null || addressLine.length === 0) return;
-    // Nominatim resolves a bare street line far better with its neighbourhood,
-    // city and country attached, and housing is Lisbon-only, so the city is a
-    // real constraint rather than a guess.
-    const query = [addressLine, listing.area, listing.city, 'Portugal']
-      .filter((part) => part.length > 0)
-      .join(', ');
-    const listingId = listing.id;
-    void (async () => {
-      try {
-        const point = await this.geocode.resolveAddress(query);
-        await this.listings.update(
-          { id: listingId, addressLine },
-          { latitude: point.latitude, longitude: point.longitude },
-        );
-      } catch (error) {
-        // The address itself is private, so it is never logged. The ref is
-        // enough to find the row.
-        this.logger.warn(
-          `Housing listing geocode failed for ${listing.ref}: ${String(error)}`,
-        );
-      }
-    })();
+    // `geocodeListingAddress` never rejects, so nothing escapes this `void`.
+    void geocodeListingAddress(
+      this.listings,
+      this.geocode,
+      {
+        id: listing.id,
+        ref: listing.ref,
+        addressLine,
+        area: listing.area,
+        city: listing.city,
+      },
+      this.logger,
+    );
   }
 
   private async mapRows(rows: HousingListing[]): Promise<HousingListingDTO[]> {
@@ -753,9 +842,12 @@ export class HousingListingsService {
     });
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // `withDeleted`: the unique slug index still covers a soft-deleted
+      // listing (ENG-466), so its slug is taken even though every read
+      // skips the row.
       const slug = await allocateUniqueSlug(
         slugify(stored.title, 'home'),
-        (s) => this.listings.exists({ where: { slug: s } }),
+        (s) => this.listings.exists({ where: { slug: s }, withDeleted: true }),
       );
       try {
         return await this.listings.save(
@@ -805,7 +897,10 @@ export class HousingListingsService {
             riskScore: assessment.score,
             riskReasons: assessment.reasons,
             filledAt: null,
+            sweptAt: null,
             expiresAt: computeExpiry(),
+            relistedAt: null,
+            geocodeAttempts: 0,
           }),
         );
       } catch (err) {

@@ -1,9 +1,14 @@
 import { MemberRef } from '../common/member-ref';
 import {
+  FinanceEventNote,
   FinanceLine,
   FinanceMetricSource,
+  FinancePartner,
+  FinanceReserve,
+  FinanceStat,
   GovernanceFinanceReport,
 } from './entities/governance-finance-report.entity';
+import { isEnteredByPeople } from './governance-finance-response';
 
 // Backs `GET /admin/governance/finances` — the admin governance Finances tab
 // (`/admin/governance`). Unlike `GovernanceFinanceResponseDTO` (the public
@@ -34,14 +39,26 @@ export interface AdminFinanceSources {
 
 export interface AdminFinanceLatest {
   quarter: string;
-  incomeTotal: number;
-  expenseTotal: number;
+  /** The five editable headline figures are null when nobody has entered
+   *  them yet (a freshly opened quarter), so the editor can show an empty
+   *  field and an entered 0 is still an entry. */
+  incomeTotal: number | null;
+  expenseTotal: number | null;
   surplus: number;
-  mrr: number;
-  sustainerCount: number;
-  solidarityRate: number;
+  mrr: number | null;
+  sustainerCount: number | null;
+  solidarityRate: number | null;
   income: FinanceLine[];
   expense: FinanceLine[];
+  /** PRD-447. The public report's tiles, notes and disclosures, editable on
+   *  the tab so none of them needs SQL. */
+  stats: FinanceStat[];
+  eventNotes: FinanceEventNote[];
+  partners: FinancePartner[];
+  reserve: FinanceReserve | null;
+  /** PRD-447. Whether `GET /governance/finances` serves this report: true
+   *  once none of the five headline figures still reads `seeded`. */
+  isPublic: boolean;
   publishedAt: string;
   /** Provenance badge state for each editable scalar. */
   sources: AdminFinanceSources;
@@ -74,14 +91,19 @@ export function toAdminFinanceLatest(
 ): AdminFinanceLatest {
   return {
     quarter: report.quarter,
-    incomeTotal: report.incomeTotal ?? 0,
-    expenseTotal: report.expenseTotal ?? 0,
+    incomeTotal: report.incomeTotal,
+    expenseTotal: report.expenseTotal,
     surplus: report.surplus ?? 0,
-    mrr: report.mrr ?? 0,
-    sustainerCount: report.sustainerCount ?? 0,
-    solidarityRate: report.solidarityRate ?? 0,
+    mrr: report.mrr,
+    sustainerCount: report.sustainerCount,
+    solidarityRate: report.solidarityRate,
     income: withLineSource(report.income ?? []),
     expense: withLineSource(report.expense ?? []),
+    stats: report.stats ?? [],
+    eventNotes: report.eventNotes ?? [],
+    partners: report.partners ?? [],
+    reserve: report.reserve ?? null,
+    isPublic: isEnteredByPeople(report),
     publishedAt: report.publishedAt.toISOString(),
     sources: {
       mrr: report.mrrSource,
@@ -96,13 +118,19 @@ export function toAdminFinanceLatest(
   };
 }
 
+/** The chart series. A quarter whose totals nobody has entered yet (a freshly
+ *  opened one) is left out, so it never plots as a real €0 (PRD-447). */
 export function toAdminFinanceHistory(
   reports: GovernanceFinanceReport[],
 ): AdminFinanceHistoryPoint[] {
-  return reports.map((report) => ({
-    quarter: report.quarter,
-    incomeTotal: report.incomeTotal ?? 0,
-    expenseTotal: report.expenseTotal ?? 0,
-    surplus: report.surplus ?? 0,
-  }));
+  return reports
+    .filter(
+      (report) => report.incomeTotal !== null || report.expenseTotal !== null,
+    )
+    .map((report) => ({
+      quarter: report.quarter,
+      incomeTotal: report.incomeTotal ?? 0,
+      expenseTotal: report.expenseTotal ?? 0,
+      surplus: report.surplus ?? 0,
+    }));
 }

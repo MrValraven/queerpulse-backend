@@ -584,6 +584,9 @@ export class ContentOwnerErasureService {
    * `SET NULL` (posts, votes, polls, photos, subscriptions, topic links).
    * Idempotent: a retry finds only the rows still attributed to `userId`.
    *
+   * A surviving fundraiser (`kind = 'ask'`) also loses its
+   * `forum_thread_funding` row here; a surviving open call keeps its own.
+   *
    * This step runs under `runIsolated`, so a failure here is logged and the
    * erasure carries on. The first two arms are therefore repeated as a
    * fail-closed backstop inside the erasure transaction, right after the user
@@ -620,6 +623,20 @@ export class ContentOwnerErasureService {
           `replies for erased account ${userId}`,
       );
     }
+    // Funding & Grants: a fundraiser that survives (other members replied in
+    // it) loses its donate link and details with its author. Nobody is left
+    // accountable for where the money would go. Open calls keep theirs: a
+    // call's link is the funder's public page, still useful to every reader.
+    // Runs after the deletion, so only the surviving asks are touched, while
+    // `author_id` still names the member.
+    await this.dataSource.query(
+      `DELETE FROM "forum_thread_funding" AS "funding"
+        USING "forum_thread" AS "t"
+        WHERE "funding"."thread_id" = "t"."id"
+          AND "t"."author_id" = $1
+          AND "t"."kind" = 'ask'`,
+      [userId],
+    );
   }
 
   /**

@@ -328,6 +328,9 @@ export class ModerationService {
       ReportSubjectType.Subprofile,
       ReportSubjectType.MagazineComment,
       ReportSubjectType.Volunteering,
+      // PRD-443: `HousingGroupsService.listVisibleListings` and its enquiry
+      // path both skip a group room with a hidden or removed row.
+      ReportSubjectType.GroupListing,
     ]);
 
   // The actions that produce a member-facing outcome the sanctioned member

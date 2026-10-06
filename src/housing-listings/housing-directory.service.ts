@@ -15,6 +15,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { BrowseHousingListingsQuery } from './dto/browse-housing-listings.query';
 import {
   HousingListing,
@@ -29,6 +30,7 @@ import { HousingListerLookup } from './housing-lister-lookup';
 import { VERIFIED_LISTING_MAX_RISK } from './housing-verified';
 import {
   HousingListingDTO,
+  HousingLocationUnlock,
   HousingSearchRow,
   toHousingListingDTO,
   toHousingSearchRow,
@@ -59,6 +61,10 @@ export class HousingDirectoryService {
     // the lister ACCEPTED is treated as trusted enough to see the exact address,
     // fulfilling the map slice's documented follow-up.
     private readonly viewings: HousingViewingsService,
+    // ENG-470: a block either way (and the viewer's own mute) takes the other
+    // member's homes off browse and search, and a block 404s the detail,
+    // the same severance the flatmate board applies.
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   // A housing listing is reported (and taken down) under the `housing` subject
@@ -107,8 +113,14 @@ export class HousingDirectoryService {
     );
   }
 
+  /**
+   * @param viewerId The member browsing. When present, homes listed by anyone
+   *   blocked either way with them, or muted by them, are dropped in-query
+   *   (ENG-470), so the page and its total stay consistent.
+   */
   async browse(
     query: BrowseHousingListingsQuery,
+    viewerId?: string,
   ): Promise<Paginated<HousingListingDTO>> {
     const page = normalizePage(query.page);
     const qb = this.listings
@@ -204,6 +216,10 @@ export class HousingDirectoryService {
     }
 
     this.excludeModeratedListings(qb);
+    if (viewerId !== undefined) {
+      // Raw column reference in the DB's snake_case (SnakeNamingStrategy).
+      this.blockFilter.excludeHidden(qb, viewerId, '"l"."owner_id"');
+    }
     qb.orderBy('l.created_at', 'DESC');
 
     return paginate(qb, page, async (rows) => {
@@ -234,8 +250,14 @@ export class HousingDirectoryService {
   // Cross-entity global search (SearchService) — LIVE listings only (mirrors
   // `browse`'s visibility), accent-folded match over title / blurb / city /
   // area, so "Principe Real" finds a listing in "Príncipe Real". No lister
-  // hydration — the search row needs none.
-  async searchByText(term: string, limit: number): Promise<HousingSearchRow[]> {
+  // hydration: the search row needs none. With a `viewerId`, homes listed by
+  // a member blocked either way or muted by the viewer drop out (ENG-470),
+  // as on `browse`.
+  async searchByText(
+    term: string,
+    limit: number,
+    viewerId?: string,
+  ): Promise<HousingSearchRow[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
     const qbSearch = this.listings
       .createQueryBuilder('l')
@@ -248,6 +270,9 @@ export class HousingDirectoryService {
         { pattern },
       );
     this.excludeModeratedListings(qbSearch);
+    if (viewerId !== undefined) {
+      this.blockFilter.excludeHidden(qbSearch, viewerId, '"l"."owner_id"');
+    }
     const rows = await qbSearch
       .orderBy('l.created_at', 'DESC')
       .take(limit)
@@ -290,6 +315,16 @@ export class HousingDirectoryService {
       throw new NotFoundException('Housing listing not found');
     }
     const listerId = listing.ownerId;
+    // ENG-470: a block either way hides the home entirely, as the same 404 so
+    // the response never confirms the listing exists (the flatmate board's
+    // `detail` does the same).
+    if (
+      !isOwner &&
+      listerId !== null &&
+      (await this.blockFilter.isBlockedEitherWay(viewerId, listerId))
+    ) {
+      throw new NotFoundException('Housing listing not found');
+    }
     const refs = await new HousingListerLookup(this.profiles).byUserIds(
       presentActorIds([listerId]),
     );
@@ -309,17 +344,44 @@ export class HousingDirectoryService {
     // so an unanswered enquiry never unlocks the address.
     // With an erased lister there is nobody to be connected to, so the
     // precise-location unlock falls back to the accepted-viewing signal alone.
-    const precise =
-      (listerId !== null &&
-        (listerId === viewerId ||
-          (await this.connections.areConnected(viewerId, listerId)))) ||
-      (await this.viewings.hasUnlockedViewing(listing.id, viewerId));
+    //
+    // DES-419: the gates are checked in this order and the first that passes
+    // is reported as `locationUnlockedVia`, so the client can say WHY the
+    // address is showing. ENG-467: a viewing unlock also needs the pair to be
+    // unblocked, and a viewing completed before the home was relisted no
+    // longer counts.
+    const unlockedVia = await this.resolveLocationUnlock(listing, viewerId);
+    const precise = unlockedVia !== null;
 
     return toHousingListingDTO(
       listing,
       actorFromLookup(refs, listerId) ?? null,
       level,
       precise,
+      false,
+      unlockedVia ?? undefined,
     );
+  }
+
+  /** Which address-privacy gate `viewerId` passes on `listing`, owner first,
+   * then connection, then viewing; null when none does. */
+  private async resolveLocationUnlock(
+    listing: HousingListing,
+    viewerId: string,
+  ): Promise<HousingLocationUnlock | null> {
+    const listerId = listing.ownerId;
+    if (listerId !== null && listerId === viewerId) return 'owner';
+    if (
+      listerId !== null &&
+      (await this.connections.areConnected(viewerId, listerId))
+    ) {
+      return 'connection';
+    }
+    const hasViewingUnlock = await this.viewings.hasUnlockedViewing(
+      listing.id,
+      viewerId,
+      { listerId, relistedAt: listing.relistedAt },
+    );
+    return hasViewingUnlock ? 'viewing' : null;
   }
 }

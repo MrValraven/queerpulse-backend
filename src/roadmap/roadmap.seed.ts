@@ -20,7 +20,6 @@ import { RoadmapItemDependency } from './entities/roadmap-item-dependency.entity
 import { RoadmapTeamMember } from './entities/roadmap-team-member.entity';
 import { RoadmapAuditLog } from './entities/roadmap-audit-log.entity';
 import type { HeroStat } from './entities/roadmap-settings.entity';
-import { RoadmapSettings } from './entities/roadmap-settings.entity';
 
 /**
  * Fixture transcribed from the frontend's
@@ -1020,32 +1019,6 @@ export const ROADMAP_ADMIN_SEED_AUDIT: RoadmapAdminSeedAuditEntry[] = [
   },
 ];
 
-// Replaces (not merges with) the base `ROADMAP_HERO_STATS` singleton row —
-// the admin Hero Stats view (Task C8) edits exactly these 4 tiles.
-export const ROADMAP_ADMIN_SEED_HERO_STATS: HeroStat[] = [
-  {
-    label: 'Resource guides live',
-    value: '6',
-    note: 'Counts published guides only',
-    jade: true,
-  },
-  {
-    label: 'Members vouched in',
-    value: '8,412',
-    note: 'Rounded down, updated nightly',
-  },
-  {
-    label: 'Shipped this quarter',
-    value: '5',
-    note: 'Auto-counted from the board',
-  },
-  {
-    label: 'Member ideas on the board',
-    value: '11',
-    note: 'Ideas promoted to board items',
-  },
-];
-
 function buildGuideSteps(
   trueSteps: RoadmapGuideStep[],
 ): Record<RoadmapGuideStep, boolean> {
@@ -1316,20 +1289,6 @@ async function seedRoadmapAdminAudit(
   console.log(`Seeded ${insertedCount} roadmap audit log entries`);
 }
 
-// Singleton upsert, same idiom as `RoadmapAdminService.updateSettings`.
-async function seedRoadmapAdminHeroStats(
-  manager: EntityManager,
-): Promise<void> {
-  const settings = manager.getRepository(RoadmapSettings);
-  let row = await settings.findOne({ where: { id: 1 } });
-  if (!row) {
-    row = settings.create({ id: 1, heroStats: [] });
-  }
-  row.heroStats = ROADMAP_ADMIN_SEED_HERO_STATS;
-  await settings.save(row);
-  console.log('Seeded roadmap admin hero stats');
-}
-
 /**
  * Entry point wired into `src/database/seed.ts` (`pnpm run seed`) — see the
  * file-level doc comment for why this is a seed-runner pass rather than
@@ -1347,5 +1306,4 @@ export async function seedRoadmapAdminContent(
   await seedRoadmapAdminIdeas(manager, nameToId);
   await seedRoadmapAdminTeam(manager, memberIdBySlug);
   await seedRoadmapAdminAudit(manager, memberIdBySlug);
-  await seedRoadmapAdminHeroStats(manager);
 }

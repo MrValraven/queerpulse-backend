@@ -2,10 +2,21 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
 import { ForumThread } from './entities/forum-thread.entity';
+import { ForumFundingService } from './forum-funding.service';
 import { ForumPostsService } from './forum-posts.service';
 import { forumThreadVisibleSql } from './forum-threads.service';
 
 const GRINNING_FACE = '\u{1F600}';
+
+// The payment-details rule `reply` and `updatePostBody` apply under a
+// fundraiser. `assertAskTextAllowed` is pure, so none of the service's
+// repositories are ever reached.
+const fundingRules = new ForumFundingService(
+  {} as never,
+  {} as never,
+  {} as never,
+  {} as never,
+);
 
 /** A high surrogate with no low surrogate after it, or the reverse: what a code-unit slice through a pair leaves behind. */
 const hasLoneSurrogate = (text: string): boolean =>
@@ -89,6 +100,8 @@ function build() {
       subscribe: jest.fn(),
       subscriberIdsToNotify: jest.fn().mockResolvedValue([]),
     } as never,
+    // Funding & Grants: the real payment-details rule (pure, no I/O).
+    fundingRules,
   );
   return {
     service,
@@ -332,6 +345,8 @@ function buildVote(options: {
       subscribe: jest.fn(),
       subscriberIdsToNotify: jest.fn().mockResolvedValue([]),
     } as never, // subscriptions
+    // Funding & Grants: the real payment-details rule (pure, no I/O).
+    fundingRules,
   );
   return { service, post, threadUpdate, loadByIdOr404 };
 }
@@ -489,6 +504,8 @@ function buildSearch() {
     {} as never,
     {} as never,
     {} as never,
+    // Funding & Grants: the real payment-details rule (pure, no I/O).
+    fundingRules,
   );
   const andWhereCalls = (): unknown[][] =>
     (queryBuilder.andWhere as jest.Mock<unknown, unknown[]>).mock.calls;
@@ -940,6 +957,8 @@ function buildListPosts(options: {
     {} as never,
     contentModeration as never,
     {} as never,
+    // Funding & Grants: the real payment-details rule (pure, no I/O).
+    fundingRules,
   );
   const viewer = {
     userId: 'viewer-1',
@@ -1183,6 +1202,8 @@ function buildReply(threadAuthorId: string | null) {
     mentions as never,
     {} as never,
     subscriptions as never,
+    // Funding & Grants: the real payment-details rule (pure, no I/O).
+    fundingRules,
   );
   const replier = {
     userId: 'replier-1',

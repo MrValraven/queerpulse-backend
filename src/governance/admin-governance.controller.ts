@@ -13,7 +13,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
+  ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -37,6 +40,7 @@ import { ListFinanceChangesQuery } from './dto/list-finance-changes.query';
 import { ListGovernanceMotionsQuery } from './dto/list-governance-motions.query';
 import { RejectGovernanceMotionDto } from './dto/reject-governance-motion.dto';
 import { ListOverviewChangesQuery } from './dto/list-overview-changes.query';
+import { OpenFinanceQuarterDto } from './dto/open-finance-quarter.dto';
 import { UpdateAdminFinancesDto } from './dto/update-admin-finances.dto';
 import { UpdateAdminOverviewDto } from './dto/update-admin-overview.dto';
 import { GovernanceFinanceService } from './governance-finance.service';
@@ -115,6 +119,27 @@ export class AdminGovernanceController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.governanceFinanceService.updateAdminFinances(dto, user.userId);
+  }
+
+  // Admin-only, like the PATCH above. PRD-447: once the seeded report is gone
+  // there is nothing to correct, so the governance team opens the next
+  // quarter here and fills it in with the PATCH.
+  @Post('finances/quarters')
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Open an empty finance report for a new quarter' })
+  @ApiCreatedResponse({
+    description: 'The updated Finances tab payload (latest + history).',
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiBadRequestResponse({
+    description: 'The quarter is malformed or older than the newest report.',
+  })
+  @ApiConflictResponse({ description: 'That quarter already has a report.' })
+  openFinanceQuarter(
+    @Body() dto: OpenFinanceQuarterDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceFinanceService.openQuarter(dto, user.userId);
   }
 
   // Admin-only: the per-field audit trail behind the "last edited" badges.

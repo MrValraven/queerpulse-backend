@@ -582,6 +582,7 @@ describe('MemberPreferencesExportContributor', () => {
       shareTyping: true,
       sharePresence: false,
       whoCanMessage: 'connections',
+      language: 'pt',
       updatedAt: new Date('2026-03-01T10:00:00.000Z'),
     });
     const contributor = new MemberPreferencesExportContributor(
@@ -598,6 +599,7 @@ describe('MemberPreferencesExportContributor', () => {
       outAtWork: 'private',
       hideMentalHealthContent: true,
       groupAddPolicy: 'invite_only',
+      language: 'pt',
       updatedAt: '2026-03-01T10:00:00.000Z',
     });
     expect(result).not.toHaveProperty('userId');

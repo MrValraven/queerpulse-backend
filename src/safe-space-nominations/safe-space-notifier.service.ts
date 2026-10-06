@@ -8,18 +8,17 @@ export const SAFE_SPACE_NOTIFICATION_SOURCE = 'safe-space';
 /**
  * The `payload.action` vocabulary for every safe-space review notification.
  *
- * These ride on `NotificationType.ModerationOutcome`, which is the repo's
- * "the platform is telling you the outcome of a review" type: no actor, no
- * preference toggle, always delivered. That is exactly right here for three
- * reasons. A badge suspension IS a moderation outcome landing on a venue
- * owner. Nobody may mute it. And carrying no actor is what keeps a flagger
- * anonymous: `NotificationsService.create` resolves the bell's "who" from the
- * actor argument, so passing none means no notification in this domain can
- * ever name the member who raised a flag.
+ * These ride on `NotificationType.SafeSpaceReview` (DES-417), which carries
+ * no actor, sits outside every preference toggle and is always delivered.
+ * Carrying no actor is what keeps a flagger anonymous:
+ * `NotificationsService.create` resolves the bell's "who" from the actor
+ * argument, so passing none means no notification in this domain can ever
+ * name the member who raised a flag.
  *
- * `ModerationOutcome`'s payload allowlist is `['action', 'note']`, unioned
- * with the common routing keys (`source`, `listingSlug`), so exactly these
- * four fields reach the client and nothing else can leak through the payload.
+ * The payload is codes and names only. `SafeSpaceReview`'s allowlist is
+ * `['action', 'audience', 'placeName', 'reason']`, unioned with the common
+ * routing keys (`source`, `listingSlug`), and the frontend writes the sentence
+ * in the member's own language from `action` and `audience`.
  */
 export const SafeSpaceNotificationAction = {
   NominationAcknowledged: 'safe_space_nomination_acknowledged',
@@ -35,9 +34,22 @@ export const SafeSpaceNotificationAction = {
 export type SafeSpaceNotificationActionCode =
   (typeof SafeSpaceNotificationAction)[keyof typeof SafeSpaceNotificationAction];
 
+/** Which side of a safe-space review the recipients of one bell are on. */
+export type SafeSpaceNotificationAudience =
+  'nominator' | 'owner' | 'flagger' | 'staff';
+
+/** The structured facts one safe-space review bell carries. */
+export interface SafeSpaceNotificationDetails {
+  audience: SafeSpaceNotificationAudience;
+  placeName?: string | null;
+  reason?: string | null;
+  listingSlug?: string | null;
+}
+
 /**
  * One place every safe-space review notification goes through, so the anonymity
- * rule and the best-effort rule are stated once instead of at nine call sites.
+ * rule and the best-effort rule are stated once here and the eleven call sites
+ * share them.
  *
  * BEST EFFORT, ALWAYS. A notification failure must never fail the decision that
  * produced it: a badge suspension that rolled back because the bell was down
@@ -56,12 +68,16 @@ export class SafeSpaceNotifierService {
   /**
    * Tell `recipientIds` the outcome of a safe-space review step. Never passes
    * an actor, so no block, mute or identity can attach to it.
+   *
+   * `details.audience` says which side of the review the recipients are on,
+   * so one action code can read differently to a nominator and to the owner.
+   * `placeName` is the venue's public name, `reason` the moderator's word to
+   * a nominator on a decline, and `listingSlug` the deep link to the venue.
    */
   async tell(
     recipientIds: (string | null | undefined)[],
     action: SafeSpaceNotificationActionCode,
-    note: string,
-    listingSlug?: string | null,
+    details: SafeSpaceNotificationDetails,
   ): Promise<void> {
     const recipients = [
       ...new Set(
@@ -72,12 +88,14 @@ export class SafeSpaceNotifierService {
     try {
       await this.notifications.createForRecipients(
         recipients,
-        NotificationType.ModerationOutcome,
+        NotificationType.SafeSpaceReview,
         {
           source: SAFE_SPACE_NOTIFICATION_SOURCE,
           action,
-          note,
-          ...(listingSlug ? { listingSlug } : {}),
+          audience: details.audience,
+          ...(details.placeName ? { placeName: details.placeName } : {}),
+          ...(details.reason ? { reason: details.reason } : {}),
+          ...(details.listingSlug ? { listingSlug: details.listingSlug } : {}),
         },
       );
     } catch (error) {

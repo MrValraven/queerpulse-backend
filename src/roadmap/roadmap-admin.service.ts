@@ -22,7 +22,6 @@ import {
 } from './entities/roadmap-item.entity';
 import { RoadmapIdea, RoadmapIdeaStatus } from './entities/roadmap-idea.entity';
 import { RoadmapVote, RoadmapVoteTarget } from './entities/roadmap-vote.entity';
-import { RoadmapSettings, HeroStat } from './entities/roadmap-settings.entity';
 import { RoadmapTeamMember } from './entities/roadmap-team-member.entity';
 import { RoadmapItemComment } from './entities/roadmap-item-comment.entity';
 import { RoadmapAuditLog } from './entities/roadmap-audit-log.entity';
@@ -44,7 +43,6 @@ import { CreateRoadmapItemDto } from './dto/create-roadmap-item.dto';
 import { UpdateRoadmapItemDto } from './dto/update-roadmap-item.dto';
 import { SubmitIdeaDto } from './dto/submit-idea.dto';
 import { UpdateIdeaDto } from './dto/update-idea.dto';
-import { UpdateSettingsDto } from './dto/update-settings.dto';
 import { BulkItemsDto } from './dto/bulk-items.dto';
 import { NotifyVotersDto } from './dto/notify-voters.dto';
 import { UpdateDepsDto } from './dto/update-deps.dto';
@@ -120,8 +118,6 @@ export class RoadmapAdminService {
     private readonly ideas: Repository<RoadmapIdea>,
     @InjectRepository(RoadmapVote)
     private readonly votes: Repository<RoadmapVote>,
-    @InjectRepository(RoadmapSettings)
-    private readonly settings: Repository<RoadmapSettings>,
     @InjectRepository(RoadmapTeamMember)
     private readonly team: Repository<RoadmapTeamMember>,
     @InjectRepository(RoadmapItemComment)
@@ -299,29 +295,27 @@ export class RoadmapAdminService {
   // N+1 across `users`/`roadmap_votes`/`roadmap_item_comments`/
   // `roadmap_item_dependencies` regardless of board size.
   async getAdmin(): Promise<RoadmapAdminResponse> {
-    const [allItems, allIdeas, teamRows, auditRows, settingsRow] =
-      await Promise.all([
-        // Bounded (BE-COM-36): the board loaded every item, idea and team row
-        // with no `take`, and each item then fans out into vote counts, a
-        // community vote breakdown, comments and dependency edges. The idea
-        // queue in particular is member-writable (`POST /roadmap/ideas`), so
-        // it is the one that actually grows. `MAX_ADMIN_BOARD_ROWS` sits far
-        // above real scale — the board is a kanban view, not an export.
-        this.items.find({
-          order: { column: 'ASC', sortOrder: 'ASC' },
-          take: MAX_ADMIN_BOARD_ROWS,
-        }),
-        this.ideas.find({
-          order: { sortOrder: 'ASC' },
-          take: MAX_ADMIN_BOARD_ROWS,
-        }),
-        this.team.find({
-          order: { sortOrder: 'ASC' },
-          take: MAX_ADMIN_BOARD_ROWS,
-        }),
-        this.auditLog.find({ order: { createdAt: 'DESC' }, take: 100 }),
-        this.settings.findOne({ where: { id: 1 } }),
-      ]);
+    const [allItems, allIdeas, teamRows, auditRows] = await Promise.all([
+      // Bounded (BE-COM-36): the board loaded every item, idea and team row
+      // with no `take`, and each item then fans out into vote counts, a
+      // community vote breakdown, comments and dependency edges. The idea
+      // queue in particular is member-writable (`POST /roadmap/ideas`), so
+      // it is the one that actually grows. `MAX_ADMIN_BOARD_ROWS` sits far
+      // above real scale: the board is a kanban view with no export.
+      this.items.find({
+        order: { column: 'ASC', sortOrder: 'ASC' },
+        take: MAX_ADMIN_BOARD_ROWS,
+      }),
+      this.ideas.find({
+        order: { sortOrder: 'ASC' },
+        take: MAX_ADMIN_BOARD_ROWS,
+      }),
+      this.team.find({
+        order: { sortOrder: 'ASC' },
+        take: MAX_ADMIN_BOARD_ROWS,
+      }),
+      this.auditLog.find({ order: { createdAt: 'DESC' }, take: 100 }),
+    ]);
 
     const itemIds = allItems.map((item) => item.id);
     const ideaIds = allIdeas.map((idea) => idea.id);
@@ -400,7 +394,6 @@ export class RoadmapAdminService {
       ideas,
       team,
       audit,
-      heroStats: settingsRow?.heroStats ?? [],
     };
   }
 
@@ -1129,21 +1122,6 @@ export class RoadmapAdminService {
     const liveVotes =
       (await this.liveVoteCounts(RoadmapVoteTarget.Idea, [id])).get(id) ?? 0;
     return toAdminIdeaDTO(saved, liveVotes);
-  }
-
-  // Upserts the `roadmap_settings` singleton (id = 1) — mirrors
-  // `GovernanceOverview`/`ChangemakerDirectorySettings`'s "no authoring
-  // endpoint beyond an admin edit" singleton pattern.
-  async updateSettings(
-    dto: UpdateSettingsDto,
-    actor?: RoadmapActor,
-  ): Promise<{ heroStats: HeroStat[] }> {
-    let row = await this.settings.findOne({ where: { id: 1 } });
-    if (!row) row = this.settings.create({ id: 1, heroStats: [] });
-    row.heroStats = dto.heroStats;
-    await this.settings.save(row);
-    await this.audit(actor, 'Updated roadmap hero stats');
-    return { heroStats: row.heroStats };
   }
 
   // --- Team CRUD (Capacity view roster) ------------------------------------

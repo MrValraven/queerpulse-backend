@@ -38,6 +38,20 @@ import { PushSubscription } from './entities/push-subscription.entity';
  */
 export const READ_DISMISS_TAG_PREFIX = 'qp-read-dismiss:';
 
+// True for a Web Push endpoint hosted by Apple (`web.push.apple.com` and any
+// `*.push.apple.com` host). A string that does not parse as a URL is false.
+export function isApplePushEndpoint(endpoint: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(endpoint).hostname;
+  } catch {
+    return false;
+  }
+  return (
+    hostname === 'web.push.apple.com' || hostname.endsWith('.push.apple.com')
+  );
+}
+
 export interface PushPayload {
   title: string;
   body: string;
@@ -65,8 +79,7 @@ export interface PushPayload {
   // `body` above are always the English fallback a sender must still set. The
   // service worker resolves `titleKey`/`bodyKey` against its bundled EN/PT
   // catalog (queerpulse/src/pushMessages.ts) in the recipient's language,
-  // interpolating `params`, and falls back to plain title/body otherwise
-  // (also what iOS renders, since it never runs the SW's push-handler JS).
+  // interpolating `params`, and falls back to plain title/body otherwise.
   // Field shape MUST match the frontend `DirectMessagePush.l10n` exactly
   // (lockstep contract) or the SW validator drops it silently.
   l10n?: {
@@ -361,17 +374,29 @@ export class PushService implements OnModuleInit {
    * Sent through `sendToUsers` directly, never `PushPreviewPrivacyService`:
    * the payload names no one and carries no message text, so there is
    * nothing a hidden-preview split would need to redact.
+   *
+   * Apple endpoints are skipped. WebKit (commit 313831@main) turns `close()`
+   * on a persistent notification into a no-op during the first 30 seconds
+   * after it is shown, so on current Apple devices the throwaway marker stays
+   * on screen as a blank "QueerPulse" notification. Apple devices therefore
+   * get no marker: after a read elsewhere the lock-screen notification stays
+   * until the app opens, where the frontend's `useCloseReadNotifications` hook
+   * closes it.
    */
   @OnEvent(MESSAGE_READ)
   async handleMessageRead(event: MessageReadEvent): Promise<void> {
     try {
-      await this.sendToUsers([event.userId], {
-        title: 'QueerPulse',
-        body: '',
-        tag: `${READ_DISMISS_TAG_PREFIX}${event.conversationId}`,
-        data: { conversationId: event.conversationId, url: '/messages' },
-        silent: true,
-      });
+      await this.sendToUsers(
+        [event.userId],
+        {
+          title: 'QueerPulse',
+          body: '',
+          tag: `${READ_DISMISS_TAG_PREFIX}${event.conversationId}`,
+          data: { conversationId: event.conversationId, url: '/messages' },
+          silent: true,
+        },
+        { shouldSkipApplePushEndpoints: true },
+      );
     } catch (error) {
       this.logger.warn(
         `Failed to fan out a read-dismissal push for ${event.conversationId}: ${String(error)}`,
@@ -391,9 +416,15 @@ export class PushService implements OnModuleInit {
   // (`push.listener.ts`'s group/DM message fan-out, `event-reminders.service.ts`'s
   // reminder fan-out) turned N recipients into N subscription lookups; this
   // resolves every recipient's subscriptions with a single `IN (...)` query.
-  async sendToUsers(userIds: string[], payload: PushPayload): Promise<void> {
+  // `shouldSkipApplePushEndpoints` drops Apple (WebKit) subscriptions from the
+  // fan-out; only payloads that must not reach those devices set it.
+  async sendToUsers(
+    userIds: string[],
+    payload: PushPayload,
+    options: { shouldSkipApplePushEndpoints?: boolean } = {},
+  ): Promise<void> {
     if (!this.enabled || userIds.length === 0) return;
-    const rows = await this.subscriptions.find({
+    const allRows = await this.subscriptions.find({
       where: { userId: In(userIds) },
       // Only what `deliverToSubscription` reads. A broadcast to a popular
       // gathering materializes every recipient's every device before the cap
@@ -401,6 +432,9 @@ export class PushService implements OnModuleInit {
       // this path looks at.
       select: ['id', 'endpoint', 'p256dh', 'auth'],
     });
+    const rows = options.shouldSkipApplePushEndpoints
+      ? allRows.filter((row) => !isApplePushEndpoint(row.endpoint))
+      : allRows;
     const body = JSON.stringify(payload);
     // Each entry is a THUNK (not a started promise) so `runWithConcurrency`
     // decides when a send actually starts; mapping to started promises here
@@ -516,6 +550,9 @@ export class PushService implements OnModuleInit {
           );
         } else if (statusCode === 404 || statusCode === 410) {
           await this.subscriptions.delete(row.id);
+          this.logger.log(
+            `Pruned push subscription ${row.id}: push service answered ${statusCode}`,
+          );
         } else if (statusCode === 401 || statusCode === 403) {
           // The push service rejected our VAPID credentials for this endpoint:
           // the subscription was created under an application server key this
@@ -523,6 +560,9 @@ export class PushService implements OnModuleInit {
           // succeed. Pruned like a 404/410 instead of failing on every push
           // forever; the client re-subscribes under the current key on boot.
           await this.subscriptions.delete(row.id);
+          this.logger.log(
+            `Pruned push subscription ${row.id}: push service answered ${statusCode}`,
+          );
         } else {
           this.logger.warn(
             `Web Push send failed for ${row.id}${hasRetried ? ' after one retry' : ''}: ${statusCode ?? String(error)}`,

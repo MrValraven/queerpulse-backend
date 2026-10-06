@@ -14,10 +14,14 @@ import {
  * `INCOME`, `EXPENSE`, `EVENTS`) — the Q2 2026 quarterly transparency
  * snapshot that `FinancesSection` renders.
  *
- * Wired into `src/database/seed.ts` via `seedGovernanceFinance()`, which
- * inserts this snapshot idempotently (keyed on `quarter`) alongside the other
- * domain fixtures. Run `pnpm run seed` to populate `governance_finance_report`
- * so `GET /governance/finances` returns the latest quarter instead of 404ing.
+ * DEV FIXTURE ONLY (PRD-447). Wired into `src/database/seed.ts` via
+ * `seedGovernanceFinance()`, which refuses to run in production. Every figure
+ * here is invented and every name is fictional. The rows it writes keep their
+ * `seeded` provenance, so `GET /governance/finances` never serves them: the
+ * public page shows a report only once the governance team has entered its
+ * headline figures on the admin Finances tab. In production,
+ * `RemoveSeededGovernanceFinances1828700000000` deletes what the historical
+ * `SeedGovernanceContent` migration inserted from this file.
  *
  * The operational-reserve figures and the two named partner-support
  * disclosures now travel on this report too (`reserve`/`partners`) — they
@@ -48,7 +52,7 @@ export const financeIncomeSeed: FinanceLine[] = [
   {
     label: 'Member contributions',
     amount: '€1,840',
-    note: 'Sliding scale €5–€25/month. 99 of 247 members contribute. No one is required to. No one is chased.',
+    note: 'Sliding scale €5–€25/month. In this sample report, 99 members contribute. No one is required to. No one is chased.',
     width: 80,
     items: [
       {
@@ -111,11 +115,15 @@ export const financeIncomeSeed: FinanceLine[] = [
     width: 26,
     items: [
       {
-        name: 'Fundação Calouste Gulbenkian',
+        name: 'Harbour Light Foundation',
         period: 'Mental Health Fund',
         amount: '€400',
       },
-      { name: 'ILGA Portugal', period: 'Community events', amount: '€200' },
+      {
+        name: 'Riverside Rights Collective',
+        period: 'Community events',
+        amount: '€200',
+      },
     ],
     total: { label: '2 partners · restricted use only', amount: '€600' },
   },
@@ -125,7 +133,7 @@ export const financeExpenseSeed: FinanceLine[] = [
   {
     label: 'Platform & tools',
     amount: '€520',
-    note: 'Hosting, email infrastructure, storage, and development tools. No proprietary stack — we use open-source where possible.',
+    note: 'Hosting, notification infrastructure, storage, and development tools. No proprietary stack: we use open-source where possible.',
     width: 26,
     items: [
       {
@@ -133,30 +141,34 @@ export const financeExpenseSeed: FinanceLine[] = [
         period: '€3/mo',
         amount: '€9',
       },
-      { name: 'Web server (Hetzner CX41)', period: '€20/mo', amount: '€60' },
+      { name: 'Web server (cloud VM)', period: '€20/mo', amount: '€60' },
       {
         name: 'Database hosting (managed PostgreSQL)',
         period: '€28/mo',
         amount: '€84',
       },
-      { name: 'Email sending (Postmark)', period: '€24/mo', amount: '€72' },
       {
-        name: 'File & media storage (Backblaze B2)',
+        name: 'Push notifications (self-hosted)',
+        period: '€24/mo',
+        amount: '€72',
+      },
+      {
+        name: 'File & media storage (object storage)',
         period: '€9/mo',
         amount: '€27',
       },
       {
-        name: 'Video calls (Jitsi, self-hosted)',
+        name: 'Video calls (self-hosted)',
         period: '€12/mo',
         amount: '€36',
       },
       {
-        name: 'Security & monitoring (Sentry + uptime)',
+        name: 'Security & monitoring (error tracking + uptime)',
         period: '€22/mo',
         amount: '€66',
       },
       {
-        name: 'Development tools (GitHub Pro, CI)',
+        name: 'Development tools (code hosting, CI)',
         period: '€15/mo',
         amount: '€45',
       },
@@ -173,7 +185,7 @@ export const financeExpenseSeed: FinanceLine[] = [
     width: 60,
     items: [
       {
-        name: 'Newcomer dinner — venue (Casa do Alentejo)',
+        name: 'Newcomer dinner: venue (community hall)',
         period: 'April',
         amount: '€180',
       },
@@ -188,7 +200,7 @@ export const financeExpenseSeed: FinanceLine[] = [
         amount: '€40',
       },
       {
-        name: 'Skills fair — venue hire (LX Factory)',
+        name: 'Skills fair: venue hire (arts centre)',
         period: 'April',
         amount: '€280',
       },
@@ -198,7 +210,7 @@ export const financeExpenseSeed: FinanceLine[] = [
         amount: '€60',
       },
       {
-        name: 'Queer cinema nights × 2 (Cinema Ideal)',
+        name: 'Queer cinema nights × 2 (neighbourhood cinema)',
         period: 'May–June',
         amount: '€180',
       },
@@ -219,7 +231,7 @@ export const financeExpenseSeed: FinanceLine[] = [
   {
     label: 'Mental health fund',
     amount: '€740',
-    note: 'Subsidised therapy sessions for members who need them. Funded in part by the Gulbenkian grant. 11 sessions this quarter.',
+    note: 'Subsidised therapy sessions for members who need them. Funded in part by the Harbour Light grant. 11 sessions this quarter.',
     width: 36,
     items: [
       {
@@ -355,12 +367,12 @@ export const financeReserveSeed: FinanceReserve = {
 // `governance.data.ts`; `scopeKey` stays an i18n key resolved on the frontend.
 export const financePartnersSeed: FinancePartner[] = [
   {
-    name: 'Fundação Calouste Gulbenkian',
+    name: 'Harbour Light Foundation',
     amount: 400,
     scopeKey: 'governance:sections.finances.partnerScope.mentalHealthFund',
   },
   {
-    name: 'ILGA Portugal',
+    name: 'Riverside Rights Collective',
     amount: 200,
     scopeKey: 'governance:sections.finances.partnerScope.communityEvents',
   },

@@ -34,8 +34,13 @@ export class HousingDirectoryController {
   @Get()
   @ApiOperation({ summary: 'Browse live housing listings (paginated)' })
   @ApiOkResponse({ description: 'A page of live housing listings.' })
-  browse(@Query() query: BrowseHousingListingsQuery) {
-    return this.service.browse(query);
+  browse(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: BrowseHousingListingsQuery,
+  ) {
+    // The viewer drops homes listed by anyone blocked either way or muted by
+    // them (ENG-470).
+    return this.service.browse(query, user.userId);
   }
 
   @Get(':slug')

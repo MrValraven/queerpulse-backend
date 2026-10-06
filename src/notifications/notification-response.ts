@@ -251,6 +251,16 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.ForumReply]: ['threadTitle'],
     [NotificationType.ForumThreadReply]: ['threadTitle'],
     [NotificationType.TopicNewPost]: ['topicSlug', 'topicLabel', 'threadTitle'],
+    // Funding & Grants. `threadTitle` names the call, `deadline` is the ISO
+    // instant the copy renders as a Lisbon date, and `stage` (`7d` | `1d`)
+    // picks the sentence. `source` and `threadSlug` ride in
+    // COMMON_PAYLOAD_KEYS and build the deep link.
+    [NotificationType.FundingDeadlineSoon]: [
+      'threadTitle',
+      'deadline',
+      'stage',
+    ],
+    [NotificationType.FundingDeadlineChanged]: ['threadTitle', 'deadline'],
     // `actionId` (ENG-480) is the `mod_audit_logs` row id of the decision, so
     // the bell can open the appeal form on that exact decision. It is the
     // recipient's own sanction, which `POST /appeals` already accepts by id
@@ -398,6 +408,19 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.PersonaEndorsed]: ['subprofileName'],
     [NotificationType.PersonaFollowed]: ['subprofileName'],
     [NotificationType.SafeSpaceVouch]: ['spaceName', 'spaceSlug'],
+    // DES-417. A safe-space review step. `action` and `audience` are closed
+    // codes the client picks its sentence from; `placeName` is the venue's
+    // public name; `reason` is the moderator's own word to a nominator on a
+    // declined nomination (moderator-authored prose written TO this recipient,
+    // like `HousingListingDecision`'s `reason`). `source` and `listingSlug`
+    // ride in COMMON_PAYLOAD_KEYS and build the deep link. No flagger id or
+    // flag text ever rides along.
+    [NotificationType.SafeSpaceReview]: [
+      'action',
+      'audience',
+      'placeName',
+      'reason',
+    ],
     [NotificationType.HousingListingMatch]: ['title', 'area', 'slug'],
     // The moderator's decision on the member's OWN housing listing, plus the
     // reason they were given. `reason` is moderator-authored prose written TO

@@ -502,4 +502,71 @@ describe('PreferencesService', () => {
       expect(result).toEqual({ hideFromSuggestions: false });
     });
   });
+
+  describe('interface language (PRD-325)', () => {
+    // `null` means the member has never told the server, which the app reads
+    // as "write this device's language up".
+    it('is null when no row exists, and the read writes nothing', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await expect(service.getLanguagePreference('u1')).resolves.toEqual({
+        language: null,
+      });
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('is null on an existing row that never stored one', async () => {
+      repo.findOne.mockResolvedValue(row({ language: null }));
+
+      await expect(service.getLanguagePreference('u1')).resolves.toEqual({
+        language: null,
+      });
+    });
+
+    it('returns the stored language', async () => {
+      repo.findOne.mockResolvedValue(row({ language: 'pt' }));
+
+      await expect(service.getLanguagePreference('u1')).resolves.toEqual({
+        language: 'pt',
+      });
+    });
+
+    it("merges onto the existing row and leaves the row's other settings alone", async () => {
+      repo.findOne.mockResolvedValue(
+        row({ language: 'en', publicProfileEnabled: true, safeOnly: false }),
+      );
+
+      const result = await service.updateLanguagePreference('u1', {
+        language: 'pt',
+      });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          language: 'pt',
+          publicProfileEnabled: true,
+          safeOnly: false,
+          outAtWork: OutAtWork.Out,
+          transSupport: ['chosen-name'],
+        }),
+      );
+      expect(result).toEqual({ language: 'pt' });
+    });
+
+    it('starts from the documented defaults when no row exists', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await service.updateLanguagePreference('u1', { language: 'pt' });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          language: 'pt',
+          publicProfileEnabled: false,
+          hidePushPreviews: true,
+          loginAlertsEnabled: true,
+        }),
+      );
+    });
+  });
 });

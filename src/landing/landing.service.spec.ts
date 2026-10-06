@@ -12,6 +12,14 @@ import {
   Changemaker,
   ChangemakerStatus,
 } from '../changemakers/entities/changemaker.entity';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import {
@@ -101,6 +109,55 @@ function makeChangemaker(overrides: Partial<Changemaker>): Changemaker {
   } as Changemaker;
 }
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+function makeEvent(overrides: Partial<Event>): Event {
+  return {
+    id: 'event-id',
+    slug: 'some-gathering',
+    title: 'Some Gathering',
+    startAt: new Date(Date.now() + ONE_DAY_MS),
+    endAt: null,
+    timezone: 'Europe/Lisbon',
+    neighbourhood: 'Arroios',
+    isOnline: false,
+    onlineUrl: null,
+    venue: 'The Back Room Bar',
+    address: 'Rua Exemplo 1, 2 Esq',
+    arrivalNotes: 'Ring the bell on the left',
+    hostId: 'host-user-id',
+    coverImageUrl: null,
+    status: EventStatus.Published,
+    visibility: EventVisibility.Public,
+    ...overrides,
+  } as Event;
+}
+
+function makeArticle(overrides: Partial<MagazineArticle>): MagazineArticle {
+  return {
+    id: 'article-id',
+    slug: 'some-story',
+    title: 'Some Story',
+    dek: 'A short dek',
+    heroImageKey: '',
+    authorId: 'author-id',
+    readMinutes: 6,
+    publishedAt: new Date(Date.now() - ONE_DAY_MS),
+    translationOfArticleId: null,
+    ...overrides,
+  } as MagazineArticle;
+}
+
+function makeAuthor(overrides: Partial<MagazineAuthor>): MagazineAuthor {
+  return {
+    id: 'author-id',
+    userId: 'author-user-id',
+    slug: 'some-author',
+    name: 'Some Author',
+    ...overrides,
+  } as MagazineAuthor;
+}
+
 function makeFeature(overrides: Partial<LandingFeature>): LandingFeature {
   return {
     id: 'feature-id',
@@ -142,6 +199,18 @@ describe('LandingService', () => {
     createQueryBuilder: jest.Mock;
   };
   let communityMembers: { createQueryBuilder: jest.Mock };
+  let events: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let articles: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let authors: { find: jest.Mock };
+  let contentModeration: { find: jest.Mock };
   // The transactional `EntityManager` seen inside `dataSource.transaction`'s
   // callback. `createFeature` and `reorderFeatures` both now do their
   // section-row-locking + writes through this, distinct from the outer
@@ -180,6 +249,18 @@ describe('LandingService', () => {
       createQueryBuilder: jest.fn(() => qbStub()),
     };
     communityMembers = { createQueryBuilder: jest.fn(() => qbStub()) };
+    events = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      createQueryBuilder: jest.fn(() => qbStub()),
+    };
+    articles = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      createQueryBuilder: jest.fn(() => qbStub()),
+    };
+    authors = { find: jest.fn().mockResolvedValue([]) };
+    contentModeration = { find: jest.fn().mockResolvedValue([]) };
     manager = {
       createQueryBuilder: jest.fn(() => qbStub()),
       save: jest.fn((value: unknown) => Promise.resolve(value)),
@@ -208,6 +289,13 @@ describe('LandingService', () => {
         {
           provide: getRepositoryToken(CommunityMember),
           useValue: communityMembers,
+        },
+        { provide: getRepositoryToken(Event), useValue: events },
+        { provide: getRepositoryToken(MagazineArticle), useValue: articles },
+        { provide: getRepositoryToken(MagazineAuthor), useValue: authors },
+        {
+          provide: getRepositoryToken(ContentModeration),
+          useValue: contentModeration,
         },
         { provide: DataSource, useValue: dataSource },
       ],
@@ -603,6 +691,191 @@ describe('LandingService', () => {
 
       expect(result.members).toEqual([]);
     });
+
+    it('keeps only public, published, upcoming gatherings that are not taken down', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Gathering) return [];
+          return [
+            'e-open',
+            'e-members',
+            'e-invite',
+            'e-community',
+            'e-cancelled',
+            'e-draft',
+            'e-ended',
+            'e-taken-down',
+            'e-deleted',
+          ].map((targetId, position) =>
+            makeFeature({
+              id: `f-${targetId}`,
+              section: LandingSection.Gathering,
+              targetId,
+              position,
+              copy: {},
+            }),
+          );
+        },
+      );
+      events.find.mockResolvedValue([
+        makeEvent({ id: 'e-open', slug: 'open-gathering' }),
+        makeEvent({
+          id: 'e-members',
+          slug: 'members-gathering',
+          visibility: EventVisibility.Members,
+        }),
+        makeEvent({
+          id: 'e-invite',
+          slug: 'invite-gathering',
+          visibility: EventVisibility.InviteOnly,
+        }),
+        makeEvent({
+          id: 'e-community',
+          slug: 'community-gathering',
+          visibility: EventVisibility.Community,
+        }),
+        makeEvent({
+          id: 'e-cancelled',
+          slug: 'cancelled-gathering',
+          status: EventStatus.Cancelled,
+        }),
+        makeEvent({
+          id: 'e-draft',
+          slug: 'draft-gathering',
+          status: EventStatus.Draft,
+        }),
+        makeEvent({
+          id: 'e-ended',
+          slug: 'ended-gathering',
+          startAt: new Date(Date.now() - 2 * ONE_DAY_MS),
+          endAt: new Date(Date.now() - ONE_DAY_MS),
+        }),
+        makeEvent({ id: 'e-taken-down', slug: 'taken-down-gathering' }),
+      ]);
+      contentModeration.find.mockResolvedValue([
+        { subjectId: 'e-taken-down', hiddenAt: new Date(), removedAt: null },
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.gatherings.map((gathering) => gathering.slug)).toEqual([
+        'open-gathering',
+      ]);
+      // Batched: one entity query and one moderation query for the section.
+      expect(events.find).toHaveBeenCalledTimes(1);
+      expect(contentModeration.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a gathering that has started and is still running', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Gathering) return [];
+          return [
+            makeFeature({
+              section: LandingSection.Gathering,
+              targetId: 'e-running',
+              copy: {},
+            }),
+          ];
+        },
+      );
+      events.find.mockResolvedValue([
+        makeEvent({
+          id: 'e-running',
+          slug: 'running-gathering',
+          startAt: new Date(Date.now() - ONE_DAY_MS),
+          endAt: new Date(Date.now() + ONE_DAY_MS),
+        }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.gatherings.map((gathering) => gathering.slug)).toEqual([
+        'running-gathering',
+      ]);
+    });
+
+    it('a public gathering card carries the area only, with no address, venue, host or attendees', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Gathering) return [];
+          return [
+            makeFeature({
+              id: 'f-gathering',
+              section: LandingSection.Gathering,
+              targetId: 'e-1',
+              copy: { blurb: 'Editor pick' },
+            }),
+          ];
+        },
+      );
+      const startAt = new Date(Date.now() + ONE_DAY_MS);
+      events.find.mockResolvedValue([
+        makeEvent({ id: 'e-1', slug: 'supper-club', startAt }),
+      ]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.gatherings).toEqual([
+        {
+          id: 'f-gathering',
+          slug: 'supper-club',
+          title: 'Some Gathering',
+          startAt: startAt.toISOString(),
+          timezone: 'Europe/Lisbon',
+          area: 'Arroios',
+          isOnline: false,
+          coverImageUrl: null,
+          blurb: 'Editor pick',
+        },
+      ]);
+    });
+
+    it('keeps only published stories and credits the byline as printed', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Story) return [];
+          return ['a-live', 'a-draft', 'a-scheduled', 'a-deleted'].map(
+            (targetId, position) =>
+              makeFeature({
+                id: `f-${targetId}`,
+                section: LandingSection.Story,
+                targetId,
+                position,
+                copy: {},
+              }),
+          );
+        },
+      );
+      articles.find.mockResolvedValue([
+        makeArticle({ id: 'a-live', slug: 'live-story' }),
+        makeArticle({ id: 'a-draft', slug: 'draft-story', publishedAt: null }),
+        makeArticle({
+          id: 'a-scheduled',
+          slug: 'scheduled-story',
+          publishedAt: new Date(Date.now() + ONE_DAY_MS),
+        }),
+      ]);
+      authors.find.mockResolvedValue([makeAuthor({ name: 'Inês Duarte' })]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.stories).toEqual([
+        {
+          id: 'f-a-live',
+          slug: 'live-story',
+          title: 'Some Story',
+          dek: 'A short dek',
+          coverImageUrl: null,
+          authorName: 'Inês Duarte',
+          readMinutes: 6,
+          blurb: null,
+        },
+      ]);
+      // Batched: one article query and one byline query for the section.
+      expect(articles.find).toHaveBeenCalledTimes(1);
+      expect(authors.find).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('createFeature', () => {
@@ -664,6 +937,197 @@ describe('LandingService', () => {
       expect(manager.save).toHaveBeenCalledWith(
         expect.objectContaining({ position: 4 }),
       );
+    });
+  });
+
+  describe('createFeature (gatherings and stories)', () => {
+    const ineligibleGatherings: Array<[string, Partial<Event>]> = [
+      ['members-only', { visibility: EventVisibility.Members }],
+      ['private to a network', { visibility: EventVisibility.Network }],
+      ['cancelled', { status: EventStatus.Cancelled }],
+      [
+        'already over',
+        {
+          startAt: new Date(Date.now() - 2 * ONE_DAY_MS),
+          endAt: new Date(Date.now() - ONE_DAY_MS),
+        },
+      ],
+    ];
+
+    it.each(ineligibleGatherings)(
+      'rejects a gathering that is %s',
+      async (_label, overrides) => {
+        events.findOne.mockResolvedValue(
+          makeEvent({ id: 'e-1', ...overrides }),
+        );
+
+        await expect(
+          service.createFeature('admin-1', {
+            section: LandingSection.Gathering,
+            targetId: 'e-1',
+            copy: {},
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(dataSource.transaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects a gathering a moderator took down', async () => {
+      events.findOne.mockResolvedValue(makeEvent({ id: 'e-1' }));
+      contentModeration.find.mockResolvedValue([
+        { subjectId: 'e-1', hiddenAt: null, removedAt: new Date() },
+      ]);
+
+      await expect(
+        service.createFeature('admin-1', {
+          section: LandingSection.Gathering,
+          targetId: 'e-1',
+          copy: {},
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('creates a feature for a public upcoming gathering', async () => {
+      events.findOne.mockResolvedValue(
+        makeEvent({ id: 'e-1', slug: 'supper-club' }),
+      );
+
+      const created = await service.createFeature('admin-1', {
+        section: LandingSection.Gathering,
+        targetId: 'e-1',
+        copy: { blurb: 'Editor pick' },
+      });
+
+      expect(created.eligible).toBe(true);
+      expect(created.target?.slug).toBe('supper-club');
+    });
+
+    it('rejects a story that is not published yet', async () => {
+      articles.findOne.mockResolvedValue(
+        makeArticle({ id: 'a-1', publishedAt: null }),
+      );
+
+      await expect(
+        service.createFeature('admin-1', {
+          section: LandingSection.Story,
+          targetId: 'a-1',
+          copy: {},
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a published translation so each piece is featured once', async () => {
+      articles.findOne.mockResolvedValue(
+        makeArticle({ id: 'a-pt', translationOfArticleId: 'a-en' }),
+      );
+
+      await expect(
+        service.createFeature('admin-1', {
+          section: LandingSection.Story,
+          targetId: 'a-pt',
+          copy: {},
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('stories and translations', () => {
+    it('drops a curated translation from the public read', async () => {
+      landingFeatures.find.mockImplementation(
+        ({ where }: { where: { section: LandingSection } }) => {
+          if (where.section !== LandingSection.Story) return [];
+          return ['a-en', 'a-pt'].map((targetId, position) =>
+            makeFeature({
+              id: `f-${targetId}`,
+              section: LandingSection.Story,
+              targetId,
+              position,
+              copy: {},
+            }),
+          );
+        },
+      );
+      articles.find.mockResolvedValue([
+        makeArticle({ id: 'a-en', slug: 'original-story' }),
+        makeArticle({
+          id: 'a-pt',
+          slug: 'historia-traduzida',
+          translationOfArticleId: 'a-en',
+        }),
+      ]);
+      authors.find.mockResolvedValue([makeAuthor({})]);
+
+      const result = await service.getPublicFeatures();
+
+      expect(result.stories.map((story) => story.slug)).toEqual([
+        'original-story',
+      ]);
+    });
+
+    it('labels a curated translation not_public on the admin roster', async () => {
+      landingFeatures.find.mockResolvedValue([
+        makeFeature({
+          id: 'f-pt',
+          section: LandingSection.Story,
+          targetId: 'a-pt',
+          copy: {},
+        }),
+      ]);
+      articles.find.mockResolvedValue([
+        makeArticle({ id: 'a-pt', translationOfArticleId: 'a-en' }),
+      ]);
+
+      const roster = await service.listAdminFeatures(LandingSection.Story);
+
+      expect(roster.map((row) => [row.eligible, row.hiddenReason])).toEqual([
+        [false, 'not_public'],
+      ]);
+    });
+
+    it('keeps translations out of the story picker query', async () => {
+      const storyQuery = qbStub();
+      articles.createQueryBuilder.mockReturnValue(storyQuery);
+
+      await service.listEligible(LandingSection.Story);
+
+      expect(storyQuery.andWhere).toHaveBeenCalledWith(
+        '"story"."translation_of_article_id" IS NULL',
+      );
+    });
+  });
+
+  describe('listAdminFeatures (gatherings)', () => {
+    it('labels a cancelled gathering and an ended one with their reasons', async () => {
+      landingFeatures.find.mockResolvedValue([
+        makeFeature({
+          id: 'f-cancelled',
+          section: LandingSection.Gathering,
+          targetId: 'e-cancelled',
+          copy: {},
+        }),
+        makeFeature({
+          id: 'f-ended',
+          section: LandingSection.Gathering,
+          targetId: 'e-ended',
+          copy: {},
+        }),
+      ]);
+      events.find.mockResolvedValue([
+        makeEvent({ id: 'e-cancelled', status: EventStatus.Cancelled }),
+        makeEvent({
+          id: 'e-ended',
+          startAt: new Date(Date.now() - ONE_DAY_MS),
+        }),
+      ]);
+
+      const rows = await service.listAdminFeatures(LandingSection.Gathering);
+
+      expect(rows.map((row) => [row.eligible, row.hiddenReason])).toEqual([
+        [false, 'cancelled'],
+        [false, 'ended'],
+      ]);
     });
   });
 

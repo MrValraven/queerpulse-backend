@@ -36,7 +36,6 @@ import { SubmitIdeaDto } from './dto/submit-idea.dto';
 import { CreateRoadmapItemDto } from './dto/create-roadmap-item.dto';
 import { UpdateRoadmapItemDto } from './dto/update-roadmap-item.dto';
 import { UpdateIdeaDto } from './dto/update-idea.dto';
-import { UpdateSettingsDto } from './dto/update-settings.dto';
 import { UpdateDepsDto } from './dto/update-deps.dto';
 import { ArchiveItemDto } from './dto/archive-item.dto';
 import { NotifyVotersDto } from './dto/notify-voters.dto';
@@ -350,15 +349,5 @@ export class AdminRoadmapController {
   @Header('Content-Disposition', 'attachment; filename="roadmap-audit.csv"')
   getAuditCsv() {
     return this.adminService.getAuditCsv();
-  }
-
-  @ApiOperation({ summary: 'Update the roadmap hero-stats settings' })
-  @ApiOkResponse({ description: 'The persisted hero stats.' })
-  @Patch('settings')
-  updateSettings(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: UpdateSettingsDto,
-  ) {
-    return this.adminService.updateSettings(dto, this.toActor(user));
   }
 }

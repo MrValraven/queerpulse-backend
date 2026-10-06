@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Between, IsNull, Not, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
 import {
   HousingListing,
   HousingListingStatus,
@@ -53,6 +54,13 @@ const MAX_EXPIRY_WARNINGS_PER_RUN = 500;
  * the repository, the table and the index, and their windows cannot overlap,
  * so a listing is never both warned and expired on one night. Each carries its
  * own try/catch, so a failure in one still lets the other run.
+ *
+ * PRD-444. The sweep stamps `sweptAt` in the same UPDATE as `filledAt`, so the
+ * owner surfaces read "hidden by the sweep" as a stored fact. It then calls off
+ * the REQUESTED viewings on the homes it just hid
+ * (`HousingViewingsService.closeRequestedForListings`), because a hidden home
+ * cannot accept one. Accepted viewings stay: the lister may still show the
+ * home and can `extend` it back up.
  */
 @Injectable()
 export class HousingListingExpirySweeperService {
@@ -62,6 +70,7 @@ export class HousingListingExpirySweeperService {
     @InjectRepository(HousingListing)
     private readonly listings: Repository<HousingListing>,
     private readonly notifications: NotificationsService,
+    private readonly viewings: HousingViewingsService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -73,24 +82,35 @@ export class HousingListingExpirySweeperService {
       for (let batch = 0; batch < SWEEP_MAX_BATCHES; batch += 1) {
         // Bound each UPDATE with a primary-key subselect + LIMIT (the same
         // shape `InviteExpirySweeperService` and `deleteInBatches` use) so we
-        // never lock the whole table at once.
+        // never lock the whole table at once. The raw subselect skips
+        // soft-deleted rows itself (ENG-466): only TypeORM's own reads do
+        // that for free.
         const result = await this.listings
           .createQueryBuilder()
           .update(HousingListing)
-          .set({ filledAt: now })
+          .set({ filledAt: now, sweptAt: now })
           .where(
             `id IN (SELECT id FROM "${tableName}" ` +
               `WHERE status = :live AND filled_at IS NULL ` +
-              `AND expires_at < :now LIMIT :limit)`,
+              `AND expires_at < :now AND deleted_at IS NULL LIMIT :limit)`,
             {
               live: HousingListingStatus.Live,
               now,
               limit: SWEEP_BATCH_SIZE,
             },
           )
+          .returning(['id'])
           .execute();
         const affected = result.affected ?? 0;
         totalExpired += affected;
+        const sweptListingIds = ((result.raw ?? []) as { id?: unknown }[])
+          .map((row) => row.id)
+          .filter((id): id is string => typeof id === 'string');
+        // Best-effort and self-contained: a failure is logged inside and the
+        // sweep carries on to the next batch.
+        if (sweptListingIds.length > 0) {
+          await this.viewings.closeRequestedForListings(sweptListingIds);
+        }
         if (affected < SWEEP_BATCH_SIZE) {
           break;
         }

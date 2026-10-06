@@ -120,9 +120,12 @@ export class GovernanceController {
     summary:
       'Get the quarterly financial-transparency snapshot (unauthenticated)',
   })
-  @ApiOkResponse({ description: 'The finance report for the quarter.' })
+  @ApiOkResponse({
+    description:
+      'The newest finance report whose figures were entered by the governance team, or the empty report (quarter: null) when none is published yet.',
+  })
   @ApiNotFoundResponse({
-    description: 'No finance report exists for the requested quarter.',
+    description: 'The requested quarter has no published finance report.',
   })
   getFinances(@Query() query: GetGovernanceFinancesQuery) {
     return this.governanceFinanceService.getFinances(query.quarter);

@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
+import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { normalizePage, paginate } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
@@ -13,15 +15,24 @@ import {
   toInquiryAckDTO,
   toInquiryDTO,
 } from './inquiries-response';
-import { Inquiry, InquiryStatus } from './entities/inquiry.entity';
+import {
+  Inquiry,
+  InquiryStatus,
+  PRIORITY_INQUIRY_TOPICS,
+} from './entities/inquiry.entity';
 
 /**
  * Stores public marketing-form submissions (Contact + partnership) so staff can
  * triage them in the admin list.
  *
- * The admin list is the ONLY channel. QueerPulse delivers no email, so nothing
- * pings an ops inbox when an inquiry arrives: staff have to open the list. A
- * submission is never lost, it just waits there to be read.
+ * The admin list is where every inquiry is read. QueerPulse delivers no email,
+ * so nothing pings an ops inbox: a submission waits in the list to be read.
+ *
+ * A safety concern (PRD-452) is the exception on two counts. It is stored
+ * with `isPriority`, which sorts it above every other waiting inquiry, and its
+ * arrival rings the staff bell through the admin-queue registry, so the
+ * Contact page's promise that safety messages are read first is something the
+ * inbox actually does.
  */
 @Injectable()
 export class InquiriesService {
@@ -30,14 +41,25 @@ export class InquiriesService {
     private readonly inquiries: Repository<Inquiry>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
   /**
-   * Persist a new inquiry (`status = 'new'`). Nothing is dispatched anywhere:
-   * the saved row IS the notification, and staff pick it up from the admin
+   * Persist a new inquiry (`status = 'new'`). Staff pick it up from the admin
    * triage list.
+   *
+   * A Contact message whose `topic` is in `PRIORITY_INQUIRY_TOPICS` is stored
+   * as priority and announced on the `intakes` queue, the bell row that deep
+   * links to /admin/intakes where this inbox lives, and reaches the same
+   * admin tier the list's own guard allows. The announce runs after the save
+   * commits and is best effort (it catches and logs), so a bell failure never
+   * fails the sender's submit.
    */
   async create(dto: CreateInquiryDto): Promise<InquiryAckDTO> {
+    const isPriority =
+      dto.kind === 'contact' &&
+      !!dto.topic &&
+      PRIORITY_INQUIRY_TOPICS.includes(dto.topic);
     const inquiry = await this.inquiries.save(
       this.inquiries.create({
         kind: dto.kind,
@@ -47,8 +69,16 @@ export class InquiriesService {
         body: dto.body,
         orgName: dto.orgName ?? null,
         status: 'new',
+        isPriority,
       }),
     );
+
+    if (isPriority) {
+      await this.adminQueueNotifications.announce(
+        AdminQueueKey.Intakes,
+        inquiry.id,
+      );
+    }
 
     return toInquiryAckDTO(inquiry);
   }
@@ -68,6 +98,10 @@ export class InquiriesService {
 
   /**
    * Admin triage list, newest first, optionally filtered by kind/status.
+   * A priority inquiry that is still `new` sorts above everything else
+   * (PRD-452); once handled it falls back into date order, so the archive
+   * reads chronologically. The CASE is written in quoted snake_case so
+   * TypeORM passes it through verbatim.
    * Paginated with the shared page/`PAGE_SIZE` idiom so the admin console codes
    * against ONE envelope for this inbox and the intakes one.
    *
@@ -81,7 +115,11 @@ export class InquiriesService {
     const page = normalizePage(query.page);
     const queryBuilder = this.inquiries
       .createQueryBuilder('inquiry')
-      .orderBy('inquiry.createdAt', 'DESC');
+      .orderBy(
+        `CASE WHEN "inquiry"."is_priority" AND "inquiry"."status" = 'new' THEN 0 ELSE 1 END`,
+        'ASC',
+      )
+      .addOrderBy('inquiry.createdAt', 'DESC');
 
     if (query.kind) {
       queryBuilder.andWhere('inquiry.kind = :kind', { kind: query.kind });

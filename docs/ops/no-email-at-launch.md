@@ -26,7 +26,7 @@ Between the original decision and 2026-08-26 a **nodemailer-backed
 `MailerService` was introduced** in `src/mailer/`, wired into `AppModule`, and
 called from four places: an intake concern update, an ops ping on a new
 marketing inquiry, a listing-draft resume link, and a newsletter
-double-opt-in confirmation. It carried SMTP env vars (`SMTP_URL`, `SMTP_HOST`,
+double-opt-in confirmation (the newsletter tables were removed on 2026-10-06 (migration 1828710000000); no email address is kept for a newsletter). It carried SMTP env vars (`SMTP_URL`, `SMTP_HOST`,
 `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`,
 `OPS_INBOX_EMAIL`) and ran log-only until they were set, meaning a single
 production env change would have started delivering mail on paths nobody had
@@ -146,7 +146,7 @@ by the owners named at the top:
 Only once those exist does an implementation order make sense, and it should be
 harm-first: the 30-day erasure warning, then moderation and appeal outcomes to a
 locked-out member, then join-request approve/decline, then DSAR responses.
-Bulk mail (digests, newsletter) comes last and needs item 2 fully in place.
+Bulk mail (digests) comes last and needs item 2 fully in place.
 
 When and if that happens, the `comingSoon` flag and the inert banners listed
 above come off, and the softened copy below is restored to promise the email

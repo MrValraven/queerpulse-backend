@@ -20,7 +20,6 @@ import {
   RoadmapPaidKind,
   RoadmapPriority,
 } from './entities/roadmap-item.entity';
-import { RoadmapSettings } from './entities/roadmap-settings.entity';
 import { RoadmapTeamMember } from './entities/roadmap-team-member.entity';
 import { RoadmapVote, RoadmapVoteTarget } from './entities/roadmap-vote.entity';
 import { RoadmapAdminService } from './roadmap-admin.service';
@@ -147,7 +146,6 @@ describe('RoadmapAdminService', () => {
     create: jest.Mock;
     save: jest.Mock;
   };
-  let settings: { findOne: jest.Mock };
   let notifications: { createForRecipients: jest.Mock; create: jest.Mock };
   // Exposed at describe scope (not just inside `beforeEach`) so tests that
   // exercise a transactional mutator (`promoteIdea`/`mergeIdea`) can assert
@@ -186,7 +184,6 @@ describe('RoadmapAdminService', () => {
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) => Promise.resolve(v)),
     };
-    settings = { findOne: jest.fn().mockResolvedValue(null) };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue([]),
       create: jest.fn(),
@@ -274,7 +271,6 @@ describe('RoadmapAdminService', () => {
         { provide: getRepositoryToken(RoadmapItem), useValue: items },
         { provide: getRepositoryToken(RoadmapIdea), useValue: ideas },
         { provide: getRepositoryToken(RoadmapVote), useValue: votes },
-        { provide: getRepositoryToken(RoadmapSettings), useValue: settings },
         { provide: getRepositoryToken(RoadmapTeamMember), useValue: team },
         { provide: getRepositoryToken(RoadmapItemComment), useValue: comments },
         {

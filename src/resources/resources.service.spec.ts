@@ -236,6 +236,27 @@ describe('ResourcesService', () => {
       expect(qb.where).toHaveBeenCalledWith('r.publishedAt IS NOT NULL');
       expect(qb.andWhere).toHaveBeenCalledWith('r.lastReviewedOn IS NOT NULL');
     });
+
+    it('matches the folded English and Portuguese title and description', async () => {
+      await service.searchByText('saúde', 5);
+
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
+        andWhere: jest.Mock;
+      };
+      const [sql, parameters] = qb.andWhere.mock.calls.find(
+        ([clause]) => typeof clause === 'string' && clause.includes('LIKE'),
+      ) as [string, { pattern: string }];
+      for (const column of [
+        'title',
+        'description',
+        'title_pt',
+        'description_pt',
+      ]) {
+        expect(sql).toContain(`"r"."${column}"`);
+      }
+      expect(sql).toContain('translate(');
+      expect(parameters.pattern).toBe('%saúde%');
+    });
   });
 
   describe('getBySlug', () => {

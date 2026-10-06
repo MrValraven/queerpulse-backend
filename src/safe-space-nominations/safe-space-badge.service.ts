@@ -267,16 +267,17 @@ export class SafeSpaceBadgeService {
     await this.notifier.tell(
       [listing.ownerId],
       SafeSpaceNotificationAction.BadgeSuspended,
-      'The safe-space badge on your listing is paused while we review it. ' +
-        'Someone from the review team will be in touch.',
-      listing.slug,
+      { audience: 'owner', placeName: listing.name, listingSlug: listing.slug },
     );
     // The members who flagged learn the platform acted on it.
     await this.notifier.tell(
       flaggerIds,
       SafeSpaceNotificationAction.FlagReviewOpened,
-      `The safe-space badge on ${listing.name} is paused while we review what was raised.`,
-      listing.slug,
+      {
+        audience: 'flagger',
+        placeName: listing.name,
+        listingSlug: listing.slug,
+      },
     );
     return suspension;
   }
@@ -321,9 +322,7 @@ export class SafeSpaceBadgeService {
     await this.notifier.tell(
       [listing.ownerId],
       SafeSpaceNotificationAction.BadgeSuspended,
-      'The safe-space badge on your listing is paused while we review it. ' +
-        'Someone from the review team will be in touch.',
-      listing.slug,
+      { audience: 'owner', placeName: listing.name, listingSlug: listing.slug },
     );
     return toAdminSafeSpaceSuspensionResponse(suspension);
   }
@@ -377,14 +376,16 @@ export class SafeSpaceBadgeService {
     await this.notifier.tell(
       [listing.ownerId],
       SafeSpaceNotificationAction.BadgeRestored,
-      'The review finished and the safe-space badge on your listing is live again.',
-      listing.slug,
+      { audience: 'owner', placeName: listing.name, listingSlug: listing.slug },
     );
     await this.notifier.tell(
       stillOpen.map((flag) => flag.flaggerId),
       SafeSpaceNotificationAction.BadgeRestored,
-      `The review of ${listing.name} finished. Thank you for raising it.`,
-      listing.slug,
+      {
+        audience: 'flagger',
+        placeName: listing.name,
+        listingSlug: listing.slug,
+      },
     );
     const lifted = await this.suspensions.findOne({
       where: { id: suspension.id },

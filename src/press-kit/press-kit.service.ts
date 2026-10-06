@@ -10,6 +10,7 @@ import {
   EntityTarget,
   IsNull,
   LessThanOrEqual,
+  LessThan,
   ObjectLiteral,
   Repository,
 } from 'typeorm';
@@ -114,9 +115,11 @@ export class PressKitService {
           ...TOP_LEVEL_WHERE,
         },
       }),
-      // Published gatherings only — drafts (not yet live) and cancelled ones
-      // are not honest "gatherings held/scheduled".
-      this.events.count({ where: { status: EventStatus.Published } }),
+      // Published gatherings that have already started: drafts, cancelled
+      // ones and future-dated listings are not "gatherings held so far".
+      this.events.count({
+        where: { status: EventStatus.Published, startAt: LessThan(new Date()) },
+      }),
       // Only nominations a moderator has APPROVED count as real safe spaces;
       // pending/rejected are an intake queue, not a badge.
       this.safeSpaceNominations.count({ where: { status: 'approved' } }),

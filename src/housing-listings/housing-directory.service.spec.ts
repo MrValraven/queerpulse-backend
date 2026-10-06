@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
@@ -84,6 +85,8 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // Null = still looking / still live to the public (owner hasn't marked it
     // filled and the sweeper hasn't hidden it).
     filledAt: null,
+    // PRD-444: the expiry sweep did not write the current `filledAt`.
+    sweptAt: null,
     // NOT NULL on the entity — every listing always carries a real expiry.
     // Relative to NOW rather than a fixed date: `detail` 404s an expired
     // listing for everyone but its owner, so a hardcoded date silently turns
@@ -91,6 +94,10 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     // PRD-244: not yet warned about this term.
     expiryWarningSentAt: null,
+    // ENG-467: never relisted after a fill.
+    relistedAt: null,
+    // ENG-469: no failed geocode of the current address.
+    geocodeAttempts: 0,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -108,6 +115,7 @@ describe('HousingDirectoryService', () => {
   let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };
   let connections: { areConnected: jest.Mock };
   let viewings: { hasUnlockedViewing: jest.Mock };
+  let blockFilter: { excludeHidden: jest.Mock; isBlockedEitherWay: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -126,6 +134,11 @@ describe('HousingDirectoryService', () => {
     connections = { areConnected: jest.fn().mockResolvedValue(false) };
     // Default: no accepted viewing → no address unlock via the viewing path.
     viewings = { hasUnlockedViewing: jest.fn().mockResolvedValue(false) };
+    // Default: nobody is blocked either way.
+    blockFilter = {
+      excludeHidden: jest.fn((builder: unknown) => builder),
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -139,6 +152,7 @@ describe('HousingDirectoryService', () => {
         { provide: VerificationService, useValue: verification },
         { provide: ConnectionsService, useValue: connections },
         { provide: HousingViewingsService, useValue: viewings },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
 
@@ -201,6 +215,30 @@ describe('HousingDirectoryService', () => {
       expect(result.items).toEqual([]);
       expect(profiles.find).not.toHaveBeenCalled();
     });
+
+    // ENG-470: blocked-either-way and muted listers drop out in-query.
+    it('hides the homes of members the viewer blocked, was blocked by or muted', async () => {
+      const builder = makeBuilder({ getManyAndCount: [[], 0] });
+      listings.createQueryBuilder.mockReturnValue(builder);
+
+      await service.browse({}, 'viewer-1');
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        builder,
+        'viewer-1',
+        '"l"."owner_id"',
+      );
+    });
+
+    it('applies no block filter when no viewer is given', async () => {
+      listings.createQueryBuilder.mockReturnValue(
+        makeBuilder({ getManyAndCount: [[], 0] }),
+      );
+
+      await service.browse({});
+
+      expect(blockFilter.excludeHidden).not.toHaveBeenCalled();
+    });
   });
 
   describe('searchByText', () => {
@@ -219,6 +257,19 @@ describe('HousingDirectoryService', () => {
           area: 'Arroios',
         },
       ]);
+    });
+
+    it('hides the homes of members the viewer blocked, was blocked by or muted', async () => {
+      const builder = makeBuilder({ getMany: [] });
+      listings.createQueryBuilder.mockReturnValue(builder);
+
+      await service.searchByText('sunny', 5, 'viewer-1');
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        builder,
+        'viewer-1',
+        '"l"."owner_id"',
+      );
     });
   });
 
@@ -256,6 +307,29 @@ describe('HousingDirectoryService', () => {
       expect(result.lister).toBeNull();
     });
 
+    // ENG-470: the same 404 a missing listing gives, so nothing is confirmed.
+    it('404s a non-owner who is blocked either way with the lister', async () => {
+      listings.findOne.mockResolvedValue(makeListing());
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(service.detail('sunny-room', 'viewer-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+        'viewer-1',
+        'owner-1',
+      );
+    });
+
+    it('lets the owner read their own listing without a block check', async () => {
+      listings.findOne.mockResolvedValue(makeListing());
+
+      const result = await service.detail('sunny-room', 'owner-1');
+
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+      expect(result.locationUnlockedVia).toBe('owner');
+    });
+
     it('withholds the exact point/address from an unconnected viewer (area only)', async () => {
       listings.findOne.mockResolvedValue(
         makeListing({
@@ -275,8 +349,17 @@ describe('HousingDirectoryService', () => {
       expect(result.locationPrecision).toBe('area');
       expect(result.preciseLatitude).toBeNull();
       expect(result.addressLine).toBeNull();
+      expect(result.isLocationUnlocked).toBe(false);
+      expect(result.locationUnlockedVia).toBeNull();
       // The approximate neighbourhood pin is still provided (Arroios centroid).
       expect(result.approxLatitude).not.toBeNull();
+      // ENG-467: the viewing gate is asked with the lister (block check) and
+      // the relist moment (stale completed viewings).
+      expect(viewings.hasUnlockedViewing).toHaveBeenCalledWith(
+        'listing-1',
+        'stranger-1',
+        { listerId: 'owner-1', relistedAt: null },
+      );
     });
 
     it('discloses the exact point/address to a connected viewer', async () => {
@@ -297,6 +380,34 @@ describe('HousingDirectoryService', () => {
 
       expect(result.locationPrecision).toBe('exact');
       expect(result.preciseLatitude).toBe(38.7169);
+      expect(result.addressLine).toBe('Rua Secreta 1');
+      expect(result.locationUnlockedVia).toBe('connection');
+      expect(viewings.hasUnlockedViewing).not.toHaveBeenCalled();
+    });
+
+    // DES-419: the client explains a viewing unlock differently from a
+    // connection, so the gate that passed is reported.
+    it('reports a viewing unlock and passes the relist moment to the viewing gate', async () => {
+      const relistedAt = new Date('2026-05-01T00:00:00.000Z');
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          latitude: 38.7169,
+          longitude: -9.1487,
+          addressLine: 'Rua Secreta 1',
+          relistedAt,
+        }),
+      );
+      viewings.hasUnlockedViewing.mockResolvedValue(true);
+
+      const result = await service.detail('sunny-room', 'visitor-1');
+
+      expect(viewings.hasUnlockedViewing).toHaveBeenCalledWith(
+        'listing-1',
+        'visitor-1',
+        { listerId: 'owner-1', relistedAt },
+      );
+      expect(result.isLocationUnlocked).toBe(true);
+      expect(result.locationUnlockedVia).toBe('viewing');
       expect(result.addressLine).toBe('Rua Secreta 1');
     });
   });

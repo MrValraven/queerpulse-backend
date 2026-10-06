@@ -486,7 +486,11 @@ describe('FeedService', () => {
   let forumThreads: { createQueryBuilder: jest.Mock };
   let forumPosts: { createQueryBuilder: jest.Mock };
   let events: { createQueryBuilder: jest.Mock };
-  let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let profiles: {
+    find: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    query: jest.Mock;
+  };
   let communityMembers: { createQueryBuilder: jest.Mock; find: jest.Mock };
   let topicFollows: { find: jest.Mock };
   let memberPreferences: { findOne: jest.Mock };
@@ -507,9 +511,12 @@ describe('FeedService', () => {
     // fallback then reports zero replies and no excerpt.
     forumPosts = { createQueryBuilder: jest.fn(() => rawQbStub()) };
     events = { createQueryBuilder: jest.fn(() => qbStub()) };
+    // `query` backs the page's batched mutual-connection count on new-member
+    // cards. No rows by default: nobody in common, so the count reads 0.
     profiles = {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
+      query: jest.fn().mockResolvedValue([]),
     };
     // `find` backs the viewer's own memberships, one of the three explicit
     // graph facts the ranked "All" tab scores on (SOC-04). Empty by default,

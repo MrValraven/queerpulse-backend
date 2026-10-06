@@ -1,12 +1,16 @@
+import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { CreateThreadFundingDto } from './create-thread-funding.dto';
 
 // `PATCH /forum/threads/:slug` body — an optional `title`, `tags` replacement
 // and `category` move, each carrying its own permission in the service (see
@@ -51,4 +55,15 @@ export class UpdateThreadDto {
   @MaxLength(50)
   @Matches(/^(?!all$).+/i, { message: '"all" is a reserved category' })
   category?: string;
+
+  // Replace an open call's funding details (wire contract: on PATCH, `funding`
+  // replaces the whole object, and the composer always sends all of it). The
+  // author or a moderator may send it at any time; it is refused on a thread
+  // whose kind carries no funding. `kind` itself is fixed at creation and has
+  // no field here.
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CreateThreadFundingDto)
+  funding?: CreateThreadFundingDto;
 }

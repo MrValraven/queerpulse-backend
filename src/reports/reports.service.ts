@@ -15,6 +15,7 @@ import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
+import { GroupListing } from '../housing-groups/entities/group-listing.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import {
   IdentityKind,
@@ -85,6 +86,8 @@ import {
   UNLINKED_SUBJECT_TYPES,
 } from './unlinked-subject';
 import {
+  GROUP_LISTING_SNAPSHOT_TYPE,
+  GroupListingSnapshotEvidence,
   GroupSnapshotEvidence,
   MailboxIdentitySnapshotEvidence,
   messageSnapshotAttachmentFrom,
@@ -442,12 +445,27 @@ export class ReportsService {
     // moderator reviewing later sees exactly what was reported even if the owner
     // edits or the listing is taken down in the meantime. Server-authoritative
     // (looked up here, never trusted from the client) and keyed by the slug the
-    // report carries as `subjectId`.
+    // report carries as `subjectId`. `withDeleted` (ENG-466): an owner delete
+    // is a soft delete, and a listing deleted after it was reported is still
+    // the evidence a moderator needs.
     let reportedHousing: HousingListing | null = null;
     if (input.subjectType === ReportSubjectType.Housing) {
       reportedHousing = await this.housing.findOne({
         where: { slug: input.subjectId },
+        withDeleted: true,
       });
+    }
+
+    // Housing-group room report (PRD-443): the same snapshot for ONE room
+    // shared inside a group. Needed more here than for a home, because
+    // `HousingGroupsService.removeListing` hard-deletes the row: a reported
+    // poster could otherwise erase the room and leave the case empty.
+    let reportedGroupListingSnapshot: GroupListingSnapshotEvidence | null =
+      null;
+    if (input.subjectType === ReportSubjectType.GroupListing) {
+      reportedGroupListingSnapshot = await this.captureReportedGroupListing(
+        input.subjectId,
+      );
     }
 
     // Gathering-photo report: snapshot the photo's facts NOW. Sharper than the
@@ -657,6 +675,7 @@ export class ReportsService {
             input.evidence,
             reportedMessage,
             reportedHousing,
+            reportedGroupListingSnapshot,
             reportedEventPhoto,
             reportedGroupSnapshot,
             reportedIdentitySnapshot,
@@ -701,6 +720,43 @@ export class ReportsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * The `group-listing-snapshot` for a reported housing-group room, or null
+   * when the id names no room. A null leaves the filing to go through without
+   * a snapshot, exactly as an unknown housing slug does.
+   *
+   * `UUID_RE` first: `group_listings.id` is a `uuid` column and `subjectId` a
+   * client string, so an arbitrary value would 500 the filing. Read through
+   * the report repository's own manager, so this one lookup needs no extra
+   * `forFeature` registration in `ReportsModule` (the persona check below
+   * reads `Subprofile` the same way).
+   */
+  private async captureReportedGroupListing(
+    subjectId: string,
+  ): Promise<GroupListingSnapshotEvidence | null> {
+    if (!UUID_RE.test(subjectId)) return null;
+    const reportedListing = await this.reports.manager.findOne(GroupListing, {
+      where: { id: subjectId.toLowerCase() },
+      relations: { group: true },
+    });
+    if (!reportedListing) return null;
+    return {
+      type: GROUP_LISTING_SNAPSHOT_TYPE,
+      listingId: reportedListing.id,
+      groupId: reportedListing.groupId,
+      groupSlug: reportedListing.group?.slug ?? null,
+      groupName: reportedListing.group?.name ?? null,
+      title: reportedListing.title,
+      description: reportedListing.description,
+      neighbourhood: reportedListing.neighbourhood,
+      priceEuros: reportedListing.priceEuros,
+      accessibilityInfo: reportedListing.accessibilityInfo,
+      posterId: reportedListing.postedByUserId,
+      listedAt: reportedListing.createdAt.toISOString(),
+      snapshotAt: new Date().toISOString(),
+    };
   }
 
   /**
@@ -1658,9 +1714,10 @@ export class ReportsService {
    * discriminant, which existing evidence consumers should treat as opaque
    * unless they specifically render it.
    *
-   * Two more snapshots have joined it on the same argument, each with its own
-   * discriminant: `housing-snapshot` for a reported home, and `photo-snapshot`
-   * for ONE gathering photo. Every shape is declared in `report-evidence.ts`,
+   * More snapshots have joined it on the same argument, each with its own
+   * discriminant: `housing-snapshot` for a reported home,
+   * `group-listing-snapshot` for a room shared inside a housing group, and
+   * `photo-snapshot` for ONE gathering photo. Every shape is declared in `report-evidence.ts`,
    * which also carries the reasoning for the one decision that is not obvious:
    * the photo snapshot holds the image BY REFERENCE and no copy of the
    * photograph is retained anywhere.
@@ -1669,6 +1726,7 @@ export class ReportsService {
     clientEvidence: CreateReportInput['evidence'],
     reportedMessage: Message | null,
     reportedHousing: HousingListing | null,
+    reportedGroupListingSnapshot: GroupListingSnapshotEvidence | null,
     reportedEventPhoto: EventPhoto | null,
     reportedGroupSnapshot: GroupSnapshotEvidence | null,
     reportedIdentitySnapshot: MailboxIdentitySnapshotEvidence | null,
@@ -1713,6 +1771,12 @@ export class ReportsService {
         listedAt: reportedHousing.createdAt.toISOString(),
         snapshotAt: new Date().toISOString(),
       });
+    }
+    // Housing-group room snapshot: built by `captureReportedGroupListing` and
+    // appended here like the group snapshot below. The poster is held by id,
+    // matching `housing-snapshot`.
+    if (reportedGroupListingSnapshot) {
+      evidence.push(reportedGroupListingSnapshot);
     }
     // Gathering-photo snapshot: the facts a moderator needs to judge ONE
     // photograph, captured at filing time so a later takedown cannot erase what

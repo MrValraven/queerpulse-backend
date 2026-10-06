@@ -674,9 +674,12 @@ export class HousingReviewsService {
   ): Promise<void> {
     if (!review.authorId) return;
     try {
+      // `withDeleted` (ENG-466): the home may have been soft-deleted since the
+      // review, and the bell still names it.
       const listing = await this.listings.findOne({
         where: { id: review.listingId },
         select: { title: true },
+        withDeleted: true,
       });
       await this.reviewReplyNotifier.notifyReviewReplied({
         reviewAuthorId: review.authorId,

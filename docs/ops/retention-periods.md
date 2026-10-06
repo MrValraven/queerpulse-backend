@@ -151,7 +151,7 @@ details a member supplied. See §2.1 D1 for the wording that makes that precise.
 
 | Data | Entity / table | Behaviour | Enforced by | Cadence |
 |---|---|---|---|---|
-| **Housing listings** | `housing_listings` | Default lifetime **60 days** (`src/housing-listings/housing-listings.service.ts:175`); past `expires_at` the listing is marked `filled_at` and drops out of public browse. **Never a hard delete** (`src/housing-listings/entities/housing-listing.entity.ts:268-277`) | `HousingListingExpirySweeperService.sweepExpiredListings` (`src/housing-listings/housing-listing-expiry-sweeper.service.ts:46-70`) | Daily at midnight |
+| **Housing listings** | `housing_listings` | Default lifetime **60 days** (`src/housing-listings/housing-listings.service.ts:260`); past `expires_at` the listing is marked `filled_at` and drops out of public browse. **Never a hard delete.** An owner delete is a soft delete: one update nulls `address_line`, `latitude` and `longitude` and sets `deleted_at`, and the row (title, description, photos, owner id) is kept. Account erasure (`withdrawHousingListings` in `src/account/content-owner-erasure.service.ts`, an UPDATE) still reaches soft-deleted rows, and the owner FK is SET NULL (`src/housing-listings/entities/housing-listing.entity.ts:98-107`) | `HousingListingExpirySweeperService.sweepExpiredListings` (`src/housing-listings/housing-listing-expiry-sweeper.service.ts:76-132`) | Daily at midnight |
 | **Invites** | `invites` | TTL **7 days** (`INVITE_TTL_MS`, `src/membership/invites.service.ts:39`); pending invites past `expires_at` flip to `expired` | `InviteExpirySweeperService.sweepExpiredInvites` (`src/membership/invite-expiry-sweeper.service.ts:42-70`) | Hourly |
 | **Governance motions** | `governance_motions` | Swept on schedule | `src/governance/governance-motion-sweeper.service.ts:44` | Daily at midnight |
 | **Safe-space reviews** | `safe_space_nominations` | Swept on schedule | `src/safe-space-nominations/safe-space-review-sweeper.service.ts:48` | Daily at 09:00 |
@@ -188,7 +188,7 @@ forever if the row does not hang off the member.
 | **DSAR requests** | `dsar_request` / `DsarRequest` | No sweeper. Retained as evidence that a statutory request was answered; `resolved_by_user_id` is `ON DELETE SET NULL` so the record outlives the reviewer (`src/account/entities/dsar-request.entity.ts:71-75`). |
 | **Event RSVPs, minus their attendance detail** | `event_rsvps` / `EventRsvp` | The row persists so past headcounts survive; its attendance detail is cleared on the 30-day sweep in §1.5. |
 | **Status incidents** | `status_incidents` / `StatusIncident` | No sweeper. The public page bounds by recency at read time, the rows stay. |
-| **Newsletter subscribers** | `src/newsletter` | No sweeper, and nothing can ever be sent to them (`docs/ops/no-mailer-at-launch.md`). |
+| **Newsletter subscribers** | removed | The newsletter tables were removed on 2026-10-06 (migration 1828710000000); no email address is kept for a newsletter. |
 | **Marketing inquiries** | `inquiries` / `Inquiry` | Written by anonymous visitors with a name and email typed into a public form (`src/inquiries/entities/inquiry.entity.ts:19-25`). No sweeper, and no member account to erase them with. |
 | **Verification records** | `member_verifications`, `verification_requests` | No sweeper. Holds a level, a method, an opaque provider reference, and the member's own free text; never a document (`src/verification/entities/member-verification.entity.ts:21-28`). |
 | **Magazine contributor fees** | `magazine_payment` | No sweeper. **UNVERIFIED, needs a human answer:** what statutory accounting retention applies. |
@@ -279,7 +279,7 @@ Nothing in `privacy.retention.*` mentions any of these, and each is a member-fac
 | Export download link | 7 days, now enforced (D4) | `src/account/account.constants.ts:19` |
 | Card verification records | 90 days | `src/membership-cards/card-scan-retention.service.ts:19` |
 | Sessions after sign-out or expiry | 30 days at the default `JWT_REFRESH_TTL` | `src/auth/auth-maintenance.service.ts:28-30` |
-| Housing listings | hidden from browse after 60 days, never deleted | `src/housing-listings/housing-listings.service.ts:175` |
+| Housing listings | hidden from browse after 60 days; an owner delete is a soft delete that clears address and coordinates and keeps the rest of the row; the row is never hard deleted | `src/housing-listings/housing-listings.service.ts:260` |
 | Invites | 7 days | `src/membership/invites.service.ts:39` |
 | Direct messages, reports, moderation records, consent logs | kept for the life of the account, with moderation records kept beyond it in pseudonymised form | §1.10 |
 
@@ -365,7 +365,7 @@ Missing from `privacy.thirdParties.*` and confirmed present in the code:
   endpoint (`src/push/push.service.ts:11`,
   `src/push/entities/push-subscription.entity.ts:20-21`).
 - **Embedded virtual tours.** A housing listing may carry a YouTube or Matterport
-  link (`src/housing-listings/entities/housing-listing.entity.ts:262-266`), which
+  link (`src/housing-listings/entities/housing-listing.entity.ts:314-318`), which
   the CSP admits (`queerpulse/vercel.json:14`). Opening such a listing hands the
   viewer's IP address to that host.
 - The hosting and storage bullet (`privacy.thirdParties.item2`, EN `:1155-1156`) is honest but

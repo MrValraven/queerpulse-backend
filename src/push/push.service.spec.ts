@@ -3,8 +3,29 @@ import { ConfigService } from '@nestjs/config';
 import {
   PushService,
   READ_DISMISS_TAG_PREFIX,
+  isApplePushEndpoint,
   pushRetryDelayMs,
 } from './push.service';
+
+// The SSRF guard resolves DNS for hostnames. Apple endpoints resolve to a
+// fixed public address here so the specs need no network; every other URL
+// (the IP literals the specs use) goes through the real guard.
+jest.mock('../link-preview/ssrf', () => {
+  const actual = jest.requireActual<typeof import('../link-preview/ssrf')>(
+    '../link-preview/ssrf',
+  );
+  return {
+    ...actual,
+    assertPublicUrl: (rawUrl: string) =>
+      new URL(rawUrl).hostname.endsWith('push.apple.com')
+        ? Promise.resolve({
+            url: new URL(rawUrl),
+            address: '8.8.4.4',
+            family: 4,
+          })
+        : actual.assertPublicUrl(rawUrl),
+  };
+});
 
 const sendNotification = jest.fn<Promise<unknown>, unknown[]>();
 const setVapidDetails = jest.fn<void, unknown[]>();
@@ -434,6 +455,33 @@ describe('handleMessageRead (PRD-335)', () => {
     expect(parsed.tag).toBe(`${READ_DISMISS_TAG_PREFIX}conv-2`);
   });
 
+  it('sends to a non-Apple subscription and skips an Apple one', async () => {
+    const repo = makeRepo([
+      { id: 's1', endpoint: 'https://8.8.8.8/e1', p256dh: 'k1', auth: 'a1' },
+      {
+        id: 's2',
+        endpoint: 'https://web.push.apple.com/e2',
+        p256dh: 'k2',
+        auth: 'a2',
+      },
+    ]);
+    const service = new PushService(repo as never, config);
+    service.onModuleInit();
+    sendNotification.mockResolvedValue(undefined);
+
+    await service.handleMessageRead({
+      conversationId: 'conv-1',
+      userId: 'user-1',
+      lastReadAt: new Date(),
+    });
+
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+    const [subscription] = sendNotification.mock.calls[0] as [
+      { endpoint: string },
+    ];
+    expect(subscription.endpoint).toBe('https://8.8.8.8/e1');
+  });
+
   it('logs and swallows a failure instead of throwing from the listener', async () => {
     const repo = makeRepo();
     repo.find.mockRejectedValueOnce(new Error('db down'));
@@ -451,5 +499,43 @@ describe('handleMessageRead (PRD-335)', () => {
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('conv-1'));
     warn.mockRestore();
+  });
+});
+
+describe('isApplePushEndpoint', () => {
+  it.each([
+    'https://web.push.apple.com/QAbc123',
+    'https://api.push.apple.com/3/device/abc',
+  ])('is true for the Apple host in %s', (endpoint) => {
+    expect(isApplePushEndpoint(endpoint)).toBe(true);
+  });
+
+  it.each([
+    'https://fcm.googleapis.com/fcm/send/abc',
+    'https://updates.push.services.mozilla.com/wpush/v2/abc',
+    'https://push.apple.com.example.org/abc',
+    'not a url',
+  ])('is false for %s', (endpoint) => {
+    expect(isApplePushEndpoint(endpoint)).toBe(false);
+  });
+});
+
+describe('sendToUsers Apple endpoint handling', () => {
+  it('sends to an Apple subscription when no options are given', async () => {
+    const repo = makeRepo([
+      {
+        id: 's1',
+        endpoint: 'https://web.push.apple.com/e1',
+        p256dh: 'k1',
+        auth: 'a1',
+      },
+    ]);
+    const service = new PushService(repo as never, config);
+    service.onModuleInit();
+    sendNotification.mockResolvedValue(undefined);
+
+    await service.sendToUsers(['user-1'], payload);
+
+    expect(sendNotification).toHaveBeenCalledTimes(1);
   });
 });

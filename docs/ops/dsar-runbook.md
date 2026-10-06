@@ -151,8 +151,8 @@ through the contact form (`src/inquiries`), a moderator DM, or in person:
 2. If they cannot or will not, **the clock still runs from the day it arrived**,
    and the request has to be tracked outside the platform.
    `[OWNER: decide and record where an off-platform DSAR is tracked]`
-3. A request from someone with **no account** (an invite applicant, a newsletter
-   subscriber, someone named in a report) cannot be filed through the form at
+3. A request from someone with **no account** (an invite applicant, someone named in a
+   report) cannot be filed through the form at
    all, because `POST /account/dsar` requires a session. These are always
    off-platform. See §5.5.
 
@@ -343,7 +343,7 @@ No dedicated intake exists (§2). Handle a restriction request as follows:
 
 ### 5.5 A requester with no account
 
-An invite applicant, a newsletter subscriber, someone who used the contact form
+An invite applicant, someone who used the contact form
 (`src/inquiries/entities/inquiry.entity.ts:19-25`), or someone named in another
 member's report.
 

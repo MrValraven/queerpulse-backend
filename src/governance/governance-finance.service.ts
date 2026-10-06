@@ -1,10 +1,12 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Not, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -12,13 +14,24 @@ import {
   toAdminFinanceChange,
 } from './admin-finance-changes';
 import {
+  FinanceAuditEntry,
+  applyLedgerEdits,
+  replaceEventNotes,
+  replacePartners,
+  replaceReserve,
+  replaceStats,
+} from './admin-finance-edits';
+import {
   AdminFinanceResponseDTO,
   toAdminFinanceHistory,
   toAdminFinanceLatest,
 } from './admin-finance-response';
+import { OpenFinanceQuarterDto } from './dto/open-finance-quarter.dto';
 import { UpdateAdminFinancesDto } from './dto/update-admin-finances.dto';
 import {
   GovernanceFinanceResponseDTO,
+  isEnteredByPeople,
+  toEmptyGovernanceFinanceResponse,
   toGovernanceFinanceResponse,
 } from './governance-finance-response';
 import { GovernanceFinanceChange } from './entities/governance-finance-change.entity';
@@ -37,6 +50,19 @@ const SCALAR_FIELDS = [
   { key: 'expenseTotal', sourceKey: 'expenseTotalSource' },
 ] as const;
 
+/**
+ * PRD-447. The public endpoint only ever reads a report whose five headline
+ * figures were all entered by people (the SQL twin of `isEnteredByPeople`).
+ * A seeded or half-entered report stays on the admin tab.
+ */
+const ENTERED_BY_PEOPLE_WHERE = {
+  mrrSource: Not(FinanceMetricSource.Seeded),
+  sustainerCountSource: Not(FinanceMetricSource.Seeded),
+  solidarityRateSource: Not(FinanceMetricSource.Seeded),
+  incomeTotalSource: Not(FinanceMetricSource.Seeded),
+  expenseTotalSource: Not(FinanceMetricSource.Seeded),
+};
+
 @Injectable()
 export class GovernanceFinanceService {
   constructor(
@@ -49,30 +75,108 @@ export class GovernanceFinanceService {
     private readonly dataSource: DataSource,
   ) {}
 
-  // A specific `quarter` fetches that snapshot exactly; omitted fetches the
-  // most recently published one (the "Q2 2026 · Financial transparency"
-  // section always shows the latest quarter by default).
+  // A specific `quarter` fetches that snapshot exactly (404 when it is
+  // missing or not yet public); omitted fetches the most recently published
+  // public one. With no public report at all, the latest read answers with
+  // the empty response (`quarter: null`), which the Governance page renders
+  // as "nothing published yet" (PRD-447).
   async getFinances(quarter?: string): Promise<GovernanceFinanceResponseDTO> {
-    // A specific `quarter` is a keyed lookup (`findOne` with a `where`). The
-    // "latest" path has no selection conditions, so it must NOT use `findOne` —
-    // TypeORM throws "You must provide selection conditions in order to find a
-    // single row" when `findOne` is called without a `where`. Take the newest
-    // row via `find` with `take: 1` instead.
-    let report: GovernanceFinanceReport | null;
     if (quarter) {
-      report = await this.reports.findOne({ where: { quarter } });
-    } else {
-      const [latest] = await this.reports.find({
-        order: { publishedAt: 'DESC' },
-        take: 1,
+      const report = await this.reports.findOne({
+        where: { quarter, ...ENTERED_BY_PEOPLE_WHERE },
       });
-      report = latest ?? null;
+      if (!report) {
+        throw new NotFoundException('Governance finance report not found');
+      }
+      return toGovernanceFinanceResponse(report);
     }
 
-    if (!report) {
-      throw new NotFoundException('Governance finance report not found');
+    // `find` with `take: 1`: the "latest" read has no keyed lookup, and the
+    // repo's convention keeps `findOne` for keyed reads.
+    const [latest] = await this.reports.find({
+      where: ENTERED_BY_PEOPLE_WHERE,
+      order: { publishedAt: 'DESC' },
+      take: 1,
+    });
+    return latest
+      ? toGovernanceFinanceResponse(latest)
+      : toEmptyGovernanceFinanceResponse();
+  }
+
+  /**
+   * PRD-447. Opens an empty report for the next quarter, so the governance
+   * team can enter real figures with no SQL. Every headline figure starts
+   * unentered (`seeded` provenance, null value), which keeps the report off
+   * the public page until each one is typed in.
+   *
+   * The quarter must sort after every existing one: the tab always edits the
+   * newest report, and opening an older quarter would silently take its
+   * place. The newest report must also be public first: the tab only edits
+   * the newest one, so opening past an unfinished quarter would strand it.
+   */
+  async openQuarter(
+    dto: OpenFinanceQuarterDto,
+    actorId: string,
+  ): Promise<AdminFinanceResponseDTO> {
+    try {
+      await this.insertQuarter(dto, actorId);
+    } catch (error) {
+      // Two admins opening the same quarter at once: both pass the lookup
+      // below and one loses on the unique index. Same answer as the lookup.
+      if (isUniqueViolation(error, 'UQ_governance_finance_report_quarter')) {
+        throw new ConflictException(
+          `A finance report for ${dto.quarter} already exists`,
+        );
+      }
+      throw error;
     }
-    return toGovernanceFinanceResponse(report);
+    return this.getAdminFinances();
+  }
+
+  private async insertQuarter(
+    dto: OpenFinanceQuarterDto,
+    actorId: string,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const existing = await manager.findOne(GovernanceFinanceReport, {
+        where: { quarter: dto.quarter },
+      });
+      if (existing) {
+        throw new ConflictException(
+          `A finance report for ${dto.quarter} already exists`,
+        );
+      }
+      const [newest] = await manager.find(GovernanceFinanceReport, {
+        order: { quarter: 'DESC' },
+        take: 1,
+      });
+      if (newest && newest.quarter.localeCompare(dto.quarter) > 0) {
+        throw new BadRequestException(
+          `Open a quarter after ${newest.quarter}, the newest report`,
+        );
+      }
+      if (newest && !isEnteredByPeople(newest)) {
+        throw new ConflictException(
+          `Enter every headline figure for ${newest.quarter} before opening the next quarter`,
+        );
+      }
+
+      await manager.save(
+        manager.create(GovernanceFinanceReport, {
+          quarter: dto.quarter,
+          stats: [],
+          income: [],
+          expense: [],
+          eventNotes: [],
+          reserve: null,
+          partners: null,
+          publishedAt: new Date(),
+        }),
+      );
+      await this.saveAudit(manager, actorId, null, [
+        { field: 'quarter', oldValue: null, newValue: dto.quarter },
+      ]);
+    });
   }
 
   // Admin governance Finances tab: the latest quarter's full metrics + ledgers
@@ -126,7 +230,15 @@ export class GovernanceFinanceService {
         const submitted = dto[field.key];
         if (submitted === undefined) continue;
         const previous = report[field.key];
-        if (previous === submitted) continue;
+        // A still-seeded figure submitted unchanged is a person confirming
+        // it (PRD-447): it flips to `manual` and is audited like any edit.
+        // Only an already-entered figure resubmitted as-is is skipped.
+        if (
+          previous === submitted &&
+          report[field.sourceKey] !== FinanceMetricSource.Seeded
+        ) {
+          continue;
+        }
         auditRows.push(
           manager.create(GovernanceFinanceChange, {
             actorId,
@@ -141,63 +253,38 @@ export class GovernanceFinanceService {
         changed = true;
       }
 
-      const applyLedger = (kind: 'income' | 'expense'): void => {
-        const edits = dto[kind];
-        if (!edits || edits.length === 0) return;
-        const lines = report[kind] ?? [];
-        for (const edit of edits) {
-          if (edit.index >= lines.length) {
-            throw new BadRequestException(
-              `No ${kind} ledger row at index ${edit.index}`,
-            );
-          }
-        }
-        // Rebuild the array with fresh line objects rather than mutating in
-        // place — TypeORM's dirty-check compares the loaded jsonb by reference,
-        // so an in-place mutation would not be persisted.
-        report[kind] = lines.map((line, index) => {
-          const edit = edits.find((candidate) => candidate.index === index);
-          if (!edit) return line;
-          const next = { ...line };
-          if (edit.amount !== undefined && edit.amount !== line.amount) {
-            auditRows.push(
-              manager.create(GovernanceFinanceChange, {
-                actorId,
-                field: `${kind}[${index}]`,
-                oldValue: line.amount,
-                newValue: edit.amount,
-                note: dto.note ?? null,
-              }),
-            );
-            next.amount = edit.amount;
-            next.source = FinanceMetricSource.Manual;
-            changed = true;
-          }
-          if (edit.note !== undefined && edit.note !== line.note) {
-            next.note = edit.note;
-            changed = true;
-          }
-          if (
-            edit.enabled !== undefined &&
-            edit.enabled !== (line.enabled ?? true)
-          ) {
-            auditRows.push(
-              manager.create(GovernanceFinanceChange, {
-                actorId,
-                field: `${kind}[${index}].enabled`,
-                oldValue: String(line.enabled ?? true),
-                newValue: String(edit.enabled),
-                note: dto.note ?? null,
-              }),
-            );
-            next.enabled = edit.enabled;
-            changed = true;
-          }
-          return next;
-        });
+      const auditEntries: FinanceAuditEntry[] = [];
+      const take = <Value>(result: {
+        value: Value;
+        audit: FinanceAuditEntry[];
+        isChanged: boolean;
+      }): Value => {
+        auditEntries.push(...result.audit);
+        if (result.isChanged) changed = true;
+        return result.value;
       };
-      applyLedger('income');
-      applyLedger('expense');
+
+      report.income = take(
+        applyLedgerEdits('income', report.income ?? [], dto.income),
+      );
+      report.expense = take(
+        applyLedgerEdits('expense', report.expense ?? [], dto.expense),
+      );
+      // PRD-447: the report's prose and disclosures, which used to need SQL.
+      if (dto.stats !== undefined) {
+        report.stats = take(replaceStats(report.stats ?? [], dto.stats));
+      }
+      if (dto.eventNotes !== undefined) {
+        report.eventNotes = take(
+          replaceEventNotes(report.eventNotes ?? [], dto.eventNotes),
+        );
+      }
+      if (dto.partners !== undefined) {
+        report.partners = take(replacePartners(report.partners, dto.partners));
+      }
+      if (dto.reserve !== undefined) {
+        report.reserve = take(replaceReserve(report.reserve, dto.reserve));
+      }
 
       // Surplus is derived, never edited: keep the stored value consistent
       // whenever a total moved.
@@ -211,9 +298,32 @@ export class GovernanceFinanceService {
       report.metricsEditedAt = new Date();
       await manager.save(report);
       if (auditRows.length > 0) await manager.save(auditRows);
+      await this.saveAudit(manager, actorId, dto.note ?? null, auditEntries);
     });
 
     return this.getAdminFinances();
+  }
+
+  /** Writes one `governance_finance_changes` row per entry, inside the
+   *  caller's transaction. */
+  private async saveAudit(
+    manager: EntityManager,
+    actorId: string,
+    note: string | null,
+    entries: FinanceAuditEntry[],
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    await manager.save(
+      entries.map((entry) =>
+        manager.create(GovernanceFinanceChange, {
+          actorId,
+          field: entry.field,
+          oldValue: entry.oldValue,
+          newValue: entry.newValue,
+          note,
+        }),
+      ),
+    );
   }
 
   /** The per-field audit trail, newest first, each row enriched with its

@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsInt,
@@ -9,6 +10,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 
@@ -19,11 +21,21 @@ import {
  * stored and rendered; the tab does not re-derive it. `enabled` toggles
  * whether the row renders on the dashboard at all — a visibility change, not
  * a data correction, so it does not flip the row's provenance to `manual`.
+ *
+ * PRD-447: `label` renames the row. An `index` one past the last row (then the
+ * next one, and so on) appends a new row; an appended row needs a `label` and
+ * an `amount`, which the service checks.
  */
 export class FinanceLedgerEditDto {
   @IsInt()
   @Min(0)
   index!: number;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  label?: string;
 
   @IsOptional()
   @IsString()
@@ -38,6 +50,68 @@ export class FinanceLedgerEditDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+}
+
+/** One public stat tile ("€4,150 · Total expenditure · Within budget"). Plain
+ *  words, shown as typed. */
+export class FinanceStatEditDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(40)
+  n!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  l!: string;
+
+  @IsString()
+  @MaxLength(80)
+  trend!: string;
+
+  @IsBoolean()
+  up!: boolean;
+}
+
+/** One "How event finances work" note: a bold lead and the sentence after it. */
+export class FinanceEventNoteEditDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  title!: string;
+
+  @IsString()
+  @MaxLength(400)
+  body!: string;
+}
+
+/** One disclosed restricted-grant partner. `scope` is the admin's own words
+ *  for what the money is restricted to ("the Mental Health Fund"). */
+export class FinancePartnerEditDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  name!: string;
+
+  @IsNumber()
+  @Min(0)
+  amount!: number;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  scope!: string;
+}
+
+/** The operational reserve: what is held and what the target is, in euros. */
+export class FinanceReserveEditDto {
+  @IsNumber()
+  @Min(0)
+  current!: number;
+
+  @IsNumber()
+  @Min(0)
+  target!: number;
 }
 
 /**
@@ -88,6 +162,36 @@ export class UpdateAdminFinancesDto {
   @ValidateNested({ each: true })
   @Type(() => FinanceLedgerEditDto)
   expense?: FinanceLedgerEditDto[];
+
+  /** PRD-447. The public stat tiles, as a full replacement list. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @ValidateNested({ each: true })
+  @Type(() => FinanceStatEditDto)
+  stats?: FinanceStatEditDto[];
+
+  /** PRD-447. The "How event finances work" notes, as a full replacement. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @ValidateNested({ each: true })
+  @Type(() => FinanceEventNoteEditDto)
+  eventNotes?: FinanceEventNoteEditDto[];
+
+  /** PRD-447. The disclosed partners, as a full replacement list. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @ValidateNested({ each: true })
+  @Type(() => FinancePartnerEditDto)
+  partners?: FinancePartnerEditDto[];
+
+  /** PRD-447. The operational reserve. `null` clears it; absent leaves it. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => FinanceReserveEditDto)
+  reserve?: FinanceReserveEditDto | null;
 
   /** Free-text reason, recorded on every audit row this request produces. */
   @IsOptional()

@@ -6,6 +6,9 @@ import {
 } from '../communities/entities/community.entity';
 import { toImageUrl } from '../common/image-url';
 import { toVisibleAvatarUrl } from '../common/member-ref';
+import { Event } from '../events/entities/event.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
   LandingFeature,
@@ -76,10 +79,50 @@ export interface LandingChangemakerFeatureDTO {
   tags: string[];
 }
 
+/** A curated public gathering, carrying only what the homepage row renders.
+ *  The place is AREA-LEVEL: the neighbourhood the host picked, or the online
+ *  flag. The street `address`, `arrivalNotes`, `venue`, `onlineUrl`, the host
+ *  and every attendee stay off this payload, the same split the event
+ *  response mapper keeps for a stranger without a 'going' RSVP. */
+export interface LandingGatheringFeatureDTO {
+  id: string;
+  slug: string;
+  title: string;
+  /** ISO 8601 start instant. */
+  startAt: string;
+  /** IANA zone the host scheduled it in. */
+  timezone: string;
+  /** The neighbourhood name, or null when the host gave none. */
+  area: string | null;
+  isOnline: boolean;
+  /** Resolved (`toImageUrl`) cover image, or null. */
+  coverImageUrl: string | null;
+  /** The admin's optional kicker line, shown above the title. */
+  blurb: string | null;
+}
+
+/** A curated published magazine story. `authorName` is the byline exactly as
+ *  the article prints it (`magazine_author.name`); the payload carries no
+ *  member id or profile link. */
+export interface LandingStoryFeatureDTO {
+  id: string;
+  slug: string;
+  title: string;
+  dek: string;
+  /** Resolved (`toImageUrl`) lead art, or null when the desk set none. */
+  coverImageUrl: string | null;
+  authorName: string;
+  readMinutes: number;
+  /** The admin's optional kicker line, shown above the title. */
+  blurb: string | null;
+}
+
 export interface LandingFeaturesResponseDTO {
   members: LandingMemberFeatureDTO[];
   communities: LandingCommunityFeatureDTO[];
   changemakers: LandingChangemakerFeatureDTO[];
+  gatherings: LandingGatheringFeatureDTO[];
+  stories: LandingStoryFeatureDTO[];
 }
 
 // ---- Admin shapes (include inactive rows + eligibility state) -------------
@@ -92,6 +135,8 @@ export type LandingHiddenReason =
   | 'unpublished'
   | 'not_public'
   | 'deleted'
+  | 'cancelled'
+  | 'ended'
   | null;
 
 export interface AdminTargetSummary {
@@ -196,6 +241,42 @@ export function toLandingChangemakerFeatureDTO(
     cause: copy.cause,
     blurb: copy.blurb,
     tags: copy.tags ?? [],
+  };
+}
+
+export function toLandingGatheringFeatureDTO(
+  feature: LandingFeature,
+  event: Event,
+): LandingGatheringFeatureDTO {
+  const copy = feature.copy as { blurb?: string };
+  return {
+    id: feature.id,
+    slug: event.slug,
+    title: event.title,
+    startAt: event.startAt.toISOString(),
+    timezone: event.timezone,
+    area: event.neighbourhood,
+    isOnline: event.isOnline,
+    coverImageUrl: toImageUrl(event.coverImageUrl),
+    blurb: copy.blurb ?? null,
+  };
+}
+
+export function toLandingStoryFeatureDTO(
+  feature: LandingFeature,
+  article: MagazineArticle,
+  author: MagazineAuthor,
+): LandingStoryFeatureDTO {
+  const copy = feature.copy as { blurb?: string };
+  return {
+    id: feature.id,
+    slug: article.slug,
+    title: article.title,
+    dek: article.dek,
+    coverImageUrl: toImageUrl(article.heroImageKey),
+    authorName: author.name,
+    readMinutes: article.readMinutes,
+    blurb: copy.blurb ?? null,
   };
 }
 

@@ -4,6 +4,26 @@ import { MemberRef } from '../common/member-ref';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumPostPhoto } from './entities/forum-post-photo.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import type { ForumThreadFunding } from './entities/forum-thread-funding.entity';
+import {
+  ASK_BENEFICIARIES,
+  ASK_ENDED_REASONS,
+  ASK_PURPOSES,
+  FUNDING_ELIGIBILITIES,
+  FUNDING_SCOPES,
+  deriveAskState,
+  deriveCallState,
+  stripLeadingWww,
+} from './forum-funding';
+import type {
+  AskBeneficiary,
+  AskEndedReason,
+  AskPurpose,
+  AskState,
+  CallState,
+  FundingEligibility,
+  FundingScope,
+} from './forum-funding';
 
 // ── Frontend-contract shapes ─────────────────────────────────────────────
 // Mirror `AuthorSummary`/`ForumThreadResponse`/`ForumPostResponse` from
@@ -434,6 +454,109 @@ export interface ForumThreadResponse {
   // because a photo is content and a takedown that left the gallery standing
   // would be no takedown at all.
   opPhotos: ForumPostPhotoView[];
+  // Funding & Grants: the structured half of an open call or a fundraiser,
+  // with its read-time state computed here (wire contract "Response"). Null on
+  // every thread with no funding row, which is nearly every thread, and on the
+  // write echoes that do not resolve one.
+  funding: ForumFundingView | null;
+}
+
+/** `ForumThreadResponse.funding`, exactly the wire contract's shape. */
+export interface ForumFundingView {
+  linkUrl: string;
+  linkHost: string;
+  funderName: string | null;
+  amountMin: number | null;
+  amountMax: number | null;
+  deadline: string | null;
+  eligibility: FundingEligibility[];
+  scope: FundingScope | null;
+  callState: CallState | null;
+  goalAmount: number | null;
+  askPurpose: AskPurpose | null;
+  beneficiary: AskBeneficiary | null;
+  endsAt: string | null;
+  endedAt: string | null;
+  endedReason: AskEndedReason | null;
+  approvedAt: string | null;
+  askState: AskState | null;
+  updatedAt: string;
+}
+
+function knownValueOrNull<Value extends string>(
+  values: readonly Value[],
+  candidate: string | null,
+): Value | null {
+  return candidate !== null && (values as readonly string[]).includes(candidate)
+    ? (candidate as Value)
+    : null;
+}
+
+/**
+ * Lowercased host of a stored link with one leading `www.` removed, through
+ * the shared `stripLeadingWww`. A stored link was validated on write, so the
+ * empty-string fallback only covers a row edited by hand, and the client
+ * then shows no host at all. Exported for the review queue's facts
+ * (`ForumFundingService.reviewFactsFor`), so a reviewer and a donor read the
+ * same host.
+ */
+export function hostOfStoredLink(linkUrl: string): string {
+  try {
+    return stripLeadingWww(new URL(linkUrl).hostname.toLowerCase());
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * One funding row as the client renders it. The states are computed here,
+ * server side, from the pure rules in `forum-funding.ts`; the frontend
+ * renders them as given. A stored value outside today's vocabulary (a scope
+ * renamed later, say) maps to null, so it never reaches a client that has no
+ * label for it.
+ */
+export function toForumFundingView(
+  row: ForumThreadFunding,
+  thread: Pick<ForumThread, 'kind' | 'reviewState' | 'authorId'>,
+  now: Date,
+): ForumFundingView {
+  const isCall = thread.kind === 'call';
+  const isAsk = thread.kind === 'ask';
+  return {
+    linkUrl: row.linkUrl,
+    linkHost: hostOfStoredLink(row.linkUrl),
+    funderName: row.funderName,
+    amountMin: row.amountMin,
+    amountMax: row.amountMax,
+    deadline: row.deadline ? row.deadline.toISOString() : null,
+    eligibility: row.eligibility.filter((value): value is FundingEligibility =>
+      (FUNDING_ELIGIBILITIES as readonly string[]).includes(value),
+    ),
+    scope: knownValueOrNull(FUNDING_SCOPES, row.scope),
+    callState: isCall
+      ? deriveCallState(row.deadline, row.updatedAt, now)
+      : null,
+    goalAmount: row.goalAmount,
+    askPurpose: knownValueOrNull(ASK_PURPOSES, row.askPurpose),
+    beneficiary: knownValueOrNull(ASK_BENEFICIARIES, row.beneficiary),
+    endsAt: row.endsAt ? row.endsAt.toISOString() : null,
+    endedAt: row.endedAt ? row.endedAt.toISOString() : null,
+    endedReason: knownValueOrNull(ASK_ENDED_REASONS, row.endedReason),
+    approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
+    askState: isAsk
+      ? deriveAskState(
+          {
+            reviewState: thread.reviewState,
+            hasAuthor: thread.authorId !== null,
+            endedAt: row.endedAt,
+            endsAt: row.endsAt,
+            approvedAt: row.approvedAt,
+          },
+          now,
+        )
+      : null,
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 /**
@@ -515,6 +638,9 @@ export function toForumThreadResponse(
   coAuthor: MemberRef | null = null,
   opPhotoRows: ForumPostPhoto[] = [],
   poll: ForumPollView | null = null,
+  // The thread's `forum_thread_funding` row, resolved by the same read paths
+  // that resolve the poll. Defaults to null for the echoes that do not.
+  fundingRow: ForumThreadFunding | null = null,
 ): ForumThreadResponse {
   const opTombstoned = opPost?.deletedAt != null;
   const isThreadAuthor = thread.authorId === viewer.userId;
@@ -596,6 +722,16 @@ export function toForumThreadResponse(
       opPost == null || isOpBlanked
         ? []
         : toPostPhotoViews(opPost, opPhotoRows),
+    // Gated on `isOpBlanked` like the excerpt and the photos: a takedown of the
+    // opening post also takes down the donate or application link it carried.
+    // A fundraiser whose opening post is gone altogether (it cascades with an
+    // erased author's account) carries no donate link either: nobody stands
+    // behind it any more. Every read path that maps a funding row resolves
+    // the OP, so a null `opPost` here means the row is really missing.
+    funding:
+      fundingRow && !isOpBlanked && !(thread.kind === 'ask' && opPost == null)
+        ? toForumFundingView(fundingRow, thread, new Date())
+        : null,
   };
 }
 

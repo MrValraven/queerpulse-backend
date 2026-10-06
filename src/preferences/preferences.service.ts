@@ -12,6 +12,7 @@ import { UpdateContentSensitivityDto } from './dto/update-content-sensitivity.dt
 import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibility.dto';
 import { UpdateMessagingPrivacyDto } from './dto/update-messaging-privacy.dto';
 import { UpdateGroupAddPolicyDto } from './dto/update-group-add-policy.dto';
+import { UpdateLanguagePreferenceDto } from './dto/update-language-preference.dto';
 import {
   DEFAULT_GROUP_ADD_POLICY,
   GroupAddPolicy,
@@ -37,6 +38,7 @@ import {
 import {
   ContentSensitivityDTO,
   GroupAddPolicyDTO,
+  LanguagePreferenceDTO,
   LoginAlertsDTO,
   MessagingPrivacyDTO,
   PublicProfileDTO,
@@ -45,6 +47,7 @@ import {
   SuggestionVisibilityDTO,
   toContentSensitivityDTO,
   toGroupAddPolicyDTO,
+  toLanguagePreferenceDTO,
   toLoginAlertsDTO,
   toMessagingPrivacyDTO,
   toPublicProfileDTO,
@@ -90,6 +93,7 @@ export class PreferencesService {
     row.shareTyping = DEFAULT_SHARE_TYPING;
     row.sharePresence = DEFAULT_SHARE_PRESENCE;
     row.whoCanMessage = DEFAULT_WHO_CAN_MESSAGE;
+    row.language = null;
     return row;
   }
 
@@ -352,6 +356,31 @@ export class PreferencesService {
       result.set(userId, byUser.get(userId) ?? DEFAULT_GROUP_ADD_POLICY);
     }
     return result;
+  }
+
+  // --- Interface language (PRD-325) ------------------------------------------
+
+  async getLanguagePreference(userId: string): Promise<LanguagePreferenceDTO> {
+    return toLanguagePreferenceDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Store the member's interface language (PRD-325).
+   *
+   * Merged onto `loadOrDefault` like every other writer here, so a language
+   * switch leaves every safety and visibility setting on the row untouched.
+   * The app writes this on every switch a signed-in member makes, and once on
+   * sign-in when the server still holds `null`, which is how the choice
+   * reaches the next device the member signs in to.
+   */
+  async updateLanguagePreference(
+    userId: string,
+    dto: UpdateLanguagePreferenceDto,
+  ): Promise<LanguagePreferenceDTO> {
+    const row = await this.loadOrDefault(userId);
+    row.language = dto.language;
+
+    return toLanguagePreferenceDTO(await this.preferences.save(row));
   }
 
   // --- Messaging privacy (PRD-364/PRD-366) -----------------------------------

@@ -72,6 +72,10 @@ export interface HousingListingDTO {
    * can be expired before the daily sweep has actually run; browse already
    * excludes it either way (see `HousingDirectoryService.browse`). */
   expired: boolean;
+  /** PRD-444. True while the current `filledAt` was written by the daily expiry
+   * sweep (`HousingListing.sweptAt`), so the owner's card can offer Extend as
+   * the way back. False for an owner fill and for a listing that is up. */
+  isHiddenBySweep: boolean;
 
   type: HousingListingType;
   title: string;
@@ -149,7 +153,18 @@ export interface HousingListingDTO {
    * the lister, which they already know, and says nothing about the listing.
    */
   isLocationUnlocked: boolean;
+  /**
+   * DES-419. WHICH gate let this viewer in, so the client can explain the
+   * unlock truthfully: `'owner'` for the lister (and a moderator), then
+   * `'connection'`, then `'viewing'` for an enquirer whose viewing the lister
+   * accepted. Null exactly when `isLocationUnlocked` is false.
+   */
+  locationUnlockedVia: HousingLocationUnlock | null;
 }
+
+/** The gate that unlocked a listing's exact location for one viewer
+ * (`HousingListingDTO.locationUnlockedVia`). */
+export type HousingLocationUnlock = 'owner' | 'connection' | 'viewing';
 
 /**
  * Lightweight row for the cross-entity global search (`SearchService`) — no
@@ -182,6 +197,9 @@ export function toHousingSearchRow(listing: HousingListing): HousingSearchRow {
  *   accepted viewing, and neither of them may read a moderator's note about
  *   somebody else's listing. Only the owner's own management reads
  *   (`listMine`/`getByRef`/`create`) and the moderator console set it.
+ * @param unlockedVia Which gate granted `precise` (DES-419). Read only when
+ *   `precise` is true, and `'owner'` when the caller leaves it out, which is
+ *   right for every owner and moderator read.
  */
 export function toHousingListingDTO(
   listing: HousingListing,
@@ -189,6 +207,7 @@ export function toHousingListingDTO(
   listerVerificationLevel: VerificationLevel,
   precise = false,
   includeDecision = false,
+  unlockedVia?: HousingLocationUnlock,
 ): HousingListingDTO {
   // The approximate pin is ALWAYS the area centroid, never the stored precise
   // point — so a public read can never be reverse-engineered into the address.
@@ -216,6 +235,8 @@ export function toHousingListingDTO(
     filledAt: listing.filledAt ? listing.filledAt.toISOString() : null,
     expiresAt: listing.expiresAt.toISOString(),
     expired: listing.expiresAt.getTime() < Date.now(),
+    // Loose check so a partial load that left `sweptAt` undefined reads false.
+    isHiddenBySweep: listing.sweptAt != null,
 
     type: listing.type,
     title: listing.title,
@@ -249,6 +270,7 @@ export function toHousingListingDTO(
     addressLine: precise ? listing.addressLine : null,
     locationPrecision: hasExact ? 'exact' : 'area',
     isLocationUnlocked: precise,
+    locationUnlockedVia: precise ? (unlockedVia ?? 'owner') : null,
   };
 }
 
@@ -323,6 +345,7 @@ export function toAdminHousingListingDTO(
       listerVerificationLevel,
       true,
       true,
+      'owner',
     ),
     riskScore: listing.riskScore,
     riskReasons: listing.riskReasons,

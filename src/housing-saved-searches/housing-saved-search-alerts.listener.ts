@@ -110,9 +110,14 @@ export class HousingSavedSearchAlertsListener {
           }
         }
 
-        // No actor — this is the platform telling you a home matched your
-        // search, so no block/mute actorId. Payload carries what the bell/push
-        // render + deep-link to the listing.
+        // The lister is passed as the actor (ENG-470) so the block/mute
+        // filter in `createForRecipients` drops anyone blocked either way
+        // with them or muting them: browse and search already hide that
+        // member's homes, and an alert must not deliver one. The bell still
+        // reads as the platform telling you a home matched your search, with
+        // no member named: the actor only gates who receives it. Payload
+        // carries what the bell/push render + deep-link to the listing. An
+        // erased lister (`ownerId` NULL) leaves nobody to gate on.
         //
         // Scoped catch: one page's write failing must not abandon the pages
         // behind it. The outer catch below wraps the SCAN, so before this an
@@ -128,6 +133,7 @@ export class HousingSavedSearchAlertsListener {
                 title: listing.title,
                 area: listing.area || listing.city,
               },
+              listing.ownerId ?? undefined,
             );
           } catch (error) {
             this.report(

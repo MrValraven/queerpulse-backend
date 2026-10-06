@@ -27,6 +27,8 @@ export interface InquiryDTO {
   body: string;
   orgName?: string;
   status: Inquiry['status'];
+  /** PRD-452. A safety concern, sorted first while it waits. */
+  isPriority: boolean;
   /** ISO 8601 timestamp. */
   createdAt: string;
   /** ISO 8601 timestamp of the move to `handled`; null while `new`. */
@@ -85,6 +87,7 @@ export function toInquiryDTO(
     body: inquiry.body,
     orgName: inquiry.orgName ?? undefined,
     status: inquiry.status,
+    isPriority: inquiry.isPriority,
     createdAt: inquiry.createdAt.toISOString(),
     handledAt: inquiry.handledAt ? inquiry.handledAt.toISOString() : null,
     handledBy: toInquiryHandlerDTO(inquiry.handledById, handler),

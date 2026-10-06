@@ -7,15 +7,19 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { MessagingService } from '../messaging/messaging.service';
 import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReportSubjectType } from '../reports/entities/report.entity';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   Connection,
@@ -39,6 +43,7 @@ import { CreateHousingGroupDto } from './dto/create-group.dto';
 import { UpdateGroupDto } from './dto/update-group.dto';
 import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
+import { CreateGroupListingEnquiryDto } from './dto/create-group-listing-enquiry.dto';
 import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HideGroupListingDto } from './dto/hide-group-listing.dto';
 import { SetGroupListingStatusDto } from './dto/set-group-listing-status.dto';
@@ -49,16 +54,17 @@ import {
   AdminGroupJoinRequestsPageDTO,
   AdminGroupListingDTO,
   AdminGroupListingsPageDTO,
-  GroupListingDTO,
+  GroupListingModerationState,
   HousingGroupDTO,
   MyGroupJoinRequestDTO,
   MyGroupListingDTO,
+  PublicGroupListingDTO,
   toAdminGroupJoinRequestDTO,
   toAdminGroupListingDTO,
-  toGroupListingDTO,
   toHousingGroupDTO,
   toMyGroupJoinRequestDTO,
   toMyGroupListingDTO,
+  toPublicGroupListingDTO,
 } from './housing-groups-response';
 
 /** One page of the moderator's group-listing review queue (LOC-19). */
@@ -81,6 +87,25 @@ export const GROUP_MEMBERSHIP_REQUIRED_CODE = 'GROUP_MEMBERSHIP_REQUIRED';
  * discloses nothing about the group's roster.
  */
 export type GroupMembershipStanding = 'pending' | 'declined' | 'none';
+
+/**
+ * Emitted in the 409 body when a member asks to join a group they have already
+ * asked to join and heard nothing back from, or already belong to (ENG-472).
+ * Same typed-body seam as `GROUP_MEMBERSHIP_REQUIRED`, so the client can say
+ * "you've already asked" or "you're already in" from the code alone.
+ */
+export const GROUP_JOIN_ALREADY_REQUESTED_CODE = 'GROUP_JOIN_ALREADY_REQUESTED';
+
+/** The caller's standing carried in that 409: a request still being read, or
+ * an approved one. A declined member may apply again, so they never get it. */
+export type GroupJoinDuplicateStanding = 'pending' | 'member';
+
+const GROUP_JOIN_DUPLICATE_MESSAGE: Record<GroupJoinDuplicateStanding, string> =
+  {
+    pending:
+      'You have already asked to join this group. You will be notified when a steward decides.',
+    member: 'You are already a member of this group.',
+  };
 
 /** What each standing is told when they try to POST a room into a gated group.
  * Separate sentences because the next step differs: wait, ask, or accept the
@@ -129,16 +154,17 @@ type GroupListingRiskFields = Pick<
  * One answer to `GET /housing-groups/:slug/listings`, plus whether that answer
  * is the same for every caller (ENG-172).
  *
- * `isCallerAgnostic` is true only for an OPEN group, where the read has always
- * been public and anonymous. On an access-gated group the same URL answers 200
- * to a member and 403 to everyone else, so the controller has to keep the
- * response out of every shared cache. The service states the fact and the
+ * `isCallerAgnostic` is true only for an OPEN group read anonymously. On an
+ * access-gated group the same URL answers 200 to a member and 403 to everyone
+ * else, and since PRD-443 a signed-in reader's answer names each room's poster
+ * and marks their own rooms, so the controller has to keep both of those out
+ * of every shared cache. The service states the fact and the
  * controller decides the header, which keeps HTTP out of here and keeps the
  * cache decision from being re-derived from a flag the controller would have to
  * fetch a second time.
  */
 export interface GroupListingsReadResult {
-  listings: GroupListingDTO[];
+  listings: PublicGroupListingDTO[];
   isCallerAgnostic: boolean;
 }
 
@@ -173,6 +199,13 @@ export class HousingGroupsService {
     // naming who acted. Reachable through a `housing_moderator` grant, so the
     // trail is the only record of which grant holder did it.
     private readonly modAudit: ModAuditService,
+    // PRD-443: a reader's message about a group room is delivered to its
+    // poster as an enquiry, the same one-message thread a member listing's
+    // enquiry opens, with messaging's own block refusal.
+    private readonly messaging: MessagingService,
+    // A block (either way) or the reader's own mute hides the other member's
+    // group rooms, the same rule member-listing browse applies (ENG-470).
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async listPublished(): Promise<HousingGroupDTO[]> {
@@ -233,19 +266,83 @@ export class HousingGroupsService {
         GROUP_LISTINGS_READ_REFUSAL_MESSAGE,
       );
     }
-    const listings = await this.listings.find({
-      where: {
-        groupId: group.id,
-        status: GroupListingStatus.Live,
-        hidden: false,
-      },
-      order: { createdAt: 'DESC' },
-      take: DEFAULT_LIST_LIMIT,
-    });
+    const listings = await this.visibleListingsQuery(group.id, viewerId)
+      .orderBy('listing.createdAt', 'DESC')
+      .addOrderBy('listing.id', 'DESC')
+      .limit(DEFAULT_LIST_LIMIT)
+      .getMany();
+    // PRD-443: the poster is named to signed-in readers only, in ONE batched
+    // profile read for the whole page. An anonymous read stays a shape that
+    // names nobody, which is what lets an open group's answer be cached.
+    const posterIds =
+      viewerId === null
+        ? []
+        : [
+            ...new Set(
+              listings
+                .map((listing) => listing.postedByUserId)
+                .filter((userId): userId is string => Boolean(userId)),
+            ),
+          ];
+    const postersByUserId = posterIds.length
+      ? await new MemberLookup(this.profiles).byUserIds(posterIds)
+      : new Map<string, MemberRef>();
     return {
-      listings: listings.map(toGroupListingDTO),
-      isCallerAgnostic: !group.isAccessGated,
+      listings: listings.map((listing) =>
+        toPublicGroupListingDTO(
+          listing,
+          listing.postedByUserId
+            ? (postersByUserId.get(listing.postedByUserId) ?? null)
+            : null,
+          viewerId,
+        ),
+      ),
+      isCallerAgnostic: !group.isAccessGated && viewerId === null,
     };
+  }
+
+  /**
+   * The rooms a reader may see in one group: approved (`status = live`),
+   * clear of a moderator's norm takedown (`hidden`), and clear of a takedown
+   * from a report (PRD-443), which writes a `content_moderation` row keyed by
+   * the room's uuid. One definition shared by the group page and the enquiry path, so a
+   * room nobody can read is a room nobody can message about either.
+   *
+   * With a signed-in `viewerId`, rooms posted by someone the viewer blocked,
+   * was blocked by, or muted are dropped too (`excludeHidden`), so a blocked
+   * pair neither sees nor messages each other's rooms. The filter is a
+   * `NOT EXISTS` on the poster column, so a room whose poster's account was
+   * erased (`posted_by_user_id` NULL) matches no block and stays visible. An
+   * anonymous read has nobody to filter for and stays the shared shape.
+   */
+  private visibleListingsQuery(
+    groupId: string,
+    viewerId: string | null = null,
+  ): SelectQueryBuilder<GroupListing> {
+    const query = this.listings
+      .createQueryBuilder('listing')
+      .where('listing.groupId = :groupId', { groupId })
+      .andWhere('listing.status = :liveStatus', {
+        liveStatus: GroupListingStatus.Live,
+      })
+      .andWhere('listing.hidden = :isHidden', { isHidden: false })
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "cm"
+          WHERE "cm"."subject_type" = :groupListingSubjectType
+            AND "cm"."subject_id" = CAST("listing"."id" AS text)
+            AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+        )`,
+        { groupListingSubjectType: ReportSubjectType.GroupListing },
+      );
+    if (viewerId !== null) {
+      this.blockFilter.excludeHidden(
+        query,
+        viewerId,
+        '"listing"."posted_by_user_id"',
+      );
+    }
+    return query;
   }
 
   async listAllForAdmin(): Promise<HousingGroupDTO[]> {
@@ -302,23 +399,35 @@ export class HousingGroupsService {
     );
   }
 
+  /**
+   * A member asks to join a group (ENG-472: signed-in active members only).
+   *
+   * One live request per member per group. A request still being read, or an
+   * approved one, answers 409 with the caller's own standing, so a second
+   * click neither queues a duplicate for the stewards nor counts the member
+   * twice. A declined member may ask again: a decline is an answer to that
+   * request, and the group can change its mind about a later one.
+   *
+   * The duplicate check runs before the pledge gate, so a member who already
+   * asked is told so directly. No unique index backs it: a declined row and a
+   * fresh request for the same pair must coexist, and the member count reads
+   * DISTINCT users, so a rare double-submit race costs the stewards one extra
+   * row to decline and never inflates the published figure.
+   */
   async createJoinRequest(
     slug: string,
     dto: CreateGroupJoinRequestDto,
-    userId: string | null,
+    userId: string,
   ): Promise<{ id: string }> {
     const group = await this.groups.findOne({
       where: { slug, published: true },
     });
     if (!group) throw new NotFoundException('Group not found');
 
-    // Baseline gate: a signed-in member asking to join commits to the affirming
-    // pledge. Anonymous applicants (userId null — the access-gated group model
-    // deliberately lets a non-member ask to be let in) are NOT gated: requiring
-    // a member-level pledge of someone who isn't a member yet is impossible, and
-    // gating who may ASK to join would edge toward the very exclusion this design
-    // avoids. Their commitment is captured at the point they become a member.
-    if (userId) await this.affirmingPledge.requireAccepted(userId);
+    await this.assertNoLiveJoinRequest(group.id, userId);
+
+    // Baseline gate: asking to join commits the member to the affirming pledge.
+    await this.affirmingPledge.requireAccepted(userId);
 
     // Access-gating enforcement: every REQUIRED screening question must have a
     // non-empty answer. Snapshot the prompt text alongside each answer so an
@@ -359,6 +468,40 @@ export class HousingGroupsService {
       saved.id,
     );
     return { id: saved.id };
+  }
+
+  /** 409 when the member already holds a pending or approved request for this
+   * group (ENG-472). Two columns only, the same narrow read
+   * `requireGroupMembership` makes. Approved wins over pending, since a member
+   * who is already in should hear that first. */
+  private async assertNoLiveJoinRequest(
+    groupId: string,
+    userId: string,
+  ): Promise<void> {
+    const liveRequests = await this.joinRequests.find({
+      where: {
+        groupId,
+        userId,
+        status: In([
+          GroupJoinRequestStatus.Pending,
+          GroupJoinRequestStatus.Approved,
+        ]),
+      },
+      select: { id: true, status: true },
+    });
+    if (liveRequests.length === 0) return;
+    const standing: GroupJoinDuplicateStanding = liveRequests.some(
+      (request) => request.status === GroupJoinRequestStatus.Approved,
+    )
+      ? 'member'
+      : 'pending';
+    throw new ConflictException({
+      statusCode: 409,
+      error: 'Conflict',
+      message: GROUP_JOIN_DUPLICATE_MESSAGE[standing],
+      code: GROUP_JOIN_ALREADY_REQUESTED_CODE,
+      membershipStanding: standing,
+    });
   }
 
   /**
@@ -643,11 +786,24 @@ export class HousingGroupsService {
    * request in either direction (and back), so a delta would drift, whereas
    * this is self-healing — one COUNT and one UPDATE per decision, off the read
    * path entirely so the group page stays a single row read.
+   *
+   * Counts distinct approved MEMBERS (ENG-472). A member approved on two
+   * requests is one person, and a by-name approval with no account behind it
+   * (`user_id` NULL, from before join requests became member-only, or after an
+   * erasure) is nobody the roster can name. `RecountHousingGroupMembers`
+   * applied the same rule to every stored figure once.
    */
   private async refreshMemberCount(groupId: string): Promise<void> {
-    const memberCount = await this.joinRequests.count({
-      where: { groupId, status: GroupJoinRequestStatus.Approved },
-    });
+    const countRow = await this.joinRequests
+      .createQueryBuilder('request')
+      .select('COUNT(DISTINCT "request"."user_id")', 'memberCount')
+      .where('request.groupId = :groupId', { groupId })
+      .andWhere('request.status = :approvedStatus', {
+        approvedStatus: GroupJoinRequestStatus.Approved,
+      })
+      .andWhere('"request"."user_id" IS NOT NULL')
+      .getRawOne<{ memberCount: string | number }>();
+    const memberCount = Number(countRow?.memberCount ?? 0);
     await this.groups.update({ id: groupId }, { memberCount });
   }
 
@@ -764,15 +920,17 @@ export class HousingGroupsService {
    * Why approved join requests are the roster: there is no `group_members`
    * table. `computeMutualConnections` and `refreshMemberCount` both already read
    * membership exactly this way, and `housing_groups.member_count` (the public
-   * "N members" figure) is a COUNT of these rows. Reading it a third way here
+   * "N members" figure) counts the distinct members behind these rows
+   * (`refreshMemberCount`). Reading it a third way here
    * would be a second definition of the same thing, free to drift. If a
    * dedicated roster table ever lands, all three move together.
    *
    * WHY A 403 AND NOT A 404. The group, its blurb and its norms are `@Public()`
-   * and deliberately discoverable: the join flow depends on a stranger finding
-   * the group and asking. Hiding it from someone who can already read it would
-   * conceal nothing and would leave the client with no way to say what to do
-   * next. The typed `code` plus the caller's own standing gives it one.
+   * and deliberately discoverable: a member reading the group page learns
+   * what it is for and asks to join from there. Hiding it from someone who
+   * can already read it would conceal nothing and would leave the client
+   * with no way to say what to do next. The typed `code` plus the caller's
+   * own standing gives it one.
    *
    * NO STAFF EXEMPTION, and no owner exemption, because there is no owner.
    * `HousingGroup` carries no owner or steward column: groups are created and
@@ -806,7 +964,7 @@ export class HousingGroupsService {
       return;
     }
 
-    // Nothing prevents a member from asking twice, so read the BEST standing
+    // A declined member may ask again (ENG-472), so read the BEST standing
     // they hold: a pending re-application is live news, an old decline is not.
     const standing: GroupMembershipStanding = requests.some(
       (request) => request.status === GroupJoinRequestStatus.Pending,
@@ -922,7 +1080,15 @@ export class HousingGroupsService {
       listing.decidedBy = null;
       listing.decisionReason = null;
     }
-    return toMyGroupListingDTO(await this.listings.save(listing), group);
+    const saved = await this.listings.save(listing);
+    // An edit lifts no report takedown, so the row the poster gets back has to
+    // keep saying the room is down.
+    const moderationStates = await this.reportTakedownStatesFor([saved.id]);
+    return toMyGroupListingDTO(
+      saved,
+      group,
+      moderationStates.get(saved.id) ?? null,
+    );
   }
 
   /**
@@ -935,6 +1101,64 @@ export class HousingGroupsService {
   async removeListing(slug: string, id: string, userId: string): Promise<void> {
     const { listing } = await this.loadPostedListingOr404(slug, id, userId);
     await this.listings.remove(listing);
+  }
+
+  /**
+   * A reader messages the member who posted a room (PRD-443). Before this a
+   * group room was read-only: a reader could see the rent and the stairs and
+   * had nobody to ask about either.
+   *
+   * The gates follow the member-listing enquiry
+   * (`HousingListingsService.createEnquiry`), in the order that refuses most
+   * honestly:
+   *  1. the group is published, and on an access-gated group the caller is a
+   *     member, with the same refusal the read gives, since a room you cannot
+   *     read is a room you cannot ask about;
+   *  2. the room is one the group page shows this caller
+   *     (`visibleListingsQuery`, block and mute filter included), else 404,
+   *     the same answer a member listing's enquiry gives for a home that is
+   *     off the board or hidden by a block;
+   *  3. there is a poster to write to, and it is somebody else;
+   *  4. the affirming pledge and a phone-verified account.
+   *
+   * Delivery is `MessagingService.deliverEnquiry`, which refuses a blocked
+   * pair, so a poster who blocked the reader never hears from them here.
+   */
+  async createListingEnquiry(
+    slug: string,
+    id: string,
+    userId: string,
+    dto: CreateGroupListingEnquiryDto,
+  ): Promise<{ conversationId: string }> {
+    const group = await this.groups.findOne({
+      where: { slug, published: true },
+    });
+    if (!group) throw new NotFoundException('Group not found');
+    if (group.isAccessGated) {
+      await this.requireGroupMembership(
+        group,
+        userId,
+        GROUP_LISTINGS_READ_REFUSAL_MESSAGE,
+      );
+    }
+    const listing = await this.visibleListingsQuery(group.id, userId)
+      .andWhere('listing.id = :listingId', { listingId: id })
+      .getOne();
+    if (!listing) throw new NotFoundException('Listing not found');
+    const posterId = listing.postedByUserId;
+    if (posterId === null) {
+      throw new BadRequestException(
+        'This room no longer has a poster to contact',
+      );
+    }
+    if (posterId === userId) {
+      throw new BadRequestException(
+        'You cannot send an enquiry about your own room',
+      );
+    }
+    await this.affirmingPledge.requireAccepted(userId);
+    await this.verification.requireLevel(userId, VerificationLevel.Phone);
+    return this.messaging.deliverEnquiry(userId, posterId, dto.body);
   }
 
   /**
@@ -960,7 +1184,47 @@ export class HousingGroupsService {
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    return listings.map((listing) => toMyGroupListingDTO(listing, group));
+    const moderationStates = await this.reportTakedownStatesFor(
+      listings.map((listing) => listing.id),
+    );
+    return listings.map((listing) =>
+      toMyGroupListingDTO(
+        listing,
+        group,
+        moderationStates.get(listing.id) ?? null,
+      ),
+    );
+  }
+
+  /**
+   * The report takedown on each of these rooms, keyed by room id. Rooms with
+   * no takedown are absent. Reads the same `content_moderation` rows
+   * `visibleListingsQuery` withholds on, so the poster's list and the group
+   * page agree about which rooms are down. One `IN (...)` query for the page.
+   *
+   * Read through the listing repository's own manager, so the one lookup
+   * needs no `ContentModerationModule` import here.
+   */
+  private async reportTakedownStatesFor(
+    listingIds: readonly string[],
+  ): Promise<Map<string, GroupListingModerationState>> {
+    const states = new Map<string, GroupListingModerationState>();
+    if (listingIds.length === 0) return states;
+    const rows = await this.listings.manager.find(ContentModeration, {
+      where: {
+        subjectType: ReportSubjectType.GroupListing,
+        subjectId: In([...listingIds]),
+      },
+      select: { subjectId: true, hiddenAt: true, removedAt: true },
+    });
+    for (const row of rows) {
+      if (row.removedAt !== null) {
+        states.set(row.subjectId, 'removed');
+      } else if (row.hiddenAt !== null) {
+        states.set(row.subjectId, 'hidden');
+      }
+    }
+    return states;
   }
 
   /** Loads a listing in the given group that the caller actually posted, with

@@ -7,10 +7,18 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import {
+  FindOptionsWhere,
+  In,
+  MoreThanOrEqual,
+  Not,
+  Repository,
+} from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
@@ -37,6 +45,30 @@ import {
   ListingSummary,
   toHousingViewingDTO,
 } from './housing-viewing-response';
+
+/** The content-moderation subject type housing listings are filed under,
+ * keyed by slug (`HousingDirectoryService.SUBJECT_TYPE`). */
+const HOUSING_MODERATION_SUBJECT = 'housing';
+
+/** The statuses a viewing is still open in: something the two people may yet
+ * act on, and something a block, a filled home or a deleted home calls off. */
+const OPEN_VIEWING_STATUSES = [
+  HousingViewingStatus.Requested,
+  HousingViewingStatus.Accepted,
+];
+
+/** Extra context for `hasUnlockedViewing`, supplied by the listing detail read
+ * that already holds the listing row. */
+export interface UnlockedViewingOptions {
+  /** The lister. A block either way between the viewer and the lister closes
+   * the address again. */
+  listerId?: string | null;
+  /** When the lister last put a filled home back on the board. A completed
+   * viewing keeps the address unlocked only when its agreed slot falls on or
+   * after this moment, so a viewing from an earlier letting stops counting once
+   * the home is relisted. */
+  relistedAt?: Date | null;
+}
 
 /**
  * Viewing scheduling for member housing listings (P2.3). Requesting a viewing
@@ -70,6 +102,13 @@ export class HousingViewingsService {
     // were accepted (which is also the moment the exact address unlocks, see
     // `hasUnlockedViewing`).
     private readonly notifications: NotificationsService,
+    // ENG-468 / ENG-467. A block either way stops a viewing being requested,
+    // answered or used to unlock the exact address, the same guard the
+    // enquiry path applies (`MessageRequestsService`).
+    private readonly blockFilter: BlockFilterService,
+    // ENG-471. A home a moderator hid or removed is off the board for viewings
+    // as well as for browse and detail.
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   async request(
@@ -79,7 +118,10 @@ export class HousingViewingsService {
     const listing = await this.listings.findOne({
       where: { ref: dto.listingRef, status: HousingListingStatus.Live },
     });
-    if (!listing) {
+    // ENG-471. A live status alone still let a filled, expired or taken-down
+    // home take viewing requests. The 404 matches what the public detail read
+    // answers for the same home, so the client reads it as "not bookable".
+    if (!listing || !(await this.isOnBoard(listing))) {
       throw new NotFoundException('Housing listing not found');
     }
     // NULL once the lister erased their account
@@ -94,6 +136,15 @@ export class HousingViewingsService {
       throw new BadRequestException(
         'You cannot request a viewing on your own listing',
       );
+    }
+    // ENG-468. A viewing request delivers a note to the lister and can unlock
+    // their address, so a block either way refuses it with the same 403 the
+    // enquiry path gives (`MessageRequestsService`). Checked before the pledge
+    // and step-up so a blocked pair is never walked through either.
+    if (
+      await this.blockFilter.isBlockedEitherWay(requesterId, listing.ownerId)
+    ) {
+      throw new ForbiddenException('You cannot contact this member');
     }
     // Baseline gate: arranging to view someone's home is the most direct
     // contact action in the module (it delivers the requester's note to the
@@ -203,12 +254,23 @@ export class HousingViewingsService {
   ): Promise<HousingViewingDTO> {
     const viewing = await this.loadParticipant(id, userId);
     this.assertPending(viewing);
+    await this.assertNotBlocked(viewing);
     const role = this.roleOf(viewing, userId);
     // You accept the OTHER side's proposal, never your own.
     if (viewing.proposedBy === role) {
       throw new ForbiddenException(
         'Wait for the other person to respond to your proposed times',
       );
+    }
+    // ENG-471. Accepting unlocks the exact address, so the home has to still
+    // be bookable: live, unfilled, unexpired and clear of any takedown. Load
+    // with `withDeleted` so a deleted home answers with this same message.
+    const listing = await this.listings.findOne({
+      where: { id: viewing.listingId },
+      withDeleted: true,
+    });
+    if (!listing || !(await this.isOnBoard(listing))) {
+      throw new BadRequestException('This home is no longer on the board');
     }
     const slotMs = new Date(dto.slot).getTime();
     const match = viewing.proposedSlots.find(
@@ -247,6 +309,7 @@ export class HousingViewingsService {
   ): Promise<HousingViewingDTO> {
     const viewing = await this.loadParticipant(id, userId);
     this.assertPending(viewing);
+    await this.assertNotBlocked(viewing);
     const role = this.roleOf(viewing, userId);
     if (viewing.proposedBy === role) {
       throw new ForbiddenException(
@@ -289,10 +352,15 @@ export class HousingViewingsService {
     return view;
   }
 
-  /** Either participant may cancel while still pending. */
+  /** Either participant may cancel a requested or an accepted viewing
+   * (ENG-467). Plans change after a time is agreed, and an accepted viewing
+   * that only one side knows is off keeps the address unlocked for someone who
+   * is no longer coming. A completed viewing is history and stays as it is. */
   async cancel(id: string, userId: string): Promise<HousingViewingDTO> {
     const viewing = await this.loadParticipant(id, userId);
-    this.assertPending(viewing);
+    if (!OPEN_VIEWING_STATUSES.includes(viewing.status)) {
+      throw new BadRequestException('This viewing can no longer be cancelled');
+    }
     viewing.status = HousingViewingStatus.Cancelled;
     const view = await this.saveAndBuild(viewing, userId);
     // PRD-240. Either side may cancel, so the recipient is whichever
@@ -352,21 +420,179 @@ export class HousingViewingsService {
    * accepted (or already completed) — the signal the address gate ORs in so an
    * accepted enquirer unlocks the precise address without needing to be a full
    * connection.
+   *
+   * ENG-467 narrows it in two ways when the caller passes the listing's
+   * context. A block either way with `options.listerId` closes the address
+   * outright. And once a filled home is relisted, only viewings that belong to
+   * the current letting count: an accepted viewing must have been requested on
+   * or after `options.relistedAt`, and a completed one must have had its agreed
+   * slot on or after it. The rule holds on its own, so it also covers accepted
+   * viewings that outlived a fill, such as fills made before
+   * `closeOpenForListing` existed.
    */
   async hasUnlockedViewing(
     listingId: string,
     userId: string,
+    options: UnlockedViewingOptions = {},
   ): Promise<boolean> {
-    return this.viewings.exists({
-      where: {
-        listingId,
-        requesterId: userId,
-        status: In([
-          HousingViewingStatus.Accepted,
-          HousingViewingStatus.Completed,
-        ]),
-      },
-    });
+    if (
+      options.listerId &&
+      (await this.blockFilter.isBlockedEitherWay(userId, options.listerId))
+    ) {
+      return false;
+    }
+    const acceptedWhere: FindOptionsWhere<HousingViewing> = {
+      listingId,
+      requesterId: userId,
+      status: HousingViewingStatus.Accepted,
+    };
+    const completedWhere: FindOptionsWhere<HousingViewing> = {
+      listingId,
+      requesterId: userId,
+      status: HousingViewingStatus.Completed,
+    };
+    if (options.relistedAt) {
+      acceptedWhere.createdAt = MoreThanOrEqual(options.relistedAt);
+      completedWhere.acceptedSlot = MoreThanOrEqual(options.relistedAt);
+    }
+    return this.viewings.exists({ where: [acceptedWhere, completedWhere] });
+  }
+
+  /**
+   * ENG-466 / ENG-467. Calls off every requested or accepted viewing on a home
+   * the lister has just filled or deleted, and tells each requester with the
+   * same `HousingViewingCancelled` bell a manual cancel sends, the lister as
+   * actor. Called by `HousingListingsService.markFilled` and `remove` after
+   * their own write has committed, so the whole pass is best-effort: a failure
+   * is logged and the lister's action stands.
+   *
+   * One guarded UPDATE with RETURNING, so the bells go to exactly the rows this
+   * write changed. A viewing completed or cancelled a moment earlier keeps its
+   * status and its requester hears nothing from here.
+   */
+  async closeOpenForListing(listingId: string, actorId: string): Promise<void> {
+    try {
+      const result = await this.viewings
+        .createQueryBuilder()
+        .update()
+        .set({ status: HousingViewingStatus.Cancelled })
+        .where('listing_id = :listingId', { listingId })
+        .andWhere('status IN (:...openStatuses)', {
+          openStatuses: OPEN_VIEWING_STATUSES,
+        })
+        .returning(['id', 'requesterId'])
+        .execute();
+      const cancelled = (
+        (result.raw ?? []) as { id?: unknown; requester_id?: unknown }[]
+      ).filter(
+        (row): row is { id: string; requester_id: string } =>
+          typeof row.id === 'string' && typeof row.requester_id === 'string',
+      );
+      if (!cancelled.length) return;
+      // `withDeleted`: on the delete path the listing is already soft-removed,
+      // and the bell still needs its slug and title.
+      const listing = await this.listings.findOne({
+        where: { id: listingId },
+        withDeleted: true,
+      });
+      for (const row of cancelled) {
+        await this.notify(
+          row.requester_id,
+          actorId,
+          NotificationType.HousingViewingCancelled,
+          {
+            viewingId: row.id,
+            slug: listing?.slug ?? '',
+            title: listing?.title ?? '',
+          },
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Closing open viewings for listing ${listingId} failed: ${String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * PRD-444. Calls off every REQUESTED viewing on homes the daily expiry sweep
+   * has just hidden, and tells each requester with the `HousingViewingCancelled`
+   * bell. A requested viewing on a hidden home can never be accepted (accept
+   * answers 400 "no longer on the board"), so leaving it open strands the
+   * requester waiting on a lister who cannot say yes.
+   *
+   * Accepted viewings stay: the lister may still show the home, and `extend`
+   * puts it back up. The lister is passed as the block/mute gate actor, the
+   * same party `closeOpenForListing` passes, so a requester who blocked them
+   * hears nothing.
+   *
+   * One guarded UPDATE with RETURNING, so the bells go to exactly the rows this
+   * write changed. Best-effort: called after the sweep's own write committed,
+   * so a failure is logged and the sweep stands.
+   */
+  async closeRequestedForListings(listingIds: string[]): Promise<void> {
+    if (!listingIds.length) return;
+    try {
+      const result = await this.viewings
+        .createQueryBuilder()
+        .update()
+        .set({ status: HousingViewingStatus.Cancelled })
+        .where('listing_id IN (:...listingIds)', { listingIds })
+        .andWhere('status = :requested', {
+          requested: HousingViewingStatus.Requested,
+        })
+        .returning(['id', 'requesterId', 'listerId', 'listingId'])
+        .execute();
+      const cancelled = (
+        (result.raw ?? []) as {
+          id?: unknown;
+          requester_id?: unknown;
+          lister_id?: unknown;
+          listing_id?: unknown;
+        }[]
+      ).filter(
+        (
+          row,
+        ): row is {
+          id: string;
+          requester_id: string;
+          lister_id: string;
+          listing_id: string;
+        } =>
+          typeof row.id === 'string' &&
+          typeof row.requester_id === 'string' &&
+          typeof row.lister_id === 'string' &&
+          typeof row.listing_id === 'string',
+      );
+      if (!cancelled.length) return;
+      const affectedListingIds = [
+        ...new Set(cancelled.map((row) => row.listing_id)),
+      ];
+      const listings = await this.listings.find({
+        where: { id: In(affectedListingIds) },
+        select: { id: true, slug: true, title: true },
+      });
+      const listingById = new Map(
+        listings.map((listing) => [listing.id, listing]),
+      );
+      for (const row of cancelled) {
+        const listing = listingById.get(row.listing_id);
+        await this.notify(
+          row.requester_id,
+          row.lister_id,
+          NotificationType.HousingViewingCancelled,
+          {
+            viewingId: row.id,
+            slug: listing?.slug ?? '',
+            title: listing?.title ?? '',
+          },
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Closing requested viewings for ${listingIds.length} swept listing(s) failed: ${String(error)}`,
+      );
+    }
   }
 
   /** Load a COMPLETED viewing the caller took part in, for the review gate.
@@ -466,6 +692,41 @@ export class HousingViewingsService {
         'This viewing is no longer awaiting a response',
       );
     }
+  }
+
+  /** ENG-468. A block either way between the two participants freezes the
+   * viewing for both: the block listener cancels it, and this refuses any
+   * answer that races in before the listener runs. */
+  private async assertNotBlocked(viewing: HousingViewing): Promise<void> {
+    if (
+      await this.blockFilter.isBlockedEitherWay(
+        viewing.requesterId,
+        viewing.listerId,
+      )
+    ) {
+      throw new ForbiddenException('You cannot contact this member');
+    }
+  }
+
+  /** ENG-471. True while the home can still be booked: live, unfilled,
+   * unexpired, present and clear of a moderator takedown. The same rules the
+   * public detail read applies before it shows the home to anyone else. */
+  private async isOnBoard(listing: HousingListing): Promise<boolean> {
+    if (!this.isListedAndCurrent(listing)) return false;
+    const moderation = await this.contentModeration.stateFor(
+      HOUSING_MODERATION_SUBJECT,
+      listing.slug,
+    );
+    return !moderation.hidden && !moderation.removed;
+  }
+
+  /** The row-level half of `isOnBoard`: live, unfilled, unexpired and present.
+   * `buildMany` pairs it with one batched moderation read for a whole page. */
+  private isListedAndCurrent(listing: HousingListing): boolean {
+    if (listing.status !== HousingListingStatus.Live) return false;
+    if (listing.filledAt !== null) return false;
+    if (new Date(listing.expiresAt).getTime() <= Date.now()) return false;
+    return !listing.deletedAt;
   }
 
   private roleOf(viewing: HousingViewing, userId: string): HousingViewingParty {
@@ -571,14 +832,46 @@ export class HousingViewingsService {
   ): Promise<HousingViewingDTO[]> {
     if (!rows.length) return [];
     const listingIds = [...new Set(rows.map((row) => row.listingId))];
+    // ENG-466. `withDeleted` so a viewing on a home the lister has since
+    // deleted keeps its title and slug in the member's history.
     const listings = await this.listings.find({
       where: { id: In(listingIds) },
+      withDeleted: true,
     });
+    // `isListingOpen` per home, batched: one moderation read for every slug
+    // and one block read against every lister, whatever the page size.
+    const [moderationBySlug, blockedListerIds] = await Promise.all([
+      this.contentModeration.statesFor(
+        HOUSING_MODERATION_SUBJECT,
+        listings.map((listing) => listing.slug),
+      ),
+      this.blockFilter.blockedUserIds(
+        callerId,
+        listings
+          .map((listing) => listing.ownerId)
+          .filter((ownerId): ownerId is string => ownerId !== null),
+      ),
+    ]);
     const listingById = new Map<string, ListingSummary>(
-      listings.map((listing) => [
-        listing.id,
-        { ref: listing.ref, slug: listing.slug, title: listing.title },
-      ]),
+      listings.map((listing) => {
+        const moderation = moderationBySlug.get(listing.slug);
+        const isOpen =
+          this.isListedAndCurrent(listing) &&
+          !moderation?.hidden &&
+          !moderation?.removed &&
+          listing.ownerId !== null &&
+          !blockedListerIds.has(listing.ownerId);
+        return [
+          listing.id,
+          {
+            ref: listing.ref,
+            slug: listing.slug,
+            title: listing.title,
+            isOpen,
+            isDeleted: Boolean(listing.deletedAt),
+          },
+        ];
+      }),
     );
     // The counterparty is whoever the caller ISN'T on each row.
     const counterpartyIds = rows.map((row) =>
@@ -588,10 +881,14 @@ export class HousingViewingsService {
       counterpartyIds,
     );
     return rows.map((row) => {
+      // A listing row missing even with `withDeleted` is gone for good, so it
+      // reads as deleted and closed.
       const summary = listingById.get(row.listingId) ?? {
         ref: '',
         slug: '',
         title: '',
+        isOpen: false,
+        isDeleted: true,
       };
       const counterpartyId =
         row.requesterId === callerId ? row.listerId : row.requesterId;

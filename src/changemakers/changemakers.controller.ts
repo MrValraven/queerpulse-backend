@@ -1,37 +1,32 @@
-import { Controller, Get, Header, Param } from '@nestjs/common';
-import { Public } from '../auth/decorators/public.decorator';
+import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { ChangemakersService } from './changemakers.service';
 import {
+  ApiCookieAuth,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import {
-  PUBLIC_READ_CACHE,
-  PUBLIC_READ_CDN_CACHE,
-} from '../common/public-read-cache';
 
-// Public, read-only directory backing `ChangemakersPage.tsx` and
-// `ChangemakerStoryPage.tsx`. Only published profiles are exposed here.
-// `@Public()` is required on every route: `JwtAuthGuard` is bound globally
-// via `APP_GUARD`, so without it a logged-out visitor would be rejected
-// before reaching the handler (see `DirectoryController` for the same
-// pattern).
-//
-// Both routes carry a positive `Cache-Control`: the response is identical for
-// every anonymous caller (no `@CurrentUser()`, no session-scoped filtering) —
-// see AUDIT-2026-07-30.md §I "No CDN cache headers on public GETs" /
-// `caching-and-cost.md`.
+// Member-only, read-only directory backing `ChangemakersPage.tsx` and
+// `ChangemakerStoryPage.tsx` (the frontend gates `/changemakers` and
+// `/changemaker/*` in `authGate.ts`). Only published profiles are exposed.
+// The global `JwtAuthGuard` authenticates every route here and
+// `ActiveMemberGuard` limits them to active members, so the responses carry no
+// shared-cache headers.
+@Feature('community')
 @ApiTags('Changemakers')
+@ApiCookieAuth()
+@ApiUnauthorizedResponse({ description: 'Not authenticated.' })
 @Controller('changemakers')
+@UseGuards(ActiveMemberGuard)
 export class ChangemakersController {
   constructor(private readonly changemakers: ChangemakersService) {}
 
-  @Public()
   @Get()
-  @Header('Cache-Control', PUBLIC_READ_CACHE)
-  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary: 'List published changemaker profiles with directory stats.',
   })
@@ -43,10 +38,7 @@ export class ChangemakersController {
     return this.changemakers.listPublic();
   }
 
-  @Public()
   @Get(':slug')
-  @Header('Cache-Control', PUBLIC_READ_CACHE)
-  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'Get a single published changemaker by slug.' })
   @ApiOkResponse({ description: 'The published changemaker profile.' })
   @ApiNotFoundResponse({

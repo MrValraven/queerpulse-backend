@@ -61,9 +61,15 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     firstLiveAt: null,
     virtualTourUrl: null,
     filledAt: null,
+    // PRD-444: the expiry sweep did not write the current `filledAt`.
+    sweptAt: null,
     expiresAt: new Date('2026-03-02T00:00:00.000Z'),
     // PRD-244: not yet warned about this term.
     expiryWarningSentAt: null,
+    // ENG-467: never relisted after a fill.
+    relistedAt: null,
+    // ENG-469: no failed geocode of the current address.
+    geocodeAttempts: 0,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -93,6 +99,7 @@ function makeQueryBuilder(
     'addOrderBy',
     'skip',
     'take',
+    'withDeleted',
   ]) {
     builder[method] = jest.fn().mockReturnValue(builder);
   }
@@ -236,6 +243,50 @@ describe('HousingListingModerationService', () => {
 
       const [saved] = listings.save.mock.calls[0] as [HousingListing];
       expect(saved.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
+
+    // PRD-444: approval renews a sweep-hidden listing the way `extend` does.
+    it('puts a listing the expiry sweep hid back up on approval', async () => {
+      const sweptAt = new Date('2020-01-02T00:00:00.000Z');
+      const relistedAt = new Date('2019-06-01T00:00:00.000Z');
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          status: HousingListingStatus.Review,
+          expiresAt: new Date('2020-01-01T00:00:00.000Z'),
+          filledAt: sweptAt,
+          sweptAt,
+          relistedAt,
+        }),
+      );
+
+      await service.decide('QPH-2026-0001', 'mod-1', {
+        decision: HousingListingDecision.Approve,
+      });
+
+      const [saved] = listings.save.mock.calls[0] as [HousingListing];
+      expect(saved.filledAt).toBeNull();
+      expect(saved.sweptAt).toBeNull();
+      expect(saved.relistedAt).toBe(relistedAt);
+    });
+
+    it('keeps an owner fill in place on approval', async () => {
+      const ownerFilledAt = new Date('2020-01-02T00:00:00.000Z');
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          status: HousingListingStatus.Review,
+          expiresAt: new Date('2020-01-01T00:00:00.000Z'),
+          filledAt: ownerFilledAt,
+          sweptAt: null,
+        }),
+      );
+
+      await service.decide('QPH-2026-0001', 'mod-1', {
+        decision: HousingListingDecision.Approve,
+      });
+
+      const [saved] = listings.save.mock.calls[0] as [HousingListing];
+      expect(saved.filledAt).toBe(ownerFilledAt);
+      expect(saved.sweptAt).toBeNull();
     });
 
     it('records who decided and when, and stamps the reason', async () => {
@@ -458,6 +509,37 @@ describe('HousingListingModerationService', () => {
       // are theirs to see. No other route returns this DTO.
       expect(item?.addressLine).toBe('Rua Example 10, 3 Esq');
       expect(item?.locationPrecision).toBe('exact');
+    });
+
+    // ENG-466: deleting a refused or taken-down listing must not clean the
+    // lister's record, and a deleted live listing must not count as live.
+    it('counts soft-deleted listings in the lister history only when they were sanctioned', async () => {
+      const row = makeListing({ status: HousingListingStatus.Review });
+      const builder = makeQueryBuilder([row], 1, [
+        {
+          ownerId: row.ownerId,
+          status: HousingListingStatus.Rejected,
+          count: '1',
+        },
+      ]);
+      listings.createQueryBuilder.mockReturnValue(builder);
+
+      const page = await service.reviewQueue({});
+
+      expect(builder.withDeleted).toHaveBeenCalled();
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        '(l.deleted_at IS NULL OR l.status IN (:...sanctionedStatuses))',
+        {
+          sanctionedStatuses: [
+            HousingListingStatus.Rejected,
+            HousingListingStatus.TakenDown,
+          ],
+        },
+      );
+      expect(page.items[0]?.listerHistory).toMatchObject({
+        rejectedListings: 1,
+        hasCleanRecord: false,
+      });
     });
   });
 });

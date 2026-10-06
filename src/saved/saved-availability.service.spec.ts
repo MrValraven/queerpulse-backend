@@ -43,9 +43,11 @@ const ref = (
 describe('SavedAvailabilityService', () => {
   let manager: ReturnType<typeof makeManager>;
   let service: SavedAvailabilityService;
+  let excludeBlocked: jest.Mock;
 
   const build = async (rowsByAlias: Record<string, string[]> = {}) => {
     manager = makeManager(rowsByAlias);
+    excludeBlocked = jest.fn((queryBuilder: unknown) => queryBuilder);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SavedAvailabilityService,
@@ -56,7 +58,7 @@ describe('SavedAvailabilityService', () => {
         {
           provide: BlockFilterService,
           useValue: {
-            excludeBlocked: jest.fn((queryBuilder: unknown) => queryBuilder),
+            excludeBlocked,
           },
         },
       ],
@@ -215,6 +217,26 @@ describe('SavedAvailabilityService', () => {
 
     expect(manager.createQueryBuilder).toHaveBeenCalledTimes(1);
     expect(available).toEqual(new Set(['listing:drama-bar']));
+  });
+
+  describe('a saved housing listing', () => {
+    it('is filtered on its owner column for blocks in either direction, in the same query', async () => {
+      await build({ housing: ['a-room'] });
+
+      const available = await service.availableRefs(
+        [ref(SavedKind.Housing, 'a-room'), ref(SavedKind.Housing, 'b-room')],
+        'viewer-1',
+      );
+
+      expect(manager.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(excludeBlocked).toHaveBeenCalledTimes(1);
+      expect(excludeBlocked).toHaveBeenCalledWith(
+        expect.anything(),
+        'viewer-1',
+        '"housing"."owner_id"',
+      );
+      expect(available).toEqual(new Set(['housing:a-room']));
+    });
   });
 
   describe('an anonymous share-link recipient', () => {

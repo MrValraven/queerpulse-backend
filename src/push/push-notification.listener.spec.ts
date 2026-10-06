@@ -55,17 +55,24 @@ function build(opts: {
   const profilesRepo = {
     findOne: jest.fn().mockResolvedValue(opts.actorProfile ?? null),
   };
-  // Doubles as both collaborators the listener now takes: `PushService` (which
-  // only `pushSecurityNewSignIn` calls directly) and
-  // `PushPreviewPrivacyService` (which every other handler sends through since
-  // ID-13). `sendSplitByPreviewPreference` delegates to `sendToUsers`, which is
-  // the real service's behaviour for a recipient who has previews SHOWN, the
-  // case every assertion below is about. The split is covered in
+  // Stands in for `PushPreviewPrivacyService`, which every handler sends
+  // through (ID-13, and `pushSecurityNewSignIn` too since PRD-325).
+  // `sendSplitByPreviewPreference` delegates to `sendToUsers`, which is the
+  // real service's behaviour for a recipient who has previews SHOWN, the case
+  // every assertion below is about. The split is covered in
   // `push-preview-privacy.service.spec.ts`.
   const push = {
     sendToUsers: jest.fn().mockResolvedValue(undefined),
     sendSplitByPreviewPreference: jest.fn(),
+    sendGenericByLanguage: jest.fn(),
   };
+  // `pushSecurityNewSignIn` sends its fixed copy through the language-aware
+  // send (PRD-325); for an English recipient that is the payload unchanged.
+  push.sendGenericByLanguage.mockImplementation(
+    async (userIds: string[], payload: unknown): Promise<void> => {
+      await push.sendToUsers(userIds, payload);
+    },
+  );
   // The real split AWAITS its sends and rethrows the first fault, so the stub
   // has to propagate too. Dropping the returned promise on the floor turned a
   // primed rejection into an unhandled rejection that killed the worker
@@ -110,7 +117,6 @@ function build(opts: {
   };
   const listener = new PushNotificationListener(
     profilesRepo as never,
-    push as never,
     push as never,
     notificationPreferences as never,
     notificationDelivery as never,

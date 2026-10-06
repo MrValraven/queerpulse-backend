@@ -47,7 +47,11 @@ describe('GovernanceOverviewService', () => {
   let service: GovernanceOverviewService;
   let usersService: { countActiveMembers: jest.Mock };
   let repo: { findOne: jest.Mock; save: jest.Mock };
-  let changesRepo: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let changesRepo: {
+    find: jest.Mock;
+    exists: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   // `getAdminOverview` now resolves the latest change per section with one
   // `DISTINCT ON (section)` query instead of scanning the whole history in JS
   // (BE-COM-36), so it goes through the query builder rather than `find`.
@@ -72,8 +76,12 @@ describe('GovernanceOverviewService', () => {
       addOrderBy: jest.fn(() => latestChangesQb),
       getMany: jest.fn().mockResolvedValue([]),
     };
+    // PRD-448: the public read asks whether anyone has saved the health
+    // section. Most tests below are about a page whose tiles were entered, so
+    // the default answer is yes; the take-down tests flip it.
     changesRepo = {
       find: jest.fn(),
+      exists: jest.fn().mockResolvedValue(true),
       createQueryBuilder: jest.fn(() => latestChangesQb),
     };
     profilesRepo = { find: jest.fn() };
@@ -153,6 +161,43 @@ describe('GovernanceOverviewService', () => {
           (stat) => stat.key !== 'activeMembers',
         ),
       );
+    });
+
+    it('serves no health tiles until someone has saved the health section', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      changesRepo.exists.mockResolvedValue(false);
+
+      const result = await service.getOverview();
+
+      expect(changesRepo.exists).toHaveBeenCalledWith({
+        where: { section: OverviewSection.Health },
+      });
+      // The stored tiles are still the seed, so the public page gets an empty
+      // list and the live count is never even asked for.
+      expect(result.health).toEqual([]);
+      expect(usersService.countActiveMembers).not.toHaveBeenCalled();
+      // The rest of the page is platform policy and still renders.
+      expect(result.principles).toEqual(governanceOverviewSeed.principles);
+      expect(result.decisions).toEqual(governanceOverviewSeed.decisions);
+    });
+
+    it('serves the saved health tiles once the health section has an edit', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      changesRepo.exists.mockResolvedValue(true);
+
+      const result = await service.getOverview();
+
+      expect(result.health).toEqual(seedHealthWithLiveCount());
+    });
+
+    it('keeps the stored tiles on the admin read, so the editor can see them', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      changesRepo.exists.mockResolvedValue(false);
+      latestChangesQb.getMany.mockResolvedValue([]);
+
+      const result = await service.getAdminOverview();
+
+      expect(result.health).toEqual(seedHealthWithLiveCount());
     });
 
     it('maps a published snapshot to an ISO `publishedAt`', async () => {

@@ -490,6 +490,9 @@ export class AccountDeletionProcessorService {
       //
       //    The count is therefore no longer worth quoting from memory. Derive
       //    it when you need it rather than trusting the number above.
+      // 3a. Fail-closed backstop for step 0b's fundraiser funding deletion.
+      //     See `deleteErasedMemberAskFunding`.
+      await this.deleteErasedMemberAskFunding(manager, userId);
       await manager.delete(User, { id: userId });
 
       // 3b. Fail-closed backstop for step 0b's forum thread deletion, which
@@ -632,6 +635,38 @@ export class AccountDeletionProcessorService {
     );
     if (!Array.isArray(rows)) return [];
     return (rows as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /**
+   * Step 3a of `eraseAccount` (Funding & Grants): deletes the funding row
+   * (the donate link and its details) of every fundraiser the member wrote,
+   * inside the erasure transaction and BEFORE the user row is deleted, while
+   * `forum_thread.author_id` still names them.
+   *
+   * WHY. `ContentOwnerErasureService.eraseForumThreads` (step 0b) already
+   * deletes these rows for the asks that survive the erasure, but it runs
+   * under `runIsolated`, which logs a failure and carries on. Step 3 would
+   * then blank `author_id`, and nothing after it could tell which authorless
+   * ask was this member's, so the donation link would outlive the person
+   * accountable for it. Running here, a failure rolls the whole erasure back
+   * and parks the request for a human to retry.
+   *
+   * Scoped to this member's asks: an open call keeps its row, since a call's
+   * link is the funder's public page. Idempotent: after step 0b succeeded it
+   * matches nothing.
+   */
+  private async deleteErasedMemberAskFunding(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    await manager.query(
+      `DELETE FROM "forum_thread_funding" AS "funding"
+        USING "forum_thread" AS "t"
+        WHERE "funding"."thread_id" = "t"."id"
+          AND "t"."author_id" = $1
+          AND "t"."kind" = 'ask'`,
+      [userId],
+    );
   }
 
   /**

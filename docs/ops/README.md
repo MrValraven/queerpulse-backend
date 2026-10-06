@@ -45,7 +45,7 @@ subscription. The reach and the limits of each are set out in
 `src/migrations/1793610000000-AddNewsletterDigestLedger.ts:9` explains its batch
 sizing in terms of "subscribers x SMTP round trip (the mailer allows 8s to
 connect and 8s per...)". There is no mailer and no SMTP connection anywhere in
-this repository, and nothing reads the newsletter ledger to send anything. The
+this repository. The newsletter tables, ledger included, were removed on 2026-10-06 (migration 1828710000000). The
 comment is applied migration history, which is frozen by the rule in the root
 `CLAUDE.md`, so it stays exactly as written. Read it as an artefact of a plan
 that was dropped, never as a description of a system that runs.

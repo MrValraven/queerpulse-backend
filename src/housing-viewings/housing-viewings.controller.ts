@@ -105,7 +105,7 @@ export class HousingViewingsController {
   }
 
   @Post(':id/cancel')
-  @ApiOperation({ summary: 'Cancel a pending viewing' })
+  @ApiOperation({ summary: 'Cancel a pending or accepted viewing' })
   @ApiOkResponse({ description: 'The cancelled viewing.' })
   cancel(
     @CurrentUser() user: CurrentUserData,

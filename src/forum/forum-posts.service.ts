@@ -39,6 +39,7 @@ import {
   replacePostPhotos,
 } from './forum-post-photo';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
+import { ForumFundingService } from './forum-funding.service';
 import {
   ForumThreadsService,
   forumThreadVisibleSql,
@@ -253,6 +254,9 @@ export class ForumPostsService {
     // SOC-13 — thread following: auto-subscribe the replier and fan a new
     // reply out to everyone else already following the thread.
     private readonly subscriptions: ForumSubscriptionsService,
+    // Funding & Grants: a reply in a fundraiser's thread is held to the
+    // payment-details rule the fundraiser itself is.
+    private readonly funding: ForumFundingService,
   ) {}
 
   // A forum post can be reported (and thus taken down) under either taxonomy
@@ -831,6 +835,13 @@ export class ForumPostsService {
     if (thread.closesAt && thread.closesAt.getTime() <= Date.now()) {
       throw new ForbiddenException('This thread has closed to new replies');
     }
+    // Funding & Grants: QueerPulse never handles money, so a reply under a
+    // fundraiser may not carry an IBAN or a Portuguese mobile either (a
+    // "send it to me instead" reply is the scam the rule exists for). Checked
+    // before any write; an open call's replies are not held to it.
+    if (thread.kind === 'ask') {
+      this.funding.assertAskTextAllowed('ask', '', body);
+    }
 
     assertSinglePhotoSpelling(image, photos);
     const normalizedPhotos = normalizePostPhotos(photos);
@@ -1184,6 +1195,18 @@ export class ForumPostsService {
       throw new ForbiddenException('Only the author can edit this post');
     }
     assertSinglePhotoSpelling(image, photos);
+    // Funding & Grants: a reply edited under a fundraiser is held to the
+    // payment-details rule `reply` applies, before anything is written. The
+    // opening post goes through `applyOpBodyEditRules` below instead.
+    if (!post.isOp) {
+      const thread = await this.posts.manager.findOne(ForumThread, {
+        where: { id: post.threadId },
+        select: ['id', 'kind'],
+      });
+      if (thread?.kind === 'ask') {
+        this.funding.assertAskTextAllowed('ask', '', body);
+      }
+    }
 
     // Snapshot the pre-edit body and persist the new one atomically: a partial
     // failure between the two writes would otherwise record a "previous body"
@@ -1221,6 +1244,20 @@ export class ForumPostsService {
       // itself a revision — the same call the `image` swap above already makes.
       if (normalizedPhotos !== null) {
         await replacePostPhotos(manager, post.id, normalizedPhotos);
+      }
+      // Funding & Grants (P4): a fundraiser's opening post is held to the
+      // payment-details rule, and an author's edit of an approved one sends
+      // it back to the moderators. Inside the transaction, so a refusal rolls
+      // the whole edit back. Only the post's author reaches this line (checked
+      // above), and an author's edit is always re-reviewed, a moderator's own
+      // fundraiser included, so the editor is never treated as the reviewer.
+      if (post.isOp) {
+        await this.threadsService.applyOpBodyEditRules(
+          manager,
+          post.threadId,
+          body,
+          false,
+        );
       }
       await manager.save(post);
     });

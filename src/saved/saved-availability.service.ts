@@ -436,7 +436,7 @@ export class SavedAvailabilityService {
    * `HousingDirectoryService.detail`: live, no takedown, and neither FILLED nor
    * EXPIRED — with the owner exempt from that last pair, because the owner
    * reaches the same public detail route from their own listings view to
-   * un-mark it.
+   * un-mark it. A lister blocked either way with the viewer withholds it too.
    */
   private async resolveHousingListings(
     slugs: string[],
@@ -455,6 +455,13 @@ export class SavedAvailabilityService {
         )`,
         { savedViewerId: viewerId },
       );
+    // A block either way 404s the detail route, so the saved card reads
+    // unavailable too. One predicate inside the same statement.
+    this.blockFilter.excludeBlocked(
+      queryBuilder,
+      viewerId,
+      '"housing"."owner_id"',
+    );
     this.excludeModerated(queryBuilder, ['housing'], '"housing"."slug"', {
       exemptWhen: null,
       viewerId,

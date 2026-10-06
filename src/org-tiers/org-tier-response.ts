@@ -1,4 +1,8 @@
-import { OrgTier, OrgTierCtaType } from './entities/org-tier.entity';
+import {
+  ChoosableOrgTierCtaType,
+  OrgTier,
+  OrgTierCtaType,
+} from './entities/org-tier.entity';
 
 export interface OrgTierDTO {
   slug: string;
@@ -8,7 +12,7 @@ export interface OrgTierDTO {
   dek: string;
   bullets: string[];
   footnote: string;
-  ctaType: OrgTierCtaType;
+  ctaType: ChoosableOrgTierCtaType;
   ctaLabel: string;
   ctaTarget: string | null;
   featured: boolean;
@@ -21,6 +25,15 @@ export interface OrgTierAdminDTO extends OrgTierDTO {
   published: boolean;
 }
 
+// A row stored with the retired `toast` type reads back as `propose`, so the
+// public card leads to the partner application and the admin editor opens on
+// a type it can save.
+function choosableCtaType(ctaType: OrgTierCtaType): ChoosableOrgTierCtaType {
+  return ctaType === OrgTierCtaType.Link
+    ? OrgTierCtaType.Link
+    : OrgTierCtaType.Propose;
+}
+
 export function toOrgTier(tier: OrgTier): OrgTierDTO {
   return {
     slug: tier.slug,
@@ -30,7 +43,7 @@ export function toOrgTier(tier: OrgTier): OrgTierDTO {
     dek: tier.dek,
     bullets: tier.bullets,
     footnote: tier.footnote,
-    ctaType: tier.ctaType,
+    ctaType: choosableCtaType(tier.ctaType),
     ctaLabel: tier.ctaLabel,
     ctaTarget: tier.ctaTarget,
     featured: tier.featured,

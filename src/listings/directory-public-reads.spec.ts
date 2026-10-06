@@ -541,16 +541,17 @@ describe('DirectoryService public reads', () => {
 
   // --- "list your business" wizard: the curated tag vocabulary -------------
   describe('listTagVocabulary', () => {
-    it('returns every curated group with its tags, in order', () => {
+    it('returns every curated group with its place and online tags, in order', () => {
       expect(service.listTagVocabulary()).toEqual(
         LISTING_TAG_GROUPS.map((group) => ({
           id: group.id,
           tags: [...group.tags],
+          onlineTags: [...group.onlineTags],
         })),
       );
     });
 
-    it('starts with the visiting group and ends with the pricing group', () => {
+    it('lists the groups in display order, from visiting to sessions', () => {
       const groupIds = service.listTagVocabulary().map((group) => group.id);
 
       expect(groupIds).toEqual([
@@ -558,14 +559,33 @@ describe('DirectoryService public reads', () => {
         'happening',
         'foodDrink',
         'pricing',
+        'ordering',
+        'payment',
+        'sessions',
       ]);
+    });
+
+    it('carries the online-only groups with an empty place list', () => {
+      const paymentGroup = service
+        .listTagVocabulary()
+        .find((group) => group.id === 'payment');
+
+      expect(paymentGroup).toEqual({
+        id: 'payment',
+        tags: [],
+        onlineTags: ['MB WAY', 'Multibanco', 'PayPal'],
+      });
     });
 
     it('hands out copies, so a caller mutating the response leaves the vocabulary intact', () => {
       const [firstGroup] = service.listTagVocabulary();
       firstGroup?.tags.push('Invented tag');
+      firstGroup?.onlineTags.push('Invented online tag');
 
       expect(LISTING_TAG_GROUPS[0]?.tags).not.toContain('Invented tag');
+      expect(LISTING_TAG_GROUPS[0]?.onlineTags).not.toContain(
+        'Invented online tag',
+      );
     });
 
     it('never reads the database', () => {

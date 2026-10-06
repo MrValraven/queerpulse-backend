@@ -106,7 +106,6 @@ import { SavedModule } from './saved/saved.module';
 import { CollectionsModule } from './collections/collections.module';
 import { MemberSuggestionsModule } from './member-suggestions/member-suggestions.module';
 import { TopicsModule } from './topics/topics.module';
-import { NewsletterModule } from './newsletter/newsletter.module';
 import { SafeSpaceNominationsModule } from './safe-space-nominations/safe-space-nominations.module';
 import { SafeSpaceVouchesModule } from './safe-space-vouches/safe-space-vouches.module';
 import { InquiriesModule } from './inquiries/inquiries.module';
@@ -310,7 +309,6 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     SavedModule,
     CollectionsModule,
     IntakesModule,
-    NewsletterModule,
     BootstrapModule,
     GenesisModule,
     PreferencesModule,

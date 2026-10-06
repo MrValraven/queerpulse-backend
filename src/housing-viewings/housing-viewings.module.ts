@@ -4,10 +4,13 @@ import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SocialModule } from '../social/social.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewing } from './entities/housing-viewing.entity';
 import { HousingViewingsController } from './housing-viewings.controller';
 import { HousingViewingsService } from './housing-viewings.service';
+import { HousingViewingsBlockListener } from './housing-viewings-block.listener';
 
 /**
  * Viewing scheduling for member housing listings (P2.3). Registers a read-only
@@ -34,9 +37,17 @@ import { HousingViewingsService } from './housing-viewings.service';
     // that reaches back into housing, which is why `HousingListingsModule` and
     // `HousingGroupsModule` already import it.
     NotificationsModule,
+    // ENG-468 / ENG-467. Exports BlockFilterService for the block checks on
+    // request, answer and address unlock. No cycle: `NotificationsModule`
+    // above already imports `SocialModule`, and nothing `SocialModule` reaches
+    // imports housing.
+    SocialModule,
+    // ENG-471. Exports ContentModerationService so a hidden or removed home
+    // takes no viewing requests. Imports only its own entity.
+    ContentModerationModule,
   ],
   controllers: [HousingViewingsController],
-  providers: [HousingViewingsService],
+  providers: [HousingViewingsService, HousingViewingsBlockListener],
   // Exported for the housing-listings address gate and the housing-reviews
   // completed-viewing gate.
   exports: [HousingViewingsService],

@@ -550,18 +550,25 @@ export function toPartnerSpace(listing: Listing): PartnerSpaceDTO {
 
 /**
  * One group of the curated listing tag vocabulary (`GET /directory/tags`).
- * `id` names the group for the frontend's heading; `tags` are the stored
- * English values, in display order.
+ * `id` names the group for the frontend's heading. `tags` are offered to
+ * listings with a physical place and `onlineTags` to online-only listings;
+ * both hold the stored English values, in display order, and either may be
+ * empty.
  */
 export interface ListingTagGroupDTO {
   id: string;
   tags: string[];
+  onlineTags: string[];
 }
 
 export function toListingTagGroupDTO(
   group: ListingTagGroup,
 ): ListingTagGroupDTO {
-  return { id: group.id, tags: [...group.tags] };
+  return {
+    id: group.id,
+    tags: [...group.tags],
+    onlineTags: [...group.onlineTags],
+  };
 }
 
 /** Card avatar tint — a presentation primitive the frontend maps to colours. */

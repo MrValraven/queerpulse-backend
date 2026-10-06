@@ -7,10 +7,10 @@ import { isUniqueViolation } from '../common/db-errors';
 import { RoadmapItem, RoadmapColumn } from './entities/roadmap-item.entity';
 import { RoadmapIdea, RoadmapIdeaStatus } from './entities/roadmap-idea.entity';
 import { RoadmapVote, RoadmapVoteTarget } from './entities/roadmap-vote.entity';
-import { RoadmapSettings } from './entities/roadmap-settings.entity';
 import {
   RoadmapResponse,
-  toHeroStatDTO,
+  computeHeroStats,
+  lisbonYear,
   toShippedDTO,
   toBuildingDTO,
   toPlannedDTO,
@@ -34,8 +34,6 @@ export class RoadmapService {
     private readonly ideas: Repository<RoadmapIdea>,
     @InjectRepository(RoadmapVote)
     private readonly votes: Repository<RoadmapVote>,
-    @InjectRepository(RoadmapSettings)
-    private readonly settings: Repository<RoadmapSettings>,
     private readonly adminQueueNotifications: AdminQueueNotificationsService,
   ) {}
 
@@ -111,9 +109,8 @@ export class RoadmapService {
       RoadmapVoteTarget.Idea,
       notBuildingIdeas.map((idea) => idea.id),
     );
-    const settings = await this.settings.findOne({ where: { id: 1 } });
     return {
-      heroStats: (settings?.heroStats ?? []).map(toHeroStatDTO),
+      heroStats: computeHeroStats(allItems, lisbonYear()),
       shipped: shipped.map(toShippedDTO),
       building: building.map(toBuildingDTO),
       planned: planned.map((item) =>

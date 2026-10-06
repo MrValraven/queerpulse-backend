@@ -216,7 +216,7 @@ export class SearchService {
           wants(SearchResultType.Housing)
             ? this.skipping(offset, probeLimit, (fetchLimit) =>
                 this.housing
-                  .searchByText(query, fetchLimit)
+                  .searchByText(query, fetchLimit, viewerUserId)
                   .then((rows) => rows.map(housingToResult)),
               )
             : Promise.resolve<SearchResultDTO[]>([]),

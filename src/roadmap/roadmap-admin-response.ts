@@ -16,7 +16,6 @@ import {
 } from './entities/roadmap-idea.entity';
 import { RoadmapTeamMember } from './entities/roadmap-team-member.entity';
 import { RoadmapAuditLog } from './entities/roadmap-audit-log.entity';
-import type { HeroStat } from './entities/roadmap-settings.entity';
 
 /**
  * Admin `/admin/roadmap` response shapes — unlike the public DTOs in
@@ -146,7 +145,6 @@ export interface RoadmapAdminResponse {
   ideas: AdminRoadmapIdeaDTO[];
   team: RoadmapTeamMemberDTO[];
   audit: RoadmapAuditEntryDTO[];
-  heroStats: HeroStat[];
 }
 
 // The computed/joined values `getAdmin()` (Task A4) resolves once per

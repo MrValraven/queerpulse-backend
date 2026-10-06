@@ -1,5 +1,24 @@
-import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
+import {
+  FUNDING_ELIGIBILITIES,
+  FUNDING_SCOPES,
+  FUNDING_VIEWS,
+} from '../forum-funding';
+import type {
+  FundingEligibility,
+  FundingScope,
+  FundingView,
+} from '../forum-funding';
 
 // `GET /forum/threads?category=&cursor=&sort=&tag=&q=` query.
 export class ListThreadsQuery {
@@ -40,4 +59,30 @@ export class ListThreadsQuery {
   @IsOptional()
   @IsString()
   q?: string;
+
+  // Funding & Grants views, honoured only with `category=funding`
+  // (`ForumThreadsService.list`): `open` and `closing` list calls by
+  // deadline, `asks` lists live fundraisers, `discussion` lists the threads
+  // with no funding details.
+  @IsOptional()
+  @IsIn(FUNDING_VIEWS)
+  fundingView?: FundingView;
+
+  // Any-of eligibility filter for the call views. `?eligibility=students` and
+  // `?eligibility=students&eligibility=collectives` both arrive here; the
+  // scalar case is coerced to a list, as `BrowseHousingListingsQuery.areas`
+  // does.
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === undefined ? undefined : Array.isArray(value) ? value : [value],
+  )
+  @IsArray()
+  @ArrayMaxSize(FUNDING_ELIGIBILITIES.length)
+  @IsIn(FUNDING_ELIGIBILITIES, { each: true })
+  eligibility?: FundingEligibility[];
+
+  // Scope filter for the call views.
+  @IsOptional()
+  @IsIn(FUNDING_SCOPES)
+  scope?: FundingScope;
 }

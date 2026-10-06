@@ -14,16 +14,43 @@ import { BadRequestException } from '@nestjs/common';
  * the price tier belongs in `price`, and spoken languages belong in `langs`.
  * None of those are tags.
  *
+ * Each group carries two lists. `tags` are offered to listings with a physical
+ * place, and `onlineTags` are offered to online-only listings
+ * (`listings.online === true`), so an online shop sees shipping and payment
+ * tags while a bar sees Terrace and DJ nights. Either list may be empty, and a
+ * tag that fits both kinds of listing appears in both lists.
+ *
+ * Validation reads the union of both lists for every listing, whatever its
+ * `online` flag. An owner who flips the online toggle keeps the tags picked
+ * earlier, and the frontend shows them as removable chips, so a save after
+ * the flip must still accept them.
+ *
  * Served as-is by `GET /directory/tags` so the frontend picker and this
  * validation read one list.
  */
 export type ListingTagGroupId =
-  'visiting' | 'happening' | 'foodDrink' | 'pricing';
+  | 'visiting'
+  | 'happening'
+  | 'foodDrink'
+  | 'pricing'
+  | 'ordering'
+  | 'payment'
+  | 'sessions';
 
 export interface ListingTagGroup {
   id: ListingTagGroupId;
+  /** Tags offered to listings with a physical place. May be empty. */
   tags: readonly string[];
+  /** Tags offered to online-only listings. May be empty. */
+  onlineTags: readonly string[];
 }
+
+const PRICING_TAGS: readonly string[] = [
+  'Gender-neutral pricing',
+  'Sliding scale',
+  'Pay what you can',
+  'Student discount',
+];
 
 export const LISTING_TAG_GROUPS: readonly ListingTagGroup[] = [
   {
@@ -37,6 +64,7 @@ export const LISTING_TAG_GROUPS: readonly ListingTagGroup[] = [
       'Memberships',
       'Class packs',
     ],
+    onlineTags: ['By appointment', 'Memberships'],
   },
   {
     id: 'happening',
@@ -52,6 +80,13 @@ export const LISTING_TAG_GROUPS: readonly ListingTagGroup[] = [
       'Support groups',
       'Space for hire',
     ],
+    onlineTags: [
+      'Workshops',
+      'Classes',
+      'Readings and talks',
+      'Community events',
+      'Support groups',
+    ],
   },
   {
     id: 'foodDrink',
@@ -63,21 +98,54 @@ export const LISTING_TAG_GROUPS: readonly ListingTagGroup[] = [
       'Terrace',
       'Late opening',
     ],
+    onlineTags: [
+      'Vegan options',
+      'Vegetarian options',
+      'Gluten-free options',
+      'Alcohol-free options',
+    ],
   },
   {
     id: 'pricing',
-    tags: [
-      'Gender-neutral pricing',
-      'Sliding scale',
-      'Pay what you can',
-      'Student discount',
+    tags: PRICING_TAGS,
+    onlineTags: PRICING_TAGS,
+  },
+  {
+    id: 'ordering',
+    tags: [],
+    onlineTags: [
+      'Ships to Portugal',
+      'Ships across the EU',
+      'Ships worldwide',
+      'Pick-up in Lisbon',
+      'Made to order',
+      'Custom commissions',
+      'Digital downloads',
+      'Gift cards',
     ],
+  },
+  {
+    id: 'payment',
+    tags: [],
+    onlineTags: ['MB WAY', 'Multibanco', 'PayPal'],
+  },
+  {
+    id: 'sessions',
+    tags: [],
+    onlineTags: ['Video sessions', 'Phone sessions', 'Free first call'],
   },
 ];
 
-/** Every tag in the vocabulary, in group order. */
-export const LISTING_TAG_OPTIONS: readonly string[] =
-  LISTING_TAG_GROUPS.flatMap((group) => group.tags);
+/**
+ * Every tag in the vocabulary, place and online alike, each once, in group
+ * order. Within a group the place tags come first, then any online tag the
+ * place list lacks.
+ */
+export const LISTING_TAG_OPTIONS: readonly string[] = [
+  ...new Set(
+    LISTING_TAG_GROUPS.flatMap((group) => [...group.tags, ...group.onlineTags]),
+  ),
+];
 
 /** Lowercased tag to its canonical spelling, for case-insensitive matching. */
 const CANONICAL_TAG_BY_LOWERCASE = new Map<string, string>(

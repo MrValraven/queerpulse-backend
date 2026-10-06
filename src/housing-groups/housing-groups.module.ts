@@ -3,8 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminQueueNotificationsModule } from '../admin-queue-notifications/admin-queue-notifications.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { Connection } from '../connections/entities/connection.entity';
+import { MessagingModule } from '../messaging/messaging.module';
 import { ModerationModule } from '../moderation/moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SocialModule } from '../social/social.module';
 import { VerificationModule } from '../verification/verification.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
@@ -52,6 +54,16 @@ import { HousingGroupsService } from './housing-groups.service';
     // `ModerationModule` graph contains no housing module, the same reasoning
     // `ForumModule` gives.
     ModerationModule,
+    // `MessagingService.deliverEnquiry` (PRD-443): a reader's message about a
+    // group room reaches its poster as an enquiry. No cycle: nothing in
+    // `MessagingModule`'s import graph reaches this module, and
+    // `HousingListingsModule` imports it the same way for its own enquiries.
+    MessagingModule,
+    // `BlockFilterService`: a block or mute hides the other member's group
+    // rooms on the group page and on the enquiry path, as member-listing
+    // browse does. No cycle: `SocialModule` imports only users, reports and
+    // identities, and `NotificationsModule` above already imports it.
+    SocialModule,
   ],
   controllers: [HousingGroupsController, AdminHousingGroupListingsController],
   providers: [HousingGroupsService],

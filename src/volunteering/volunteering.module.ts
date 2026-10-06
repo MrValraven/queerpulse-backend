@@ -4,6 +4,7 @@ import { CommunityMembershipModule } from '../communities/community-membership.m
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PartnersModule } from '../partners/partners.module';
+import { SocialModule } from '../social/social.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { VolunteerOpportunityTeam } from './entities/volunteer-opportunity-team.entity';
@@ -39,6 +40,10 @@ import { VolunteeringService } from './volunteering.service';
     // `volunteering` subject withholds the opportunity from ordinary members'
     // read paths (mirrors `JobsModule`'s identical import).
     ContentModerationModule,
+    // `BlockFilterService` for ENG-474: the public detail drops the poster and
+    // teammates in a block with the viewer. One-way: `SocialModule` imports
+    // nothing that reaches back here (mirrors `saved.module.ts`).
+    SocialModule,
   ],
   // `AdminVolunteeringController` is the staff-side read of the same data
   // (SUS-05's funder report). It needs no extra imports: `VolunteeringService`

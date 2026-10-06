@@ -24,6 +24,7 @@ export type ReasonCode =
   | 'venue_accessibility'
   | 'housing_unsafe'
   | 'housing_scam'
+  | 'funding_scam'
   | 'not_affirming'
   | 'off_platform'
   // System-filed listing-domain codes (NOT member-selectable — deliberately
@@ -54,6 +55,7 @@ export const REASON_CODES: readonly ReasonCode[] = [
   'venue_accessibility',
   'housing_unsafe',
   'housing_scam',
+  'funding_scam',
   'not_affirming',
   'off_platform',
   'other',
@@ -81,6 +83,8 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   venue_accessibility: 'An accessibility problem',
   housing_unsafe: 'Unsafe, discriminatory, or misrepresented housing',
   housing_scam: 'Scam or fake listing',
+  // Funding & Grants: a fake fundraiser, or a "grant" that charges to apply.
+  funding_scam: 'Scam or fake fundraiser or grant',
   not_affirming: 'Not LGBTQ+ affirming — broke the community pledge',
   off_platform: 'Asked to pay or move off-platform',
   // System-filed listing codes (see the `ReasonCode` union comment) — labelled
@@ -123,6 +127,9 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'discrimination',
     'spam',
     'off_topic',
+    // Funding & Grants: offered on every post here; the frontend shows it
+    // only on posts in the funding category (`reportReasons.ts`).
+    'funding_scam',
     'other',
   ],
   [ReportSubjectType.Reply]: [
@@ -133,6 +140,10 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'discrimination',
     'spam',
     'off_topic',
+    // Funding & Grants: a reply under a fundraiser or an open call can push
+    // its own payment route or a fake grant. Offered here like on `Post`; the
+    // frontend shows it only in the funding category.
+    'funding_scam',
     'other',
   ],
   [ReportSubjectType.Venue]: [
@@ -422,6 +433,21 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'venue_safety',
     'discrimination',
+    'other',
+  ],
+  // PRD-443. ONE room shared inside a housing group. The `Housing` set,
+  // unchanged: a group room is the same kind of advert for the same kind of
+  // home, so a reader raises the same concerns about it, and a moderator
+  // reading the two queues never has to learn which codes exist where.
+  [ReportSubjectType.GroupListing]: [
+    'outing',
+    'doxxing',
+    'housing_scam',
+    'housing_unsafe',
+    'not_affirming',
+    'discrimination',
+    'off_platform',
+    'harassment',
     'other',
   ],
 };

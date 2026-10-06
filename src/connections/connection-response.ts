@@ -27,14 +27,23 @@ export interface ConnectionCounts {
 }
 
 /**
- * One pending request the viewer has been sent, reduced to the two facts a
- * profile hero needs: whose profile it is on, and which connection to answer.
- * The id is what `PATCH /connections/:id` accepts, so the hero can accept or
- * decline without first loading the connections page.
+ * One pending request the viewer has been sent: whose profile it is on, which
+ * connection to answer, and the requester's own words, so the request can be
+ * read where it is answered. The id is what `PATCH /connections/:id` accepts,
+ * so the hero can accept or decline without first loading the connections
+ * page.
+ *
+ * The viewer is always the addressee here, the same audience the
+ * `GET /connections?tab=incoming` list already shows `requestMessage` and
+ * `requestReason` to, so carrying them exposes nothing new.
  */
 export interface IncomingConnectionRef {
   slug: string;
   connectionId: string;
+  /** The requester's note, verbatim, or null when they wrote none. */
+  requestMessage: string | null;
+  /** `open:<id>`, `custom:<label>`, or a REASONS id; null when none was picked. */
+  requestReason: string | null;
 }
 
 /**

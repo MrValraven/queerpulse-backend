@@ -1,9 +1,8 @@
-import { RoadmapItem } from './entities/roadmap-item.entity';
+import { RoadmapColumn, RoadmapItem } from './entities/roadmap-item.entity';
 import {
   RoadmapIdea,
   RoadmapDeclineReason,
 } from './entities/roadmap-idea.entity';
-import type { HeroStat } from './entities/roadmap-settings.entity';
 
 /**
  * Public `GET /roadmap` response shapes, hand-mapped from `RoadmapItem` /
@@ -21,10 +20,8 @@ import type { HeroStat } from './entities/roadmap-settings.entity';
  */
 
 export interface HeroStatDTO {
-  label: string;
-  value?: string;
-  note?: string;
-  jade: boolean;
+  kind: 'shipped' | 'building' | 'planned';
+  count: number;
 }
 
 /** The most recent target-date move for a committed card — reason only, no
@@ -97,12 +94,40 @@ export interface RoadmapResponse {
   notBuilding: NotBuildingDTO[];
 }
 
-export const toHeroStatDTO = (stat: HeroStat): HeroStatDTO => ({
-  label: stat.label,
-  value: stat.value,
-  note: stat.note,
-  jade: stat.jade ?? false,
-});
+/**
+ * The hero tiles, counted from the public board itself so the header can never
+ * contradict the columns beneath it. Counts only: the page owns the wording.
+ * A shipped card counts toward "this year" when its free-text `date` (e.g.
+ * "May 2026") names the current year; callers pass the Europe/Lisbon year
+ * (see `lisbonYear`), the platform's home calendar.
+ */
+export const computeHeroStats = (
+  items: RoadmapItem[],
+  currentYear: number,
+): HeroStatDTO[] => {
+  const countIn = (column: RoadmapColumn) =>
+    items.filter((item) => item.column === column).length;
+  const shippedThisYear = items.filter(
+    (item) =>
+      item.column === RoadmapColumn.Shipped &&
+      (item.date ?? '').includes(String(currentYear)),
+  ).length;
+  return [
+    { kind: 'shipped', count: shippedThisYear },
+    { kind: 'building', count: countIn(RoadmapColumn.Building) },
+    { kind: 'planned', count: countIn(RoadmapColumn.Planned) },
+  ];
+};
+
+/** The calendar year in Europe/Lisbon, so a new year starts for the board at
+ *  the same moment it starts for the community. */
+export const lisbonYear = (now: Date = new Date()): number =>
+  Number(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Lisbon',
+      year: 'numeric',
+    }).format(now),
+  );
 
 // Last entry of `item.slips`, reason only — see the file doc for why
 // `movedByName`/`movedAt` never leave this function.

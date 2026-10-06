@@ -10,6 +10,7 @@ import { UpdateContentSensitivityDto } from './dto/update-content-sensitivity.dt
 import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibility.dto';
 import { UpdateMessagingPrivacyDto } from './dto/update-messaging-privacy.dto';
 import { UpdateGroupAddPolicyDto } from './dto/update-group-add-policy.dto';
+import { UpdateLanguagePreferenceDto } from './dto/update-language-preference.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { PreferencesService } from './preferences.service';
 import {
@@ -25,7 +26,8 @@ import {
 /**
  * Member safety + visibility switches. Mirrors the frontend contract exactly:
  * `GET|PUT /me/work-preferences`, `GET|PUT /me/public-profile`,
- * `GET|PUT /me/login-alerts`, `GET|PUT /me/push-previews`.
+ * `GET|PUT /me/login-alerts`, `GET|PUT /me/push-previews`,
+ * `GET|PUT /me/language`.
  *
  * ---------------------------------------------------------------------------
  * GUARDS: JWT only — deliberately NO ActiveMemberGuard
@@ -333,5 +335,30 @@ export class PreferencesController {
     @Body() body: UpdateMessagingPrivacyDto,
   ) {
     return this.preferencesService.updateMessagingPrivacy(user.userId, body);
+  }
+
+  // `{ language: null }` until the member's first signed-in device writes one
+  // up (PRD-325). The app reads this once per session and adopts it, so the
+  // interface language follows the member to a new device.
+  @ApiOperation({ summary: "Get the member's interface language." })
+  @ApiOkResponse({
+    description: 'The interface language (`en` or `pt`), or null when unset.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('language')
+  getLanguagePreference(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getLanguagePreference(user.userId);
+  }
+
+  @ApiOperation({ summary: "Replace the member's interface language." })
+  @ApiOkResponse({ description: 'The persisted interface language.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('language')
+  updateLanguagePreference(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateLanguagePreferenceDto,
+  ) {
+    return this.preferencesService.updateLanguagePreference(user.userId, body);
   }
 }

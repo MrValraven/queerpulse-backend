@@ -155,9 +155,13 @@ export class HousingExportContributor implements DataExportContribution {
   ) {}
 
   async buildContribution(userId: string): Promise<unknown> {
+    // `withDeleted` (ENG-466): a listing the member deleted is a soft-deleted
+    // row that is still theirs, so it belongs in their export. Deleting it
+    // cleared its address and coordinates, and none of those are exported.
     const rows = await this.housingListings.find({
       where: { ownerId: userId },
       order: { createdAt: 'ASC' },
+      withDeleted: true,
     });
     return rows.map((housingListing) => ({
       id: housingListing.id,
@@ -167,6 +171,9 @@ export class HousingExportContributor implements DataExportContribution {
       rentEuros: housingListing.rentEuros,
       status: housingListing.status,
       createdAt: housingListing.createdAt.toISOString(),
+      deletedAt: housingListing.deletedAt
+        ? housingListing.deletedAt.toISOString()
+        : null,
     }));
   }
 }

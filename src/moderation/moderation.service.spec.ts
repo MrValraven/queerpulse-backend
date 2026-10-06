@@ -4447,6 +4447,29 @@ describe('ModerationService', () => {
         );
       });
 
+      it('accepts a takedown on a room in a housing group', async () => {
+        reports.findOne.mockResolvedValue(
+          postReport({
+            subjectType: ReportSubjectType.GroupListing,
+            subjectId: '7f4f6a3e-5b1c-4d2a-9c3e-2a1b0c9d8e7f',
+          }),
+        );
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'hide_content',
+          reasonCode: 'housing_scam',
+          note: memberFacingNote,
+        });
+
+        expect(applyContentAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            subjectType: ReportSubjectType.GroupListing,
+            subjectId: '7f4f6a3e-5b1c-4d2a-9c3e-2a1b0c9d8e7f',
+          }),
+        );
+      });
+
       it('lands a refused row in failed and still actions the rest of a batch', async () => {
         reports.find.mockResolvedValue([
           postReport({ id: 'report-1' }),

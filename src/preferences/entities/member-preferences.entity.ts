@@ -1,5 +1,6 @@
 import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 import { DEFAULT_WHO_CAN_MESSAGE, WhoCanMessage } from '../who-can-message';
+import { MemberLanguage } from '../member-language';
 
 // The out-at-work spectrum — a choice, never a binary toggle. Values mirror the
 // frontend's `OUT_AT_WORK` list (`features/economy/workProfile.data.ts`).
@@ -337,6 +338,25 @@ export class MemberPreferences {
     default: DEFAULT_WHO_CAN_MESSAGE,
   })
   whoCanMessage!: WhoCanMessage;
+
+  // --- Interface language (GET/PUT /me/language) ----------------------------
+
+  /**
+   * The member's interface language (PRD-325), so it follows them to a new
+   * device and survives cleared site data.
+   *
+   * NULLABLE, with no default: `null` means the member has never told the
+   * server, and the app answers that by writing up the language the device
+   * already uses. A literal default would read the same as a member who chose
+   * it. See `member-language.ts` for the closed set.
+   *
+   * Also read on the push send path: `PushPreviewPrivacyService` composes the
+   * generic hidden-preview copy in this language, because iOS renders a
+   * payload's plain `title`/`body` itself and never runs the service worker
+   * that would otherwise localise it.
+   */
+  @Column({ type: 'varchar', length: 5, nullable: true })
+  language!: MemberLanguage | null;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

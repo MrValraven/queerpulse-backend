@@ -9,7 +9,6 @@ import {
   SafeSpaceNotificationAction,
   SafeSpaceNotifierService,
 } from './safe-space-notifier.service';
-import { SAFE_SPACE_ACKNOWLEDGEMENT_HOURS } from './safe-space-policy';
 
 /**
  * Once a day, tell the people on shift what the safe-space process owes.
@@ -69,25 +68,10 @@ export class SafeSpaceReviewSweeperService {
         return;
       }
 
-      const parts: string[] = [];
-      if (breaching.length) {
-        parts.push(
-          `${breaching.length} safe-space ${
-            breaching.length === 1 ? 'nomination is' : 'nominations are'
-          } past the ${SAFE_SPACE_ACKNOWLEDGEMENT_HOURS}-hour acknowledgement window`,
-        );
-      }
-      if (reReviewDueCount) {
-        parts.push(
-          `${reReviewDueCount} ${
-            reReviewDueCount === 1 ? 'badge is' : 'badges are'
-          } due for the annual re-review`,
-        );
-      }
       await this.notifier.tell(
         staff.map((staffUser) => staffUser.id),
         SafeSpaceNotificationAction.QueueOverdue,
-        `${parts.join(', and ')}.`,
+        { audience: 'staff' },
       );
       this.logger.log(
         `Safe-space queue: ${breaching.length} unacknowledged past window, ` +

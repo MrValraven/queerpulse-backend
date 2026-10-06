@@ -24,7 +24,6 @@ import { Profile } from '../users/entities/profile.entity';
 import { GENERIC_PUSH_COPY } from './generic-push-copy';
 import { PushMessageListener } from './push.listener';
 import { PushPreviewPrivacyService } from './push-preview-privacy.service';
-import { PushService } from './push.service';
 
 /** The Go together meet-again page for one group. Mirrors
  *  `routes.goTogetherFeedback` in the frontend's `routeMap.ts`, the same
@@ -75,7 +74,9 @@ const GO_TOGETHER_FEEDBACK_PATH = '/go-together/feedback';
  * `this.pushService.sendToUsers` directly is a privacy bug even when the copy
  * looks harmless today, because the copy is what changes. The ONE exception in
  * this file is `pushSecurityNewSignIn`, which has no rich variant at all,
- * because its only copy is already generic. It says so at its own docstring.
+ * because its only copy is already generic. It sends through
+ * `previewPrivacy.sendGenericByLanguage`, which picks the member's language
+ * and skips the preview split. It says so at its own docstring.
  */
 @Injectable()
 export class PushNotificationListener {
@@ -84,7 +85,6 @@ export class PushNotificationListener {
   constructor(
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
-    private readonly pushService: PushService,
     private readonly previewPrivacy: PushPreviewPrivacyService,
     private readonly notificationPreferences: NotificationPreferencesService,
     private readonly notificationDelivery: NotificationDeliveryService,
@@ -1470,10 +1470,12 @@ export class PushNotificationListener {
    *
    * THE ONE SENDER IN THIS FILE THAT DOES NOT SPLIT BY PREVIEW PREFERENCE, and
    * the reason is that there is nothing to split: this copy is already the
-   * generic copy. It names no member, carries no actor, no avatar and no
-   * image, so hiding previews would replace one non-identifying sentence with a
-   * vaguer one and cost the member the single fact that makes the notification
-   * worth unlocking for.
+   * generic copy (`GENERIC_PUSH_COPY.newSignIn`). It goes through
+   * `sendGenericByLanguage` so the plain fields iOS prints are in the
+   * member's stored language (PRD-325). It names no member, carries no
+   * actor, no avatar and no image, so hiding previews would replace one
+   * non-identifying sentence with a vaguer one and cost the member the single
+   * fact that makes the notification worth unlocking for.
    *
    * THE DEVICE LABEL IS DELIBERATELY ABSENT from the body. "Safari on iPhone"
    * is right on the in-app row and on `/account/sessions`, where the member is
@@ -1489,22 +1491,25 @@ export class PushNotificationListener {
     userIds: string[],
     notification: Notification,
   ): Promise<void> {
-    await this.pushService.sendToUsers(userIds, {
-      // The same product-name title a hidden-preview push uses, from the same
-      // constant, so the two can never drift apart on a lock screen.
-      title: GENERIC_PUSH_COPY.notification.title,
-      body: 'A new device signed in to your account.',
-      tag: `notification:${notification.id}`,
-      data: { url: '/account/sessions' },
-      l10n: {
-        titleKey: GENERIC_PUSH_COPY.notification.titleKey,
-        // ENG-228. A key the service-worker catalog (`pushMessages.ts`) actually
-        // holds; the old `notifications:` key lived only in the app catalogs,
-        // so the worker could never localise this body.
-        bodyKey: 'push:security.newSignIn.body',
+    const copy = GENERIC_PUSH_COPY.newSignIn;
+    await this.previewPrivacy.sendGenericByLanguage(
+      userIds,
+      {
+        title: copy.title,
+        body: copy.body,
+        tag: `notification:${notification.id}`,
+        data: { url: '/account/sessions' },
+        l10n: {
+          titleKey: copy.titleKey,
+          // ENG-228. A key the service-worker catalog (`pushMessages.ts`)
+          // actually holds; the old `notifications:` key lived only in the app
+          // catalogs, so the worker could never localise this body.
+          bodyKey: copy.bodyKey,
+        },
+        timestamp: notification.createdAt.getTime(),
       },
-      timestamp: notification.createdAt.getTime(),
-    });
+      copy,
+    );
   }
 
   // --- Shared helpers -------------------------------------------------------

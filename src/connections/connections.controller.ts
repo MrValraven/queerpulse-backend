@@ -84,7 +84,7 @@ export class ConnectionsController {
   })
   @ApiOkResponse({
     description:
-      'Accepted slugs, pending requests waiting for your answer (slug + connection id), and slugs you have asked.',
+      'Accepted slugs, pending requests waiting for your answer (slug, connection id, and the request note and reason), and slugs you have asked.',
   })
   relationships(
     @CurrentUser() user: CurrentUserData,

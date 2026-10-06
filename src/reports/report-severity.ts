@@ -34,6 +34,7 @@ const MEDIUM_REASONS: ReadonlySet<ReasonCode> = new Set([
   'venue_staff',
   'venue_accessibility',
   'housing_scam',
+  'funding_scam',
   'not_affirming',
   'off_platform',
   // A listing dispute/claim gets a 3-day review window; the low-urgency

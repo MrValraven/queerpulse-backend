@@ -295,10 +295,11 @@ export class SafeSpaceFlagsService {
     await this.notifier.tell(
       [flag.flaggerId],
       SafeSpaceNotificationAction.FlagResolved,
-      listing
-        ? `The review team finished looking at what you raised about ${listing.name}.`
-        : 'The review team finished looking at what you raised.',
-      listing?.slug ?? null,
+      {
+        audience: 'flagger',
+        placeName: listing?.name ?? null,
+        listingSlug: listing?.slug ?? null,
+      },
     );
     const updated = await this.flags.findOne({ where: { id: flag.id } });
     return toAdminSafeSpaceFlagResponse(

@@ -200,6 +200,7 @@ export class MemberPreferencesExportContributor implements DataExportContributio
       shareTyping: preferences.shareTyping,
       sharePresence: preferences.sharePresence,
       whoCanMessage: preferences.whoCanMessage,
+      language: preferences.language,
       updatedAt: preferences.updatedAt.toISOString(),
     };
   }

@@ -8,6 +8,7 @@ import { ModerationModule } from '../moderation/moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
+import { VerificationModule } from '../verification/verification.module';
 import { ForumPollOption } from './entities/forum-poll-option.entity';
 import { ForumPollVote } from './entities/forum-poll-vote.entity';
 import { ForumPoll } from './entities/forum-poll.entity';
@@ -17,11 +18,17 @@ import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadSubscription } from './entities/forum-thread-subscription.entity';
+import { ForumThreadFunding } from './entities/forum-thread-funding.entity';
+import { FundingDeadlineReminder } from './entities/funding-deadline-reminder.entity';
 import { ForumController } from './forum.controller';
 import { ForumPollsService } from './forum-polls.service';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
+import { ForumFundingService } from './forum-funding.service';
+import { FundingDeadlineReminderService } from './funding-deadline-reminder.service';
+import { FundingDeadlineChangedListener } from './funding-deadline-changed.listener';
+import { SavedItem } from '../saved/entities/saved-item.entity';
 
 @Module({
   imports: [
@@ -40,6 +47,12 @@ import { ForumThreadsService } from './forum-threads.service';
       ForumPollOption,
       ForumPollVote,
       ForumPostPhoto,
+      // Funding & Grants: the 1:1 call/ask details beside a thread, and the
+      // once-per-stage ledger the deadline reminder sweeper writes.
+      ForumThreadFunding,
+      FundingDeadlineReminder,
+      // Read-only here: who saved a call, for the deadline-changed fan-out.
+      SavedItem,
     ]),
     // Gives access to `Repository<Profile>` (exported by `UsersModule`) for
     // resolving thread/post authors to `AuthorSummary` — mirrors
@@ -81,6 +94,11 @@ import { ForumThreadsService } from './forum-threads.service';
     // `forwardRef`: `NotificationsModule` imports users, social, reports and
     // community membership, none of which reaches back into `ForumModule`.
     NotificationsModule,
+    // Fundraisers: ForumFundingService reads a poster's verification level for
+    // the phone gate and the admin review facts. VerificationModule imports
+    // only users, notifications and admin-queue notifications, none of which
+    // reaches back into ForumModule, so a plain import is enough.
+    VerificationModule,
   ],
   controllers: [ForumController],
   providers: [
@@ -93,6 +111,9 @@ import { ForumThreadsService } from './forum-threads.service';
     // `forwardRef`.
     ForumPollsService,
     ForumSubscriptionsService,
+    ForumFundingService,
+    FundingDeadlineReminderService,
+    FundingDeadlineChangedListener,
   ],
   exports: [
     ForumThreadsService,

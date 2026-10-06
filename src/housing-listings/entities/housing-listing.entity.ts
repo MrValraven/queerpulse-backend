@@ -1,6 +1,7 @@
 import {
   Column,
   CreateDateColumn,
+  DeleteDateColumn,
   Entity,
   Index,
   PrimaryGeneratedColumn,
@@ -327,6 +328,15 @@ export class HousingListing {
   @Column({ type: 'timestamptz', nullable: true })
   filledAt!: Date | null;
 
+  // When the daily expiry sweep wrote the current `filledAt`, or null when the
+  // listing is up or the owner filled it themselves. The sweep stamps both
+  // columns in one UPDATE, so "hidden by the sweep" is a stored fact the owner
+  // surfaces read directly. Cleared by every path that writes or resets
+  // `filledAt` on the owner's behalf: `extend` and `markAvailable` (the home is
+  // back up) and `markFilled` (an owner fill replaces a sweep fill).
+  @Column({ type: 'timestamptz', nullable: true })
+  sweptAt!: Date | null;
+
   // Auto-computed at create time (see HousingListingsService.computeExpiry,
   // DEFAULT_LISTING_LIFETIME_DAYS) and resettable by the owner via
   // `PATCH :ref/extend`. NOT NULL (mirrors `board_posts.expires_at` —
@@ -355,6 +365,36 @@ export class HousingListing {
   // ever".
   @Column({ type: 'timestamptz', nullable: true })
   expiryWarningSentAt!: Date | null;
+
+  // ENG-467. When the owner last marked a FILLED listing as available again,
+  // or null while it never has been. A completed viewing from an earlier
+  // tenancy unlocks the exact address only when its slot falls after this
+  // moment (`HousingViewingsService.hasUnlockedViewing`). Set by
+  // `markAvailable` after an owner fill; `extend` on a listing the expiry sweep
+  // hid leaves it alone, because nobody moved in.
+  @Column({ type: 'timestamptz', nullable: true })
+  relistedAt!: Date | null;
+
+  // ENG-469. Failed geocodes of the current `addressLine`. Each failure adds
+  // one, an address change resets it to 0, and
+  // `HousingListingGeocodeRetryService` retries a listing with an address and
+  // no coordinates while this stays under its cap.
+  @Column({ type: 'int', default: 0 })
+  geocodeAttempts!: number;
+
+  /**
+   * ENG-466. Set when the owner deletes the listing. The row stays so the
+   * viewings and reviews attached to it survive (both foreign keys cascade on a
+   * hard delete). TypeORM skips soft-deleted rows on every `find` and
+   * `createQueryBuilder` read; raw SQL must filter `deleted_at IS NULL` itself,
+   * and the slug allocator passes `withDeleted` because the unique slug index
+   * still covers these rows.
+   *
+   * Optional, like `Topic.archivedAt`: the ORM writes it on the soft-delete
+   * path only, so a hand-built fixture or `create()` call leaves it out.
+   */
+  @DeleteDateColumn({ type: 'timestamptz', nullable: true })
+  deletedAt?: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

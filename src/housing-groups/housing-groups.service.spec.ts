@@ -1,11 +1,18 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { Connection } from '../connections/entities/connection.entity';
+import { MessagingService } from '../messaging/messaging.service';
 import { ModAuditService } from '../moderation/mod-audit.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -25,28 +32,77 @@ import { HousingGroupsService } from './housing-groups.service';
 /**
  * Covers `createListing` (the admin-queue-notifications announce call, ENG
  * queue `housing_group_listings`), plus the PRD-462 announce on
- * `createJoinRequest` and the ENG-490 audit rows on `deleteGroup` and
- * `triageJoinRequest`. The listing-review surfaces, including the hide
- * toggle, are exercised by `housing-groups-listing-review.service.spec.ts`.
+ * `createJoinRequest`, its ENG-472 duplicate refusal, the ENG-490 audit rows
+ * on `deleteGroup` and `triageJoinRequest`, the distinct member recount, and
+ * the PRD-443 poster on the group read and the room enquiry. The
+ * listing-review surfaces, including the hide toggle, are exercised by
+ * `housing-groups-listing-review.service.spec.ts`.
  */
+
+/** A chainable stand-in for a TypeORM `SelectQueryBuilder`: every builder
+ * call returns the same object, and the terminal reads are plain mocks. */
+interface QueryBuilderMock {
+  select: jest.Mock;
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  orderBy: jest.Mock;
+  addOrderBy: jest.Mock;
+  limit: jest.Mock;
+  getMany: jest.Mock;
+  getOne: jest.Mock;
+  getRawOne: jest.Mock;
+}
+
+function makeQueryBuilder(terminals: {
+  getMany?: unknown;
+  getOne?: unknown;
+  getRawOne?: unknown;
+}): QueryBuilderMock {
+  const builder: QueryBuilderMock = {
+    select: jest.fn(() => builder),
+    where: jest.fn(() => builder),
+    andWhere: jest.fn(() => builder),
+    orderBy: jest.fn(() => builder),
+    addOrderBy: jest.fn(() => builder),
+    limit: jest.fn(() => builder),
+    getMany: jest.fn().mockResolvedValue(terminals.getMany ?? []),
+    getOne: jest.fn().mockResolvedValue(terminals.getOne ?? null),
+    getRawOne: jest.fn().mockResolvedValue(terminals.getRawOne),
+  };
+  return builder;
+}
+
 describe('HousingGroupsService', () => {
   let service: HousingGroupsService;
   let groups: { findOne: jest.Mock; delete: jest.Mock; update: jest.Mock };
-  let listings: { create: jest.Mock; save: jest.Mock };
+  let listings: {
+    create: jest.Mock;
+    save: jest.Mock;
+    find: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    // `listMyListings` reads report takedowns off `content_moderation`
+    // through the repository's own manager.
+    manager: { find: jest.Mock };
+  };
+  let listingQuery: ReturnType<typeof makeQueryBuilder>;
   let joinRequests: {
     count: jest.Mock;
     find: jest.Mock;
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
+  let memberCountQuery: ReturnType<typeof makeQueryBuilder>;
   let connections: Record<string, jest.Mock>;
-  let profiles: Record<string, jest.Mock>;
+  let profiles: { find: jest.Mock };
   let affirmingPledge: { requireAccepted: jest.Mock };
   let verification: { requireLevel: jest.Mock; levelForUser: jest.Mock };
   let notifications: { create: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
   let modAudit: { writeAuditLog: jest.Mock };
+  let messaging: { deliverEnquiry: jest.Mock };
+  let blockFilter: { excludeHidden: jest.Mock };
 
   // An OPEN group: `isAccessGated` false means "an open reading room", so every
   // active member may share a room in it and gate 0 stands down (ENG-171).
@@ -69,6 +125,8 @@ describe('HousingGroupsService', () => {
   };
 
   beforeEach(async () => {
+    listingQuery = makeQueryBuilder({});
+    memberCountQuery = makeQueryBuilder({ getRawOne: { memberCount: '0' } });
     groups = {
       findOne: jest.fn().mockResolvedValue(publishedGroup),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
@@ -89,6 +147,9 @@ describe('HousingGroupsService', () => {
           ...(row as object),
         }),
       ),
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn(() => listingQuery),
+      manager: { find: jest.fn().mockResolvedValue([]) },
     };
     joinRequests = {
       count: jest.fn().mockResolvedValue(0),
@@ -100,6 +161,8 @@ describe('HousingGroupsService', () => {
       save: jest.fn((row: object) =>
         Promise.resolve({ id: 'join-request-1', ...row }),
       ),
+      // `refreshMemberCount` counts DISTINCT approved members (ENG-472).
+      createQueryBuilder: jest.fn(() => memberCountQuery),
     };
     connections = { find: jest.fn().mockResolvedValue([]) };
     profiles = { find: jest.fn().mockResolvedValue([]) };
@@ -115,6 +178,14 @@ describe('HousingGroupsService', () => {
       announce: jest.fn().mockResolvedValue(undefined),
     };
     modAudit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
+    messaging = {
+      deliverEnquiry: jest
+        .fn()
+        .mockResolvedValue({ conversationId: 'conversation-1' }),
+    };
+    blockFilter = {
+      excludeHidden: jest.fn((queryBuilder: unknown) => queryBuilder),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -135,6 +206,8 @@ describe('HousingGroupsService', () => {
           useValue: adminQueueNotifications,
         },
         { provide: ModAuditService, useValue: modAudit },
+        { provide: MessagingService, useValue: messaging },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
 
@@ -253,18 +326,82 @@ describe('HousingGroupsService', () => {
       );
     });
 
-    it('announces an anonymous application too', async () => {
+    it('asks every applicant for the affirming pledge', async () => {
       await service.createJoinRequest(
         'sunset-house',
         { name: 'Sam', relationship: 'Neighbour', answers: [] },
-        null,
+        'member-2',
       );
 
-      expect(affirmingPledge.requireAccepted).not.toHaveBeenCalled();
-      expect(adminQueueNotifications.announce).toHaveBeenCalledWith(
-        AdminQueueKey.HousingGroupJoinRequests,
-        'join-request-1',
+      expect(affirmingPledge.requireAccepted).toHaveBeenCalledWith('member-2');
+      expect(joinRequests.save).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'member-2' }),
       );
+    });
+
+    it('answers a second request still in triage with a typed 409', async () => {
+      joinRequests.find.mockResolvedValue([
+        { id: 'request-1', status: GroupJoinRequestStatus.Pending },
+      ]);
+
+      const attempt = service.createJoinRequest(
+        'sunset-house',
+        { name: 'Alex', relationship: 'Friend', answers: [] },
+        'member-1',
+      );
+
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toMatchObject({
+        response: {
+          statusCode: 409,
+          code: 'GROUP_JOIN_ALREADY_REQUESTED',
+          membershipStanding: 'pending',
+        },
+      });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('tells an approved member they are already in', async () => {
+      joinRequests.find.mockResolvedValue([
+        { id: 'request-1', status: GroupJoinRequestStatus.Pending },
+        { id: 'request-2', status: GroupJoinRequestStatus.Approved },
+      ]);
+
+      await expect(
+        service.createJoinRequest(
+          'sunset-house',
+          { name: 'Alex', relationship: 'Friend', answers: [] },
+          'member-1',
+        ),
+      ).rejects.toMatchObject({
+        response: {
+          code: 'GROUP_JOIN_ALREADY_REQUESTED',
+          membershipStanding: 'member',
+        },
+      });
+      expect(joinRequests.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a declined member ask again', async () => {
+      // The duplicate check reads only pending and approved rows, so an old
+      // decline never reaches it.
+      joinRequests.find.mockResolvedValue([]);
+
+      await service.createJoinRequest(
+        'sunset-house',
+        { name: 'Alex', relationship: 'Friend', answers: [] },
+        'member-1',
+      );
+
+      const [findOptions] = joinRequests.find.mock.calls[0] as [
+        { where: { groupId: string; userId: string } },
+      ];
+      expect(findOptions.where).toMatchObject({
+        groupId: 'group-1',
+        userId: 'member-1',
+      });
+      expect(joinRequests.save).toHaveBeenCalled();
     });
 
     it('tells nobody when the group does not exist', async () => {
@@ -280,6 +417,262 @@ describe('HousingGroupsService', () => {
 
       expect(joinRequests.save).not.toHaveBeenCalled();
       expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listVisibleListings (PRD-443)', () => {
+    const liveRoom = {
+      id: 'group-listing-1',
+      title: 'Room in a queer household',
+      description: 'A bright room.',
+      neighbourhood: 'Arroios',
+      priceEuros: 450,
+      accessibilityInfo: 'Ground floor, no stairs.',
+      postedByUserId: 'poster-1',
+    };
+    const posterProfile = {
+      userId: 'poster-1',
+      slug: 'rui',
+      firstName: 'Rui',
+      lastName: 'Sousa',
+      pronouns: null,
+      avatarUrl: null,
+      photoVisible: true,
+    };
+
+    it('names nobody to an anonymous reader, so the open answer stays cacheable', async () => {
+      listingQuery.getMany.mockResolvedValue([liveRoom]);
+
+      const read = await service.listVisibleListings('sunset-house', null);
+
+      expect(read.isCallerAgnostic).toBe(true);
+      expect(read.listings[0]).toMatchObject({
+        id: 'group-listing-1',
+        poster: null,
+        isOwnListing: false,
+      });
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+
+    it('names the poster to a signed-in reader and keeps that answer private', async () => {
+      listingQuery.getMany.mockResolvedValue([liveRoom]);
+      profiles.find.mockResolvedValue([posterProfile]);
+
+      const read = await service.listVisibleListings(
+        'sunset-house',
+        'reader-1',
+      );
+
+      expect(read.isCallerAgnostic).toBe(false);
+      expect(read.listings[0]).toMatchObject({
+        poster: { slug: 'rui', firstName: 'Rui' },
+        isOwnListing: false,
+      });
+    });
+
+    it('marks the reader their own room', async () => {
+      listingQuery.getMany.mockResolvedValue([liveRoom]);
+      profiles.find.mockResolvedValue([posterProfile]);
+
+      const read = await service.listVisibleListings(
+        'sunset-house',
+        'poster-1',
+      );
+
+      expect(read.listings[0]?.isOwnListing).toBe(true);
+    });
+
+    it('skips a room taken down from a report', async () => {
+      await service.listVisibleListings('sunset-house', null);
+
+      expect(listingQuery.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('content_moderation'),
+        { groupListingSubjectType: 'group_listing' },
+      );
+    });
+
+    it('hides rooms from members the signed-in reader blocked, was blocked by, or muted', async () => {
+      await service.listVisibleListings('sunset-house', 'reader-1');
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        listingQuery,
+        'reader-1',
+        '"listing"."posted_by_user_id"',
+      );
+    });
+
+    it('applies no block filter to an anonymous reader', async () => {
+      await service.listVisibleListings('sunset-house', null);
+
+      expect(blockFilter.excludeHidden).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createListingEnquiry (PRD-443)', () => {
+    const ENQUIRY = { body: 'Hello, is the room still free from March?' };
+    const liveRoom = { id: 'group-listing-1', postedByUserId: 'poster-1' };
+
+    it('delivers the message to the poster as an enquiry', async () => {
+      listingQuery.getOne.mockResolvedValue(liveRoom);
+
+      const result = await service.createListingEnquiry(
+        'sunset-house',
+        'group-listing-1',
+        'reader-1',
+        ENQUIRY,
+      );
+
+      expect(result).toEqual({ conversationId: 'conversation-1' });
+      expect(affirmingPledge.requireAccepted).toHaveBeenCalledWith('reader-1');
+      expect(verification.requireLevel).toHaveBeenCalledWith(
+        'reader-1',
+        VerificationLevel.Phone,
+      );
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'reader-1',
+        'poster-1',
+        ENQUIRY.body,
+      );
+    });
+
+    it('404s a room the group page does not show', async () => {
+      listingQuery.getOne.mockResolvedValue(null);
+
+      await expect(
+        service.createListingEnquiry(
+          'sunset-house',
+          'group-listing-1',
+          'reader-1',
+          ENQUIRY,
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('reads the room through the block and mute filter for the sender', async () => {
+      listingQuery.getOne.mockResolvedValue(liveRoom);
+
+      await service.createListingEnquiry(
+        'sunset-house',
+        'group-listing-1',
+        'reader-1',
+        ENQUIRY,
+      );
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        listingQuery,
+        'reader-1',
+        '"listing"."posted_by_user_id"',
+      );
+    });
+
+    it('refuses a message about your own room', async () => {
+      listingQuery.getOne.mockResolvedValue(liveRoom);
+
+      await expect(
+        service.createListingEnquiry(
+          'sunset-house',
+          'group-listing-1',
+          'poster-1',
+          ENQUIRY,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('refuses a room with no poster left to contact', async () => {
+      listingQuery.getOne.mockResolvedValue({
+        ...liveRoom,
+        postedByUserId: null,
+      });
+
+      await expect(
+        service.createListingEnquiry(
+          'sunset-house',
+          'group-listing-1',
+          'reader-1',
+          ENQUIRY,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('refuses a non-member of an access-gated group before reading the room', async () => {
+      groups.findOne.mockResolvedValue(gatedGroup);
+
+      await expect(
+        service.createListingEnquiry(
+          'sunset-house',
+          'group-listing-1',
+          'stranger-1',
+          ENQUIRY,
+        ),
+      ).rejects.toMatchObject({
+        response: { code: 'GROUP_MEMBERSHIP_REQUIRED' },
+      });
+      expect(listingQuery.getOne).not.toHaveBeenCalled();
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+  });
+
+  // A report takedown writes `content_moderation`, which the group page
+  // honours. The poster's own list has to say so too, or a room nobody can see
+  // reads as live to the one person who posted it.
+  describe('listMyListings report takedowns (PRD-443)', () => {
+    const ownRoom = (id: string) => ({
+      id,
+      groupId: 'group-1',
+      title: 'Room in a queer household',
+      description: 'A bright room.',
+      neighbourhood: 'Arroios',
+      priceEuros: 450,
+      accessibilityInfo: 'Ground floor.',
+      status: GroupListingStatus.Live,
+      hidden: false,
+      hiddenReason: null,
+      postedByUserId: 'member-1',
+      decidedAt: null,
+      decisionReason: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    it('marks a hidden room, a removed room, and leaves an untouched one null', async () => {
+      listings.find.mockResolvedValue([
+        ownRoom('room-hidden'),
+        ownRoom('room-removed'),
+        ownRoom('room-clear'),
+      ]);
+      listings.manager.find.mockResolvedValue([
+        {
+          subjectId: 'room-hidden',
+          hiddenAt: new Date('2026-02-01T00:00:00.000Z'),
+          removedAt: null,
+        },
+        {
+          subjectId: 'room-removed',
+          hiddenAt: new Date('2026-02-01T00:00:00.000Z'),
+          removedAt: new Date('2026-02-02T00:00:00.000Z'),
+        },
+      ]);
+
+      const rows = await service.listMyListings('sunset-house', 'member-1');
+
+      expect(rows.map((row) => [row.id, row.moderationState] as const)).toEqual(
+        [
+          ['room-hidden', 'hidden'],
+          ['room-removed', 'removed'],
+          ['room-clear', null],
+        ],
+      );
+    });
+
+    it('skips the takedown lookup when the poster has no rooms', async () => {
+      listings.find.mockResolvedValue([]);
+
+      const rows = await service.listMyListings('sunset-house', 'member-1');
+
+      expect(rows).toEqual([]);
+      expect(listings.manager.find).not.toHaveBeenCalled();
     });
   });
 
@@ -351,6 +744,32 @@ describe('HousingGroupsService', () => {
         'housing_group_join_request_triage',
         undefined,
         expect.stringMatching(/join-request-7.*approved/),
+      );
+    });
+
+    it('recounts the group as distinct approved members', async () => {
+      memberCountQuery.getRawOne.mockResolvedValue({ memberCount: '3' });
+      joinRequests.findOne
+        .mockResolvedValueOnce({ ...pendingRequest })
+        .mockResolvedValueOnce({
+          ...pendingRequest,
+          status: GroupJoinRequestStatus.Approved,
+          group: publishedGroup,
+        });
+
+      await service.triageJoinRequest(
+        'join-request-7',
+        'approved',
+        'moderator-1',
+      );
+
+      expect(memberCountQuery.select).toHaveBeenCalledWith(
+        expect.stringContaining('COUNT(DISTINCT'),
+        'memberCount',
+      );
+      expect(groups.update).toHaveBeenCalledWith(
+        { id: 'group-1' },
+        { memberCount: 3 },
       );
     });
 

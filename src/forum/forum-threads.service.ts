@@ -40,7 +40,7 @@ import { MemberLookup, MemberRef } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
-import { isGatedTier } from '../communities/community-gate';
+import { GATED_ACCESS_TIERS } from '../communities/community-gate';
 import { COMMUNITY_MODERATION_SUBJECT_TYPE } from '../communities/community-read-gate';
 import {
   ownRosterRowCountsSql,
@@ -63,12 +63,32 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { CreateThreadPollDto } from './dto/create-thread-poll.dto';
+import { CreateThreadFundingDto } from './dto/create-thread-funding.dto';
 import { ForumPostPhotoDto } from './dto/forum-post-photo.dto';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostPhoto } from './entities/forum-post-photo.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import { ForumThreadFunding } from './entities/forum-thread-funding.entity';
+import {
+  ASK_AUTO_END_MS,
+  AskEndedReason,
+  CALL_CLOSING_WINDOW_MS,
+  FundingListFilter,
+  OPEN_CALL_TAG,
+  ROLLING_CALL_STALE_MS,
+  ResolvedFundingFields,
+  fundingException,
+  isFundingCategory,
+  isFundingKind,
+  normalizeFundingLink,
+  withServerOwnedFundingTag,
+} from './forum-funding';
+import {
+  ForumFundingReviewFacts,
+  ForumFundingService,
+} from './forum-funding.service';
 import {
   ResolvedPollInput,
   insertThreadPoll,
@@ -125,12 +145,26 @@ const MAX_PINNED_THREADS = 3;
 const MAX_CONTENT_WARNINGS = 8;
 
 // The categories where an anonymous byline is allowed at all (server-enforced;
-// see `CreateThreadDto.isAnonymous`). These are the three where anonymity is
-// the difference between asking and not asking: a health question, a housing
-// ask, a trans-specific thread. Everywhere else `isAnonymous` coerces to false,
-// because an anonymous byline on a general thread costs the forum
-// accountability and buys the author nothing they needed.
-const ANONYMOUS_CATEGORIES: readonly string[] = ['health', 'housing', 'trans'];
+// see `CreateThreadDto.isAnonymous`). These are the ones where anonymity is the
+// difference between asking and not asking: a health question, a housing ask,
+// a trans-specific thread, a legal worry, a relationship question, and a
+// funding question (an associação or NIF problem, a rejected application).
+//
+// The frontend composer offers exactly this list (`ANONYMOUS_CATEGORIES` in
+// `compose/composeCategories.data.ts`). Keep the two identical: a checkbox the
+// server ignores publishes the post under the author's own name.
+//
+// Everywhere else `isAnonymous` coerces to false, because an anonymous byline
+// on a general thread costs the forum accountability and buys the author
+// nothing they needed.
+const ANONYMOUS_CATEGORIES: readonly string[] = [
+  'health',
+  'housing',
+  'trans',
+  'legal',
+  'relationships',
+  'funding',
+];
 
 // How far ahead `publishAt`/`closesAt` may be set. A deadline or an embargo
 // further out than a year is not a schedule, and the ceiling is what stops a
@@ -206,6 +240,32 @@ export function forumThreadVisibleSql(alias: string): string {
 }
 
 /**
+ * Funding & Grants: true while no moderator has hidden or removed the
+ * thread's opening post (a `content_moderation` row under either forum
+ * subject type with `hidden_at` or `removed_at` set). A takedown of the OP
+ * takes its donate or application link down with it, so the funding views
+ * (`open`, `closing`, `asks`), the duplicate-link lookup and the saved-call
+ * reminders (`fundingSaverVisibleSql`) all leave such a thread out.
+ *
+ * Returns a bare `NOT EXISTS (...)` (no leading AND) over the caller's
+ * already-quoted thread alias, for example `'"t"'`. It takes no bind
+ * parameters, and its inner aliases (`"op"`, `"moderation"`) are scoped to
+ * the subquery.
+ */
+export function forumOpNotTakenDownSql(threadAlias: string): string {
+  return `NOT EXISTS (
+           SELECT 1
+             FROM "forum_post" "op"
+             JOIN "content_moderation" "moderation"
+               ON "moderation"."subject_id" = "op"."id"::text
+              AND "moderation"."subject_type" IN ('post', 'reply')
+            WHERE "op"."thread_id" = ${threadAlias}."id"
+              AND "op"."is_op" = true
+              AND ("moderation"."hidden_at" IS NOT NULL OR "moderation"."removed_at" IS NOT NULL)
+         )`;
+}
+
+/**
  * The single-row twin of `FORUM_THREAD_VISIBLE_SQL`, for the by-slug/by-id
  * reads that hold a loaded thread rather than a query builder
  * (`assertVisibleOr404`).
@@ -261,15 +321,6 @@ const CATEGORY_MOVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 // `MODERATOR_ROLES` below is replicated. Keep the two in sync: this one exists
 // only so a hidden or removed OP's words stay out of a thread card's `excerpt`.
 const OP_MODERATION_SUBJECT_TYPES: readonly string[] = ['post', 'reply'];
-
-// The access tiers whose content is closed to anyone off the community's
-// roster, i.e. everything but `public`. Derived from `isGatedTier` rather than
-// listed by hand so the forum's read gates and the community gate itself can
-// never disagree about which tiers are closed, and so a tier added later is
-// gated until somebody deliberately opens it. Used by `isCommunityHiddenFrom`,
-// whose sense is inverted and so needs the closed tiers rather than `public`.
-const GATED_ACCESS_TIERS: readonly AccessTier[] =
-  Object.values(AccessTier).filter(isGatedTier);
 
 // What a thread card assumes about an OP nobody has moderated.
 const OP_NOT_MODERATED: ContentModerationState = {
@@ -330,18 +381,49 @@ export function isModeratorRole(role: string): boolean {
 // `#`, drop empties, dedupe (first-wins), cap at `MAX_TAGS`. Applied on create +
 // update so `forum_thread.tags` is always clean and matches the same shape the
 // `:tag = ANY(t.tags)` filter normalizes a query tag to (`normalizeTag`).
-function normalizeTags(tags: string[] | undefined): string[] {
+// `excludedTag` (optional) is dropped before the cap counts it.
+function normalizeTags(
+  tags: string[] | undefined,
+  excludedTag?: string,
+): string[] {
   if (!tags) return [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of tags) {
     const tag = raw.trim().toLowerCase().replace(/^#+/, '').trim();
-    if (!tag || seen.has(tag)) continue;
+    if (!tag || seen.has(tag) || tag === excludedTag) continue;
     seen.add(tag);
     out.push(tag);
     if (out.length >= MAX_TAGS) break;
   }
   return out;
+}
+
+// Funding & Grants: the tag set a thread of `kind` stores. The server-owned
+// `open-call` tag is dropped from the member's input BEFORE the `MAX_TAGS` cap,
+// so a member who also sent it keeps all five of their own tags on an
+// ordinary thread; `withServerOwnedFundingTag` then puts it first on a call.
+function storedThreadTags(
+  kind: string | null,
+  tags: string[] | undefined,
+): string[] {
+  return withServerOwnedFundingTag(
+    kind,
+    normalizeTags(tags, OPEN_CALL_TAG),
+    MAX_TAGS,
+  );
+}
+
+// Whether two stored tag sets are the same tags in the same order. Order
+// counts because it is what the card renders.
+function haveSameTagsInOrder(
+  previous: readonly string[],
+  next: readonly string[],
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((tag, index) => tag === next[index])
+  );
 }
 
 // Normalizes author-supplied content warnings for storage: trim, drop empties,
@@ -373,6 +455,36 @@ function normalizeTag(tag: string): string {
   return tag.trim().toLowerCase().replace(/^#+/, '').trim();
 }
 
+// The `open`, `closing` and `asks` funding views answer one page of at most
+// this many rows with no cursor (Funding & Grants plan, delta 7).
+const FUNDING_VIEW_MAX_ROWS = 100;
+
+// "Open or closing" for a call, shared by the `open` view and the duplicate
+// lookup so the two agree on which calls still count (`deriveCallState` is
+// the row-level twin): a dated call whose deadline has not passed, or a
+// rolling call edited within the stale window. Both boundaries use the
+// comparisons `deriveCallState` uses, so a call exactly 183 days old or due
+// this instant reads open in SQL and in the view alike.
+const OPEN_CALL_STATE_SQL =
+  '(("funding"."deadline" IS NULL AND "funding"."updated_at" >= :rollingFreshAfter) OR "funding"."deadline" >= :fundingNow)';
+
+function openCallStateParameters(now: Date): {
+  rollingFreshAfter: Date;
+  fundingNow: Date;
+} {
+  return {
+    rollingFreshAfter: new Date(now.getTime() - ROLLING_CALL_STALE_MS),
+    fundingNow: now,
+  };
+}
+
+/** `GET /forum/funding/lookup`'s 200 body. */
+export interface FundingLookupResult {
+  slug: string;
+  title: string;
+  deadline: string | null;
+}
+
 export interface CreateThreadInput {
   title: string;
   body: string;
@@ -382,7 +494,7 @@ export interface CreateThreadInput {
   isOfficial?: boolean;
   /** Storage key of one optional photo on the opening post (SOC-13). */
   image?: string;
-  /** 'question' | 'guide' | 'proposal' | 'share'; omitted = unclassified. */
+  /** 'question' | 'guide' | 'proposal' | 'share' | 'call' | 'ask'; omitted = unclassified. */
   kind?: string;
   /** Author-chosen warnings, normalized by `normalizeContentWarnings`. */
   contentWarnings?: string[];
@@ -409,6 +521,11 @@ export interface CreateThreadInput {
   poll?: CreateThreadPollDto;
   /** Up to four photos on the opening post, in the author's order. */
   photos?: ForumPostPhotoDto[];
+  /**
+   * The structured half of an open call or a fundraiser. Validated by
+   * `ForumFundingService.resolveForCreate` before the insert transaction.
+   */
+  funding?: CreateThreadFundingDto;
 }
 
 /**
@@ -438,6 +555,11 @@ interface ResolvedThreadFields {
    * claimed later by `publishThread`. See `ForumThread.fannedOutAt`.
    */
   fannedOutAt: Date | null;
+  /**
+   * The validated funding row to insert with the thread, or null for a thread
+   * that is neither an open call nor a fundraiser.
+   */
+  funding: ResolvedFundingFields | null;
 }
 
 /** The community a thread in the staff review queue was written in. */
@@ -453,6 +575,11 @@ export interface ForumReviewQueueCommunity {
  */
 export interface ForumReviewQueueRow extends ForumThreadResponse {
   community: ForumReviewQueueCommunity | null;
+  /**
+   * Funding & Grants: where a fundraiser's money would go, how verified its
+   * poster is and how old their account is. Null on every other kind.
+   */
+  fundingReview: ForumFundingReviewFacts | null;
 }
 
 @Injectable()
@@ -499,6 +626,10 @@ export class ForumThreadsService {
     // import `ForumModule`, so this is a plain import with no `forwardRef` —
     // same shape as every other module that reaches it.
     private readonly notifications: NotificationsService,
+    // Funding & Grants: the side table behind open calls and fundraisers.
+    // Owned by this module and depending on nothing in it, so a plain
+    // injection with no `forwardRef`.
+    private readonly funding: ForumFundingService,
   ) {}
 
   // GET /forum/threads?category=&cursor=&sort=&tag=&q= — a cursor page ordered
@@ -512,6 +643,7 @@ export class ForumThreadsService {
     tag?: string,
     q?: string,
     viewerIsModerator = false,
+    fundingFilter?: FundingListFilter,
   ): Promise<CursorPage<ForumThreadResponse>> {
     const qb = this.threads.createQueryBuilder('t');
     // Threads by a member blocked either way, or one the viewer has muted,
@@ -537,10 +669,22 @@ export class ForumThreadsService {
     if (category) {
       qb.andWhere('t.category = :category', { category });
     }
-    // Pinned threads live in their own bucket (`listPinned`, rendered above
-    // this paginated list) — excluded here so a pinned thread never appears
-    // twice across a scroll session.
-    qb.andWhere('t.is_pinned = false');
+    // Funding & Grants: `fundingView` narrows the funding category only.
+    const fundingView =
+      category && isFundingCategory(category) ? fundingFilter?.view : undefined;
+    const isFundingStateView =
+      fundingView === 'open' ||
+      fundingView === 'closing' ||
+      fundingView === 'asks';
+    // On every ordinary page, pinned threads live in their own bucket
+    // (`listPinned`, rendered above this paginated list) and are excluded here
+    // so a pinned thread never appears twice across a scroll session. The
+    // funding state views are the one exception: they list every matching
+    // call or ask, pinned ones included, because the funding page draws no
+    // pinned bucket above them.
+    if (!isFundingStateView) {
+      qb.andWhere('t.is_pinned = false');
+    }
     // `q`/`tag` fold in AFTER the block filter (spec §Backend): same visibility
     // rules first, then narrow the visible set by text (title or any visible
     // reply body, C9) / tag membership.
@@ -558,6 +702,22 @@ export class ForumThreadsService {
     // rows this branch can return (SOC-13).
     if (sort === 'unanswered') {
       qb.andWhere('t.accepted_post_id IS NULL');
+    }
+    // Funding discussion: the funding category's threads with no call or ask
+    // behind them, on the ordinary cursor.
+    if (fundingView === 'discussion') {
+      qb.andWhere(
+        'NOT EXISTS (SELECT 1 FROM "forum_thread_funding" "funding_absent" WHERE "funding_absent"."thread_id" = "t"."id")',
+      );
+    }
+    if (isFundingStateView) {
+      return this.pageFundingView(
+        qb,
+        fundingView,
+        fundingFilter ?? {},
+        viewerId,
+        viewerIsModerator,
+      );
     }
 
     // `top` needs three sort columns and a recency window, neither of which the
@@ -843,6 +1003,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -916,6 +1077,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -936,6 +1098,15 @@ export class ForumThreadsService {
       includeDeleted: true,
       includeUnpublished: true,
     });
+    // A fundraiser is posted under its author's own name (donors need to know
+    // who they are trusting), so the official byline is refused on an ask.
+    // Clearing it stays allowed, which repairs any row that carries it.
+    if (official && thread.kind === 'ask') {
+      throw fundingException(
+        'funding_ask_not_anonymous',
+        "A fundraiser keeps its author's own name, so it cannot carry the official byline",
+      );
+    }
     if (thread.isOfficial !== official) {
       thread.isOfficial = official;
       await this.threads.save(thread);
@@ -968,6 +1139,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -1115,6 +1287,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -1201,7 +1374,11 @@ export class ForumThreadsService {
     // Only an admin can actually post as "QueerPulse Official" — silently
     // coerced here (not a 403) since the composer only shows the checkbox to
     // admins in the first place; anyone else's value is simply ignored.
-    const isOfficial = viewerIsAdmin && !!input.isOfficial;
+    // A fundraiser never carries the official byline either: donors need the
+    // name of the member behind the link, so the flag is coerced off for an
+    // ask the same quiet way.
+    const isOfficial =
+      viewerIsAdmin && !!input.isOfficial && input.kind !== 'ask';
     // Anonymity is coerced the same way, against two rules. It is allowed only
     // in the categories where it is the difference between asking and not
     // asking, and `isOfficial` wins outright when both arrive: the platform
@@ -1218,6 +1395,25 @@ export class ForumThreadsService {
     // that thread is already there. Coerced off rather than 400'd, matching
     // `isOfficial`: it is a checkbox only the community composer shows.
     const crossPosted = communityId != null && !!input.crossPosted;
+    // Funding & Grants: an open call carries a `funding` object and lives in
+    // the funding category; every other kind carries none. Resolved here with
+    // everything else that can REJECT the request, so a malformed call costs
+    // no insert.
+    const resolvedFunding = this.funding.resolveForCreate({
+      kind: input.kind,
+      category: input.category,
+      title: input.title,
+      body: input.body,
+      isAnonymous: !!input.isAnonymous,
+      funding: input.funding,
+    });
+    // A fundraiser needs a phone-verified author: checked before any insert.
+    // The gate is the author's own (they are the one posting here); edits
+    // are never phone-gated (see `ForumFundingService.assertCanPostAsk`).
+    const isAsk = resolvedFunding?.kind === 'ask';
+    if (isAsk) {
+      await this.funding.assertCanPostAsk(authorId);
+    }
     // The three that can REJECT the request, resolved before the transaction
     // opens so a bad handle or a date in the past costs no insert. Mirrors the
     // community resolution above.
@@ -1258,9 +1454,12 @@ export class ForumThreadsService {
       // A thread sent to the editors or the council starts PENDING, which
       // keeps it out of every member-facing read until somebody approves it.
       // Everything else starts NULL: never submitted, and visible.
-      reviewState: input.submitForReview ? REVIEW_STATE_PENDING : null,
+      // A fundraiser is always read by a moderator first, whatever the
+      // composer sent: for an ask the platform makes the author's choice.
+      reviewState: input.submitForReview || isAsk ? REVIEW_STATE_PENDING : null,
       // Filled in immediately below, once the two fields it reads are set.
       fannedOutAt: null,
+      funding: resolvedFunding,
     };
     // THE ONE QUESTION THAT DECIDES WHETHER THE FAN-OUT HAPPENS NOW.
     //
@@ -1283,7 +1482,7 @@ export class ForumThreadsService {
     // the instant it was always meant to happen.
     const isVisibleOnCreate = isThreadPublished(resolved);
     resolved.fannedOutAt = isVisibleOnCreate ? new Date() : null;
-    const { thread, opPost } = await this.createWithUniqueSlug(
+    const { thread, opPost, fundingRow } = await this.createWithUniqueSlug(
       authorId,
       input,
       communityId,
@@ -1341,6 +1540,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       photoRows.get(opPost.id) ?? [],
       polls.get(thread.id) ?? null,
+      fundingRow,
     );
   }
 
@@ -1633,9 +1833,12 @@ export class ForumThreadsService {
       't',
       true,
     );
-    const [responses, communityById] = await Promise.all([
+    const [responses, communityById, fundingFactsByThread] = await Promise.all([
       this.toThreadResponses(page.rows, user.userId, true),
       this.reviewQueueCommunities(page.rows),
+      // Funding & Grants: one batch of fundraiser facts for the page. An ask
+      // whose author erased their account is absent from the map.
+      this.funding.reviewFactsFor(page.rows),
     ]);
     const communityIdByThreadId = new Map(
       page.rows.map((row) => [row.id, row.communityId]),
@@ -1647,6 +1850,7 @@ export class ForumThreadsService {
         community: communityId
           ? (communityById.get(communityId) ?? null)
           : null,
+        fundingReview: fundingFactsByThread.get(response.id) ?? null,
       };
     });
     return {
@@ -1732,7 +1936,17 @@ export class ForumThreadsService {
     thread.reviewState = approve
       ? REVIEW_STATE_APPROVED
       : REVIEW_STATE_REJECTED;
-    await this.threads.save(thread);
+    await this.dataSource.transaction(async (manager) => {
+      await manager.save(thread);
+      // Funding & Grants: the approval date backs "Checked by moderators on
+      // {{date}}" and the 90-day auto-end. Stamped on every approval, so an
+      // ask re-approved after an edit shows the latest check, and written in
+      // the same transaction as the verdict so the two commit together. This
+      // is the only path that approves a thread.
+      if (approve && thread.kind === 'ask') {
+        await this.funding.markAskApproved(manager, thread.id, new Date());
+      }
+    });
     await this.auditThreadAction(
       user,
       approve
@@ -1766,6 +1980,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -2076,6 +2291,7 @@ export class ForumThreadsService {
     title?: string,
     tags?: string[],
     category?: string,
+    funding?: CreateThreadFundingDto,
   ): Promise<ForumThreadResponse> {
     // Filing a thread is janitorial and a moderator may do it at any time, so
     // the scheduled/under-review gate must not put a pending guide out of their
@@ -2098,6 +2314,22 @@ export class ForumThreadsService {
         "Only the author or a moderator can change this thread's category",
       );
     }
+    // Funding details follow the tag rule: author or moderator, at any time.
+    if (funding !== undefined && !isAuthor && !isModerator) {
+      throw new ForbiddenException(
+        "Only the author or a moderator can edit this thread's funding details",
+      );
+    }
+    // A call or a fundraiser is defined by where it lives: moved out of the
+    // funding category, its details would sit on a thread no funding view
+    // lists. Refused for moderators too.
+    if (
+      category !== undefined &&
+      isFundingKind(thread.kind) &&
+      !isFundingCategory(category)
+    ) {
+      throw fundingException('funding_kind_category_mismatch');
+    }
     // The author's move window. A moderator is not bound by it, so this is
     // checked only when the caller is relying on authorship alone.
     if (
@@ -2109,10 +2341,21 @@ export class ForumThreadsService {
         'A thread can only be moved to another category in its first 24 hours. Ask a moderator to move it.',
       );
     }
-    if (title === undefined && tags === undefined && category === undefined) {
+    if (
+      title === undefined &&
+      tags === undefined &&
+      category === undefined &&
+      funding === undefined
+    ) {
       throw new BadRequestException('Nothing to update');
     }
 
+    // Validated before the transaction opens, against the stored row, so a
+    // malformed replacement costs no write.
+    const preparedFunding =
+      funding !== undefined
+        ? await this.funding.prepareEdit(thread, funding)
+        : null;
     // The OP is the `is_op` post — one source of truth with every other path
     // (`resolveOp`/`toThreadResponses`/create), not a separate
     // oldest-by-`createdAt` lookup.
@@ -2129,15 +2372,32 @@ export class ForumThreadsService {
     // changed, and an "edited" mark that appears because someone re-filed the
     // thread would be false on its face.
     const isTitleChanged = title !== undefined && title !== thread.title;
+    // A fundraiser's title is held to the payment-details rule its body is,
+    // checked against the STORED opening post before anything is written.
+    if (title !== undefined && isTitleChanged) {
+      this.funding.assertAskTextAllowed(thread.kind, title, opPost?.body ?? '');
+    }
     if (title !== undefined) {
       thread.title = title;
     }
     // `tags` is an optional replacement set: only touch the column when the
     // caller sent the field (an explicit `[]` clears them; omitting it leaves
     // the existing tags untouched).
+    // Captured before the replacement below, so the re-review rule can tell a
+    // real tag change from a resend of the same set.
+    const previousTags = [...thread.tags];
     if (tags !== undefined) {
-      thread.tags = normalizeTags(tags);
+      thread.tags = storedThreadTags(thread.kind, tags);
     }
+    // Compared AFTER `storedThreadTags`, in order, so a resend that only
+    // differs in case, a `#` or the server-owned tag changes nothing.
+    const isTagsChanged =
+      tags !== undefined && !haveSameTagsInOrder(previousTags, thread.tags);
+    // Funding & Grants: who the re-review rule treats as the reviewer. A
+    // moderator fixing someone else's fundraiser keeps it live; a moderator
+    // editing their own is its author like anyone else, so the edit goes
+    // back to another moderator.
+    const isReviewerEdit = isModerator && !isAuthor;
     // Moving the thread is a plain column write: the category is a free-text
     // filter key (`CreateThreadDto` validates its shape, `UpdateThreadDto`
     // repeats exactly the same rules including the reserved `"all"`), and the
@@ -2159,8 +2419,24 @@ export class ForumThreadsService {
         opPost.editedAt = new Date();
         await manager.save(opPost);
       }
+      if (preparedFunding) {
+        await this.funding.saveEdit(manager, preparedFunding);
+      }
+      // An author's edit of an approved fundraiser (title, tags or funding
+      // details) sends it back to the moderators, which hides it until they
+      // approve it again. Only a REAL title or tag change counts; a resend of
+      // the stored values keeps the ask live. Inside the edit transaction, so
+      // the edit and the reset commit together. The echo below then reads
+      // `reviewState: 'pending'`.
+      if (isTitleChanged || isTagsChanged || preparedFunding !== null) {
+        await this.funding.sendBackToReview(manager, thread, isReviewerEdit);
+      }
       await manager.save(thread);
     });
+    // After the commit, so a listener never hears about a rolled-back edit.
+    if (preparedFunding) {
+      this.funding.emitDeadlineChanged(thread, preparedFunding, user.userId);
+    }
 
     const byline = await this.bylineRefs(thread);
     // `opPost` (oldest post) is the OP; reuse it rather than a second lookup.
@@ -2176,15 +2452,27 @@ export class ForumThreadsService {
     // an edit blank the gallery and drop the ballot from the page until a
     // reload put them back. Resolved through the same two batched helpers every
     // other read uses, with a one-element id list.
-    const [pollByThread, photosByPost] = await Promise.all([
-      pollViewsByThread(
-        this.threads.manager,
-        [thread.id],
-        user.userId,
-        isModerator,
-      ),
-      photoRowsByPost(this.threads.manager, opPost ? [opPost.id] : []),
-    ]);
+    const [pollByThread, photosByPost, fundingByThread, opModerationStates] =
+      await Promise.all([
+        pollViewsByThread(
+          this.threads.manager,
+          [thread.id],
+          user.userId,
+          isModerator,
+        ),
+        photoRowsByPost(this.threads.manager, opPost ? [opPost.id] : []),
+        // Read back after the commit, so the echo shows what was stored.
+        this.funding.rowsByThread([thread.id]),
+        // The OP's takedown state, the same lookup `resolveOp` makes, so this
+        // echo blanks the excerpt, photos and funding details of a hidden or
+        // removed OP exactly as every read path does.
+        opPost
+          ? this.contentModeration.statesForAnyType(
+              OP_MODERATION_SUBJECT_TYPES,
+              [opPost.id],
+            )
+          : Promise.resolve(new Map<string, ContentModerationState>()),
+      ]);
     return toForumThreadResponse(
       thread,
       byline.author,
@@ -2192,11 +2480,69 @@ export class ForumThreadsService {
       opPost,
       myVote,
       await this.subscriptions.isSubscribed(thread.id, user.userId),
-      undefined,
+      opPost
+        ? (opModerationStates.get(opPost.id) ?? OP_NOT_MODERATED)
+        : OP_NOT_MODERATED,
       null,
       byline.coAuthor,
       opPost ? (photosByPost.get(opPost.id) ?? []) : [],
       pollByThread.get(thread.id) ?? null,
+      fundingByThread.get(thread.id) ?? null,
+    );
+  }
+
+  /**
+   * POST /forum/threads/:slug/funding/end: the author marks their fundraiser
+   * as ended (goal reached, or closed). The thread stays readable; its
+   * funding view reads `askState: 'ended'` and it leaves the `asks` view.
+   */
+  async endFundingAsk(
+    slug: string,
+    user: CurrentUserData,
+    reason: AskEndedReason,
+  ): Promise<ForumThreadResponse> {
+    const isModerator = isModeratorRole(user.role);
+    const thread = await this.loadOr404(slug, user.userId, {
+      includeUnpublished: isModerator,
+    });
+    await this.funding.endAsk(thread, user.userId, reason, new Date());
+    const [byline, op, isSubscribed] = await Promise.all([
+      this.bylineRefs(thread),
+      this.resolveOp(thread.id, user.userId, isModerator),
+      this.subscriptions.isSubscribed(thread.id, user.userId),
+    ]);
+    return toForumThreadResponse(
+      thread,
+      byline.author,
+      { userId: user.userId, isModerator },
+      op.opPost,
+      op.myVote,
+      isSubscribed,
+      op.moderation,
+      null,
+      byline.coAuthor,
+      op.opPhotos,
+      op.poll,
+      op.fundingRow,
+    );
+  }
+
+  /**
+   * Shared with `ForumPostsService.updatePostBody`, inside its transaction:
+   * an opening-post edit of a fundraiser is checked for payment details and
+   * sends an approved ask back to review. A no-op for every other thread.
+   */
+  async applyOpBodyEditRules(
+    manager: EntityManager,
+    threadId: string,
+    nextBody: string,
+    editorIsModerator: boolean,
+  ): Promise<void> {
+    await this.funding.onOpBodyEdit(
+      manager,
+      threadId,
+      nextBody,
+      editorIsModerator,
     );
   }
 
@@ -2313,6 +2659,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -2380,6 +2727,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -2422,6 +2770,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -2484,6 +2833,7 @@ export class ForumThreadsService {
       byline.coAuthor,
       op.opPhotos,
       op.poll,
+      op.fundingRow,
     );
   }
 
@@ -2526,7 +2876,147 @@ export class ForumThreadsService {
     return this.toThreadResponses(rows, '', false);
   }
 
+  /**
+   * GET /forum/funding/lookup: the newest open call already posted with the
+   * same link, for the composer's "already posted" prompt.
+   *
+   * VISIBLE MEANS THE BROWSE LIST'S GATE, applied through the same helpers
+   * `list` uses (blocks and mutes, community access, withdrawn, scheduled or
+   * held), so the lookup can never name a call the list would hide. The link
+   * is normalised with `normalizeFundingLink`, so `www.`, case, tracking
+   * parameters and a trailing slash all find the same call. Answers null for a
+   * link that is not https or that matches nothing; the controller turns that
+   * into 204.
+   */
+  async findOpenCallByLink(
+    viewerId: string,
+    link: string,
+  ): Promise<FundingLookupResult | null> {
+    const normalized = normalizeFundingLink(link);
+    if (!normalized) return null;
+    const qb = this.threads
+      .createQueryBuilder('t')
+      .innerJoin(
+        ForumThreadFunding,
+        'funding',
+        '"funding"."thread_id" = "t"."id"',
+      )
+      .where('"t"."kind" = :fundingKind', { fundingKind: 'call' })
+      .andWhere('"funding"."link_key" = :fundingLinkKey', {
+        fundingLinkKey: normalized.linkKey,
+      });
+    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    this.applyCommunityAccessFilter(qb, viewerId);
+    this.excludeDeletedThreads(qb, false);
+    this.applyPublishedThreadGate(qb, false);
+    // The open view leaves out a call whose OP a moderator took down, so the
+    // lookup never names one either.
+    qb.andWhere(forumOpNotTakenDownSql('"t"'));
+    qb.andWhere(OPEN_CALL_STATE_SQL, openCallStateParameters(new Date()));
+    const thread = await qb
+      .orderBy('"t"."created_at"', 'DESC')
+      .addOrderBy('"t"."id"', 'DESC')
+      .limit(1)
+      .getOne();
+    if (!thread) return null;
+    const fundingByThread = await this.funding.rowsByThread([thread.id]);
+    const deadline = fundingByThread.get(thread.id)?.deadline ?? null;
+    return {
+      slug: thread.slug,
+      title: thread.title,
+      deadline: deadline ? deadline.toISOString() : null,
+    };
+  }
+
   // --- internals ---
+
+  /**
+   * The `open`, `closing` and `asks` funding views: one page of at most
+   * `FUNDING_VIEW_MAX_ROWS`, ordered by the funding row, with no cursor. The
+   * builder arrives with every read gate `list` applies already folded on.
+   *
+   * `asks` repeats the approval test explicitly because a moderator's builder
+   * skips the published gate, and a pending fundraiser must never sit in the
+   * live list even for staff. It repeats the withdrawn test for the same
+   * reason (a moderator's builder keeps withdrawn threads). An ask whose
+   * author erased their account has nobody accountable behind its link, so
+   * it is left out too. The running test mirrors `deriveAskState`: an ask
+   * with no `ends_at` runs for 90 days from its approval, and one approved
+   * with no date recorded yet counts as running.
+   */
+  private async pageFundingView(
+    qb: SelectQueryBuilder<ForumThread>,
+    view: 'open' | 'closing' | 'asks',
+    filter: FundingListFilter,
+    viewerId: string,
+    viewerIsModerator: boolean,
+  ): Promise<CursorPage<ForumThreadResponse>> {
+    const now = new Date();
+    qb.innerJoin(
+      ForumThreadFunding,
+      'funding',
+      '"funding"."thread_id" = "t"."id"',
+    );
+    // A call or an ask whose opening post a moderator hid or removed carries
+    // no link on its card (`toForumThreadResponse` blanks it), so it has no
+    // place in a list of live calls or fundraisers either, staff included.
+    qb.andWhere(forumOpNotTakenDownSql('"t"'));
+    if (view === 'asks') {
+      qb.andWhere('"t"."kind" = :fundingKind', { fundingKind: 'ask' })
+        .andWhere('"t"."review_state" = :approvedReview', {
+          approvedReview: REVIEW_STATE_APPROVED,
+        })
+        .andWhere('"t"."author_id" IS NOT NULL')
+        .andWhere('"t"."deleted_at" IS NULL')
+        .andWhere('"funding"."ended_at" IS NULL')
+        .andWhere(
+          '("funding"."ends_at" >= :fundingNow OR ("funding"."ends_at" IS NULL AND ("funding"."approved_at" IS NULL OR "funding"."approved_at" >= :askAutoEndAfter)))',
+          {
+            fundingNow: now,
+            askAutoEndAfter: new Date(now.getTime() - ASK_AUTO_END_MS),
+          },
+        )
+        // An ask approved with no date recorded sorts after the dated ones.
+        .orderBy('"funding"."approved_at"', 'DESC', 'NULLS LAST')
+        .addOrderBy('"t"."id"', 'DESC');
+    } else {
+      qb.andWhere('"t"."kind" = :fundingKind', { fundingKind: 'call' });
+      if (view === 'open') {
+        qb.andWhere(OPEN_CALL_STATE_SQL, openCallStateParameters(now))
+          .orderBy('"funding"."deadline"', 'ASC', 'NULLS LAST')
+          .addOrderBy('"t"."created_at"', 'DESC')
+          .addOrderBy('"t"."id"', 'DESC');
+      } else {
+        qb.andWhere(
+          '"funding"."deadline" >= :fundingNow AND "funding"."deadline" <= :closingUntil',
+          {
+            fundingNow: now,
+            closingUntil: new Date(now.getTime() + CALL_CLOSING_WINDOW_MS),
+          },
+        )
+          .orderBy('"funding"."deadline"', 'ASC')
+          .addOrderBy('"t"."id"', 'DESC');
+      }
+      if (filter.eligibility?.length) {
+        qb.andWhere(
+          '"funding"."eligibility" && CAST(:fundingEligibility AS text[])',
+          { fundingEligibility: filter.eligibility },
+        );
+      }
+      if (filter.scope) {
+        qb.andWhere('"funding"."scope" = :fundingScope', {
+          fundingScope: filter.scope,
+        });
+      }
+    }
+    const rows = await qb.limit(FUNDING_VIEW_MAX_ROWS + 1).getMany();
+    const hasMore = rows.length > FUNDING_VIEW_MAX_ROWS;
+    const pageRows = hasMore ? rows.slice(0, FUNDING_VIEW_MAX_ROWS) : rows;
+    return {
+      data: await this.toThreadResponses(pageRows, viewerId, viewerIsModerator),
+      pageInfo: { nextCursor: null, hasMore },
+    };
+  }
 
   /**
    * Resolves `coAuthorHandle` to a user id, or null when no co-author was
@@ -2687,7 +3177,11 @@ export class ForumThreadsService {
     // trustworthy — it only writes.
     resolvedPoll: ResolvedPollInput | null,
     photos: PostPhotoInput[],
-  ): Promise<{ thread: ForumThread; opPost: ForumPost }> {
+  ): Promise<{
+    thread: ForumThread;
+    opPost: ForumPost;
+    fundingRow: ForumThreadFunding | null;
+  }> {
     for (let attempt = 1; attempt <= MAX_SLUG_ATTEMPTS; attempt++) {
       const slug = await allocateUniqueSlug(
         slugify(input.title, 'thread'),
@@ -2709,7 +3203,9 @@ export class ForumThreadsService {
               isPinned: false,
               isLocked: false,
               isOfficial: resolved.isOfficial,
-              tags: normalizeTags(input.tags),
+              // Normalized, then the server-owned `open-call` tag applied:
+              // first on a call, stripped from every other kind.
+              tags: storedThreadTags(input.kind ?? null, input.tags),
               communityId,
               // The composer's ten fields. The four that pass straight through
               // are normalized here (or explicitly NULLed) rather than left to
@@ -2767,8 +3263,32 @@ export class ForumThreadsService {
             await insertThreadPoll(manager, thread.id, resolvedPoll);
           }
           await insertPostPhotos(manager, opPost.id, photos);
+          // The funding row commits with its thread for the reason the poll
+          // does: a call without its details would render as a bare thread.
+          const fundingRow = resolved.funding
+            ? await this.funding.insertForThread(
+                manager,
+                thread.id,
+                resolved.funding,
+                now,
+              )
+            : null;
 
-          return { thread, opPost };
+          // One live or pending fundraiser per member, checked inside this
+          // transaction under a per-member lock, after the insert above wrote
+          // the new ask as pending (see `ForumFundingService.assertAskLimit`,
+          // which relies on this transaction keeping the default READ
+          // COMMITTED isolation).
+          if (resolved.funding?.kind === 'ask') {
+            await this.funding.assertAskLimit(
+              manager,
+              authorId,
+              thread.id,
+              now,
+            );
+          }
+
+          return { thread, opPost, fundingRow };
         });
       } catch (err) {
         if (isUniqueViolation(err) && attempt < MAX_SLUG_ATTEMPTS) {
@@ -2982,9 +3502,10 @@ export class ForumThreadsService {
   // `communityId`, so no gate applies to them.
   //
   // This one reads the tier half inverted, so it asks for the gated tiers
-  // instead of for `public`. The list comes from `GATED_ACCESS_TIERS`
-  // (derived from `isGatedTier`) rather than being spelled out here, so a tier
-  // added later hides its content until somebody deliberately opens it.
+  // instead of for `public`. The list comes from the shared
+  // `GATED_ACCESS_TIERS` in `community-gate.ts` (derived from `isGatedTier`)
+  // rather than being spelled out here, so a tier added later hides its
+  // content until somebody deliberately opens it.
   //
   // Inside a space the viewer's standing is their effective role: a space
   // roster row counts only while the parent row is still held
@@ -3148,8 +3669,9 @@ export class ForumThreadsService {
     moderation: ContentModerationState;
     opPhotos: ForumPostPhoto[];
     poll: ForumPollView | null;
+    fundingRow: ForumThreadFunding | null;
   }> {
-    const [op, polls] = await Promise.all([
+    const [op, polls, fundingByThread] = await Promise.all([
       this.posts.findOne({ where: { threadId, isOp: true } }),
       pollViewsByThread(
         this.threads.manager,
@@ -3157,8 +3679,12 @@ export class ForumThreadsService {
         viewerId,
         viewerIsModerator,
       ),
+      // Same one-element batch as the poll, so the list and every
+      // single-thread echo build a funding view through one function.
+      this.funding.rowsByThread([threadId]),
     ]);
     const poll = polls.get(threadId) ?? null;
+    const fundingRow = fundingByThread.get(threadId) ?? null;
     if (!op) {
       return {
         opPost: null,
@@ -3166,6 +3692,7 @@ export class ForumThreadsService {
         moderation: OP_NOT_MODERATED,
         opPhotos: [],
         poll,
+        fundingRow,
       };
     }
     const [vote, moderationStates, photosByPost] = await Promise.all([
@@ -3183,6 +3710,7 @@ export class ForumThreadsService {
       moderation: moderationStates.get(op.id) ?? OP_NOT_MODERATED,
       opPhotos: photosByPost.get(op.id) ?? [],
       poll,
+      fundingRow,
     };
   }
 
@@ -3222,6 +3750,7 @@ export class ForumThreadsService {
       subscribedThreadIds,
       unreadByThread,
       pollByThread,
+      fundingByThread,
     ] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
       this.posts.find({ where: { isOp: true, threadId: In(threadIds) } }),
@@ -3241,6 +3770,8 @@ export class ForumThreadsService {
         viewerId,
         viewerIsModerator,
       ),
+      // Funding & Grants: one `thread_id IN (...)` read for the page.
+      this.funding.rowsByThread(threadIds),
     ]);
     const opByThread = new Map(opPosts.map((post) => [post.threadId, post]));
 
@@ -3288,6 +3819,8 @@ export class ForumThreadsService {
         // Absent from the map = this thread carries no poll, which is nearly
         // every thread.
         pollByThread.get(t.id) ?? null,
+        // Absent from the map = no funding row, which is nearly every thread.
+        fundingByThread.get(t.id) ?? null,
       );
     });
   }

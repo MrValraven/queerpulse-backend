@@ -17,6 +17,7 @@ import {
 } from '../communities/entities/community.entity';
 import { ownRosterRowCountsSql } from '../communities/subcommunity-rules';
 import { ConnectionsService } from '../connections/connections.service';
+import { ConnectionStatus } from '../connections/entities/connection.entity';
 import {
   Event,
   EventStatus,
@@ -74,6 +75,8 @@ import {
   FeedItemSource,
   forumThreadToFeedItem,
   ForumThreadCard,
+  interestKey,
+  interestsInCommon,
   magazineArticleToFeedItem,
   MagazineByline,
   newMemberToFeedItem,
@@ -1858,6 +1861,155 @@ export class FeedService {
   }
 
   /**
+   * How many of the viewer's accepted connections are also accepted
+   * connections of each of `memberUserIds`, for the whole page's new-member
+   * cards in ONE query (the "3 mutual connections" line).
+   *
+   * Two CTEs over `connections`, each a pair of single-column lookups so the
+   * `requester_id` and `addressee_id` indexes serve them directly:
+   * `viewer_connection` is the far end of every accepted edge touching the
+   * viewer, and `member_connection` is the far end of every accepted edge
+   * touching one of the page's members (tagged with which member). Their join
+   * is the mutual set; `COUNT(DISTINCT ...)` keeps the answer exact even if a
+   * pair ever had two accepted rows, which `UQ_connections_pair` already rules
+   * out.
+   *
+   * The viewer and the member themselves are excluded explicitly. Neither can
+   * really appear (no self-edge exists, and the viewer is never in their own
+   * connection set), so these two predicates only guard against a future
+   * data shape.
+   *
+   * A mutual connection blocked either way relative to the viewer is left out,
+   * with the same two-direction `blocks` predicate
+   * `BlockFilterService.excludeBlocked` applies to content lists (and
+   * `dropBlocked` applies to the member card itself): the card must not
+   * count, and so hint at, someone the viewer has severed contact with.
+   *
+   * No member-level gate applies. Profiles carry no setting that hides a
+   * member's connection list (`privateNetwork` hides the vouch network, a
+   * separate graph), and the profile page's own mutuals chip
+   * (`ConnectionsService.mutualMembers`) shows this count to any viewer who
+   * can open the profile. The feed's new-member sources already apply the
+   * same "may the viewer see this member at all" gates the profile does.
+   *
+   * Returns null when there is no signed-in viewer, so the caller omits the
+   * field entirely. Raw SQL through the repository with
+   * positional parameters, the shape `LandingService.getCommunityRosterFaces`
+   * uses, so no TypeORM alias rewriting is involved; every identifier is
+   * quoted snake_case and every output alias is snake_case.
+   */
+  private async mutualConnectionCounts(
+    memberUserIds: string[],
+    viewerId: string,
+  ): Promise<Map<string, number> | null> {
+    if (!viewerId) return null;
+    const countByMemberId = new Map<string, number>();
+    if (!memberUserIds.length) return countByMemberId;
+
+    const rows = await this.profiles.query<
+      { member_id: string; mutual_connection_count: number }[]
+    >(
+      `WITH "viewer_connection" AS (
+         SELECT "c"."addressee_id" AS "connection_user_id"
+           FROM "connections" "c"
+          WHERE "c"."status" = $3 AND "c"."requester_id" = $2
+         UNION
+         SELECT "c"."requester_id" AS "connection_user_id"
+           FROM "connections" "c"
+          WHERE "c"."status" = $3 AND "c"."addressee_id" = $2
+       ),
+       "member_connection" AS (
+         SELECT "c"."requester_id" AS "member_id",
+                "c"."addressee_id" AS "connection_user_id"
+           FROM "connections" "c"
+          WHERE "c"."status" = $3 AND "c"."requester_id" = ANY($1::uuid[])
+         UNION ALL
+         SELECT "c"."addressee_id" AS "member_id",
+                "c"."requester_id" AS "connection_user_id"
+           FROM "connections" "c"
+          WHERE "c"."status" = $3 AND "c"."addressee_id" = ANY($1::uuid[])
+       )
+       SELECT "member_connection"."member_id" AS "member_id",
+              CAST(COUNT(DISTINCT "member_connection"."connection_user_id") AS integer) AS "mutual_connection_count"
+         FROM "member_connection"
+         JOIN "viewer_connection"
+           ON "viewer_connection"."connection_user_id" = "member_connection"."connection_user_id"
+        WHERE "member_connection"."connection_user_id" <> $2
+          AND "member_connection"."connection_user_id" <> "member_connection"."member_id"
+          AND NOT EXISTS (
+            SELECT 1 FROM "blocks" "mutual_block"
+             WHERE ("mutual_block"."blocker_id" = $2 AND "mutual_block"."blocked_id" = "member_connection"."connection_user_id")
+                OR ("mutual_block"."blocked_id" = $2 AND "mutual_block"."blocker_id" = "member_connection"."connection_user_id")
+          )
+        GROUP BY "member_connection"."member_id"`,
+      [memberUserIds, viewerId, ConnectionStatus.Accepted],
+    );
+
+    for (const row of rows) {
+      // Cast to `integer` in SQL, so the driver hands back a native number;
+      // `Number` keeps the mapping honest if it ever arrives as a string.
+      countByMemberId.set(row.member_id, Number(row.mutual_connection_count));
+    }
+    return countByMemberId;
+  }
+
+  /**
+   * The interest tags the page's new-member cards compare against, for the
+   * "You both like X" line (`FeedItem.sharedInterests`), in ONE query: the
+   * viewer's own `profiles.tags` plus the tags of every member in
+   * `memberUserIdsNeedingTags`. Only the `community_new_member` source needs
+   * that second part, since its candidate row is a membership and the
+   * batched `MemberRef` lookup carries no tags; the global `new_member`
+   * source's candidate row IS the profile and already holds them.
+   *
+   * The viewer's profile is not read anywhere else on the feed path (ranking
+   * reads memberships, connections and topic follows, and the
+   * content-sensitivity switches live on `member_preferences`), so folding
+   * it into this lookup is what keeps the page at one extra query.
+   *
+   * Privacy: `profiles.tags` are a member's public interests, ungated by
+   * `visibility` (the entity says so, and `toProfileCard` and the global
+   * source's `interests` both send them as-is). The community source applies
+   * the same "may the viewer see this member" gates as the global one
+   * (active user, `hidden_until`, hidden-from, and `dropBlocked`), so the
+   * members reaching this lookup are ones whose tags are already public to
+   * this viewer. Only the intersection with the viewer's own list leaves
+   * the server.
+   *
+   * Returns null when there is no signed-in viewer, so the caller omits the
+   * field entirely. A member missing from `tagsByMemberId` shares nothing.
+   */
+  private async interestTagsForPage(
+    memberUserIdsNeedingTags: string[],
+    viewerId: string,
+  ): Promise<{
+    viewerInterestKeys: Set<string>;
+    tagsByMemberId: Map<string, string[]>;
+  } | null> {
+    if (!viewerId) return null;
+    const userIds = [...new Set([viewerId, ...memberUserIdsNeedingTags])];
+    const rows = await this.profiles.find({
+      where: { userId: In(userIds) },
+      select: { userId: true, tags: true },
+    });
+
+    const viewerInterestKeys = new Set<string>();
+    const tagsByMemberId = new Map<string, string[]>();
+    for (const row of rows) {
+      const tags = row.tags ?? [];
+      if (row.userId === viewerId) {
+        for (const tag of tags) {
+          const key = interestKey(tag);
+          if (key) viewerInterestKeys.add(key);
+        }
+      } else {
+        tagsByMemberId.set(row.userId, tags);
+      }
+    }
+    return { viewerInterestKeys, tagsByMemberId };
+  }
+
+  /**
    * What ranking worked out about this page, threaded into the mapping so the
    * response can say WHY each item is here (SOC-04). Absent on every tab but
    * `all`, where the tab itself is the explanation.
@@ -1907,15 +2059,74 @@ export class FeedService {
     const threadIds = candidates
       .filter((c) => c.type === 'forum_thread')
       .map((c) => c.id);
-    const [authors, communityById, interactionsByPostId, threadCards] =
-      await Promise.all([
-        new MemberLookup(this.profiles).byUserIds(authorIds),
-        ranking
-          ? Promise.resolve(ranking.communityById)
-          : this.communitiesByIds(collectCommunityIds(candidates)),
-        this.feedInteractions.forPosts(postIds, viewerId),
-        this.forumThreadCards(threadIds, viewerId),
-      ]);
+    // The "N mutual connections" line on every new-member card, both the
+    // global source and the community one, keyed by the member's user id
+    // (their `authorId`), one grouped query for the whole page.
+    const newMemberUserIds = [
+      ...new Set(
+        candidates
+          .filter(
+            (candidate) =>
+              candidate.type === 'new_member' ||
+              candidate.type === 'community_new_member',
+          )
+          .map((candidate) => candidate.authorId)
+          .filter((authorId): authorId is string => authorId !== null),
+      ),
+    ];
+    // The "You both like X" line needs the joining member's tags for the
+    // community source only (the global source's row is the profile itself).
+    // A page with no new-member cards at all skips the lookup entirely.
+    const communityNewMemberUserIds = [
+      ...new Set(
+        candidates
+          .filter((candidate) => candidate.type === 'community_new_member')
+          .map((candidate) => candidate.authorId)
+          .filter((authorId): authorId is string => authorId !== null),
+      ),
+    ];
+    const [
+      authors,
+      communityById,
+      interactionsByPostId,
+      threadCards,
+      mutualCountByMemberId,
+      interestTags,
+    ] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds(authorIds),
+      ranking
+        ? Promise.resolve(ranking.communityById)
+        : this.communitiesByIds(collectCommunityIds(candidates)),
+      this.feedInteractions.forPosts(postIds, viewerId),
+      this.forumThreadCards(threadIds, viewerId),
+      this.mutualConnectionCounts(newMemberUserIds, viewerId),
+      newMemberUserIds.length
+        ? this.interestTagsForPage(communityNewMemberUserIds, viewerId)
+        : Promise.resolve(null),
+    ]);
+
+    /** The interests this member shares with the viewer, or undefined when
+     *  the page did not compute them (no signed-in viewer), which omits the
+     *  field entirely. `memberTags` is the member's public tag list, or null
+     *  to read it off the batched lookup (the community source). */
+    const sharedInterestsFor = (
+      memberUserId: string | null,
+      memberTags: string[] | null,
+    ): string[] | undefined => {
+      if (!interestTags) return undefined;
+      const tags =
+        memberTags ??
+        (memberUserId ? interestTags.tagsByMemberId.get(memberUserId) : null);
+      return interestsInCommon(tags, interestTags.viewerInterestKeys);
+    };
+
+    /** A member's mutual-connection count, or undefined when the page did not
+     *  compute one (no signed-in viewer), which omits the field entirely. A
+     *  member absent from a computed map shares nobody with the viewer. */
+    const mutualCountFor = (memberUserId: string | null): number | undefined =>
+      mutualCountByMemberId && memberUserId
+        ? (mutualCountByMemberId.get(memberUserId) ?? 0)
+        : undefined;
 
     /**
      * The source this card came from, so its menu can offer "show me less of
@@ -2038,11 +2249,18 @@ export class FeedService {
         }
         case 'gathering':
           return { ...eventToFeedItem(c.row as Event, author), ...signals };
-        case 'new_member':
+        case 'new_member': {
+          const memberProfile = c.row as Profile;
           return {
-            ...newMemberToFeedItem(c.row as Profile, author),
+            ...newMemberToFeedItem(
+              memberProfile,
+              author,
+              mutualCountFor(c.authorId),
+              sharedInterestsFor(c.authorId, memberProfile.tags ?? []),
+            ),
             ...signals,
           };
+        }
         case 'community_new_member':
           return {
             ...communityNewMemberToFeedItem(
@@ -2050,6 +2268,8 @@ export class FeedService {
               c.createdAt,
               author,
               community,
+              mutualCountFor(c.authorId),
+              sharedInterestsFor(c.authorId, null),
             ),
             ...signals,
           };

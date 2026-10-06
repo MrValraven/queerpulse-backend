@@ -238,7 +238,7 @@ export class SafeSpaceNominationsService {
     await this.notifier.tell(
       [nomination.nominatorId],
       SafeSpaceNotificationAction.NominationAcknowledged,
-      `We have your nomination of ${nomination.placeName} and a reviewer is on it.`,
+      { audience: 'nominator', placeName: nomination.placeName },
     );
     return this.getForAdmin(id);
   }
@@ -359,7 +359,7 @@ export class SafeSpaceNominationsService {
       await this.notifier.tell(
         [nomination.nominatorId],
         SafeSpaceNotificationAction.NominationDeclined,
-        `We reviewed ${nomination.placeName} and are not badging it for now. ${reason}`,
+        { audience: 'nominator', placeName: nomination.placeName, reason },
       );
       return this.getForAdmin(id);
     }
@@ -478,14 +478,16 @@ export class SafeSpaceNominationsService {
     await this.notifier.tell(
       [nomination.nominatorId],
       SafeSpaceNotificationAction.NominationAwarded,
-      `${listing.name} is now a verified safe space. Thank you for nominating it.`,
-      listing.slug,
+      {
+        audience: 'nominator',
+        placeName: listing.name,
+        listingSlug: listing.slug,
+      },
     );
     await this.notifier.tell(
       [listing.ownerId],
       SafeSpaceNotificationAction.NominationAwarded,
-      'Your listing now carries the QueerPulse safe-space badge.',
-      listing.slug,
+      { audience: 'owner', placeName: listing.name, listingSlug: listing.slug },
     );
     return this.getForAdmin(id);
   }

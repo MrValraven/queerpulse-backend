@@ -15,6 +15,7 @@ import {
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { CreateThreadPollDto } from './create-thread-poll.dto';
+import { CreateThreadFundingDto } from './create-thread-funding.dto';
 import { ForumPostPhotoDto, MAX_POST_PHOTOS } from './forum-post-photo.dto';
 
 // `POST /forum/threads` body — matches `CreateThreadDto` in the frontend's
@@ -82,8 +83,14 @@ export class CreateThreadDto {
   // on its own. Optional, and omitting it stores NULL: "unclassified" is a real
   // state (every thread written before the composer asked is in it), so the DTO
   // does not default a guess into the column. See `ForumThread.kind`.
+  //
+  // `call` (an open call for funding) arrived with Funding & Grants and must
+  // come with `category: 'funding'` and a `funding` object, both checked in
+  // `ForumFundingService.resolveForCreate`. `ask` (a fundraiser) comes with
+  // the same pairing plus a phone-verified author, forced review, an
+  // allow-listed link and no payment details in its text.
   @IsOptional()
-  @IsIn(['question', 'guide', 'proposal', 'share'])
+  @IsIn(['question', 'guide', 'proposal', 'share', 'call', 'ask'])
   kind?: string;
 
   // The author's own warnings about what is inside. Capped at 8 because they
@@ -107,7 +114,8 @@ export class CreateThreadDto {
   // value arriving outside that is a stale client, not a member to argue with:
   //
   //  1. Only the categories where anonymity is the difference between asking
-  //     and not asking (`health`, `housing`, `trans`) accept it. Everywhere
+  //     and not asking (`health`, `housing`, `trans`, `legal`, `relationships`,
+  //     `funding`; see `ANONYMOUS_CATEGORIES`) accept it. Everywhere
   //     else it coerces to false: an anonymous byline on a general thread costs
   //     the forum accountability and buys the author nothing they needed.
   //  2. It is mutually exclusive with `isOfficial`, and `isOfficial` wins. The
@@ -226,4 +234,15 @@ export class CreateThreadDto {
   @ValidateNested({ each: true })
   @Type(() => ForumPostPhotoDto)
   photos?: ForumPostPhotoDto[];
+
+  // The structured half of an open call: link, funder, amounts, deadline,
+  // eligibility and scope (`CreateThreadFundingDto`). Required on a `call` and
+  // refused on every other kind, with coded errors from
+  // `ForumFundingService.resolveForCreate`. `@ValidateNested` and `@Type` are
+  // load-bearing for the reason the `poll` comment above gives.
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CreateThreadFundingDto)
+  funding?: CreateThreadFundingDto;
 }

@@ -2,6 +2,10 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Changemaker } from '../changemakers/entities/changemaker.entity';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { Event } from '../events/entities/event.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -13,9 +17,11 @@ import { LandingService } from './landing.service';
 @Module({
   imports: [
     // Every repository `LandingService` injects: `LandingFeature` (own
-    // table), `Profile`/`Community`/`Changemaker` (the three featurable
-    // target types), and `CommunityMember` (community member counts on the
-    // public payload).
+    // table), `Profile`/`Community`/`Changemaker`/`Event`/`MagazineArticle`
+    // (the five featurable target types), `CommunityMember` (community member
+    // counts on the public payload), `MagazineAuthor` (a featured story's
+    // byline) and `ContentModeration` (a featured gathering's takedown state).
+    // All read-only here; the owning modules keep every write.
     TypeOrmModule.forFeature([
       // Read-only, and only for `RolesOrStaffGuard` on this module's admin
       // controllers: it resolves the caller's additive staff grants when their
@@ -28,6 +34,10 @@ import { LandingService } from './landing.service';
       Community,
       Changemaker,
       CommunityMember,
+      Event,
+      MagazineArticle,
+      MagazineAuthor,
+      ContentModeration,
     ]),
   ],
   controllers: [LandingController, AdminLandingController],

@@ -211,8 +211,17 @@ function build(opts: {
   const push = {
     sendToUsers: jest.fn().mockResolvedValue(undefined),
     sendSplitByPreviewPreference: jest.fn(),
+    sendGenericByLanguage: jest.fn(),
   };
   push.sendSplitByPreviewPreference.mockImplementation(
+    (userIds: string[], payload: unknown): Promise<void> => {
+      push.sendToUsers(userIds, payload);
+      return Promise.resolve();
+    },
+  );
+  // The fixed stranger copy (ENG-232) goes through the language-aware send
+  // (PRD-325); for an English recipient that is the payload unchanged.
+  push.sendGenericByLanguage.mockImplementation(
     (userIds: string[], payload: unknown): Promise<void> => {
       push.sendToUsers(userIds, payload);
       return Promise.resolve();

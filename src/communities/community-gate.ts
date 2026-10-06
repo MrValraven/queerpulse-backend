@@ -26,6 +26,24 @@ export function isGatedTier(tier: AccessTier): boolean {
 }
 
 /**
+ * Every gated tier, in enum order, derived from `isGatedTier` so a tier added
+ * later is gated here too. The one shared list: the forum's read gate binds it
+ * as a query parameter and the saver gate renders it with
+ * `gatedAccessTiersSqlLiteralList`.
+ */
+export const GATED_ACCESS_TIERS: readonly AccessTier[] =
+  Object.values(AccessTier).filter(isGatedTier);
+
+/**
+ * `GATED_ACCESS_TIERS` as a quoted, comma-separated SQL literal list, for raw
+ * `query()` calls that cannot take a bound array. Enum values only, so
+ * inlining them is safe and adds no bind parameter.
+ */
+export function gatedAccessTiersSqlLiteralList(): string {
+  return GATED_ACCESS_TIERS.map((accessTier) => `'${accessTier}'`).join(', ');
+}
+
+/**
  * The refusal a gated community hands a non-member. 403 and not 404, because
  * a `request` or `invite` community is already listed in discover and already
  * carries its tier on its card: its existence is not the secret, its contents

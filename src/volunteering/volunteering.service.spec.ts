@@ -13,6 +13,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VolunteerOpportunityTeam } from './entities/volunteer-opportunity-team.entity';
 import {
@@ -49,6 +50,7 @@ const qbStub = () => {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getRawMany = jest.fn().mockResolvedValue([]);
+  qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
   qb.execute = jest.fn().mockResolvedValue({ affected: 0 });
   return qb;
@@ -94,6 +96,7 @@ describe('VolunteeringService', () => {
   };
   let notificationsService: { create: jest.Mock };
   let contentModerationService: { stateFor: jest.Mock };
+  let blockFilter: { blockedUserIds: jest.Mock };
   let managerFindOne: jest.Mock;
 
   const baseDto = {
@@ -183,6 +186,9 @@ describe('VolunteeringService', () => {
     contentModerationService = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
+    // Default: the viewer is in no block with anyone, so every existing test
+    // names the same members it always did. The ENG-474 cases override it.
+    blockFilter = { blockedUserIds: jest.fn().mockResolvedValue(new Set()) };
     managerFindOne = jest.fn();
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -236,6 +242,7 @@ describe('VolunteeringService', () => {
           provide: ContentModerationService,
           useValue: contentModerationService,
         },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(VolunteeringService);
@@ -592,6 +599,136 @@ describe('VolunteeringService', () => {
       const detail = await service.getBySlug('zero-spots', 'viewer-1');
 
       expect(detail.spotsPct).toBe(0);
+    });
+  });
+
+  describe('getBySlug / who the detail names (ENG-474)', () => {
+    const opportunityRow = () => ({
+      id: 'opp-1',
+      slug: 'mentor-qyc',
+      org: 'Queer Youth Collective',
+      partnerId: null,
+      role: 'Mentor',
+      causes: [OpportunityCause.Youth],
+      commit: OpportunityCommitLevel.Low,
+      time: '2 hrs / week',
+      location: 'Lisbon',
+      skills: [],
+      desc: 'Mentor queer youth.',
+      detail: {
+        why: [],
+        tasks: [],
+        commitments: [],
+        goodFor: [],
+        teamIntro: null,
+      },
+      spotsTotal: 4,
+      applyRole: 'Volunteer Coordinator',
+      posterId: 'poster-1',
+      status: OpportunityStatus.Open,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const profileRow = (userId: string, slug: string) => ({
+      userId,
+      slug,
+      firstName: slug,
+      lastName: 'Member',
+      pronouns: null,
+      avatarUrl: null,
+      photoVisible: true,
+    });
+    let activeProfilesQuery: ReturnType<typeof qbStub>;
+    // Held as its own non-optional mock: indexing the stub's record types it
+    // as possibly undefined.
+    let activeProfilesGetMany: jest.Mock;
+
+    beforeEach(() => {
+      opportunities.findOne.mockResolvedValue(opportunityRow());
+      team.find.mockResolvedValue([
+        { opportunityId: 'opp-1', userId: 'teammate-1' },
+        { opportunityId: 'opp-1', userId: 'teammate-2' },
+      ]);
+      activeProfilesQuery = qbStub();
+      activeProfilesGetMany = jest
+        .fn()
+        .mockResolvedValue([
+          profileRow('poster-1', 'poster'),
+          profileRow('teammate-1', 'jo'),
+          profileRow('teammate-2', 'sam'),
+        ]);
+      activeProfilesQuery.getMany = activeProfilesGetMany;
+      profiles.createQueryBuilder.mockReturnValue(activeProfilesQuery);
+    });
+
+    it('names nobody to an anonymous reader and runs no member query at all', async () => {
+      const detail = await service.getBySlug('mentor-qyc', null);
+
+      expect(detail.team).toEqual([]);
+      expect(detail.poster).toBeNull();
+      expect(team.find).not.toHaveBeenCalled();
+      expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
+      expect(blockFilter.blockedUserIds).not.toHaveBeenCalled();
+    });
+
+    it('names the poster and every teammate to a signed-in viewer with no blocks', async () => {
+      const detail = await service.getBySlug('mentor-qyc', 'viewer-1');
+
+      expect(detail.poster?.slug).toBe('poster');
+      expect(detail.team.map((member) => member.slug)).toEqual(['jo', 'sam']);
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
+        'poster-1',
+        'teammate-1',
+        'teammate-2',
+      ]);
+    });
+
+    it('resolves members through the active-user join, so a suspended or deactivated teammate drops out', async () => {
+      // The join is in the query, so an inactive account simply never comes
+      // back from it: here `teammate-2` and the poster are not active.
+      activeProfilesGetMany.mockResolvedValue([profileRow('teammate-1', 'jo')]);
+
+      const detail = await service.getBySlug('mentor-qyc', 'viewer-1');
+
+      expect(activeProfilesQuery.innerJoin).toHaveBeenCalledWith(
+        'p.user',
+        'u',
+        'u.status = :active',
+        { active: 'active' },
+      );
+      expect(detail.team.map((member) => member.slug)).toEqual(['jo']);
+      expect(detail.poster).toBeNull();
+    });
+
+    it('drops a teammate in a block with the viewer, either direction', async () => {
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['teammate-2']));
+
+      const detail = await service.getBySlug('mentor-qyc', 'viewer-1');
+
+      expect(detail.team.map((member) => member.slug)).toEqual(['jo']);
+      expect(detail.poster?.slug).toBe('poster');
+    });
+
+    it('drops a poster in a block with the viewer', async () => {
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['poster-1']));
+
+      const detail = await service.getBySlug('mentor-qyc', 'viewer-1');
+
+      expect(detail.poster).toBeNull();
+      expect(detail.team.map((member) => member.slug)).toEqual(['jo', 'sam']);
+    });
+
+    it('still names the poster to themselves', async () => {
+      const detail = await service.getBySlug('mentor-qyc', 'poster-1');
+
+      // The viewer goes in as the actor. `BlockFilterService.blockedUserIds`
+      // never reports its actor as blocked from itself, which is why the
+      // poster survives the block rule on their own detail.
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith(
+        'poster-1',
+        expect.arrayContaining(['poster-1']),
+      );
+      expect(detail.poster?.slug).toBe('poster');
+      expect(detail.canEditOpportunity).toBe(true);
     });
   });
 

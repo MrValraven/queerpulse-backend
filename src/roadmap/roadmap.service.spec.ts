@@ -4,7 +4,6 @@ import { AdminQueueNotificationsService } from '../admin-queue-notifications/adm
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { RoadmapIdea } from './entities/roadmap-idea.entity';
 import { RoadmapItem } from './entities/roadmap-item.entity';
-import { RoadmapSettings } from './entities/roadmap-settings.entity';
 import { RoadmapVote } from './entities/roadmap-vote.entity';
 import { RoadmapService } from './roadmap.service';
 
@@ -51,7 +50,6 @@ describe('RoadmapService', () => {
         { provide: getRepositoryToken(RoadmapItem), useValue: {} },
         { provide: getRepositoryToken(RoadmapIdea), useValue: ideas },
         { provide: getRepositoryToken(RoadmapVote), useValue: {} },
-        { provide: getRepositoryToken(RoadmapSettings), useValue: {} },
         {
           provide: AdminQueueNotificationsService,
           useValue: adminQueueNotifications,

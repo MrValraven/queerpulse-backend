@@ -24,6 +24,8 @@ import {
   toPushSubscriptionResponse,
 } from './push-response';
 import { PushService } from './push.service';
+import { PushPreviewPrivacyService } from './push-preview-privacy.service';
+import { GENERIC_PUSH_COPY } from './generic-push-copy';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
@@ -42,7 +44,10 @@ import {
 @Controller('push')
 @UseGuards(ActiveMemberGuard)
 export class PushController {
-  constructor(private readonly pushService: PushService) {}
+  constructor(
+    private readonly pushService: PushService,
+    private readonly previewPrivacy: PushPreviewPrivacyService,
+  ) {}
 
   // A device (re)subscribes rarely; a modest cap keeps the endpoint from being
   // used to churn subscription rows without disrupting legitimate use.
@@ -131,15 +136,21 @@ export class PushController {
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post('test')
   async test(@CurrentUser() user: CurrentUserData): Promise<{ ok: true }> {
-    await this.pushService.sendToUser(user.userId, {
-      title: 'Test notification',
-      body: 'This is a test. Your notifications are working.',
-      tag: 'push-test',
-      data: { url: '/account/settings' },
-      // English strings above are the fallback (iOS, and when the SW lacks the
-      // key); the service worker localizes from these keys when it can.
-      l10n: { titleKey: 'push:test.title', bodyKey: 'push:test.body' },
-    });
+    // The plain title/body are what iOS prints, so they follow the member's
+    // stored language (PRD-325); the service worker localizes from the keys
+    // on every other engine.
+    const copy = GENERIC_PUSH_COPY.test;
+    await this.previewPrivacy.sendGenericByLanguage(
+      [user.userId],
+      {
+        title: copy.title,
+        body: copy.body,
+        tag: 'push-test',
+        data: { url: '/account/settings' },
+        l10n: { titleKey: copy.titleKey, bodyKey: copy.bodyKey },
+      },
+      copy,
+    );
     return { ok: true };
   }
 }

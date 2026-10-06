@@ -71,6 +71,36 @@ export function toGroupListingDTO(listing: GroupListing): GroupListingDTO {
   };
 }
 
+/**
+ * A visible room as the group page reads it (PRD-443): the public fields plus
+ * who posted it, so a reader has someone to message about the room.
+ *
+ * `poster` is the member behind `postedByUserId` resolved to a `MemberRef`,
+ * and it is filled only for a signed-in reader. An anonymous answer on an open
+ * group is the one shape a shared cache may hold, so it carries `poster: null`
+ * and `isOwnListing: false` and names nobody. `isOwnListing` tells the poster
+ * their own room apart, so the page offers no "Message" on it.
+ */
+export interface PublicGroupListingDTO extends GroupListingDTO {
+  poster: MemberRef | null;
+  isOwnListing: boolean;
+}
+
+export function toPublicGroupListingDTO(
+  listing: GroupListing,
+  poster: MemberRef | null,
+  viewerId: string | null,
+): PublicGroupListingDTO {
+  return {
+    ...toGroupListingDTO(listing),
+    poster: viewerId === null ? null : poster,
+    isOwnListing:
+      viewerId !== null &&
+      listing.postedByUserId !== null &&
+      listing.postedByUserId === viewerId,
+  };
+}
+
 // A lean group reference embedded in an admin join-request row.
 export interface GroupReferenceDTO {
   slug: string;
@@ -223,6 +253,14 @@ export interface AdminGroupListingsPageDTO {
 }
 
 /**
+ * A takedown from a REPORT (PRD-443): a moderator acting on a report writes a
+ * `content_moderation` row keyed by the room's uuid, which the group page
+ * honours. `removed` wins when both are set. Separate from `hidden`, which is
+ * the moderator's norm takedown and carries its own reason.
+ */
+export type GroupListingModerationState = 'hidden' | 'removed' | null;
+
+/**
  * The POSTER's own view of a room they submitted to a group (LOC-19).
  *
  * The public `GroupListingDTO` carries no moderation state at all, which is
@@ -243,6 +281,9 @@ export interface MyGroupListingDTO extends GroupListingDTO {
   /** A post-publication takedown, with the norm the moderator recorded. */
   hidden: boolean;
   hiddenReason: string | null;
+  /** A takedown from a report, so the poster sees their room is off the
+   *  group page even when `status` still reads `live`. */
+  moderationState: GroupListingModerationState;
   decidedAt: Date | null;
   decisionReason: string | null;
   createdAt: Date;
@@ -252,6 +293,7 @@ export interface MyGroupListingDTO extends GroupListingDTO {
 export function toMyGroupListingDTO(
   listing: GroupListing,
   group: Pick<HousingGroup, 'slug' | 'name'> | null = null,
+  moderationState: GroupListingModerationState = null,
 ): MyGroupListingDTO {
   const resolvedGroup = group ?? listing.group ?? null;
   return {
@@ -261,6 +303,7 @@ export function toMyGroupListingDTO(
     status: listing.status,
     hidden: listing.hidden,
     hiddenReason: listing.hiddenReason,
+    moderationState,
     decidedAt: listing.decidedAt,
     decisionReason: listing.decisionReason,
     createdAt: listing.createdAt,

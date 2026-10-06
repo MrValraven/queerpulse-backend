@@ -354,6 +354,12 @@ export class ReportSubjectResolverService {
       // `Venue`; the filing-time snapshot keeps the facts. See `IDENTITY_SQL`.
       case ReportSubjectType.Identity:
         return this.queryByUuid(IDENTITY_SQL, subjectIds);
+
+      // PRD-443: ONE room shared inside a housing group, keyed by the room's
+      // own uuid. `housing` above names a member listing by slug in a
+      // different table, so the two never collide. See `GROUP_LISTING_SQL`.
+      case ReportSubjectType.GroupListing:
+        return this.queryByUuid(GROUP_LISTING_SQL, subjectIds);
     }
   }
 
@@ -905,6 +911,19 @@ const LANDLORD_SQL = `
          NULL::uuid              AS community_id
   FROM landlords la
   WHERE la.slug = ANY($1::text[])
+`;
+
+// A room shared inside a housing group (PRD-443). The poster answers for it:
+// `posted_by_user_id` is the member who submitted the room, and it is NULL for
+// an unattributed row, which resolves to nobody to warn. The room's title is
+// the excerpt. A housing group is no community, hence the constant NULL.
+const GROUP_LISTING_SQL = `
+  SELECT gl.id::text            AS key,
+         gl.posted_by_user_id   AS author_user_id,
+         NULLIF(btrim(gl.title), '') AS excerpt,
+         NULL::uuid             AS community_id
+  FROM group_listings gl
+  WHERE gl.id = ANY($1::uuid[])
 `;
 
 /**

@@ -22,6 +22,11 @@ import {
  * Wired into `src/database/seed.ts` via `seedGovernanceOverview()` — run
  * `pnpm run seed` to populate the row so `GET /governance/overview` returns it
  * instead of 404ing.
+ *
+ * PRD-448: the `health` tiles below are invented dev figures. The public read
+ * serves no health tiles until someone saves that section on the admin Policy
+ * tab, and `RemoveSeededGovernanceFinances1828700000000` empties these tiles
+ * in production where the historical seed migration inserted them.
  */
 
 // Short stat key → `governance:health.stat.<key>.label`; short trend key →

@@ -4,6 +4,7 @@ import {
   OutAtWork,
 } from './entities/member-preferences.entity';
 import { WhoCanMessage } from './who-can-message';
+import { MemberLanguage } from './member-language';
 
 // Response shapes are the frontend contract exactly — the two endpoints project
 // disjoint subsets of the one row, so neither leaks the other's settings.
@@ -84,6 +85,14 @@ export interface GroupAddPolicyDTO {
   policy: GroupAddPolicy;
 }
 
+/**
+ * `GET|PUT /me/language` (PRD-325): the interface language, on its own.
+ * `null` until the member's first signed-in device writes one up.
+ */
+export interface LanguagePreferenceDTO {
+  language: MemberLanguage | null;
+}
+
 export function toWorkPreferencesDTO(
   row: MemberPreferences,
 ): WorkPreferencesDTO {
@@ -137,4 +146,10 @@ export function toMessagingPrivacyDTO(
 
 export function toGroupAddPolicyDTO(row: MemberPreferences): GroupAddPolicyDTO {
   return { policy: row.groupAddPolicy };
+}
+
+export function toLanguagePreferenceDTO(
+  row: MemberPreferences,
+): LanguagePreferenceDTO {
+  return { language: row.language };
 }

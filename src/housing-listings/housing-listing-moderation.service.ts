@@ -216,6 +216,17 @@ export class HousingListingModerationService {
       // a window no longer on the row and never warn again.
       listing.expiryWarningSentAt = null;
     }
+    // PRD-444: a listing the expiry sweep hid, then edited back into review,
+    // is renewed by approval the same way `extend` renews it, so the "your
+    // home is live" bell matches the board. `relistedAt` stays as it is:
+    // nobody moved in. An owner fill (`sweptAt` null) stays filled.
+    if (
+      dto.decision === HousingListingDecision.Approve &&
+      listing.sweptAt != null
+    ) {
+      listing.filledAt = null;
+      listing.sweptAt = null;
+    }
     listing.decisionReason = reason.length ? reason : null;
     listing.decidedById = moderatorId;
     listing.decidedAt = new Date();
@@ -423,6 +434,12 @@ export class HousingListingModerationService {
    * fixed is back in `review` and no longer counts against them), backed by
    * `IDX_housing_listings_owner_id`, and it cannot be skewed by a decision that
    * was later reversed.
+   *
+   * ENG-466: an owner delete is a soft delete, which the query builder would
+   * skip by default. `withDeleted` brings deleted rows back, and the extra
+   * predicate keeps only the refused and taken-down ones among them: deleting a
+   * sanctioned listing leaves the sanction on the lister's record, while a
+   * deleted live or in-review listing stops counting as one they have.
    */
   private async listerHistories(
     ownerIds: string[],
@@ -435,7 +452,17 @@ export class HousingListingModerationService {
       .select('l.owner_id', 'ownerId')
       .addSelect('l.status', 'status')
       .addSelect('COUNT(*)', 'count')
+      .withDeleted()
       .where({ ownerId: In(ownerIds) })
+      .andWhere(
+        '(l.deleted_at IS NULL OR l.status IN (:...sanctionedStatuses))',
+        {
+          sanctionedStatuses: [
+            HousingListingStatus.Rejected,
+            HousingListingStatus.TakenDown,
+          ],
+        },
+      )
       .groupBy('l.owner_id')
       .addGroupBy('l.status')
       .getRawMany<{

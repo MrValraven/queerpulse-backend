@@ -29,6 +29,8 @@ describe('ForumController', () => {
     deleteThread: jest.Mock;
     markRead: jest.Mock;
     removeCoAuthor: jest.Mock;
+    findOpenCallByLink: jest.Mock;
+    endFundingAsk: jest.Mock;
   };
   let postsService: {
     listPosts: jest.Mock;
@@ -51,6 +53,8 @@ describe('ForumController', () => {
       deleteThread: jest.fn().mockResolvedValue({}),
       markRead: jest.fn().mockResolvedValue({ ok: true }),
       removeCoAuthor: jest.fn().mockResolvedValue({}),
+      findOpenCallByLink: jest.fn().mockResolvedValue(null),
+      endFundingAsk: jest.fn().mockResolvedValue({}),
     };
     postsService = {
       listPosts: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
@@ -90,7 +94,65 @@ describe('ForumController', () => {
       'lease',
       // A plain member: the OP card lock/moderation flags stay off.
       false,
+      { view: undefined, eligibility: undefined, scope: undefined },
     );
+  });
+
+  it('passes the funding view filters through to the list', async () => {
+    await controller.listThreads(user, {
+      category: 'funding',
+      fundingView: 'open',
+      eligibility: ['students'],
+      scope: 'eu',
+    });
+
+    expect(threadsService.list).toHaveBeenCalledWith(
+      'user-1',
+      'funding',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { view: 'open', eligibility: ['students'], scope: 'eu' },
+    );
+  });
+
+  it('answers the duplicate lookup with the matching call', async () => {
+    const match = {
+      slug: 'arts-grant',
+      title: 'Arts grant',
+      deadline: '2026-12-01T23:59:00.000Z',
+    };
+    threadsService.findOpenCallByLink.mockResolvedValueOnce(match);
+    const response = { status: jest.fn() };
+
+    await expect(
+      controller.lookupFundingLink(
+        user,
+        { link: 'https://www.gulbenkian.pt/bolsas/arte-queer' },
+        response as never,
+      ),
+    ).resolves.toEqual(match);
+    expect(threadsService.findOpenCallByLink).toHaveBeenCalledWith(
+      'user-1',
+      'https://www.gulbenkian.pt/bolsas/arte-queer',
+    );
+    expect(response.status).not.toHaveBeenCalled();
+  });
+
+  it('answers 204 when no open call uses the link', async () => {
+    const response = { status: jest.fn() };
+
+    await expect(
+      controller.lookupFundingLink(
+        user,
+        { link: 'https://www.gulbenkian.pt/bolsas/nothing-here' },
+        response as never,
+      ),
+    ).resolves.toBeUndefined();
+    expect(response.status).toHaveBeenCalledWith(204);
   });
 
   it('delegates threadCounts with the caller id and q/tag, plus hasEverPosted', async () => {
@@ -123,6 +185,38 @@ describe('ForumController', () => {
       'New title',
       ['housing'],
       'health',
+      undefined,
+    );
+  });
+
+  it('passes a funding replacement through on updateThread', async () => {
+    const funding = {
+      linkUrl: 'https://www.gulbenkian.pt/bolsas/arte-queer',
+      funderName: 'Fundação Gulbenkian',
+      scope: 'national' as const,
+    };
+
+    await controller.updateThread(user, 'arts-grant', { funding });
+
+    expect(threadsService.updateThread).toHaveBeenCalledWith(
+      'arts-grant',
+      user,
+      undefined,
+      undefined,
+      undefined,
+      funding,
+    );
+  });
+
+  it('delegates ending a fundraiser with the caller and the reason', async () => {
+    await controller.endFundingAsk(user, 'help-ana', {
+      reason: 'goal_reached',
+    });
+
+    expect(threadsService.endFundingAsk).toHaveBeenCalledWith(
+      'help-ana',
+      user,
+      'goal_reached',
     );
   });
 

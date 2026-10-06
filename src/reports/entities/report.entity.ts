@@ -134,6 +134,17 @@ export enum ReportSubjectType {
   // Backed by `AddIdentityReportSubject1821281000000` (adds the value to
   // `reports_subject_type_enum`).
   Identity = 'identity',
+  // PRD-443. ONE room shared inside a housing group (`group_listings`),
+  // addressed by the room's uuid. `Housing` names a member listing by slug in
+  // `housing_listings`, a different table, so a group room had no report
+  // control at all. Resolved by `ReportSubjectResolverService` to the room's
+  // poster (`posted_by_user_id`) with its title as the excerpt; a takedown
+  // writes a `content_moderation` row that
+  // `HousingGroupsService.listVisibleListings` filters on.
+  //
+  // Backed by `AddGroupListingReportSubject1829500200000` (adds the value to
+  // `reports_subject_type_enum`).
+  GroupListing = 'group_listing',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

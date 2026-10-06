@@ -1,4 +1,7 @@
+import { GUARDS_METADATA, HEADERS_METADATA } from '@nestjs/common/constants';
 import { Test, TestingModule } from '@nestjs/testing';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
 import { ChangemakersController } from './changemakers.controller';
 import { ChangemakersService } from './changemakers.service';
 
@@ -47,5 +50,19 @@ describe('ChangemakersController', () => {
 
     expect(service.getPublicBySlug).toHaveBeenCalledWith('ada-lovelace');
     expect(result).toBe(profile);
+  });
+
+  it('is member-only: ActiveMemberGuard on the class with private caching', () => {
+    expect(
+      Reflect.getMetadata(GUARDS_METADATA, ChangemakersController),
+    ).toEqual([ActiveMemberGuard]);
+    for (const handlerName of ['list', 'getBySlug'] as const) {
+      const handler = Object.getOwnPropertyDescriptor(
+        ChangemakersController.prototype,
+        handlerName,
+      )?.value as object;
+      expect(Reflect.getMetadata(IS_PUBLIC_KEY, handler)).toBeUndefined();
+      expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toBeUndefined();
+    }
   });
 });

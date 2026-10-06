@@ -14,6 +14,8 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -41,6 +43,8 @@ function makePaginatedBuilder(
   builder.getManyAndCount = jest.fn().mockResolvedValue([rows, total]);
   return builder;
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
   return {
@@ -89,12 +93,18 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // Null = still looking / still live to the public (owner hasn't marked it
     // filled and the sweeper hasn't hidden it).
     filledAt: null,
+    // PRD-444: the expiry sweep did not write the current `filledAt`.
+    sweptAt: null,
     // NOT NULL on the entity — every listing always carries a real expiry.
-    // Comfortably after the fixture's `createdAt` so "live" fixtures read as
-    // not-yet-expired by default.
-    expiresAt: new Date('2026-03-02T00:00:00.000Z'),
+    // Relative to NOW so "live" fixtures read as not-yet-expired whatever the
+    // wall clock says: `loadLiveOr404` 404s an expired listing (ENG-471).
+    expiresAt: new Date(Date.now() + 30 * DAY_MS),
     // PRD-244: not yet warned about this term.
     expiryWarningSentAt: null,
+    // ENG-467: never relisted after a fill.
+    relistedAt: null,
+    // ENG-469: no failed geocode of the current address.
+    geocodeAttempts: 0,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -125,6 +135,7 @@ describe('HousingListingsService', () => {
     create: jest.Mock;
     save: jest.Mock<Promise<HousingListing>, [HousingListing]>;
     remove: jest.Mock;
+    update: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let profiles: RepoMock;
@@ -142,6 +153,8 @@ describe('HousingListingsService', () => {
   let eventEmitter: { emit: jest.Mock };
   let adminQueueNotifications: { announce: jest.Mock };
   let geocode: { resolveAddress: jest.Mock };
+  let viewings: { closeOpenForListing: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -151,6 +164,7 @@ describe('HousingListingsService', () => {
       create: jest.fn((row: unknown) => row),
       save: jest.fn((row: HousingListing) => Promise.resolve(row)),
       remove: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => makePaginatedBuilder([], 0)),
     };
     // buildDTO / mapRows hydrate the lister via MemberLookup(profiles).find.
@@ -184,6 +198,12 @@ describe('HousingListingsService', () => {
         .fn()
         .mockResolvedValue({ latitude: 38.7169, longitude: -9.1487 }),
     };
+    viewings = {
+      closeOpenForListing: jest.fn().mockResolvedValue(undefined),
+    };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -203,6 +223,8 @@ describe('HousingListingsService', () => {
         // calls it for a listing that HAS an address, off the request path and
         // without awaiting it, so nothing here should ever reach the network.
         { provide: GeocodeService, useValue: geocode },
+        { provide: HousingViewingsService, useValue: viewings },
+        { provide: ContentModerationService, useValue: contentModeration },
       ],
     }).compile();
 
@@ -379,6 +401,21 @@ describe('HousingListingsService', () => {
         AdminQueueKey.HousingListings,
         'listing-1',
       );
+    });
+
+    // ENG-466: the unique slug index still covers a soft-deleted listing, so
+    // the allocator must see those slugs as taken or a repost 409s.
+    it('checks slug availability against soft-deleted listings too', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+
+      await service.create('owner-1', CREATE_DTO);
+
+      expect(listings.exists).toHaveBeenCalledWith({
+        where: { slug: 'sunny-room' },
+        withDeleted: true,
+      });
     });
 
     it('tells nobody when the verification step-up is refused', async () => {
@@ -562,6 +599,30 @@ describe('HousingListingsService', () => {
       });
     });
 
+    // ENG-469: a new address earns a fresh set of geocode retries.
+    it('resets the geocode attempt count when the address changes', async () => {
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          addressLine: 'Rua Velha 1',
+          geocodeAttempts: 4,
+        }),
+      );
+
+      await service.update('QPH-2026-0001', 'owner-1', {
+        addressLine: 'Rua Nova 2',
+      });
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          addressLine: 'Rua Nova 2',
+          latitude: null,
+          longitude: null,
+          geocodeAttempts: 0,
+        }),
+      );
+    });
+
     // BE-HSG-07 on the write side: the flag is not settable at all, so a PATCH
     // carrying it neither flips the column nor counts as a moderated change.
     it('ignores lgbtqFriendly on update — affirming is not a per-listing flag', async () => {
@@ -640,16 +701,220 @@ describe('HousingListingsService', () => {
       await expect(service.remove('QPH-2026-0001', 'intruder')).rejects.toThrow(
         NotFoundException,
       );
-      expect(listings.remove).not.toHaveBeenCalled();
+      expect(listings.update).not.toHaveBeenCalled();
+      expect(viewings.closeOpenForListing).not.toHaveBeenCalled();
     });
 
-    it('removes the listing for its owner', async () => {
-      const listing = makeListing({ ownerId: 'owner-1' });
+    // ENG-466: a hard delete cascaded to every viewing and review of the home.
+    // The row now stays, so the private location is cleared in the same write.
+    it('soft-deletes the listing with its address cleared, then closes its open viewings', async () => {
+      const listing = makeListing({
+        ownerId: 'owner-1',
+        addressLine: 'Rua Secreta 1',
+        latitude: 38.7169,
+        longitude: -9.1487,
+      });
       mockOwnedFindOne(listing);
+      const callOrder: string[] = [];
+      listings.update.mockImplementation(() => {
+        callOrder.push('update');
+        return Promise.resolve({ affected: 1 });
+      });
+      viewings.closeOpenForListing.mockImplementation(() => {
+        callOrder.push('closeOpenForListing');
+        return Promise.resolve();
+      });
 
       await service.remove('QPH-2026-0001', 'owner-1');
 
-      expect(listings.remove).toHaveBeenCalledWith(listing);
+      expect(listings.update).toHaveBeenCalledTimes(1);
+      expect(listings.update).toHaveBeenCalledWith(
+        { id: 'listing-1' },
+        {
+          addressLine: null,
+          latitude: null,
+          longitude: null,
+          deletedAt: expect.any(Date) as Date,
+        },
+      );
+      expect(listings.remove).not.toHaveBeenCalled();
+      expect(viewings.closeOpenForListing).toHaveBeenCalledWith(
+        'listing-1',
+        'owner-1',
+      );
+      expect(callOrder).toEqual(['update', 'closeOpenForListing']);
+    });
+  });
+
+  describe('owner lifecycle', () => {
+    // ENG-467: nobody should travel to see a home that has been filled.
+    it('closes the open viewings when the owner marks the listing filled', async () => {
+      mockOwnedFindOne(makeListing({ ownerId: 'owner-1' }));
+
+      const result = await service.markFilled('QPH-2026-0001', 'owner-1');
+
+      expect(result.filledAt).not.toBeNull();
+      expect(viewings.closeOpenForListing).toHaveBeenCalledWith(
+        'listing-1',
+        'owner-1',
+      );
+    });
+
+    // PRD-444: an owner fill replaces a sweep fill, so Extend keeps it hidden.
+    it('clears the sweep marker when the owner marks a swept listing filled', async () => {
+      const lapsedAt = new Date(Date.now() - 2 * DAY_MS);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          expiresAt: lapsedAt,
+          filledAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+          sweptAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+        }),
+      );
+
+      const result = await service.markFilled('QPH-2026-0001', 'owner-1');
+
+      expect(result.isHiddenBySweep).toBe(false);
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ sweptAt: null }),
+      );
+    });
+
+    it('stamps relistedAt when the owner makes a filled listing available again', async () => {
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          filledAt: new Date(Date.now() - DAY_MS),
+          expiresAt: new Date(Date.now() + 10 * DAY_MS),
+        }),
+      );
+
+      await service.markAvailable('QPH-2026-0001', 'owner-1');
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filledAt: null,
+          relistedAt: expect.any(Date) as Date,
+        }),
+      );
+    });
+
+    it('leaves relistedAt alone when the fill being undone came from the expiry sweep', async () => {
+      const lapsedAt = new Date(Date.now() - 2 * DAY_MS);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          expiresAt: lapsedAt,
+          filledAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+          sweptAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+        }),
+      );
+
+      await service.markAvailable('QPH-2026-0001', 'owner-1');
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filledAt: null,
+          sweptAt: null,
+          relistedAt: null,
+        }),
+      );
+    });
+
+    // PRD-444: the owner filled it after the term ran out and before the sweep
+    // got there. The fill is theirs, so undoing it is a relist.
+    it('stamps relistedAt when undoing an owner fill made after the expiry', async () => {
+      const lapsedAt = new Date(Date.now() - 2 * DAY_MS);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          expiresAt: lapsedAt,
+          filledAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+        }),
+      );
+
+      await service.markAvailable('QPH-2026-0001', 'owner-1');
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filledAt: null,
+          relistedAt: expect.any(Date) as Date,
+        }),
+      );
+    });
+
+    // PRD-444: extending a listing the sweep hid brings it back to browse.
+    it('clears a sweep-set filledAt on extend and leaves relistedAt alone', async () => {
+      const lapsedAt = new Date(Date.now() - 2 * DAY_MS);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          expiresAt: lapsedAt,
+          filledAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+          sweptAt: new Date(lapsedAt.getTime() + 60 * 60 * 1000),
+        }),
+      );
+
+      const result = await service.extend('QPH-2026-0001', 'owner-1');
+
+      expect(result.filledAt).toBeNull();
+      expect(result.isHiddenBySweep).toBe(false);
+      expect(result.expired).toBe(false);
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ relistedAt: null, sweptAt: null }),
+      );
+    });
+
+    // A moderator re-approval refreshed `expiresAt` past the sweep's fill, so
+    // the fill time alone reads like an owner fill. The marker still holds.
+    it('clears a sweep fill on extend after a re-approval refreshed the expiry', async () => {
+      const sweptAt = new Date(Date.now() - 5 * DAY_MS);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          expiresAt: new Date(Date.now() + 50 * DAY_MS),
+          filledAt: sweptAt,
+          sweptAt,
+        }),
+      );
+
+      const result = await service.extend('QPH-2026-0001', 'owner-1');
+
+      expect(result.filledAt).toBeNull();
+    });
+
+    // The owner marked an already-expired listing filled before the sweep ran.
+    // The fill time sits after the expiry, and it is still their own fill.
+    it('keeps an owner fill made after the expiry in place on extend', async () => {
+      const lapsedAt = new Date(Date.now() - 2 * DAY_MS);
+      const ownerFilledAt = new Date(lapsedAt.getTime() + 60 * 60 * 1000);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          expiresAt: lapsedAt,
+          filledAt: ownerFilledAt,
+        }),
+      );
+
+      const result = await service.extend('QPH-2026-0001', 'owner-1');
+
+      expect(result.filledAt).toBe(ownerFilledAt.toISOString());
+      expect(result.isHiddenBySweep).toBe(false);
+    });
+
+    it('keeps an owner fill in place on extend', async () => {
+      const ownerFilledAt = new Date(Date.now() - DAY_MS);
+      mockOwnedFindOne(
+        makeListing({
+          ownerId: 'owner-1',
+          filledAt: ownerFilledAt,
+          expiresAt: new Date(Date.now() + 10 * DAY_MS),
+        }),
+      );
+
+      const result = await service.extend('QPH-2026-0001', 'owner-1');
+
+      expect(result.filledAt).toBe(ownerFilledAt.toISOString());
     });
   });
 
@@ -751,6 +1016,52 @@ describe('HousingListingsService', () => {
 
       await expect(service.loadLiveOr404('QPH-x')).rejects.toThrow(
         NotFoundException,
+      );
+    });
+
+    // ENG-471: an enquiry about a home off the board is refused as a 404.
+    it('404s a live listing the owner marked filled', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ filledAt: new Date(Date.now() - DAY_MS) }),
+      );
+
+      await expect(service.loadLiveOr404('QPH-2026-0001')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('404s a live listing whose term has run out', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ expiresAt: new Date(Date.now() - DAY_MS) }),
+      );
+
+      await expect(service.loadLiveOr404('QPH-2026-0001')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('404s a live listing under a moderator takedown', async () => {
+      listings.findOne.mockResolvedValue(makeListing());
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(service.loadLiveOr404('QPH-2026-0001')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(contentModeration.stateFor).toHaveBeenCalledWith(
+        'housing',
+        'sunny-room',
+      );
+    });
+
+    it('returns a live listing that is still on the board', async () => {
+      const listing = makeListing();
+      listings.findOne.mockResolvedValue(listing);
+
+      await expect(service.loadLiveOr404('QPH-2026-0001')).resolves.toBe(
+        listing,
       );
     });
   });

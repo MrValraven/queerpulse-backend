@@ -3,13 +3,16 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
-  IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
   MaxLength,
 } from 'class-validator';
-import { OrgTierCtaType } from '../entities/org-tier.entity';
+import {
+  CHOOSABLE_ORG_TIER_CTA_TYPES,
+  type ChoosableOrgTierCtaType,
+} from '../entities/org-tier.entity';
 
 export class CreateOrgTierDto {
   @IsString() @MaxLength(120) name!: string;
@@ -25,7 +28,8 @@ export class CreateOrgTierDto {
   bullets?: string[];
 
   @IsString() @MaxLength(400) footnote!: string;
-  @IsEnum(OrgTierCtaType) ctaType!: OrgTierCtaType;
+  // `toast` is retired (see `OrgTierCtaType`), so only link and propose pass.
+  @IsIn(CHOOSABLE_ORG_TIER_CTA_TYPES) ctaType!: ChoosableOrgTierCtaType;
   @IsString() @MaxLength(80) ctaLabel!: string;
 
   @IsOptional() @IsString() @MaxLength(200) ctaTarget?: string | null;

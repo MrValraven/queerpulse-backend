@@ -336,16 +336,9 @@ Tigris, Vercel). Rows list only the recipients **beyond** that floor.
 
 ### 2.10 Newsletter
 
-- **Data subjects:** subscribers, including non-members.
-- **Personal data:** the `src/newsletter` module's subscriber rows.
-- **Purpose:** a mailing list.
-- **Legal basis:** Article 6(1)(a), consent.
-- **Reality check:** **nothing can be sent.** There is no mailer (§0), so a
-  subscription is stored and never acted on. `docs/ops/no-mailer-at-launch.md` §0
-  records the newsletter double-opt-in copy as an open item precisely because a
-  confirmation link cannot be delivered.
-- **Retention:** **no sweeper.** Rows persist until deleted by hand.
-- **Recipients:** none. There is no email service processor.
+- **Status:** removed. The newsletter module and its tables were removed on 2026-10-06 (migration 1828710000000).
+- **Personal data:** none. No email address is kept for a newsletter.
+- **Recipients:** none.
 
 ### 2.11 Analytics and monitoring
 

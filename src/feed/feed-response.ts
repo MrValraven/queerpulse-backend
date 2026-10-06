@@ -121,6 +121,28 @@ export interface FeedItem extends FeedItemSignals {
   neighbourhood?: string | null;
   interests?: string[];
   /**
+   * `new_member` only (both the global source and the community one): how
+   * many of the VIEWER's accepted connections are also accepted connections
+   * of this member, so the card can offer "3 mutual connections" as a reason
+   * to reach out. Computed for a whole page in one query
+   * (`FeedService.mutualConnectionCounts`), excluding anyone blocked either
+   * way relative to the viewer. Zero is a real answer (nobody in common);
+   * undefined means the count was not computed (no signed-in viewer) and is
+   * always undefined on every other item type.
+   */
+  mutualConnectionCount?: number;
+  /**
+   * `new_member` only (both the global source and the community one): the
+   * member's public interests (their `profiles.tags`, the same list the
+   * global source sends as `interests`) that the VIEWER's own profile also
+   * lists, so the card can show them first and say "You both like X".
+   * Matched trimmed and case-insensitively, returned in the member's order
+   * and in the member's own spelling (`interestsInCommon`). An empty array is
+   * a real answer (nothing shared); undefined means it was not computed (no
+   * signed-in viewer) and is always undefined on every other item type.
+   */
+  sharedInterests?: string[];
+  /**
    * A plain-text preview of the item's own body (PRD-167). Carried for
    * `forum_thread`, whose card used to be the only one in the feed with no
    * content preview at all: members had to decide whether to open a thread
@@ -372,10 +394,16 @@ export function eventToFeedItem(
  * `tagline` to `bio` to an empty string (both nullable). `neighbourhood`
  * (visibility-gated) and `interests` (public tags) enrich the card off the
  * profile row directly — see `FeedItem`'s field notes.
+ *
+ * `mutualConnectionCount` is the page's batched count for this member, or
+ * undefined when it was not computed, in which case the field is omitted.
+ * `sharedInterests` follows the same rule.
  */
 export function newMemberToFeedItem(
   profile: Profile,
   actor: MemberRef | null,
+  mutualConnectionCount?: number,
+  sharedInterests?: string[],
 ): FeedItem {
   return {
     id: profile.userId,
@@ -395,6 +423,8 @@ export function newMemberToFeedItem(
         ? matchNeighbourhood(profile.location)
         : null,
     interests: profile.tags,
+    ...(mutualConnectionCount !== undefined ? { mutualConnectionCount } : {}),
+    ...(sharedInterests !== undefined ? { sharedInterests } : {}),
   };
 }
 
@@ -414,12 +444,20 @@ export function newMemberToFeedItem(
  * `MemberCard`/`NewMemberCard` the People-tab source already uses — the
  * `'community_new_member'` string only ever exists as `FeedService`'s
  * internal candidate discriminator.
+ *
+ * `mutualConnectionCount` and `sharedInterests` follow `newMemberToFeedItem`'s
+ * rule: carried when the page computed them, omitted when undefined. This
+ * card carries no `interests` list of its own; `sharedInterests` is resolved
+ * by `FeedService` from the joining member's public `tags` (fetched in one
+ * batched lookup per page, since a `MemberRef` holds no tags).
  */
 export function communityNewMemberToFeedItem(
   membershipId: string,
   joinedAt: Date,
   member: MemberRef | null,
   community: Community | null,
+  mutualConnectionCount?: number,
+  sharedInterests?: string[],
 ): FeedItem {
   return {
     id: membershipId,
@@ -431,7 +469,38 @@ export function communityNewMemberToFeedItem(
     summary: community ? `Joined ${community.name}` : 'Joined a community',
     link: member ? `/profile/${member.slug}` : '/feed',
     actor: toAuthorSummary(member),
+    ...(mutualConnectionCount !== undefined ? { mutualConnectionCount } : {}),
+    ...(sharedInterests !== undefined ? { sharedInterests } : {}),
   };
+}
+
+/** The comparison key for one interest tag: trimmed and lower-cased, so
+ *  "Ceramics " and "ceramics" count as the same interest. */
+export function interestKey(tag: string): string {
+  return tag.trim().toLowerCase();
+}
+
+/**
+ * The member's interests that the viewer also lists, for `sharedInterests`.
+ * Walks `memberTags` in the member's own order and returns each match in the
+ * member's original spelling. A tag that is blank once trimmed never
+ * matches, and a second tag with the same key as an earlier one is skipped,
+ * so the card never shows one interest twice.
+ */
+export function interestsInCommon(
+  memberTags: readonly string[] | null | undefined,
+  viewerInterestKeys: ReadonlySet<string>,
+): string[] {
+  if (!memberTags?.length || !viewerInterestKeys.size) return [];
+  const seenKeys = new Set<string>();
+  const shared: string[] = [];
+  for (const tag of memberTags) {
+    const key = interestKey(tag);
+    if (!key || seenKeys.has(key) || !viewerInterestKeys.has(key)) continue;
+    seenKeys.add(key);
+    shared.push(tag);
+  }
+  return shared;
 }
 
 /**

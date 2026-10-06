@@ -34,6 +34,18 @@ export class CreateInquiryDto {
   @MaxLength(160)
   subject?: string;
 
+  /**
+   * PRD-452. The Contact form's topic id (`safety`, `press`, ...), sent beside
+   * the translated `subject` label so the server can read it in any locale.
+   * Free text by design: the topic list is the frontend's, and a topic added
+   * there must keep the form working. Only the ids in
+   * `PRIORITY_INQUIRY_TOPICS` change anything; it is not stored.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  topic?: string;
+
   @IsString()
   @IsNotEmpty()
   @MaxLength(4000)

@@ -552,6 +552,9 @@ export class PushMessageListener {
       // gets the generic copy whatever the recipient's preview preference,
       // matching the parallel message-request path, which never puts a
       // stranger's name on a lock screen. No icon, no actions, no params.
+      // Sent through `sendGenericByLanguage` (PRD-325), so a Portuguese
+      // member's iPhone shows the Portuguese copy whether or not they hide
+      // previews.
       const strangerPayload: PushPayload = {
         title: GENERIC_PUSH_COPY.message.title,
         body: GENERIC_PUSH_COPY.message.body,
@@ -582,7 +585,11 @@ export class PushMessageListener {
         pushableUserIds,
         conversationId,
       );
-      const sendBatches: { userIds: string[]; payload: PushPayload }[] = [];
+      const sendBatches: {
+        userIds: string[];
+        payload: PushPayload;
+        isFixedGenericCopy: boolean;
+      }[] = [];
       for (const [userIds, isQuietRepeat] of [
         [pacedRecipients.freshUserIds, false],
         [pacedRecipients.quietRepeatUserIds, true],
@@ -611,18 +618,21 @@ export class PushMessageListener {
           sendBatches.push({
             userIds: plainConnectedUserIds,
             payload: withPushPacing(contentPayload, isQuietRepeat),
+            isFixedGenericCopy: false,
           });
         }
         if (mentionedInBatch.length > 0 && mentionContentPayload) {
           sendBatches.push({
             userIds: mentionedInBatch,
             payload: withPushPacing(mentionContentPayload, isQuietRepeat),
+            isFixedGenericCopy: false,
           });
         }
         if (unconnectedUserIds.length > 0) {
           sendBatches.push({
             userIds: unconnectedUserIds,
             payload: withPushPacing(strangerPayload, isQuietRepeat),
+            isFixedGenericCopy: true,
           });
         }
       }
@@ -636,6 +646,14 @@ export class PushMessageListener {
       // behind a push that never went out.
       for (const batch of sendBatches) {
         try {
+          if (batch.isFixedGenericCopy) {
+            await this.previewPrivacy.sendGenericByLanguage(
+              batch.userIds,
+              batch.payload,
+              GENERIC_PUSH_COPY.message,
+            );
+            continue;
+          }
           await this.previewPrivacy.sendSplitByPreviewPreference(
             batch.userIds,
             batch.payload,

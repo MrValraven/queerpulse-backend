@@ -3,11 +3,13 @@ import {
   Controller,
   Delete,
   Get,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -26,17 +28,23 @@ import { ReplyThreadDto } from './dto/reply-thread.dto';
 import { SetAcceptedPostDto } from './dto/set-accepted-post.dto';
 import { UpdateForumPostDto } from './dto/update-post.dto';
 import { UpdateThreadDto } from './dto/update-thread.dto';
+import { EndFundingAskDto } from './dto/end-funding-ask.dto';
 import { VotePollDto } from './dto/vote-poll.dto';
 import { VotePostDto } from './dto/vote-post.dto';
 import { ForumPollsService } from './forum-polls.service';
 import { ForumPostsService } from './forum-posts.service';
-import { ForumThreadsService, isModeratorRole } from './forum-threads.service';
+import {
+  FundingLookupResult,
+  ForumThreadsService,
+  isModeratorRole,
+} from './forum-threads.service';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -44,6 +52,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { Throttle, seconds } from '@nestjs/throttler';
+import { Response } from 'express';
+import { FundingLookupQuery } from './dto/funding-lookup.query';
 
 @Feature('forum')
 @ApiTags('Forum')
@@ -76,6 +86,11 @@ export class ForumController {
       query.tag,
       query.q,
       isModeratorRole(user.role),
+      {
+        view: query.fundingView,
+        eligibility: query.eligibility,
+        scope: query.scope,
+      },
     );
   }
 
@@ -133,6 +148,36 @@ export class ForumController {
       query.category,
       isModeratorRole(user.role),
     );
+  }
+
+  // Funding & Grants: the composer's duplicate check, run when the link field
+  // loses focus. Member-only like every route here, and rate limited by the
+  // global throttler like the other member reads.
+  @Get('funding/lookup')
+  @ApiOperation({
+    summary: 'Find an open call already posted with the same link',
+  })
+  @ApiOkResponse({
+    description:
+      '`{ slug, title, deadline }` of the newest visible open call with this link.',
+  })
+  @ApiNoContentResponse({
+    description: 'No visible open call uses this link, or it is not https.',
+  })
+  async lookupFundingLink(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: FundingLookupQuery,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<FundingLookupResult | undefined> {
+    const match = await this.threadsService.findOpenCallByLink(
+      user.userId,
+      query.link,
+    );
+    if (!match) {
+      response.status(HttpStatus.NO_CONTENT);
+      return undefined;
+    }
+    return match;
   }
 
   @Get('threads/:slug')
@@ -370,7 +415,8 @@ export class ForumController {
       "thread's first 24 hours, or by a moderator at any time.",
   })
   @ApiBadRequestResponse({
-    description: 'No title, tags or category were sent.',
+    description:
+      'No title, tags, category or funding were sent, or the funding details failed validation (coded `funding_*` errors).',
   })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   updateThread(
@@ -384,7 +430,33 @@ export class ForumController {
       dto.title,
       dto.tags,
       dto.category,
+      dto.funding,
     );
+  }
+
+  // Funding & Grants: the author's own "goal reached" or "closed". Declared
+  // with the other `threads/:slug` routes.
+  @Post('threads/:slug/funding/end')
+  @UseGuards(NotRestrictedGuard)
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @ApiOperation({
+    summary: 'Mark your own fundraiser as ended (goal reached, or closed)',
+  })
+  @ApiCreatedResponse({
+    description: "The thread, with `funding.askState` now 'ended'.",
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the author can end this fundraiser.',
+  })
+  @ApiNotFoundResponse({
+    description: 'Thread not found, or it is not a fundraiser.',
+  })
+  endFundingAsk(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: EndFundingAskDto,
+  ) {
+    return this.threadsService.endFundingAsk(slug, user, dto.reason);
   }
 
   // Declared alongside the other `threads/:slug` routes. Distinct from

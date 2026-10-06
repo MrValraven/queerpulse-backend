@@ -153,7 +153,7 @@ export class DirectoryController {
   })
   @ApiOkResponse({
     description:
-      'Every `{ id, tags }` group a listing may pick tags from, in display order. Tags are the stored English values; create and update reject anything else.',
+      "Every `{ id, tags, onlineTags }` group a listing may pick tags from, in display order. `tags` are offered to listings with a physical place and `onlineTags` to online-only listings; either may be empty. Tags are the stored English values. Create and update accept any tag from either list, whatever the listing's `online` flag, and reject everything else.",
   })
   listTagVocabulary() {
     return this.directoryService.listTagVocabulary();

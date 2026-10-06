@@ -262,6 +262,8 @@ function build(
   };
   const previewPrivacy = {
     sendSplitByPreviewPreference: jest.fn().mockResolvedValue(undefined),
+    // The fixed stranger copy goes here instead (PRD-325).
+    sendGenericByLanguage: jest.fn().mockResolvedValue(undefined),
   };
   const listener = new PushMessageListener(
     conversationsRepository as never,
@@ -290,9 +292,12 @@ function build(
 /** Every send, flattened to one payload per recipient. */
 function payloadByRecipient(previewPrivacy: {
   sendSplitByPreviewPreference: jest.Mock;
+  sendGenericByLanguage: jest.Mock;
 }): Map<string, PushPayload> {
-  const calls = previewPrivacy.sendSplitByPreviewPreference.mock
-    .calls as unknown as [string[], PushPayload][];
+  const calls = [
+    ...(previewPrivacy.sendSplitByPreviewPreference.mock.calls as unknown[]),
+    ...(previewPrivacy.sendGenericByLanguage.mock.calls as unknown[]),
+  ] as [string[], PushPayload][];
   const result = new Map<string, PushPayload>();
   for (const [userIds, payload] of calls) {
     for (const userId of userIds) {

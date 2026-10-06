@@ -356,9 +356,9 @@ choice that makes it acceptable.**
 
 ### 4.6 Non-members
 
-Invite applicants and newsletter subscribers have no account and therefore no
+Invite applicants have no account and therefore no
 in-app channel at all (`docs/ops/no-mailer-at-launch.md` §2b). If a breach
-touches `join_requests` or newsletter subscriber rows, the only available
+touches `join_requests` rows, the only available
 communication is the public status page, and the internal record must say that
 those data subjects could not be reached individually.
 
@@ -432,7 +432,7 @@ Notification type: initial / follow-up (phase N of M)
    What happened, in plain language.
    Breach type: confidentiality / integrity / availability (may be several).
    Categories of data subjects affected: [members / pending members / invite
-     applicants / newsletter subscribers].
+     applicants].
    Approximate number of data subjects: N   (estimate; basis for the estimate)
    Categories of personal data: [e.g. direct message content, home addresses,
      special-category identity data, authentication credentials].

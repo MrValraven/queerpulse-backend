@@ -104,6 +104,31 @@ describe('OrgTiersService', () => {
       expect(tier).not.toHaveProperty('sortOrder');
       expect(tier).not.toHaveProperty('published');
     });
+
+    it('reads a row stored with the retired toast CTA back as propose', async () => {
+      tiers.find.mockResolvedValue([
+        {
+          id: 'tier-2',
+          slug: 'funder',
+          name: 'Programme funder',
+          priceDisplay: '€15k+',
+          pricePeriod: 'per year',
+          dek: 'For funders backing a specific programme.',
+          bullets: [],
+          footnote: 'Multi-year commitments preferred.',
+          ctaType: OrgTierCtaType.Toast,
+          ctaLabel: 'Discuss funding',
+          ctaTarget: null,
+          featured: false,
+          sortOrder: 2,
+          published: true,
+        },
+      ]);
+
+      const [tier] = await service.listPublished();
+
+      expect(tier?.ctaType).toBe(OrgTierCtaType.Propose);
+    });
   });
 
   describe('listAll', () => {

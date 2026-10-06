@@ -232,6 +232,14 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   // otherwise about to travel to a viewing that is not happening.
   [NotificationType.HousingViewingRequested]:
     NotificationPreferenceCategory.Opportunities,
+  // Funding & Grants. A reminder about an open call the member saved, and the
+  // notice that its deadline moved. Both answer a bookmark the member chose to
+  // make, and somebody saving a dozen calls may want them quieter, so they sit
+  // behind the same switch as the other opportunity signals.
+  [NotificationType.FundingDeadlineSoon]:
+    NotificationPreferenceCategory.Opportunities,
+  [NotificationType.FundingDeadlineChanged]:
+    NotificationPreferenceCategory.Opportunities,
 
   // --- The magazine ---------------------------------------------------------
   [NotificationType.MagazinePieceMessage]:
@@ -431,6 +439,14 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.ForumThreadReviewed,
     NotificationType.ChangemakerNominationApproved,
     NotificationType.ChangemakerNominationDismissed,
+    // DES-417. Every step of a safe-space review: a nomination the member
+    // made, a badge on the venue they own, a flag they raised, or (for staff)
+    // a queue past its deadline. Each is the platform answering something the
+    // recipient started or owns, it arrives once per review step, and with no
+    // email the bell is the whole channel. These rows used to ride on
+    // `ModerationOutcome` in group 1, so they keep its always-delivered
+    // standing under their own type.
+    NotificationType.SafeSpaceReview,
     NotificationType.RoadmapStatus,
     // The outcome of any non-concern intake form the member filled in, split off
     // from `ConcernUpdate` above so the copy names the form rather than calling

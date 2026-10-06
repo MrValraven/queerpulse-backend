@@ -16,6 +16,8 @@ import {
 import { Response } from 'express';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNoContentResponse,
@@ -35,6 +37,7 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
+import { CreateGroupListingEnquiryDto } from './dto/create-group-listing-enquiry.dto';
 import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HousingGroupsService } from './housing-groups.service';
 import {
@@ -79,12 +82,10 @@ const VARY_ON_SESSION = 'Cookie';
  * `join-requests`) sit under the `:slug` prefix, so route matching resolves
  * them literally.
  *
- * Join requests may be submitted by anyone — the access-gated group model
- * collects a `name` and community-relationship answer precisely so a non-member
- * can ask to be let in. `OptionalJwtAuthGuard` + `@Public()` best-effort attach
- * `req.user` WHEN a valid session cookie is present (so a signed-in member's
- * `userId` is captured for the mutual-connections trust signal) without ever
- * rejecting an anonymous applicant.
+ * Join requests come from signed-in active members (ENG-472). The group's
+ * screening still collects a `name` and a community-relationship answer, and
+ * the member's account is what lets one request per member be enforced, the
+ * roster be counted in people, and the decision reach the applicant's bell.
  */
 @Feature('housing')
 @ApiTags('Housing groups')
@@ -218,22 +219,26 @@ export class HousingGroupsController {
     return this.groups.listMyListings(slug, user.userId);
   }
 
-  // Anonymous public write: tightly throttled per IP so the group review queue
-  // can't be flooded. `@Public()` + optional guard means an anonymous applicant
-  // is allowed, a signed-in one is identified.
-  @Public()
-  @UseGuards(OptionalJwtAuthGuard)
+  // ENG-472: member-only. An anonymous request could be filed any number of
+  // times, by anyone, under any name, and each one counted towards the group
+  // once approved. Still tightly throttled so the review queue can't be
+  // flooded; the service answers a second live request with a typed 409.
+  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post(':slug/join-requests')
-  @ApiOperation({ summary: 'Ask to join a group (anonymous allowed)' })
+  @ApiOperation({ summary: 'Ask to join a group (member only)' })
   @ApiCreatedResponse({ description: 'The created join request.' })
   @ApiNotFoundResponse({ description: 'No published group with that slug.' })
+  @ApiConflictResponse({
+    description:
+      'The caller already has a pending or approved request for this group (`code: GROUP_JOIN_ALREADY_REQUESTED`).',
+  })
   submitJoinRequest(
     @Param('slug') slug: string,
     @Body() dto: CreateGroupJoinRequestDto,
-    @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.groups.createJoinRequest(slug, dto, user?.userId ?? null);
+    return this.groups.createJoinRequest(slug, dto, user.userId);
   }
 
   // Sharing a listing into a group requires an active member. Norms (price +
@@ -297,5 +302,35 @@ export class HousingGroupsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.groups.removeListing(slug, id, user.userId);
+  }
+
+  // PRD-443: a reader messages the member who posted a room. The same guards
+  // and default throttle as the member-listing enquiry
+  // (`POST /housing-listings/:ref/enquiries`), and the same answer shape, so
+  // the frontend enquiry modal reads both the same way. A 404 means the room
+  // is no longer on the group page.
+  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
+  @Post(':slug/listings/:id/enquiries')
+  @ApiOperation({ summary: 'Message the member who posted a group room' })
+  @ApiCreatedResponse({
+    description: 'The conversation id for the delivered enquiry.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No such group, or the room is not on the group page.',
+  })
+  @ApiBadRequestResponse({
+    description: 'The room is your own, or has no poster left to contact.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The group is access-gated and the caller is not a member, or a pledge or verification step is outstanding.',
+  })
+  enquireAboutListing(
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateGroupListingEnquiryDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.groups.createListingEnquiry(slug, id, user.userId, dto);
   }
 }

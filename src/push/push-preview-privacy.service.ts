@@ -43,6 +43,13 @@ import { PushService, type PushPayload } from './push.service';
  * since reads never create one) means hidden, matching
  * `DEFAULT_HIDE_PUSH_PREVIEWS`.
  * Only an explicit `hide_push_previews = false` puts a name on a lock screen.
+ *
+ * LANGUAGE (PRD-325). The generic copy is the one payload this service writes
+ * itself, so it is also where the recipient's `member_preferences.language` is
+ * honoured: a member whose language is `pt` gets the Portuguese title and body
+ * in the plain fields iOS prints. Anyone else, including a member with no row
+ * or no stored language, gets the English fallback, and every engine that
+ * runs the service worker still localises from the `l10n` keys either way.
  */
 @Injectable()
 export class PushPreviewPrivacyService {
@@ -69,11 +76,18 @@ export class PushPreviewPrivacyService {
   ): Promise<void> {
     if (recipientUserIds.length === 0) return;
 
-    const showingUserIds =
-      await this.recipientsShowingPreviews(recipientUserIds);
+    const { showingUserIds, portugueseUserIds } =
+      await this.recipientPreferences(recipientUserIds);
     const showing = new Set(showingUserIds);
+    const portuguese = new Set(portugueseUserIds);
     const hidingUserIds = recipientUserIds.filter(
       (userId) => !showing.has(userId),
+    );
+    const hidingDefaultLanguageUserIds = hidingUserIds.filter(
+      (userId) => !portuguese.has(userId),
+    );
+    const hidingPortugueseUserIds = hidingUserIds.filter((userId) =>
+      portuguese.has(userId),
     );
 
     // One after the other, not concurrently. Every push in this module funnels
@@ -92,32 +106,106 @@ export class PushPreviewPrivacyService {
     // then the first fault is rethrown so the caller still sees it.
     // `sendToUsers` already swallows per-endpoint failures, so a rejection here
     // is a database fault, not a delivery one.
+    //
+    // The Portuguese generic send runs only when someone needs it, so a batch
+    // with no Portuguese member hiding previews costs the same two sends as
+    // before the language column existed.
     const sends = [
       () => this.pushService.sendToUsers(showingUserIds, richPayload),
       () =>
         this.pushService.sendToUsers(
-          hidingUserIds,
+          hidingDefaultLanguageUserIds,
           toGenericPayload(richPayload, genericCopy),
         ),
     ];
-    let hasFailed = false;
-    let firstFailure: unknown;
-    for (const send of sends) {
-      try {
-        await send();
-      } catch (error) {
-        if (!hasFailed) {
-          hasFailed = true;
-          firstFailure = error;
-        }
-      }
+    if (hidingPortugueseUserIds.length > 0) {
+      sends.push(() =>
+        this.pushService.sendToUsers(
+          hidingPortugueseUserIds,
+          toGenericPayload(richPayload, {
+            ...genericCopy,
+            title: genericCopy.pt.title,
+            body: genericCopy.pt.body,
+          }),
+        ),
+      );
     }
-    if (hasFailed) throw firstFailure;
+    await runSendsInOrder(sends);
   }
 
   /**
-   * The subset of `userIds` who have explicitly asked to SEE previews, in one
-   * batched query for the whole notification batch, in the same spirit as
+   * Deliver a FIXED copy that names nobody (the stranger-DM copy, the
+   * new-device alert, the test push) in each recipient's stored language
+   * (PRD-325).
+   *
+   * No preview split: the copy is already safe for a lock screen, so hiding
+   * previews would change nothing. What does change per recipient is the
+   * language of the plain `title`/`body`, which iOS prints as it is: a member
+   * whose `member_preferences.language` is `pt` gets `genericCopy.pt`, and
+   * everyone else, including a member with no row, gets the English copy.
+   * Both sends are built through `toGenericPayload`, the same allowlist a
+   * hidden-preview push passes through, so a field added to `basePayload`
+   * later cannot ride along by accident. The `l10n` keys come from
+   * `genericCopy`, so engines that run the service worker still localise.
+   *
+   * One query for the whole batch. Each language group is sent only when it
+   * has someone in it, one after the other, with the same rethrow-the-first-
+   * fault contract as `sendSplitByPreviewPreference`.
+   */
+  async sendGenericByLanguage(
+    recipientUserIds: string[],
+    basePayload: PushPayload,
+    genericCopy: GenericPushCopy,
+  ): Promise<void> {
+    if (recipientUserIds.length === 0) return;
+
+    const portuguese = new Set(
+      await this.portugueseRecipients(recipientUserIds),
+    );
+    const englishUserIds = recipientUserIds.filter(
+      (userId) => !portuguese.has(userId),
+    );
+    const portugueseUserIds = recipientUserIds.filter((userId) =>
+      portuguese.has(userId),
+    );
+
+    const sends: (() => Promise<void>)[] = [];
+    if (englishUserIds.length > 0) {
+      sends.push(() =>
+        this.pushService.sendToUsers(
+          englishUserIds,
+          toGenericPayload(basePayload, genericCopy),
+        ),
+      );
+    }
+    if (portugueseUserIds.length > 0) {
+      sends.push(() =>
+        this.pushService.sendToUsers(
+          portugueseUserIds,
+          toGenericPayload(basePayload, {
+            ...genericCopy,
+            title: genericCopy.pt.title,
+            body: genericCopy.pt.body,
+          }),
+        ),
+      );
+    }
+    await runSendsInOrder(sends);
+  }
+
+  /** The subset of `userIds` whose stored interface language is `pt`. */
+  private async portugueseRecipients(userIds: string[]): Promise<string[]> {
+    const rows = await this.preferences.find({
+      where: { userId: In(userIds) },
+      select: { userId: true, language: true },
+    });
+    return rows.filter((row) => row.language === 'pt').map((row) => row.userId);
+  }
+
+  /**
+   * The subset of `userIds` who have explicitly asked to SEE previews, and the
+   * subset whose stored interface language is Portuguese, in one batched query
+   * for the whole notification batch, in the same spirit as
    * `NotificationPreferencesService.recipientsPushEnabled`.
    *
    * Deliberately the positive list rather than the negative one. Building the
@@ -126,18 +214,46 @@ export class PushPreviewPrivacyService {
    * missing row, a failed lookup or a member added mid-flight all land on the
    * private side of the branch.
    */
-  private async recipientsShowingPreviews(
+  private async recipientPreferences(
     userIds: string[],
-  ): Promise<string[]> {
-    if (userIds.length === 0) return [];
+  ): Promise<{ showingUserIds: string[]; portugueseUserIds: string[] }> {
+    if (userIds.length === 0) {
+      return { showingUserIds: [], portugueseUserIds: [] };
+    }
     const rows = await this.preferences.find({
       where: { userId: In(userIds) },
-      select: { userId: true, hidePushPreviews: true },
+      select: { userId: true, hidePushPreviews: true, language: true },
     });
-    return rows
-      .filter((row) => row.hidePushPreviews === false)
-      .map((row) => row.userId);
+    return {
+      showingUserIds: rows
+        .filter((row) => row.hidePushPreviews === false)
+        .map((row) => row.userId),
+      portugueseUserIds: rows
+        .filter((row) => row.language === 'pt')
+        .map((row) => row.userId),
+    };
   }
+}
+
+/**
+ * Run every send one after the other. None is skipped because an earlier one
+ * threw; once all have run, the first fault is rethrown so the caller still
+ * sees it.
+ */
+async function runSendsInOrder(sends: (() => Promise<void>)[]): Promise<void> {
+  let hasFailed = false;
+  let firstFailure: unknown;
+  for (const send of sends) {
+    try {
+      await send();
+    } catch (error) {
+      if (!hasFailed) {
+        hasFailed = true;
+        firstFailure = error;
+      }
+    }
+  }
+  if (hasFailed) throw firstFailure;
 }
 
 /**

@@ -124,6 +124,7 @@ const CATEGORY_BY_REASON_CODE: Partial<
   venue_accessibility: 'space_safety',
   housing_unsafe: 'space_safety',
   housing_scam: 'space_safety',
+  funding_scam: 'space_safety',
   not_affirming: 'space_safety',
   off_platform: 'other',
   other: 'other',

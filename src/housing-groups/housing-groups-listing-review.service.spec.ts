@@ -4,9 +4,11 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { Connection } from '../connections/entities/connection.entity';
+import { MessagingService } from '../messaging/messaging.service';
 import { ModAuditService } from '../moderation/mod-audit.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationService } from '../verification/verification.service';
 import { GroupJoinRequest } from './entities/group-join-request.entity';
@@ -91,6 +93,15 @@ describe('HousingGroupsService — group-listing review (LOC-19)', () => {
           useValue: { announce: jest.fn().mockResolvedValue(undefined) },
         },
         { provide: ModAuditService, useValue: modAudit },
+        // The room enquiry (PRD-443) is the only caller; the review paths
+        // under test never reach it.
+        { provide: MessagingService, useValue: {} },
+        {
+          provide: BlockFilterService,
+          useValue: {
+            excludeHidden: jest.fn((queryBuilder: unknown) => queryBuilder),
+          },
+        },
       ],
     }).compile();
     service = module.get(HousingGroupsService);

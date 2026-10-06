@@ -40,7 +40,6 @@ import { MagazinePitch } from './entities/magazine-pitch.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazinePieceService } from './magazine-piece.service';
 import { MagazineIssueAnnouncerService } from './magazine-issue-announcer.service';
-import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -253,7 +252,6 @@ describe('MagazinePieceService', () => {
   let staffRoles: RepositoryMock;
   let users: RepositoryMock;
   let profiles: RepositoryMock;
-  let newsletterSubscriptions: RepositoryMock;
   let transactionManager: { getRepository: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let notifications: { create: jest.Mock };
@@ -277,7 +275,6 @@ describe('MagazinePieceService', () => {
     staffRoles = makeRepositoryMock();
     users = makeRepositoryMock();
     profiles = makeRepositoryMock();
-    newsletterSubscriptions = makeRepositoryMock();
 
     // The commission/ship flows run inside `dataSource.transaction`,
     // resolving per-entity repos off the transactional `EntityManager` —
@@ -345,10 +342,6 @@ describe('MagazinePieceService', () => {
         { provide: getRepositoryToken(UserStaffRole), useValue: staffRoles },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: getRepositoryToken(Profile), useValue: profiles },
-        {
-          provide: getRepositoryToken(NewsletterSubscription),
-          useValue: newsletterSubscriptions,
-        },
         { provide: DataSource, useValue: dataSource },
         { provide: NotificationsService, useValue: notifications },
         { provide: MagazineIssueAnnouncerService, useValue: issueAnnouncer },

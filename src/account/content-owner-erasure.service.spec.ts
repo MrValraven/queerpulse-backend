@@ -415,12 +415,33 @@ describe('ContentOwnerErasureService forum threads', () => {
   it('runs the deletion before the recount and the scrub', async () => {
     const { service, dataSource } = build();
     await service.eraseFor(ERASED_USER_ID);
-    const order = statements(dataSource).map(({ sql }) => sql.slice(0, 22));
+    const order = statements(dataSource).map(({ sql }) => sql.slice(0, 34));
     expect(order).toEqual([
-      'DELETE FROM "forum_thr',
-      'UPDATE "forum_thread" ',
-      'UPDATE "topic_post" SE',
+      'DELETE FROM "forum_thread" AS "t" ',
+      'DELETE FROM "forum_thread_funding"',
+      'UPDATE "forum_thread" "t" SET "rep',
+      'UPDATE "topic_post" SET "author_na',
     ]);
+  });
+
+  // Funding & Grants: a surviving fundraiser keeps nobody accountable for
+  // its donate link once its author is erased; a surviving call keeps its
+  // public funder link.
+  it("removes the funding details of the member's surviving fundraisers only", async () => {
+    const { service, dataSource } = build();
+    await service.eraseFor(ERASED_USER_ID);
+    const fundingDeletion = statements(dataSource).find(({ sql }) =>
+      sql.startsWith('DELETE FROM "forum_thread_funding"'),
+    );
+    if (!fundingDeletion) {
+      throw new Error('expected the fundraiser funding deletion');
+    }
+    expect(fundingDeletion.sql).toContain('USING "forum_thread" AS "t"');
+    expect(fundingDeletion.sql).toContain('"funding"."thread_id" = "t"."id"');
+    expect(fundingDeletion.sql).toContain('"t"."author_id" = $1');
+    expect(fundingDeletion.sql).toContain(`"t"."kind" = 'ask'`);
+    expect(fundingDeletion.sql).not.toContain("'call'");
+    expect(fundingDeletion.parameters).toEqual([ERASED_USER_ID]);
   });
 
   it('still scrubs the topic bylines when the thread deletion fails', async () => {

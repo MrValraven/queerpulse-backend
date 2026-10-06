@@ -70,13 +70,8 @@ Verify each is still honest before go-live (another edit could regress them):
 
 **Still open (owned by other work-streams — do not regress, do not ship a promise):**
 
-- [ ] **Newsletter confirmation** (`homepage:*` newsletter subscribe copy +
-      `system:*` "we'll email a one-time confirmation link"). `POST
-      /newsletter/subscribe` records a `pending` row and mints a confirm token,
-      and **nothing delivers it**: the confirm and unsubscribe routes stay
-      reachable only for a token someone is handed out of band. Any copy that
-      says a link is on its way is false. Either gate the newsletter form behind
-      demo mode or soften the copy. Tracked with the homepage owner.
+- [x] **Newsletter confirmation.** Closed on 2026-10-06 by removal: the
+      newsletter module, its routes and its tables were removed on 2026-10-06 (migration 1828710000000). No email address is kept for a newsletter.
 - [ ] **Event RSVP / host copy** ("you'll receive a confirmation email",
       "you'll get an email notification for each new attendee",
       `gatherings:*`). Owned by the events work-stream. In-app notifications
@@ -179,10 +174,8 @@ at all. That risk is named per-flow below, and it is accepted.
   response shape and the `email_preference` table are all removed. See §4.
 - **In-app handling:** the settings email-delivery and login-alert controls are
   already `comingSoon`-gated (rendered `inert` with a "Coming soon" badge), so
-  they don't lie. The **newsletter confirmation copy** is the exception still to
-  close (see §0).
-- **Risk:** none to safety — this is unused schema and inert UI. The only risk is
-  a member *subscribing* to a newsletter that can never send them a confirmation.
+  they don't lie. The newsletter and its tables were removed on 2026-10-06 (migration 1828710000000).
+- **Risk:** none to safety. This is unused schema and inert UI.
 
 ---
 

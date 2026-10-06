@@ -11,11 +11,11 @@
  *  - CLIENT evidence (`url`, `screenshot`) is whatever the reporter attached.
  *    Stored verbatim and trusted for nothing.
  *  - SERVER SNAPSHOTS (`message-snapshot`, `housing-snapshot`,
- *    `photo-snapshot`) are captured by `ReportsService.buildEvidence` at filing
- *    time from the row itself. They exist because the reported thing can be
- *    edited or deleted between the report and the review, and a moderator
- *    reading the live row would then be judging something other than what was
- *    reported.
+ *    `group-listing-snapshot`, `photo-snapshot`) are captured by
+ *    `ReportsService.buildEvidence` at filing time from the row itself. They
+ *    exist because the reported thing can be edited or deleted between the
+ *    report and the review, and a moderator reading the live row would then
+ *    be judging something other than what was reported.
  *
  * Every entry carries its own `type` discriminant, and a reader that does not
  * recognise a `type` must treat the entry as opaque rather than dropping it.
@@ -148,6 +148,31 @@ export interface HousingSnapshotEvidence {
   city: string | null;
   area: string | null;
   listerId: string | null;
+  listedAt: string;
+  snapshotAt: string;
+}
+
+export const GROUP_LISTING_SNAPSHOT_TYPE = 'group-listing-snapshot';
+
+/**
+ * ONE room shared inside a housing group, as it stood when the report was
+ * filed. Captured for the same reason as `housing-snapshot`, and it matters
+ * more here: `HousingGroupsService.removeListing` hard-deletes the row, so
+ * without this a reported poster could erase the room and leave the moderator
+ * with a subject that resolves to nothing.
+ */
+export interface GroupListingSnapshotEvidence {
+  type: typeof GROUP_LISTING_SNAPSHOT_TYPE;
+  listingId: string;
+  groupId: string;
+  groupSlug: string | null;
+  groupName: string | null;
+  title: string;
+  description: string;
+  neighbourhood: string;
+  priceEuros: number;
+  accessibilityInfo: string;
+  posterId: string | null;
   listedAt: string;
   snapshotAt: string;
 }
@@ -308,6 +333,7 @@ export type ReportEvidenceEntry =
   | ScreenshotEvidence
   | MessageSnapshotEvidence
   | HousingSnapshotEvidence
+  | GroupListingSnapshotEvidence
   | PhotoSnapshotEvidence
   | GroupSnapshotEvidence
   | MailboxIdentitySnapshotEvidence;

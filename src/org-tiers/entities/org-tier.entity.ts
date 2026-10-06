@@ -7,15 +7,29 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-// The CTA behaviour a tier card renders: a toast (info acknowledgement), an
-// internal link (to `ctaTarget`), or the "propose a partnership" anchor to the
-// contact form. Kept as an enum so the FE can switch on a stable value rather
-// than parse copy.
+// The CTA behaviour a tier card renders: an internal link (to `ctaTarget`), or
+// the "propose a partnership" anchor to the partner application. Kept as an
+// enum so the FE can switch on a stable value and leave the copy alone.
+//
+// `Toast` is retired. Its button only showed a toast repeating its own label,
+// so an organisation clicking it reached nobody. The value stays here because
+// `org_tiers_cta_type_enum` still holds it in Postgres, but the write DTO only
+// accepts `CHOOSABLE_ORG_TIER_CTA_TYPES` and `toOrgTier` reads a stored toast
+// row back as `propose`.
 export enum OrgTierCtaType {
   Toast = 'toast',
   Link = 'link',
   Propose = 'propose',
 }
+
+/** The CTA types an admin can choose for a tier. */
+export const CHOOSABLE_ORG_TIER_CTA_TYPES = [
+  OrgTierCtaType.Link,
+  OrgTierCtaType.Propose,
+] as const;
+
+export type ChoosableOrgTierCtaType =
+  (typeof CHOOSABLE_ORG_TIER_CTA_TYPES)[number];
 
 @Entity('org_tiers')
 export class OrgTier {

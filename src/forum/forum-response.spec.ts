@@ -1,7 +1,12 @@
 import { MemberRef } from '../common/member-ref';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
-import { toForumPostResponse, toForumThreadResponse } from './forum-response';
+import { ForumThreadFunding } from './entities/forum-thread-funding.entity';
+import {
+  hostOfStoredLink,
+  toForumPostResponse,
+  toForumThreadResponse,
+} from './forum-response';
 import { isThreadPublished } from './forum-threads.service';
 
 // A COMPLETE default typed as `ForumPost` itself, so TS rejects it outright
@@ -801,5 +806,231 @@ describe('toForumThreadResponse viewerIsCoAuthor', () => {
 
     expect(anonymousView.coAuthor).toBeNull();
     expect(anonymousView.viewerIsCoAuthor).toBe(true);
+  });
+});
+
+describe('toForumThreadResponse funding', () => {
+  const viewer = { userId: 'viewer-1', isModerator: false };
+
+  function fundingRow(
+    overrides: Partial<ForumThreadFunding> = {},
+  ): ForumThreadFunding {
+    return {
+      threadId: 'thread-1',
+      linkUrl: 'https://www.gofundme.com/f/help-ana',
+      linkKey: 'gofundme.com/f/help-ana',
+      updatedAt: new Date('2026-10-01T10:00:00.000Z'),
+      funderName: null,
+      amountMin: null,
+      amountMax: null,
+      deadline: null,
+      eligibility: [],
+      scope: null,
+      goalAmount: null,
+      askPurpose: null,
+      beneficiary: null,
+      endsAt: null,
+      endedAt: null,
+      endedReason: null,
+      approvedAt: null,
+      ...overrides,
+    };
+  }
+
+  it('is null on a thread with no funding row', () => {
+    const response = toForumThreadResponse(makeThread(), null, viewer);
+    expect(response.funding).toBeNull();
+  });
+
+  it('maps a call with its host and a closing state', () => {
+    const deadline = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const response = toForumThreadResponse(
+      makeThread({ kind: 'call', category: 'funding' }),
+      null,
+      viewer,
+      null,
+      0,
+      false,
+      undefined,
+      null,
+      null,
+      [],
+      null,
+      fundingRow({
+        linkUrl: 'https://www.gulbenkian.pt/bolsas/arte-queer',
+        funderName: 'Fundação Gulbenkian',
+        amountMax: 5000,
+        deadline,
+        eligibility: ['individuals', 'retired'],
+        scope: 'national',
+      }),
+    );
+
+    expect(response.funding).toEqual(
+      expect.objectContaining({
+        linkHost: 'gulbenkian.pt',
+        funderName: 'Fundação Gulbenkian',
+        amountMax: 5000,
+        deadline: deadline.toISOString(),
+        eligibility: ['individuals'],
+        scope: 'national',
+        callState: 'closing',
+        askState: null,
+      }),
+    );
+  });
+
+  it('maps an approved ask as active with its approval date', () => {
+    const approvedAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const response = toForumThreadResponse(
+      makeThread({ kind: 'ask', category: 'funding', reviewState: 'approved' }),
+      null,
+      viewer,
+      makePost({ isOp: true }),
+      0,
+      false,
+      undefined,
+      null,
+      null,
+      [],
+      null,
+      fundingRow({
+        goalAmount: 1200,
+        askPurpose: 'healthcare',
+        beneficiary: 'self',
+        approvedAt,
+      }),
+    );
+
+    expect(response.funding).toEqual(
+      expect.objectContaining({
+        linkHost: 'gofundme.com',
+        goalAmount: 1200,
+        askPurpose: 'healthcare',
+        beneficiary: 'self',
+        approvedAt: approvedAt.toISOString(),
+        askState: 'active',
+        callState: null,
+      }),
+    );
+  });
+
+  function callResponse(
+    moderation?: { hidden: boolean; removed: boolean },
+    opDeletedAt: Date | null = null,
+  ) {
+    return toForumThreadResponse(
+      makeThread({ kind: 'call', category: 'funding' }),
+      null,
+      viewer,
+      makePost({ isOp: true, deletedAt: opDeletedAt }),
+      0,
+      false,
+      moderation,
+      null,
+      null,
+      [],
+      null,
+      fundingRow({ funderName: 'Fundação Gulbenkian' }),
+    );
+  }
+
+  it('keeps the funding view for a visible OP', () => {
+    expect(
+      callResponse({ hidden: false, removed: false }).funding,
+    ).not.toBeNull();
+  });
+
+  it('is null for an OP a moderator removed', () => {
+    expect(callResponse({ hidden: true, removed: true }).funding).toBeNull();
+  });
+
+  it('is null for an OP a moderator hid', () => {
+    expect(callResponse({ hidden: true, removed: false }).funding).toBeNull();
+  });
+
+  it('is null for a tombstoned OP', () => {
+    expect(callResponse(undefined, new Date()).funding).toBeNull();
+  });
+
+  it('maps a pending ask as pending', () => {
+    const response = toForumThreadResponse(
+      makeThread({ kind: 'ask', category: 'funding', reviewState: 'pending' }),
+      null,
+      viewer,
+      makePost({ isOp: true }),
+      0,
+      false,
+      undefined,
+      null,
+      null,
+      [],
+      null,
+      fundingRow({
+        goalAmount: 1200,
+        askPurpose: 'legal',
+        beneficiary: 'self',
+      }),
+    );
+    expect(response.funding?.askState).toBe('pending');
+  });
+
+  // The OP cascades with an erased author's account, so an ask with no OP
+  // left has nobody behind its donate link.
+  it('is null for an ask whose opening post is gone', () => {
+    const response = toForumThreadResponse(
+      makeThread({
+        kind: 'ask',
+        category: 'funding',
+        reviewState: 'approved',
+        authorId: null,
+      }),
+      null,
+      viewer,
+      null,
+      0,
+      false,
+      undefined,
+      null,
+      null,
+      [],
+      null,
+      fundingRow({
+        goalAmount: 1200,
+        askPurpose: 'healthcare',
+        beneficiary: 'self',
+      }),
+    );
+    expect(response.funding).toBeNull();
+  });
+
+  it('keeps the funding view of a call whose opening post is gone', () => {
+    const response = toForumThreadResponse(
+      makeThread({ kind: 'call', category: 'funding' }),
+      null,
+      viewer,
+      null,
+      0,
+      false,
+      undefined,
+      null,
+      null,
+      [],
+      null,
+      fundingRow({ funderName: 'Fundação Gulbenkian' }),
+    );
+    expect(response.funding?.funderName).toBe('Fundação Gulbenkian');
+  });
+});
+
+describe('hostOfStoredLink', () => {
+  it('lowercases the host and strips one leading www.', () => {
+    expect(hostOfStoredLink('https://WWW.GoFundMe.com/f/help-ana')).toBe(
+      'gofundme.com',
+    );
+  });
+
+  it('answers an empty host for a row that no longer parses', () => {
+    expect(hostOfStoredLink('not a url')).toBe('');
   });
 });

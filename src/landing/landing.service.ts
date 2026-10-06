@@ -26,6 +26,15 @@ import {
   Changemaker,
   ChangemakerStatus,
 } from '../changemakers/entities/changemaker.entity';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
+import { hasEnded } from '../events/event-timing';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { CreateLandingFeatureDto } from './dto/create-landing-feature.dto';
@@ -47,7 +56,9 @@ import {
   toAdminLandingFeatureDTO,
   toLandingChangemakerFeatureDTO,
   toLandingCommunityFeatureDTO,
+  toLandingGatheringFeatureDTO,
   toLandingMemberFeatureDTO,
+  toLandingStoryFeatureDTO,
 } from './landing-response';
 
 /** How many roster avatars a featured-community card shows before collapsing
@@ -62,6 +73,11 @@ const LANDING_COMMUNITY_FACE_LIMIT = 5;
  *  `search` first. Mirrors the logger-only truncation precedent in
  *  `AdminCommunitiesService` (`MAX_LISTED_COMMUNITIES`). */
 const MAX_ELIGIBLE_RESULTS = 30;
+
+/** The `content_moderation.subject_type` a gathering is reported and taken
+ *  down under: the same value `EventsService.SUBJECT_TYPE` (private there) and
+ *  `EVENT_MODERATION_SUBJECT_TYPE` in `event-reminders.service.ts` use. */
+const GATHERING_MODERATION_SUBJECT_TYPE = 'event';
 
 /** Result of resolving a single `(section, targetId)` pair against its source
  *  entity: whether it currently exists, whether it is eligible to be
@@ -79,7 +95,8 @@ interface TargetState {
 // drift between the read-time honesty filter and the admin picker/CRUD.
 
 // Each predicate below has a SQL twin (`LandingService#memberEligibilityQuery`
-// / `#communityEligibilityQuery` / `#changemakerEligibilityQuery`), used by
+// / `#communityEligibilityQuery` / `#changemakerEligibilityQuery` /
+// `#gatheringEligibilityQuery` / `#storyEligibilityQuery`), used by
 // `listEligible`'s anti-join query, where the same rule has to be expressed
 // as a WHERE clause, since that query filters in Postgres. Both forms of a
 // rule MUST stay in sync; a change here needs the matching change there, and
@@ -163,6 +180,60 @@ function changemakerHiddenReason(
     : null;
 }
 
+/** JS form of the gathering eligibility rule: published, visible to everyone
+ *  (`EventVisibility.Public` alone qualifies; members-only, invite-only,
+ *  network and community-scoped gatherings stay off the homepage), still
+ *  ahead by `hasEnded`'s reading, and clear of any moderator takedown. Keep in sync with
+ *  `gatheringEligibilityQuery`'s SQL. A cancelled gathering fails the
+ *  `Published` check, since cancelling moves `status` to `Cancelled`. */
+function isGatheringEligible(
+  event: Event,
+  isTakenDown: boolean,
+  now: Date,
+): boolean {
+  return gatheringHiddenReason(event, isTakenDown, now) === null;
+}
+
+/** Checked in the order an admin most needs to hear it: a cancelled or draft
+ *  gathering reads as that before anything else. A moderator takedown reads
+ *  as `not_public`, like an archived community: the public can no longer see
+ *  it either way. */
+function gatheringHiddenReason(
+  event: Event,
+  isTakenDown: boolean,
+  now: Date,
+): LandingHiddenReason {
+  if (event.status === EventStatus.Cancelled) return 'cancelled';
+  if (event.status !== EventStatus.Published) return 'unpublished';
+  if (event.visibility !== EventVisibility.Public) return 'not_public';
+  if (isTakenDown) return 'not_public';
+  if (hasEnded(event, now)) return 'ended';
+  return null;
+}
+
+/** JS form of the story eligibility rule: an original magazine article whose
+ *  publish instant has arrived. `publishedAt` doubles as the schedule, so a
+ *  future value is a scheduled piece and still unpublished. Only originals
+ *  qualify, so the homepage shows each piece once: the reader's language
+ *  choice on the magazine picks the translation. Keep in sync with
+ *  `storyEligibilityQuery`'s SQL. */
+function isStoryEligible(article: MagazineArticle, now: Date): boolean {
+  return storyHiddenReason(article, now) === null;
+}
+
+/** A curated translation maps to `not_public`: like a non-public community,
+ *  it is a row the public homepage never shows. */
+function storyHiddenReason(
+  article: MagazineArticle,
+  now: Date,
+): LandingHiddenReason {
+  if (article.publishedAt === null || article.publishedAt > now) {
+    return 'unpublished';
+  }
+  if (article.translationOfArticleId !== null) return 'not_public';
+  return null;
+}
+
 function memberSummary(profile: Profile): AdminTargetSummary {
   return {
     slug: profile.slug,
@@ -190,12 +261,29 @@ function changemakerSummary(changemaker: Changemaker): AdminTargetSummary {
   };
 }
 
+function gatheringSummary(event: Event): AdminTargetSummary {
+  return {
+    slug: event.slug,
+    name: event.title,
+    avatarUrl: toImageUrl(event.coverImageUrl),
+  };
+}
+
+function storySummary(article: MagazineArticle): AdminTargetSummary {
+  return {
+    slug: article.slug,
+    name: article.title,
+    avatarUrl: toImageUrl(article.heroImageKey),
+  };
+}
+
 /**
  * Service behind the admin-curated live landing page: eligibility rules,
  * admin CRUD + reorder over `landing_feature`, and the public read-time
  * honesty filter (`getPublicFeatures`) that re-checks eligibility on every
- * read, so a member revoking `featuredConsent` or a community going private
- * stops appearing immediately, with no separate cleanup job.
+ * read, so a member revoking `featuredConsent`, a community going private, a
+ * gathering ending or being cancelled, or a story being unpublished stops
+ * appearing immediately, with no separate cleanup job.
  */
 @Injectable()
 export class LandingService {
@@ -212,6 +300,14 @@ export class LandingService {
     private readonly changemakers: Repository<Changemaker>,
     @InjectRepository(CommunityMember)
     private readonly communityMembers: Repository<CommunityMember>,
+    @InjectRepository(Event)
+    private readonly events: Repository<Event>,
+    @InjectRepository(MagazineArticle)
+    private readonly articles: Repository<MagazineArticle>,
+    @InjectRepository(MagazineAuthor)
+    private readonly authors: Repository<MagazineAuthor>,
+    @InjectRepository(ContentModeration)
+    private readonly contentModeration: Repository<ContentModeration>,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -223,21 +319,19 @@ export class LandingService {
    * maps survivors to the public DTOs.
    */
   async getPublicFeatures(): Promise<LandingFeaturesResponseDTO> {
-    const [memberFeatures, communityFeatures, changemakerFeatures] =
-      await Promise.all([
-        this.landingFeatures.find({
-          where: { section: LandingSection.Member, active: true },
-          order: { position: 'ASC' },
-        }),
-        this.landingFeatures.find({
-          where: { section: LandingSection.Community, active: true },
-          order: { position: 'ASC' },
-        }),
-        this.landingFeatures.find({
-          where: { section: LandingSection.Changemaker, active: true },
-          order: { position: 'ASC' },
-        }),
-      ]);
+    const [
+      memberFeatures,
+      communityFeatures,
+      changemakerFeatures,
+      gatheringFeatures,
+      storyFeatures,
+    ] = await Promise.all([
+      this.activeFeatures(LandingSection.Member),
+      this.activeFeatures(LandingSection.Community),
+      this.activeFeatures(LandingSection.Changemaker),
+      this.activeFeatures(LandingSection.Gathering),
+      this.activeFeatures(LandingSection.Story),
+    ]);
 
     // The community target ids are known immediately from `communityFeatures`,
     // with no need to wait for `communitiesById` to resolve before starting
@@ -246,12 +340,18 @@ export class LandingService {
     const communityTargetIds = communityFeatures.map(
       (feature) => feature.targetId,
     );
+    const gatheringTargetIds = gatheringFeatures.map(
+      (feature) => feature.targetId,
+    );
     const [
       profilesById,
       communitiesById,
       changemakersById,
       memberCountsByCommunityId,
       rosterFacesByCommunityId,
+      gatheringsById,
+      takenDownGatheringIds,
+      storiesById,
     ] = await Promise.all([
       this.getProfilesByIds(memberFeatures.map((feature) => feature.targetId)),
       this.getCommunitiesByIds(communityTargetIds),
@@ -260,18 +360,26 @@ export class LandingService {
       ),
       this.getCommunityMemberCounts(communityTargetIds),
       this.getCommunityRosterFaces(communityTargetIds),
+      this.getGatheringsByIds(gatheringTargetIds),
+      this.getTakenDownGatheringIds(gatheringTargetIds),
+      this.getStoriesByIds(storyFeatures.map((feature) => feature.targetId)),
     ]);
 
-    // The featured communities' owners, resolved in one query. `ownerId` is a
-    // `User.id`, which is exactly the key `getProfilesByIds` maps on
-    // (`Profile.userId`). Depends on `communitiesById`, so it can't join the
-    // batch wave above. It stays a single extra round trip for the whole
-    // section.
-    const ownerProfilesByUserId = await this.getProfilesByIds(
-      [...communitiesById.values()]
-        .map((community) => community.ownerId)
-        .filter((ownerId): ownerId is string => ownerId !== null),
-    );
+    // Two lookups that depend on the wave above, run together so they cost a
+    // single extra round trip between them. The featured communities' owners:
+    // `ownerId` is a `User.id`, which is exactly the key `getProfilesByIds`
+    // maps on (`Profile.userId`). The featured stories' bylines: one query
+    // for every story on the page.
+    const [ownerProfilesByUserId, authorsById] = await Promise.all([
+      this.getProfilesByIds(
+        [...communitiesById.values()]
+          .map((community) => community.ownerId)
+          .filter((ownerId): ownerId is string => ownerId !== null),
+      ),
+      this.getAuthorsByIds(
+        [...storiesById.values()].map((article) => article.authorId),
+      ),
+    ]);
 
     const members = memberFeatures.flatMap((feature) => {
       const profile = profilesById.get(feature.targetId);
@@ -312,7 +420,38 @@ export class LandingService {
       return [toLandingChangemakerFeatureDTO(feature, changemaker)];
     });
 
-    return { members, communities, changemakers };
+    // One clock reading for the whole response, so two gatherings ending in
+    // the same second cannot be judged against different instants.
+    const now = new Date();
+
+    const gatherings = gatheringFeatures.flatMap((feature) => {
+      const event = gatheringsById.get(feature.targetId);
+      if (!event) return [];
+      const isTakenDown = takenDownGatheringIds.has(event.id);
+      if (!isGatheringEligible(event, isTakenDown, now)) return [];
+      return [toLandingGatheringFeatureDTO(feature, event)];
+    });
+
+    const stories = storyFeatures.flatMap((feature) => {
+      const article = storiesById.get(feature.targetId);
+      if (!article || !isStoryEligible(article, now)) return [];
+      // `author_id` is a non-null FK, so a missing byline means the row
+      // changed under this read. Drop the card over printing a blank credit.
+      const author = authorsById.get(article.authorId);
+      if (!author) return [];
+      return [toLandingStoryFeatureDTO(feature, article, author)];
+    });
+
+    return { members, communities, changemakers, gatherings, stories };
+  }
+
+  /** One section's ACTIVE features in `position` order: what the public page
+   *  renders, before the per-target eligibility check. */
+  private activeFeatures(section: LandingSection): Promise<LandingFeature[]> {
+    return this.landingFeatures.find({
+      where: { section, active: true },
+      order: { position: 'ASC' },
+    });
   }
 
   /**
@@ -357,6 +496,42 @@ export class LandingService {
           communitySummary(community),
           isCommunityEligible(community),
           communityHiddenReason(community),
+        );
+      });
+    }
+
+    if (section === LandingSection.Gathering) {
+      const [gatheringsById, takenDownGatheringIds] = await Promise.all([
+        this.getGatheringsByIds(targetIds),
+        this.getTakenDownGatheringIds(targetIds),
+      ]);
+      const now = new Date();
+      return features.map((feature) => {
+        const event = gatheringsById.get(feature.targetId);
+        if (!event)
+          return toAdminLandingFeatureDTO(feature, null, false, 'deleted');
+        const isTakenDown = takenDownGatheringIds.has(event.id);
+        return toAdminLandingFeatureDTO(
+          feature,
+          gatheringSummary(event),
+          isGatheringEligible(event, isTakenDown, now),
+          gatheringHiddenReason(event, isTakenDown, now),
+        );
+      });
+    }
+
+    if (section === LandingSection.Story) {
+      const storiesById = await this.getStoriesByIds(targetIds);
+      const now = new Date();
+      return features.map((feature) => {
+        const article = storiesById.get(feature.targetId);
+        if (!article)
+          return toAdminLandingFeatureDTO(feature, null, false, 'deleted');
+        return toAdminLandingFeatureDTO(
+          feature,
+          storySummary(article),
+          isStoryEligible(article, now),
+          storyHiddenReason(article, now),
         );
       });
     }
@@ -460,6 +635,73 @@ export class LandingService {
       );
     }
 
+    if (section === LandingSection.Gathering) {
+      const query = this.gatheringEligibilityQuery();
+      if (alreadyFeaturedTargetIds.length) {
+        query.andWhere('gathering.id NOT IN (:...alreadyFeaturedTargetIds)', {
+          alreadyFeaturedTargetIds,
+        });
+      }
+      if (searchPattern) {
+        query.andWhere(
+          `${foldedHaystack('gathering', ['title', 'slug'])} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`,
+          { searchPattern },
+        );
+      }
+      // Soonest first: the gathering an admin is most likely to want on the
+      // homepage this week leads the picker.
+      const events = await query
+        .orderBy('gathering.startAt', 'ASC')
+        .take(MAX_ELIGIBLE_RESULTS)
+        .getMany();
+      if (events.length === MAX_ELIGIBLE_RESULTS) {
+        this.logger.warn(
+          `listEligible(gathering) truncated at ${MAX_ELIGIBLE_RESULTS} results. Narrow the search term to see more.`,
+        );
+      }
+      return events.map((event) =>
+        toAdminEligibleEntityDTO(
+          event.id,
+          event.slug,
+          event.title,
+          event.coverImageUrl,
+        ),
+      );
+    }
+
+    if (section === LandingSection.Story) {
+      const query = this.storyEligibilityQuery();
+      if (alreadyFeaturedTargetIds.length) {
+        query.andWhere('story.id NOT IN (:...alreadyFeaturedTargetIds)', {
+          alreadyFeaturedTargetIds,
+        });
+      }
+      if (searchPattern) {
+        query.andWhere(
+          `${foldedHaystack('story', ['title', 'slug'])} LIKE ${foldedSearchTerm('searchPattern')} ESCAPE '\\'`,
+          { searchPattern },
+        );
+      }
+      // Newest first, the order the magazine itself lists its archive in.
+      const articles = await query
+        .orderBy('story.publishedAt', 'DESC')
+        .take(MAX_ELIGIBLE_RESULTS)
+        .getMany();
+      if (articles.length === MAX_ELIGIBLE_RESULTS) {
+        this.logger.warn(
+          `listEligible(story) truncated at ${MAX_ELIGIBLE_RESULTS} results. Narrow the search term to see more.`,
+        );
+      }
+      return articles.map((article) =>
+        toAdminEligibleEntityDTO(
+          article.id,
+          article.slug,
+          article.title,
+          article.heroImageKey,
+        ),
+      );
+    }
+
     const query = this.changemakerEligibilityQuery();
     if (alreadyFeaturedTargetIds.length) {
       query.andWhere('changemaker.id NOT IN (:...alreadyFeaturedTargetIds)', {
@@ -531,6 +773,44 @@ export class LandingService {
       .where('changemaker.status = :status', {
         status: ChangemakerStatus.Published,
       });
+  }
+
+  /** SQL form of `isGatheringEligible` (Published + Public visibility + not
+   *  ended + not taken down). "Not ended" is `hasEnded`'s rule inverted: the
+   *  end instant, or the start when the host gave no end, is still ahead.
+   *  Quoted snake_case column names throughout, since TypeORM leaves an
+   *  `alias.property` path inside a function call or before `::text`
+   *  unrewritten. Keep in sync with `isGatheringEligible`. */
+  private gatheringEligibilityQuery(): SelectQueryBuilder<Event> {
+    return this.events
+      .createQueryBuilder('gathering')
+      .where('gathering.status = :status', { status: EventStatus.Published })
+      .andWhere('gathering.visibility = :visibility', {
+        visibility: EventVisibility.Public,
+      })
+      .andWhere(
+        'COALESCE("gathering"."end_at", "gathering"."start_at") > now()',
+      )
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "moderation"
+          WHERE "moderation"."subject_type" = :gatheringSubjectType
+            AND "moderation"."subject_id" = "gathering"."id"::text
+            AND ("moderation"."hidden_at" IS NOT NULL
+              OR "moderation"."removed_at" IS NOT NULL)
+        )`,
+        { gatheringSubjectType: GATHERING_MODERATION_SUBJECT_TYPE },
+      );
+  }
+
+  /** SQL form of `isStoryEligible` (an original with its publish instant set
+   *  and reached). Keep in sync with `isStoryEligible`. */
+  private storyEligibilityQuery(): SelectQueryBuilder<MagazineArticle> {
+    return this.articles
+      .createQueryBuilder('story')
+      .where('story.publishedAt IS NOT NULL')
+      .andWhere('story.publishedAt <= now()')
+      .andWhere('"story"."translation_of_article_id" IS NULL');
   }
 
   /**
@@ -728,6 +1008,56 @@ export class LandingService {
     );
   }
 
+  private async getGatheringsByIds(
+    eventIds: string[],
+  ): Promise<Map<string, Event>> {
+    if (!eventIds.length) return new Map();
+    const events = await this.events.find({ where: { id: In(eventIds) } });
+    return new Map(events.map((event) => [event.id, event]));
+  }
+
+  /** The subset of `eventIds` a moderator has hidden or removed. One query
+   *  for the whole batch, read beside `getGatheringsByIds` so a takedown drops
+   *  a featured gathering on the very next public read. */
+  private async getTakenDownGatheringIds(
+    eventIds: string[],
+  ): Promise<Set<string>> {
+    if (!eventIds.length) return new Set();
+    const rows = await this.contentModeration.find({
+      where: {
+        subjectType: GATHERING_MODERATION_SUBJECT_TYPE,
+        subjectId: In(eventIds),
+      },
+      select: { subjectId: true, hiddenAt: true, removedAt: true },
+    });
+    return new Set(
+      rows
+        .filter((row) => row.hiddenAt !== null || row.removedAt !== null)
+        .map((row) => row.subjectId),
+    );
+  }
+
+  private async getStoriesByIds(
+    articleIds: string[],
+  ): Promise<Map<string, MagazineArticle>> {
+    if (!articleIds.length) return new Map();
+    const articles = await this.articles.find({
+      where: { id: In(articleIds) },
+    });
+    return new Map(articles.map((article) => [article.id, article]));
+  }
+
+  private async getAuthorsByIds(
+    authorIds: string[],
+  ): Promise<Map<string, MagazineAuthor>> {
+    const uniqueAuthorIds = [...new Set(authorIds)];
+    if (!uniqueAuthorIds.length) return new Map();
+    const authors = await this.authors.find({
+      where: { id: In(uniqueAuthorIds) },
+    });
+    return new Map(authors.map((author) => [author.id, author]));
+  }
+
   private async getCommunityMemberCounts(
     communityIds: string[],
   ): Promise<Map<string, number>> {
@@ -847,6 +1177,34 @@ export class LandingService {
         eligible: isCommunityEligible(community),
         hiddenReason: communityHiddenReason(community),
         summary: communitySummary(community),
+      };
+    }
+
+    if (section === LandingSection.Gathering) {
+      const [event, takenDownGatheringIds] = await Promise.all([
+        this.events.findOne({ where: { id: targetId } }),
+        this.getTakenDownGatheringIds([targetId]),
+      ]);
+      if (!event)
+        return { eligible: false, hiddenReason: 'deleted', summary: null };
+      const isTakenDown = takenDownGatheringIds.has(event.id);
+      const now = new Date();
+      return {
+        eligible: isGatheringEligible(event, isTakenDown, now),
+        hiddenReason: gatheringHiddenReason(event, isTakenDown, now),
+        summary: gatheringSummary(event),
+      };
+    }
+
+    if (section === LandingSection.Story) {
+      const article = await this.articles.findOne({ where: { id: targetId } });
+      if (!article)
+        return { eligible: false, hiddenReason: 'deleted', summary: null };
+      const now = new Date();
+      return {
+        eligible: isStoryEligible(article, now),
+        hiddenReason: storyHiddenReason(article, now),
+        summary: storySummary(article),
       };
     }
 
