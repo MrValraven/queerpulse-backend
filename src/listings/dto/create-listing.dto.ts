@@ -589,11 +589,11 @@ export class CreateListingDto {
 
   /**
    * Who owns and runs the business, as the owner declares it: any of
-   * `women`, `trans`, `nonbinary`, each at most once. Self-declared, never
-   * verified. OWNER-PERSONAL (it discloses the owner's gender identity): a
-   * co-manager PATCH carrying it is refused, a suggestion accepts it and
-   * stores none of it, and `AdminCreateListingDto` omits it. See
-   * `Listing.ownedBy`.
+   * `women`, `trans`, `nonbinary`, `bipoc`, each at most once. Self-declared,
+   * never verified. OWNER-PERSONAL (it discloses the owner's gender or racial
+   * identity): a co-manager PATCH carrying it is refused, a suggestion
+   * accepts it and stores none of it, and `AdminCreateListingDto` omits it.
+   * See `Listing.ownedBy`.
    */
   @IsOptional()
   @IsArray()

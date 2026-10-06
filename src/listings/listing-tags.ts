@@ -11,13 +11,14 @@ import { BadRequestException } from '@nestjs/common';
  *
  * What stays out on purpose: accessibility claims belong in `accessibility`
  * (structured answers that can also say no), atmosphere belongs in `goodFor`,
- * and the price tier belongs in `price`. None of those are tags.
+ * the price tier belongs in `price`, and spoken languages belong in `langs`.
+ * None of those are tags.
  *
  * Served as-is by `GET /directory/tags` so the frontend picker and this
  * validation read one list.
  */
 export type ListingTagGroupId =
-  'visiting' | 'happening' | 'foodDrink' | 'pricing' | 'languages';
+  'visiting' | 'happening' | 'foodDrink' | 'pricing';
 
 export interface ListingTagGroup {
   id: ListingTagGroupId;
@@ -70,16 +71,6 @@ export const LISTING_TAG_GROUPS: readonly ListingTagGroup[] = [
       'Sliding scale',
       'Pay what you can',
       'Student discount',
-    ],
-  },
-  {
-    id: 'languages',
-    tags: [
-      'Portuguese spoken',
-      'English spoken',
-      'Spanish spoken',
-      'French spoken',
-      'Portuguese Sign Language',
     ],
   },
 ];

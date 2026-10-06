@@ -550,7 +550,7 @@ describe('DirectoryService public reads', () => {
       );
     });
 
-    it('starts with the visiting group and ends with the languages group', () => {
+    it('starts with the visiting group and ends with the pricing group', () => {
       const groupIds = service.listTagVocabulary().map((group) => group.id);
 
       expect(groupIds).toEqual([
@@ -558,7 +558,6 @@ describe('DirectoryService public reads', () => {
         'happening',
         'foodDrink',
         'pricing',
-        'languages',
       ]);
     });
 

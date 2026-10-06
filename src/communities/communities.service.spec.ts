@@ -234,8 +234,14 @@ describe('CommunitiesService', () => {
   // `suggestedCommunities`'s social-graph signal and `unfreeze`'s
   // automatic-freeze gate (BE-COM-04). Neither is exercised by the flows
   // below beyond needing to resolve, so both default to the permissive
-  // answer: no connections, and zero open reports.
-  let connections: { allAcceptedConnectionUserIds: jest.Mock };
+  // answer: no connections, and zero open reports. `resolveInvitees` also
+  // asks which founding invitees are the creator's connections
+  // (`acceptedConnectionsAmong`); the create tests that invite somebody
+  // answer it themselves.
+  let connections: {
+    allAcceptedConnectionUserIds: jest.Mock;
+    acceptedConnectionsAmong: jest.Mock;
+  };
   let autoFreeze: { openReportCount: jest.Mock };
   let bans: {
     exists: jest.Mock;
@@ -358,6 +364,7 @@ describe('CommunitiesService', () => {
     };
     connections = {
       allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
+      acceptedConnectionsAmong: jest.fn().mockResolvedValue(new Set<string>()),
     };
     autoFreeze = {
       openReportCount: jest.fn().mockResolvedValue(0),
@@ -612,6 +619,11 @@ describe('CommunitiesService', () => {
       const qb = qbStub();
       qb.getMany!.mockResolvedValue([{ slug: 'jo', userId: 'steward-1' }]);
       profiles.createQueryBuilder.mockReturnValue(qb);
+      // A steward is one of the creator's connections; anyone else is
+      // dropped before any invitation is written.
+      connections.acceptedConnectionsAmong.mockResolvedValue(
+        new Set(['steward-1']),
+      );
 
       const dto = {
         name: 'Queer Devs',
@@ -660,6 +672,9 @@ describe('CommunitiesService', () => {
       const qb = qbStub();
       qb.getMany!.mockResolvedValue([{ slug: 'invitee', userId: 'invitee-1' }]);
       profiles.createQueryBuilder.mockReturnValue(qb);
+      connections.acceptedConnectionsAmong.mockResolvedValue(
+        new Set(['invitee-1']),
+      );
 
       const dto = {
         name: 'Queer Devs',
@@ -711,6 +726,9 @@ describe('CommunitiesService', () => {
         { slug: 'invitee', userId: 'invitee-1' },
       ]);
       profiles.createQueryBuilder.mockReturnValue(qb);
+      connections.acceptedConnectionsAmong.mockResolvedValue(
+        new Set(['steward-1', 'invitee-1']),
+      );
 
       const dto = {
         name: 'Queer Devs',
@@ -750,6 +768,73 @@ describe('CommunitiesService', () => {
         expect.objectContaining({ proposedRole: RosterRole.Mod }),
         'u1',
       );
+    });
+
+    it('drops founding invitees and stewards who are not connected to the creator', async () => {
+      communities.save.mockImplementation((c: Partial<Community>) => ({
+        ...c,
+        id: 'c1',
+        slug: 'queer-devs',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      }));
+      members.save.mockImplementation((m: Partial<CommunityMember>) => m);
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([
+        { slug: 'jo', userId: 'steward-1' },
+        { slug: 'stranger-steward', userId: 'stranger-steward-1' },
+        { slug: 'invitee', userId: 'invitee-1' },
+        { slug: 'stranger', userId: 'stranger-1' },
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      // Only `jo` and `invitee` are the creator's connections.
+      connections.acceptedConnectionsAmong.mockResolvedValue(
+        new Set(['steward-1', 'invitee-1']),
+      );
+
+      const dto = {
+        name: 'Queer Devs',
+        handle: 'queer-devs',
+        type: 'professional',
+        accessTier: 'public',
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        purpose: 'x',
+        whoFor: 'y',
+        tagline: 'z',
+        stewards: ['jo', 'stranger-steward'],
+        invites: ['invitee', 'stranger'],
+      };
+      await service.create('u1', dto as CreateCommunityInput);
+
+      // One batched lookup over every resolved person, asked from the
+      // creator's side.
+      expect(connections.acceptedConnectionsAmong).toHaveBeenCalledTimes(1);
+      expect(connections.acceptedConnectionsAmong).toHaveBeenCalledWith('u1', [
+        'steward-1',
+        'stranger-steward-1',
+        'invitee-1',
+        'stranger-1',
+      ]);
+      // The strangers are dropped silently, like an unknown slug: no bell,
+      // and the create still succeeds.
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['invitee-1'],
+        NotificationType.CommunityInviteReceived,
+        expect.anything(),
+        'u1',
+      );
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['steward-1'],
+        NotificationType.CommunityInviteReceived,
+        expect.objectContaining({ proposedRole: RosterRole.Mod }),
+        'u1',
+      );
+      const notifiedUserIds = (
+        notifications.createForRecipients.mock.calls as Array<[string[]]>
+      ).flatMap(([recipientUserIds]) => recipientUserIds);
+      expect(notifiedUserIds).not.toContain('stranger-steward-1');
+      expect(notifiedUserIds).not.toContain('stranger-1');
     });
 
     it('retries ref/slug allocation on a unique-violation race and eventually succeeds', async () => {

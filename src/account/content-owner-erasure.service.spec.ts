@@ -58,6 +58,8 @@ describe('ContentOwnerErasureService gatherings', () => {
         .mockResolvedValueOnce(unfinishedEvents)
         .mockResolvedValue(seriesOccurrences),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      // A handover seats the new host as 'going' (`seatHostAsGoing`).
+      manager: { query: jest.fn().mockResolvedValue([]) },
     };
     const cohosts = {
       find: jest.fn().mockResolvedValue(cohostRows),

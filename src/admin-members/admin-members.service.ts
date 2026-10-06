@@ -15,7 +15,12 @@ import {
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
-import { MemberLookup, MemberRef } from '../common/member-ref';
+import {
+  MemberLookup,
+  MemberRef,
+  toVisibleAvatarUrl,
+} from '../common/member-ref';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import {
   CommunityMember,
   RosterRole,
@@ -32,7 +37,11 @@ import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
-import { StaffRoleId } from '../users/staff-roles.registry';
+import {
+  STAFF_ROLE_IDS,
+  StaffRoleId,
+  isStaffRoleId,
+} from '../users/staff-roles.registry';
 import { VouchService } from '../vouch/vouch.service';
 import { UsersService } from '../users/users.service';
 import { Vouch } from '../vouch/entities/vouch.entity';
@@ -46,7 +55,9 @@ import {
   AdminMemberDetailDTO,
   AdminMemberListDTO,
   AdminMemberRoleDTO,
+  AdminStaffGrantDTO,
   AdminStaffRoleHolderDTO,
+  AdminStaffRosterRowDTO,
   FlaggedMemberDTO,
   VouchAvatarDTO,
   VouchGraphNodeDTO,
@@ -95,6 +106,18 @@ const UUID_RE =
  *  `AdminCommunitiesService`'s `MAX_SCANNED_REPORTS`: well above real scale,
  *  purely so neither query can ever be unbounded. */
 const MAX_FLAGGED_SCAN = 2000;
+
+/** The account tiers that put someone on the `/admin/staff` roster by tier
+ *  alone. Plain members reach it only through a grant. */
+const STAFF_ROSTER_TIERS = [UserRole.Moderator, UserRole.Admin];
+
+/** Roster sort: admins first, then moderators, then grant holders on the
+ *  member tier. */
+const STAFF_ROSTER_TIER_RANK: Record<UserRole, number> = {
+  [UserRole.Admin]: 0,
+  [UserRole.Moderator]: 1,
+  [UserRole.Member]: 2,
+};
 
 // Mirrors the (small, closed) set of `ModAuditLog.action` codes written by
 // `ModerationService` — `MOD_ACTION_CODES` in `dto/mod-action.dto.ts`
@@ -276,6 +299,110 @@ export class AdminMembersService {
       platformRole: profileRow.user.role,
       staffRoles: (grantsByUserId.get(profileRow.userId) ?? []).sort(),
     }));
+  }
+
+  /**
+   * The whole `/admin/staff` roster as one row per person: the moderator and
+   * admin account tiers, plus everyone holding any staff-role grant (badged or
+   * unbadged), each carrying their avatar, account state and every grant.
+   * Before this, the page merged `GET /platform/staff` with `staff-roles`
+   * above and had no photo to show.
+   *
+   * WHO IS ON IT. All three statuses stay in: an admin deciding whether to
+   * revoke a grant needs to see the suspended or deactivated person still
+   * holding it, which is the one thing the public roster (active only, by
+   * design) hides. House accounts (`isSystem`) are left out, since they are
+   * platform machinery with nothing to manage here, and so is anyone without
+   * a profile row, who has no slug or name to render.
+   *
+   * THE LIMIT. Applied per population, for the reason
+   * `PlatformStaffService.loadRoster` gives: one shared `take` across the
+   * union would let a long moderator bench push grant holders off the end.
+   * The grant query is capped by grant ROWS, the tier query by people, and
+   * the grant-holder lookup by people, all at `DEFAULT_LIST_LIMIT`, far above
+   * any plausible staff.
+   *
+   * Three batched reads in total, whatever the roster size: grants and tiers
+   * in parallel, then one lookup for the grant holders the tier read did not
+   * already return.
+   */
+  async listStaffRoster(): Promise<AdminStaffRosterRowDTO[]> {
+    const [grantRows, tierUsers] = await Promise.all([
+      this.staffRoles.find({
+        select: ['userId', 'role', 'grantedAt'],
+        // Deterministic order so the cap, if it were ever reached, truncates
+        // the same rows on every call.
+        order: { userId: 'ASC', role: 'ASC' },
+        take: DEFAULT_LIST_LIMIT,
+      }),
+      this.users.find({
+        where: { role: In(STAFF_ROSTER_TIERS), isSystem: false },
+        relations: { profile: true },
+        order: { id: 'ASC' },
+        take: DEFAULT_LIST_LIMIT,
+      }),
+    ]);
+
+    const grantsByUserId = new Map<string, AdminStaffGrantDTO[]>();
+    for (const grantRow of grantRows) {
+      // `user_staff_roles.role` is a varchar validated at the app layer, so a
+      // row written by an older build (or by hand) can hold a string this
+      // build does not know. It is dropped, and a member whose only rows are
+      // unknown strings holds nothing this build can show or revoke, so they
+      // stay off the roster.
+      if (!isStaffRoleId(grantRow.role)) continue;
+      const heldGrants = grantsByUserId.get(grantRow.userId) ?? [];
+      heldGrants.push({
+        role: grantRow.role,
+        grantedAt: grantRow.grantedAt.toISOString(),
+      });
+      grantsByUserId.set(grantRow.userId, heldGrants);
+    }
+
+    const rosterUsersById = new Map<string, User>();
+    for (const tierUser of tierUsers) {
+      rosterUsersById.set(tierUser.id, tierUser);
+    }
+
+    // An admin holding a grant is already loaded by the tier read, so only
+    // the holders it missed (mostly the ordinary member tier) need a lookup.
+    const missingHolderIds = [...grantsByUserId.keys()].filter(
+      (holderId) => !rosterUsersById.has(holderId),
+    );
+    if (missingHolderIds.length) {
+      const grantHolders = await this.users.find({
+        where: { id: In(missingHolderIds), isSystem: false },
+        relations: { profile: true },
+        order: { id: 'ASC' },
+        take: DEFAULT_LIST_LIMIT,
+      });
+      for (const grantHolder of grantHolders) {
+        rosterUsersById.set(grantHolder.id, grantHolder);
+      }
+    }
+
+    return [...rosterUsersById.values()]
+      .filter((rosterUser) => rosterUser.profile?.slug)
+      .map((rosterUser): AdminStaffRosterRowDTO => ({
+        id: rosterUser.id,
+        slug: rosterUser.profile.slug,
+        firstName: rosterUser.profile.firstName,
+        lastName: rosterUser.profile.lastName,
+        avatarUrl: toVisibleAvatarUrl(rosterUser.profile),
+        platformRole: rosterUser.role,
+        status: rosterUser.status,
+        joinedAt: rosterUser.createdAt.toISOString(),
+        grants: sortGrantsByRegistryOrder(
+          grantsByUserId.get(rosterUser.id) ?? [],
+        ),
+      }))
+      .sort(
+        (first, second) =>
+          STAFF_ROSTER_TIER_RANK[first.platformRole] -
+            STAFF_ROSTER_TIER_RANK[second.platformRole] ||
+          first.firstName.localeCompare(second.firstName) ||
+          first.lastName.localeCompare(second.lastName),
+      );
   }
 
   async listFlagged(): Promise<FlaggedMemberDTO[]> {
@@ -1366,4 +1493,18 @@ export class AdminMembersService {
       avatarUrl,
     };
   }
+}
+
+/**
+ * Registry order (`STAFF_ROLES`), so a person holding several grants reads the
+ * same way on every load and the row does not reorder itself between two
+ * calls that read the grant rows in a different sequence.
+ */
+function sortGrantsByRegistryOrder(
+  grants: AdminStaffGrantDTO[],
+): AdminStaffGrantDTO[] {
+  return [...grants].sort(
+    (first, second) =>
+      STAFF_ROLE_IDS.indexOf(first.role) - STAFF_ROLE_IDS.indexOf(second.role),
+  );
 }

@@ -109,6 +109,7 @@ import {
 import { toCsvRow } from '../common/csv';
 import { EVENT_DELETING, type EventDeletingEvent } from './event.events';
 import { RsvpService } from './rsvp.service';
+import { seatHostAsGoing } from './host-seat';
 import { occurrenceStartAt } from './series-occurrences';
 
 /** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
@@ -491,6 +492,18 @@ export class EventsService {
         seriesIndex: seriesId ? index : null,
       });
       const saved = await this.saveWithUniqueSlug(event, dto.title);
+      // THE HOST IS GOING. Whoever creates a gathering is on its roster, and
+      // their seat counts against capacity: a gathering for five has four
+      // spots left for guests the moment it exists. It is a real 'going' row,
+      // so `goingCount`, `seatsTaken`, the full flag, the attendee roster,
+      // reminders and the capacity alerts all read it with no host carve-out
+      // of their own. Written by `seatHostAsGoing` on purpose:
+      // `RsvpService.rsvp` would announce it (EVENT_RSVPED, the host's own
+      // "someone is going" notification and profile activity), and nobody
+      // needs telling that the host is going to the gathering they just
+      // made. The house account (`users.is_system`) is never seated; see
+      // `host-seat.ts`.
+      await seatHostAsGoing(this.rsvps.manager, saved.id, hostId);
       occurrenceSlugs.push(saved.slug);
       if (index === 0) firstSaved = saved;
     }
@@ -1235,6 +1248,11 @@ export class EventsService {
         this.rsvps.count({
           where: {
             eventId: event.id,
+            // The host's own seat is left out of the stake count. `create`
+            // puts every host on their own roster, so counting that row would
+            // leave a host unable to delete even an untouched gathering, and
+            // the host deleting it is the one person who needs no telling.
+            userId: Not(userId),
             status: In([
               RsvpStatus.Going,
               RsvpStatus.Maybe,
@@ -1425,6 +1443,13 @@ export class EventsService {
         .innerJoin(EventRsvp, 'r', 'r.event_id = e.id')
         .where('r.user_id = :userId', { userId })
         .andWhere('r.status = :status', { status })
+        // A member's own gatherings belong under 'hosting'. Every host holds
+        // a 'going' row on what they create (`EventsService.create`), so
+        // without this each one would be listed twice, and a busy host's
+        // own dates would crowd the gatherings they are attending off the
+        // first page. `IS DISTINCT FROM` keeps a gathering whose host erased
+        // their account (NULL `host_id`) on its attendees' lists.
+        .andWhere('e.host_id IS DISTINCT FROM :userId', { userId })
         // Property path (`startAt`), not the DB column: with the join + skip/take
         // this goes through TypeORM's distinct-id pagination pass, which resolves
         // ORDER BY via `findColumnWithPropertyPath` and throws on a raw column.

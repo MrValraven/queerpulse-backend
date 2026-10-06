@@ -269,8 +269,8 @@ type ListingCreateInput = Omit<CreateListingDto, 'affirmingBaselineAccepted'>;
  *  `visibility` is blanked to its column default here because
  *  `normalizeCreate` would otherwise store the suggester's answer, and a
  *  transfer does not reset it, so a later claimant would inherit it.
- *  `ownedBy` is blanked because a suggester cannot declare the gender
- *  identity of somebody else, the owner. A function rather than a shared
+ *  `ownedBy` is blanked because a suggester cannot declare the gender or
+ *  racial identity of somebody else, the owner. A function rather than a shared
  *  constant so every suggestion gets its own `ownedBy` array. */
 function suggestionOwnerPersonalBlanks() {
   return {

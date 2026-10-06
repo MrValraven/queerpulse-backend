@@ -45,6 +45,7 @@ import {
   readableMessageBody,
   readableMessageEditedAt,
 } from './legacy-message-body';
+import { EXACT_CREATED_AT_SELECT } from './message-history-cursor';
 import {
   messageAttachmentReferenceFromImageUrl,
   storageKeyFromImageUrl,
@@ -65,6 +66,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import {
+  authorTitleName,
   buildAuthorSummary,
   loadSenderIdentityContext,
   renderMessageSender,
@@ -629,6 +631,8 @@ export class MessagingCoreService {
                 identityHandle: description.handle ?? '',
                 identityAvatarUrl: description.avatarUrl,
                 staffFirstName: null,
+                personaKind: description.personaKind,
+                personaOwnerName: description.personaOwnerName,
               })
             : FORMER_IDENTITY_AUTHOR,
       };
@@ -811,21 +815,31 @@ export class MessagingCoreService {
 
   /**
    * The `created_at` of one message, scoped to the conversation it must belong
-   * to, or `null` when it isn't there. Backs `markRead`'s explicit read
-   * watermark (`upToMessageId`): the timestamp comes from the DB row, never
-   * from the caller, so a client can neither stamp a watermark past what it
-   * actually received nor point at another thread's message.
+   * to, as exact UTC ISO-8601 text, or `null` when it isn't there. Backs
+   * `markRead`'s explicit read watermark (`upToMessageId`): the timestamp
+   * comes from the DB row, never from the caller, so a client can neither
+   * stamp a watermark past what it actually received nor point at another
+   * thread's message.
+   *
+   * Selected with `EXACT_CREATED_AT_SELECT` because `messages.created_at`
+   * carries microsecond precision: this watermark is later compared back
+   * against `messages.created_at` in SQL (`m.created_at > p.last_read_at` in
+   * `unread-conversations-query.ts`), so full precision keeps that comparison
+   * exact. See `message-history-cursor.ts`'s header doc for the same trap on
+   * history cursors.
    */
   async messageCreatedAt(
     conversationId: string,
     messageId: string,
-  ): Promise<Date | null> {
-    const message = await this.messages.findOne({
-      where: { id: messageId, conversationId },
-      select: ['id', 'createdAt'],
-      withDeleted: true,
-    });
-    return message?.createdAt ?? null;
+  ): Promise<string | null> {
+    const row = await this.messages
+      .createQueryBuilder('m')
+      .withDeleted()
+      .select(EXACT_CREATED_AT_SELECT, 'exact_created_at')
+      .where('m.id = :messageId', { messageId })
+      .andWhere('m.conversation_id = :conversationId', { conversationId })
+      .getRawOne<{ exact_created_at: string }>();
+    return row?.exact_created_at ?? null;
   }
 
   /**
@@ -1993,12 +2007,14 @@ export class MessagingCoreService {
         replyParentSenderIdentityKind !== IdentityKind.Profile
           ? {
               ...plainReplyTo,
-              senderName: renderMessageSender(
-                replyParent,
-                profileByUser,
-                senderIdentityContext,
-                nameOptions,
-              ).displayName,
+              senderName: authorTitleName(
+                renderMessageSender(
+                  replyParent,
+                  profileByUser,
+                  senderIdentityContext,
+                  nameOptions,
+                ),
+              ),
             }
           : plainReplyTo;
       return {

@@ -508,9 +508,10 @@ export class PublicEligibilityService {
    * a `going` RSVP on a published gathering whose start time has passed,
    * where the member is neither the host nor a co-host.
    *
-   * `attendedEventCount` below counts every past `going` RSVP, including one
-   * a host left on their own gathering, and that made the whole 600 XP
-   * `events` cap solo. `EventsService.create` rejects a start time in the
+   * `attendedEventCount` below counts every past `going` RSVP outside the
+   * member's own hosted gatherings, and still counts a co-hosted one. This
+   * count once counted a host's own gathering too, and that made the whole
+   * 600 XP `events` cap solo. `EventsService.create` rejects a start time in the
    * past, so the naive version of that farm costs a wait, but `update` calls
    * `assertScheduleValid` with `rejectPast: false`, so a host can create a
    * gathering for tomorrow, PATCH `startAt` into last week, RSVP to it and
@@ -545,6 +546,12 @@ export class PublicEligibilityService {
     return query.getCount();
   }
 
+  // Gatherings attended, for the participation score. The member's own
+  // gatherings are left out: every host holds a 'going' row on what they
+  // create (`EventsService.create`), and hosting already scores on its own
+  // signal (`hostedOpenEvents`), so counting that row here too would pay each
+  // hosted gathering twice. `IS DISTINCT FROM` keeps a gathering whose host
+  // erased their account counting for the people who went to it.
   private async attendedEventCount(userId: string, now: Date): Promise<number> {
     return this.rsvps
       .createQueryBuilder('rsvp')
@@ -552,6 +559,7 @@ export class PublicEligibilityService {
       .where('rsvp.userId = :userId', { userId })
       .andWhere('rsvp.status = :status', { status: RsvpStatus.Going })
       .andWhere('event.startAt < :now', { now })
+      .andWhere('event.hostId IS DISTINCT FROM :userId', { userId })
       .getCount();
   }
 }

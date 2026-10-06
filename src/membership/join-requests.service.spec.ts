@@ -1007,14 +1007,20 @@ describe('JoinRequestsService', () => {
       email: 'sam@example.com',
       status: PlatformJoinRequestStatus.Pending,
     });
+    // Every approval needs a closed-set reason key; the decline reason slot
+    // before it stays undefined.
+    const approve = (requestId: string, reviewerId: string) =>
+      service.review(
+        requestId,
+        reviewerId,
+        PlatformJoinRequestStatus.Approved,
+        undefined,
+        'member_vouched',
+      );
 
     it('approving mints an invite bound to the email, on the SAME manager', async () => {
       txRepo.findOne.mockResolvedValue(pendingRow());
-      const result = await service.review(
-        'r1',
-        'admin-1',
-        PlatformJoinRequestStatus.Approved,
-      );
+      const result = await approve('r1', 'admin-1');
 
       expect(invites.createInviteForApproval).toHaveBeenCalledWith(
         manager,
@@ -1028,7 +1034,7 @@ describe('JoinRequestsService', () => {
 
     it('records the approving admin as the inviter', async () => {
       txRepo.findOne.mockResolvedValue(pendingRow());
-      await service.review('r1', 'admin-7', PlatformJoinRequestStatus.Approved);
+      await approve('r1', 'admin-7');
       expect(invites.createInviteForApproval).toHaveBeenCalledWith(
         expect.anything(),
         'admin-7',
@@ -1038,7 +1044,7 @@ describe('JoinRequestsService', () => {
 
     it('writes invite_id in the same UPDATE as the status flip', async () => {
       txRepo.findOne.mockResolvedValue(pendingRow());
-      await service.review('r1', 'admin-1', PlatformJoinRequestStatus.Approved);
+      await approve('r1', 'admin-1');
       expect(txRepo.update).toHaveBeenCalledWith(
         {
           id: 'r1',
@@ -1098,9 +1104,9 @@ describe('JoinRequestsService', () => {
 
     it('404s on an unknown request', async () => {
       txRepo.findOne.mockResolvedValue(null);
-      await expect(
-        service.review('nope', 'admin-1', PlatformJoinRequestStatus.Approved),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(approve('nope', 'admin-1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     it('rejects an already-reviewed request with 409', async () => {
@@ -1108,9 +1114,9 @@ describe('JoinRequestsService', () => {
         ...pendingRow(),
         status: PlatformJoinRequestStatus.Approved,
       });
-      await expect(
-        service.review('r1', 'admin-1', PlatformJoinRequestStatus.Approved),
-      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(approve('r1', 'admin-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
       expect(invites.createInviteForApproval).not.toHaveBeenCalled();
     });
 
@@ -1119,9 +1125,9 @@ describe('JoinRequestsService', () => {
       txRepo.update.mockResolvedValue({ affected: 0 });
       // The mint already ran, but the throw rolls the whole transaction back,
       // so the orphaned invite never commits.
-      await expect(
-        service.review('r1', 'admin-1', PlatformJoinRequestStatus.Approved),
-      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(approve('r1', 'admin-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
     });
 
     it('moves a pending request to waitlisted without minting an invite', async () => {
@@ -1152,11 +1158,7 @@ describe('JoinRequestsService', () => {
         ...pendingRow(),
         status: PlatformJoinRequestStatus.Waitlisted,
       });
-      const result = await service.review(
-        'r1',
-        'admin-1',
-        PlatformJoinRequestStatus.Approved,
-      );
+      const result = await approve('r1', 'admin-1');
       expect(result.status).toBe(PlatformJoinRequestStatus.Approved);
       expect(invites.createInviteForApproval).toHaveBeenCalled();
     });
@@ -1192,9 +1194,89 @@ describe('JoinRequestsService', () => {
         expect.objectContaining({ declineReason: 'spam_pattern' }),
       );
     });
+
+    // The approval-side twin of the decline check: every approval records
+    // why, so reviewers can be compared against one bar.
+    it('refuses an approval with no reason', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      await expect(
+        service.review('r1', 'admin-1', PlatformJoinRequestStatus.Approved),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(invites.createInviteForApproval).not.toHaveBeenCalled();
+      expect(txRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('records the trimmed approval reason on the update', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      const result = await service.review(
+        'r1',
+        'admin-1',
+        PlatformJoinRequestStatus.Approved,
+        undefined,
+        '  known_to_team  ',
+      );
+      expect(txRepo.update).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          approvalReason: 'known_to_team',
+          declineReason: null,
+        }),
+      );
+      expect(result.approvalReason).toBe('known_to_team');
+    });
+
+    it('writes a null approval reason on a decline', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      await service.review(
+        'r1',
+        'admin-1',
+        PlatformJoinRequestStatus.Declined,
+        'spam_pattern',
+        'member_vouched',
+      );
+      expect(txRepo.update).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ approvalReason: null }),
+      );
+    });
+
+    it('writes a null approval reason on a waitlist', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      await service.review(
+        'r1',
+        'admin-1',
+        PlatformJoinRequestStatus.Waitlisted,
+        undefined,
+        'member_vouched',
+      );
+      expect(txRepo.update).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ approvalReason: null }),
+      );
+    });
   });
 
   describe('bulkReview', () => {
+    it('lands every id in failed when a bulk approve carries no reason', async () => {
+      txRepo.findOne.mockResolvedValue({
+        id: 'a',
+        name: 'A',
+        email: 'a@example.com',
+        status: PlatformJoinRequestStatus.Pending,
+      });
+      const result = await service.bulkReview(
+        ['a', 'b'],
+        'admin-1',
+        PlatformJoinRequestStatus.Approved,
+      );
+      expect(result.succeeded).toEqual([]);
+      expect(result.failed).toEqual([
+        { id: 'a', reason: 'An approval reason is required' },
+        { id: 'b', reason: 'An approval reason is required' },
+      ]);
+      expect(txRepo.update).not.toHaveBeenCalled();
+    });
+
     it('reports per-item success and failure without stopping on the first error', async () => {
       txRepo.findOne
         .mockResolvedValueOnce({
@@ -1322,6 +1404,138 @@ describe('JoinRequestsService', () => {
 
       // Never their email: this label is shown to OTHER reviewers.
       expect(rows[0]!.reviewedByName).toBe('Member');
+    });
+  });
+
+  describe('updateInternalNote', () => {
+    const requestWithStatus = (
+      status: PlatformJoinRequestStatus,
+      overrides: Partial<PlatformJoinRequest> = {},
+    ) =>
+      ({
+        id: 'r1',
+        name: 'Sam',
+        email: 'sam@example.com',
+        status,
+        reviewedBy: 'reviewer-ana',
+        assignedStaffId: null,
+        inviteId: null,
+        internalNote: null,
+        internalNoteUpdatedAt: null,
+        internalNoteUpdatedBy: null,
+        ...overrides,
+      }) as unknown as PlatformJoinRequest;
+
+    it('404s an unknown request and writes nothing', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateInternalNote('missing', 'staff-luis', 'context'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(repo.update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      PlatformJoinRequestStatus.Pending,
+      PlatformJoinRequestStatus.Waitlisted,
+      PlatformJoinRequestStatus.Approved,
+    ])('409s a %s request: only a decline carries a note', async (status) => {
+      repo.findOne.mockResolvedValue(requestWithStatus(status));
+
+      await expect(
+        service.updateInternalNote('r1', 'staff-luis', 'context'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(repo.update).not.toHaveBeenCalled();
+    });
+
+    it('stores the trimmed text, stamps the actor, and names them on the returned view', async () => {
+      const savedAt = new Date('2026-10-05T12:00:00.000Z');
+      repo.findOne
+        .mockResolvedValueOnce(
+          requestWithStatus(PlatformJoinRequestStatus.Declined),
+        )
+        // `viewOfOne` re-reads the row after the write.
+        .mockResolvedValueOnce(
+          requestWithStatus(PlatformJoinRequestStatus.Declined, {
+            internalNote: 'Same person as the March request',
+            internalNoteUpdatedAt: savedAt,
+            internalNoteUpdatedBy: 'staff-luis',
+          }),
+        );
+      profileRepo.find.mockResolvedValue([
+        { userId: 'reviewer-ana', firstName: 'Ana', lastName: 'Reis' },
+        { userId: 'staff-luis', firstName: 'Luís', lastName: 'Matos' },
+      ]);
+
+      const view = await service.updateInternalNote(
+        'r1',
+        'staff-luis',
+        '   Same person as the March request \n',
+      );
+
+      // Conditional on Declined, so a racing status change cannot land a note
+      // on a row that is no longer a decline.
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'r1', status: PlatformJoinRequestStatus.Declined },
+        {
+          internalNote: 'Same person as the March request',
+          internalNoteUpdatedAt: expect.any(Date) as unknown,
+          internalNoteUpdatedBy: 'staff-luis',
+        },
+      );
+      expect(view.internalNote).toBe('Same person as the March request');
+      expect(view.internalNoteUpdatedAt).toBe(savedAt);
+      expect(view.internalNoteUpdatedBy).toBe('staff-luis');
+      expect(view.internalNoteUpdatedByName).toBe('Luís Matos');
+      // The author resolves in the SAME batched lookup as the reviewer.
+      expect(profileRepo.find).toHaveBeenCalledTimes(1);
+      expect(profileRepo.find).toHaveBeenCalledWith({
+        where: { userId: In(['reviewer-ana', 'staff-luis']) },
+      });
+    });
+
+    it('clears the text and both stamps when the note is blank', async () => {
+      repo.findOne
+        .mockResolvedValueOnce(
+          requestWithStatus(PlatformJoinRequestStatus.Declined, {
+            internalNote: 'An older note',
+            internalNoteUpdatedAt: new Date('2026-10-01T00:00:00.000Z'),
+            internalNoteUpdatedBy: 'staff-luis',
+          }),
+        )
+        .mockResolvedValueOnce(
+          requestWithStatus(PlatformJoinRequestStatus.Declined),
+        );
+
+      const view = await service.updateInternalNote('r1', 'staff-ana', '   ');
+
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'r1', status: PlatformJoinRequestStatus.Declined },
+        {
+          internalNote: null,
+          internalNoteUpdatedAt: null,
+          internalNoteUpdatedBy: null,
+        },
+      );
+      expect(view.internalNote).toBeNull();
+      expect(view.internalNoteUpdatedAt).toBeNull();
+      expect(view.internalNoteUpdatedBy).toBeNull();
+      expect(view).not.toHaveProperty('internalNoteUpdatedByName');
+    });
+
+    it('409s when the row stopped being a decline between the read and the write', async () => {
+      repo.findOne
+        .mockResolvedValueOnce(
+          requestWithStatus(PlatformJoinRequestStatus.Declined),
+        )
+        .mockResolvedValueOnce(
+          requestWithStatus(PlatformJoinRequestStatus.Approved),
+        );
+      repo.update.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.updateInternalNote('r1', 'staff-luis', 'context'),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
   });
 });

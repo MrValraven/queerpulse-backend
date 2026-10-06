@@ -637,6 +637,8 @@ export function renderDirectCounterpart(
       identityHandle: identityDescription.handle ?? '',
       identityAvatarUrl: identityDescription.avatarUrl,
       staffFirstName: null,
+      personaKind: identityDescription.personaKind,
+      personaOwnerName: identityDescription.personaOwnerName,
     });
   }
   if (identityKind === IdentityKind.Profile) {

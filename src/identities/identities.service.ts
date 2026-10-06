@@ -16,6 +16,7 @@ import {
   SubprofileLinkVisibility,
   SubprofileStatus,
 } from '../subprofiles/entities/subprofile.entity';
+import type { SubprofileKind } from '../subprofiles/subprofile-kinds';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { countUnreadConversationsByIdentity } from '../messaging/unread-conversations-query';
 import {
@@ -45,6 +46,14 @@ export interface IdentityDescription {
   displayName: string;
   handle: string | null;
   avatarUrl: string | null;
+  /** The persona's craft, set on every `Subprofile` description and absent
+   *  on every other kind, so a reader can title a persona still named after
+   *  its profession as "Owner Name | Craft". */
+  personaKind?: SubprofileKind;
+  /** The persona owner's `firstName lastName`, present only for a LINKED
+   *  persona whose owner name composes to something non-blank. An unlinked
+   *  persona never carries it, so it never reveals who is behind it. */
+  personaOwnerName?: string;
 }
 
 /**
@@ -184,7 +193,8 @@ export class IdentitiesService {
   /**
    * The identity's own display name, handle and avatar, batched by kind: one
    * query to learn each identity's kind and owner row, then at most one
-   * further query per kind actually present in `identityIds` (never one per
+   * further query per kind actually present in `identityIds` (two for
+   * `Subprofile` when a linked persona is present; never one per
    * identity), the same fixed-cost shape `buildStaffNameResolver` uses for
    * staff attribution. A thread's or page's mix of senders is at most the
    * four kinds `IdentityKind` has, so this never grows with message or page
@@ -206,7 +216,13 @@ export class IdentitiesService {
    *   only the nested `slug`, which is not independently routable without
    *   its owner's own username, so `handle` stays null, leaving the caller
    *   to fall back on its own generic label), `avatarUrl`
-   *   resolved through `toImageUrl`.
+   *   resolved through `toImageUrl`. `personaKind` is the persona's `kind`
+   *   on every one. `personaOwnerName` is the owner's `firstName`/`lastName`
+   *   joined, set only for a LINKED persona whose joined name is non-blank,
+   *   mirroring the directory card's linked-only `ownerName`. It costs one
+   *   more batched `Profile` read over the linked personas' owners, run
+   *   after the subprofile rows are known and skipped when none is linked,
+   *   so an unlinked persona's owner is never resolved at all.
    * - `Company`: `nameText` for `displayName`, `slug` for `handle`.
    *   `avatarUrl` is always null: `Company` carries no avatar or logo
    *   column today (only `slug`, `nameText` and `tagline`), so this null is
@@ -323,16 +339,46 @@ export class IdentitiesService {
       });
     }
 
+    const linkedOwnerUserIds = [
+      ...new Set(
+        subprofileRows
+          .filter(
+            (subprofile) =>
+              subprofile.linkVisibility === SubprofileLinkVisibility.Linked,
+          )
+          .map((subprofile) => subprofile.userId),
+      ),
+    ];
+    const linkedOwnerProfiles = linkedOwnerUserIds.length
+      ? await this.profiles.find({
+          where: { userId: In(linkedOwnerUserIds) },
+        })
+      : [];
+    const linkedOwnerNameByUserId = new Map(
+      linkedOwnerProfiles.map((ownerProfile) => [
+        ownerProfile.userId,
+        `${ownerProfile.firstName} ${ownerProfile.lastName}`.trim(),
+      ]),
+    );
+
     const subprofileById = new Map(subprofileRows.map((s) => [s.id, s]));
     for (const identity of subprofileIdentities) {
       const subprofile = subprofileById.get(identity.subprofileId);
       if (!subprofile) {
         continue;
       }
+      // Linked only: an unlinked persona's owner was never loaded above, and
+      // the check here keeps that true even if the read ever widens.
+      const personaOwnerName =
+        subprofile.linkVisibility === SubprofileLinkVisibility.Linked
+          ? linkedOwnerNameByUserId.get(subprofile.userId)
+          : undefined;
       result.set(identity.id, {
         displayName: subprofile.displayName,
         handle: subprofile.handle,
         avatarUrl: toImageUrl(subprofile.avatarUrl),
+        personaKind: subprofile.kind,
+        ...(personaOwnerName ? { personaOwnerName } : {}),
       });
     }
 

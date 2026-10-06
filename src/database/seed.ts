@@ -80,6 +80,7 @@ import {
   EventVenueConfirmation,
   EventVisibility,
 } from '../events/entities/event.entity';
+import { seatHostAsGoing } from '../events/host-seat';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import {
   Report,
@@ -3823,9 +3824,10 @@ async function seedListings(
       const startAt = new Date();
       startAt.setDate(startAt.getDate() + listingEvent.inDays);
       startAt.setHours(listingEvent.hour, 0, 0, 0);
-      await events.save(
+      const hostId = userId(listing.ownerSlug);
+      const savedEvent = await events.save(
         events.create({
-          hostId: userId(listing.ownerSlug),
+          hostId,
           listingId: saved.id,
           slug: listingEvent.slug,
           title: listingEvent.title,
@@ -3843,6 +3845,12 @@ async function seedListings(
           venueConfirmedAt: new Date(),
         }),
       );
+      // The host is going to their own gathering and holds one of its seats,
+      // exactly as `EventsService.create` seats every host, so a seeded
+      // gathering reads the same as one made through the API. The same helper
+      // `create` uses, so a house-account host (`users.is_system`) would be
+      // skipped here too, though every seeded listing owner is a member.
+      await seatHostAsGoing(manager, savedEvent.id, hostId);
     }
 
     console.log(

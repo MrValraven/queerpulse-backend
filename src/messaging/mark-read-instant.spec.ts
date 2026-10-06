@@ -66,9 +66,11 @@ describe('ConversationsService.markRead (PRD-351 read instant)', () => {
         userId: VIEWER_ID,
         leftAt: null,
       }),
+      // Exact microsecond ISO text, mirroring the real `messageCreatedAt`
+      // (see its doc in messaging-core.service.ts).
       messageCreatedAt: jest
         .fn()
-        .mockResolvedValue(new Date('2026-09-15T09:59:00Z')),
+        .mockResolvedValue('2026-09-15T09:59:00.123456Z'),
     };
     preferencesService = {
       getMessagingPrivacy: jest

@@ -18,4 +18,11 @@ export class ReviewJoinRequestDto {
   @IsString()
   @MaxLength(64)
   declineReason?: string;
+
+  // Closed-set key from the frontend catalogue, required by
+  // `JoinRequestsService.review` when `status` is Approved.
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  approvalReason?: string;
 }

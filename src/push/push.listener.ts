@@ -11,6 +11,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import { IdentityAttributionService } from '../identities/identity-attribution.service';
 import { IdentitiesService } from '../identities/identities.service';
 import {
+  authorTitleName,
   loadSenderIdentityContext,
   renderMessageSender,
 } from '../messaging/author-summary';
@@ -402,9 +403,11 @@ export class PushMessageListener {
       // catalog entry still renders today's title. The customer's own
       // payload separately gains a titleKey and params naming the staff
       // member, built further down near `contentPayload`, and only when
-      // attribution allows it.
+      // attribution allows it. A persona still named after its profession
+      // titles as "Owner Name | Craft", as the chat inbox and header compose
+      // it.
       const senderName = mailboxSenderAuthors
-        ? mailboxSenderAuthors.businessAuthor.displayName
+        ? authorTitleName(mailboxSenderAuthors.businessAuthor)
         : // PRD-423: a matched Go together chat names its sender by first name.
           requireAuthorSummary(
             senderProfile,

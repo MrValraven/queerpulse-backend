@@ -1,8 +1,9 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, EntityTarget, ObjectLiteral } from 'typeorm';
+import { DataSource, EntityTarget, In, ObjectLiteral } from 'typeorm';
 import { AmbassadorsService } from '../ambassadors/ambassadors.service';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import {
   CommunityMember,
   RosterRole,
@@ -15,7 +16,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { UsersService } from '../users/users.service';
@@ -526,6 +527,261 @@ describe('AdminMembersService', () => {
       expect(membershipQueryBuilder.andWhere).toHaveBeenCalledWith(
         'community.parent_id IS NULL',
       );
+    });
+  });
+
+  describe('listStaffRoster', () => {
+    /** A roster user as the service reads it: the tier, the state, the join
+     *  date and the profile relation. */
+    function makeRosterUser(
+      overrides: {
+        id?: string;
+        role?: UserRole;
+        status?: UserStatus;
+        profile?: Partial<Profile> | null;
+      } = {},
+    ): User {
+      const userId = overrides.id ?? 'user-ines';
+      return {
+        id: userId,
+        role: overrides.role ?? UserRole.Member,
+        status: overrides.status ?? UserStatus.Active,
+        isSystem: false,
+        createdAt: daysAgo(300),
+        profile:
+          overrides.profile === null
+            ? null
+            : makeProfile({
+                userId,
+                photoVisible: true,
+                ...overrides.profile,
+              }),
+      } as unknown as User;
+    }
+
+    function makeGrantRow(userId: string, role: string, grantedDaysAgo = 10) {
+      return { userId, role, grantedAt: daysAgo(grantedDaysAgo) };
+    }
+
+    it('returns one row per person across tiers and grant holders, sorted admins, moderators, members, then by name', async () => {
+      staffRoles.find.mockResolvedValue([
+        makeGrantRow('user-admin', 'communities'),
+        makeGrantRow('user-member-zoe', 'housing_moderator'),
+        makeGrantRow('user-member-ana', 'magazine_writer'),
+      ]);
+      users.find
+        .mockResolvedValueOnce([
+          makeRosterUser({
+            id: 'user-moderator',
+            role: UserRole.Moderator,
+            profile: { slug: 'mo-reyes', firstName: 'Mo', lastName: 'Reyes' },
+          }),
+          makeRosterUser({
+            id: 'user-admin',
+            role: UserRole.Admin,
+            profile: { slug: 'sam-ortiz', firstName: 'Sam', lastName: 'Ortiz' },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeRosterUser({
+            id: 'user-member-zoe',
+            profile: { slug: 'zoe-lima', firstName: 'Zoe', lastName: 'Lima' },
+          }),
+          makeRosterUser({
+            id: 'user-member-ana',
+            profile: { slug: 'ana-silva', firstName: 'Ana', lastName: 'Silva' },
+          }),
+        ]);
+
+      const roster = await service.listStaffRoster();
+
+      expect(roster.map((rosterRow) => rosterRow.slug)).toEqual([
+        'sam-ortiz',
+        'mo-reyes',
+        'ana-silva',
+        'zoe-lima',
+      ]);
+      // The admin holding a grant matches the tier read and the grant table,
+      // and still appears once, carrying both.
+      expect(roster[0]).toEqual({
+        id: 'user-admin',
+        slug: 'sam-ortiz',
+        firstName: 'Sam',
+        lastName: 'Ortiz',
+        avatarUrl: null,
+        platformRole: 'admin',
+        status: 'active',
+        joinedAt: daysAgo(300).toISOString(),
+        grants: [{ role: 'communities', grantedAt: daysAgo(10).toISOString() }],
+      });
+      // An unbadged grant (`magazine_writer`) still earns a roster row.
+      expect(roster[2]!.grants).toEqual([
+        { role: 'magazine_writer', grantedAt: daysAgo(10).toISOString() },
+      ]);
+      expect(roster[1]!.grants).toEqual([]);
+    });
+
+    it('looks up only the grant holders the tier read did not already return, in one batched query', async () => {
+      staffRoles.find.mockResolvedValue([
+        makeGrantRow('user-admin', 'editorial'),
+        makeGrantRow('user-member', 'resource_curator'),
+      ]);
+      users.find
+        .mockResolvedValueOnce([
+          makeRosterUser({ id: 'user-admin', role: UserRole.Admin }),
+        ])
+        .mockResolvedValueOnce([
+          makeRosterUser({
+            id: 'user-member',
+            profile: { slug: 'river-day' },
+          }),
+        ]);
+
+      await service.listStaffRoster();
+
+      expect(users.find).toHaveBeenCalledTimes(2);
+      expect(users.find).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          where: { id: In(['user-member']), isSystem: false },
+        }),
+      );
+    });
+
+    it('skips the holder lookup entirely when every grant holder is already on a tier', async () => {
+      staffRoles.find.mockResolvedValue([
+        makeGrantRow('user-moderator', 'directory_moderator'),
+      ]);
+      users.find.mockResolvedValueOnce([
+        makeRosterUser({ id: 'user-moderator', role: UserRole.Moderator }),
+      ]);
+
+      await service.listStaffRoster();
+
+      expect(users.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('caps each population, keeps every status, and excludes house accounts', async () => {
+      await service.listStaffRoster();
+
+      expect(staffRoles.find).toHaveBeenCalledWith(
+        expect.objectContaining({ take: DEFAULT_LIST_LIMIT }),
+      );
+      // The exact `where` (no `status` key): a suspended or deactivated person
+      // still holding power must stay visible to the admin deciding what to
+      // revoke.
+      expect(users.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            role: In([UserRole.Moderator, UserRole.Admin]),
+            isSystem: false,
+          },
+          take: DEFAULT_LIST_LIMIT,
+        }),
+      );
+    });
+
+    it('serves suspended and deactivated staff with their status', async () => {
+      users.find.mockResolvedValueOnce([
+        makeRosterUser({
+          id: 'user-suspended',
+          role: UserRole.Moderator,
+          status: UserStatus.Suspended,
+          profile: { slug: 'kai-devon', firstName: 'Kai' },
+        }),
+        makeRosterUser({
+          id: 'user-paused',
+          role: UserRole.Moderator,
+          status: UserStatus.Deactivated,
+          profile: { slug: 'lee-park', firstName: 'Lee' },
+        }),
+      ]);
+
+      const roster = await service.listStaffRoster();
+
+      expect(
+        roster.map((rosterRow) => [rosterRow.slug, rosterRow.status]),
+      ).toEqual([
+        ['kai-devon', 'suspended'],
+        ['lee-park', 'deactivated'],
+      ]);
+    });
+
+    it('orders grants by the registry and drops role strings this build does not know', async () => {
+      staffRoles.find.mockResolvedValue([
+        makeGrantRow('user-member', 'partnerships', 1),
+        makeGrantRow('user-member', 'retired_role', 2),
+        makeGrantRow('user-member', 'magazine_editor', 3),
+        makeGrantRow('user-member', 'housing_moderator', 4),
+      ]);
+      users.find
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([makeRosterUser({ id: 'user-member' })]);
+
+      const [rosterRow] = await service.listStaffRoster();
+
+      expect(rosterRow!.grants.map((grant) => grant.role)).toEqual([
+        'magazine_editor',
+        'housing_moderator',
+        'partnerships',
+      ]);
+    });
+
+    it('leaves off a member whose only grant rows are unknown role strings', async () => {
+      staffRoles.find.mockResolvedValue([
+        makeGrantRow('user-member', 'retired_role'),
+      ]);
+      users.find.mockResolvedValueOnce([]);
+
+      await expect(service.listStaffRoster()).resolves.toEqual([]);
+      expect(users.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('hides the avatar of a member who turned their photo off, and serves it otherwise', async () => {
+      users.find.mockResolvedValueOnce([
+        makeRosterUser({
+          id: 'user-visible',
+          role: UserRole.Admin,
+          profile: {
+            slug: 'ana-visible',
+            firstName: 'Ana',
+            avatarUrl: 'https://lh3.googleusercontent.com/ana',
+            photoVisible: true,
+          },
+        }),
+        makeRosterUser({
+          id: 'user-hidden',
+          role: UserRole.Admin,
+          profile: {
+            slug: 'bea-hidden',
+            firstName: 'Bea',
+            avatarUrl: 'https://lh3.googleusercontent.com/bea',
+            photoVisible: false,
+          },
+        }),
+      ]);
+
+      const roster = await service.listStaffRoster();
+
+      expect(roster.map((rosterRow) => rosterRow.avatarUrl)).toEqual([
+        'https://lh3.googleusercontent.com/ana',
+        null,
+      ]);
+    });
+
+    it('skips anyone without a profile row', async () => {
+      users.find.mockResolvedValueOnce([
+        makeRosterUser({
+          id: 'user-no-profile',
+          role: UserRole.Admin,
+          profile: null,
+        }),
+        makeRosterUser({ id: 'user-admin', role: UserRole.Admin }),
+      ]);
+
+      const roster = await service.listStaffRoster();
+
+      expect(roster.map((rosterRow) => rosterRow.id)).toEqual(['user-admin']);
     });
   });
 

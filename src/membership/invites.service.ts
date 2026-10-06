@@ -15,8 +15,13 @@ import { randomBytes } from 'node:crypto';
 import {
   DataSource,
   EntityManager,
+  FindOptionsWhere,
   In,
+  IsNull,
+  LessThanOrEqual,
+  MoreThan,
   MoreThanOrEqual,
+  Or,
   Repository,
 } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
@@ -25,6 +30,7 @@ import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import {
   InviteQuotaView,
+  MyInviteCountsView,
   MyInviteView,
   PublicInviteStatus,
   PublicInviteView,
@@ -321,17 +327,22 @@ export class InvitesService {
   // freshly-computed status so a not-yet-swept expiry reads as 'expired'. For
   // any 'used' invite the redeemer (acceptedBy) is batch-loaded WITH profile in
   // a single query — never per-row — and mapped to public fields only.
+  //
+  // `status` narrows the page to one computed status (a filter tab). The same
+  // `now` drives both the filter and the mapped status, so every returned row
+  // reads as the tab it was fetched for.
   async listMyInvites(
     inviterId: string,
     page?: PageParams,
+    status?: PublicInviteStatus,
   ): Promise<MyInviteView[]> {
+    const now = new Date();
     const invites = await this.invites.find({
-      where: { inviterId },
+      where: this.myInvitesWhere(inviterId, status, now),
       order: { createdAt: 'DESC' },
       take: page?.limit ?? DEFAULT_PAGE_SIZE,
       skip: page?.offset ?? 0,
     });
-    const now = new Date();
     // Collect the redeemer ids for accepted invites and resolve them in one
     // `IN (...)` query, then index by id so the map below is O(1) per row.
     const acceptedByIds = Array.from(
@@ -352,6 +363,65 @@ export class InvitesService {
         invite.acceptedBy ? usersById.get(invite.acceptedBy) : null,
       ),
     );
+  }
+
+  // The true per-tab totals for the member's invite list. Each count runs on
+  // the same where clause its tab's list uses, so a tab's number always agrees
+  // with the rows it pages through. A row is always exactly one of the four
+  // computed statuses, so `all` is their sum.
+  async countMyInvites(inviterId: string): Promise<MyInviteCountsView> {
+    const now = new Date();
+    const countFor = (status: PublicInviteStatus) =>
+      this.invites.count({
+        where: this.myInvitesWhere(inviterId, status, now),
+      });
+    const [valid, used, expired, revoked] = await Promise.all([
+      countFor('valid'),
+      countFor('used'),
+      countFor('expired'),
+      countFor('revoked'),
+    ]);
+    return {
+      all: valid + used + expired + revoked,
+      valid,
+      used,
+      expired,
+      revoked,
+    };
+  }
+
+  // The `where` for one computed status of the inviter's own invites, mirroring
+  // `resolveInviteStatus` exactly: the explicit terminal DB states map straight
+  // across, and only a still-pending invite is checked against `expiresAt`
+  // (a null expiry never lapses). `undefined` matches every invite.
+  private myInvitesWhere(
+    inviterId: string,
+    status: PublicInviteStatus | undefined,
+    now: Date,
+  ): FindOptionsWhere<Invite> | FindOptionsWhere<Invite>[] {
+    switch (status) {
+      case undefined:
+        return { inviterId };
+      case 'valid':
+        return {
+          inviterId,
+          status: InviteStatus.Pending,
+          expiresAt: Or(IsNull(), MoreThan(now)),
+        };
+      case 'expired':
+        return [
+          { inviterId, status: InviteStatus.Expired },
+          {
+            inviterId,
+            status: InviteStatus.Pending,
+            expiresAt: LessThanOrEqual(now),
+          },
+        ];
+      case 'used':
+        return { inviterId, status: InviteStatus.Accepted };
+      case 'revoked':
+        return { inviterId, status: InviteStatus.Revoked };
+    }
   }
 
   /**

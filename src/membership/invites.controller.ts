@@ -19,9 +19,10 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateInviteDto } from './dto/create-invite.dto';
-import { PaginationQuery } from '../common/pagination.query';
+import { ListMyInvitesQuery } from './dto/list-my-invites.query';
 import {
   InviteQuotaView,
+  MyInviteCountsView,
   MyInviteView,
   PublicInviteView,
 } from './invite-response';
@@ -76,12 +77,18 @@ export class InvitesController {
   @Get()
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: "List the current member's own invites" })
-  @ApiOkResponse({ description: "Paginated page of the member's invites." })
+  @ApiOkResponse({
+    description:
+      "Paginated page of the member's invites, optionally filtered by status.",
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  list(@CurrentUser() user: CurrentUserData, @Query() page: PaginationQuery) {
-    return this.invitesService.listMyInvites(user.userId, page);
+  list(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListMyInvitesQuery,
+  ) {
+    return this.invitesService.listMyInvites(user.userId, query, query.status);
   }
 
   @Get('quota')
@@ -93,6 +100,21 @@ export class InvitesController {
   })
   quota(@CurrentUser() user: CurrentUserData): Promise<InviteQuotaView> {
     return this.invitesService.getQuota(user.userId);
+  }
+
+  // The true per-tab totals behind GET /'s `?status=` filter tabs, so a tab can
+  // show its full count while the list itself pages in.
+  @Get('counts')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: "Count the current member's invites per status" })
+  @ApiOkResponse({
+    description: 'Totals for all, valid, used, expired, and revoked invites.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  counts(@CurrentUser() user: CurrentUserData): Promise<MyInviteCountsView> {
+    return this.invitesService.countMyInvites(user.userId);
   }
 
   // Cancel one of the member's own still-pending invites, addressed by the code

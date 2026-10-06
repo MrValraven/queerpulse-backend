@@ -442,8 +442,8 @@ export interface ListingDTO {
   consentOuting: boolean;
   consentGuide: boolean;
   /** Who owns and runs the business, as the owner declared it (`women`,
-   * `trans`, `nonbinary`). OWNER-PERSONAL: omitted from a co-manager's copy
-   * like the seven fields above. Always an array. */
+   * `trans`, `nonbinary`, `bipoc`). OWNER-PERSONAL: omitted from a
+   * co-manager's copy like the seven fields above. Always an array. */
   ownedBy: ListingOwnedBy[];
   /** Moderator-verified confirmation of the "queer-owned" badge as it
    * CURRENTLY reads — distinct from `linkToProfile` (the member's own
@@ -780,11 +780,11 @@ export interface DirectoryCardDTO {
    * — no separate detail mapping needed. */
   queerOwnedVerified: boolean;
   /** Who owns and runs the business, as the OWNER declared it: any of
-   * `women`, `trans`, `nonbinary`, in canonical order. `[]` when they declared
-   * none, never undefined. Self-declared: nobody verifies it, so a surface
-   * must not render it the way it renders `queerOwnedVerified`. Public by the
-   * owner's own choice, and the directory's `owned=` filter matches on it.
-   * `DirectoryDetailDTO` inherits it. */
+   * `women`, `trans`, `nonbinary`, `bipoc`, in canonical order. `[]` when
+   * they declared none, never undefined. Self-declared: nobody verifies it,
+   * so a surface must not render it the way it renders `queerOwnedVerified`.
+   * Public by the owner's own choice, and the directory's `owned=` filter
+   * matches on it. `DirectoryDetailDTO` inherits it. */
   ownedBy: ListingOwnedBy[];
   memberFirst: string | null;
   /** The owner's real profile photo, so the card's "run by <first>" line shows

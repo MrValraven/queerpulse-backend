@@ -1,4 +1,5 @@
-import { UserRole } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
+import { StaffRoleId } from '../users/staff-roles.registry';
 import { maskEmailAddress } from './admin-identity-response';
 
 export type BadgeTone = 'plum' | 'coral' | 'jade' | 'violet' | 'amber';
@@ -346,4 +347,39 @@ export interface AdminStaffRoleHolderDTO {
   lastName: string;
   platformRole: UserRole;
   staffRoles: string[];
+}
+
+/**
+ * One staff-role grant as the `/admin/staff` roster renders it: the role and
+ * when it was handed over (`user_staff_roles.granted_at`, ISO).
+ */
+export interface AdminStaffGrantDTO {
+  role: StaffRoleId;
+  grantedAt: string;
+}
+
+/**
+ * One staff person on the redesigned `/admin/staff` page, served by
+ * `GET /admin/members/staff-roster`. A single row per person carries their
+ * account tier, their account state and every grant they hold, so the page
+ * reads one endpoint and can show each face.
+ *
+ * The tier and status are spelled as the enums' wire values (template literal
+ * types over `UserRole` / `UserStatus`), which keeps this contract exactly the
+ * union the frontend is written against while the entity enums stay the
+ * source of truth.
+ */
+export interface AdminStaffRosterRowDTO {
+  id: string;
+  slug: string;
+  firstName: string;
+  lastName: string;
+  /** Honours the member's "Show your photo" toggle (`toVisibleAvatarUrl`). */
+  avatarUrl: string | null;
+  platformRole: `${UserRole}`;
+  status: `${UserStatus}`;
+  /** ISO timestamp of `User.createdAt`. */
+  joinedAt: string;
+  /** Every grant held, badged or unbadged, in `STAFF_ROLES` registry order. */
+  grants: AdminStaffGrantDTO[];
 }

@@ -1147,7 +1147,11 @@ export class ConversationsService {
     // blocker "I read your message", and a removed group member could keep
     // firing `read` frames into a thread they can no longer see.
     await this.core.requireActiveParticipant(conversationId, userId);
-    let watermark: Date | string | null = null;
+    // Stays full microsecond ISO-8601 text throughout: `messageCreatedAt`
+    // already resolves it that way (see its doc), and this watermark must
+    // keep that precision all the way into the SQL comparison below, or the
+    // newest message in a thread can stay unread forever.
+    let watermark: string | null = null;
     if (options?.upToMessageId) {
       watermark = await this.core.messageCreatedAt(
         conversationId,
@@ -1211,10 +1215,7 @@ export class ConversationsService {
           // preference toggle (see `ConversationParticipant.markedUnreadAt`).
           markedUnreadAt: null,
         })
-        .setParameter(
-          'watermark',
-          watermark instanceof Date ? watermark.toISOString() : watermark,
-        );
+        .setParameter('watermark', watermark);
     } else {
       update.set({
         lastReadAt: () => 'GREATEST(last_read_at, now())',

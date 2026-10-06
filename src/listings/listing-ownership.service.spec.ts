@@ -153,6 +153,31 @@ describe('ListingOwnershipService.transferOwnership', () => {
     expect(result.revokedCoManagerCount).toBe(2);
   });
 
+  // Final fix wave item #1: the "who runs it" tags describe whoever holds
+  // the listing now, so they leave with the previous holder exactly as the
+  // other personal fields above do, and the new owner starts from nothing.
+  it('resets the owner identity tags to nothing on a transfer', async () => {
+    const listings = buildListingsRepository();
+    const manager = buildManager(listings);
+    const coManagers = buildCoManagers(0);
+    const service = buildService(listings, coManagers);
+    const listing = {
+      ...buildListing('old-owner'),
+      ownerIdentities: ['women'],
+    };
+
+    await service.transferOwnership(
+      manager,
+      listing,
+      'new-owner',
+      'actor-1',
+      'Ownership accepted from a staff offer.',
+      TRANSFERRED_AT,
+    );
+
+    expect(listing.ownerIdentities).toEqual([]);
+  });
+
   it('saves the listing through the caller transaction', async () => {
     const listings = buildListingsRepository();
     const manager = buildManager(listings);

@@ -83,6 +83,17 @@ export interface MyInviteView {
   acceptedBy: InviteAcceptedByView | null;
 }
 
+// GET /invites/counts: the true per-tab totals behind the paginated list's
+// filter tabs. Every invite resolves to exactly one of the four computed
+// statuses, so `all` is their sum.
+export interface MyInviteCountsView {
+  all: number;
+  valid: number;
+  used: number;
+  expired: number;
+  revoked: number;
+}
+
 // `acceptedByUser` is the (optionally profile-loaded) redeemer the caller
 // batch-loads for a 'used' invite; pass null/undefined for any other status.
 // It is mapped in only when the computed status is 'used', so a caller that

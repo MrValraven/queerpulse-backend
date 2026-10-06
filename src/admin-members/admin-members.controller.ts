@@ -83,6 +83,22 @@ export class AdminMembersController {
     return this.adminMembers.listStaffRoleHolders();
   }
 
+  // Declared before ':id' for the same reason as 'flagged' above. Admin-only
+  // through the class-level guard: the roster names suspended and deactivated
+  // staff and carries user ids, which is operational detail for admins.
+  @ApiOperation({
+    summary:
+      'List the staff roster: moderators, admins and every staff-role grant holder, one row each.',
+  })
+  @ApiOkResponse({
+    description:
+      'One row per staff person with their avatar, tier, account status and grants.',
+  })
+  @Get('staff-roster')
+  listStaffRoster() {
+    return this.adminMembers.listStaffRoster();
+  }
+
   @ApiOperation({ summary: "One member's full admin detail view." })
   @ApiOkResponse({ description: 'The member detail.' })
   @ApiNotFoundResponse({ description: 'Member not found.' })

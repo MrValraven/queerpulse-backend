@@ -3,7 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, EntityManager } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  IsNull,
+  LessThanOrEqual,
+  MoreThan,
+  Or,
+} from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
@@ -707,14 +714,17 @@ describe('InvitesService.createInvite', () => {
 
 describe('InvitesService.listMyInvites', () => {
   let service: InvitesService;
-  let repo: { find: jest.Mock };
+  let repo: { find: jest.Mock; count: jest.Mock };
   // `listMyInvites` batch-resolves the redeemers of *accepted* invites via
   // `usersService.findByIdsWithProfile`. The rows below are pending, so it's
   // called with an empty id list and returns no users.
   let users: { findByIdsWithProfile: jest.Mock };
 
   beforeEach(async () => {
-    repo = { find: jest.fn().mockResolvedValue([]) };
+    repo = {
+      find: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+    };
     users = { findByIdsWithProfile: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -800,6 +810,114 @@ describe('InvitesService.listMyInvites', () => {
     ]);
     const rows = await service.listMyInvites('inviter');
     expect(rows[0]!.status).toBe('expired');
+  });
+
+  // The `?status=` filter tabs and their counts. Time is frozen so the `now`
+  // inside each built where clause is a known instant to compare against.
+  describe('status filter + countMyInvites', () => {
+    const FIXED_NOW = new Date('2026-10-05T12:00:00.000Z');
+
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(FIXED_NOW);
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    const findWhere = () =>
+      (repo.find.mock.calls[0] as [{ where: unknown }])[0].where;
+
+    it('keeps the plain inviter scope when no status is given', async () => {
+      await service.listMyInvites('inviter', { limit: 10 }, undefined);
+      expect(findWhere()).toEqual({ inviterId: 'inviter' });
+    });
+
+    it("filters 'valid' to pending invites with no expiry or a future one", async () => {
+      await service.listMyInvites('inviter', undefined, 'valid');
+      expect(findWhere()).toEqual({
+        inviterId: 'inviter',
+        status: InviteStatus.Pending,
+        expiresAt: Or(IsNull(), MoreThan(FIXED_NOW)),
+      });
+    });
+
+    it("filters 'expired' to swept rows OR pending rows already past expiry", async () => {
+      await service.listMyInvites('inviter', undefined, 'expired');
+      expect(findWhere()).toEqual([
+        { inviterId: 'inviter', status: InviteStatus.Expired },
+        {
+          inviterId: 'inviter',
+          status: InviteStatus.Pending,
+          expiresAt: LessThanOrEqual(FIXED_NOW),
+        },
+      ]);
+    });
+
+    it("filters 'used' to accepted invites", async () => {
+      await service.listMyInvites('inviter', undefined, 'used');
+      expect(findWhere()).toEqual({
+        inviterId: 'inviter',
+        status: InviteStatus.Accepted,
+      });
+    });
+
+    it("filters 'revoked' to revoked invites", async () => {
+      await service.listMyInvites('inviter', undefined, 'revoked');
+      expect(findWhere()).toEqual({
+        inviterId: 'inviter',
+        status: InviteStatus.Revoked,
+      });
+    });
+
+    it('keeps the newest-first order and the page bounds under a filter', async () => {
+      await service.listMyInvites(
+        'inviter',
+        { limit: 5, offset: 10 },
+        'revoked',
+      );
+      expect(repo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          order: { createdAt: 'DESC' },
+          take: 5,
+          skip: 10,
+        }),
+      );
+    });
+
+    it('counts each tab on the same where clause its list uses, and sums them for all', async () => {
+      const countsByStatus = new Map<unknown, number>([
+        [InviteStatus.Pending, 3],
+        [InviteStatus.Accepted, 2],
+        [InviteStatus.Revoked, 1],
+      ]);
+      // Single-object wheres are keyed by their DB status; the expired OR
+      // (an array) answers 4.
+      repo.count.mockImplementation(
+        ({ where }: { where: { status?: InviteStatus } | unknown[] }) =>
+          Promise.resolve(
+            Array.isArray(where) ? 4 : (countsByStatus.get(where.status) ?? 0),
+          ),
+      );
+
+      const counts = await service.countMyInvites('inviter');
+
+      expect(counts).toEqual({
+        all: 10,
+        valid: 3,
+        used: 2,
+        expired: 4,
+        revoked: 1,
+      });
+      expect(repo.count).toHaveBeenCalledTimes(4);
+
+      // Each count's where equals the where the matching list tab builds.
+      for (const status of ['valid', 'used', 'expired', 'revoked'] as const) {
+        repo.find.mockClear();
+        await service.listMyInvites('inviter', undefined, status);
+        expect(repo.count).toHaveBeenCalledWith({ where: findWhere() });
+      }
+    });
   });
 });
 

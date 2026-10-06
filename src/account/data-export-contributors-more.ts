@@ -534,8 +534,8 @@ export class VerificationExportContributor implements DataExportContribution {
  * redeemed. Their name, email, city and message, where they heard about the
  * platform, the Terms revision and age attestation they gave, and how it was
  * decided. The mutual member's email is another person's data, and the status
- * token hash, the reviewer and the decline key stay out. Null when the member
- * joined without an application.
+ * token hash, the reviewer, and the decline and approval keys stay out. Null
+ * when the member joined without an application.
  */
 @Injectable()
 export class JoinApplicationExportContributor implements DataExportContribution {

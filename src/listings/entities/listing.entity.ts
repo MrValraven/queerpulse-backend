@@ -366,6 +366,14 @@ export class Listing {
   goodFor!: string[];
 
   /**
+   * "Who runs it" tags (`LISTING_OWNER_IDENTITY_SLUGS`), self-declared and
+   * optional, stored in canonical order. Filtered client-side by the Local
+   * directory, so no index.
+   */
+  @Column({ type: 'text', array: true, default: '{}' })
+  ownerIdentities!: string[];
+
+  /**
    * The venue's answers to the canonical accessibility questions
    * (`LISTING_ACCESSIBILITY_QUESTION_SLUGS`), one answer per slug.
    *

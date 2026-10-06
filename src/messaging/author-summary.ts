@@ -7,6 +7,8 @@ import type {
   IdentitiesService,
   IdentityDescription,
 } from '../identities/identities.service';
+import type { SubprofileKind } from '../subprofiles/subprofile-kinds';
+import { personaTitleName } from '../subprofiles/persona-title-name';
 import type { Profile } from '../users/entities/profile.entity';
 import {
   AuthorSummary,
@@ -34,6 +36,13 @@ export interface BuildAuthorSummaryInput {
   identityHandle: string;
   identityAvatarUrl: string | null;
   staffFirstName: string | null;
+  /** A persona identity's craft, passed straight from
+   *  `IdentityDescription.personaKind`; absent for every other kind. */
+  personaKind?: SubprofileKind;
+  /** A LINKED persona's owner name, passed straight from
+   *  `IdentityDescription.personaOwnerName`, which already applies the
+   *  linked-only rule; absent otherwise. */
+  personaOwnerName?: string;
 }
 
 /**
@@ -55,6 +64,8 @@ export function buildAuthorSummary(
     identityHandle,
     identityAvatarUrl,
     staffFirstName,
+    personaKind,
+    personaOwnerName,
   } = input;
   const trimmedStaffFirstName = staffFirstName?.trim();
   return {
@@ -67,7 +78,27 @@ export function buildAuthorSummary(
     identityId: identity.id,
     identityKind: identity.kind,
     ...(trimmedStaffFirstName ? { staffFirstName: trimmedStaffFirstName } : {}),
+    ...(personaKind ? { personaKind } : {}),
+    ...(personaOwnerName ? { personaOwnerName } : {}),
   };
+}
+
+/**
+ * The name to TITLE a message author with where the server spells it into
+ * text of its own (a quoted message's label, a push notification title), so
+ * it matches what the frontend composes for the chat inbox and header. A
+ * persona still named after its profession reads as "Owner Name | Craft"
+ * through `personaTitleName`; every other author keeps its `displayName`.
+ */
+export function authorTitleName(author: AuthorSummary): string {
+  if (author.identityKind === IdentityKind.Subprofile && author.personaKind) {
+    return personaTitleName({
+      displayName: author.displayName,
+      kind: author.personaKind,
+      ownerName: author.personaOwnerName,
+    });
+  }
+  return author.displayName;
 }
 
 /**
@@ -167,6 +198,8 @@ export function renderMessageSender(
         senderId,
         profileByUser.get(senderId)?.firstName ?? '',
       ),
+      personaKind: identityDescription.personaKind,
+      personaOwnerName: identityDescription.personaOwnerName,
     });
   }
   if (identityKind === IdentityKind.Profile) {

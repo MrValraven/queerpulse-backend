@@ -60,11 +60,25 @@ interface MockRepo {
   find: jest.Mock;
 }
 
+interface MockCommunityMemberRepo extends MockRepo {
+  createQueryBuilder: jest.Mock;
+}
+
 function makeMockRepo(): MockRepo {
   return {
     count: jest.fn().mockResolvedValue(0),
     find: jest.fn().mockResolvedValue([]),
   };
+}
+
+/** Chainable stub for the public-community join feed query. */
+function communityJoinQueryStub(rows: unknown[] = []) {
+  const queryBuilder: Record<string, jest.Mock> = {};
+  for (const method of ['innerJoin', 'where', 'andWhere', 'orderBy', 'limit']) {
+    queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+  }
+  queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+  return queryBuilder;
 }
 
 describe('AdminOverviewService', () => {
@@ -75,7 +89,7 @@ describe('AdminOverviewService', () => {
   let appeals: MockRepo;
   let modAuditLogs: MockRepo;
   let vouches: MockRepo;
-  let communityMembers: MockRepo;
+  let communityMembers: MockCommunityMemberRepo;
   let communities: MockRepo;
   let usersService: { countActiveMembers: jest.Mock };
   let adminCommunitiesService: { listCommunities: jest.Mock };
@@ -89,7 +103,10 @@ describe('AdminOverviewService', () => {
     appeals = makeMockRepo();
     modAuditLogs = makeMockRepo();
     vouches = makeMockRepo();
-    communityMembers = makeMockRepo();
+    communityMembers = {
+      ...makeMockRepo(),
+      createQueryBuilder: jest.fn(() => communityJoinQueryStub()),
+    };
     communities = makeMockRepo();
     usersService = { countActiveMembers: jest.fn().mockResolvedValue(8412) };
     adminCommunitiesService = {
@@ -248,6 +265,42 @@ describe('AdminOverviewService', () => {
       expect(result.triage.openReports).toBe(2);
       expect(result.stats.openReports.emergencies).toBe(1);
       expect(result.triage.emergencies).toBe(1);
+    });
+
+    it('only feeds joins of public, top-level, live communities', async () => {
+      const queryBuilder = communityJoinQueryStub([]);
+      communityMembers.createQueryBuilder = jest.fn(() => queryBuilder);
+
+      await service.getOverview();
+
+      expect(queryBuilder.where).toHaveBeenCalledWith(
+        '"c"."access_tier" = :publicTier',
+        { publicTier: 'public' },
+      );
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        '"c"."parent_id" IS NULL',
+      );
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        '"c"."archived_at" IS NULL',
+      );
+    });
+
+    it('hides the voucher of an anonymous vouch', async () => {
+      vouches.find.mockResolvedValueOnce([
+        {
+          id: 'v1',
+          voucherId: 'voucher-1',
+          voucheeId: 'vouchee-1',
+          anonymous: true,
+          withdrawnAt: null,
+          createdAt: new Date('2026-10-05T10:00:00Z'),
+        },
+      ]);
+
+      const overview = await service.getOverview();
+
+      const vouchEntry = overview.feed.find((entry) => entry.id === 'vouch-v1');
+      expect(vouchEntry?.actor).toBeNull();
     });
   });
 });

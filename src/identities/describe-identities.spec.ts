@@ -1,3 +1,5 @@
+import { In } from 'typeorm';
+import { SubprofileLinkVisibility } from '../subprofiles/entities/subprofile.entity';
 import { IdentityKind } from './entities/identity.entity';
 import { IdentitiesService } from './identities.service';
 
@@ -96,6 +98,7 @@ describe('IdentitiesService.describeIdentities', () => {
     subprofiles.find.mockResolvedValue([
       {
         id: 'subprofile-1',
+        kind: 'writer',
         displayName: 'Night Owl',
         handle: 'night-owl',
         avatarUrl: 'https://example.test/owl-key.jpg',
@@ -126,6 +129,7 @@ describe('IdentitiesService.describeIdentities', () => {
       displayName: 'Night Owl',
       handle: 'night-owl',
       avatarUrl: 'https://example.test/owl-key.jpg',
+      personaKind: 'writer',
     });
     // Company: permanently no avatar column, so this is exactly null, never
     // a placeholder.
@@ -229,6 +233,133 @@ describe('IdentitiesService.describeIdentities', () => {
     expect(listings.find).toHaveBeenCalledTimes(1);
     expect(subprofiles.find).toHaveBeenCalledTimes(1);
     expect(companies.find).toHaveBeenCalledTimes(1);
+  });
+
+  it("names a linked persona's owner and keeps an unlinked persona's owner unread", async () => {
+    const { service, identities, subprofiles, profiles } = makeService();
+    identities.find.mockResolvedValue([
+      {
+        id: 'identity-linked',
+        kind: IdentityKind.Subprofile,
+        userId: null,
+        listingId: null,
+        subprofileId: 'subprofile-linked',
+        companyId: null,
+      },
+      {
+        id: 'identity-unlinked',
+        kind: IdentityKind.Subprofile,
+        userId: null,
+        listingId: null,
+        subprofileId: 'subprofile-unlinked',
+        companyId: null,
+      },
+      {
+        id: 'identity-linked-blank-owner',
+        kind: IdentityKind.Subprofile,
+        userId: null,
+        listingId: null,
+        subprofileId: 'subprofile-linked-blank-owner',
+        companyId: null,
+      },
+    ]);
+    subprofiles.find.mockResolvedValue([
+      {
+        id: 'subprofile-linked',
+        userId: 'owner-linked',
+        kind: 'visual_artist',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+        displayName: 'Art historian',
+        handle: 'art-historian',
+        avatarUrl: null,
+      },
+      {
+        id: 'subprofile-unlinked',
+        userId: 'owner-unlinked',
+        kind: 'dancer',
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+        displayName: 'Dancer',
+        handle: 'dancer',
+        avatarUrl: null,
+      },
+      {
+        id: 'subprofile-linked-blank-owner',
+        userId: 'owner-blank',
+        kind: 'writer',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+        displayName: 'Writer',
+        handle: 'writer',
+        avatarUrl: null,
+      },
+    ]);
+    // The unlinked owner's row is returned too, so the test proves the
+    // linked-only rule holds even when the read hands that owner back.
+    profiles.find.mockResolvedValue([
+      { userId: 'owner-linked', firstName: 'Alina', lastName: 'C.' },
+      { userId: 'owner-unlinked', firstName: 'Secret', lastName: 'Person' },
+      { userId: 'owner-blank', firstName: ' ', lastName: '' },
+    ]);
+
+    const result = await service.describeIdentities([
+      'identity-linked',
+      'identity-unlinked',
+      'identity-linked-blank-owner',
+    ]);
+
+    expect(result.get('identity-linked')).toEqual({
+      displayName: 'Art historian',
+      handle: 'art-historian',
+      avatarUrl: null,
+      personaKind: 'visual_artist',
+      personaOwnerName: 'Alina C.',
+    });
+    const unlinkedDescription = result.get('identity-unlinked');
+    expect(unlinkedDescription?.personaKind).toBe('dancer');
+    expect(unlinkedDescription).not.toHaveProperty('personaOwnerName');
+    // A linked owner whose name composes to blank carries no key at all.
+    expect(result.get('identity-linked-blank-owner')).not.toHaveProperty(
+      'personaOwnerName',
+    );
+    // ONE batched owner read, over the linked personas' owners only.
+    expect(profiles.find).toHaveBeenCalledTimes(1);
+    expect(profiles.find).toHaveBeenCalledWith({
+      where: { userId: In(['owner-linked', 'owner-blank']) },
+    });
+  });
+
+  it('skips the owner read entirely when no persona is linked', async () => {
+    const { service, identities, subprofiles, profiles } = makeService();
+    identities.find.mockResolvedValue([
+      {
+        id: 'identity-unlinked',
+        kind: IdentityKind.Subprofile,
+        userId: null,
+        listingId: null,
+        subprofileId: 'subprofile-unlinked',
+        companyId: null,
+      },
+    ]);
+    subprofiles.find.mockResolvedValue([
+      {
+        id: 'subprofile-unlinked',
+        userId: 'owner-unlinked',
+        kind: 'dancer',
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+        displayName: 'Dancer',
+        handle: 'dancer',
+        avatarUrl: null,
+      },
+    ]);
+
+    const result = await service.describeIdentities(['identity-unlinked']);
+
+    expect(result.get('identity-unlinked')).toEqual({
+      displayName: 'Dancer',
+      handle: 'dancer',
+      avatarUrl: null,
+      personaKind: 'dancer',
+    });
+    expect(profiles.find).not.toHaveBeenCalled();
   });
 
   it('omits an identity whose own row has vanished, and never throws', async () => {

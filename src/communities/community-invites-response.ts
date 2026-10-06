@@ -14,6 +14,13 @@ export enum CommunityInviteSkipReason {
   UnknownMember = 'unknown_member',
   /** The inviter named themselves. */
   Self = 'self',
+  /**
+   * Holds no accepted connection with the inviter. Invitations travel along
+   * the inviter's own connections only, so a moderator cannot use a
+   * community to reach a stranger. A blocked member still reads as
+   * `unknown_member`, so neither side learns of the block.
+   */
+  NotConnected = 'not_connected',
   /** A house/system account (`users.is_system`), which is never invited. */
   SystemAccount = 'system_account',
   /** Already on the roster, so there is nothing to invite them to. */

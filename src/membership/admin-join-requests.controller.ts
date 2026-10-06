@@ -24,6 +24,7 @@ import { BulkReviewJoinRequestsDto } from './dto/bulk-review-join-requests.dto';
 import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import { ReviewJoinRequestDto } from './dto/review-join-request.dto';
 import { SampleJoinRequestsQuery } from './dto/sample-join-requests.query';
+import { UpdateJoinRequestNoteDto } from './dto/update-join-request-note.dto';
 import { JoinRequestView } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
 import {
@@ -102,6 +103,7 @@ export class AdminJoinRequestsController {
       user.userId,
       dto.status,
       dto.declineReason,
+      dto.approvalReason,
     );
   }
 
@@ -201,6 +203,35 @@ export class AdminJoinRequestsController {
     );
   }
 
+  /**
+   * Write, replace or clear the staff-only internal note on a DECLINED
+   * request. An empty `note` clears it. The note is shown to the review queue
+   * and to nobody else: the applicant's status page maps its own narrow view
+   * and never reads it.
+   *
+   * Declared BEFORE `PATCH :id` for the same literal-before-parameterized
+   * reason as `:id/assignment`, and guarded at class level with the rest of
+   * the queue, so any reviewer working it can annotate a decline.
+   */
+  @Patch(':id/note')
+  @ApiOperation({ summary: 'Set the internal note on a declined request' })
+  @ApiOkResponse({ description: 'The updated invite request.' })
+  @ApiNotFoundResponse({ description: 'The invite request does not exist.' })
+  @ApiConflictResponse({
+    description: 'Only a declined invite request can carry an internal note.',
+  })
+  updateNote(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: UpdateJoinRequestNoteDto,
+  ): Promise<JoinRequestView> {
+    return this.joinRequestsService.updateInternalNote(
+      id,
+      user.userId,
+      dto.note,
+    );
+  }
+
   @Patch(':id')
   @ApiOperation({ summary: 'Approve or decline an invite request' })
   @ApiOkResponse({ description: 'The updated invite request.' })
@@ -218,6 +249,7 @@ export class AdminJoinRequestsController {
       user.userId,
       dto.status,
       dto.declineReason,
+      dto.approvalReason,
     );
   }
 }

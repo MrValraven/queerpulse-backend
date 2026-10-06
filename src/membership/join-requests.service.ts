@@ -11,6 +11,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'node:crypto';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { toStoredPlainTextOrNull } from '../communities/community-plain-text';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
   optionalQueueAssigneeName,
@@ -673,10 +674,12 @@ export class JoinRequestsService {
     // OPS-04: one batched profile lookup for every reviewer holding a row on
     // this page, so the queue can print "Claimed by Ana Reis" without a query
     // per row. The DECIDING reviewers ride along in the SAME lookup, so naming
-    // who made each past call costs this page nothing extra.
+    // who made each past call costs this page nothing extra, and so do the
+    // authors of each declined row's internal note.
     const staffRefs = await this.staffRefs([
       ...requests.map((r) => r.assignedStaffId),
       ...requests.map((r) => r.reviewedBy),
+      ...requests.map((r) => r.internalNoteUpdatedBy),
     ]);
 
     return requests.map((r) => {
@@ -692,6 +695,7 @@ export class JoinRequestsService {
         reference?.slug ?? null,
         optionalQueueAssigneeName(r.assignedStaffId, staffRefs),
         optionalQueueAssigneeName(r.reviewedBy, staffRefs),
+        optionalQueueAssigneeName(r.internalNoteUpdatedBy, staffRefs),
       );
     });
   }
@@ -741,9 +745,11 @@ export class JoinRequestsService {
     return this.viewOfOne(id);
   }
 
-  /** Re-reads one request and maps it with its assignee resolved. Used by
-   *  `setAssignment`, which changes only the assignee fields, so none of
-   *  `list`'s batch-derived context (flags, prior declines) applies. */
+  /** Re-reads one request and maps it with its staff names resolved. Used by
+   *  `setAssignment` and `updateInternalNote`, which change only the assignee
+   *  or note fields, so none of `list`'s batch-derived context (flags, prior
+   *  declines, reference member) applies and the caller patches just those
+   *  fields onto the row it already holds. */
   private async viewOfOne(id: string): Promise<JoinRequestView> {
     const saved = await this.joinRequests.findOne({ where: { id } });
     if (!saved) throw new NotFoundException('Join request not found');
@@ -751,6 +757,7 @@ export class JoinRequestsService {
     const staffRefs = await this.staffRefs([
       saved.assignedStaffId,
       saved.reviewedBy,
+      saved.internalNoteUpdatedBy,
     ]);
     return toJoinRequestView(
       saved,
@@ -761,13 +768,93 @@ export class JoinRequestsService {
       null,
       optionalQueueAssigneeName(saved.assignedStaffId, staffRefs),
       optionalQueueAssigneeName(saved.reviewedBy, staffRefs),
+      optionalQueueAssigneeName(saved.internalNoteUpdatedBy, staffRefs),
     );
   }
 
   /**
+   * Write, replace or clear the STAFF-ONLY internal note on a declined request
+   * (`PATCH /admin/join-requests/:id/note`).
+   *
+   * The text goes through `toStoredPlainTextOrNull`, the same write-boundary
+   * normaliser community-authored short text uses: markup is stripped, the
+   * result is trimmed, and a value that strips down to nothing comes back null.
+   * A non-null result stamps who wrote it and when. A null result is a clear,
+   * and wipes the stamp along with the text, so a row never reports an author
+   * for a note that is not there.
+   *
+   * Answers:
+   *  - 404 when the id is unknown;
+   *  - 409 when the request is not Declined. The note exists to explain a
+   *    decline to the next reviewer, and an open or approved row has no
+   *    decline to explain.
+   *
+   * The write is a conditional UPDATE guarded on `status = Declined`, so the
+   * pre-read cannot go stale under it: a row that changed status between the
+   * read and the write matches nothing, and the re-read reports the 404 or 409
+   * that now applies. Declined is terminal today, so that race is narrow, but
+   * the guard keeps a note off a non-declined row even if that ever changes.
+   *
+   * Returns the request's queue view (`viewOfOne`), with the note author's
+   * name resolved, so the caller can patch the row in place.
+   */
+  async updateInternalNote(
+    id: string,
+    actorId: string,
+    note: string,
+  ): Promise<JoinRequestView> {
+    const request = await this.joinRequests.findOne({ where: { id } });
+    this.assertInternalNoteWritable(request);
+
+    const storedNote = toStoredPlainTextOrNull(note);
+    const noteFields =
+      storedNote === null
+        ? {
+            internalNote: null,
+            internalNoteUpdatedAt: null,
+            internalNoteUpdatedBy: null,
+          }
+        : {
+            internalNote: storedNote,
+            internalNoteUpdatedAt: new Date(),
+            internalNoteUpdatedBy: actorId,
+          };
+
+    const result = await this.joinRequests.update(
+      { id, status: PlatformJoinRequestStatus.Declined },
+      noteFields,
+    );
+    if (result.affected !== 1) {
+      // Lost a race with whatever moved the row off Declined (or removed it).
+      // Re-read and report the state that actually won.
+      const current = await this.joinRequests.findOne({ where: { id } });
+      this.assertInternalNoteWritable(current);
+      throw new ConflictException(
+        'Only a declined invite request can carry an internal note.',
+      );
+    }
+
+    return this.viewOfOne(id);
+  }
+
+  /** 404 for an unknown request, 409 for one that is not Declined, or return
+   *  quietly when the internal note can be written. */
+  private assertInternalNoteWritable(
+    request: PlatformJoinRequest | null,
+  ): asserts request is PlatformJoinRequest {
+    if (!request) throw new NotFoundException('Join request not found');
+    if (request.status !== PlatformJoinRequestStatus.Declined) {
+      throw new ConflictException(
+        'Only a declined invite request can carry an internal note.',
+      );
+    }
+  }
+
+  /**
    * Batched userId -> profile ref for the staff attached to a set of rows:
-   * whoever is HOLDING each row and whoever DECIDED it, resolved together in
-   * ONE query because they are the same population and a page needs both.
+   * whoever is HOLDING each row, whoever DECIDED it, and whoever last wrote its
+   * internal note, resolved together in ONE query because they are the same
+   * population and a page needs all three.
    * Skips the query entirely when the set is empty (a page of unclaimed,
    * undecided requests), and de-duplicates, so one reviewer across fifty rows
    * is looked up once.
@@ -795,12 +882,22 @@ export class JoinRequestsService {
     // Required for a decline: defense at the service layer, not just relying
     // on the frontend always sending it.
     declineReason?: string,
+    // Reason key a reviewer picked when approving (e.g. `member_vouched`).
+    // Required for an approval, enforced here the same way as the decline
+    // reason. Staff-only.
+    approvalReason?: string,
   ): Promise<JoinRequestView> {
     if (
       status === PlatformJoinRequestStatus.Declined &&
       !declineReason?.trim()
     ) {
       throw new BadRequestException('A decline reason is required');
+    }
+    if (
+      status === PlatformJoinRequestStatus.Approved &&
+      !approvalReason?.trim()
+    ) {
+      throw new BadRequestException('An approval reason is required');
     }
 
     // The claim and the invite minting run in one transaction on the same
@@ -856,6 +953,11 @@ export class JoinRequestsService {
         status === PlatformJoinRequestStatus.Declined
           ? (declineReason?.trim() ?? null)
           : null;
+      // Same shape on the approval side: only kept when approving.
+      const resolvedApprovalReason =
+        status === PlatformJoinRequestStatus.Approved
+          ? (approvalReason?.trim() ?? null)
+          : null;
 
       // Conditional claim: only a reviewer who flips it out of an open state
       // wins; a concurrent reviewer sees affected === 0 and is rejected.
@@ -867,6 +969,7 @@ export class JoinRequestsService {
           reviewedAt,
           inviteId,
           declineReason: resolvedDeclineReason,
+          approvalReason: resolvedApprovalReason,
         },
       );
       if (claim.affected !== 1) {
@@ -877,6 +980,7 @@ export class JoinRequestsService {
       current.reviewedAt = reviewedAt;
       current.inviteId = inviteId;
       current.declineReason = resolvedDeclineReason;
+      current.approvalReason = resolvedApprovalReason;
       return toJoinRequestView(current, inviteRef);
     });
   }
@@ -887,7 +991,8 @@ export class JoinRequestsService {
    * `VerificationService.bulkDecide`'s per-item pattern (batch size capped at
    * the DTO layer via `JOIN_REQUEST_BULK_ACTION_CAP`): a failure on one id
    * (not found, already reviewed, concurrently claimed, missing decline
-   * reason) lands that id in `failed`, and every other id is still attempted.
+   * reason, missing approval reason) lands that id in `failed`, and every
+   * other id is still attempted.
    *
    * ONLY an `HttpException` message reaches `failed[].reason`. Those are our
    * own deliberate, reviewer-facing sentences. Anything else is an internal
@@ -913,6 +1018,7 @@ export class JoinRequestsService {
       | PlatformJoinRequestStatus.Declined
       | PlatformJoinRequestStatus.Waitlisted,
     declineReason?: string,
+    approvalReason?: string,
   ): Promise<{
     succeeded: string[];
     failed: { id: string; reason: string }[];
@@ -921,7 +1027,13 @@ export class JoinRequestsService {
     const failed: { id: string; reason: string }[] = [];
     for (const id of ids) {
       try {
-        await this.review(id, reviewerId, status, declineReason);
+        await this.review(
+          id,
+          reviewerId,
+          status,
+          declineReason,
+          approvalReason,
+        );
         succeeded.push(id);
       } catch (err) {
         if (err instanceof HttpException) {
@@ -972,10 +1084,12 @@ export class JoinRequestsService {
     const inviteRefById = await this.loadInviteRefs(requests);
     // A decided row can still carry the claim it was worked under, so both
     // staff ids go into the one lookup rather than resolving the reviewer and
-    // leaving the holder as a bare uuid.
+    // leaving the holder as a bare uuid. A sampled decline can carry an
+    // internal note too, and its author rides along in the same lookup.
     const staffRefs = await this.staffRefs([
       ...requests.map((r) => r.reviewedBy),
       ...requests.map((r) => r.assignedStaffId),
+      ...requests.map((r) => r.internalNoteUpdatedBy),
     ]);
     return requests.map((r) =>
       toJoinRequestView(
@@ -987,6 +1101,7 @@ export class JoinRequestsService {
         null,
         optionalQueueAssigneeName(r.assignedStaffId, staffRefs),
         optionalQueueAssigneeName(r.reviewedBy, staffRefs),
+        optionalQueueAssigneeName(r.internalNoteUpdatedBy, staffRefs),
       ),
     );
   }
@@ -1071,10 +1186,13 @@ export class JoinRequestsService {
     );
     // The caller patches a decided row in place with this, so the reviewer's
     // name has to survive the patch or reissuing an invite would blank out who
-    // decided the request. One batched lookup for the single row.
+    // decided the request. One batched lookup for the single row. The note
+    // author rides along so every queue view carries the same fields, even
+    // though only a declined row can hold a note and this one is approved.
     const staffRefs = await this.staffRefs([
       request.reviewedBy,
       request.assignedStaffId,
+      request.internalNoteUpdatedBy,
     ]);
     return toJoinRequestView(
       request,
@@ -1089,6 +1207,7 @@ export class JoinRequestsService {
       null,
       optionalQueueAssigneeName(request.assignedStaffId, staffRefs),
       optionalQueueAssigneeName(request.reviewedBy, staffRefs),
+      optionalQueueAssigneeName(request.internalNoteUpdatedBy, staffRefs),
     );
   }
 
@@ -1180,10 +1299,12 @@ export class JoinRequestsService {
       throw new NotFoundException('No invite to revoke for this request');
     }
     // Same reason as reissue: the caller patches a decided row in place, so the
-    // reviewer's name has to survive the patch. One batched lookup.
+    // reviewer's name has to survive the patch. One batched lookup, with the
+    // note author in it for the same reason as reissue.
     const staffRefs = await this.staffRefs([
       request.reviewedBy,
       request.assignedStaffId,
+      request.internalNoteUpdatedBy,
     ]);
     return toJoinRequestView(
       request,
@@ -1198,6 +1319,7 @@ export class JoinRequestsService {
       null,
       optionalQueueAssigneeName(request.assignedStaffId, staffRefs),
       optionalQueueAssigneeName(request.reviewedBy, staffRefs),
+      optionalQueueAssigneeName(request.internalNoteUpdatedBy, staffRefs),
     );
   }
 

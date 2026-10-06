@@ -5,6 +5,7 @@ import { truncateCharacters } from '../common/text-characters';
 import { readableMessageBody } from './legacy-message-body';
 import type { CropRect } from '../media-crops/crop-rect';
 import { IdentityKind } from '../identities/entities/identity.entity';
+import type { SubprofileKind } from '../subprofiles/subprofile-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import {
   ConversationMuteMode,
@@ -158,6 +159,17 @@ export interface AuthorSummary {
    *  testing `=== undefined` agree. Meaningless, and never set, on a profile
    *  author summary. */
   staffFirstName?: string;
+  /** The persona's craft, present only when {@link identityKind} is
+   *  `subprofile`, so the client can title a persona still named after its
+   *  profession as "Owner Name | Craft" (`personaTitleName`), the same title
+   *  the persona page shows. Absent on every other author summary. */
+  personaKind?: SubprofileKind;
+  /** The persona owner's `firstName lastName`, present only for a LINKED
+   *  persona whose owner name composes to something non-blank, mirroring the
+   *  directory card's linked-only `ownerName`. An unlinked persona never
+   *  carries it, so it never reveals who is behind it. Absent (never null,
+   *  never a blank string) otherwise, like {@link staffFirstName}. */
+  personaOwnerName?: string;
 }
 
 export interface ReactionSummary {

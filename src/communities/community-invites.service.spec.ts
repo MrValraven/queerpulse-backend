@@ -1,5 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ForbiddenException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { PAGE_SIZE } from '../common/pagination';
+import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -7,6 +10,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { CommunitiesService } from './communities.service';
+import { listInviteCandidates } from './community-invite-candidates';
 import {
   liveInvitedUserIds,
   livePendingInvitesForInvitee,
@@ -36,6 +40,25 @@ const mockedLivePendingInvitesForInvitee = jest.mocked(
 );
 const mockedRetireDeadPendingInvites = jest.mocked(retireDeadPendingInvites);
 const mockedWhereInviteIsLive = jest.mocked(whereInviteIsLive);
+// The candidates query is SQL too; its clauses are covered by
+// `community-invite-candidates.spec.ts`, and these specs drive the gate and
+// the arguments the service hands it.
+jest.mock('./community-invite-candidates');
+const mockedListInviteCandidates = jest.mocked(listInviteCandidates);
+
+/** `ConnectionsService.acceptedConnectionsAmong`: every person asked about
+ *  holds an accepted connection with the inviter, except `strangerUserIds`. */
+function acceptedConnectionsAmongStub(strangerUserIds: string[] = []) {
+  return jest.fn((_viewerUserId: string, candidateUserIds: string[]) =>
+    Promise.resolve(
+      new Set(
+        candidateUserIds.filter(
+          (candidateUserId) => !strangerUserIds.includes(candidateUserId),
+        ),
+      ),
+    ),
+  );
+}
 
 const INVITER_ID = 'inviter';
 const PARENT_ID = 'parent-1';
@@ -179,6 +202,14 @@ describe('CommunityInvitesService.invite on a space', () => {
             blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
           },
         },
+        // Everyone named is one of the inviter's connections, so only the
+        // parent's roster and bans decide this suite.
+        {
+          provide: ConnectionsService,
+          useValue: {
+            acceptedConnectionsAmong: acceptedConnectionsAmongStub(),
+          },
+        },
       ],
     }).compile();
     service = module.get(CommunityInvitesService);
@@ -308,12 +339,32 @@ describe('CommunityInvitesService liveness, expiry and blocks', () => {
   let communities: { findOne: jest.Mock; find: jest.Mock };
   let contentModeration: { statesFor: jest.Mock };
   let communitiesService: { cardsByCommunityId: jest.Mock };
+  let members: { findOne: jest.Mock; find: jest.Mock };
+  let profiles: { createQueryBuilder: jest.Mock; find: jest.Mock };
+  let connections: { acceptedConnectionsAmong: jest.Mock };
 
   beforeEach(async () => {
     jest.resetAllMocks();
     mockedLiveInvitedUserIds.mockResolvedValue(new Set<string>());
     mockedRetireDeadPendingInvites.mockResolvedValue(undefined);
     mockedWhereInviteIsLive.mockImplementation((queryBuilder) => queryBuilder);
+    // By default everyone named is one of the inviter's connections; the
+    // `not_connected` cases narrow it.
+    connections = { acceptedConnectionsAmong: acceptedConnectionsAmongStub() };
+    members = {
+      // The inviter moderates this top-level community; nobody named is on
+      // the roster yet.
+      findOne: jest.fn().mockResolvedValue({
+        communityId: TOP_LEVEL_COMMUNITY.id,
+        userId: INVITER_ID,
+        role: RosterRole.Mod,
+      }),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    profiles = {
+      createQueryBuilder: jest.fn(() => profileSlugLookup()),
+      find: jest.fn().mockResolvedValue(LISTED_PROFILES),
+    };
 
     inviteChain = chainStub({
       execute: jest.fn().mockResolvedValue({ raw: [] }),
@@ -348,19 +399,7 @@ describe('CommunityInvitesService liveness, expiry and blocks', () => {
       providers: [
         CommunityInvitesService,
         { provide: getRepositoryToken(Community), useValue: communities },
-        {
-          provide: getRepositoryToken(CommunityMember),
-          useValue: {
-            // The inviter moderates this top-level community; nobody named
-            // is on the roster yet.
-            findOne: jest.fn().mockResolvedValue({
-              communityId: TOP_LEVEL_COMMUNITY.id,
-              userId: INVITER_ID,
-              role: RosterRole.Mod,
-            }),
-            find: jest.fn().mockResolvedValue([]),
-          },
-        },
+        { provide: getRepositoryToken(CommunityMember), useValue: members },
         {
           provide: getRepositoryToken(CommunityJoinRequest),
           useValue: { find: jest.fn().mockResolvedValue([]) },
@@ -370,13 +409,7 @@ describe('CommunityInvitesService liveness, expiry and blocks', () => {
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         { provide: getRepositoryToken(CommunityInvite), useValue: invites },
-        {
-          provide: getRepositoryToken(Profile),
-          useValue: {
-            createQueryBuilder: jest.fn(() => profileSlugLookup()),
-            find: jest.fn().mockResolvedValue(LISTED_PROFILES),
-          },
-        },
+        { provide: getRepositoryToken(Profile), useValue: profiles },
         {
           provide: getRepositoryToken(User),
           useValue: { find: jest.fn().mockResolvedValue([]) },
@@ -385,6 +418,7 @@ describe('CommunityInvitesService liveness, expiry and blocks', () => {
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: CommunitiesService, useValue: communitiesService },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: ConnectionsService, useValue: connections },
       ],
     }).compile();
     service = module.get(CommunityInvitesService);
@@ -392,6 +426,10 @@ describe('CommunityInvitesService liveness, expiry and blocks', () => {
 
   it('invite skips a member who blocked the inviter and reports them as unknown_member', async () => {
     blockFilter.blockedUserIds.mockResolvedValue(new Set(['user-blocker']));
+    // A block severs the connection as well, so the blocker is no connection
+    // either. The block is checked first and still decides the answer, so the
+    // inviter cannot tell a block from a typo.
+    connections.acceptedConnectionsAmong.mockResolvedValue(new Set<string>());
 
     const result = await service.invite(TOP_LEVEL_COMMUNITY.slug, INVITER_ID, {
       memberSlugs: ['blocker'],
@@ -436,6 +474,140 @@ describe('CommunityInvitesService liveness, expiry and blocks', () => {
       expect.objectContaining({ communitySlug: TOP_LEVEL_COMMUNITY.slug }),
       INVITER_ID,
     );
+  });
+
+  it('invite passes over a member who is no connection of the inviter as not_connected', async () => {
+    connections.acceptedConnectionsAmong.mockImplementation(
+      acceptedConnectionsAmongStub(['user-returning']),
+    );
+    inviteChain.execute.mockResolvedValue({
+      raw: [{ id: 'invite-friend', invited_user_id: 'user-friend' }],
+    });
+
+    const result = await service.invite(TOP_LEVEL_COMMUNITY.slug, INVITER_ID, {
+      memberSlugs: ['friend', 'returning'],
+    });
+
+    // One batched lookup over every resolved person, asked from the
+    // inviter's side.
+    expect(connections.acceptedConnectionsAmong).toHaveBeenCalledTimes(1);
+    expect(connections.acceptedConnectionsAmong).toHaveBeenCalledWith(
+      INVITER_ID,
+      ['user-friend', 'user-returning'],
+    );
+    expect(result.invited).toEqual(['friend']);
+    expect(result.skipped).toEqual([
+      { slug: 'returning', reason: CommunityInviteSkipReason.NotConnected },
+    ]);
+    expect(inviteChain.values).toHaveBeenCalledWith([
+      expect.objectContaining({ invitedUserId: 'user-friend' }),
+    ]);
+    expect(notifications.createForRecipients).toHaveBeenCalledWith(
+      ['user-friend'],
+      NotificationType.CommunityInviteReceived,
+      expect.objectContaining({ communitySlug: TOP_LEVEL_COMMUNITY.slug }),
+      INVITER_ID,
+    );
+  });
+
+  it('invite reports not_connected ahead of a pending invitation, writing and sending nothing', async () => {
+    // A stranger who somehow holds a live invitation still reads as no
+    // connection: the connection rule outranks every community-side reason.
+    connections.acceptedConnectionsAmong.mockResolvedValue(new Set<string>());
+    mockedLiveInvitedUserIds.mockResolvedValue(new Set(['user-holder']));
+
+    const result = await service.invite(TOP_LEVEL_COMMUNITY.slug, INVITER_ID, {
+      memberSlugs: ['holder'],
+    });
+
+    expect(result.skipped).toEqual([
+      { slug: 'holder', reason: CommunityInviteSkipReason.NotConnected },
+    ]);
+    expect(mockedRetireDeadPendingInvites).not.toHaveBeenCalled();
+    expect(inviteChain.insert).not.toHaveBeenCalled();
+    expect(notifications.createForRecipients).not.toHaveBeenCalled();
+  });
+
+  it('listCandidates resolves the staff community and hands the query through', async () => {
+    const candidatePage = {
+      items: [
+        {
+          slug: 'friend',
+          firstName: 'Fran',
+          lastName: 'Friend',
+          pronouns: null,
+          avatarUrl: null,
+        },
+      ],
+      total: 21,
+      page: 2,
+      pageSize: PAGE_SIZE,
+    };
+    mockedListInviteCandidates.mockResolvedValue(candidatePage);
+
+    const result = await service.listCandidates(
+      TOP_LEVEL_COMMUNITY.slug,
+      INVITER_ID,
+      { q: 'São', page: 2 },
+    );
+
+    expect(communities.findOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          slug: TOP_LEVEL_COMMUNITY.slug,
+        }) as unknown,
+      }),
+    );
+    expect(mockedListInviteCandidates).toHaveBeenCalledWith(
+      { profiles, invites, blockFilter },
+      TOP_LEVEL_COMMUNITY,
+      INVITER_ID,
+      'São',
+      2,
+    );
+    expect(result).toEqual(candidatePage);
+  });
+
+  it('listCandidates reads no search and page 1 when the query is empty', async () => {
+    mockedListInviteCandidates.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      pageSize: PAGE_SIZE,
+    });
+
+    const result = await service.listCandidates(
+      TOP_LEVEL_COMMUNITY.slug,
+      INVITER_ID,
+      {},
+    );
+
+    expect(mockedListInviteCandidates).toHaveBeenCalledWith(
+      expect.anything(),
+      TOP_LEVEL_COMMUNITY,
+      INVITER_ID,
+      '',
+      1,
+    );
+    expect(result).toEqual({
+      items: [],
+      total: 0,
+      page: 1,
+      pageSize: PAGE_SIZE,
+    });
+  });
+
+  it('listCandidates refuses a plain member before any candidate is read', async () => {
+    members.findOne.mockResolvedValue({
+      communityId: TOP_LEVEL_COMMUNITY.id,
+      userId: INVITER_ID,
+      role: RosterRole.Member,
+    });
+
+    await expect(
+      service.listCandidates(TOP_LEVEL_COMMUNITY.slug, INVITER_ID, {}),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(mockedListInviteCandidates).not.toHaveBeenCalled();
   });
 
   it('invite retires a dead pending row before writing a fresh invitation', async () => {

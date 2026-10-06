@@ -98,6 +98,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   whatItIs: [],
   tags: [],
   goodFor: [],
+  ownerIdentities: [],
   langs: [],
   online: false,
   address: '',

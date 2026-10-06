@@ -45,6 +45,12 @@ interface CancelledRsvpOutcome {
 
 @Injectable()
 export class RsvpService {
+  // One wording for every way of trying to give up the host's own seat
+  // (stepping down to maybe, cancelling, being removed), so the client can
+  // show the same explanation whichever button led there.
+  private static readonly HOST_ALWAYS_GOING_MESSAGE =
+    'The host is always going to their own gathering';
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
@@ -103,6 +109,14 @@ export class RsvpService {
         throw new BadRequestException('This gathering has already happened');
       }
       const isOrganizer = await this.assertMayRsvp(manager, event, userId);
+      // The HOST (never a co-host, who RSVPs like anyone else) always holds
+      // a 'going' seat on their own gathering: `EventsService.create` gives
+      // them one. 'maybe' would hand that seat back, so it is refused, and
+      // 'going' below skips the capacity check and the waitlist entirely.
+      const isHost = event.hostId === userId;
+      if (isHost && status === 'maybe') {
+        throw new BadRequestException(RsvpService.HOST_ALWAYS_GOING_MESSAGE);
+      }
 
       const rsvpRepo = manager.getRepository(EventRsvp);
       const existing = await rsvpRepo.findOne({
@@ -186,7 +200,13 @@ export class RsvpService {
       let resolved: RsvpStatus;
       let waitlistPosition: number | null = null;
 
+      // The host is exempt: their seat is theirs by right of running the
+      // gathering, so they are seated even on a full roster (a host whose
+      // row was lost, or who reached here from an older gathering made before
+      // hosts were seated automatically) and are never waitlisted or turned
+      // away by the "Allow waitlist" toggle below.
       if (
+        !isHost &&
         event.capacity !== null &&
         effectiveSeats + mySeats > event.capacity
       ) {
@@ -285,7 +305,13 @@ export class RsvpService {
     // take the row locks in the same order rather than deadlocking.
     const outcomes = await this.dataSource.transaction(async (manager) => {
       const results: CancelledRsvpOutcome[] = [];
-      const primary = await this.cancelRsvpOne(manager, slug, userId);
+      // The occurrence the member pressed "cancel" on is refused outright
+      // when they host it. Later siblings only KEEP the host's seat: a series
+      // is normally one host's throughout, so the primary throw already
+      // covers them, but a co-host who inherited one date after the original
+      // host's account was erased can still be an ordinary attendee of the
+      // rest, and leaving those should not fail on the one date they now run.
+      const primary = await this.cancelRsvpOne(manager, slug, userId, 'reject');
       results.push(primary);
       if (
         scope === 'future' &&
@@ -300,7 +326,9 @@ export class RsvpService {
           order: { seriesIndex: 'ASC' },
         });
         for (const sibling of siblings) {
-          results.push(await this.cancelRsvpOne(manager, sibling.slug, userId));
+          results.push(
+            await this.cancelRsvpOne(manager, sibling.slug, userId, 'keep'),
+          );
         }
       }
       return results;
@@ -323,10 +351,16 @@ export class RsvpService {
   // the public method above can find later siblings without a second lookup.
   // Runs on the CALLER'S transaction (see `cancelRsvp`) and emits nothing
   // itself, so the whole series commits or rolls back as one.
+  //
+  // `onOwnGathering` is what happens when the caller HOSTS this occurrence,
+  // whose seat they always hold (see `rsvp`): `'reject'` refuses the cancel
+  // with a 400, `'keep'` leaves the seat as it is and moves on. `cancelRsvp`
+  // explains which occurrence gets which.
   private async cancelRsvpOne(
     manager: EntityManager,
     slug: string,
     userId: string,
+    onOwnGathering: 'reject' | 'keep',
   ): Promise<CancelledRsvpOutcome> {
     const event = await manager.findOne(Event, {
       where: { slug },
@@ -335,12 +369,16 @@ export class RsvpService {
     if (!event) {
       throw new NotFoundException('Event not found');
     }
+    const isHost = event.hostId === userId;
+    if (isHost && onOwnGathering === 'reject') {
+      throw new BadRequestException(RsvpService.HOST_ALWAYS_GOING_MESSAGE);
+    }
 
     const rsvpRepo = manager.getRepository(EventRsvp);
     const mine = await rsvpRepo.findOne({
       where: { eventId: event.id, userId },
     });
-    if (!mine || mine.status === RsvpStatus.Cancelled) {
+    if (isHost || !mine || mine.status === RsvpStatus.Cancelled) {
       return {
         eventId: event.id,
         eventSlug: event.slug,
@@ -415,6 +453,13 @@ export class RsvpService {
         throw new NotFoundException('Event not found');
       }
       await this.assertOrganizer(manager, event, actorId);
+      // The host's seat is held for the life of the gathering (see `rsvp`),
+      // so a co-host cannot take it away through the door list, and the host
+      // cannot remove themselves this way around the cancel guard either.
+      // `EventBansService` refuses to ban the host for the same reason.
+      if (event.hostId === targetUserId) {
+        throw new BadRequestException(RsvpService.HOST_ALWAYS_GOING_MESSAGE);
+      }
 
       const rsvpRepo = manager.getRepository(EventRsvp);
       const target = await rsvpRepo.findOne({

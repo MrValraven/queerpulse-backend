@@ -62,6 +62,41 @@ export interface JoinRequestView {
   reviewedByName?: string;
   declineReason: string | null;
   /**
+   * The closed-set reason key the reviewer picked when approving
+   * (`member_vouched`, `clear_request`, …), rendered from the frontend
+   * catalogue. Present only on an approval made after the column landed. STAFF
+   * ONLY: `PublicJoinRequestStatusView` and the member data export leave it
+   * out.
+   */
+  approvalReason: string | null;
+  /**
+   * The STAFF-ONLY free-text note on a declined request, written through
+   * `PATCH /admin/join-requests/:id/note`. Plain text (markup stripped and
+   * trimmed at write time), or null when nobody has written one. Only a
+   * Declined row can carry one, because the write refuses every other status.
+   *
+   * This view is the staff queue's, and it is the ONLY place the note leaves
+   * the server: `PublicJoinRequestStatusView` and `SubmittedJoinRequestView`
+   * below are mapped field by field and never read it.
+   */
+  internalNote: string | null;
+  /** When the note was last written. Null whenever `internalNote` is. */
+  internalNoteUpdatedAt: Date | null;
+  /**
+   * The staff member who last wrote the note. Null whenever `internalNote` is,
+   * and after that staff member's erasure (`internal_note_updated_by` is
+   * `ON DELETE SET NULL`, the same shape as `reviewedBy`).
+   */
+  internalNoteUpdatedBy: string | null;
+  /**
+   * Display name of `internalNoteUpdatedBy`, resolved through the same batched
+   * `staffRefs` lookup that names `reviewedBy` and `assignedStaffId`, so it
+   * costs a page no extra query. Absent when `internalNoteUpdatedBy` is null,
+   * the same convention as `reviewedByName`, and on a single just-reviewed row
+   * mapped with no batch behind it (`review()`).
+   */
+  internalNoteUpdatedByName?: string;
+  /**
    * OPS-04. The reviewer currently working this request, or null when nobody
    * has claimed it. Distinct from `reviewedBy`, which is who DECIDED it: a
    * claim says "I am looking at this now" so a second reviewer does not open
@@ -155,9 +190,10 @@ export type PublicJoinRequestStatus = 'under_review' | 'approved' | 'declined';
 /**
  * The applicant's own view of their request. NARROW on purpose: it carries the
  * outcome and nothing else. No name, no email, no city, no submitted message,
- * no reviewer, no triage flags, no prior-decline count, no id — anyone holding
- * the token can read this, and the token travels in a URL, so it must not be
- * worth stealing for anything beyond "what happened to my request".
+ * no reviewer, no staff note, no triage flags, no prior-decline count, no id —
+ * anyone holding the token can read this, and the token travels in a URL, so
+ * it must not be worth stealing for anything beyond "what happened to my
+ * request".
  */
 export interface PublicJoinRequestStatusView {
   status: PublicJoinRequestStatus;
@@ -255,6 +291,11 @@ export function toJoinRequestView(
   // erased (the id is NULLed by the FK, so there is nothing to resolve), and on
   // a single just-reviewed row with no batch behind it.
   reviewedByName?: string,
+  // The display name of whoever last wrote the staff-only internal note,
+  // resolved by the caller through `optionalQueueAssigneeName` against the
+  // SAME batched profile lookup as the two names above. Undefined when the row
+  // has no note author, and on a single just-reviewed row with no batch.
+  internalNoteUpdatedByName?: string,
 ): JoinRequestView {
   return {
     id: request.id,
@@ -273,6 +314,11 @@ export function toJoinRequestView(
     reviewedBy: request.reviewedBy,
     ...(reviewedByName ? { reviewedByName } : {}),
     declineReason: request.declineReason,
+    approvalReason: request.approvalReason,
+    internalNote: request.internalNote,
+    internalNoteUpdatedAt: request.internalNoteUpdatedAt,
+    internalNoteUpdatedBy: request.internalNoteUpdatedBy,
+    ...(internalNoteUpdatedByName ? { internalNoteUpdatedByName } : {}),
     assignedStaffId: request.assignedStaffId,
     ...(assignedStaffName ? { assignedStaffName } : {}),
     dueAt: request.dueAt,

@@ -7,6 +7,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, MoreThan, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { Paginated, normalizePage } from '../common/pagination';
+import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -14,6 +16,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { CommunitiesService } from './communities.service';
+import { listInviteCandidates } from './community-invite-candidates';
 import {
   liveInvitedUserIds,
   livePendingInvitesForInvitee,
@@ -31,6 +34,7 @@ import {
 } from './community-invites-response';
 import { resolveStaffCommunity } from './community-staff-access';
 import { CreateCommunityInvitesDto } from './dto/create-community-invites.dto';
+import { ListInviteCandidatesQuery } from './dto/list-invite-candidates.query';
 import { CommunityBan } from './entities/community-ban.entity';
 import {
   CommunityInvite,
@@ -107,6 +111,9 @@ export class CommunityInvitesService {
     // A block either way between inviter and invitee passes the invitee over
     // (ENG-425), answered as `unknown_member` so neither side learns of it.
     private readonly blockFilter: BlockFilterService,
+    // Only the inviter's accepted connections can be invited, so the send
+    // asks which of the named people are connected to them, in one query.
+    private readonly connections: ConnectionsService,
   ) {}
 
   /**
@@ -116,6 +123,11 @@ export class CommunityInvitesService {
    * they are reported back to the caller and never notified. Resolution is
    * batched, so the whole call is a fixed handful of queries whatever the
    * list's length.
+   *
+   * Only the inviter's own accepted connections can be invited: anyone else
+   * is passed over as `not_connected`. The invite panel offers exactly the
+   * invitable connections (`listCandidates`), so this is the server holding
+   * the same line for a hand-typed or replayed slug.
    *
    * ## The row is the invitation, the notification announces it
    *
@@ -181,6 +193,7 @@ export class CommunityInvitesService {
       parentRosterUserIds,
       parentBannedUserIds,
       blockedUserIds,
+      connectedUserIds,
     ] = await Promise.all([
       this.systemUserIds(resolvedUserIds),
       this.rosterUserIds(community.id, resolvedUserIds),
@@ -197,6 +210,7 @@ export class CommunityInvitesService {
         ? this.bannedUserIds(parentId, resolvedUserIds)
         : Promise.resolve(new Set<string>()),
       this.blockFilter.blockedUserIds(inviterUserId, resolvedUserIds),
+      this.connections.acceptedConnectionsAmong(inviterUserId, resolvedUserIds),
     ]);
     // A ban in the parent bars every space of that parent as well.
     const bannedUserIds = new Set([
@@ -221,6 +235,7 @@ export class CommunityInvitesService {
         invitedAlreadyUserIds,
         parentRosterUserIds,
         blockedUserIds,
+        connectedUserIds,
       );
       if (reason || !userId) {
         skipReasonBySlug.set(
@@ -299,6 +314,37 @@ export class CommunityInvitesService {
   }
 
   /**
+   * `GET /communities/:slug/invites/candidates` (owner, co-owner or
+   * moderator): the caller's accepted connections that `invite` would accept
+   * right now, most recently connected first, searched and paged in SQL. See
+   * `community-invite-candidates.ts` for how each filter maps to a skip
+   * reason.
+   */
+  async listCandidates(
+    slug: string,
+    viewerUserId: string,
+    query: ListInviteCandidatesQuery,
+  ): Promise<Paginated<MemberRef>> {
+    const { community } = await resolveStaffCommunity(
+      this.communities,
+      this.members,
+      slug,
+      viewerUserId,
+    );
+    return listInviteCandidates(
+      {
+        profiles: this.profiles,
+        invites: this.invites,
+        blockFilter: this.blockFilter,
+      },
+      community,
+      viewerUserId,
+      query.q ?? '',
+      normalizePage(query.page),
+    );
+  }
+
+  /**
    * The first reason this member cannot be invited, or `null` when they can.
    * Ordered so the most informative answer wins: "already a member" is
    * more use to an owner than "they also have a pending request".
@@ -315,6 +361,8 @@ export class CommunityInvitesService {
     parentRosterUserIds: Set<string> | null,
     // Members blocked with the inviter in either direction.
     blockedUserIds: Set<string>,
+    // Members holding an accepted connection with the inviter.
+    connectedUserIds: Set<string>,
   ): CommunityInviteSkipReason | null {
     if (!userId) return CommunityInviteSkipReason.UnknownMember;
     if (userId === inviterUserId) return CommunityInviteSkipReason.Self;
@@ -322,6 +370,11 @@ export class CommunityInvitesService {
     // answer a lookup for someone who blocked you gives elsewhere.
     if (blockedUserIds.has(userId)) {
       return CommunityInviteSkipReason.UnknownMember;
+    }
+    // Read after the block check on purpose: a block severs the connection
+    // too, and a blocked person must keep reading as unknown.
+    if (!connectedUserIds.has(userId)) {
+      return CommunityInviteSkipReason.NotConnected;
     }
     if (systemUserIds.has(userId)) {
       return CommunityInviteSkipReason.SystemAccount;
@@ -336,7 +389,7 @@ export class CommunityInvitesService {
     if (pendingUserIds.has(userId)) {
       return CommunityInviteSkipReason.PendingJoinRequest;
     }
-    // Last, being the least surprising of the seven: the invitation this owner
+    // Last, being the least surprising of the eight: the invitation this owner
     // is trying to send is already sitting in that member's list.
     if (invitedAlreadyUserIds.has(userId)) {
       return CommunityInviteSkipReason.AlreadyInvited;

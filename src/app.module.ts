@@ -63,6 +63,7 @@ import { TransparencyModule } from './transparency/transparency.module';
 import { AdminTopicsModule } from './admin-topics/admin-topics.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
+import { PlatformLogModule } from './platform-log/platform-log.module';
 import { AdminModerationHealthModule } from './admin-moderation-health/admin-moderation-health.module';
 import { AdminQueueNotificationsModule } from './admin-queue-notifications/admin-queue-notifications.module';
 import { AdminQueuesModule } from './admin-queues/admin-queues.module';
@@ -380,6 +381,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     AdminTopicsModule,
     AdminTrustNetworkModule,
     AdminOverviewModule,
+    PlatformLogModule,
     // Moderator workload and SLA alerting (TS-04). Registering it starts the
     // hourly queue-health cron as well as opening
     // /admin/moderation/queue-health, which is why it is named here in its own

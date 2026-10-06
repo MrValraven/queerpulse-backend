@@ -143,6 +143,46 @@ export class PlatformJoinRequest extends QueueAssignmentColumns {
   declineReason!: string | null;
 
   /**
+   * Closed-set reason key the reviewer picked when approving (e.g.
+   * `member_vouched`, `clear_request`, `known_to_team`, `partner_or_event`,
+   * `other`), the approval-side twin of `declineReason`. The catalogue lives on
+   * the frontend and this column is only length-capped, so the set can grow
+   * without a backend deploy. STAFF-ONLY and never applicant-facing. Null for
+   * every other status and for approvals that predate
+   * `AddJoinRequestApprovalReason1828400000000`.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  approvalReason!: string | null;
+
+  /**
+   * STAFF-ONLY free-text note on a DECLINED request: the context a closed-set
+   * `declineReason` key cannot carry, kept for whichever reviewer meets this
+   * applicant next. One editable note per request, written only through
+   * `JoinRequestsService.updateInternalNote`, which refuses any status but
+   * Declined and stores plain text (markup stripped, trimmed, NULL for blank).
+   *
+   * NEVER applicant-facing. The public status view and the member data export
+   * map their columns explicitly and leave this out, and anything new that
+   * serialises this row to a non-staff audience must do the same. Added by
+   * `AddJoinRequestInternalNote1828100000000`.
+   */
+  @Column({ type: 'text', nullable: true })
+  internalNote!: string | null;
+
+  /** When `internalNote` was last written. Null whenever the note is. */
+  @Column({ type: 'timestamptz', nullable: true })
+  internalNoteUpdatedAt!: Date | null;
+
+  /**
+   * The staff member who last wrote `internalNote`. Null whenever the note is,
+   * and after that staff member's erasure: the FK is ON DELETE SET NULL, the
+   * same shape as `reviewedBy`, so the note itself survives them.
+   */
+  @Index('IDX_join_requests_internal_note_updated_by')
+  @Column({ type: 'uuid', nullable: true })
+  internalNoteUpdatedBy!: string | null;
+
+  /**
    * The invite minted by the approval, bound to `email`. Null while pending and
    * for declined requests. The FK is ON DELETE SET NULL so purging an invite
    * never erases the record that the approval happened.

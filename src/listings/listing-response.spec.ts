@@ -263,6 +263,24 @@ describe('toDirectoryDetail', () => {
       expect(detail.owner.first).toBe('');
     });
   });
+
+  it('emits owner identity tags in canonical order, and [] for an old row', () => {
+    const tagged = toDirectoryDetail(
+      makeDirectoryListing({ ownerIdentities: ['bipoc', 'women'] }),
+      [],
+      [],
+      0,
+    );
+    expect(tagged.ownerIdentities).toEqual(['women', 'bipoc']);
+
+    const old = toDirectoryDetail(
+      makeDirectoryListing({ ownerIdentities: undefined }),
+      [],
+      [],
+      0,
+    );
+    expect(old.ownerIdentities).toEqual([]);
+  });
 });
 
 describe('safe-space adapters', () => {

@@ -5,7 +5,10 @@ import { AdminCommunityCardDTO } from '../admin-communities/admin-communities-re
 import { AdminCommunitiesService } from '../admin-communities/admin-communities.service';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityMember } from '../communities/entities/community-member.entity';
-import { Community } from '../communities/entities/community.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import {
   PlatformJoinRequest,
   PlatformJoinRequestStatus,
@@ -225,10 +228,20 @@ export class AdminOverviewService {
         order: { createdAt: 'DESC' },
         take: FEED_SOURCE_FETCH_LIMIT,
       }),
-      this.communityMembers.find({
-        order: { joinedAt: 'DESC' },
-        take: FEED_SOURCE_FETCH_LIMIT,
-      }),
+      // Only joins of public, top-level, live communities: being IN a private
+      // space is exactly the fact a private space exists to keep (the same
+      // gate as `ActivityListener` and the platform log's `cjoin` source).
+      this.communityMembers
+        .createQueryBuilder('cm')
+        .innerJoin(Community, 'c', '"c"."id" = "cm"."community_id"')
+        .where('"c"."access_tier" = :publicTier', {
+          publicTier: AccessTier.Public,
+        })
+        .andWhere('"c"."parent_id" IS NULL')
+        .andWhere('"c"."archived_at" IS NULL')
+        .orderBy('cm.joinedAt', 'DESC')
+        .limit(FEED_SOURCE_FETCH_LIMIT)
+        .getMany(),
       this.joinRequests.find({
         order: { createdAt: 'DESC' },
         take: FEED_SOURCE_FETCH_LIMIT,
@@ -558,7 +571,9 @@ export class AdminOverviewService {
       feedCandidates.push({
         id: `vouch-${vouch.id}`,
         type: 'vouch_received',
-        actorUserId: vouch.voucherId,
+        // An anonymous vouch keeps its voucher private from staff views too;
+        // the card already renders a vouch with no actor (`bodyNoActor`).
+        actorUserId: vouch.anonymous ? null : vouch.voucherId,
         targetUserId: vouch.voucheeId,
         community: null,
         count: null,

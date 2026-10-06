@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
@@ -32,6 +33,7 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunityInvitesService } from './community-invites.service';
 import { CreateCommunityInvitesDto } from './dto/create-community-invites.dto';
+import { ListInviteCandidatesQuery } from './dto/list-invite-candidates.query';
 
 /**
  * `@Controller('communities/:slug/invites')` — standalone controller on a
@@ -43,9 +45,14 @@ import { CreateCommunityInvitesDto } from './dto/create-community-invites.dto';
  * each accepted call already fans out to up to 25 people: the pair of limits
  * is what keeps this from becoming a way to page the member directory.
  *
- * The two routes beside it are the same door from the community's side
- * (PRD-140, PRD-141): reading who is still standing outside with an
- * invitation open, and withdrawing one. The invitee's own half lives on
+ * The invite panel's picker reads `GET candidates`, throttled to `60 per 60s`
+ * because it backs search-as-you-type (debounced on the client). It only ever
+ * returns the caller's own accepted connections, so the looser limit pages
+ * nothing beyond what the caller can already see.
+ *
+ * The pending list and the withdraw route are the same door from the
+ * community's side (PRD-140, PRD-141): reading who is still standing outside
+ * with an invitation open, and withdrawing one. The invitee's own half lives on
  * `MeCommunityInvitesController`.
  */
 @Feature('communities')
@@ -107,6 +114,37 @@ export class CommunityInvitesController {
     @Param('slug') slug: string,
   ) {
     return this.communityInvitesService.listPending(slug, user.userId);
+  }
+
+  @Get('candidates')
+  @Throttle({ default: { limit: 60, ttl: seconds(60) } })
+  @ApiOperation({
+    summary:
+      'Who the caller can invite here (owner, co-owner or moderator): their own accepted connections, searched and paged on the server.',
+  })
+  @ApiOkResponse({
+    description:
+      'A page of connections, most recently connected first. Anyone already on the roster, banned, outside the parent of a space, waiting on a join request, holding a live invitation or blocked either way is left out.',
+  })
+  @ApiBadRequestResponse({
+    description: 'A search term over 80 characters, or an invalid page.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Owner, co-owner or moderator role required.',
+  })
+  @ApiNotFoundResponse({
+    description: 'Unknown slug, or an archived community.',
+  })
+  listCandidates(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() query: ListInviteCandidatesQuery,
+  ) {
+    return this.communityInvitesService.listCandidates(
+      slug,
+      user.userId,
+      query,
+    );
   }
 
   @Delete(':id')

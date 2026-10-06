@@ -64,6 +64,9 @@ describe('EventsService', () => {
     exists: jest.Mock;
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
+    // `create` seats the host with a 'going' row on every occurrence, through
+    // `seatHostAsGoing`'s raw upsert on the repository's manager.
+    manager: { query: jest.Mock };
   };
   let invites: { exists: jest.Mock };
   let lineupEntries: { find: jest.Mock };
@@ -261,6 +264,7 @@ describe('EventsService', () => {
       exists: jest.fn().mockResolvedValue(false),
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => attendeesQbStub()),
+      manager: { query: jest.fn().mockResolvedValue([]) },
     };
     invites = { exists: jest.fn().mockResolvedValue(false) };
     lineupEntries = { find: jest.fn().mockResolvedValue([]) };

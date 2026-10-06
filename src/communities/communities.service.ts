@@ -4058,6 +4058,11 @@ export class CommunitiesService {
    * platform accounts nobody signs in as, so an invitation to one can never be
    * answered. Mirrors the house-account guardrail on `transferOwnership`.
    * `MemberLookup.userIdsForSlugs` already restricts to `active` users.
+   *
+   * Anyone without an accepted connection to the creator is dropped the same
+   * silent way, from both lists: invitations travel along the inviter's own
+   * connections only, the rule `CommunityInvitesService.invite` applies for
+   * the rest of the community's life (`not_connected`).
    */
   private async resolveInvitees(
     ownerId: string,
@@ -4071,16 +4076,20 @@ export class CommunitiesService {
       slugs,
     );
     const resolvedIds = [...new Set(idBySlug.values())];
-    const systemUserIds = resolvedIds.length
-      ? new Set(
-          (
-            await this.users.find({
+    const [systemUserIds, connectedUserIds] = resolvedIds.length
+      ? await Promise.all([
+          this.users
+            .find({
               where: { id: In(resolvedIds), isSystem: true },
               select: { id: true },
             })
-          ).map((user) => user.id),
-        )
-      : new Set<string>();
+            .then((rows) => new Set(rows.map((user) => user.id))),
+          this.connectionsService.acceptedConnectionsAmong(
+            ownerId,
+            resolvedIds,
+          ),
+        ])
+      : [new Set<string>(), new Set<string>()];
 
     // The creator is trivially already on the roster, and nobody is invited
     // twice — a slug listed as BOTH a steward and an invite is only ever the
@@ -4090,7 +4099,14 @@ export class CommunitiesService {
       const out: string[] = [];
       for (const slug of slugList) {
         const userId = idBySlug.get(slug);
-        if (!userId || seen.has(userId) || systemUserIds.has(userId)) continue;
+        if (
+          !userId ||
+          seen.has(userId) ||
+          systemUserIds.has(userId) ||
+          !connectedUserIds.has(userId)
+        ) {
+          continue;
+        }
         seen.add(userId);
         out.push(userId);
       }

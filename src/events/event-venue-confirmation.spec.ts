@@ -195,6 +195,9 @@ describe('EventsService venue confirmation (LOC-16)', () => {
             exists: jest.fn().mockResolvedValue(false),
             find: jest.fn().mockResolvedValue([]),
             createQueryBuilder: jest.fn(() => qbStub()),
+            // `create` seats the host with a 'going' row on each occurrence,
+            // through `seatHostAsGoing`'s raw upsert on this manager.
+            manager: { query: jest.fn().mockResolvedValue([]) },
           },
         },
         {

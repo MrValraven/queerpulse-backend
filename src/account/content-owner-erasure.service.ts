@@ -10,6 +10,8 @@ import {
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { EventSeries } from '../events/entities/event-series.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { hasEnded } from '../events/event-timing';
+import { seatHostAsGoing } from '../events/host-seat';
 import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Job, JobStatus } from '../jobs/entities/job.entity';
@@ -296,6 +298,15 @@ export class ContentOwnerErasureService {
    * Promote the chosen co-host to host. Their `event_cohosts` row is removed
    * in the same pass so the same member is not both host and co-host, which
    * would render them twice on the gathering's organizer list.
+   *
+   * The new host is then seated as 'going' (`seatHostAsGoing`), the same seat
+   * `EventsService.create` gives every host and `RsvpService` holds for them.
+   * A co-host RSVPs like anyone else, so without this the inherited
+   * gathering would have a host with no seat, or one still sitting on its
+   * waitlist. An RSVP they already hold is moved to 'going' and keeps their
+   * guests and answers. Capacity-exempt and silent, like every host seat.
+   * Only a gathering that is still live gets one: `handleFutureGatherings`
+   * hands over nothing else, and the check below keeps that true on its own.
    */
   private async handOverEvents(
     events: Event[],
@@ -309,6 +320,11 @@ export class ContentOwnerErasureService {
         eventId: event.id,
         userId: successorUserId,
       });
+      const isLiveGathering =
+        event.status !== EventStatus.Cancelled && !hasEnded(event);
+      if (isLiveGathering) {
+        await seatHostAsGoing(this.events.manager, event.id, successorUserId);
+      }
       this.logger.log(
         `Gathering ${event.id} handed to co-host ${successorUserId} ` +
           `after the host's account was erased`,
@@ -386,12 +402,17 @@ export class ContentOwnerErasureService {
           where: { eventId: In(eventIds), status: EventInviteStatus.Pending },
         }),
       ]);
+      // The erased host is never a recipient. Every host holds a 'going' row
+      // on their own gathering (`EventsService.create`), so without this the
+      // member whose account is being erased would be sent a notice about
+      // the very gatherings their erasure called off.
+      const erasedHostIds = new Set(ordered.map((event) => event.hostId));
       const recipientIds = [
         ...new Set([
           ...rsvps.map((rsvp) => rsvp.userId),
           ...invites.map((invite) => invite.inviteeId),
         ]),
-      ];
+      ].filter((recipientId) => !erasedHostIds.has(recipientId));
       if (!recipientIds.length) return;
       // No `actorId`: there is no acting member to name. The gathering was
       // cancelled by the platform because its host is gone.
