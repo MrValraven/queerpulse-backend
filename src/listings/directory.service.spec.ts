@@ -743,9 +743,9 @@ describe('DirectoryService', () => {
       }) as unknown as Listing;
 
     // Evaluates one TypeORM `find` condition against an in-memory value. It
-    // covers the operators this read uses (`Not`, `In`) plus plain equality,
-    // so the spec asserts which rows the query admits and stays independent
-    // of how the `where` object happens to be spelled.
+    // covers the operators this read uses (`Not`, `In`, `ArrayContains`) plus
+    // plain equality, so the spec asserts which rows the query admits and
+    // stays independent of how the `where` object happens to be spelled.
     const matchesCondition = (actual: unknown, condition: unknown): boolean => {
       if (condition instanceof FindOperator) {
         if (condition.type === 'not') {
@@ -756,6 +756,15 @@ describe('DirectoryService', () => {
         }
         if (condition.type === 'in') {
           return (condition.value as unknown[]).includes(actual);
+        }
+        if (condition.type === 'arrayContains') {
+          const wantedEntries = condition.value as unknown[];
+          return (
+            Array.isArray(actual) &&
+            wantedEntries.every((entry) =>
+              (actual as unknown[]).includes(entry),
+            )
+          );
         }
         throw new Error(`Spec matcher lacks operator "${condition.type}"`);
       }
@@ -852,6 +861,55 @@ describe('DirectoryService', () => {
       const cards = await service.listByMemberSlug(OWNER_SLUG);
 
       expect(cards.map((card) => card.slug)).toEqual(['legacy-cafe']);
+    });
+
+    it('looks up crops for the gallery photos a card shows and leaves shop item photos out', async () => {
+      storedListings = [
+        ownedListing({
+          hasOnlineShop: true,
+          photoGallery: [
+            { image: 'listing-photos/owner-1/cover.jpg', alt: '', caption: '' },
+          ],
+          shopItems: [
+            {
+              id: 'item-1',
+              name: 'Zine',
+              price: '',
+              link: '',
+              photo: {
+                image: 'listing-photos/owner-1/zine.jpg',
+                alt: 'A zine',
+                caption: '',
+              },
+            },
+          ],
+        }),
+      ];
+      const cardLookups = service as unknown as {
+        mediaCropService: { getMany: jest.Mock };
+      };
+
+      await service.listByMemberSlug(OWNER_SLUG);
+
+      expect(cardLookups.mediaCropService.getMany).toHaveBeenCalledWith([
+        'listing-photos/owner-1/cover.jpg',
+      ]);
+    });
+
+    it('leaves an 18+ listing off the strip, whoever is looking', async () => {
+      storedListings = [
+        ownedListing({}),
+        ownedListing({
+          id: 'listing-adult',
+          slug: 'velvet-box',
+          cats: ['intimacy'],
+          online: true,
+        }),
+      ];
+
+      const cards = await service.listByMemberSlug(OWNER_SLUG);
+
+      expect(cards.map((card) => card.slug)).toEqual(['lux-cafe']);
     });
   });
 });

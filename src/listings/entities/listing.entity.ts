@@ -6,7 +6,9 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import type { ListingAccessibilityAnswerMap } from '../listing-accessibility';
+import type { ListingStoredAccessibilityAnswerMap } from '../listing-accessibility';
+import type { ListingOnlineDetails } from '../listing-online-details';
+import type { ListingShopItem } from '../listing-shop-items';
 import type { ListingGalleryPhoto } from '../listing-photo-gallery';
 import type { ListingOwnedBy } from '../listing-owned-by';
 
@@ -153,8 +155,11 @@ export interface ListingServiceOffering {
   note: string;
 }
 
-/** Which priced list the public page shows. Both are kept whichever is on. */
-export type ListingPricingMode = 'services' | 'menu';
+/** Which priced list the public page shows. All three are kept whichever is
+ * on. `shop` ("In the shop", `shopItems`) belongs to listings that sell
+ * online; a listing that stops selling online falls back to the default for
+ * its categories. */
+export type ListingPricingMode = 'services' | 'menu' | 'shop';
 
 /** The four fixed dietary labels, in display order. */
 export type ListingMenuDietary =
@@ -316,10 +321,11 @@ export class Listing {
   @Column({ type: 'varchar', default: '' })
   hood!: string;
 
-  /** City the venue sits in. Drives the detail page's location eyebrow and the
-   * JSON-LD `addressRegion`; empty ⇒ the frontend defaults to Lisbon (where the
-   * directory currently lives). Not part of the member wizard yet — populated by
-   * seed/ops for non-Lisbon listings. */
+  /** For a place: the city the venue sits in, `LISTING_CITY` on every member
+   * write (`resolveListingLocation`). For an online-only listing: where the
+   * business says it is based ("Based in"), stored as typed and possibly empty.
+   * Drives the detail page's location eyebrow, the card's "Online · {city}"
+   * line and the JSON-LD `addressRegion`. */
   @Column({ type: 'varchar', default: '' })
   city!: string;
 
@@ -369,6 +375,11 @@ export class Listing {
    * The venue's answers to the canonical accessibility questions
    * (`LISTING_ACCESSIBILITY_QUESTION_SLUGS`), one answer per slug.
    *
+   * Since 2026-10-07 a listing also answers the four online questions
+   * (`LISTING_ONLINE_ACCESSIBILITY_QUESTION_SLUGS`). A row written earlier
+   * holds the six until its next save, and every reader normalises the map up
+   * to ten (`normalizeListingAccessibilityAnswers`).
+   *
    * Always a COMPLETE map: the write-side normalizer fills every question, so
    * an unanswered question is stored as a real `unknown` rather than as an
    * absent key. That distinction is the whole point. "We do not have a
@@ -384,7 +395,7 @@ export class Listing {
    * Only `yes` ever matches a filter; `unknown` is not a match.
    */
   @Column({ type: 'jsonb', default: () => "'{}'" })
-  accessibilityAnswers!: ListingAccessibilityAnswerMap;
+  accessibilityAnswers!: ListingStoredAccessibilityAnswerMap;
 
   /**
    * The owner's free-text accessibility note, for the honesty the six
@@ -414,7 +425,7 @@ export class Listing {
   })
   menu!: ListingMenu;
 
-  /** Which of `services` or `menu` the public page shows. */
+  /** Which of `services`, `menu` or `shop` (`shopItems`) the public page shows. */
   @Column({ type: 'varchar', length: 16, default: 'services' })
   pricingMode!: ListingPricingMode;
 
@@ -422,9 +433,38 @@ export class Listing {
   langs!: string[];
 
   /** Online-only business (no physical location). When true the listing has no
-   *  address or coordinates and never appears as a map pin. */
+   *  address or coordinates and never appears as a map pin. Its categories
+   *  come from `ONLINE_LISTING_CATEGORY_SLUGS`. */
   @Column({ type: 'boolean', default: false })
   online!: boolean;
+
+  /**
+   * A place (`online === false`) that also sells online: it keeps its address,
+   * hours and place categories and adds the ordering fields below. Always
+   * false for an online-only listing, which sells online by definition. "Sells
+   * online" everywhere means `online || hasOnlineShop`; the Online tab and the
+   * directory's `online=true` filter use that definition.
+   */
+  @Column({ type: 'boolean', default: false })
+  hasOnlineShop!: boolean;
+
+  /**
+   * The "Ordering & delivery" facts (`ListingOnlineDetails`): main link, more
+   * links, how people get it, ships from, payments, session formats,
+   * professional registration, the reply and dispatch note, and the 18+
+   * acceptance stamp. Reset to the empty value whenever the listing does not
+   * sell online. Normalised on every read (`normalizeListingOnlineDetails`),
+   * so the `'{}'` an older row holds reads as a complete, empty value.
+   */
+  @Column({ type: 'jsonb', default: () => "'{}'" })
+  onlineDetails!: ListingOnlineDetails;
+
+  /**
+   * "In the shop" (`ListingShopItem`, at most six), shown when `pricingMode`
+   * is `shop`. Emptied whenever the listing does not sell online.
+   */
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  shopItems!: ListingShopItem[];
 
   @Column({ type: 'text', default: '' })
   address!: string;

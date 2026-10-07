@@ -6,7 +6,10 @@ import {
 } from './entities/listing.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
+import { emptyListingOnlineDetails } from './listing-online-details';
 import {
+  listingCardPhotoKeys,
+  listingPhotoKeys,
   mapSafeSpaceCategory,
   toDirectoryCard,
   toDirectoryDetail,
@@ -629,5 +632,197 @@ describe('toListingDTO (the owner/managed response)', () => {
       null,
     );
     expect(dto).not.toHaveProperty('contactEmail');
+  });
+
+  it('carries the full online details, the 18+ acceptance stamp included', () => {
+    const dto = toListingDTO(
+      makeManagedListing({
+        online: true,
+        city: 'Porto',
+        onlineDetails: {
+          ...emptyListingOnlineDetails(),
+          mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+          adultTermsAcceptedAt: '2026-10-07T10:00:00.000Z',
+        },
+      }),
+      null,
+    );
+
+    expect(dto.onlineDetails.adultTermsAcceptedAt).toBe(
+      '2026-10-07T10:00:00.000Z',
+    );
+    expect(dto.city).toBe('Porto');
+    expect(dto.hasOnlineShop).toBe(false);
+  });
+
+  it('reads missing online columns as empty values', () => {
+    const dto = toListingDTO(makeManagedListing(), null);
+
+    expect(dto.onlineDetails).toEqual(emptyListingOnlineDetails());
+    expect(dto.shopItems).toEqual([]);
+    expect(dto.hasOnlineShop).toBe(false);
+    expect(Object.keys(dto.accessibility.answers)).toHaveLength(10);
+  });
+});
+
+describe('online listings on the public directory responses', () => {
+  const ZINE_PHOTO_URL = 'https://images.unsplash.com/photo-zine.jpg';
+
+  const onlineShop = (overrides: Partial<Listing> = {}) =>
+    makeDirectoryListing({
+      online: true,
+      city: 'Porto',
+      hood: '',
+      cats: ['handmade'],
+      hasOnlineShop: false,
+      onlineDetails: {
+        ...emptyListingOnlineDetails(),
+        mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+        fulfilment: ['shipsEu', 'digital'],
+        shipsFrom: 'outsideEu',
+        isVatIncluded: true,
+        replyNote: 'Orders packed Tuesdays.',
+        adultTermsAcceptedAt: '2026-10-07T10:00:00.000Z',
+      },
+      shopItems: [
+        {
+          id: 'item-1',
+          name: 'Zine',
+          price: '6 EUR',
+          link: '',
+          photo: {
+            image: ZINE_PHOTO_URL,
+            alt: 'A risograph zine',
+            caption: '',
+          },
+        },
+      ],
+      ...overrides,
+    });
+
+  it('prints an online listing’s own city, and nothing when it gave none', () => {
+    expect(toDirectoryCard(onlineShop()).city).toBe('Porto');
+    expect(toDirectoryCard(onlineShop({ city: '' })).city).toBe('');
+  });
+
+  it('prints Lisbon for a place whose row holds no city', () => {
+    expect(toDirectoryCard(makeDirectoryListing({ city: '' })).city).toBe(
+      'Lisbon',
+    );
+  });
+
+  it('summarises the main link, delivery and sessions on the card', () => {
+    expect(toDirectoryCard(onlineShop()).onlineSummary).toEqual({
+      mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+      fulfilment: ['shipsEu', 'digital'],
+      sessionFormats: [],
+    });
+  });
+
+  it('gives a place that does not sell online no summary, no ordering block and no shop', () => {
+    const place = makeDirectoryListing();
+    expect(toDirectoryCard(place).onlineSummary).toBeNull();
+    const detail = toDirectoryDetail(place, [], [], 0);
+    expect(detail.onlineDetails).toBeNull();
+    expect(detail.shopItems).toEqual([]);
+  });
+
+  it('serves a place that also sells online its pill flag and its ordering block', () => {
+    const place = makeDirectoryListing({
+      hasOnlineShop: true,
+      onlineDetails: {
+        ...emptyListingOnlineDetails(),
+        mainLink: { url: 'https://casa.example.pt', kind: 'shop' },
+      },
+    });
+    expect(toDirectoryCard(place).hasOnlineShop).toBe(true);
+    expect(
+      toDirectoryDetail(place, [], [], 0).onlineDetails?.mainLink?.url,
+    ).toBe('https://casa.example.pt');
+  });
+
+  it('never flags an online-only listing as a place with an online shop', () => {
+    expect(
+      toDirectoryCard(onlineShop({ hasOnlineShop: true })).hasOnlineShop,
+    ).toBe(false);
+  });
+
+  it('keeps the 18+ acceptance stamp off the public detail', () => {
+    const detail = toDirectoryDetail(onlineShop(), [], [], 0);
+    expect(detail.onlineDetails).not.toHaveProperty('adultTermsAcceptedAt');
+    expect(JSON.stringify(detail)).not.toContain('2026-10-07T10:00:00.000Z');
+  });
+
+  it('marks an 18+ listing on the card', () => {
+    expect(
+      toDirectoryCard(onlineShop({ cats: ['intimacy'] })).isAdultsOnly,
+    ).toBe(true);
+    expect(toDirectoryCard(onlineShop()).isAdultsOnly).toBe(false);
+  });
+
+  it('reads an old online row with no details as a complete, empty block', () => {
+    const detail = toDirectoryDetail(
+      onlineShop({
+        onlineDetails: undefined as unknown as Listing['onlineDetails'],
+        shopItems: undefined as unknown as Listing['shopItems'],
+      }),
+      [],
+      [],
+      0,
+    );
+    const { adultTermsAcceptedAt: _adultTermsAcceptedAt, ...emptyPublic } =
+      emptyListingOnlineDetails();
+
+    expect(detail.onlineDetails).toEqual(emptyPublic);
+    expect(detail.shopItems).toEqual([]);
+  });
+
+  it('resolves shop item photos like gallery photos, alt text kept', () => {
+    expect(toDirectoryDetail(onlineShop(), [], [], 0).shopItems).toEqual([
+      {
+        id: 'item-1',
+        name: 'Zine',
+        price: '6 EUR',
+        link: '',
+        photo: { image: ZINE_PHOTO_URL, alt: 'A risograph zine', caption: '' },
+      },
+    ]);
+  });
+
+  it('answers all ten accessibility questions on the card', () => {
+    const card = toDirectoryCard(onlineShop());
+    expect(Object.keys(card.accessibilityAnswers)).toHaveLength(10);
+    expect(card.accessibilityAnswers['image-descriptions']).toBe('unknown');
+  });
+});
+
+describe('the crop lookup keys', () => {
+  const listingWithShopPhoto = makeDirectoryListing({
+    hasOnlineShop: true,
+    photoGallery: [
+      { image: 'listing-photos/u/cover.jpg', alt: '', caption: '' },
+    ],
+    shopItems: [
+      {
+        id: 'item-1',
+        name: 'Zine',
+        price: '',
+        link: '',
+        photo: { image: 'listing-photos/u/zine.jpg', alt: '', caption: '' },
+      },
+    ],
+  });
+
+  it('gives a card the gallery photos only', () => {
+    expect(listingCardPhotoKeys(listingWithShopPhoto)).toEqual([
+      'listing-photos/u/cover.jpg',
+    ]);
+  });
+
+  it('gives the detail page and the owner wire the shop item photos too', () => {
+    expect(listingPhotoKeys(listingWithShopPhoto)).toEqual([
+      'listing-photos/u/cover.jpg',
+      'listing-photos/u/zine.jpg',
+    ]);
   });
 });

@@ -206,6 +206,49 @@ describe('ListingEditSuggestionsService', () => {
       ).rejects.toThrow(NotFoundException);
     });
 
+    it('refuses an address suggestion for an online-only listing', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'fio-rosa',
+        ownerId: 'owner-1',
+        online: true,
+      });
+
+      await expect(
+        service.submit('fio-rosa', 'member-1', {
+          field: 'address',
+          message: 'They have a shop on Rua X now.',
+        }),
+      ).rejects.toThrow(
+        'This business is online only, so it has no address to correct.',
+      );
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('still takes an hours suggestion for an online-only listing', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'fio-rosa',
+        ownerId: 'owner-1',
+        online: true,
+      });
+      suggestions.save.mockResolvedValue({
+        id: 'sugg-1',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+
+      await expect(
+        service.submit('fio-rosa', 'member-1', {
+          field: 'hours',
+          message: 'Orders ship on Mondays only.',
+        }),
+      ).resolves.toEqual({
+        id: 'sugg-1',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+    });
+
     it('stores a trimmed proposed replacement value alongside the prose', async () => {
       listings.findOne.mockResolvedValue({
         id: 'listing-1',
@@ -427,6 +470,345 @@ describe('ListingEditSuggestionsService', () => {
           }) as ListingSocial,
         }),
       );
+    });
+
+    it('writes an accepted hours correction for an online-only listing into its reply note', async () => {
+      const correction = `Orders ship on Mondays. ${'x'.repeat(200)}`;
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-online-hours',
+        listingId: 'listing-1',
+        field: 'hours',
+        message: correction,
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        hoursNote: 'Old note',
+        onlineDetails: {
+          mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+        },
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      await service.resolve('sugg-online-hours', 'mod-1', {
+        status: 'accepted',
+      });
+
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.hoursNote).toBe('Old note');
+      expect(savedListing.onlineDetails.replyNote).toBe(
+        Array.from(correction).slice(0, 140).join(''),
+      );
+      expect(savedListing.onlineDetails.mainLink).toEqual({
+        url: 'https://fiorosa.pt',
+        kind: 'shop',
+      });
+      expect(moderationEvents.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changedFields: ['onlineDetails'],
+          reason:
+            'A moderator applied a suggested correction to the reply and dispatch note.',
+        }),
+      );
+    });
+
+    it('still writes an accepted hours correction for a place into its hours note', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-place-hours',
+        listingId: 'listing-1',
+        field: 'hours',
+        message: 'Closed on Mondays',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'galeria-lume',
+        online: false,
+        hoursNote: 'Old note',
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      await service.resolve('sugg-place-hours', 'mod-1', {
+        status: 'accepted',
+      });
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ hoursNote: 'Closed on Mondays' }),
+      );
+      expect(moderationEvents.save).toHaveBeenCalledWith(
+        expect.objectContaining({ changedFields: ['hoursNote'] }),
+      );
+    });
+
+    it('resolves an accepted address suggestion for a listing now online only without writing an address', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-online-address',
+        listingId: 'listing-1',
+        field: 'address',
+        message: '123 New Street',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        address: '',
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      const result = await service.resolve('sugg-online-address', 'mod-1', {
+        status: 'accepted',
+      });
+
+      expect(result.status).toBe(ListingEditSuggestionStatus.Accepted);
+      expect(listings.save).not.toHaveBeenCalled();
+      expect(moderationEvents.save).not.toHaveBeenCalled();
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner-1',
+        'listing_edit_suggestion_accepted',
+        { source: 'listing', listingSlug: 'fio-rosa', field: 'address' },
+      );
+    });
+
+    it('refuses a moderator address value for a listing now online only, before resolving the row', async () => {
+      const suggestion = {
+        id: 'sugg-online-address-value',
+        listingId: 'listing-1',
+        field: 'address',
+        message: 'They moved.',
+        status: ListingEditSuggestionStatus.Pending,
+      };
+      suggestions.findOne.mockResolvedValue(suggestion);
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        address: '',
+      });
+
+      await expect(
+        service.resolve('sugg-online-address-value', 'mod-1', {
+          status: 'accepted',
+          value: '123 New Street',
+        }),
+      ).rejects.toThrow(
+        'This business is online only, so it has no address to correct.',
+      );
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(suggestion.status).toBe(ListingEditSuggestionStatus.Pending);
+      expect(listings.save).not.toHaveBeenCalled();
+    });
+
+    it('writes an accepted website correction for an online-only listing into its main link, keeping the kind', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-online-website',
+        listingId: 'listing-1',
+        field: 'website',
+        message: 'Their shop moved.',
+        proposedValue: 'fiorosa.shop',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        onlineDetails: {
+          mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+          replyNote: 'Replies within a day.',
+        },
+        social: {
+          phone: '',
+          website: 'fiorosa.pt',
+          email: '',
+          instagram: 'fiorosa',
+        },
+      });
+
+      await service.resolve('sugg-online-website', 'mod-1', {
+        status: 'accepted',
+      });
+
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.onlineDetails.mainLink).toEqual({
+        url: 'https://fiorosa.shop',
+        kind: 'shop',
+      });
+      expect(savedListing.onlineDetails.replyNote).toBe(
+        'Replies within a day.',
+      );
+      expect(savedListing.social).toEqual(
+        expect.objectContaining({
+          website: 'fiorosa.shop',
+          instagram: 'fiorosa',
+        }),
+      );
+      expect(moderationEvents.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changedFields: ['onlineDetails', 'social'],
+          reason:
+            'A moderator applied a suggested correction to the main link and the website.',
+        }),
+      );
+    });
+
+    it('gives an online-only listing with no main link a website main link from an accepted correction', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-online-website-new',
+        listingId: 'listing-1',
+        field: 'website',
+        message: 'https://fiorosa.pt',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        onlineDetails: {},
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      await service.resolve('sugg-online-website-new', 'mod-1', {
+        status: 'accepted',
+      });
+
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.onlineDetails.mainLink).toEqual({
+        url: 'https://fiorosa.pt',
+        kind: 'website',
+      });
+    });
+
+    it('resolves an accepted website correction the main link cannot hold without writing anything', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-online-website-bad',
+        listingId: 'listing-1',
+        field: 'website',
+        message: 'Their site is fiorosa now.',
+        proposedValue: 'fiorosa',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        onlineDetails: {
+          mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+        },
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      const result = await service.resolve('sugg-online-website-bad', 'mod-1', {
+        status: 'accepted',
+      });
+
+      expect(result.status).toBe(ListingEditSuggestionStatus.Accepted);
+      expect(listings.save).not.toHaveBeenCalled();
+      expect(moderationEvents.save).not.toHaveBeenCalled();
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner-1',
+        'listing_edit_suggestion_accepted',
+        { source: 'listing', listingSlug: 'fio-rosa', field: 'website' },
+      );
+    });
+
+    it('refuses a moderator website value the main link of an online-only listing cannot hold, before resolving the row', async () => {
+      const suggestion = {
+        id: 'sugg-online-website-value',
+        listingId: 'listing-1',
+        field: 'website',
+        message: 'Their site moved.',
+        status: ListingEditSuggestionStatus.Pending,
+      };
+      suggestions.findOne.mockResolvedValue(suggestion);
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+      });
+
+      await expect(
+        service.resolve('sugg-online-website-value', 'mod-1', {
+          status: 'accepted',
+          value: 'fiorosa',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(suggestion.status).toBe(ListingEditSuggestionStatus.Pending);
+      expect(listings.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a moderator hours value over 140 characters for an online-only listing, before resolving the row', async () => {
+      const suggestion = {
+        id: 'sugg-online-hours-value',
+        listingId: 'listing-1',
+        field: 'hours',
+        message: 'They dispatch on Mondays now.',
+        status: ListingEditSuggestionStatus.Pending,
+      };
+      suggestions.findOne.mockResolvedValue(suggestion);
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+      });
+
+      await expect(
+        service.resolve('sugg-online-hours-value', 'mod-1', {
+          status: 'accepted',
+          value: 'é'.repeat(141),
+        }),
+      ).rejects.toThrow(
+        'This business is online only, so an hours correction becomes its reply and dispatch note, which holds at most 140 characters.',
+      );
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(suggestion.status).toBe(ListingEditSuggestionStatus.Pending);
+      expect(listings.save).not.toHaveBeenCalled();
+    });
+
+    it('takes a moderator hours value of 140 characters for an online-only listing', async () => {
+      const suggestion = {
+        id: 'sugg-online-hours-fits',
+        listingId: 'listing-1',
+        field: 'hours',
+        message: 'They dispatch on Mondays now.',
+        status: ListingEditSuggestionStatus.Pending,
+      };
+      suggestions.findOne.mockResolvedValue(suggestion);
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'fio-rosa',
+        online: true,
+        hoursNote: '',
+        onlineDetails: {},
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      await service.resolve('sugg-online-hours-fits', 'mod-1', {
+        status: 'accepted',
+        value: 'é'.repeat(140),
+      });
+
+      const [savedListing] = listings.save.mock.calls[0] as [Listing];
+      expect(savedListing.onlineDetails.replyNote).toBe('é'.repeat(140));
     });
 
     it('does not touch any listing column for an accepted "other" suggestion, but still notifies the owner', async () => {

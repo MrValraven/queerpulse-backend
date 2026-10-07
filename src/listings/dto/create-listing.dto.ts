@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -26,14 +26,19 @@ import {
   ListingAccessibilityAnswer,
   MAX_ACCESSIBILITY_NOTE_LENGTH,
 } from '../listing-accessibility';
-import { LISTING_CATEGORY_SLUGS } from '../listing-categories';
+import { ALL_LISTING_CATEGORY_SLUGS } from '../listing-categories';
 import { LISTING_OWNED_BY_VALUES, ListingOwnedBy } from '../listing-owned-by';
 import { MAX_LISTING_GALLERY_PHOTOS } from '../listing-photo-gallery';
 import type {
   ListingMenuDietary,
   ListingPricingMode,
 } from '../entities/listing.entity';
-import { IsAccessibilityAnswerMap } from './accessibility-answers.validator';
+import { MAX_LISTING_SHOP_ITEMS } from '../listing-shop-items';
+import {
+  ListingOnlineDetailsDto,
+  ListingShopItemDto,
+} from './listing-online-details.dto';
+import { IsListingAccessibilityAnswerMap } from './accessibility-answers.validator';
 import { IsValidDayHours } from './day-hours.validator';
 import {
   HasUniqueExceptionDates,
@@ -249,11 +254,13 @@ export class ListingHoursExceptionDto extends ListingDayHoursDto {
  * On PATCH the answers MERGE per question rather than replacing the map, so an
  * owner who corrects one answer does not blank the other five. The note
  * replaces wholesale, being a single value.
+ *
+ * The map takes the four online questions beside the six place ones.
  */
 export class ListingAccessibilityDto {
   @IsOptional()
   @IsObject()
-  @IsAccessibilityAnswerMap()
+  @IsListingAccessibilityAnswerMap()
   answers?: Partial<Record<string, ListingAccessibilityAnswer>>;
 
   @IsOptional()
@@ -285,8 +292,8 @@ export class ListingServiceOfferingDto {
   @IsOptional() @IsString() @MaxLength(140) note?: string;
 }
 
-/** The two lists a listing can show. */
-export const LISTING_PRICING_MODES = ['services', 'menu'] as const;
+/** The three lists a listing can show. `shop` is for listings that sell online. */
+export const LISTING_PRICING_MODES = ['services', 'menu', 'shop'] as const;
 
 /** The fixed dietary labels, in display order. */
 export const LISTING_MENU_DIETARY = [
@@ -370,6 +377,11 @@ function requiredOnClaim(field: keyof CreateListingDto) {
     dto.path === 'claim' || (dto[field] !== undefined && dto[field] !== '');
 }
 
+/** A `@Transform` that reads a JSON `null` as a key the body left out. */
+function nullAsAbsent({ value }: { value: unknown }): unknown {
+  return value === null ? undefined : value;
+}
+
 /**
  * POST /listings body — the wizard's full draft, verbatim
  * (`CreateListingDto = ListingDraft` on the frontend; see `listings.api.ts`).
@@ -390,17 +402,62 @@ export class CreateListingDto {
 
   @IsString() @MinLength(1) @MaxLength(200) name!: string;
 
-  // Required for both paths: at least one (up to two) category slug.
+  // Required for both paths: at least one (up to two) category slug, from
+  // either vocabulary at this layer. The service then checks each slug
+  // against the vocabulary that matches the listing's `online` flag and
+  // answers 400 `Category "<slug>" is not offered to <online|place> listings`.
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(2)
-  @IsIn(LISTING_CATEGORY_SLUGS, { each: true })
+  @IsIn(ALL_LISTING_CATEGORY_SLUGS, { each: true })
   cats!: string[];
 
   // Online-only business (no physical location). When true, address,
   // coordinates and neighbourhood are all optional (see the `@ValidateIf`s
-  // below) and the listing is stored without a pin.
-  @IsOptional() @IsBoolean() online?: boolean;
+  // below) and the listing is stored without a pin. A `null` reads as an
+  // absent key: the update body's `PartialType` skips validation on `null`,
+  // and a PATCH carrying `online: null` would otherwise turn the listing into
+  // a place.
+  @Transform(nullAsAbsent)
+  @IsOptional()
+  @IsBoolean()
+  online?: boolean;
+
+  // A place that also sells online. Stored false for an online-only listing.
+  // `null` reads as an absent key, as on `online`.
+  @Transform(nullAsAbsent)
+  @IsOptional()
+  @IsBoolean()
+  hasOnlineShop?: boolean;
+
+  // The "Ordering & delivery" facts, validated field by field. The 18+
+  // acceptance stamp inside them is server-set and ignored on input.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingOnlineDetailsDto)
+  onlineDetails?: ListingOnlineDetailsDto;
+
+  // "In the shop". Replaced wholesale on PATCH, like `services`. Each item id
+  // appears once, so a repeated id is a 400 (the normaliser would drop it).
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_LISTING_SHOP_ITEMS)
+  @ArrayUnique((item: ListingShopItemDto) => item?.id)
+  @ValidateNested({ each: true })
+  @Type(() => ListingShopItemDto)
+  shopItems?: ListingShopItemDto[];
+
+  /**
+   * The submitter accepts the 18+ terms ("QueerPulse lists products and
+   * content. Sexual services are not allowed, and photos on your page must be
+   * safe to view in public."). Write-only. Required with the `intimacy`
+   * category until the listing holds an acceptance, which the server stamps
+   * itself on the first one (`onlineDetails.adultTermsAcceptedAt`), so the
+   * record cannot be backdated. Kept on `UpdateListingDto`. Both admin
+   * bodies omit it (`AdminCreateListingDto`): staff cannot make this promise
+   * on a business's behalf, as with the affirming baseline.
+   */
+  @IsOptional() @IsBoolean() adultTermsAccepted?: boolean;
 
   // Required for both paths — UNLESS this is an online-only listing. When
   // online, a neighbourhood is optional, but a supplied one is still checked.

@@ -25,16 +25,20 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import {
+  NO_STALE_READ_CDN_CACHE,
   PUBLIC_READ_CACHE,
   PUBLIC_READ_CDN_CACHE,
 } from '../common/public-read-cache';
-import { AnonymousPublicCacheInterceptor } from '../subprofiles/anonymous-public-cache.interceptor';
+import { AnonymousNoStaleCacheInterceptor } from '../subprofiles/anonymous-public-cache.interceptor';
 import { UserStatus } from '../users/entities/user.entity';
 import { DirectoryService } from './directory.service';
 import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { CreateListingReviewDto } from './dto/create-review.dto';
-import { ListListingDirectoryQuery } from './dto/list-directory.query';
+import {
+  ListAdultDirectoryQuery,
+  ListListingDirectoryQuery,
+} from './dto/list-directory.query';
 import { UpdateReviewDto } from './dto/update-review.dto';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import {
@@ -50,39 +54,40 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-/**
- * CDN freshness for the public reads that CARRY A SAFE-SPACE BADGE, in place of
- * `PUBLIC_READ_CDN_CACHE`.
+/*
+ * Which public reads here use `NO_STALE_READ_CDN_CACHE` in place of
+ * `PUBLIC_READ_CDN_CACHE`, and why.
  *
  * The difference is the stale window, and only the stale window. The shared
  * default is `s-maxage=60, stale-while-revalidate=300`: 60 seconds fresh, then
  * up to five more minutes in which the CDN knowingly serves the stale copy and
- * refreshes behind it. For most of this directory that is exactly right, and it
- * is why it is the default.
+ * refreshes behind it. For static data such as the tag vocabulary that is
+ * exactly right, and it is why it is the default.
  *
- * A badge suspension is the one fact here that is designed to take effect
- * IMMEDIATELY. Three members flag a space and the badge stops speaking that
- * instant, because the promise the platform published is that it does. Under
- * the shared header a stored page could go on presenting that space as verified
- * for up to six minutes after the platform stopped vouching for it, and the
- * whole point of the badge is that it is worth more than a sticker in a window.
- * Six minutes of a trust claim the platform has already withdrawn is not a
- * rounding error; it is the failure the mechanism exists to prevent.
+ * Two facts here are designed to take effect promptly. A badge suspension:
+ * three members flag a space and the badge stops speaking that instant, because
+ * the promise the platform published is that it does. And a listing leaving the
+ * public directory: an owner pausing it, or moving it into the 18+ category
+ * that logged-out visitors never see. Under the shared header a stored copy
+ * could go on presenting a withdrawn trust claim, or a listing its owner has
+ * taken out of public view, for up to six minutes.
  *
- * So these reads keep the 60-second freshness window and drop the stale window.
- * The cost is small and bounded: after 60 seconds an edge revalidates instead of
- * answering free from its stored copy, and these responses carry an ETag, so an
- * unchanged page comes back 304 with no body. The worst-case lag between a
- * suspension being written and a browsing member seeing it falls from about six
- * minutes to about one.
- *
- * `GET /directory/:slug` is deliberately not on this list. It sets its headers
- * through `AnonymousPublicCacheInterceptor` rather than the static pair, and
- * changing that interceptor would change every unrelated surface using it. The
- * detail page is also the surface with room to say a review is open, which the
- * card grid does not have. Noted rather than fixed here.
+ * So every read that carries either fact keeps the 60-second freshness window
+ * and drops the stale window: the badge-bearing grids (`GET /directory`,
+ * `safe-spaces`, `safe-spaces/:slug`, `by-member/:slug`), the partner spaces
+ * (`GET /directory/spaces`), and the listing detail with its reviews and
+ * questions (`:slug`, `:slug/reviews`, `:slug/questions`). Those three set
+ * their headers through `AnonymousNoStaleCacheInterceptor`, which is
+ * `AnonymousPublicCacheInterceptor` with this one value changed, so the
+ * subprofile surfaces on the original keep theirs. The cost is
+ * small and bounded: after 60 seconds an edge revalidates, and these responses
+ * carry an ETag, so an unchanged page comes back 304 with no body. The
+ * worst-case lag between the change being written and a logged-out visitor
+ * seeing it falls from about six minutes to about one.
  */
-export const SAFE_SPACE_READ_CDN_CACHE = 'public, s-maxage=60';
+
+/** Both cache headers of a members-only read: nothing stores it. */
+const MEMBER_ONLY_READ_CACHE = 'private, no-store';
 
 /**
  * Public, read-only directory over the businesses (`listings`) table, backing
@@ -90,18 +95,22 @@ export const SAFE_SPACE_READ_CDN_CACHE = 'public, s-maxage=60';
  * SEPARATE controller from `ListingsController`: that one carries a class-level
  * `ActiveMemberGuard`, and `ActiveMemberGuard` does NOT honor `@Public()` (it
  * unconditionally requires an active member), so public reads cannot live under
- * it. Every route here is `@Public()` and there is no class guard.
+ * it. Every read here is `@Public()` except `GET /directory/adult`, and there
+ * is no class guard.
  *
  * `spaces` and `tags` are static segments declared before the `:slug` detail
  * route (added in a later sub-project) so route matching resolves them
  * literally.
  *
- * Every read here carries a positive cache header (AUDIT-2026-07-30.md §I
- * "No CDN cache headers on public GETs"), so Vercel's CDN can answer repeat
+ * Every public read here carries a positive cache header (AUDIT-2026-07-30.md
+ * §I "No CDN cache headers on public GETs"), so Vercel's CDN can answer repeat
  * anonymous requests without invoking the Function or touching Postgres at all
- * for up to 60s, then serve one more stale response while revalidating in the
- * background for up to 5 more minutes (see `caching-and-cost.md`). That stale
- * window is addressed to the CDN ALONE, via `CDN-Cache-Control`: see
+ * for up to 60s (see `caching-and-cost.md`). Only `GET /directory/tags` adds
+ * the shared stale window on top (`PUBLIC_READ_CDN_CACHE`: one more stale
+ * response while revalidating for up to 5 more minutes), because its static
+ * vocabulary names no listing. Every other public read uses the 60s window
+ * with no stale answer (`NO_STALE_READ_CDN_CACHE`, see the block above). Any
+ * stale window is addressed to the CDN ALONE, via `CDN-Cache-Control`: see
  * `common/public-read-cache.ts` for why a browser must never be given it. The
  * write routes stay uncached (POST/PATCH/DELETE are never cached regardless).
  *
@@ -111,13 +120,19 @@ export const SAFE_SPACE_READ_CDN_CACHE = 'public, s-maxage=60';
  * were theirs. The helpful-vote WRITE routes return that answer instead, which
  * is the only place it is genuinely caller-specific.
  *
- * ONE read is an exception and states why at its own declaration: the listing
- * detail (`GET /directory/:slug`) widens its "upcoming gatherings" block for a
- * signed-in active member, so it carries `OptionalJwtAuthGuard` +
- * `AnonymousPublicCacheInterceptor` in place of the static `@Header` pair. Only
- * its anonymous variant is shared-cacheable; the member variant is
+ * THREE reads are exceptions and state why at their own declarations: the
+ * listing detail (`GET /directory/:slug`) and its two child reads
+ * (`GET /directory/:slug/reviews`, `GET /directory/:slug/questions`). The
+ * detail widens its "upcoming gatherings" block for a signed-in active member,
+ * and all three answer an 18+ listing to a member while an anonymous caller
+ * gets the 404 a missing slug gets. They carry `OptionalJwtAuthGuard` +
+ * `AnonymousNoStaleCacheInterceptor` in place of the static `@Header` pair.
+ * Only their anonymous variant is shared-cacheable; the member variant is
  * `private, no-store`, and both send `Vary: Cookie`. Any future per-caller
- * field on a read here needs the same treatment, never the static headers.
+ * field on a read here needs the same treatment.
+ *
+ * `GET /directory/adult` is the one members-only read: `ActiveMemberGuard`
+ * and `private, no-store` on both cache headers, so no CDN ever stores it.
  */
 @Feature('listings')
 @ApiTags('Local Directory')
@@ -133,7 +148,8 @@ export class DirectoryController {
   @Public()
   @Get('spaces')
   @Header('Cache-Control', PUBLIC_READ_CACHE)
-  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
+  // Lists listings by identity, so a paused listing must drop out promptly.
+  @Header('CDN-Cache-Control', NO_STALE_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List live listings flagged as partner venues' })
   @ApiOkResponse({ description: 'The partner spaces.' })
   listPartnerSpaces() {
@@ -166,8 +182,8 @@ export class DirectoryController {
   @Get()
   @Header('Cache-Control', PUBLIC_READ_CACHE)
   // Badge-bearing: every card carries `safeSpaceStatus`, and `safe=verified`
-  // filters on it. See `SAFE_SPACE_READ_CDN_CACHE`.
-  @Header('CDN-Cache-Control', SAFE_SPACE_READ_CDN_CACHE)
+  // filters on it. See `NO_STALE_READ_CDN_CACHE`.
+  @Header('CDN-Cache-Control', NO_STALE_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List the public directory of live listings' })
   @ApiOkResponse({
     description:
@@ -184,7 +200,7 @@ export class DirectoryController {
   @Get('safe-spaces')
   @Header('Cache-Control', PUBLIC_READ_CACHE)
   // Badge-bearing, and entirely so: this page IS the trust claim.
-  @Header('CDN-Cache-Control', SAFE_SPACE_READ_CDN_CACHE)
+  @Header('CDN-Cache-Control', NO_STALE_READ_CDN_CACHE)
   @ApiOperation({
     summary: 'List verified and removed safe spaces with hero stats',
   })
@@ -198,7 +214,7 @@ export class DirectoryController {
   @Get('safe-spaces/:slug')
   @Header('Cache-Control', PUBLIC_READ_CACHE)
   // Badge-bearing: carries `isBadgeSuspended`.
-  @Header('CDN-Cache-Control', SAFE_SPACE_READ_CDN_CACHE)
+  @Header('CDN-Cache-Control', NO_STALE_READ_CDN_CACHE)
   @ApiOperation({ summary: 'Get a safe space (verified or removed) by slug' })
   @ApiOkResponse({ description: 'The safe-space detail.' })
   @ApiNotFoundResponse({ description: 'No safe space with that slug.' })
@@ -215,7 +231,7 @@ export class DirectoryController {
   @Get('by-member/:slug')
   @Header('Cache-Control', PUBLIC_READ_CACHE)
   // Badge-bearing: returns `DirectoryCardDTO[]`.
-  @Header('CDN-Cache-Control', SAFE_SPACE_READ_CDN_CACHE)
+  @Header('CDN-Cache-Control', NO_STALE_READ_CDN_CACHE)
   @ApiOperation({
     summary: "List live listings owned by a member's profile slug",
   })
@@ -227,12 +243,31 @@ export class DirectoryController {
     return this.directoryService.listByMemberSlug(slug);
   }
 
+  // Members only: the 18+ listings, for the Online tab's "Show 18+ shops"
+  // chip. Every public grid leaves these out, so this is the one read that
+  // lists them. A static segment, so it sits above the `:slug` detail route.
+  @Get('adult')
+  @UseGuards(ActiveMemberGuard)
+  @Header('Cache-Control', MEMBER_ONLY_READ_CACHE)
+  @Header('CDN-Cache-Control', MEMBER_ONLY_READ_CACHE)
+  @ApiOperation({ summary: 'List live 18+ listings (members only)' })
+  @ApiOkResponse({
+    description:
+      'Up to 100 directory cards, each with `isAdultsOnly: true`, in the grid order. Accepts `cat` and `q` only.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listAdultDirectory(@Query() query: ListAdultDirectoryQuery) {
+    return this.directoryService.listAdultDirectory(query);
+  }
+
   // Directory detail — declared AFTER the static `spaces`/`safe-spaces` routes
   // so route matching resolves those literally rather than as `:slug`.
   //
-  // The ONE read here that is not caller-agnostic, and the reason it carries
-  // `OptionalJwtAuthGuard` + `AnonymousPublicCacheInterceptor` instead of the
-  // static `@Header` pair every sibling read uses.
+  // The first of the three caller-aware reads named in the class doc, and the
+  // reason they carry `OptionalJwtAuthGuard` + `AnonymousNoStaleCacheInterceptor`
+  // in place of the static `@Header` pair the public grids use.
   //
   // The `upcoming` block lists gatherings held at this venue. A gathering
   // scoped `members` is for signed-in members and nobody else, so the response
@@ -250,7 +285,7 @@ export class DirectoryController {
   // not where that computation belongs.
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
-  @UseInterceptors(AnonymousPublicCacheInterceptor)
+  @UseInterceptors(AnonymousNoStaleCacheInterceptor)
   @Get(':slug')
   @ApiOperation({ summary: 'Get a live directory listing by slug' })
   @ApiOkResponse({ description: 'The directory detail.' })
@@ -266,18 +301,26 @@ export class DirectoryController {
     );
   }
 
-  // Public: paginated reviews for a listing.
+  // Public: paginated reviews for a listing. Caller-aware like the detail
+  // above it: an 18+ listing's reviews 404 for an anonymous caller and load
+  // for a signed-in active member, so the anonymous variant is the only one a
+  // shared cache may keep.
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @UseInterceptors(AnonymousNoStaleCacheInterceptor)
   @Get(':slug/reviews')
-  @Header('Cache-Control', PUBLIC_READ_CACHE)
-  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List paginated reviews for a live listing' })
   @ApiOkResponse({ description: 'A page of reviews.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
-  listReviews(@Param('slug') slug: string, @Query('page') page?: string) {
+  listReviews(
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Param('slug') slug: string,
+    @Query('page') page?: string,
+  ) {
     return this.directoryService.listReviews(
       slug,
       page ? Number(page) : undefined,
+      user?.status === UserStatus.Active,
     );
   }
 
@@ -392,18 +435,24 @@ export class DirectoryController {
 
   // Public: the full Q&A history for a listing, newest first, answers inline.
   // The detail read embeds only the most recent handful; this is the "see all".
-  // Cached like every other read here — it varies by listing, never by caller.
+  // Caller-aware for the reason the reviews read is: an 18+ listing's
+  // questions 404 for an anonymous caller.
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @UseInterceptors(AnonymousNoStaleCacheInterceptor)
   @Get(':slug/questions')
-  @Header('Cache-Control', PUBLIC_READ_CACHE)
-  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List public questions and answers for a listing' })
   @ApiOkResponse({ description: 'A page of questions with answers inline.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
-  listQuestions(@Param('slug') slug: string, @Query('page') page?: string) {
+  listQuestions(
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Param('slug') slug: string,
+    @Query('page') page?: string,
+  ) {
     return this.directoryService.listQuestions(
       slug,
       page ? Number(page) : undefined,
+      user?.status === UserStatus.Active,
     );
   }
 

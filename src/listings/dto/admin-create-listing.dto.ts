@@ -19,12 +19,19 @@ import { CreateListingOwnerOfferDto } from './create-listing-owner-offer.dto';
  * ValidationPipe rejects a body that carries any of them, so an admin who
  * sends `ownerName` gets a 400 and a clear message about it.
  *
+ * `adultTermsAccepted` is omitted for the affirming baseline's reason: the
+ * 18+ terms are the business's own promise about what it lists, and staff
+ * cannot make it for them. A staff create in the 18+ category is therefore
+ * refused (`adult_terms_required`), and a staff edit keeps that category
+ * only on a listing whose owner already accepted.
+ *
  * `contactEmail` is retired (`CreateListingDto` accepts it only so stale
  * member clients keep working, and ignores it). It stays omitted here because
  * no admin client ever sent it, so the admin body keeps rejecting it outright.
  */
 export class AdminCreateListingDto extends OmitType(CreateListingDto, [
   'affirmingBaselineAccepted',
+  'adultTermsAccepted',
   'ownerName',
   'ownerRole',
   'ownerBio',

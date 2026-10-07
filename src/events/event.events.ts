@@ -94,3 +94,33 @@ export const EVENT_DELETING = 'event.deleting';
 export interface EventDeletingEvent {
   eventId: string;
 }
+
+export const EVENT_DOOR_CHANGED = 'event.door.changed';
+
+/**
+ * A check-in or an undo changed state at a gathering's door (an idempotent
+ * repeat does not fire this). `organizerUserIds` is the host plus the
+ * co-hosts, the same people the check-in routes admit; the chat relay turns
+ * this into the `gathering:checkin` frame for their `user:` rooms only.
+ */
+export interface EventDoorChangedEvent {
+  eventSlug: string;
+  memberSlug: string;
+  change: 'checked_in' | 'undone';
+  organizerUserIds: string[];
+}
+
+/**
+ * The `gathering:checkin` socket frame. It goes to each organiser's own
+ * `user:<userId>` room and to no other: who went is sensitive, so the frame
+ * names no guest beyond their slug and carries no names or arrival stamps.
+ * A door device refetches its roster and groups on it.
+ */
+export const GATHERING_CHECKIN_FRAME = 'gathering:checkin';
+
+/** Payload of {@link GATHERING_CHECKIN_FRAME}. */
+export interface GatheringCheckInFrame {
+  eventSlug: string;
+  memberSlug: string;
+  change: 'checked_in' | 'undone';
+}

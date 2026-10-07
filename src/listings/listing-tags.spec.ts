@@ -77,19 +77,26 @@ describe('resolveListingTagsOrThrow', () => {
   });
 
   it('accepts an online-only tag and a place-only tag on one listing', () => {
-    expect(resolveListingTagsOrThrow(['mb way', 'Terrace'], [])).toEqual([
-      'MB WAY',
+    expect(resolveListingTagsOrThrow(['gift cards', 'Terrace'], [])).toEqual([
+      'Gift cards',
       'Terrace',
     ]);
   });
 
   it('accepts a tag from every online-only group', () => {
     expect(
-      resolveListingTagsOrThrow(
-        ['Ships worldwide', 'PayPal', 'Free first call'],
-        [],
-      ),
-    ).toEqual(['Ships worldwide', 'PayPal', 'Free first call']);
+      resolveListingTagsOrThrow(['Made to order', 'Free first call'], []),
+    ).toEqual(['Made to order', 'Free first call']);
+  });
+
+  it('refuses a tag that became a structured field on a listing that never carried it', () => {
+    expect(() => resolveListingTagsOrThrow(['MB WAY'], [])).toThrow(/"MB WAY"/);
+  });
+
+  it('keeps a tag that became a structured field when the listing already carries it', () => {
+    expect(
+      resolveListingTagsOrThrow(['Ships worldwide'], ['Ships worldwide']),
+    ).toEqual(['Ships worldwide']);
   });
 
   it('throws a 400 naming each unknown tag', () => {
@@ -168,7 +175,35 @@ describe('LISTING_TAG_GROUPS', () => {
 
   it('offers both place-only and online-only tags as options', () => {
     expect(LISTING_TAG_OPTIONS).toEqual(
-      expect.arrayContaining(['Terrace', 'DJ nights', 'MB WAY', 'Gift cards']),
+      expect.arrayContaining([
+        'Terrace',
+        'DJ nights',
+        'Custom commissions',
+        'Gift cards',
+      ]),
+    );
+  });
+
+  it('offers none of the ten tags that became structured fields', () => {
+    for (const retiredTag of [
+      'Ships to Portugal',
+      'Ships across the EU',
+      'Ships worldwide',
+      'Pick-up in Lisbon',
+      'Digital downloads',
+      'MB WAY',
+      'Multibanco',
+      'PayPal',
+      'Video sessions',
+      'Phone sessions',
+    ]) {
+      expect(LISTING_TAG_OPTIONS).not.toContain(retiredTag);
+    }
+  });
+
+  it('has no payment group', () => {
+    expect(LISTING_TAG_GROUPS.map((group) => group.id as string)).not.toContain(
+      'payment',
     );
   });
 });

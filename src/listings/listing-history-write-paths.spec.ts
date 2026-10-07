@@ -32,6 +32,7 @@ import {
   SafeSpaceStatus,
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
+import { emptyListingOnlineDetails } from './listing-online-details';
 import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsService } from './listings.service';
@@ -120,6 +121,9 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   services: [],
   menu: { sections: [], file: null, link: '' },
   pricingMode: 'services',
+  hasOnlineShop: false,
+  onlineDetails: emptyListingOnlineDetails(),
+  shopItems: [],
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',

@@ -17,6 +17,7 @@ import {
   EVENT_SEARCH_COLUMNS,
   foldedHaystack,
   foldedSearchTerm,
+  PROFILE_NAME_SEARCH_COLUMNS,
 } from '../search/search-text';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
@@ -51,7 +52,10 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { restrictToAttendeesVisibleTo } from './attendee-roster-visibility';
-import { AttendeeStatusFilter } from './dto/list-attendees.query';
+import {
+  AttendeeArrivalFilter,
+  AttendeeStatusFilter,
+} from './dto/list-attendees.query';
 import type { EventCostFilter } from './dto/list-events.query';
 import type {
   RecurrenceCadence,
@@ -755,10 +759,13 @@ export class EventsService {
     // Same absent/null/uuid three-way as `communitySlug` above: absent
     // leaves the existing link (if any) unchanged, `null` explicitly
     // detaches it (falling back to plain-text `venue`), a uuid
-    // resolves+validates the new link.
+    // resolves+validates the new link. Re-sending the venue the gathering
+    // already has is a no-op: a listing that has since gone online-only, 18+,
+    // closed or paused stays attached, so the host can still save every other
+    // edit without being told to drop the venue first.
     let listingId = event.listingId;
     let venueListing: AttachableListingRef | null = null;
-    if (dto.listingId !== undefined) {
+    if (dto.listingId !== undefined && dto.listingId !== event.listingId) {
       venueListing = dto.listingId
         ? await this.assertAttachableListing(dto.listingId, event)
         : null;
@@ -1829,6 +1836,7 @@ export class EventsService {
     viewerId: string,
     status: AttendeeStatusFilter,
     page?: number,
+    filters: { arrival?: AttendeeArrivalFilter; q?: string } = {},
   ): Promise<AttendeesPageDTO> {
     const event = await this.loadEventOr404(slug);
     const isOrganizer = await this.assertCanView(event, viewerId);
@@ -1899,12 +1907,54 @@ export class EventsService {
       EventsService.ACTIVE_ATTENDEE_ACCOUNT_PARAMETERS,
     );
 
-    const {
-      items,
-      total,
-      page: resolvedPage,
-      pageSize,
-    } = await paginate(qb, normalizedPage, async (rows) => {
+    // The door's filters (Check-in tab). Arrival is the host's operational
+    // picture, so only an organiser's going list honours it.
+    //
+    // Past the retention window the check-ins are no longer kept. The sweeper
+    // clears the `checked_in_at` stamps only once a day, so for up to a day
+    // some stamps still exist; the date rule (the one `rosterCounts` uses)
+    // decides instead, so the answer never depends on the sweep's progress.
+    // "expected" is then the whole going list, still ordered by name like the
+    // in-window "Still to arrive" list, with the stamp filter dropped because
+    // the stamps are gone or ignored. "arrived" is an empty page, and every
+    // view carries a null stamp.
+    const isAttendanceWindowClosed = isAttendanceCleared(
+      event,
+      this.config.get<number>('retention.eventAttendanceDays', 30),
+    );
+    const requestedArrival =
+      isOrganizer && status === 'going' ? filters.arrival : undefined;
+    const arrival = isAttendanceWindowClosed ? undefined : requestedArrival;
+    const isClearedArrivedRequest =
+      isAttendanceWindowClosed && requestedArrival === 'arrived';
+    // Name order follows the requested "expected" view on both sides of the
+    // window; only the in-window request also narrows to unstamped rows.
+    const isNameOrdered = requestedArrival === 'expected';
+    const searchTerm = filters.q?.trim() || undefined;
+    const isProfileJoined = Boolean(isNameOrdered || arrival || searchTerm);
+    if (isProfileJoined) {
+      qb.innerJoin(Profile, 'p', '"p"."user_id" = "r"."user_id"');
+    }
+    if (arrival === 'expected') {
+      qb.andWhere('"r"."checked_in_at" IS NULL');
+    }
+    if (isNameOrdered) {
+      qb.orderBy('"p"."first_name"', 'ASC')
+        .addOrderBy('"p"."last_name"', 'ASC')
+        .addOrderBy('"r"."id"', 'ASC');
+    } else if (arrival === 'arrived') {
+      qb.andWhere('"r"."checked_in_at" IS NOT NULL')
+        .orderBy('"r"."checked_in_at"', 'DESC')
+        .addOrderBy('"r"."id"', 'ASC');
+    }
+    if (searchTerm) {
+      qb.andWhere(
+        `${foldedHaystack('p', PROFILE_NAME_SEARCH_COLUMNS)} LIKE ${foldedSearchTerm('attendeeSearch')} ESCAPE '\\'`,
+        { attendeeSearch: `%${escapeLikeTerm(searchTerm)}%` },
+      );
+    }
+
+    const mapAttendeeRows = async (rows: EventRsvp[]) => {
       if (!rows.length) return [];
       const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
       return rows
@@ -1915,13 +1965,38 @@ export class EventsService {
           // fields entirely for anybody else, and this route is never
           // `@Public()`.
           const view = toAttendeeView(r, profiles.get(r.userId), isOrganizer);
+          if (isAttendanceWindowClosed) {
+            view.checkedInAt = null;
+          }
           // Waitlist ordering is organizer-only; hide positions from regular viewers.
           if (!isOrganizer) {
             view.waitlistPosition = null;
           }
           return view;
         });
-    });
+    };
+
+    let items: Awaited<ReturnType<typeof mapAttendeeRows>>;
+    let total: number;
+    const resolvedPage = normalizedPage;
+    const pageSize = PAGE_SIZE;
+    if (isClearedArrivedRequest) {
+      items = [];
+      total = 0;
+    } else if (isProfileJoined) {
+      // The joined profile alias with quoted order keys breaks the distinct-id
+      // query `paginate()` triggers, so the filtered and name-ordered paths
+      // page with plain offset and limit. One profile per user keeps the
+      // joined count exact.
+      const rows = await qb
+        .offset((normalizedPage - 1) * PAGE_SIZE)
+        .limit(PAGE_SIZE)
+        .getMany();
+      total = await qb.getCount();
+      items = await mapAttendeeRows(rows);
+    } else {
+      ({ items, total } = await paginate(qb, normalizedPage, mapAttendeeRows));
+    }
 
     const counts = await this.rosterCounts(event);
     return {

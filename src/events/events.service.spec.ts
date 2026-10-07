@@ -110,6 +110,11 @@ describe('EventsService', () => {
   };
   // `remove()` announces a hard delete through `emitAsync` and waits for it.
   let eventEmitter: { emitAsync: jest.Mock };
+  let listingLookup: {
+    findLive: jest.Mock;
+    findLinkable: jest.Mock;
+    findAttachable: jest.Mock;
+  };
 
   // A chainable query-builder stub for the RSVP queries: `attendees`'
   // paginated page (`.skip().take().getManyAndCount()`, matching
@@ -125,11 +130,14 @@ describe('EventsService', () => {
       'addSelect',
       'where',
       'andWhere',
+      'innerJoin',
       'setParameters',
       'orderBy',
       'addOrderBy',
       'skip',
       'take',
+      'offset',
+      'limit',
     ]) {
       qb[method] = jest.fn().mockReturnValue(qb);
     }
@@ -305,6 +313,11 @@ describe('EventsService', () => {
       }),
     };
     eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
+    listingLookup = {
+      findLive: jest.fn().mockResolvedValue(null),
+      findLinkable: jest.fn().mockResolvedValue(null),
+      findAttachable: jest.fn().mockResolvedValue(null),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -343,15 +356,9 @@ describe('EventsService', () => {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
-        // An event can point at a venue listing; no test here does, so the
-        // lookup resolves to "no such live listing".
-        {
-          provide: ListingLookupService,
-          useValue: {
-            findLive: jest.fn().mockResolvedValue(null),
-            findLinkable: jest.fn().mockResolvedValue(null),
-          },
-        },
+        // An event can point at a venue listing. By default the lookup
+        // resolves to "no such live listing"; the venue tests below override it.
+        { provide: ListingLookupService, useValue: listingLookup },
         { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
@@ -566,6 +573,231 @@ describe('EventsService', () => {
         expect(page.seatsTaken).toBe(5);
         // A non-organiser never receives the notes, whatever the setting.
         expect(page.items[0]!.accessNeeds).toBeUndefined();
+      });
+    });
+
+    describe('door filters', () => {
+      const organiserId = 'host-1';
+
+      it('narrows going to guests still expected, ordered by name', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', organiserId, 'going', 1, {
+          arrival: 'expected',
+        });
+
+        expect(qb.innerJoin).toHaveBeenCalledWith(
+          expect.anything(),
+          'p',
+          '"p"."user_id" = "r"."user_id"',
+        );
+        expect(qb.andWhere).toHaveBeenCalledWith('"r"."checked_in_at" IS NULL');
+        expect(qb.orderBy).toHaveBeenLastCalledWith('"p"."first_name"', 'ASC');
+        expect(qb.addOrderBy).toHaveBeenCalledWith('"p"."last_name"', 'ASC');
+        expect(qb.addOrderBy).toHaveBeenLastCalledWith('"r"."id"', 'ASC');
+      });
+
+      it('narrows going to arrived guests, newest arrival first', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', organiserId, 'going', 1, {
+          arrival: 'arrived',
+        });
+
+        expect(qb.andWhere).toHaveBeenCalledWith(
+          '"r"."checked_in_at" IS NOT NULL',
+        );
+        expect(qb.orderBy).toHaveBeenLastCalledWith(
+          '"r"."checked_in_at"',
+          'DESC',
+        );
+        expect(qb.addOrderBy).toHaveBeenLastCalledWith('"r"."id"', 'ASC');
+      });
+
+      describe('past the attendance retention window', () => {
+        const clearedEvent = {
+          ...publishedEvent,
+          startAt: new Date(Date.now() - 60 * 24 * 3_600_000),
+        };
+        const stampedRow = {
+          id: 'rsvp-1',
+          eventId: 'e1',
+          userId: 'guest-1',
+          status: 'going',
+          visibility: 'everyone',
+          guestCount: 1,
+          checkedInAt: new Date(),
+          createdAt: new Date(),
+        };
+
+        it('returns the whole list for expected, with no stamp filter and no stamp on the views', async () => {
+          events.findOne.mockResolvedValue(clearedEvent);
+          const qb = attendeesQbStub();
+          // Expected stays name-ordered past the window, so the service joins
+          // the profile and pages with offset and limit, which reads getMany.
+          qb.getMany!.mockResolvedValue([stampedRow]);
+          qb.getCount!.mockResolvedValue(1);
+          rsvps.createQueryBuilder.mockReturnValue(qb);
+          profiles.find.mockResolvedValue([
+            { userId: 'guest-1', firstName: 'Rui', slug: 'rui' },
+          ]);
+
+          const page = await service.attendees(
+            'party',
+            organiserId,
+            'going',
+            1,
+            { arrival: 'expected' },
+          );
+
+          expect(qb.andWhere).not.toHaveBeenCalledWith(
+            '"r"."checked_in_at" IS NULL',
+          );
+          expect(qb.andWhere).not.toHaveBeenCalledWith(
+            '"r"."checked_in_at" IS NOT NULL',
+          );
+          expect(page.items).toHaveLength(1);
+          expect(page.items[0]!.checkedInAt).toBeNull();
+          expect(page.checkedInCount).toBeNull();
+        });
+
+        it('orders expected by name and pages it with offset and limit', async () => {
+          events.findOne.mockResolvedValue(clearedEvent);
+          const qb = attendeesQbStub();
+          rsvps.createQueryBuilder.mockReturnValue(qb);
+
+          await service.attendees('party', organiserId, 'going', 2, {
+            arrival: 'expected',
+          });
+
+          expect(qb.innerJoin).toHaveBeenCalledWith(
+            expect.anything(),
+            'p',
+            '"p"."user_id" = "r"."user_id"',
+          );
+          expect(qb.orderBy).toHaveBeenLastCalledWith(
+            '"p"."first_name"',
+            'ASC',
+          );
+          expect(qb.addOrderBy).toHaveBeenCalledWith('"p"."last_name"', 'ASC');
+          expect(qb.addOrderBy).toHaveBeenLastCalledWith('"r"."id"', 'ASC');
+          expect(qb.offset).toHaveBeenCalledWith(20);
+          expect(qb.limit).toHaveBeenCalledWith(20);
+          expect(qb.getManyAndCount).not.toHaveBeenCalled();
+        });
+
+        it('keeps the RSVP order for a viewer who is not an organiser', async () => {
+          events.findOne.mockResolvedValue(clearedEvent);
+          const qb = attendeesQbStub();
+          rsvps.createQueryBuilder.mockReturnValue(qb);
+
+          await service.attendees('party', 'viewer-1', 'going', 1, {
+            arrival: 'expected',
+          });
+
+          expect(qb.innerJoin).not.toHaveBeenCalled();
+          expect(qb.orderBy).not.toHaveBeenCalledWith(
+            '"p"."first_name"',
+            'ASC',
+          );
+          expect(qb.getManyAndCount).toHaveBeenCalled();
+        });
+
+        it('returns an empty page for arrived without querying rows', async () => {
+          events.findOne.mockResolvedValue(clearedEvent);
+          const qb = attendeesQbStub();
+          rsvps.createQueryBuilder.mockReturnValue(qb);
+
+          const page = await service.attendees(
+            'party',
+            organiserId,
+            'going',
+            1,
+            { arrival: 'arrived' },
+          );
+
+          expect(page.items).toEqual([]);
+          expect(page.total).toBe(0);
+          expect(qb.getMany).not.toHaveBeenCalled();
+          expect(qb.getManyAndCount).not.toHaveBeenCalled();
+          expect(page.checkedInCount).toBeNull();
+        });
+      });
+
+      it('pages a filtered request with offset and limit', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', organiserId, 'going', 2, {
+          arrival: 'arrived',
+        });
+
+        expect(qb.offset).toHaveBeenCalledWith(20);
+        expect(qb.limit).toHaveBeenCalledWith(20);
+        expect(qb.getMany).toHaveBeenCalled();
+        expect(qb.getCount).toHaveBeenCalled();
+        expect(qb.getManyAndCount).not.toHaveBeenCalled();
+      });
+
+      it('keeps getManyAndCount for an unfiltered request', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', organiserId, 'going', 1);
+
+        expect(qb.getManyAndCount).toHaveBeenCalled();
+        expect(qb.offset).not.toHaveBeenCalled();
+      });
+
+      it('matches a name accent-folded and escapes LIKE wildcards', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', organiserId, 'going', 1, {
+          q: '  50%_off  ',
+        });
+
+        const searchCall = (
+          qb.andWhere!.mock.calls as Array<[unknown, unknown]>
+        ).find(([sql]) => typeof sql === 'string' && sql.includes('LIKE'));
+        expect(searchCall?.[0]).toContain('translate(lower(');
+        expect(searchCall?.[0]).toContain(`ESCAPE '\\'`);
+        expect(searchCall?.[1]).toEqual({ attendeeSearch: '%50\\%\\_off%' });
+      });
+
+      it('ignores arrival for a viewer who is not an organiser', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', 'viewer-1', 'going', 1, {
+          arrival: 'arrived',
+        });
+
+        expect(qb.andWhere).not.toHaveBeenCalledWith(
+          '"r"."checked_in_at" IS NOT NULL',
+        );
+      });
+
+      it('ignores arrival on the waitlist', async () => {
+        events.findOne.mockResolvedValue(publishedEvent);
+        const qb = attendeesQbStub();
+        rsvps.createQueryBuilder.mockReturnValue(qb);
+
+        await service.attendees('party', organiserId, 'waitlisted', 1, {
+          arrival: 'expected',
+        });
+
+        expect(qb.andWhere).not.toHaveBeenCalledWith(
+          '"r"."checked_in_at" IS NULL',
+        );
       });
     });
   });
@@ -1246,6 +1478,69 @@ describe('EventsService', () => {
         'lisbon-hikers',
         'u1',
       );
+    });
+  });
+
+  // A gathering's venue must be a place people visit. The lookup owns the
+  // predicate (`findAttachable` drops online-only and 18+ listings in-query,
+  // so either one arrives here as null); this block pins what the service does
+  // with that answer, and that re-sending the CURRENT venue never re-asks.
+  describe('update venue listing handling', () => {
+    // A place that also sells online: `online = false`, `hasOnlineShop = true`.
+    const placeWithOnlineShop = {
+      id: 'listing-shop',
+      slug: 'corner-books',
+      name: 'Corner Books',
+      ownerId: null,
+    };
+
+    it('400s when the new venue is an 18+ listing the lookup refuses', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      listingLookup.findAttachable.mockResolvedValue(null);
+      await expect(
+        service.update('x', 'u1', { listingId: 'listing-adult' }),
+      ).rejects.toThrow(new BadRequestException('Venue listing not found'));
+      expect(listingLookup.findAttachable).toHaveBeenCalledWith(
+        'listing-adult',
+      );
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('400s when the new venue is an online-only listing the lookup refuses', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      listingLookup.findAttachable.mockResolvedValue(null);
+      await expect(
+        service.update('x', 'u1', { listingId: 'listing-online' }),
+      ).rejects.toThrow(new BadRequestException('Venue listing not found'));
+      expect(listingLookup.findAttachable).toHaveBeenCalledWith(
+        'listing-online',
+      );
+    });
+
+    it('attaches a place that also sells online', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      listingLookup.findAttachable.mockResolvedValue(placeWithOnlineShop);
+      await service.update('x', 'u1', { listingId: placeWithOnlineShop.id });
+      const savedEvent = events.save.mock.calls.at(-1)![0];
+      expect(savedEvent.listingId).toBe(placeWithOnlineShop.id);
+    });
+
+    it('keeps the current venue without re-validating it when the same listingId is re-sent', async () => {
+      // The listing went online-only or 18+ after it was attached, so the
+      // lookup would now refuse it. Any other edit must still save.
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        listingId: 'listing-now-online',
+      });
+      listingLookup.findAttachable.mockResolvedValue(null);
+      await service.update('x', 'u1', {
+        listingId: 'listing-now-online',
+        capacity: 12,
+      });
+      expect(listingLookup.findAttachable).not.toHaveBeenCalled();
+      const savedEvent = events.save.mock.calls.at(-1)![0];
+      expect(savedEvent.listingId).toBe('listing-now-online');
+      expect(savedEvent.capacity).toBe(12);
     });
   });
 

@@ -62,6 +62,10 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // The menu's PDF or photo. Its own source, so a menu file is kept alive by
   // the menu alone.
   'ListingMenuFileDto.url': 'Listing.menu.file',
+  // "In the shop": one photo per shop item, an ordinary listing photo upload.
+  // Its own source, so a photo moved from the gallery into a shop item stays
+  // referenced.
+  'ListingShopItemPhotoDto.image': 'Listing.shopItems[].photo.image',
   'UpdateSubprofileDTO.avatarUrl': 'Subprofile.avatarUrl',
   'UpdateSubprofileDTO.coverUrl': 'Subprofile.coverUrl',
   'SubprofileItemInputDTO.imageUrl': 'SubprofileItem.imageUrl',
@@ -208,5 +212,14 @@ describe('media reference source coverage (tripwire)', () => {
         );
       }
     }
+  });
+});
+
+describe('shop item photos', () => {
+  it('are a listing reference, so the media pages name the listing they sit on', () => {
+    const shopItemSource = MEDIA_REFERENCE_SOURCES.find(
+      (source) => source.field === 'Listing.shopItems[].photo.image',
+    );
+    expect(shopItemSource?.type).toBe('listing');
   });
 });

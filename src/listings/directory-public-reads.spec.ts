@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -15,7 +16,7 @@ import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
-import { DirectoryService } from './directory.service';
+import { ADULT_DIRECTORY_LIMIT, DirectoryService } from './directory.service';
 import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
@@ -560,20 +561,19 @@ describe('DirectoryService public reads', () => {
         'foodDrink',
         'pricing',
         'ordering',
-        'payment',
         'sessions',
       ]);
     });
 
     it('carries the online-only groups with an empty place list', () => {
-      const paymentGroup = service
+      const sessionsGroup = service
         .listTagVocabulary()
-        .find((group) => group.id === 'payment');
+        .find((group) => group.id === 'sessions');
 
-      expect(paymentGroup).toEqual({
-        id: 'payment',
+      expect(sessionsGroup).toEqual({
+        id: 'sessions',
         tags: [],
-        onlineTags: ['MB WAY', 'Multibanco', 'PayPal'],
+        onlineTags: ['Free first call'],
       });
     });
 
@@ -592,6 +592,95 @@ describe('DirectoryService public reads', () => {
       service.listTagVocabulary();
 
       expect(listings.createQueryBuilder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('online and 18+ reads', () => {
+    const ADULT_PREDICATE = 'NOT (:adultCategory = ANY("listing"."cats"))';
+    const ONLY_ADULT_PREDICATE = ':adultCategory = ANY("listing"."cats")';
+    const ONLINE_PREDICATE =
+      '("listing"."online" = true OR "listing"."has_online_shop" = true)';
+
+    const predicateTexts = () => andWhereCalls().map((call) => String(call[0]));
+
+    it('narrows to listings that sell online when online=true', async () => {
+      await service.listDirectory({ online: 'true' });
+
+      expect(predicateTexts()).toContain(ONLINE_PREDICATE);
+    });
+
+    it('adds no online predicate when the filter is absent', async () => {
+      await service.listDirectory({});
+
+      expect(predicateTexts()).not.toContain(ONLINE_PREDICATE);
+    });
+
+    it('leaves 18+ listings out of the public grid, in the query itself', async () => {
+      await service.listDirectory({});
+
+      expect(andWhereCalls()).toContainEqual([
+        ADULT_PREDICATE,
+        { adultCategory: 'intimacy' },
+      ]);
+    });
+
+    it('keeps only 18+ listings on the members’ list, capped at 100', async () => {
+      await service.listAdultDirectory({ cat: 'intimacy' });
+
+      expect(andWhereCalls()).toContainEqual([
+        ONLY_ADULT_PREDICATE,
+        { adultCategory: 'intimacy' },
+      ]);
+      expect(predicateTexts()).not.toContain(ADULT_PREDICATE);
+      expect(queryBuilder['take']).toHaveBeenCalledWith(ADULT_DIRECTORY_LIMIT);
+      expect(ADULT_DIRECTORY_LIMIT).toBe(100);
+    });
+
+    it('answers an anonymous caller with the 404 a missing slug gets', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ cats: ['intimacy'], online: true }),
+      );
+
+      await expect(service.getDirectoryBySlug('casa-t')).rejects.toThrow(
+        new NotFoundException('Listing not found'),
+      );
+    });
+
+    it('shows a signed-in active member the 18+ detail page', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ cats: ['intimacy'], online: true }),
+      );
+
+      const detail = await service.getDirectoryBySlug('casa-t', true);
+
+      expect(detail.isAdultsOnly).toBe(true);
+    });
+
+    it('404s the reviews and questions of an 18+ listing for an anonymous caller', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({ cats: ['intimacy'], online: true }),
+      );
+
+      await expect(service.listReviews('casa-t')).rejects.toThrow(
+        NotFoundException,
+      );
+      await expect(service.listQuestions('casa-t')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('never serves an 18+ listing as a safe space', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          cats: ['intimacy'],
+          online: true,
+          safeSpaceStatus: SafeSpaceStatus.Verified,
+        }),
+      );
+
+      await expect(service.getSafeSpaceBySlug('casa-t')).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });
@@ -630,7 +719,7 @@ describe('toDirectoryCard hours and accessibility', () => {
     expect(DIRECTORY_CARD_HOURS_EXCEPTION_DAYS_AHEAD).toBeGreaterThan(0);
   });
 
-  it('carries all six answers, keeping `unknown` distinct from `no`', () => {
+  it('carries every answer, keeping `unknown` distinct from `no`', () => {
     const card = toDirectoryCard(
       makeListing({
         accessibilityAnswers: {
@@ -644,7 +733,7 @@ describe('toDirectoryCard hours and accessibility', () => {
     expect(card.accessibilityAnswers['step-free-entrance']).toBe('yes');
     expect(card.accessibilityAnswers['accessible-toilet']).toBe('no');
     expect(card.accessibilityAnswers['quiet-hours']).toBe('unknown');
-    expect(Object.keys(card.accessibilityAnswers)).toHaveLength(6);
+    expect(Object.keys(card.accessibilityAnswers)).toHaveLength(10);
   });
 
   it('carries the owner’s ownedBy', () => {

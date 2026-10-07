@@ -31,6 +31,11 @@ import {
   isAcceptedSuggestionValueValid,
   resolveAcceptedSuggestionTarget,
 } from './accepted-suggestion-value';
+import {
+  MAX_ONLINE_NOTE_LENGTH,
+  normalizeListingOnlineDetails,
+  normalizeOnlineListingUrl,
+} from './listing-online-details';
 
 /**
  * The `Listing` property a `suggestion_applied` history row names in
@@ -63,6 +68,28 @@ const ACCEPTED_SUGGESTION_FIELD_LABEL: Record<
   hoursNote: 'the opening-hours note',
   tagline: 'the tagline',
 };
+
+/**
+ * The 400 for an `address` correction on an online-only listing. Such a
+ * listing stores no address (rule 1 of the online write rules), so there is
+ * nothing to correct and nothing an accept could safely write.
+ */
+const ONLINE_ONLY_ADDRESS_MESSAGE =
+  'This business is online only, so it has no address to correct.';
+
+/**
+ * The 400 for a moderator-typed `hours` correction too long for an online-only
+ * listing. The correction lands on `onlineDetails.replyNote`, which holds at
+ * most 140 characters, and a moderator's own typed value is never cut short.
+ */
+const ONLINE_ONLY_HOURS_TOO_LONG_MESSAGE = `This business is online only, so an hours correction becomes its reply and dispatch note, which holds at most ${MAX_ONLINE_NOTE_LENGTH} characters.`;
+
+/**
+ * The 400 for a moderator-typed `website` correction an online-only listing's
+ * main link cannot hold (`normalizeOnlineListingUrl` returns `null` for it).
+ */
+const ONLINE_ONLY_WEBSITE_MESSAGE =
+  'This business is online only, so a website correction becomes its main link, which takes a web address (http or https) with no spaces or backslashes.';
 
 export interface ListEditSuggestionsQueryInput {
   status?: ListingEditSuggestionStatus;
@@ -140,6 +167,10 @@ export class ListingEditSuggestionsService {
       throw new BadRequestException(
         'You own this listing — edit it directly instead of suggesting a change',
       );
+    }
+
+    if (dto.field === 'address' && listing.online) {
+      throw new BadRequestException(ONLINE_ONLY_ADDRESS_MESSAGE);
     }
 
     // `@IsNotEmpty` only rejects an empty string, not a whitespace-only one
@@ -280,6 +311,10 @@ export class ListingEditSuggestionsService {
         dto.status,
         moderatorValue,
       );
+      await this.assertModeratorValueFitsOnlineListing(
+        suggestion,
+        moderatorValue,
+      );
     }
 
     suggestion.status =
@@ -344,6 +379,48 @@ export class ListingEditSuggestionsService {
   }
 
   /**
+   * Rejects a moderator override an online-only listing could not take as
+   * typed, before `resolve` mutates anything. A moderator who typed a value
+   * and saw nothing happen (or saw it cut short) cannot tell applied from
+   * discarded, so each case is a 400. Such a listing stores no address, its
+   * hours correction lands on the reply note (at most 140 characters), and
+   * its website correction lands on the main link, which takes only what
+   * `normalizeOnlineListingUrl` stores (see `applyAcceptedBestEffort`).
+   */
+  private async assertModeratorValueFitsOnlineListing(
+    suggestion: ListingEditSuggestion,
+    moderatorValue: string,
+  ): Promise<void> {
+    const target = resolveAcceptedSuggestionTarget(suggestion.field);
+    if (
+      target !== 'address' &&
+      target !== 'hoursNote' &&
+      target !== 'website'
+    ) {
+      return;
+    }
+    const listing = await this.listings.findOne({
+      where: { id: suggestion.listingId },
+    });
+    if (!listing?.online) return;
+    if (target === 'address') {
+      throw new BadRequestException(ONLINE_ONLY_ADDRESS_MESSAGE);
+    }
+    if (
+      target === 'hoursNote' &&
+      Array.from(moderatorValue).length > MAX_ONLINE_NOTE_LENGTH
+    ) {
+      throw new BadRequestException(ONLINE_ONLY_HOURS_TOO_LONG_MESSAGE);
+    }
+    if (
+      target === 'website' &&
+      normalizeOnlineListingUrl(moderatorValue) === null
+    ) {
+      throw new BadRequestException(ONLINE_ONLY_WEBSITE_MESSAGE);
+    }
+  }
+
+  /**
    * Writes an accepted correction onto the actual `Listing` row and notifies
    * the owner. Best-effort (mirrors `ListingsService.notifyApprovedBestEffort`
    * exactly): the suggestion's own status flip has already committed by the
@@ -358,7 +435,12 @@ export class ListingEditSuggestionsService {
    * free-text correction can't become that shape without a human parsing it,
    * so it lands on the adjoining free-text `hoursNote` column instead (which
    * exists for exactly this: a plain-text clarification shown next to the
-   * hours grid). `description` has no dedicated column at all; the closest
+   * hours grid). On an online-only listing an `hours` correction lands on
+   * `onlineDetails.replyNote` (first 140 characters), the note that takes the
+   * hours' place there, and a `website` correction lands on
+   * `onlineDetails.mainLink` as well as `social.website`, since the main link
+   * is that listing's Visit action.
+   * `description` has no dedicated column at all; the closest
    * fit is `tagline` (the detail page's own pull-quote copy), not `blurb`,
    * which is DB-capped at 140 chars and would reject a longer correction
    * outright. `other` is an intentional catch-all with no column to target —
@@ -380,6 +462,9 @@ export class ListingEditSuggestionsService {
    * resolves and the owner is still notified with the raw message, so the
    * moderator's own decision stands and a human can follow up. Refusing the
    * accept outright would instead leave the row stuck in the queue forever.
+   * An `address` correction for a listing that has gone online-only since it
+   * was filed takes the same path: an online-only listing stores no address,
+   * so nothing is written (`submit` refuses new ones outright).
    *
    * `moderatorValue` is the override from the resolve body, already checked
    * against this suggestion's target in `assertModeratorValueApplicable`, or
@@ -424,12 +509,64 @@ export class ListingEditSuggestionsService {
               `the suggested value fails the validation the create path ` +
               `enforces on "${target}". Listing ${listing.ref} left unchanged.`,
           );
+        } else if (target === 'address' && listing.online) {
+          // The listing went online-only after the suggestion was filed, so
+          // it stores no address and this correction no longer applies. Same
+          // handling as a value that fails validation: no write, no history
+          // row, the queue row still resolves and the owner is still told.
+          this.logger.warn(
+            `Edit suggestion ${suggestion.id} was accepted but not applied: ` +
+              `listing ${listing.ref} is online only and stores no address.`,
+          );
         } else if (target === 'phone') {
           listing.social = { ...listing.social, phone: valueToWrite };
           await this.saveAppliedCorrection(listing, target, moderatorUserId);
+        } else if (target === 'website' && listing.online) {
+          // An online-only listing's Visit action is its main link, so a
+          // corrected website lands there (keeping the link's kind, or
+          // `website` when it had none) and in `social` beside it. A value the
+          // main link cannot hold takes the invalid-value path above: no
+          // write, no history row, the owner still told.
+          const mainLinkUrl = normalizeOnlineListingUrl(valueToWrite);
+          if (mainLinkUrl === null) {
+            this.logger.warn(
+              `Edit suggestion ${suggestion.id} was accepted but not applied: ` +
+                `the suggested website is no main link listing ` +
+                `${listing.ref} can hold.`,
+            );
+          } else {
+            const currentDetails = normalizeListingOnlineDetails(
+              listing.onlineDetails,
+            );
+            listing.onlineDetails = normalizeListingOnlineDetails({
+              ...currentDetails,
+              mainLink: {
+                url: mainLinkUrl,
+                kind: currentDetails.mainLink?.kind ?? 'website',
+              },
+            });
+            listing.social = { ...listing.social, website: valueToWrite };
+            await this.saveAppliedCorrection(listing, target, moderatorUserId, {
+              changedFields: ['onlineDetails', 'social'],
+              label: 'the main link and the website',
+            });
+          }
         } else if (target === 'website') {
           listing.social = { ...listing.social, website: valueToWrite };
           await this.saveAppliedCorrection(listing, target, moderatorUserId);
+        } else if (target === 'hoursNote' && listing.online) {
+          // An online-only listing shows no opening hours: its "when you
+          // reply and dispatch" note stands in their place, so a corrected
+          // hours line belongs there, cut to that note's 140 characters by
+          // the normaliser. `hoursNote` is left as it was.
+          listing.onlineDetails = normalizeListingOnlineDetails({
+            ...normalizeListingOnlineDetails(listing.onlineDetails),
+            replyNote: valueToWrite,
+          });
+          await this.saveAppliedCorrection(listing, target, moderatorUserId, {
+            changedFields: ['onlineDetails'],
+            label: 'the reply and dispatch note',
+          });
         } else {
           // 'address' | 'hoursNote' | 'tagline' — all plain string columns.
           listing[target] = valueToWrite;
@@ -468,6 +605,13 @@ export class ListingEditSuggestionsService {
     listing: Listing,
     target: AcceptedSuggestionTarget,
     moderatorUserId: string,
+    // Where the value landed, when that differs from the target's own column
+    // (an online-only listing's hours correction lands on its reply note, its
+    // website correction on its main link and in `social`).
+    landing: { changedFields: (keyof Listing)[]; label: string } = {
+      changedFields: [ACCEPTED_SUGGESTION_CHANGED_FIELD[target]],
+      label: ACCEPTED_SUGGESTION_FIELD_LABEL[target],
+    },
   ): Promise<void> {
     await this.listings.manager.transaction(async (manager) => {
       await manager.withRepository(this.listings).save(listing);
@@ -477,8 +621,8 @@ export class ListingEditSuggestionsService {
         action: ListingModerationAction.SuggestionApplied,
         fromStatus: null,
         toStatus: null,
-        reason: `A moderator applied a suggested correction to ${ACCEPTED_SUGGESTION_FIELD_LABEL[target]}.`,
-        changedFields: [ACCEPTED_SUGGESTION_CHANGED_FIELD[target]],
+        reason: `A moderator applied a suggested correction to ${landing.label}.`,
+        changedFields: landing.changedFields,
       });
     });
   }

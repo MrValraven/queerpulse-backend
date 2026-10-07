@@ -16,9 +16,14 @@ import { BadRequestException } from '@nestjs/common';
  *
  * Each group carries two lists. `tags` are offered to listings with a physical
  * place, and `onlineTags` are offered to online-only listings
- * (`listings.online === true`), so an online shop sees shipping and payment
- * tags while a bar sees Terrace and DJ nights. Either list may be empty, and a
- * tag that fits both kinds of listing appears in both lists.
+ * (`listings.online === true`), so an online shop sees "Made to order" and
+ * "Gift cards" while a bar sees Terrace and DJ nights. Either list may be
+ * empty, and a tag that fits both kinds of listing appears in both lists.
+ *
+ * Shipping, pick-up, payment and session facts are structured fields on
+ * `onlineDetails` (`listing-online-details.ts`) since 2026-10-07, and the ten
+ * tags that used to carry them left this vocabulary then. A listing that still
+ * carries one keeps it on save (the `existing` rule below).
  *
  * Validation reads the union of both lists for every listing, whatever its
  * `online` flag. An owner who flips the online toggle keeps the tags picked
@@ -29,13 +34,7 @@ import { BadRequestException } from '@nestjs/common';
  * validation read one list.
  */
 export type ListingTagGroupId =
-  | 'visiting'
-  | 'happening'
-  | 'foodDrink'
-  | 'pricing'
-  | 'ordering'
-  | 'payment'
-  | 'sessions';
+  'visiting' | 'happening' | 'foodDrink' | 'pricing' | 'ordering' | 'sessions';
 
 export interface ListingTagGroup {
   id: ListingTagGroupId;
@@ -113,26 +112,12 @@ export const LISTING_TAG_GROUPS: readonly ListingTagGroup[] = [
   {
     id: 'ordering',
     tags: [],
-    onlineTags: [
-      'Ships to Portugal',
-      'Ships across the EU',
-      'Ships worldwide',
-      'Pick-up in Lisbon',
-      'Made to order',
-      'Custom commissions',
-      'Digital downloads',
-      'Gift cards',
-    ],
-  },
-  {
-    id: 'payment',
-    tags: [],
-    onlineTags: ['MB WAY', 'Multibanco', 'PayPal'],
+    onlineTags: ['Made to order', 'Custom commissions', 'Gift cards'],
   },
   {
     id: 'sessions',
     tags: [],
-    onlineTags: ['Video sessions', 'Phone sessions', 'Free first call'],
+    onlineTags: ['Free first call'],
   },
 ];
 

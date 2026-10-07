@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { CardTokenService } from '../membership-cards/card-token.service';
@@ -57,7 +58,10 @@ describe('EventCheckInService card check-in', () => {
         endAt: null,
       }),
     };
-    const cohosts = { exists: jest.fn().mockResolvedValue(false) };
+    const cohosts = {
+      exists: jest.fn().mockResolvedValue(false),
+      find: jest.fn().mockResolvedValue([]),
+    };
     rsvps = {
       findOne: jest.fn().mockResolvedValue({
         id: 'rsvp-1',
@@ -119,6 +123,7 @@ describe('EventCheckInService card check-in', () => {
       communities as unknown as Repository<Community>,
       cardTokens as unknown as CardTokenService,
       eventsService as unknown as EventsService,
+      { emit: jest.fn() } as unknown as EventEmitter2,
     );
   });
 
@@ -187,7 +192,10 @@ describe('EventCheckInService check-in by name', () => {
         endAt: null,
       }),
     };
-    const cohosts = { exists: jest.fn().mockResolvedValue(false) };
+    const cohosts = {
+      exists: jest.fn().mockResolvedValue(false),
+      find: jest.fn().mockResolvedValue([]),
+    };
     rsvps = {
       findOne: jest.fn().mockResolvedValue({
         id: 'rsvp-1',
@@ -228,6 +236,7 @@ describe('EventCheckInService check-in by name', () => {
       communities as unknown as Repository<Community>,
       cardTokens as unknown as CardTokenService,
       eventsService as unknown as EventsService,
+      { emit: jest.fn() } as unknown as EventEmitter2,
     );
   });
 
@@ -319,7 +328,10 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
         endAt: null,
       }),
     };
-    const cohosts = { exists: jest.fn().mockResolvedValue(false) };
+    const cohosts = {
+      exists: jest.fn().mockResolvedValue(false),
+      find: jest.fn().mockResolvedValue([]),
+    };
     rsvps = {
       findOne: jest.fn(),
       save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
@@ -351,6 +363,7 @@ describe('EventCheckInService coded RSVP-state refusals', () => {
       communities as unknown as Repository<Community>,
       cardTokens as unknown as CardTokenService,
       eventsService as unknown as EventsService,
+      { emit: jest.fn() } as unknown as EventEmitter2,
     );
   });
 

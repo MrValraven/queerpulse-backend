@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
+  ArrayContains,
   DataSource,
   EntityManager,
   In,
@@ -56,8 +57,15 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
 import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateListingReviewDto } from './dto/create-review.dto';
-import { ListListingDirectoryQuery } from './dto/list-directory.query';
+import {
+  ListAdultDirectoryQuery,
+  ListListingDirectoryQuery,
+} from './dto/list-directory.query';
 import { ListingAccessibilityAnswer } from './listing-accessibility';
+import {
+  ADULT_LISTING_CATEGORY_SLUG,
+  isAdultListing,
+} from './listing-categories';
 import { LISTING_TAG_GROUPS } from './listing-tags';
 import {
   ListingPublicQuestionDTO,
@@ -89,6 +97,7 @@ import {
   ReviewHelpfulDTO,
   SafeSpaceCardDTO,
   SafeSpaceListDTO,
+  listingCardPhotoKeys,
   listingPhotoKeys,
   toDirectoryCard,
   toDirectoryDetail,
@@ -139,6 +148,12 @@ function toBusinessSearchRow(
     hood: listing.hood,
   };
 }
+
+/**
+ * How many 18+ listings `GET /directory/adult` returns. No paging: the set is
+ * small, and the Online tab merges it into the page it already holds.
+ */
+export const ADULT_DIRECTORY_LIMIT = 100;
 
 /**
  * Public, read-only views over the `listings` (businesses) table for the
@@ -332,13 +347,17 @@ export class DirectoryService {
     qb.andWhere('listing.isHiddenByOwner = false');
   }
 
-  // `find()`-option twin of `excludeHiddenFromDirectory` for the read paths
-  // that do not build a query builder (`listPartnerSpaces`, `listByMemberSlug`,
-  // `listSafeSpaces`, `resolveMovedToListing`). Spread into the `where` object
-  // so the filters are applied IN the query, keeping any `take` honest.
+  // `find()`-option twin of `excludeHiddenFromDirectory` and of the 18+
+  // exclusion in `buildDirectoryQuery`, for the read paths that do not build a
+  // query builder (`listPartnerSpaces`, `listByMemberSlug`, `listSafeSpaces`,
+  // `resolveMovedToListing`). Spread into the `where` object so the filters
+  // are applied IN the query, keeping any `take` honest. Every one of those
+  // reads is public and CDN-cached, so an 18+ listing appears in none of them,
+  // signed in or out.
   private static readonly PUBLICLY_LISTED = {
     operatingState: Not(ListingOperatingState.PermanentlyClosed),
     isHiddenByOwner: false,
+    cats: Not(ArrayContains([ADULT_LISTING_CATEGORY_SLUG])),
   } as const;
 
   // Excludes moderator-taken-down listings from a directory query, in-query so
@@ -475,8 +494,11 @@ export class DirectoryService {
   private buildDirectoryQuery(
     query: Pick<
       ListListingDirectoryQuery,
-      'cat' | 'q' | 'safe' | 'owned' | 'access'
+      'cat' | 'q' | 'safe' | 'owned' | 'access' | 'online'
     >,
+    // `exclude` for every public read, which is anonymous-readable and
+    // CDN-cached. `only` for the members-only `GET /directory/adult`.
+    adultListings: 'exclude' | 'only' = 'exclude',
   ): SelectQueryBuilder<Listing> {
     const qb = this.listings
       .createQueryBuilder('listing')
@@ -540,6 +562,26 @@ export class DirectoryService {
         { accessRequirement: JSON.stringify(accessRequirement) },
       );
     }
+
+    if (query.online === 'true') {
+      // "Sells online": online-only listings and places that also sell
+      // online. In the query, so `listDirectoryPage`'s `total` counts only
+      // matching rows and the Online tab reads an honest count.
+      qb.andWhere(
+        '("listing"."online" = true OR "listing"."has_online_shop" = true)',
+      );
+    }
+
+    // The 18+ category stays off every public grid. This query backs
+    // CDN-cached reads served to everybody from one stored copy, so it carries
+    // no per-caller variant; signed-in members ask `GET /directory/adult`,
+    // which passes `only`.
+    qb.andWhere(
+      adultListings === 'only'
+        ? ':adultCategory = ANY("listing"."cats")'
+        : 'NOT (:adultCategory = ANY("listing"."cats"))',
+      { adultCategory: ADULT_LISTING_CATEGORY_SLUG },
+    );
 
     this.excludeModeratedListings(qb);
     // Applied here, in the ONE query both the bare list and the paginated page
@@ -651,8 +693,10 @@ export class DirectoryService {
    * as its crop Map.
    */
   private async toDirectoryCards(rows: Listing[]): Promise<DirectoryCardDTO[]> {
+    // A card shows gallery photos only, so shop item photos stay out of the
+    // lookup (`listingCardPhotoKeys`).
     const crops = await this.mediaCropService.getMany(
-      rows.flatMap((row) => listingPhotoKeys(row)),
+      rows.flatMap((row) => listingCardPhotoKeys(row)),
     );
     const ownerAvatars = await this.resolveOwnerAvatars(rows);
     // ONE query for the page's suspensions, never one per card.
@@ -682,6 +726,21 @@ export class DirectoryService {
     return paginate(qb, normalizePage(query.page), (rows) =>
       this.toDirectoryCards(rows),
     );
+  }
+
+  /**
+   * The live 18+ listings, for a signed-in member who turned on "Show 18+
+   * shops" in the Online tab (`GET /directory/adult`, `private, no-store`).
+   * The grid's own filters, visibility rules and order, narrowed to the
+   * `intimacy` category and capped at `ADULT_DIRECTORY_LIMIT`.
+   */
+  async listAdultDirectory(
+    query: ListAdultDirectoryQuery,
+  ): Promise<DirectoryCardDTO[]> {
+    const rows = await this.buildDirectoryQuery(query, 'only')
+      .take(ADULT_DIRECTORY_LIMIT)
+      .getMany();
+    return this.toDirectoryCards(rows);
   }
 
   /**
@@ -728,7 +787,7 @@ export class DirectoryService {
     // ONE batched crop lookup for the strip's cover photos (see
     // `listDirectory`), never a per-row query.
     const crops = await this.mediaCropService.getMany(
-      visibleRows.flatMap((row) => listingPhotoKeys(row)),
+      visibleRows.flatMap((row) => listingCardPhotoKeys(row)),
     );
     const ownerAvatars = await this.resolveOwnerAvatars(visibleRows);
     // ONE query for the strip's suspensions, never one per card.
@@ -768,6 +827,7 @@ export class DirectoryService {
     isActiveMemberViewer = false,
   ): Promise<DirectoryDetailDTO> {
     const listing = await this.loadLiveOr404(slug);
+    this.assertAdultListingReadable(listing, isActiveMemberViewer);
     // Bounded: the detail card embeds the review list AND derives its rating
     // aggregate from this same array, so `take` must sit well above any real
     // listing's review count (DEFAULT_LIST_LIMIT is sized for exactly that) to
@@ -1182,12 +1242,15 @@ export class DirectoryService {
     });
   }
 
-  /** Paginated reviews for one live listing. */
+  /** Paginated reviews for one live listing. An 18+ listing 404s for an
+   * anonymous caller, as its detail page does. */
   async listReviews(
     slug: string,
     page?: number,
+    isActiveMemberViewer = false,
   ): Promise<Paginated<ReviewDTO>> {
     const listing = await this.loadLiveOr404(slug);
+    this.assertAdultListingReadable(listing, isActiveMemberViewer);
     const qb = this.reviews
       .createQueryBuilder('review')
       .where('review.listing_id = :listingId', { listingId: listing.id })
@@ -1698,12 +1761,16 @@ export class DirectoryService {
    * an ORDER BY on the joined alias; this query orders by its own column and
    * resolves asker identities in a separate batched lookup precisely so it
    * never has to join.
+   *
+   * An 18+ listing 404s for an anonymous caller, as its detail page does.
    */
   async listQuestions(
     slug: string,
     page?: number,
+    isActiveMemberViewer = false,
   ): Promise<Paginated<ListingPublicQuestionDTO>> {
     const listing = await this.loadLiveOr404(slug);
+    this.assertAdultListingReadable(listing, isActiveMemberViewer);
     const qb = this.publicQuestions
       .createQueryBuilder('question')
       .where('question.listing_id = :listingId', { listingId: listing.id })
@@ -1864,7 +1931,11 @@ export class DirectoryService {
     const listing = await this.listings.findOne({
       where: { slug, status: ListingStatus.Live, isHiddenByOwner: false },
     });
-    if (!listing || listing.safeSpaceStatus === SafeSpaceStatus.None) {
+    if (
+      !listing ||
+      listing.safeSpaceStatus === SafeSpaceStatus.None ||
+      isAdultListing(listing.cats)
+    ) {
       throw new NotFoundException('Safe space not found');
     }
     await this.assertNotModerated(slug);
@@ -1893,6 +1964,22 @@ export class DirectoryService {
       memberVouches,
       suspendedBadges.has(listing.id),
     );
+  }
+
+  /**
+   * An 18+ listing answers an anonymous caller with the very 404 a missing
+   * slug gets, so the open web cannot even learn it exists. A signed-in active
+   * member reads it. Every route that calls this varies its cache headers by
+   * caller (`AnonymousNoStaleCacheInterceptor`), so a member's 200 is never
+   * stored for anyone else.
+   */
+  private assertAdultListingReadable(
+    listing: Pick<Listing, 'cats'>,
+    isActiveMemberViewer: boolean,
+  ): void {
+    if (!isActiveMemberViewer && isAdultListing(listing.cats)) {
+      throw new NotFoundException('Listing not found');
+    }
   }
 
   // Shared detail-page load for `getDirectoryBySlug`, `listReviews` and

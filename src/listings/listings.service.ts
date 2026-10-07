@@ -10,7 +10,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AdminQueueKey } from '../admin-queue-notifications/admin-queue.registry';
 import { isUniqueViolation } from '../common/db-errors';
-import { resolveListingLocation, resolveListingTimezone } from './listing-city';
+import {
+  LISTING_CITY,
+  resolveListingLocation,
+  resolveListingTimezone,
+} from './listing-city';
 import { resolveListingTagsOrThrow } from './listing-tags';
 import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
 import { toImageUrl } from '../common/image-url';
@@ -121,7 +125,23 @@ import {
   ListingWitLine,
   SafeSpaceStatus,
 } from './entities/listing.entity';
-import { normalizeAccessibilityAnswers } from './listing-accessibility';
+import { normalizeListingAccessibilityAnswers } from './listing-accessibility';
+import {
+  hasOnlineFulfilmentOrSessionFormat,
+  normalizeListingOnlineDetails,
+} from './listing-online-details';
+import {
+  normalizeListingShopItems,
+  shopItemImageReferences,
+} from './listing-shop-items';
+import {
+  OnlineListingFieldName,
+  OnlineListingFields,
+  healStoredListingColumns,
+  pickOnlineListingFields,
+  resolveOnlineListingCity,
+  resolveOnlineListingFields,
+} from './listing-online-rules';
 import {
   defaultPricingModeForCats,
   normalizeListingMenu,
@@ -438,7 +458,11 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
   // listing plus an empty timezone that silently disables opening hours.
   // `resolveListingLocation` also rescues a neighbourhood name submitted in the
   // city field rather than discarding it.
-  const location = resolveListingLocation(dto);
+  // An online-only listing stores its "Based in" city as given (trimmed,
+  // possibly empty) and no neighbourhood.
+  const location = dto.online
+    ? { city: resolveOnlineListingCity(dto.city), hood: '' }
+    : resolveListingLocation(dto);
   return {
     path: dto.path ?? '',
     name: dto.name,
@@ -457,16 +481,29 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
     // Always the COMPLETE question set: an omitted question is stored as a
     // real `unknown`, which is a different stored value from `no` and reads
     // as "we have not said" rather than as a denial.
-    accessibilityAnswers: normalizeAccessibilityAnswers(
+    accessibilityAnswers: normalizeListingAccessibilityAnswers(
       dto.accessibility?.answers,
     ),
     accessibilityNote: dto.accessibility?.note ?? '',
     services: normalizeServices(dto.services),
     menu: normalizeListingMenu(dto.menu),
-    pricingMode: dto.pricingMode ?? defaultPricingModeForCats(dto.cats ?? []),
+    // An online-only listing offers Services or Shop and hides the menu, so
+    // its default is `services` whatever its categories.
+    pricingMode:
+      dto.pricingMode ??
+      (dto.online ? 'services' : defaultPricingModeForCats(dto.cats ?? [])),
     langs: dto.langs ?? [],
     // An online-only listing carries no location, whatever the client sent.
     online: dto.online ?? false,
+    // Stored false for an online-only listing, which sells online by
+    // definition. `resolveOnlineListingFields` applies the rest of the rules.
+    hasOnlineShop: dto.online ? false : (dto.hasOnlineShop ?? false),
+    // The acceptance stamp is server-set, so whatever a body carries is dropped.
+    onlineDetails: normalizeListingOnlineDetails({
+      ...dto.onlineDetails,
+      adultTermsAcceptedAt: null,
+    }),
+    shopItems: normalizeListingShopItems(dto.shopItems),
     address: dto.online ? '' : (dto.address ?? ''),
     geocoded: dto.online ? false : (dto.geocoded ?? false),
     latitude: dto.online ? null : (dto.latitude ?? null),
@@ -531,18 +568,28 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     // enquiry rules read, so a PATCH that still carries it leaves it alone.
     ...(dto.name !== undefined ? { name: dto.name } : {}),
     ...(dto.cats !== undefined ? { cats: dto.cats } : {}),
-    // Same rule on update as on create (LOC-15): a submitted city is normalised
-    // to the one city rather than stored verbatim, and a neighbourhood sent in
-    // the city field moves to `hood` instead of overwriting it.
-    ...(dto.hood !== undefined || dto.city !== undefined
-      ? (() => {
-          const location = resolveListingLocation(dto);
-          return {
-            city: location.city,
-            ...(location.hood !== undefined ? { hood: location.hood } : {}),
-          };
-        })()
-      : {}),
+    // An online-only listing (as this PATCH leaves it) keeps the city its
+    // owner gave as "Based in", trimmed and possibly empty; its neighbourhood
+    // is blanked afterwards by `resolveOnlineListingFields`. A place follows
+    // LOC-15: the one city, and a neighbourhood sent in the city field moves
+    // to `hood`. An online listing turning into a place with no city or
+    // neighbourhood in the body gets the one city too, so its old "Based in"
+    // never reads as a place's city.
+    ...((dto.online ?? listing.online)
+      ? dto.city !== undefined
+        ? { city: resolveOnlineListingCity(dto.city) }
+        : {}
+      : dto.hood !== undefined || dto.city !== undefined
+        ? (() => {
+            const location = resolveListingLocation(dto);
+            return {
+              city: location.city,
+              ...(location.hood !== undefined ? { hood: location.hood } : {}),
+            };
+          })()
+        : listing.online
+          ? { city: LISTING_CITY }
+          : {}),
     ...(dto.timezone !== undefined
       ? { timezone: resolveListingTimezone(dto.timezone) }
       : {}),
@@ -562,8 +609,10 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     // one of the three real answers. The note is a single value and replaces.
     ...(dto.accessibility?.answers !== undefined
       ? {
-          accessibilityAnswers: normalizeAccessibilityAnswers({
-            ...normalizeAccessibilityAnswers(listing.accessibilityAnswers),
+          accessibilityAnswers: normalizeListingAccessibilityAnswers({
+            ...normalizeListingAccessibilityAnswers(
+              listing.accessibilityAnswers,
+            ),
             ...dto.accessibility.answers,
           }),
         }
@@ -582,6 +631,27 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.pricingMode !== undefined ? { pricingMode: dto.pricingMode } : {}),
     ...(dto.langs !== undefined ? { langs: dto.langs } : {}),
     ...(dto.online !== undefined ? { online: dto.online } : {}),
+    ...(dto.hasOnlineShop !== undefined
+      ? { hasOnlineShop: dto.hasOnlineShop }
+      : {}),
+    // Replaced wholesale, like `menu`. The 18+ acceptance stamp is the
+    // server's record, so it carries over from the stored value whatever the
+    // body says (`resolveOnlineListingFields` enforces the same from the
+    // healed row in `applyListingEdit`).
+    ...(dto.onlineDetails !== undefined
+      ? {
+          onlineDetails: normalizeListingOnlineDetails({
+            ...dto.onlineDetails,
+            adultTermsAcceptedAt: normalizeListingOnlineDetails(
+              listing.onlineDetails,
+            ).adultTermsAcceptedAt,
+          }),
+        }
+      : {}),
+    // Replaced wholesale: an ordered list the owner arranged, like `services`.
+    ...(dto.shopItems !== undefined
+      ? { shopItems: normalizeListingShopItems(dto.shopItems) }
+      : {}),
     ...(dto.address !== undefined ? { address: dto.address } : {}),
     ...(dto.geocoded !== undefined ? { geocoded: dto.geocoded } : {}),
     // Persist a moved/cleared pin: applied when present (incl. explicit null to
@@ -729,9 +799,12 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   accessibilityNote: 'the accessibility note',
   services: 'the services and prices',
   menu: 'the menu',
-  pricingMode: 'whether the page shows services or a menu',
+  pricingMode: 'whether the page shows services, a menu or shop items',
   langs: 'the languages spoken',
   online: 'the online-only setting',
+  hasOnlineShop: 'the "also sells online" setting',
+  onlineDetails: 'the ordering and delivery details',
+  shopItems: 'the shop items',
   address: 'the address',
   geocoded: 'the geocoded flag',
   latitude: 'the map pin',
@@ -984,6 +1057,16 @@ export class ListingsService {
     // Tags are pick-only from `LISTING_TAG_GROUPS`. Checked before the ref is
     // drawn, so a rejected submission does not burn a sequence number.
     const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
+    const isSuggestion = dto.path === 'suggest';
+    // The 18+ terms are the business's own promise, so only a claimant (who
+    // runs the business) can accept them. A suggester cannot make it for a
+    // business they do not run, the same as staff and the affirming baseline,
+    // and a later claim or owner offer does not ask again. A suggestion in
+    // the 18+ category is therefore refused whatever the body says.
+    const onlineFields = this.resolveCreateOnlineFields(
+      dto,
+      !isSuggestion && dto.adultTermsAccepted === true,
+    );
 
     const ref = await this.nextRef();
     // A suggestion is held by the platform: no owner until a claim or an owner
@@ -991,7 +1074,6 @@ export class ListingsService {
     // their personal answers are not stored, because the listing does not
     // describe them. The affirming baseline waits for the owner, the same as
     // on `adminCreate`.
-    const isSuggestion = dto.path === 'suggest';
     const saved = await this.createWithUniqueSlug(
       isSuggestion ? null : submitterUserId,
       ref,
@@ -1001,8 +1083,9 @@ export class ListingsService {
             suggestedByUserId: submitterUserId,
             affirmingBaselineAcceptedAt: null,
             ...suggestionOwnerPersonalBlanks(),
+            ...onlineFields,
           }
-        : {},
+        : onlineFields,
     );
     // Tell whoever works the listing-submission queue that a listing landed
     // for review. Awaited, but safe to await: `announce` catches everything
@@ -1045,6 +1128,9 @@ export class ListingsService {
     this.assertPathRequirements(dto);
     // Staff authoring picks from the same vocabulary as the member wizard.
     const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
+    // Staff cannot accept the 18+ terms for a business (the admin body has no
+    // such field), so a staff-authored listing in that category is refused.
+    const onlineFields = this.resolveCreateOnlineFields(dto, false);
 
     const ref = await this.nextRef();
     const saved = await this.createWithUniqueSlug(
@@ -1058,6 +1144,7 @@ export class ListingsService {
             : ListingStatus.Review,
         affirmingBaselineAcceptedAt: null,
         createdByStaffId: adminUserId,
+        ...onlineFields,
       },
     );
 
@@ -1286,21 +1373,64 @@ export class ListingsService {
       );
   }
 
-  /** Claim-path presence checks for the two nested shapes the DTO can't gate
-   * (see `create`). No-op on the `suggest` path. */
+  /**
+   * The online fields a create stores, after the online write rules
+   * (`resolveOnlineListingFields`): categories per kind of listing, the main
+   * link, the 18+ terms and the blanking for each kind. Run before the ref is
+   * drawn, like the tag check, so a refused submission burns no sequence
+   * number. A new listing has no stored acceptance, so the 18+ stamp comes
+   * only from `isAdultTermsAcceptedNow` and the server clock; a stamp in the
+   * body is discarded. `isAdultTermsAcceptedNow` is the body's flag on the
+   * claim path only: staff (`adminCreate`) and suggesters pass false, because
+   * neither runs the business whose promise the 18+ terms are.
+   */
+  private resolveCreateOnlineFields(
+    dto: ListingCreateInput,
+    isAdultTermsAcceptedNow: boolean,
+  ): OnlineListingFields {
+    return resolveOnlineListingFields(
+      pickOnlineListingFields(normalizeCreate(dto)),
+      {
+        isAdultTermsAcceptedNow,
+        storedAdultTermsAcceptedAt: null,
+        shouldCheckCategories: true,
+        // A new listing that sells online always states its main link.
+        shouldRequireMainLink: true,
+        now: new Date(),
+      },
+    );
+  }
+
+  /**
+   * Claim-path presence checks the DTO cannot express (see `create`): opening
+   * hours for a place, a delivery option or session format for an online-only
+   * listing, and the cover photo with its alt text. No-op on the `suggest`
+   * path.
+   */
   private assertPathRequirements(dto: ListingCreateInput): void {
     if (dto.path !== 'claim') return;
 
     const missing: string[] = [];
-    // `Object.values` on a fixed-key class widens to `any[]`, so assert the
-    // element type back to the day DTO before scanning for an open day.
-    const days = (dto.hours ? Object.values(dto.hours) : []) as (
-      ListingDayHoursDto | undefined
-    )[];
-    const hasOpenDay = days.some(
-      (day) => day?.open && (day.intervals?.length ?? 0) >= 1,
-    );
-    if (!hasOpenDay) missing.push('opening hours');
+    if (dto.online) {
+      // An online-only business has no opening hours to give. What a buyer
+      // needs before trusting it is how they get the thing: a delivery option,
+      // or for a therapist or a teacher, a session format.
+      if (!hasOnlineFulfilmentOrSessionFormat(dto.onlineDetails)) {
+        missing.push(
+          'a way people get it (a delivery option or a session format)',
+        );
+      }
+    } else {
+      // `Object.values` on a fixed-key class widens to `any[]`, so assert the
+      // element type back to the day DTO before scanning for an open day.
+      const days = (dto.hours ? Object.values(dto.hours) : []) as (
+        ListingDayHoursDto | undefined
+      )[];
+      const hasOpenDay = days.some(
+        (day) => day?.open && (day.intervals?.length ?? 0) >= 1,
+      );
+      if (!hasOpenDay) missing.push('opening hours');
+    }
     // The cover is the FIRST photo of the ordered gallery, whichever request
     // shape carried it. Its alt text is required too: a claimed listing's lead
     // image is the one every card and detail page renders, and shipping it
@@ -1738,16 +1868,22 @@ export class ListingsService {
    * `AdminListingsController.update`). An incoming photo key uploaded by
    * somebody else passes only when the listing already carries it; see the
    * call site in `update` for why both request shapes and both stored shapes
-   * are compared.
+   * are compared. Shop item photos are uploads too, so both their stored and
+   * incoming keys take part.
    */
   private assertNoForeignListingPhotoIntroduced(
     listing: Listing,
     userId: string,
     dto: UpdateListingDto,
   ): void {
-    if (dto.photoGallery !== undefined || dto.photos !== undefined) {
+    if (
+      dto.photoGallery !== undefined ||
+      dto.photos !== undefined ||
+      dto.shopItems !== undefined
+    ) {
       const alreadyStoredPhotoKeys = [
         ...galleryImageReferences(listing.photoGallery),
+        ...shopItemImageReferences(listing.shopItems),
         listing.photos?.wide,
         listing.photos?.d1,
         listing.photos?.d2,
@@ -1755,6 +1891,9 @@ export class ListingsService {
       ];
       const incomingPhotoKeys = [
         ...(dto.photoGallery ?? []).map((photo) => photo.image),
+        ...(dto.shopItems ?? []).flatMap((item) =>
+          item.photo ? [item.photo.image] : [],
+        ),
         ...(dto.photos
           ? [dto.photos.wide, dto.photos.d1, dto.photos.d2, dto.photos.vibe]
           : []),
@@ -1803,9 +1942,54 @@ export class ListingsService {
     // afterwards. `applyUpdate` replaces the nested `social`/`photos`/`alt`
     // objects rather than mutating them, so this shallow copy stays a faithful
     // "before" picture (see `changedListingFields`).
+    //
+    // A row written before the online fields existed holds `'{}'`, `'[]'` and
+    // six accessibility answers, and an online-only row the old write path
+    // saved may still carry a neighbourhood or a pin. Healing it first means
+    // the snapshot below and the edited row compare like with like, so an
+    // unrelated PATCH writes no audit row and stamps no freshness.
+    healStoredListingColumns(listing);
+    if (listing.online) {
+      Object.assign(listing, {
+        hood: '',
+        address: '',
+        geocoded: false,
+        latitude: null,
+        longitude: null,
+      });
+    }
     const listingBeforeEdit: Listing = { ...listing };
     const wasLive = listing.status === ListingStatus.Live;
     applyUpdate(listing, dto);
+    // The online write rules run on the row as the PATCH leaves it: the
+    // category vocabulary for its `online` flag, the main link, the 18+ terms
+    // and the blanking for each kind of listing. A 400 here leaves nothing
+    // saved. Categories are checked only when this PATCH carries `cats` or
+    // `online`, so a legacy category on an older row never blocks an
+    // unrelated edit, and the main link is asked for only when it carries
+    // `online`, `hasOnlineShop` or `onlineDetails`, so an older online listing
+    // with none can still save an unrelated edit. The 18+ stamp comes from
+    // the healed row as it stood before this PATCH; a stamp in the body is
+    // discarded. Staff can never accept the 18+ terms for a business (the
+    // admin DTOs omit the flag), so a staff edit passes false whatever the
+    // body holds.
+    const isStaffEdit = auditAction === ListingModerationAction.StaffEdited;
+    Object.assign(
+      listing,
+      resolveOnlineListingFields(pickOnlineListingFields(listing), {
+        isAdultTermsAcceptedNow:
+          !isStaffEdit && dto.adultTermsAccepted === true,
+        storedAdultTermsAcceptedAt:
+          listingBeforeEdit.onlineDetails.adultTermsAcceptedAt,
+        shouldCheckCategories:
+          dto.cats !== undefined || dto.online !== undefined,
+        shouldRequireMainLink:
+          dto.online !== undefined ||
+          dto.hasOnlineShop !== undefined ||
+          dto.onlineDetails !== undefined,
+        now: new Date(),
+      }),
+    );
 
     // An owner edit NEVER changes `listing.status`. Once a moderator has
     // approved a listing it stays live through its owner's corrections, and a
@@ -3579,7 +3763,9 @@ export class ListingsService {
    * shape this function cannot see leaks replaced photos forever. It therefore
    * reads BOTH the ordered `photoGallery` (the source of truth) and the legacy
    * `photos`/`alt` mirror, so a row written before the backfill is still
-   * cleaned up correctly.
+   * cleaned up correctly. Shop item photos count as well, so a photo moved
+   * from the gallery into a shop item survives the edit, and a removed
+   * listing's shop photos are cleaned up with it.
    *
    * Non-key values (external URLs, alt strings that were never keys) are
    * collected too and simply no-op at delete time —
@@ -3587,7 +3773,10 @@ export class ListingsService {
    * or delete the raw list without pre-filtering.
    */
   private collectListingImageKeys(listing: Listing): string[] {
-    const keys: string[] = galleryImageReferences(listing.photoGallery);
+    const keys: string[] = [
+      ...galleryImageReferences(listing.photoGallery),
+      ...shopItemImageReferences(listing.shopItems),
+    ];
     for (const set of [listing.photos, listing.alt]) {
       if (!set) continue;
       for (const value of [set.wide, set.d1, set.d2, set.vibe]) {
@@ -3759,6 +3948,7 @@ export class ListingsService {
         | 'linkToProfile'
         | 'visibility'
         | 'ownedBy'
+        | OnlineListingFieldName
       >
     > = {},
   ): Promise<Listing> {
@@ -3784,8 +3974,8 @@ export class ListingsService {
             affirmingBaselineAcceptedAt: new Date(),
             ...normalizeCreate(dto),
             // The staff authoring and suggest paths' own stamps, spread last
-            // so they win over the member defaults above. Empty on the claim
-            // path, where this line contributes nothing.
+            // so they win over the member defaults above, and on every path
+            // the online fields as the online write rules resolved them.
             ...overrides,
           }),
         );

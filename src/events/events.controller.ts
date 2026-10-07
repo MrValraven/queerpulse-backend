@@ -362,6 +362,7 @@ export class EventsController {
       user.userId,
       query.status ?? 'going',
       query.page,
+      { arrival: query.arrival, q: query.q },
     );
   }
 

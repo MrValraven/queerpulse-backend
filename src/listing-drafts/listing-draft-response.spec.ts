@@ -174,6 +174,38 @@ describe('toAdminListingDraftDetailDTO', () => {
     ).not.toContain('secret-token');
   });
 
+  it('carries the online business fields and leaves the 18+ acceptance behind', () => {
+    const onlineDetails = {
+      mainLink: { url: 'https://fiorosa.pt', kind: 'shop' },
+      fulfilment: ['shipsEu'],
+    };
+    const shopItems = [{ id: 'item-1', name: 'Skein', price: '9 EUR' }];
+    const dto = toAdminListingDraftDetailDTO(
+      draftRow({
+        step: 3,
+        draft: {
+          name: 'Fio Rosa',
+          online: true,
+          city: 'Porto',
+          hasOnlineShop: false,
+          onlineDetails,
+          shopItems,
+          adultTermsAccepted: true,
+        },
+      }),
+      ownerRef,
+    );
+
+    expect(dto.payload).toEqual({
+      name: 'Fio Rosa',
+      online: true,
+      city: 'Porto',
+      hasOnlineShop: false,
+      onlineDetails,
+      shopItems,
+    });
+  });
+
   it('reads a flat payload and keeps an empty one empty', () => {
     expect(
       toAdminListingDraftDetailDTO(

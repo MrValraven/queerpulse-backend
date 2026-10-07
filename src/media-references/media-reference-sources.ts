@@ -644,7 +644,8 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     // The ordered gallery: `[{ image, alt, caption }]`. Only `image` holds a
     // storage ref. `alt` and `caption` are prose about the photo, never keys.
     //
-    // This is the ONLY listing-photo source, and it is complete. The legacy
+    // This is the only source over the gallery, and it is complete for the gallery.
+    // Shop item photos have a source of their own, below. The legacy
     // `photos` column is still written, but only ever as a derived mirror of
     // the first four gallery entries (`legacySlotsFromGallery`), so every key it
     // holds is already in `photo_gallery`. A second source over it would report
@@ -673,6 +674,29 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
         ?.file?.url;
       return typeof fileUrl === 'string' ? [fileUrl] : [];
     },
+  }),
+
+  arraySource({
+    type: 'listing',
+    field: 'Listing.shopItems[].photo.image',
+    entity: Listing,
+    // Raw SQL column name (see the gallery source above).
+    column: 'shop_items',
+    idColumn: 'id',
+    labelColumns: ['name'],
+    slugColumn: 'slug',
+    // "In the shop": `[{ id, name, price, link, photo }]`. Only `photo.image`
+    // holds a storage ref; `link` points at another site. Typed `listing`, so
+    // the media pages name the listing the photo sits on, as they do for a
+    // gallery photo.
+    extractRefs: (row) =>
+      (
+        (row.shopItems ?? []) as Array<{
+          photo?: { image?: unknown } | null;
+        }>
+      )
+        .map((item) => item?.photo?.image)
+        .filter((value): value is string => typeof value === 'string'),
   }),
 
   arraySource({

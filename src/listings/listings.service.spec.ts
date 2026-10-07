@@ -26,6 +26,8 @@ import {
   LISTING_NAME_SEARCH_COLUMNS,
 } from '../search/search-text';
 import { CreateListingDto } from './dto/create-listing.dto';
+import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
+import { AdminUpdateListingDto } from './dto/admin-update-listing.dto';
 import { Profile } from '../users/entities/profile.entity';
 import {
   ListingModerationAction,
@@ -41,6 +43,7 @@ import {
   SafeSpaceStatus,
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
+import { emptyListingOnlineDetails } from './listing-online-details';
 import { ListingCoManagersService } from './listing-co-managers.service';
 import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { ListingsService } from './listings.service';
@@ -182,6 +185,9 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   services: [],
   menu: { sections: [], file: null, link: '' },
   pricingMode: 'services',
+  hasOnlineShop: false,
+  onlineDetails: emptyListingOnlineDetails(),
+  shopItems: [],
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',
@@ -1010,6 +1016,764 @@ describe('ListingsService', () => {
         expect(dto.photoGallery).toHaveLength(5);
         expect(dto.photoGallery[1]?.image).toContain('replaced.jpg');
         expect(dto.photoGallery[4]?.caption).toBe('Open studio night');
+      });
+    });
+  });
+
+  describe('online listings', () => {
+    const OWNER_ID = 'owner-1';
+    const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+    const FILE_SEGMENT = '44444444-4444-4444-4444-444444444444';
+    const FOREIGN_KEY = `listing-photos/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+    const MUG_PHOTO_URL = 'https://images.unsplash.com/photo-mug.jpg';
+    const STORED_STAMP = '2026-10-01T09:00:00.000Z';
+    const FORGED_STAMP = '2020-01-01T00:00:00.000Z';
+
+    const onlineBody = (overrides: Partial<CreateListingDto> = {}) =>
+      ({
+        name: 'Fio Rosa',
+        online: true,
+        cats: ['handmade'],
+        onlineDetails: { mainLink: { url: 'fiorosa.pt', kind: 'shop' } },
+        ...overrides,
+      }) as CreateListingDto;
+
+    const sellingDetails = () => ({
+      ...emptyListingOnlineDetails(),
+      mainLink: { url: 'https://fiorosa.pt', kind: 'shop' as const },
+    });
+
+    const storedOnlineListing = (overrides: Partial<Listing> = {}) =>
+      baseListing({
+        ownerId: OWNER_ID,
+        online: true,
+        cats: ['handmade'],
+        hood: '',
+        address: '',
+        onlineDetails: sellingDetails(),
+        ...overrides,
+      });
+
+    const savedRow = () =>
+      (listings.save.mock.calls.at(-1) as [Listing] | undefined)?.[0];
+
+    it('stores an online listing with no location, its own city, and no online shop flag', async () => {
+      const result = await service.create(
+        OWNER_ID,
+        onlineBody({
+          hasOnlineShop: true,
+          city: ' Porto ',
+          hood: 'Anjos',
+          address: 'Rua X 1',
+          latitude: 38.7,
+          longitude: -9.1,
+        }),
+      );
+
+      expect(savedRow()).toEqual(
+        expect.objectContaining({
+          online: true,
+          hasOnlineShop: false,
+          hood: '',
+          address: '',
+          latitude: null,
+          longitude: null,
+          city: 'Porto',
+          pricingMode: 'services',
+        }),
+      );
+      expect(savedRow()?.onlineDetails.mainLink).toEqual({
+        url: 'https://fiorosa.pt',
+        kind: 'shop',
+      });
+      expect(result.city).toBe('Porto');
+    });
+
+    it('refuses a place category on an online listing before drawing a ref', async () => {
+      await expect(
+        service.create(OWNER_ID, onlineBody({ cats: ['nightlife'] })),
+      ).rejects.toThrow(
+        'Category "nightlife" is not offered to online listings',
+      );
+      expect(dataSource.query).not.toHaveBeenCalled();
+      expect(listings.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses an online category on a place', async () => {
+      await expect(
+        service.create(OWNER_ID, {
+          name: 'Casa',
+          cats: ['apparel'],
+        } as CreateListingDto),
+      ).rejects.toThrow('Category "apparel" is not offered to place listings');
+    });
+
+    it('requires a main link from a listing that sells online', async () => {
+      await expect(
+        service.create(OWNER_ID, onlineBody({ onlineDetails: {} })),
+      ).rejects.toThrow('onlineDetails.mainLink is required');
+      await expect(
+        service.create(OWNER_ID, {
+          name: 'Casa',
+          cats: ['food'],
+          hasOnlineShop: true,
+        } as CreateListingDto),
+      ).rejects.toThrow('onlineDetails.mainLink is required');
+    });
+
+    it('empties the online fields of a place that does not sell online', async () => {
+      await service.create(OWNER_ID, {
+        name: 'Casa',
+        cats: ['food'],
+        pricingMode: 'shop',
+        onlineDetails: {
+          replyNote: 'Stale',
+          mainLink: { url: 'casa.pt', kind: 'shop' },
+        },
+        shopItems: [{ id: 'item-1', name: 'Mug' }],
+      } as CreateListingDto);
+
+      expect(savedRow()?.onlineDetails).toEqual(emptyListingOnlineDetails());
+      expect(savedRow()?.shopItems).toEqual([]);
+      expect(savedRow()?.pricingMode).toBe('menu');
+    });
+
+    it('leaves pick-up out for a place that also sells online', async () => {
+      await service.create(OWNER_ID, {
+        name: 'Casa',
+        cats: ['food'],
+        hasOnlineShop: true,
+        onlineDetails: {
+          mainLink: { url: 'casa.pt', kind: 'shop' },
+          fulfilment: ['pickupLisbon', 'shipsEu'],
+          pickupNote: 'At the counter',
+        },
+      } as CreateListingDto);
+
+      expect(savedRow()?.onlineDetails.fulfilment).toEqual(['shipsEu']);
+      expect(savedRow()?.onlineDetails.pickupNote).toBe('');
+      expect(savedRow()?.hasOnlineShop).toBe(true);
+    });
+
+    describe('the claim path', () => {
+      const claimedOnline = (
+        onlineDetails: CreateListingDto['onlineDetails'],
+      ) =>
+        onlineBody({
+          path: 'claim',
+          onlineDetails,
+          photoGallery: [{ image: MUG_PHOTO_URL, alt: 'Yarn on a table' }],
+        });
+
+      it('asks an online listing for a delivery option or a session format', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimedOnline({ mainLink: { url: 'fiorosa.pt', kind: 'shop' } }),
+          ),
+        ).rejects.toThrow(
+          'Claiming a listing requires a way people get it (a delivery option or a session format).',
+        );
+      });
+
+      it('accepts a session format alone, and asks for no opening hours', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimedOnline({
+              mainLink: { url: 'fiorosa.pt', kind: 'booking' },
+              sessionFormats: ['video'],
+            }),
+          ),
+        ).resolves.toBeDefined();
+      });
+
+      it('asks nothing of a suggested online listing', async () => {
+        await expect(
+          service.create(
+            'member-1',
+            onlineBody({
+              path: 'suggest',
+              onlineDetails: { mainLink: { url: 'fiorosa.pt', kind: 'shop' } },
+            }),
+          ),
+        ).resolves.toBeDefined();
+      });
+    });
+
+    describe('the 18+ terms', () => {
+      it('refuses the 18+ category with no acceptance', async () => {
+        const failure: unknown = await service
+          .create(OWNER_ID, onlineBody({ cats: ['intimacy'] }))
+          .catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(BadRequestException);
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('stamps the first acceptance from the server clock', async () => {
+        await service.create(
+          OWNER_ID,
+          onlineBody({ cats: ['intimacy'], adultTermsAccepted: true }),
+        );
+
+        const stamp = savedRow()?.onlineDetails.adultTermsAcceptedAt;
+        expect(stamp).toEqual(expect.any(String));
+        expect(Date.now() - Date.parse(stamp as string)).toBeLessThan(60_000);
+      });
+
+      it('refuses a suggestion in the 18+ category even when the suggester accepts', async () => {
+        const failure: unknown = await service
+          .create(
+            'member-1',
+            onlineBody({
+              path: 'suggest',
+              cats: ['intimacy'],
+              adultTermsAccepted: true,
+            }),
+          )
+          .catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(BadRequestException);
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(dataSource.query).not.toHaveBeenCalled();
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('stamps a claim in the 18+ category when the claimant accepts', async () => {
+        await service.create(
+          OWNER_ID,
+          onlineBody({
+            path: 'claim',
+            cats: ['intimacy'],
+            adultTermsAccepted: true,
+            onlineDetails: {
+              mainLink: { url: 'fiorosa.pt', kind: 'shop' },
+              fulfilment: ['shipsPortugal'],
+            },
+            photoGallery: [{ image: MUG_PHOTO_URL, alt: 'Yarn on a table' }],
+          }),
+        );
+
+        expect(savedRow()?.ownerId).toBe(OWNER_ID);
+        expect(savedRow()?.onlineDetails.adultTermsAcceptedAt).toEqual(
+          expect.any(String),
+        );
+      });
+
+      it('stores no acceptance stamp a create body carries', async () => {
+        await service.create(
+          OWNER_ID,
+          onlineBody({
+            onlineDetails: {
+              mainLink: { url: 'fiorosa.pt', kind: 'shop' },
+              adultTermsAcceptedAt: FORGED_STAMP,
+            },
+          }),
+        );
+
+        expect(savedRow()?.onlineDetails.adultTermsAcceptedAt).toBeNull();
+      });
+
+      it('replaces a forged stamp in a create body with the server clock', async () => {
+        await service.create(
+          OWNER_ID,
+          onlineBody({
+            cats: ['intimacy'],
+            adultTermsAccepted: true,
+            onlineDetails: {
+              mainLink: { url: 'fiorosa.pt', kind: 'shop' },
+              adultTermsAcceptedAt: FORGED_STAMP,
+            },
+          }),
+        );
+
+        const stamp = savedRow()?.onlineDetails.adultTermsAcceptedAt;
+        expect(stamp).toEqual(expect.any(String));
+        expect(stamp).not.toBe(FORGED_STAMP);
+      });
+
+      it('lets a later edit through with no second acceptance, stamp unchanged', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            cats: ['intimacy'],
+            onlineDetails: {
+              ...sellingDetails(),
+              adultTermsAcceptedAt: STORED_STAMP,
+            },
+          }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          blurb: 'New blurb',
+          onlineDetails: { mainLink: { url: 'fiorosa.pt', kind: 'shop' } },
+        });
+
+        expect(dto.onlineDetails.adultTermsAcceptedAt).toBe(STORED_STAMP);
+      });
+
+      it('keeps the stored stamp when an update carries a forged one', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            cats: ['intimacy'],
+            onlineDetails: {
+              ...sellingDetails(),
+              adultTermsAcceptedAt: STORED_STAMP,
+            },
+          }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          onlineDetails: {
+            mainLink: { url: 'fiorosa.pt', kind: 'shop' },
+            adultTermsAcceptedAt: FORGED_STAMP,
+          },
+        });
+
+        expect(savedRow()?.onlineDetails.adultTermsAcceptedAt).toBe(
+          STORED_STAMP,
+        );
+      });
+
+      it('ignores an acceptance stamp a client sends', async () => {
+        listings.findOne.mockResolvedValue(storedOnlineListing());
+
+        const failure: unknown = await service
+          .update('QPL-2026-0001', OWNER_ID, {
+            cats: ['intimacy'],
+            onlineDetails: {
+              mainLink: { url: 'fiorosa.pt', kind: 'shop' },
+              adultTermsAcceptedAt: FORGED_STAMP,
+            },
+          })
+          .catch((error: unknown) => error);
+
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('stamps an owner who accepts on an edit that adds the 18+ category', async () => {
+        listings.findOne.mockResolvedValue(storedOnlineListing());
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          cats: ['intimacy'],
+          adultTermsAccepted: true,
+        });
+
+        expect(savedRow()?.cats).toEqual(['intimacy']);
+        expect(savedRow()?.onlineDetails.adultTermsAcceptedAt).toEqual(
+          expect.any(String),
+        );
+      });
+    });
+
+    describe('edits', () => {
+      it('writes no audit row for an unrelated PATCH on a row from before the online fields', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            status: ListingStatus.Live,
+            blurb: 'Same blurb',
+            onlineDetails: {} as Listing['onlineDetails'],
+            shopItems: undefined as unknown as Listing['shopItems'],
+          }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          blurb: 'Same blurb',
+        });
+
+        expect(dto.detailsConfirmedAt).toBeNull();
+        expect(transactionManager.save).not.toHaveBeenCalled();
+      });
+
+      it('writes no audit row for an unrelated PATCH on an online row that kept a neighbourhood', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            status: ListingStatus.Live,
+            blurb: 'Same blurb',
+            hood: 'Anjos',
+          }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          blurb: 'Same blurb',
+        });
+
+        expect(dto.detailsConfirmedAt).toBeNull();
+        expect(transactionManager.save).not.toHaveBeenCalled();
+        expect(savedRow()?.hood).toBe('');
+      });
+
+      it('lets an online listing with no main link save an unrelated edit', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ onlineDetails: emptyListingOnlineDetails() }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          blurb: 'New blurb',
+        });
+
+        expect(dto.blurb).toBe('New blurb');
+        expect(dto.onlineDetails.mainLink).toBeNull();
+      });
+
+      it('lets an online listing with no main link save its shop items', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ onlineDetails: emptyListingOnlineDetails() }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          shopItems: [{ id: 'item-1', name: 'Zine' }],
+        });
+
+        expect(savedRow()?.shopItems).toEqual([
+          { id: 'item-1', name: 'Zine', price: '', link: '', photo: null },
+        ]);
+      });
+
+      it('asks for a main link once the PATCH touches the ordering section', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ onlineDetails: emptyListingOnlineDetails() }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            onlineDetails: { fulfilment: ['shipsEu'] },
+          }),
+        ).rejects.toThrow('onlineDetails.mainLink is required');
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('asks for a main link when a place turns on its online shop', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, cats: ['food'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, { hasOnlineShop: true }),
+        ).rejects.toThrow('onlineDetails.mainLink is required');
+      });
+
+      it('lets a legacy category through on an edit that leaves categories alone', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, cats: ['café'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, { blurb: 'New blurb' }),
+        ).resolves.toBeDefined();
+      });
+
+      it('checks the categories when the PATCH carries them', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, cats: ['food'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, { cats: ['apparel'] }),
+        ).rejects.toThrow(
+          'Category "apparel" is not offered to place listings',
+        );
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('checks the stored categories when the PATCH turns a place online-only', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, cats: ['nightlife'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            online: true,
+            onlineDetails: { mainLink: { url: 'casa.pt', kind: 'shop' } },
+          }),
+        ).rejects.toThrow(
+          'Category "nightlife" is not offered to online listings',
+        );
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('blanks the location when a place turns online-only, and keeps its new city', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            cats: ['food'],
+            address: 'Rua X 1',
+            latitude: 38.7,
+            longitude: -9.1,
+            geocoded: true,
+          }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          online: true,
+          city: 'Braga',
+          onlineDetails: { mainLink: { url: 'casa.pt', kind: 'shop' } },
+        });
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({
+            hood: '',
+            address: '',
+            latitude: null,
+            longitude: null,
+            geocoded: false,
+            city: 'Braga',
+          }),
+        );
+        expect(dto.city).toBe('Braga');
+      });
+
+      it('gives an online listing turning into a place the one city when the PATCH names none', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ city: 'Porto' }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          online: false,
+          cats: ['design'],
+        });
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({ online: false, city: 'Lisbon' }),
+        );
+        expect(dto.city).toBe('Lisbon');
+      });
+
+      it('leaves the stored city of a place alone on an edit that names none', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, cats: ['food'], city: '' }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, { blurb: 'New blurb' });
+
+        expect(savedRow()?.city).toBe('');
+      });
+
+      it('names a shop item change in the owner_edited audit row', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ status: ListingStatus.Live }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          shopItems: [{ id: 'item-1', name: 'Zine', price: '6 EUR' }],
+        });
+
+        expect(transactionManager.save).toHaveBeenCalledWith(
+          ListingModerationEvent,
+          expect.objectContaining({
+            changedFields: ['shopItems'],
+            reason: expect.stringContaining('the shop items') as unknown,
+          }),
+        );
+      });
+    });
+
+    // Staff bodies omit `adultTermsAccepted`, so a staff write can never
+    // accept the 18+ terms for a business. The service passes false on the
+    // staff paths whatever the body holds, which the cast bodies below pin.
+    describe('staff writes and the 18+ category', () => {
+      it('refuses a staff create in the 18+ category', async () => {
+        const failure: unknown = await service
+          .adminCreate('admin-1', {
+            name: 'Velvet Box',
+            online: true,
+            cats: ['intimacy'],
+            onlineDetails: {
+              mainLink: { url: 'velvet.example.pt', kind: 'shop' },
+            },
+            publishState: 'review',
+          } as AdminCreateListingDto)
+          .catch((error: unknown) => error);
+
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a staff create in the 18+ category even with the flag smuggled in', async () => {
+        const failure: unknown = await service
+          .adminCreate('admin-1', {
+            name: 'Velvet Box',
+            online: true,
+            cats: ['intimacy'],
+            onlineDetails: {
+              mainLink: { url: 'velvet.example.pt', kind: 'shop' },
+            },
+            publishState: 'review',
+            adultTermsAccepted: true,
+          } as unknown as AdminCreateListingDto)
+          .catch((error: unknown) => error);
+
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('keeps the 18+ category on a staff edit of a listing whose owner accepted', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            ownerId: null,
+            cats: ['intimacy'],
+            onlineDetails: {
+              ...sellingDetails(),
+              adultTermsAcceptedAt: STORED_STAMP,
+            },
+          }),
+        );
+
+        const dto = await service.adminUpdate('QPL-2026-0001', 'admin-1', {
+          blurb: 'Staff correction',
+        });
+
+        expect(dto.onlineDetails.adultTermsAcceptedAt).toBe(STORED_STAMP);
+      });
+
+      it('refuses a staff edit that adds the 18+ category to an unaccepted listing', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ ownerId: null }),
+        );
+
+        const failure: unknown = await service
+          .adminUpdate('QPL-2026-0001', 'admin-1', { cats: ['intimacy'] })
+          .catch((error: unknown) => error);
+
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(transactionManager.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a staff edit that adds the 18+ category even with the flag smuggled in', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({ ownerId: null }),
+        );
+
+        const failure: unknown = await service
+          .adminUpdate('QPL-2026-0001', 'admin-1', {
+            cats: ['intimacy'],
+            adultTermsAccepted: true,
+          } as unknown as AdminUpdateListingDto)
+          .catch((error: unknown) => error);
+
+        expect((failure as BadRequestException).getResponse()).toMatchObject({
+          code: 'adult_terms_required',
+        });
+        expect(transactionManager.save).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('shop item photos', () => {
+      it('refuses a new foreign upload introduced through a shop item', async () => {
+        listings.findOne.mockResolvedValue(storedOnlineListing());
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            shopItems: [
+              {
+                id: 'item-1',
+                name: 'Mug',
+                photo: { image: FOREIGN_KEY, alt: 'Not mine' },
+              },
+            ],
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('lets an edit re-save a shop item photo someone else uploaded once it is stored', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            shopItems: [
+              {
+                id: 'item-1',
+                name: 'Mug',
+                price: '',
+                link: '',
+                photo: { image: FOREIGN_KEY, alt: 'A mug', caption: '' },
+              },
+            ],
+          }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            shopItems: [
+              {
+                id: 'item-1',
+                name: 'Blue mug',
+                photo: { image: FOREIGN_KEY, alt: 'A mug' },
+              },
+            ],
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('keeps a photo moved from the gallery into a shop item', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            photoGallery: [
+              { image: MUG_PHOTO_URL, alt: 'A blue mug', caption: '' },
+            ],
+          }),
+        );
+        const storage = (
+          service as unknown as {
+            storage: { deleteObjectByReference: jest.Mock };
+          }
+        ).storage;
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          photoGallery: [],
+          shopItems: [
+            {
+              id: 'item-1',
+              name: 'Mug',
+              photo: { image: MUG_PHOTO_URL, alt: 'A blue mug' },
+            },
+          ],
+        });
+
+        expect(storage.deleteObjectByReference).not.toHaveBeenCalledWith(
+          MUG_PHOTO_URL,
+        );
+      });
+
+      it('cleans up a shop item photo the edit removes', async () => {
+        listings.findOne.mockResolvedValue(
+          storedOnlineListing({
+            shopItems: [
+              {
+                id: 'item-1',
+                name: 'Mug',
+                price: '',
+                link: '',
+                photo: { image: MUG_PHOTO_URL, alt: 'A mug', caption: '' },
+              },
+            ],
+          }),
+        );
+        const storage = (
+          service as unknown as {
+            storage: { deleteObjectByReference: jest.Mock };
+          }
+        ).storage;
+
+        await service.update('QPL-2026-0001', OWNER_ID, { shopItems: [] });
+
+        expect(storage.deleteObjectByReference).toHaveBeenCalledWith(
+          MUG_PHOTO_URL,
+        );
       });
     });
   });

@@ -143,6 +143,8 @@ export function toAdminListingDraftDTO(
  * `badge` with its `evidence`: a queer-owned claim says the owner is queer,
  * an outing risk exactly like `ownedBy`, and the member never confirmed it.
  * Also the wizard-only state `path`, `managementRole` and `isStaffAuthored`.
+ * The 18+ acceptance (`adultTermsAccepted`) stays behind too: it is the
+ * business's own promise, and the staff create path stamps nothing from a draft.
  */
 export const LISTING_DRAFT_BUSINESS_KEYS = [
   'name',
@@ -160,6 +162,10 @@ export const LISTING_DRAFT_BUSINESS_KEYS = [
   'menu',
   'langs',
   'online',
+  'city',
+  'hasOnlineShop',
+  'onlineDetails',
+  'shopItems',
   'address',
   'geocoded',
   'latitude',

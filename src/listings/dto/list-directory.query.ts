@@ -1,3 +1,4 @@
+import { PickType } from '@nestjs/mapped-types';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -149,4 +150,25 @@ export class ListListingDirectoryQuery {
   @ArrayMaxSize(LISTING_OWNED_BY_VALUES.length)
   @IsIn(LISTING_OWNED_BY_VALUES as readonly string[], { each: true })
   owned?: ListingOwnedBy[];
+
+  /**
+   * `true` narrows the grid to listings that sell online: online-only ones and
+   * places that also sell online (`online OR has_online_shop`). Applied in the
+   * query, so the paged `total` counts only matching rows. Only the literal
+   * `true` is accepted; any other value is a 400, so a client always knows
+   * whether it is reading the Online tab.
+   */
+  @IsOptional()
+  @IsIn(['true'])
+  online?: 'true';
 }
+
+/**
+ * `GET /directory/adult`: the 18+ listings a signed-in member asked to see.
+ * The category and free-text filters only; any other key is a 400 under the
+ * global `forbidNonWhitelisted` pipe.
+ */
+export class ListAdultDirectoryQuery extends PickType(
+  ListListingDirectoryQuery,
+  ['cat', 'q'] as const,
+) {}

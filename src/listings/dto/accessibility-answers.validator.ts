@@ -6,7 +6,9 @@ import {
 import {
   isListingAccessibilityAnswer,
   isListingAccessibilityQuestionSlug,
+  isListingAnyAccessibilityQuestionSlug,
   LISTING_ACCESSIBILITY_QUESTION_SLUGS,
+  LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS,
 } from '../listing-accessibility';
 
 /**
@@ -48,6 +50,43 @@ export function IsAccessibilityAnswerMap(options?: ValidationOptions) {
           return (
             `${args.property} must map known accessibility questions ` +
             `(${LISTING_ACCESSIBILITY_QUESTION_SLUGS.join(', ')}) ` +
+            'to one of: yes, no, unknown.'
+          );
+        },
+      },
+    });
+  };
+}
+
+/**
+ * `IsAccessibilityAnswerMap` for a BUSINESS LISTING, which also answers the
+ * four online questions (`LISTING_ONLINE_ACCESSIBILITY_QUESTION_SLUGS`).
+ * Gatherings keep the six-question decorator above, so a gathering body that
+ * sends `image-descriptions` is still refused.
+ */
+export function IsListingAccessibilityAnswerMap(options?: ValidationOptions) {
+  return function (object: object, propertyName: string): void {
+    registerDecorator({
+      name: 'isListingAccessibilityAnswerMap',
+      target: object.constructor,
+      propertyName,
+      options,
+      validator: {
+        validate(value: unknown): boolean {
+          if (value === undefined || value === null) return true;
+          if (typeof value !== 'object' || Array.isArray(value)) return false;
+          for (const [slug, answer] of Object.entries(
+            value as Record<string, unknown>,
+          )) {
+            if (!isListingAnyAccessibilityQuestionSlug(slug)) return false;
+            if (!isListingAccessibilityAnswer(answer)) return false;
+          }
+          return true;
+        },
+        defaultMessage(args: ValidationArguments): string {
+          return (
+            `${args.property} must map known accessibility questions ` +
+            `(${LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS.join(', ')}) ` +
             'to one of: yes, no, unknown.'
           );
         },

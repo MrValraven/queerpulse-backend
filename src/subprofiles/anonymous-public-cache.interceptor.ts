@@ -8,6 +8,7 @@ import { HttpException } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { Observable, catchError, throwError } from 'rxjs';
 import {
+  NO_STALE_READ_CDN_CACHE,
   PUBLIC_READ_CACHE,
   PUBLIC_READ_CDN_CACHE,
 } from '../common/public-read-cache';
@@ -76,6 +77,10 @@ function isMovedResponse(err: unknown): boolean {
 
 @Injectable()
 export class AnonymousPublicCacheInterceptor implements NestInterceptor {
+  // The anonymous branch's `CDN-Cache-Control`. A subclass may narrow it (see
+  // `AnonymousNoStaleCacheInterceptor` below); everything else is shared.
+  protected readonly anonymousCdnCacheControl: string = PUBLIC_READ_CDN_CACHE;
+
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     if (context.getType() === 'http') {
       const request = context
@@ -88,7 +93,9 @@ export class AnonymousPublicCacheInterceptor implements NestInterceptor {
       );
       response.setHeader(
         'CDN-Cache-Control',
-        request.user ? AUTHENTICATED_CACHE_CONTROL : PUBLIC_READ_CDN_CACHE,
+        request.user
+          ? AUTHENTICATED_CACHE_CONTROL
+          : this.anonymousCdnCacheControl,
       );
       // `res.vary()` APPENDS rather than replacing, so the `Vary: Origin` the
       // CORS layer already set survives alongside it.
@@ -109,4 +116,15 @@ export class AnonymousPublicCacheInterceptor implements NestInterceptor {
     }
     return next.handle();
   }
+}
+
+// The same interceptor with the CDN stale window dropped from the anonymous
+// branch (`NO_STALE_READ_CDN_CACHE`), for public reads whose anonymous answer
+// can be withdrawn and must stop being served within about a minute. Every
+// other behaviour (`Vary: Cookie` on both branches, `private, no-store` when
+// authenticated, the moved-response downgrade) is inherited unchanged. The
+// directory detail reads use it; see `listings/directory.controller.ts`.
+@Injectable()
+export class AnonymousNoStaleCacheInterceptor extends AnonymousPublicCacheInterceptor {
+  protected readonly anonymousCdnCacheControl: string = NO_STALE_READ_CDN_CACHE;
 }

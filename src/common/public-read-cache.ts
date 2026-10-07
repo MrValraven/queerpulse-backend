@@ -37,3 +37,14 @@ export const PUBLIC_READ_CACHE = 'public, s-maxage=60';
  */
 export const PUBLIC_READ_CDN_CACHE =
   'public, s-maxage=60, stale-while-revalidate=300';
+
+/**
+ * CDN-facing freshness for public reads whose content can be WITHDRAWN and
+ * must stop being served promptly when it is: the same 60s fresh window as
+ * `PUBLIC_READ_CDN_CACHE`, with the stale window dropped. After 60 seconds an
+ * edge revalidates instead of answering from its stored copy, and an unchanged
+ * page comes back 304 on its ETag, so the cost is small and bounded. The
+ * directory reads that use it, and why, are listed in
+ * `listings/directory.controller.ts`.
+ */
+export const NO_STALE_READ_CDN_CACHE = 'public, s-maxage=60';

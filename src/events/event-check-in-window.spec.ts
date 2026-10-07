@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { CardTokenService } from '../membership-cards/card-token.service';
@@ -32,7 +33,7 @@ describe('EventCheckInService attendance window', () => {
   const MEMBER_ID = 'member-1';
 
   let events: { findOne: jest.Mock };
-  let cohosts: { exists: jest.Mock };
+  let cohosts: { exists: jest.Mock; find: jest.Mock };
   let rsvps: { findOne: jest.Mock; save: jest.Mock };
   let profiles: { findOne: jest.Mock };
   let cardTokens: { verify: jest.Mock };
@@ -65,7 +66,10 @@ describe('EventCheckInService attendance window', () => {
     retention['retention.eventAttendanceDays'] = 30;
 
     events = { findOne: jest.fn() };
-    cohosts = { exists: jest.fn().mockResolvedValue(false) };
+    cohosts = {
+      exists: jest.fn().mockResolvedValue(false),
+      find: jest.fn().mockResolvedValue([]),
+    };
     rsvps = {
       findOne: jest.fn().mockResolvedValue(goingRsvp()),
       save: jest.fn((row: EventRsvp) => Promise.resolve(row)),
@@ -100,6 +104,7 @@ describe('EventCheckInService attendance window', () => {
       {} as unknown as Repository<Community>,
       cardTokens as unknown as CardTokenService,
       eventsService as unknown as EventsService,
+      { emit: jest.fn() } as unknown as EventEmitter2,
     );
   });
 

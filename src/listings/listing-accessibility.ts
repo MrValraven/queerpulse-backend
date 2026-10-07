@@ -115,6 +115,80 @@ export function normalizeAccessibilityAnswers(
 }
 
 /**
+ * The questions an ONLINE-ONLY listing answers about itself, where the six
+ * above are about a building. Same three answers and the same free-text note.
+ * They live in the same `accessibilityAnswers` map, so every listing row
+ * carries all ten slugs; a place never shows or asks these four, and an online
+ * listing never shows or asks the six.
+ *
+ * Kept apart from `LISTING_ACCESSIBILITY_QUESTION_SLUGS` on purpose: gatherings
+ * (`events/`) share that list, and a gathering has no product photos or
+ * checkout to describe. Mirrors the frontend's online accessibility list.
+ */
+export const LISTING_ONLINE_ACCESSIBILITY_QUESTION_SLUGS = [
+  'image-descriptions',
+  'video-captions',
+  'size-inclusive',
+  'plain-language',
+] as const;
+
+export type ListingOnlineAccessibilityQuestionSlug =
+  (typeof LISTING_ONLINE_ACCESSIBILITY_QUESTION_SLUGS)[number];
+
+/** Every question a business listing can answer: the six place questions, then the four online ones. */
+export const LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS = [
+  ...LISTING_ACCESSIBILITY_QUESTION_SLUGS,
+  ...LISTING_ONLINE_ACCESSIBILITY_QUESTION_SLUGS,
+] as const;
+
+export type ListingAnyAccessibilityQuestionSlug =
+  (typeof LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS)[number];
+
+/** The answer map every listing RESPONSE carries: all ten questions. */
+export type ListingFullAccessibilityAnswerMap = Record<
+  ListingAnyAccessibilityQuestionSlug,
+  ListingAccessibilityAnswer
+>;
+
+/**
+ * The answer map as a `listings` row may hold it. A row written before the
+ * online questions existed holds the six; every write from now on stores all
+ * ten, and every reader goes through `normalizeListingAccessibilityAnswers`.
+ */
+export type ListingStoredAccessibilityAnswerMap =
+  ListingAccessibilityAnswerMap &
+    Partial<
+      Record<ListingOnlineAccessibilityQuestionSlug, ListingAccessibilityAnswer>
+    >;
+
+/** True when `value` is one of the ten listing question slugs. */
+export function isListingAnyAccessibilityQuestionSlug(
+  value: string,
+): value is ListingAnyAccessibilityQuestionSlug {
+  return (
+    LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS as readonly string[]
+  ).includes(value);
+}
+
+/**
+ * `normalizeAccessibilityAnswers` for a business listing: the complete ten
+ * questions, each a real answer, `unknown` wherever the input says nothing
+ * valid. Unknown keys drop out.
+ */
+export function normalizeListingAccessibilityAnswers(
+  input?: Partial<Record<string, unknown>> | null,
+): ListingFullAccessibilityAnswerMap {
+  const answers = {} as ListingFullAccessibilityAnswerMap;
+  for (const slug of LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS) {
+    const value = input?.[slug];
+    answers[slug] = isListingAccessibilityAnswer(value)
+      ? value
+      : ListingAccessibilityAnswer.Unknown;
+  }
+  return answers;
+}
+
+/**
  * The accessibility-flavoured entries of the OLD flat `goodFor` amenity
  * vocabulary, mapped to the question each one was really answering `yes` to.
  *

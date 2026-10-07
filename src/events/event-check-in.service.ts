@@ -2,9 +2,11 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
@@ -26,6 +28,7 @@ import {
   isAttendanceCleared,
 } from './event-attendance-window';
 import { AttendeeView, toAttendeeView } from './event-response';
+import { EVENT_DOOR_CHANGED, EventDoorChangedEvent } from './event.events';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
@@ -76,6 +79,8 @@ export interface CheckInResultDTO {
  */
 @Injectable()
 export class EventCheckInService {
+  private readonly logger = new Logger(EventCheckInService.name);
+
   constructor(
     // Reads `retention.eventAttendanceDays` so the door stops accepting
     // arrivals at exactly the instant the retention sweep stops keeping them.
@@ -93,6 +98,8 @@ export class EventCheckInService {
     private readonly communities: Repository<Community>,
     private readonly cardTokens: CardTokenService,
     private readonly eventsService: EventsService,
+    // Announces a changed door to the organisers' other devices.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -157,11 +164,18 @@ export class EventCheckInService {
       );
     }
 
-    if (rsvp.checkedInAt === null) {
+    const didChange = rsvp.checkedInAt === null;
+    if (didChange) {
       rsvp.checkedInAt = new Date();
       await this.rsvps.save(rsvp);
     }
-    return this.result(event, rsvp, targetUserId);
+    const result = await this.result(event, rsvp, targetUserId);
+    // An idempotent repeat changed nothing, so other doors have nothing to
+    // learn from it.
+    if (didChange) {
+      await this.announceDoorChange(event, result.attendee.slug, 'checked_in');
+    }
+    return result;
   }
 
   /**
@@ -195,11 +209,16 @@ export class EventCheckInService {
     // sweep has not reached yet and that a host is now forbidden from taking
     // off. Clearing an already-null value is a no-op, so this stays safe and
     // available forever.
-    if (rsvp.checkedInAt !== null) {
+    const didChange = rsvp.checkedInAt !== null;
+    if (didChange) {
       rsvp.checkedInAt = null;
       await this.rsvps.save(rsvp);
     }
-    return this.result(event, rsvp, targetUserId);
+    const result = await this.result(event, rsvp, targetUserId);
+    if (didChange) {
+      await this.announceDoorChange(event, result.attendee.slug, 'undone');
+    }
+    return result;
   }
 
   // --- internals ---
@@ -260,6 +279,47 @@ export class EventCheckInService {
       attendee: toAttendeeView(rsvp, profile ?? undefined, true),
       ...counts,
     };
+  }
+
+  /**
+   * Tells every organiser's devices that this gathering's door changed, after
+   * the write committed. The audience is exactly the people `assertOrganizer`
+   * admits: the host and the co-hosts. The event names the gathering and the
+   * member's slug only; the chat relay forwards it to those users' own rooms.
+   * Best effort: the check-in already succeeded, and a door device that misses
+   * the frame catches up on its socket reconnect or on its own next check-in or
+   * undo. A failure here is logged and leaves the check-in result unaffected.
+   */
+  private async announceDoorChange(
+    event: Event,
+    memberSlug: string,
+    change: EventDoorChangedEvent['change'],
+  ): Promise<void> {
+    try {
+      const cohostRows = await this.cohosts.find({
+        where: { eventId: event.id },
+      });
+      const organizerUserIds = [
+        ...new Set([
+          ...(event.hostId ? [event.hostId] : []),
+          ...cohostRows.map((cohost) => cohost.userId),
+        ]),
+      ];
+      const payload: EventDoorChangedEvent = {
+        eventSlug: event.slug,
+        memberSlug,
+        change,
+        organizerUserIds,
+      };
+      this.eventEmitter.emit(EVENT_DOOR_CHANGED, payload);
+    } catch (error) {
+      // See the doc above: the write is the record, the frame is a hint.
+      this.logger.warn(
+        `Door change announcement failed for event ${event.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private async resolveByMemberSlug(memberSlug: string): Promise<string> {

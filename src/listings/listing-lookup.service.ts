@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
+import { ArrayContains, Not, Repository } from 'typeorm';
 import {
   Listing,
   ListingOperatingState,
   ListingStatus,
 } from './entities/listing.entity';
+import { ADULT_LISTING_CATEGORY_SLUG } from './listing-categories';
 
 export interface ListingRef {
   slug: string;
@@ -76,6 +77,13 @@ export class ListingLookupService {
    * reason: its public page 404s, so a new link pointing at it would be broken
    * the moment it was made. Existing links are unaffected, because they resolve
    * through `findLive` above.
+   *
+   * The link target is a gathering's VENUE, so it must also be a place people
+   * can walk into. An online-only listing has no premises, and an 18+ listing
+   * is kept off every public surface while the venue page of a public
+   * gathering is one, so both are unlinkable. A place that ALSO sells online
+   * (`online = false`, `hasOnlineShop = true`) keeps its address and stays
+   * linkable.
    */
   async findLinkable(listingId: string): Promise<ListingRef | null> {
     const listing = await this.findAttachable(listingId);
@@ -101,6 +109,9 @@ export class ListingLookupService {
         status: ListingStatus.Live,
         operatingState: Not(ListingOperatingState.PermanentlyClosed),
         isHiddenByOwner: false,
+        online: false,
+        // Same in-query 18+ exclusion as `DirectoryService.PUBLICLY_LISTED`.
+        cats: Not(ArrayContains([ADULT_LISTING_CATEGORY_SLUG])),
       },
     });
     return listing

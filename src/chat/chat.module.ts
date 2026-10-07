@@ -15,6 +15,7 @@ import { ChatGateway } from './chat.gateway';
 import { ChatSessionEnforcementService } from './chat-session-enforcement.service';
 import { ChatSingleInstanceGuard } from './chat-single-instance.guard';
 import { ChatGatewayInstanceHeartbeat } from './entities/chat-gateway-instance-heartbeat.entity';
+import { GatheringDoorRelayListener } from './gathering-door-relay.listener';
 import { MailboxStaffRelayListener } from './mailbox-staff-relay.listener';
 import { PresenceService } from './presence.service';
 
@@ -94,6 +95,8 @@ import { PresenceService } from './presence.service';
     // repository `UsersModule` already exports, and `ConversationParticipant`
     // through the registration above.
     MailboxStaffRelayListener,
+    // Door devices: the `gathering:checkin` frame to organiser `user:` rooms.
+    GatheringDoorRelayListener,
   ],
   exports: [PresenceService],
 })

@@ -31,9 +31,23 @@ import { toListingMenuView } from './listing-menu';
 import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
 import type { ListingTagGroup } from './listing-tags';
 import {
-  ListingAccessibilityAnswerMap,
-  normalizeAccessibilityAnswers,
+  ListingFullAccessibilityAnswerMap,
+  normalizeListingAccessibilityAnswers,
 } from './listing-accessibility';
+import { isAdultListing } from './listing-categories';
+import {
+  ListingOnlineDetails,
+  ListingOnlineSummary,
+  ListingPublicOnlineDetails,
+  normalizeListingOnlineDetails,
+  toListingOnlineSummary,
+  toListingPublicOnlineDetails,
+} from './listing-online-details';
+import {
+  ListingShopItemView,
+  shopItemImageReferences,
+  toListingShopItemViews,
+} from './listing-shop-items';
 import {
   galleryImageReferences,
   legacySlotsFromGallery,
@@ -148,9 +162,23 @@ function toPhotoCrops(
  *
  * Reads the ordered gallery, which is the source of truth. The legacy
  * `photos` slots are a derived mirror of the first four entries, so they add
- * nothing here.
+ * nothing here. Shop item photos are read too: they carry crops the same way
+ * the gallery's do.
  */
 export function listingPhotoKeys(listing: Listing): string[] {
+  return [
+    ...galleryImageReferences(listing.photoGallery),
+    ...shopItemImageReferences(listing.shopItems),
+  ];
+}
+
+/**
+ * The raw references a directory card emits: the gallery's only. A card
+ * carries no shop items (they reach the detail page and the owner wire, which
+ * read `listingPhotoKeys`), so a card grid's batched crop lookup leaves their
+ * photos out.
+ */
+export function listingCardPhotoKeys(listing: Listing): string[] {
   return galleryImageReferences(listing.photoGallery);
 }
 
@@ -222,9 +250,12 @@ export function operatingStateView(listing: Listing): OperatingStateView {
  *
  * `note` is the owner's free-text caveat ("two steps at the door"), or `null`
  * when they wrote none.
+ *
+ * A listing answers ten questions: six about a place, four about an online
+ * shop.
  */
 export interface ListingAccessibilityView {
-  answers: ListingAccessibilityAnswerMap;
+  answers: ListingFullAccessibilityAnswerMap;
   note: string | null;
 }
 
@@ -233,7 +264,7 @@ export interface ListingAccessibilityView {
  * existed still answers it (as `unknown`). */
 export function accessibilityView(listing: Listing): ListingAccessibilityView {
   return {
-    answers: normalizeAccessibilityAnswers(listing.accessibilityAnswers),
+    answers: normalizeListingAccessibilityAnswers(listing.accessibilityAnswers),
     note: listing.accessibilityNote || null,
   };
 }
@@ -387,6 +418,9 @@ export interface ListingDTO {
   name: string;
   cats: string[];
   hood: string;
+  /** The city as stored, trimmed: `Lisbon` for a place, the owner's "Based
+   * in" (possibly `''`) for an online-only listing. The editor round-trips it. */
+  city: string;
   badge: string;
   evidence: string;
   price: string;
@@ -402,13 +436,20 @@ export interface ListingDTO {
   /** What the business sells and what it costs. Empty when it prices
    * nothing. The single `price` band above is unchanged. */
   services: ListingServiceOffering[];
-  /** Which list the page shows: `services` or `menu`. */
+  /** Which list the page shows: `services`, `menu` or `shop`. */
   pricingMode: ListingPricingMode;
   /** The menu, with `file.url` resolved to its served URL. */
   menu: ListingMenu;
   langs: string[];
   /** Online-only business (no physical location). */
   online: boolean;
+  /** A place that also sells online. Always false for an online-only listing. */
+  hasOnlineShop: boolean;
+  /** The "Ordering & delivery" facts, complete, with the 18+ acceptance stamp
+   * (owner wire only). The empty value for a listing that does not sell online. */
+  onlineDetails: ListingOnlineDetails;
+  /** "In the shop", photos resolved like `photoGallery`. `[]` when there are none. */
+  shopItems: ListingShopItemView[];
   address: string;
   geocoded: boolean;
   latitude: number | null;
@@ -804,6 +845,26 @@ export interface DirectoryCardDTO {
   /** Online-only business (no physical location) — the card shows an "Online"
    *  badge instead of a neighbourhood and never pins the map. */
   online: boolean;
+  /** Where an online-only listing says it is based ("Based in"), verbatim and
+   * possibly `''` (the card then reads "Online"). For a place, the city it sits
+   * in, `Lisbon` when the row holds none. `DirectoryDetailDTO` inherits it. */
+  city: string;
+  /** A place that also sells online. Always `false` for an online-only
+   * listing, which sells online by definition. */
+  hasOnlineShop: boolean;
+  /** Carries the 18+ category. Only a signed-in member ever receives such a
+   * card (`GET /directory/adult`, or the detail page); every public grid
+   * leaves these listings out. */
+  isAdultsOnly: boolean;
+  /** What the card's status slot and Visit action need, for a listing that
+   * sells online (`online || hasOnlineShop`). `null` for every other listing. */
+  onlineSummary: ListingOnlineSummary | null;
+  /** Where an online-only business lives on the web, so the Online tab's card
+   *  can print the site's own address in its browser bar. The same public
+   *  `social` values the detail page already carries, trimmed; `''` when the
+   *  owner left one out. `null` on a place, whose card shows its neighbourhood
+   *  instead, so the place grid's payload does not grow. */
+  onlineLinks: { website: string; instagram: string } | null;
   // Map pin, when the owner placed one while listing. null ⇒ list-only (no pin).
   latitude: number | null;
   longitude: number | null;
@@ -889,8 +950,9 @@ export interface DirectoryCardDTO {
    */
   hoursExceptions: ListingHoursException[];
   /**
-   * The venue's answers to the six canonical accessibility questions
-   * (`LISTING_ACCESSIBILITY_QUESTION_SLUGS`), always a complete map.
+   * The listing's answers to all ten accessibility questions
+   * (`LISTING_ALL_ACCESSIBILITY_QUESTION_SLUGS`: six about a place, four about
+   * an online shop), always a complete map.
    *
    * All three values reach the card. `unknown` means nobody has asked the venue
    * and it is a different fact from `no`: it must never be rendered as a met
@@ -901,7 +963,7 @@ export interface DirectoryCardDTO {
    * The free-text `accessibilityNote` is deliberately NOT here: it runs to 500
    * characters and belongs on the detail page (`DirectoryDetailDTO.accessibility`).
    */
-  accessibilityAnswers: ListingAccessibilityAnswerMap;
+  accessibilityAnswers: ListingFullAccessibilityAnswerMap;
 }
 
 /**
@@ -925,6 +987,17 @@ export function directorySafeSpaceStatus(
     return 'suspended';
   }
   return listing.safeSpaceStatus;
+}
+
+/**
+ * The city a card and a detail page print. An online-only listing shows
+ * exactly what its owner gave as "Based in", which may be empty (the card then
+ * reads "Online"). A place keeps the directory's one-city fallback.
+ */
+function directoryCity(listing: Pick<Listing, 'online' | 'city'>): string {
+  return listing.online === true
+    ? (listing.city ?? '').trim()
+    : listingCityOrDefault(listing.city);
 }
 
 export function toDirectoryCard(
@@ -981,6 +1054,16 @@ export function toDirectoryCard(
     // and `role`, and for a listing that was never linked to a profile.
     memberAvatarUrl: owner.inQueerPulse ? ownerAvatarUrl : null,
     online: listing.online ?? false,
+    city: directoryCity(listing),
+    hasOnlineShop: listing.online !== true && listing.hasOnlineShop === true,
+    isAdultsOnly: isAdultListing(listing.cats),
+    onlineSummary: toListingOnlineSummary(listing),
+    onlineLinks: listing.online
+      ? {
+          website: listing.social?.website?.trim() ?? '',
+          instagram: listing.social?.instagram?.trim() ?? '',
+        }
+      : null,
     latitude: listing.latitude ?? null,
     longitude: listing.longitude ?? null,
     safeSpaceStatus,
@@ -997,7 +1080,7 @@ export function toDirectoryCard(
     hoursExceptions: nearTermHoursExceptions(listing, now),
     // Normalized up to the full vocabulary, so a row written before a question
     // existed still answers it — as `unknown`, which is the honest answer.
-    accessibilityAnswers: normalizeAccessibilityAnswers(
+    accessibilityAnswers: normalizeListingAccessibilityAnswers(
       listing.accessibilityAnswers,
     ),
   };
@@ -1257,8 +1340,6 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * report/dispute endpoint. Read-only, non-sensitive reference id. */
   ref: string;
   tagline: string;
-  /** City the venue sits in; `null` ⇒ the frontend defaults to Lisbon. */
-  city: string | null;
   /** IANA timezone the hours run on; `null` ⇒ the frontend defaults to
    * Europe/Lisbon for its "Open now" computation. */
   timezone: string | null;
@@ -1299,10 +1380,16 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * ("from 25 EUR", "sliding scale"). Empty when it prices nothing. The
    * inherited `pills` still lead with the at-a-glance `price` band. */
   services: ListingServiceOffering[];
-  /** Which list the page shows: `services` or `menu`. */
+  /** Which list the page shows: `services`, `menu` or `shop`. */
   pricingMode: ListingPricingMode;
   /** The menu, with `file.url` resolved to its served URL. */
   menu: ListingMenu;
+  /** The "Ordering & delivery" block, for a listing that sells online. `null`
+   * for every other listing. Carries no `adultTermsAcceptedAt`, which is the
+   * owner's own record. */
+  onlineDetails: ListingPublicOnlineDetails | null;
+  /** "In the shop", photos resolved like the gallery's. `[]` when there are none. */
+  shopItems: ListingShopItemView[];
   /** The listing's agreement to the LGBTQ+ affirming baseline, so the page can
    * state the commitment every business here has made. `isAccepted` is true on
    * every listing by definition; it is not a distinguishing badge and not a
@@ -1440,9 +1527,9 @@ export function toDirectoryDetail(
     ),
     ref: listing.ref,
     tagline: listing.tagline,
-    // Empty text columns read as "unset" (frontend then defaults to Lisbon /
-    // Europe-Lisbon), same `|| null` idiom the safe-space fields below use.
-    city: listing.city || null,
+    // An empty timezone reads as "unset" (the frontend then defaults to
+    // Europe/Lisbon), the same `|| null` idiom the safe-space fields below use.
+    // The city comes from the card spread above.
     timezone: listing.timezone || null,
     // LEGACY caption strip (the prototype rendered caption cells, no images).
     // A photo's own `caption` when it has one, its `alt` otherwise, in gallery
@@ -1466,6 +1553,8 @@ export function toDirectoryDetail(
     services: listing.services ?? [],
     pricingMode: listing.pricingMode ?? 'services',
     menu: toListingMenuView(listing.menu),
+    onlineDetails: toListingPublicOnlineDetails(listing),
+    shopItems: toListingShopItemViews(listing.shopItems, crops),
     affirmingBaseline: affirmingBaselineView(listing),
     queerOwnedVerification: queerOwnedVerificationView(listing),
     hoursType: hoursTypeForCategory(listing.cats[0] ?? ''),
@@ -1550,6 +1639,7 @@ export function toListingDTO(
     name: listing.name,
     cats: listing.cats,
     hood: listing.hood,
+    city: (listing.city ?? '').trim(),
     badge: listing.badge,
     evidence: listing.evidence,
     price: listing.price,
@@ -1564,6 +1654,9 @@ export function toListingDTO(
     menu: toListingMenuView(listing.menu),
     langs: listing.langs,
     online: listing.online ?? false,
+    hasOnlineShop: listing.online !== true && listing.hasOnlineShop === true,
+    onlineDetails: normalizeListingOnlineDetails(listing.onlineDetails),
+    shopItems: toListingShopItemViews(listing.shopItems, crops),
     address: listing.address,
     geocoded: listing.geocoded,
     latitude: listing.latitude ?? null,
