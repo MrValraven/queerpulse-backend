@@ -206,6 +206,36 @@ describe('toAdminListingDraftDetailDTO', () => {
     });
   });
 
+  it('carries the out-and-about fields to the staff console', () => {
+    const mobileDetails = {
+      allOfCity: false,
+      parishes: ['Arroios', 'Estrela'],
+      alsoTravelsTo: ['Almada'],
+      byAppointment: true,
+    };
+    const dto = toAdminListingDraftDetailDTO(
+      draftRow({
+        step: 3,
+        draft: {
+          name: 'Corte Movel',
+          mobile: true,
+          mobileDetails,
+          hood: '',
+          address: '',
+        },
+      }),
+      ownerRef,
+    );
+
+    expect(dto.payload).toEqual({
+      name: 'Corte Movel',
+      mobile: true,
+      mobileDetails,
+      hood: '',
+      address: '',
+    });
+  });
+
   it('reads a flat payload and keeps an empty one empty', () => {
     expect(
       toAdminListingDraftDetailDTO(

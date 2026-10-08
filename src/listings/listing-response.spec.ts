@@ -4,8 +4,10 @@ import {
   ListingStatus,
   SafeSpaceStatus,
 } from './entities/listing.entity';
+import { Event, EventVenueConfirmation } from '../events/entities/event.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
+import { emptyListingMobileDetails } from './listing-mobile-details';
 import { emptyListingOnlineDetails } from './listing-online-details';
 import {
   listingCardPhotoKeys,
@@ -14,6 +16,7 @@ import {
   toDirectoryCard,
   toDirectoryDetail,
   toListingDTO,
+  toManagedListingItem,
   toReviewDTO,
   toSafeSpaceCard,
   toSafeSpaceDetail,
@@ -663,6 +666,38 @@ describe('toListingDTO (the owner/managed response)', () => {
     expect(dto.hasOnlineShop).toBe(false);
     expect(Object.keys(dto.accessibility.answers)).toHaveLength(10);
   });
+
+  it('carries the mobile flag and the full details of a mobile listing', () => {
+    const dto = toListingDTO(
+      makeManagedListing({
+        mobile: true,
+        hood: '',
+        address: '',
+        mobileDetails: {
+          allOfCity: false,
+          parishes: ['Estrela', 'Arroios'],
+          alsoTravelsTo: [],
+          byAppointment: true,
+        },
+      }),
+      null,
+    );
+
+    expect(dto.mobile).toBe(true);
+    expect(dto.mobileDetails).toEqual({
+      allOfCity: false,
+      parishes: ['Arroios', 'Estrela'],
+      alsoTravelsTo: [],
+      byAppointment: true,
+    });
+  });
+
+  it('reads missing mobile columns as a place with the default details', () => {
+    const dto = toListingDTO(makeManagedListing(), null);
+
+    expect(dto.mobile).toBe(false);
+    expect(dto.mobileDetails).toEqual(emptyListingMobileDetails());
+  });
 });
 
 describe('online listings on the public directory responses', () => {
@@ -824,5 +859,168 @@ describe('the crop lookup keys', () => {
       'listing-photos/u/cover.jpg',
       'listing-photos/u/zine.jpg',
     ]);
+  });
+});
+
+describe('mobile listings on the public directory responses', () => {
+  const movingDetails = {
+    allOfCity: true,
+    parishes: [],
+    alsoTravelsTo: ['Almada', 'Oeiras'],
+    byAppointment: true,
+  };
+
+  it('carries the mobile flag and its details on the card and the detail', () => {
+    const listing = makeDirectoryListing({
+      online: false,
+      mobile: true,
+      mobileDetails: movingDetails,
+      hood: '',
+      address: '',
+      latitude: null,
+      longitude: null,
+    });
+
+    const card = toDirectoryCard(listing);
+    expect(card.mobile).toBe(true);
+    expect(card.mobileDetails).toEqual(movingDetails);
+
+    const detail = toDirectoryDetail(listing, [], [], 0);
+    expect(detail.mobile).toBe(true);
+    expect(detail.mobileDetails).toEqual(movingDetails);
+  });
+
+  it('reads a stored "{}" on a mobile row as the full default', () => {
+    const card = toDirectoryCard(
+      makeDirectoryListing({
+        mobile: true,
+        mobileDetails: {} as Listing['mobileDetails'],
+      }),
+    );
+    expect(card.mobileDetails).toEqual(emptyListingMobileDetails());
+  });
+
+  it('gives a place the default details whatever its column holds', () => {
+    const card = toDirectoryCard(
+      makeDirectoryListing({ mobile: false, mobileDetails: movingDetails }),
+    );
+    expect(card.mobile).toBe(false);
+    expect(card.mobileDetails).toEqual(emptyListingMobileDetails());
+  });
+
+  it('reads a row carrying both flags as online', () => {
+    const card = toDirectoryCard(
+      makeDirectoryListing({
+        online: true,
+        mobile: true,
+        mobileDetails: movingDetails,
+      }),
+    );
+    expect(card.mobile).toBe(false);
+    expect(card.mobileDetails).toEqual(emptyListingMobileDetails());
+  });
+});
+
+describe('the Upcoming block on a listing detail', () => {
+  const LISTING_ID = 'listing-1';
+
+  const upcomingEvent = (overrides: Partial<Event>): Event =>
+    ({
+      id: 'event-1',
+      slug: 'queer-history-walk',
+      title: 'Queer history walk',
+      startAt: new Date('2026-11-01T10:00:00.000Z'),
+      venueConfirmation: EventVenueConfirmation.Confirmed,
+      listingId: null,
+      runByListingId: null,
+      ...overrides,
+    }) as unknown as Event;
+
+  const upcomingOf = (events: Event[]) =>
+    toDirectoryDetail(makeDirectoryListing({ id: LISTING_ID }), [], events, 0)
+      .upcoming;
+
+  it('reads a gathering held at the listing as a venue item', () => {
+    expect(
+      upcomingOf([upcomingEvent({ listingId: LISTING_ID })])[0],
+    ).toMatchObject({ slug: 'queer-history-walk', role: 'venue' });
+  });
+
+  it('reads a gathering the listing runs as a run-by item', () => {
+    expect(
+      upcomingOf([
+        upcomingEvent({
+          runByListingId: LISTING_ID,
+          listingId: 'listing-cafe',
+          venueConfirmation: EventVenueConfirmation.Pending,
+        }),
+      ])[0],
+    ).toMatchObject({ role: 'runBy', venueConfirmed: false });
+  });
+
+  it('reads a gathering both run by and held at the listing as run by, once', () => {
+    const upcoming = upcomingOf([
+      upcomingEvent({ listingId: LISTING_ID, runByListingId: LISTING_ID }),
+    ]);
+    expect(upcoming).toHaveLength(1);
+    expect(upcoming[0]?.role).toBe('runBy');
+  });
+});
+
+describe('toManagedListingItem', () => {
+  const managedRow = (overrides: Partial<Listing>): Listing =>
+    ({
+      id: '6f1c2a54-8d3e-4b7a-9c21-0e5f4d3b2a10',
+      ref: 'QPL-2026-0042',
+      slug: 'lisboa-a-pe',
+      name: 'Lisboa a Pé',
+      online: false,
+      mobile: true,
+      address: ' Praça do Comércio ',
+      hood: 'Santa Maria Maior',
+      latitude: 38.7075,
+      longitude: -9.1364,
+      ...overrides,
+    }) as unknown as Listing;
+
+  it('hands a mobile listing its meeting point, trimmed', () => {
+    expect(toManagedListingItem(managedRow({}))).toEqual({
+      id: '6f1c2a54-8d3e-4b7a-9c21-0e5f4d3b2a10',
+      ref: 'QPL-2026-0042',
+      slug: 'lisboa-a-pe',
+      name: 'Lisboa a Pé',
+      kind: 'mobile',
+      meetingPoint: {
+        address: 'Praça do Comércio',
+        hood: 'Santa Maria Maior',
+        latitude: 38.7075,
+        longitude: -9.1364,
+      },
+    });
+  });
+
+  it('gives a mobile listing with no meeting point none', () => {
+    expect(
+      toManagedListingItem(
+        managedRow({ latitude: null, longitude: null, address: '', hood: '' }),
+      ).meetingPoint,
+    ).toBeNull();
+  });
+
+  it('gives a place and an online listing their kind and no meeting point', () => {
+    const place = toManagedListingItem(managedRow({ mobile: false }));
+    expect(place.kind).toBe('place');
+    expect(place.meetingPoint).toBeNull();
+
+    const online = toManagedListingItem(
+      managedRow({
+        online: true,
+        mobile: false,
+        latitude: null,
+        longitude: null,
+      }),
+    );
+    expect(online.kind).toBe('online');
+    expect(online.meetingPoint).toBeNull();
   });
 });

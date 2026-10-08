@@ -157,7 +157,12 @@ export class EventsController {
       '`endAt` — each occurrence keeps its own date). `?scope=this` (the ' +
       'default) touches only this occurrence.',
   })
-  @ApiOkResponse({ description: 'The updated event detail.' })
+  @ApiOkResponse({
+    description:
+      'The updated event detail, plus `notifiedCount`: how many distinct ' +
+      'people this edit sent an update notification to, across every ' +
+      'occurrence it touched (0 when no start time or location moved).',
+  })
   @ApiBadRequestResponse({ description: 'Invalid resulting schedule.' })
   @ApiForbiddenResponse({
     description: 'Only the host or a co-host can update it.',

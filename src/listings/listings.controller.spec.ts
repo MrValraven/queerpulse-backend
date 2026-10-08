@@ -22,6 +22,7 @@ describe('ListingsController', () => {
   let service: {
     create: jest.Mock;
     listMine: jest.Mock;
+    listManaged: jest.Mock;
     getByRef: jest.Mock;
     update: jest.Mock;
     remove: jest.Mock;
@@ -49,6 +50,7 @@ describe('ListingsController', () => {
     service = {
       create: jest.fn(),
       listMine: jest.fn(),
+      listManaged: jest.fn(),
       getByRef: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
@@ -90,6 +92,36 @@ describe('ListingsController', () => {
       .compile();
     controller = module.get(ListingsController);
     adminController = module.get(AdminListingsController);
+  });
+
+  it('GET /managed lists the listings the caller can name as running a gathering', async () => {
+    const items = [
+      {
+        id: 'listing-42',
+        ref: 'QPL-2026-0042',
+        slug: 'lisboa-a-pe',
+        name: 'Lisboa a Pé',
+        kind: 'mobile',
+        meetingPoint: null,
+      },
+    ];
+    service.listManaged.mockResolvedValue(items);
+
+    await expect(controller.listManaged(user)).resolves.toEqual(items);
+    expect(service.listManaged).toHaveBeenCalledWith('owner-1');
+  });
+
+  it('declares GET /managed before GET /:ref, so "managed" never reads as a ref', () => {
+    // Nest matches handlers in declaration order, and property order on the
+    // prototype is the order the decorators registered them.
+    const declarationOrder = Object.getOwnPropertyNames(
+      ListingsController.prototype,
+    );
+    const managedIndex = declarationOrder.indexOf('listManaged');
+    const byRefIndex = declarationOrder.indexOf('get');
+
+    expect(managedIndex).toBeGreaterThan(-1);
+    expect(byRefIndex).toBeGreaterThan(managedIndex);
   });
 
   it('GET /:ref/history passes the caller and page to the owner history read', async () => {

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
+import { clearUnmanagedFutureRunByLinks } from '../events/run-by-listing-links';
 import { IdentityKind } from '../identities/entities/identity.entity';
 import {
   IdentityMailboxSyncService,
@@ -108,6 +109,17 @@ export class ListingOwnershipService {
         listing.id,
         transferredAt,
       );
+
+    // "Run by" follows the management of the listing. With the owner moved
+    // and the appointees' seats revoked above, every gathering still ahead
+    // whose host no longer runs the listing (the previous owner, each revoked
+    // appointee) stops naming it. Past gatherings keep the line. Same
+    // transaction, so a rolled-back transfer clears nothing.
+    await clearUnmanagedFutureRunByLinks(
+      manager,
+      { listingId: listing.id },
+      transferredAt,
+    );
 
     // Reconcile the mailbox against the fresh staff set, in this same
     // transaction so it reads the ownership reassignment and the seat

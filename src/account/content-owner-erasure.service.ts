@@ -12,6 +12,7 @@ import { EventSeries } from '../events/entities/event-series.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { hasEnded } from '../events/event-timing';
 import { seatHostAsGoing } from '../events/host-seat';
+import { clearUnmanagedFutureRunByLinks } from '../events/run-by-listing-links';
 import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Job, JobStatus } from '../jobs/entities/job.entity';
@@ -290,6 +291,13 @@ export class ContentOwnerErasureService {
     }
 
     await this.handOverEvents(handedOver, successorByEventId);
+    // A handed-over gathering keeps its "Run by" business only when the new
+    // host runs that business too. Same instant as the handover.
+    await clearUnmanagedFutureRunByLinks(
+      this.events.manager,
+      { eventIds: handedOver.map((event) => event.id) },
+      now,
+    );
     await this.cancelEvents(cancelled);
     await this.releaseHostedSeries(userId, successorByEventId, now);
   }

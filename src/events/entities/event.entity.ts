@@ -114,6 +114,13 @@ export enum EventVenueConfirmation {
 @Index('IDX_events_gathering_family', ['gatheringFamily'], {
   where: `"status" = 'published'`,
 })
+// "Run by": the listing's Upcoming block and the clearing pass when someone
+// stops managing a listing both look up non-null values only, and most
+// gatherings name no business, so the index is partial. Named as
+// `AddEventRunByListing1830400100000` names it.
+@Index('IDX_events_run_by_listing_id', ['runByListingId'], {
+  where: `"run_by_listing_id" IS NOT NULL`,
+})
 export class Event {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -212,6 +219,17 @@ export class Event {
 
   @Column({ type: 'timestamptz', nullable: true })
   venueDetachedAt!: Date | null;
+
+  /**
+   * "Run by": the directory listing whose business runs this gathering, set
+   * by a host who owns or co-manages it (`ListingRunByService`). Independent
+   * of the venue `listingId`: a gathering can carry both, and both may name
+   * the same listing. Cleared on a host's future gatherings once they stop
+   * managing the listing (`clearUnmanagedFutureRunByLinks`). FK
+   * `ON DELETE SET NULL`.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  runByListingId!: string | null;
 
   // Optional link to the community this event belongs to, so a community's
   // page can show its upcoming events. Null means the event isn't tied to a

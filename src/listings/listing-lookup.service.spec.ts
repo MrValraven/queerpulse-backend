@@ -88,6 +88,13 @@ describe('ListingLookupService', () => {
       expect(whereOfLastLookup().online).toBe(false);
     });
 
+    it('refuses an out-and-about listing in-query', async () => {
+      await expect(
+        service.findAttachable('listing-mobile'),
+      ).resolves.toBeNull();
+      expect(whereOfLastLookup().mobile).toBe(false);
+    });
+
     it('accepts a place that also sells online', async () => {
       listings.findOne.mockResolvedValue(placeWithOnlineShop);
       await expect(
@@ -108,6 +115,7 @@ describe('ListingLookupService', () => {
       await service.findLinkable('listing-1');
       expect(whereOfLastLookup()).toMatchObject({
         online: false,
+        mobile: false,
         cats: Not(ArrayContains([ADULT_LISTING_CATEGORY_SLUG])),
       });
     });
@@ -120,7 +128,8 @@ describe('ListingLookupService', () => {
       expect(where).toEqual({ id: 'listing-1', status: ListingStatus.Live });
     });
 
-    // The pin follows the listing's own public page (see `VenueListingRef`).
+    // The pin and the address follow the listing's own public page (see
+    // `VenueListingRef`).
     const pinnedVenue = {
       id: 'listing-pinned',
       slug: 'casa-lux',
@@ -130,15 +139,17 @@ describe('ListingLookupService', () => {
       operatingState: ListingOperatingState.Open,
       latitude: 38.7223,
       longitude: -9.1393,
+      address: 'Rua da Rosa 12, Lisboa',
     };
 
-    it('carries the pin of a venue whose public page shows it', async () => {
+    it('carries the pin and address of a venue whose public page shows them', async () => {
       listings.findOne.mockResolvedValue(pinnedVenue);
       await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
         slug: 'casa-lux',
         name: 'Casa Lux',
         latitude: 38.7223,
         longitude: -9.1393,
+        address: 'Rua da Rosa 12, Lisboa',
       });
       expect(contentModeration.statesForAnyType).toHaveBeenCalledWith(
         ['business', 'listing'],
@@ -146,7 +157,7 @@ describe('ListingLookupService', () => {
       );
     });
 
-    it('keeps the pin of a permanently closed venue, whose page stays up', async () => {
+    it('keeps the pin and address of a permanently closed venue, whose page stays up', async () => {
       listings.findOne.mockResolvedValue({
         ...pinnedVenue,
         operatingState: ListingOperatingState.PermanentlyClosed,
@@ -154,22 +165,24 @@ describe('ListingLookupService', () => {
       await expect(service.findLive(pinnedVenue.id)).resolves.toMatchObject({
         latitude: 38.7223,
         longitude: -9.1393,
+        address: 'Rua da Rosa 12, Lisboa',
       });
     });
 
     it.each([
-      ['paused by its owner', { isHiddenByOwner: true }],
-      ['online-only', { online: true }],
-      ['missing half its pin', { longitude: null }],
+      ['paused by its owner', { isHiddenByOwner: true }, null],
+      ['online-only', { online: true }, null],
+      ['missing half its pin', { longitude: null }, 'Rua da Rosa 12, Lisboa'],
     ])(
       'keeps the name and drops the pin of a venue %s',
-      async (_label, overrides) => {
+      async (_label, overrides, expectedAddress) => {
         listings.findOne.mockResolvedValue({ ...pinnedVenue, ...overrides });
         await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
           slug: 'casa-lux',
           name: 'Casa Lux',
           latitude: null,
           longitude: null,
+          address: expectedAddress,
         });
       },
     );
@@ -178,7 +191,7 @@ describe('ListingLookupService', () => {
       ['hidden', { hidden: true, removed: false }],
       ['removed', { hidden: false, removed: true }],
     ])(
-      'drops the pin of a venue a moderator has %s',
+      'drops the pin and address of a venue a moderator has %s',
       async (_label, moderationState) => {
         listings.findOne.mockResolvedValue(pinnedVenue);
         contentModeration.statesForAnyType.mockResolvedValue(
@@ -188,8 +201,82 @@ describe('ListingLookupService', () => {
           name: 'Casa Lux',
           latitude: null,
           longitude: null,
+          address: null,
         });
       },
     );
+
+    it('trims the address the public page prints', async () => {
+      listings.findOne.mockResolvedValue({
+        ...pinnedVenue,
+        address: '  Rua da Rosa 12, Lisboa \n',
+      });
+      await expect(service.findLive(pinnedVenue.id)).resolves.toMatchObject({
+        address: 'Rua da Rosa 12, Lisboa',
+      });
+    });
+
+    it('carries the address of a venue that never placed a pin', async () => {
+      listings.findOne.mockResolvedValue({
+        ...pinnedVenue,
+        latitude: null,
+        longitude: null,
+      });
+      await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
+        slug: 'casa-lux',
+        name: 'Casa Lux',
+        latitude: null,
+        longitude: null,
+        address: 'Rua da Rosa 12, Lisboa',
+      });
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['empty', ''],
+      ['only whitespace', '   '],
+    ])(
+      'keeps the pin and drops an address that is %s',
+      async (_label, address) => {
+        listings.findOne.mockResolvedValue({ ...pinnedVenue, address });
+        await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
+          slug: 'casa-lux',
+          name: 'Casa Lux',
+          latitude: 38.7223,
+          longitude: -9.1393,
+          address: null,
+        });
+      },
+    );
+
+    it.each([
+      [
+        'unpinned with a blank address',
+        { latitude: null, longitude: null, address: '   ' },
+      ],
+      ['online-only', { online: true }],
+    ])(
+      'skips the moderation read for a venue %s, with nothing to withhold',
+      async (_label, overrides) => {
+        listings.findOne.mockResolvedValue({ ...pinnedVenue, ...overrides });
+        await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
+          slug: 'casa-lux',
+          name: 'Casa Lux',
+          latitude: null,
+          longitude: null,
+          address: null,
+        });
+        expect(contentModeration.statesForAnyType).not.toHaveBeenCalled();
+      },
+    );
+
+    it('skips the moderation read for a venue its owner paused', async () => {
+      listings.findOne.mockResolvedValue({
+        ...pinnedVenue,
+        isHiddenByOwner: true,
+      });
+      await service.findLive(pinnedVenue.id);
+      expect(contentModeration.statesForAnyType).not.toHaveBeenCalled();
+    });
   });
 });

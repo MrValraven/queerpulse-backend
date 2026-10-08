@@ -48,6 +48,10 @@ import {
   ListingLookupService,
 } from '../listings/listing-lookup.service';
 import {
+  ListingRunByService,
+  RunByListingRef,
+} from '../listings/listing-run-by.service';
+import {
   ListingAccessibilityAnswer,
   normalizeAccessibilityAnswers,
 } from '../listings/listing-accessibility';
@@ -87,6 +91,7 @@ import {
   toOrganizerView,
   toEventCareFields,
   toRsvpDetailsView,
+  UpdatedEventDetail,
   withholdHiddenAttendeeCounts,
 } from './event-response';
 import {
@@ -181,6 +186,10 @@ export interface CreateEventInput {
   // listing); absent (the `Partial` in `UpdateEventInput` below) leaves it
   // unchanged on update. Mirrors `communitySlug` below in shape.
   listingId?: string | null;
+  // "Run by": a listing the host owns or co-manages, independent of the
+  // venue above. Same absent/null/uuid three-way; a new uuid is checked by
+  // `ListingRunByService.assertCanRunGatherings`.
+  runByListingId?: string | null;
   isOnline?: boolean;
   onlineUrl?: string;
   capacity?: number;
@@ -327,6 +336,10 @@ export class EventsService {
     // notifies them once the gathering is published
     // (`notifyDescriptionMentions`).
     private readonly mentions: MentionNotificationService,
+    // "Run by": who may name a listing as running a gathering, and the line
+    // every summary and detail carries. From `ListingLookupModule`, which
+    // this module already imports.
+    private readonly runByListings: ListingRunByService,
   ) {}
 
   private readonly logger = new Logger(EventsService.name);
@@ -386,6 +399,16 @@ export class EventsService {
       ? await this.assertAttachableListing(dto.listingId)
       : null;
     const listingId = venueListing?.id ?? null;
+    // "Run by": only a host who owns or co-manages the listing may name it.
+    // Checked once for the whole create call, before anything is written, and
+    // copied onto every occurrence of a series below.
+    const runByListingId = dto.runByListingId
+      ? (
+          await this.runByListings.assertCanRunGatherings(dto.runByListingId, [
+            hostId,
+          ])
+        ).id
+      : null;
     const visibilityReachesVenuePage =
       visibility === EventVisibility.Public ||
       visibility === EventVisibility.Members;
@@ -455,6 +478,7 @@ export class EventsService {
         timezone: dto.timezone,
         venue: dto.venue ?? null,
         listingId,
+        runByListingId,
         // LOC-16, see `EventVenueConfirmation`. Set explicitly rather than
         // left to the column default so the in-memory row and the stored row
         // agree from the first line of code that reads either.
@@ -669,7 +693,7 @@ export class EventsService {
     userId: string,
     dto: UpdateEventInput,
     scope: SeriesScope = 'this',
-  ): Promise<EventDetail> {
+  ): Promise<UpdatedEventDetail> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, userId);
 
@@ -710,13 +734,20 @@ export class EventsService {
         await this.rsvpService.reconcileWaitlist(outcome.event.slug);
       }
     }
+    // One set across every occurrence: a member who RSVP'd to three dates of a
+    // series hears about each of them, and the host's "N notified" still counts
+    // that member once.
+    const notifiedRecipientIds = new Set<string>();
     for (const outcome of applied) {
       if (outcome.materialChanges.length > 0) {
-        await this.notifyEventUpdated(
+        const recipientIds = await this.notifyEventUpdated(
           outcome.event,
           userId,
           outcome.materialChanges,
         );
+        for (const recipientId of recipientIds) {
+          notifiedRecipientIds.add(recipientId);
+        }
       }
     }
     // LOC-16: ask the venue's owner, after the write is durable. A series
@@ -756,7 +787,10 @@ export class EventsService {
     }
 
     const saved = applied[0]?.event ?? event;
-    return this.buildDetail(saved, userId);
+    return {
+      ...(await this.buildDetail(saved, userId)),
+      notifiedCount: notifiedRecipientIds.size,
+    };
   }
 
   // The actual single-event patch — everything `update()` did before MSG-10
@@ -849,6 +883,27 @@ export class EventsService {
     // marker left over from a venue this gathering has since left.
     const isNewVenue = listingId !== event.listingId;
 
+    // "Run by", in the same absent/null/uuid three-way as `listingId`.
+    // Re-sending the stored value is a no-op, so an edit never re-checks a
+    // link the gathering already holds. A new listing must be run by the
+    // gathering's host, whose role decides when the link is cleared
+    // (`clearUnmanagedFutureRunByLinks`), and by the organiser making the
+    // edit, who speaks for the business by setting it.
+    let runByListingId = event.runByListingId;
+    if (
+      dto.runByListingId !== undefined &&
+      dto.runByListingId !== event.runByListingId
+    ) {
+      runByListingId = dto.runByListingId
+        ? (
+            await this.runByListings.assertCanRunGatherings(
+              dto.runByListingId,
+              presentActorIds([event.hostId, userId]),
+            )
+          ).id
+        : null;
+    }
+
     const oldStartAt = event.startAt;
     const oldCapacity = event.capacity;
     // Read before the patch lands, so the mention fan-out can tell a publish
@@ -890,6 +945,7 @@ export class EventsService {
       ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
       ...(dto.venue !== undefined ? { venue: dto.venue ?? null } : {}),
       ...(dto.listingId !== undefined ? { listingId } : {}),
+      ...(dto.runByListingId !== undefined ? { runByListingId } : {}),
       ...(isNewVenue
         ? {
             venueConfirmation: EventVenueConfirmation.Pending,
@@ -1320,12 +1376,17 @@ export class EventsService {
    * the organizer who made the edit. Recipients are de-duplicated so a member
    * who is both invited and RSVP'd gets exactly one row per update (no spam),
    * mirroring the `EventCancelled` fan-out in `cancel()`.
+   *
+   * Resolves to the ids that actually hold a row afterwards, as
+   * `createForRecipients` reports them: a member who switched gathering
+   * updates off is dropped there, and an unread row absorbing the update
+   * still counts. `update()` sums these into the host's "N notified".
    */
   private async notifyEventUpdated(
     event: Event,
     editorId: string,
     changes: string[],
-  ): Promise<void> {
+  ): Promise<string[]> {
     const [rsvps, invites] = await Promise.all([
       this.rsvps.find({
         where: {
@@ -1345,8 +1406,8 @@ export class EventsService {
         ...invites.map((invite) => invite.inviteeId),
       ]),
     ].filter((recipientId) => recipientId !== editorId);
-    if (recipientIds.length === 0) return;
-    await this.notifications.createForRecipients(
+    if (recipientIds.length === 0) return [];
+    return this.notifications.createForRecipients(
       recipientIds,
       NotificationType.EventUpdated,
       {
@@ -2658,6 +2719,13 @@ export class EventsService {
     const seriesById = await this.eventSeriesByIds(
       events.flatMap((e) => (e.seriesId ? [e.seriesId] : [])),
     );
+    // ...and ONE batched "Run by" lookup for every event on the page that
+    // names a business, never a per-event query.
+    const runByListingsById = await this.runByListings.resolveForDisplay(
+      events.flatMap((event) =>
+        event.runByListingId ? [event.runByListingId] : [],
+      ),
+    );
 
     // ...and ONE batched lookup of which of those events the viewer co-hosts,
     // asked only about the events whose host hid the going count and that the
@@ -2683,6 +2751,7 @@ export class EventsService {
           toOrganizerView(actorFromLookup(hostProfiles, e.hostId)),
           e.seriesId ? seriesById.get(e.seriesId) : undefined,
           seatsByEvent.get(e.id) ?? 0,
+          EventsService.runByListingOf(e, runByListingsById),
         ),
         (e.hostId !== null && e.hostId === userId) || cohostedIds.has(e.id),
       ),
@@ -2780,6 +2849,7 @@ export class EventsService {
       series,
       seatCounts,
       announcementRows,
+      runByListingsById,
     ] = await Promise.all([
       this.rsvps.count({
         where: { eventId: event.id, status: RsvpStatus.Going },
@@ -2820,6 +2890,11 @@ export class EventsService {
         order: { createdAt: 'DESC' },
         take: EventsService.ANNOUNCEMENT_DETAIL_LIMIT,
       }),
+      // "Run by": the same batched read the list uses, for one event. No
+      // query at all when the gathering names no business.
+      this.runByListings.resolveForDisplay(
+        event.runByListingId ? [event.runByListingId] : [],
+      ),
     ]);
     const myRsvp = preview
       ? previewRsvpRow(preview.rsvpStatus, waitlistCount)
@@ -2865,6 +2940,7 @@ export class EventsService {
         null,
         series ?? undefined,
         seatCounts.seatsTaken,
+        EventsService.runByListingOf(event, runByListingsById),
       ),
       isOrganizer,
     );
@@ -2952,6 +3028,16 @@ export class EventsService {
       goingAttendeesPreview: attendeesPreview.attendees,
       goingAttendeesPreviewTotal: attendeesPreview.total,
     };
+  }
+
+  /** An event's resolved "Run by" line out of a batched lookup, or null. */
+  private static runByListingOf(
+    event: Pick<Event, 'runByListingId'>,
+    runByListingsById: ReadonlyMap<string, RunByListingRef>,
+  ): RunByListingRef | null {
+    return event.runByListingId
+      ? (runByListingsById.get(event.runByListingId) ?? null)
+      : null;
   }
 
   /** At most this many announcements ride on `EventDetail.announcements`.

@@ -26,6 +26,7 @@ import {
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
 import { emptyListingOnlineDetails } from './listing-online-details';
+import { emptyListingMobileDetails } from './listing-mobile-details';
 import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingOwnedBy } from './listing-owned-by';
 import {
@@ -130,6 +131,8 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   hasOnlineShop: false,
   onlineDetails: emptyListingOnlineDetails(),
   shopItems: [],
+  mobile: false,
+  mobileDetails: emptyListingMobileDetails(),
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',

@@ -5,6 +5,7 @@ import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
 import type { AccessTier } from '../communities/entities/community.entity';
 import type { ListingAccessibilityAnswerMap } from '../listings/listing-accessibility';
+import type { RunByListingRef } from '../listings/listing-run-by.service';
 import { Profile } from '../users/entities/profile.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventBan } from './entities/event-ban.entity';
@@ -138,6 +139,15 @@ export interface EventSummary {
   // dashboard's this-vs-future edit/cancel choice both have what they need
   // without a second request — see `EventSeries`'s class doc.
   series: EventSeriesView | null;
+  /**
+   * "Run by": the business that runs this gathering, as its host named it,
+   * on every list row and on the detail. Resolved in one batched read per
+   * page (`ListingRunByService.resolveForDisplay`). `null` when unset, or
+   * when the listing is no longer live, its owner paused it, or a moderator
+   * hid or removed it. Independent of the venue (`listingId`,
+   * `venueListing`).
+   */
+  runByListing: RunByListingRef | null;
 }
 
 // One event's own position + cadence within its `EventSeries` — see
@@ -248,11 +258,20 @@ export interface EventDetail extends EventSummary {
   // is online-only, or it was never pinned. A permanently closed venue keeps
   // its pin, since its page stays up. See `VenueListingRef` in
   // `listing-lookup.service.ts` for the full rule.
+  //
+  // `address` is the business's public directory address (trimmed), the same
+  // street line its directory page already prints for every member. It is
+  // unrelated to the gathering's attendee-only `address` below, which the
+  // host types and which stays gated to organisers and confirmed attendees.
+  // Null under the same rule as the pin: the owner paused the listing, a
+  // moderator hid or removed it, it is online-only, or no address was ever
+  // typed. A permanently closed venue keeps it.
   venueListing: {
     slug: string;
     name: string;
     latitude: number | null;
     longitude: number | null;
+    address: string | null;
   } | null;
   /**
    * ORGANISERS ONLY (LOC-16): whether the venue this gathering names has
@@ -335,6 +354,10 @@ export interface EventDetail extends EventSummary {
    * or a pop-up can therefore be listed at all, which it could not be while
    * the only location field was a 300-character venue name.
    *
+   * A gathering at a listed venue also carries that business's own public
+   * address on `venueListing.address`, which every reader may see because the
+   * venue's directory page already shows it.
+   *
    * `locationPrecision` tells the client which of the two it is holding, so
    * the page can honestly say "the address is shared once you RSVP" rather
    * than rendering an empty line.
@@ -375,6 +398,18 @@ export interface EventDetail extends EventSummary {
    *  they are already looking at, not only in a notification that has since
    *  scrolled away. Empty for a viewer with no stake in the event. */
   announcements: EventAnnouncementView[];
+}
+
+/**
+ * What `PATCH /events/:slug` answers: the edited occurrence's detail plus how
+ * many people this edit notified.
+ */
+export interface UpdatedEventDetail extends EventDetail {
+  /** Distinct people sent an `EventUpdated` notification by this edit, across
+   *  every occurrence it touched. 0 when no start time or location moved, the
+   *  gathering is not published, or nobody with a stake in it is left to tell
+   *  once members who switched gathering updates off are dropped. */
+  notifiedCount: number;
 }
 
 /**
@@ -692,6 +727,10 @@ export function toEventSummary(
   // behaves exactly as this function did before LOC-07, rather than silently
   // reporting zero seats taken.
   seatsTaken: number = goingCount,
+  // The resolved "Run by" line, or null. Both callers in `EventsService`
+  // (`summarize` and `buildDetail`) resolve it in one batched read and pass
+  // it; the default keeps any other caller on the old shape.
+  runByListing: RunByListingRef | null = null,
 ): CountedEventSummary {
   return {
     slug: e.slug,
@@ -723,6 +762,7 @@ export function toEventSummary(
     costKind: e.costKind ?? null,
     host,
     series: toEventSeriesView(e, series),
+    runByListing,
   };
 }
 

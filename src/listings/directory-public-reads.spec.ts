@@ -223,9 +223,13 @@ describe('DirectoryService public reads', () => {
     /** The `where` object handed to the events repository. */
     const eventsWhere = (): Record<string, unknown> => {
       const [firstCall] = events.find.mock.calls as [
-        { where: Record<string, unknown> },
+        { where: Record<string, unknown> | Record<string, unknown>[] },
       ][];
-      return firstCall === undefined ? {} : firstCall[0].where;
+      if (firstCall === undefined) return {};
+      const { where } = firstCall[0];
+      // The query ORs its arms; the first venue arm carries every narrowing
+      // condition the venue arms share.
+      return Array.isArray(where) ? (where[0] ?? {}) : where;
     };
 
     it('asks for public events only when the viewer is anonymous', async () => {
@@ -281,9 +285,9 @@ describe('DirectoryService public reads', () => {
       // return for the anonymous filter are public ones, and the detail carries
       // exactly those.
       events.find.mockImplementation(
-        (options: { where: { visibility: unknown } }) => {
+        (options: { where: { visibility: unknown }[] }) => {
           const publicOnly =
-            options.where.visibility === EventVisibility.Public;
+            options.where[0]?.visibility === EventVisibility.Public;
           return Promise.resolve(
             publicOnly
               ? [makeEvent({ id: 'event-open', slug: 'open-mic' })]
@@ -328,9 +332,13 @@ describe('DirectoryService public reads', () => {
   describe('getDirectoryBySlug pending venue attachments', () => {
     const eventsWhere = (): Record<string, unknown> => {
       const [firstCall] = events.find.mock.calls as [
-        { where: Record<string, unknown> },
+        { where: Record<string, unknown> | Record<string, unknown>[] },
       ][];
-      return firstCall === undefined ? {} : firstCall[0].where;
+      if (firstCall === undefined) return {};
+      const { where } = firstCall[0];
+      // The query ORs its arms; the first venue arm carries every narrowing
+      // condition the venue arms share.
+      return Array.isArray(where) ? (where[0] ?? {}) : where;
     };
 
     it('asks for confirmed attachments only when the viewer is anonymous', async () => {
@@ -383,9 +391,9 @@ describe('DirectoryService public reads', () => {
       // The repository is filtered in-query, so the anonymous read never sees
       // the row. Prove the whole path the way the LOC-02 case does.
       events.find.mockImplementation(
-        (options: { where: { venueConfirmation?: unknown } }) => {
+        (options: { where: { venueConfirmation?: unknown }[] }) => {
           const confirmedOnly =
-            options.where.venueConfirmation ===
+            options.where[0]?.venueConfirmation ===
             EventVenueConfirmation.Confirmed;
           return Promise.resolve(
             confirmedOnly
@@ -418,6 +426,98 @@ describe('DirectoryService public reads', () => {
         'open-mic',
       ]);
       expect(JSON.stringify(anonymous)).not.toContain('basement-party');
+    });
+  });
+
+  // --- "Run by": gatherings the listing's own business runs ---------------
+  describe('getDirectoryBySlug run-by gatherings', () => {
+    /** Every arm the events query ORs, in order. */
+    const upcomingArms = (): Record<string, unknown>[] => {
+      const [firstCall] = events.find.mock.calls as [
+        { where: Record<string, unknown>[] },
+      ][];
+      return firstCall === undefined ? [] : firstCall[0].where;
+    };
+
+    it('adds a run-by pair carrying published and the anonymous tier, with no venue condition', async () => {
+      await service.getDirectoryBySlug('casa-t');
+
+      const arms = upcomingArms();
+      expect(arms).toHaveLength(4);
+      for (const runByArm of arms.slice(2)) {
+        expect(runByArm['runByListingId']).toBe('listing-1');
+        expect(runByArm['status']).toBe(EventStatus.Published);
+        expect(runByArm['visibility']).toBe(EventVisibility.Public);
+        expect(runByArm).not.toHaveProperty('listingId');
+        expect(runByArm).not.toHaveProperty('venueConfirmation');
+      }
+      expect(arms[2]).toHaveProperty('startAt');
+      expect(arms[3]).toHaveProperty('endAt');
+    });
+
+    it('widens the run-by pair for a member exactly as far as the venue pair', async () => {
+      await service.getDirectoryBySlug('casa-t', true);
+
+      const arms = upcomingArms();
+      expect(arms[2]?.['visibility']).toEqual(arms[0]?.['visibility']);
+      expect(arms[3]?.['visibility']).toEqual(arms[0]?.['visibility']);
+    });
+
+    it('keeps the confirmed-venue rule on the anonymous venue pair', async () => {
+      await service.getDirectoryBySlug('casa-t');
+
+      const arms = upcomingArms();
+      expect(arms[0]?.['venueConfirmation']).toBe(
+        EventVenueConfirmation.Confirmed,
+      );
+      expect(arms[1]?.['venueConfirmation']).toBe(
+        EventVenueConfirmation.Confirmed,
+      );
+      expect(arms[0]?.['listingId']).toBe('listing-1');
+    });
+
+    it('still takes four, soonest first', async () => {
+      await service.getDirectoryBySlug('casa-t');
+
+      const [firstCall] = events.find.mock.calls as [
+        { order: unknown; take: number },
+      ][];
+      expect(firstCall?.[0].order).toEqual({ startAt: 'ASC' });
+      expect(firstCall?.[0].take).toBe(4);
+    });
+
+    it('lists a gathering run by and held at the listing once, as run by', async () => {
+      events.find.mockResolvedValue([
+        makeEvent({
+          id: 'event-walk',
+          slug: 'queer-history-walk',
+          listingId: 'listing-1',
+          runByListingId: 'listing-1',
+          venueConfirmation: EventVenueConfirmation.Confirmed,
+        }),
+      ]);
+
+      const anonymous = await service.getDirectoryBySlug('casa-t');
+
+      expect(anonymous.upcoming).toHaveLength(1);
+      expect(anonymous.upcoming[0]).toMatchObject({
+        slug: 'queer-history-walk',
+        role: 'runBy',
+      });
+    });
+
+    it('reads a gathering held here and run by another business as a venue item', async () => {
+      events.find.mockResolvedValue([
+        makeEvent({
+          listingId: 'listing-1',
+          runByListingId: 'listing-other',
+          venueConfirmation: EventVenueConfirmation.Confirmed,
+        }),
+      ]);
+
+      const detail = await service.getDirectoryBySlug('casa-t');
+
+      expect(detail.upcoming[0]?.role).toBe('venue');
     });
   });
 

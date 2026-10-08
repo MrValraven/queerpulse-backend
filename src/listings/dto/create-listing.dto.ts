@@ -34,6 +34,7 @@ import type {
   ListingPricingMode,
 } from '../entities/listing.entity';
 import { MAX_LISTING_SHOP_ITEMS } from '../listing-shop-items';
+import { ListingMobileDetailsDto } from './listing-mobile-details.dto';
 import {
   ListingOnlineDetailsDto,
   ListingShopItemDto,
@@ -447,6 +448,21 @@ export class CreateListingDto {
   @Type(() => ListingShopItemDto)
   shopItems?: ListingShopItemDto[];
 
+  // An "out and about" business with no fixed premises. Never true together
+  // with `online` (the service answers 400). `null` reads as an absent key,
+  // as on `online`.
+  @Transform(nullAsAbsent)
+  @IsOptional()
+  @IsBoolean()
+  mobile?: boolean;
+
+  // Where a mobile listing works. Replaced wholesale on PATCH, like
+  // `onlineDetails`, and reset to the default for any other kind of listing.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingMobileDetailsDto)
+  mobileDetails?: ListingMobileDetailsDto;
+
   /**
    * The submitter accepts the 18+ terms ("QueerPulse lists products and
    * content. Sexual services are not allowed, and photos on your page must be
@@ -461,7 +477,10 @@ export class CreateListingDto {
 
   // Required for both paths — UNLESS this is an online-only listing. When
   // online, a neighbourhood is optional, but a supplied one is still checked.
-  @ValidateIf((dto: CreateListingDto) => !dto.online || !!dto.hood)
+  // A mobile listing's is optional too: it belongs to its meeting point.
+  @ValidateIf(
+    (dto: CreateListingDto) => (!dto.online && !dto.mobile) || !!dto.hood,
+  )
   @IsString()
   @IsNotEmpty()
   @MaxLength(120)
@@ -549,8 +568,11 @@ export class CreateListingDto {
   langs?: string[];
 
   // Required for both paths — unless this is an online-only listing, which has
-  // no street address at all.
-  @ValidateIf((dto: CreateListingDto) => !dto.online)
+  // no street address at all. A mobile listing gives one only for its
+  // meeting point, and a supplied one is still checked.
+  @ValidateIf(
+    (dto: CreateListingDto) => !dto.online && (!dto.mobile || !!dto.address),
+  )
   @IsString()
   @IsNotEmpty()
   @MaxLength(300)
@@ -560,12 +582,22 @@ export class CreateListingDto {
   // Coordinates are required for a physical listing — the frontend always
   // resolves a pin (geocode, a pasted Google Maps link, or a neighbourhood-
   // centroid fallback) before submit, so a physical listing can never land
-  // without a location. An online-only listing carries no coordinates.
-  @ValidateIf((dto: CreateListingDto) => !dto.online)
+  // without a location. An online-only listing carries no coordinates. A
+  // mobile listing carries them only for its meeting point, and supplied
+  // ones are still checked; the service stores no pin unless both are set.
+  @ValidateIf(
+    (dto: CreateListingDto) =>
+      !dto.online &&
+      (!dto.mobile || (dto.latitude !== undefined && dto.latitude !== null)),
+  )
   @IsLatitude()
   latitude!: number;
 
-  @ValidateIf((dto: CreateListingDto) => !dto.online)
+  @ValidateIf(
+    (dto: CreateListingDto) =>
+      !dto.online &&
+      (!dto.mobile || (dto.longitude !== undefined && dto.longitude !== null)),
+  )
   @IsLongitude()
   longitude!: number;
 

@@ -1766,11 +1766,11 @@ const COMPANIES: CompanySeedDefinition[] = [
     ],
   },
   {
-    slug: 'opus-diversus',
-    nameText: 'Opus Diversus',
+    slug: 'mare-lilas',
+    nameText: 'Maré Lilás',
     tagline: 'Inclusive consulting for arts organizations.',
     about:
-      'Opus Diversus advises arts and cultural institutions on inclusive programming, accessibility, and diversity in hiring and curation.',
+      'Maré Lilás advises arts and cultural institutions on inclusive programming, accessibility, and diversity in hiring and curation.',
     queerRun: false,
     queerLed: false,
     values: [
@@ -2146,7 +2146,7 @@ const JOBS: JobSeedDefinition[] = [
   },
   {
     slug: 'programme-coordinator',
-    companySlug: 'opus-diversus',
+    companySlug: 'mare-lilas',
     posterSlug: 'tomas-mendes',
     title: 'Programme Coordinator',
     category: 'operations',
@@ -2172,7 +2172,7 @@ const JOBS: JobSeedDefinition[] = [
     qrLabel: null,
     detail: {
       about: [
-        'Opus Diversus advises arts and cultural institutions on inclusive programming, accessibility, and diversity in hiring and curation.',
+        'Maré Lilás advises arts and cultural institutions on inclusive programming, accessibility, and diversity in hiring and curation.',
       ],
       dayToDay: [
         'Coordinate engagement timelines with partner institutions',
@@ -2197,7 +2197,7 @@ const JOBS: JobSeedDefinition[] = [
     screening: ['Portfolio/CV review', 'Interview'],
     contacts: ['Noa Silva, Engagements Lead'],
     email: null,
-    link: 'https://opusdiversus.example.com/careers',
+    link: 'https://marelilas.example.com/careers',
     status: JobStatus.Open,
   },
   {

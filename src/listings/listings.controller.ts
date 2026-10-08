@@ -137,6 +137,27 @@ export class ListingsController {
     return this.listingsService.listMine(user.userId, query);
   }
 
+  // "Run by one of your businesses": every listing the caller owns or
+  // co-manages that can take a new "Run by" link on a gathering, sorted by
+  // name, each with its kind and (for a mobile listing) its meeting point.
+  // Declared before `:ref` so the literal `managed` segment never resolves
+  // as a ref.
+  @Get('managed')
+  @ApiOperation({
+    summary:
+      'List the listings the current member can name as running a gathering',
+  })
+  @ApiOkResponse({
+    description:
+      'Live listings the member owns or co-manages, sorted by name, each with its kind and meeting point.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listManaged(@CurrentUser() user: CurrentUserData) {
+    return this.listingsService.listManaged(user.userId);
+  }
+
   // Live dedupe search for the wizard (item #5): up to five live listings
   // matching the typed name or sitting within ~150m of a resolved pin.
   // Declared before `:ref` so Nest resolves the literal `similar` segment

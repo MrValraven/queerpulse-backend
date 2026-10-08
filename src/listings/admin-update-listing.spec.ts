@@ -45,6 +45,7 @@ import {
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
 import { emptyListingOnlineDetails } from './listing-online-details';
+import { emptyListingMobileDetails } from './listing-mobile-details';
 import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingManagementRole } from './listing-owner-personal-fields';
 import { ListingsService } from './listings.service';
@@ -149,6 +150,8 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   hasOnlineShop: false,
   onlineDetails: emptyListingOnlineDetails(),
   shopItems: [],
+  mobile: false,
+  mobileDetails: emptyListingMobileDetails(),
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',
@@ -337,6 +340,56 @@ describe('ListingsService.adminUpdate', () => {
         }),
       );
       expect(rows[0]?.changedFields).toContain('name');
+    });
+
+    it('applies the mobile rules to a staff edit', async () => {
+      lockedListings.findOne.mockResolvedValue(
+        baseListing({
+          cats: ['home-services'],
+          hood: 'Arroios',
+          address: 'Rua X 1',
+          geocoded: true,
+          latitude: 38.72,
+          longitude: -9.135,
+        }),
+      );
+
+      await service.adminUpdate(LISTING_REF, STAFF_ID, {
+        mobile: true,
+        mobileDetails: { allOfCity: false, parishes: ['Arroios'] },
+        latitude: null as unknown as number,
+        longitude: null as unknown as number,
+      });
+
+      expect(savedListings()[0]).toEqual(
+        expect.objectContaining({
+          mobile: true,
+          hood: '',
+          address: '',
+          geocoded: false,
+          latitude: null,
+          longitude: null,
+        }),
+      );
+      expect(savedListings()[0]?.mobileDetails).toEqual({
+        allOfCity: false,
+        parishes: ['Arroios'],
+        alsoTravelsTo: [],
+        byAppointment: false,
+      });
+    });
+
+    it('refuses online and mobile together on a staff edit and saves nothing', async () => {
+      lockedListings.findOne.mockResolvedValue(
+        baseListing({ cats: ['tours'], mobile: true, hood: '' }),
+      );
+
+      await expect(
+        service.adminUpdate(LISTING_REF, STAFF_ID, { online: true }),
+      ).rejects.toThrow(
+        'A listing that is out and about (mobile) cannot also be online only.',
+      );
+      expect(savedListings()).toHaveLength(0);
     });
 
     it('words the audit reason from the admin side', async () => {

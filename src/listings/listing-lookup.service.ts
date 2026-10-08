@@ -16,34 +16,44 @@ export interface ListingRef {
 
 /**
  * What the DISPLAY path (`findLive`) returns on top of the display ref: the
- * listing's own map pin, so a gathering's page can draw its venue on a map
- * (`EventDetail.venueListing`). Decimal degrees, read straight off the
- * `double precision` columns, which the pg driver already hands back as JS
- * numbers, so no conversion is needed (`toDirectoryCard` reads them the same
- * way).
+ * listing's own map pin and street address, so a gathering's page can draw its
+ * venue on a map and say where it is (`EventDetail.venueListing`). The pin is
+ * in decimal degrees, read straight off the `double precision` columns, which
+ * the pg driver already hands back as JS numbers, so no conversion is needed
+ * (`toDirectoryCard` reads them the same way). The address is the listing's
+ * own `address` column, trimmed.
  *
- * The pin follows the listing's own public page exactly. `toDirectoryCard`
- * prints the stored pair with no condition of its own, so the rule is decided
- * by whether that page renders at all, and both values are null whenever it
- * would not show the pin:
+ * Both follow the listing's own public page exactly. `toDirectoryCard` prints
+ * the stored pair, and `toDirectoryDetail` the stored address, with no
+ * condition of their own, so the rule is decided by whether that page renders
+ * at all. The pin values are null whenever the page would not show the pin:
  *  - the owner has paused the listing (`isHiddenByOwner`): its page 404s;
  *  - a moderator has hidden or removed it: its page 404s;
  *  - it is online-only: it has no premises, its card never pins the map, and
  *    the write path already blanks its coordinates;
  *  - the owner never placed a pin (or only half of one).
- * A permanently closed business keeps its pin, because its page stays up so
- * its reviews and history stay where every link points. An 18+ listing keeps
- * it too: its page is readable by any signed-in active member, and every
- * reader of a gathering is one (`ActiveMemberGuard` on `EventsController`).
+ * The address is null under the same first three conditions, and when the
+ * owner never typed one (blank after trimming).
+ * A permanently closed business keeps its pin and its address, because its
+ * page stays up so its reviews and history stay where every link points. An
+ * 18+ listing keeps them too: its page is readable by any signed-in active
+ * member, and every reader of a gathering is one (`ActiveMemberGuard` on
+ * `EventsController`).
+ *
+ * The address here is the BUSINESS's public directory address. It has nothing
+ * to do with the gathering's own host-typed `EventDetail.address`, which stays
+ * attendee-only: this one reveals only what the listing's page already shows
+ * every member.
  *
  * Kept OFF `ListingRef` on purpose. `findLinkable` and `findAttachable` share
  * that ref for the create/update path, which never draws a map and skips the
- * takedown check above, so a pin there would be an ungated copy waiting for a
- * caller to publish it.
+ * takedown check above, so a pin or an address there would be an ungated copy
+ * waiting for a caller to publish it.
  */
 export interface VenueListingRef extends ListingRef {
   latitude: number | null;
   longitude: number | null;
+  address: string | null;
 }
 
 /**
@@ -94,34 +104,48 @@ export class ListingLookupService {
    * same holds for a listing its owner has paused: the gathering was at that
    * venue, and the pause is about the directory entry rather than about the
    * event's history. Only the venue's NAME and, where its own public page
-   * shows one, its map pin are surfaced from here, never a browsable listing
-   * (see `VenueListingRef` for the pin rule). Use `findLinkable` for the
-   * create/update path, where a closed or paused venue is a real error.
+   * shows them, its map pin and street address are surfaced from here, never
+   * a browsable listing (see `VenueListingRef` for the rule). Use
+   * `findLinkable` for the create/update path, where a closed or paused venue
+   * is a real error.
+   *
+   * The cheap column checks run first, so the moderation read happens at most
+   * once, and only for a listing that has a pin or an address to withhold.
    */
   async findLive(listingId: string): Promise<VenueListingRef | null> {
     const listing = await this.listings.findOne({
       where: { id: listingId, status: ListingStatus.Live },
     });
     if (!listing) return null;
-    const isPinShown = await this.isPinOnPublicPage(listing);
+    // An online-only listing has no premises, so its page shows neither.
+    const isPlace = !listing.online;
+    const hasPin =
+      isPlace &&
+      typeof listing.latitude === 'number' &&
+      typeof listing.longitude === 'number';
+    const trimmedAddress = isPlace ? listing.address.trim() : '';
+    const hasAddress = trimmedAddress.length > 0;
+    const isPublicPageRendered =
+      (hasPin || hasAddress) && (await this.isPublicPageRendered(listing));
+    const isPinShown = hasPin && isPublicPageRendered;
+    const isAddressShown = hasAddress && isPublicPageRendered;
     return {
       slug: listing.slug,
       name: listing.name,
       latitude: isPinShown ? listing.latitude : null,
       longitude: isPinShown ? listing.longitude : null,
+      address: isAddressShown ? trimmedAddress : null,
     };
   }
 
   /**
-   * Whether the listing's own public page would show its map pin, by the rule
-   * `VenueListingRef` spells out. The cheap column checks run first, so the
-   * moderation read only happens for a listing that has a pin to withhold.
+   * Whether the listing's own public directory page renders at all, by the
+   * rule `VenueListingRef` spells out: its owner has not paused it, and no
+   * moderator has hidden or removed it. The owner check runs first, so the
+   * moderation read is skipped for a paused listing.
    */
-  private async isPinOnPublicPage(listing: Listing): Promise<boolean> {
-    const hasPin =
-      typeof listing.latitude === 'number' &&
-      typeof listing.longitude === 'number';
-    if (!hasPin || listing.isHiddenByOwner || listing.online) return false;
+  private async isPublicPageRendered(listing: Listing): Promise<boolean> {
+    if (listing.isHiddenByOwner) return false;
     const states = await this.contentModeration.statesForAnyType(
       ListingLookupService.MODERATION_SUBJECT_TYPES,
       [listing.slug],
@@ -146,9 +170,11 @@ export class ListingLookupService {
    * through `findLive` above.
    *
    * The link target is a gathering's VENUE, so it must also be a place people
-   * can walk into. An online-only listing has no premises, and an 18+ listing
-   * is kept off every public surface while the venue page of a public
-   * gathering is one, so both are unlinkable. A place that ALSO sells online
+   * can walk into. An online-only listing has no premises, an out-and-about
+   * (mobile) listing has no fixed premises (hosts link those businesses
+   * through "Run by" instead), and an 18+ listing is kept off every public
+   * surface while the venue page of a public gathering is one, so all three
+   * are unlinkable. A place that ALSO sells online
    * (`online = false`, `hasOnlineShop = true`) keeps its address and stays
    * linkable.
    */
@@ -177,6 +203,7 @@ export class ListingLookupService {
         operatingState: Not(ListingOperatingState.PermanentlyClosed),
         isHiddenByOwner: false,
         online: false,
+        mobile: false,
         // Same in-query 18+ exclusion as `DirectoryService.PUBLICLY_LISTED`.
         cats: Not(ArrayContains([ADULT_LISTING_CATEGORY_SLUG])),
       },

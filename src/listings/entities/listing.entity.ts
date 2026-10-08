@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -7,6 +8,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import type { ListingStoredAccessibilityAnswerMap } from '../listing-accessibility';
+import type { ListingMobileDetails } from '../listing-mobile-details';
 import type { ListingOnlineDetails } from '../listing-online-details';
 import type { ListingShopItem } from '../listing-shop-items';
 import type { ListingGalleryPhoto } from '../listing-photo-gallery';
@@ -234,6 +236,14 @@ export interface ListingPhotoSet {
  * `slugify(name)`-derived value carried through on the DTO but never used as
  * a lookup key by the frontend.
  */
+// A listing is online only or out and about (mobile), never both at once. The
+// write rules answer 400 first (`assertSingleListingKind`); this keeps any
+// other writer honest. Named as `AddListingMobile1830400000000` names it, so
+// schema generation sees the constraint as present.
+@Check(
+  'CHK_listings_not_online_and_mobile',
+  '"online" = false OR "mobile" = false',
+)
 @Entity('listings')
 export class Listing {
   @PrimaryGeneratedColumn('uuid')
@@ -465,6 +475,27 @@ export class Listing {
    */
   @Column({ type: 'jsonb', default: () => "'[]'" })
   shopItems!: ListingShopItem[];
+
+  /**
+   * An "out and about" business with no fixed premises: a walking tour, a
+   * mobile hairdresser, a mover. Never true together with `online`
+   * (`CHK_listings_not_online_and_mobile`). Its categories come from the
+   * place list, and its optional meeting point lives in `address`, `hood`,
+   * `latitude`, `longitude` and `geocoded`, which stay blank when it has
+   * none. Readers ask `listingKindOf` and leave this flag alone.
+   */
+  @Column({ type: 'boolean', default: false })
+  mobile!: boolean;
+
+  /**
+   * Where a mobile listing works (`ListingMobileDetails`): all of Lisbon or
+   * some parishes, the nearby municipalities it also travels to, and whether
+   * it works by appointment only. Reset to the default whenever `mobile` is
+   * false. Normalised on every read (`normalizeListingMobileDetails`), so the
+   * `'{}'` an older row holds reads as the complete default.
+   */
+  @Column({ type: 'jsonb', default: () => "'{}'" })
+  mobileDetails!: ListingMobileDetails;
 
   @Column({ type: 'text', default: '' })
   address!: string;

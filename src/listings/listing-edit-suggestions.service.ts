@@ -31,6 +31,7 @@ import {
   isAcceptedSuggestionValueValid,
   resolveAcceptedSuggestionTarget,
 } from './accepted-suggestion-value';
+import { isMobileWithoutMeetingPoint } from './listing-mobile-details';
 import {
   MAX_ONLINE_NOTE_LENGTH,
   normalizeListingOnlineDetails,
@@ -76,6 +77,14 @@ const ACCEPTED_SUGGESTION_FIELD_LABEL: Record<
  */
 const ONLINE_ONLY_ADDRESS_MESSAGE =
   'This business is online only, so it has no address to correct.';
+
+/**
+ * The 400 for an `address` correction on a mobile listing with no meeting
+ * point. Such a listing stores no address (rule 7 of the mobile write rules),
+ * the same as an online-only one.
+ */
+const MOBILE_WITHOUT_MEETING_POINT_ADDRESS_MESSAGE =
+  'This business works out and about with no meeting point, so it has no address to correct.';
 
 /**
  * The 400 for a moderator-typed `hours` correction too long for an online-only
@@ -171,6 +180,11 @@ export class ListingEditSuggestionsService {
 
     if (dto.field === 'address' && listing.online) {
       throw new BadRequestException(ONLINE_ONLY_ADDRESS_MESSAGE);
+    }
+    if (dto.field === 'address' && isMobileWithoutMeetingPoint(listing)) {
+      throw new BadRequestException(
+        MOBILE_WITHOUT_MEETING_POINT_ADDRESS_MESSAGE,
+      );
     }
 
     // `@IsNotEmpty` only rejects an empty string, not a whitespace-only one
@@ -402,7 +416,13 @@ export class ListingEditSuggestionsService {
     const listing = await this.listings.findOne({
       where: { id: suggestion.listingId },
     });
-    if (!listing?.online) return;
+    if (!listing) return;
+    if (target === 'address' && isMobileWithoutMeetingPoint(listing)) {
+      throw new BadRequestException(
+        MOBILE_WITHOUT_MEETING_POINT_ADDRESS_MESSAGE,
+      );
+    }
+    if (!listing.online) return;
     if (target === 'address') {
       throw new BadRequestException(ONLINE_ONLY_ADDRESS_MESSAGE);
     }
@@ -517,6 +537,17 @@ export class ListingEditSuggestionsService {
           this.logger.warn(
             `Edit suggestion ${suggestion.id} was accepted but not applied: ` +
               `listing ${listing.ref} is online only and stores no address.`,
+          );
+        } else if (
+          target === 'address' &&
+          isMobileWithoutMeetingPoint(listing)
+        ) {
+          // A mobile listing with no meeting point stores no address either,
+          // so the correction has nowhere to land: no write, no history row,
+          // the queue row still resolves and the owner is still told.
+          this.logger.warn(
+            `Edit suggestion ${suggestion.id} was accepted but not applied: ` +
+              `listing ${listing.ref} works out and about with no meeting point and stores no address.`,
           );
         } else if (target === 'phone') {
           listing.social = { ...listing.social, phone: valueToWrite };

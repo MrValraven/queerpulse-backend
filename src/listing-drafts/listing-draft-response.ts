@@ -166,6 +166,8 @@ export const LISTING_DRAFT_BUSINESS_KEYS = [
   'hasOnlineShop',
   'onlineDetails',
   'shopItems',
+  'mobile',
+  'mobileDetails',
   'address',
   'geocoded',
   'latitude',

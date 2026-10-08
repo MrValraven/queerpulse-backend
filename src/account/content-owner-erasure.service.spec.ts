@@ -137,6 +137,35 @@ describe('ContentOwnerErasureService gatherings', () => {
     });
   });
 
+  /** The run-by clearing calls the events manager received, as `[sql, parameters]`. */
+  const runByClearingCalls = (events: { manager: { query: jest.Mock } }) =>
+    (events.manager.query.mock.calls as [string, unknown[]][]).filter(([sql]) =>
+      sql.includes('"run_by_listing_id" = NULL'),
+    );
+
+  it('clears the run-by line of a handed-over gathering unless the new host runs that business', async () => {
+    const { service, events } = build({
+      unfinishedEvents: [runningFestival()],
+      cohostRows: [{ eventId: 'event-1', userId: 'cohost-1' }],
+    });
+
+    await service.eraseFor(ERASED_USER_ID);
+
+    const calls = runByClearingCalls(events);
+    expect(calls).toHaveLength(1);
+    const [, parameters] = calls[0]!;
+    expect(parameters[0]).toBeInstanceOf(Date);
+    expect(parameters[1]).toEqual(['event-1']);
+  });
+
+  it('runs no run-by pass when nothing was handed over', async () => {
+    const { service, events } = build({ unfinishedEvents: [gathering()] });
+
+    await service.eraseFor(ERASED_USER_ID);
+
+    expect(runByClearingCalls(events)).toHaveLength(0);
+  });
+
   // The whole point of keeping the two outcomes scoped differently. Telling a
   // room full of people who already turned up that the thing they are at is
   // cancelled would be worse than the silence it replaces.

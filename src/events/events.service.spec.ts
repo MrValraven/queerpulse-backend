@@ -18,6 +18,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { ListingLookupService } from '../listings/listing-lookup.service';
+import { ListingRunByService } from '../listings/listing-run-by.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -78,7 +79,8 @@ describe('EventsService', () => {
     // `seatHostAsGoing`'s raw upsert on the repository's manager.
     manager: { query: jest.Mock };
   };
-  let invites: { exists: jest.Mock };
+  // `find` is the invite half of `notifyEventUpdated`'s recipient list.
+  let invites: { exists: jest.Mock; find: jest.Mock };
   // Recurrence: `create` writes one `EventSeries` row and hangs the generated
   // occurrences off it. No test here creates a series, so the default is a
   // repository nothing has written to.
@@ -132,6 +134,11 @@ describe('EventsService', () => {
     findLive: jest.Mock;
     findLinkable: jest.Mock;
     findAttachable: jest.Mock;
+  };
+  // "Run by": the permission check and the batched display line.
+  let runByListings: {
+    assertCanRunGatherings: jest.Mock;
+    resolveForDisplay: jest.Mock;
   };
 
   // A chainable query-builder stub for the RSVP queries: `attendees`'
@@ -307,7 +314,10 @@ describe('EventsService', () => {
       createQueryBuilder: jest.fn(() => attendeesQbStub()),
       manager: { query: jest.fn().mockResolvedValue([]) },
     };
-    invites = { exists: jest.fn().mockResolvedValue(false) };
+    invites = {
+      exists: jest.fn().mockResolvedValue(false),
+      find: jest.fn().mockResolvedValue([]),
+    };
     eventSeries = {
       create: jest.fn((entity: unknown) => entity),
       save: jest.fn((entity: object) =>
@@ -317,8 +327,10 @@ describe('EventsService', () => {
       findOne: jest.fn().mockResolvedValue(null),
     };
     rsvpService = { reconcileWaitlist: jest.fn().mockResolvedValue(undefined) };
+    // Resolves to the ids that ended up holding a row, as the real service
+    // does. Nobody, by default.
     notifications = {
-      createForRecipients: jest.fn().mockResolvedValue(undefined),
+      createForRecipients: jest.fn().mockResolvedValue([]),
     };
     blockFilter = {
       excludeBlocked: jest.fn((qb: unknown) => qb),
@@ -362,6 +374,10 @@ describe('EventsService', () => {
       findLinkable: jest.fn().mockResolvedValue(null),
       findAttachable: jest.fn().mockResolvedValue(null),
     };
+    runByListings = {
+      assertCanRunGatherings: jest.fn(),
+      resolveForDisplay: jest.fn().mockResolvedValue(new Map()),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -404,6 +420,7 @@ describe('EventsService', () => {
         // resolves to "no such live listing"; the venue tests below override it.
         { provide: ListingLookupService, useValue: listingLookup },
         { provide: EventEmitter2, useValue: eventEmitter },
+        { provide: ListingRunByService, useValue: runByListings },
         { provide: MentionNotificationService, useValue: mentions },
       ],
     }).compile();
@@ -1532,6 +1549,114 @@ describe('EventsService', () => {
     expect(rsvpService.reconcileWaitlist).not.toHaveBeenCalled();
   });
 
+  // The host's success panel reads "N notified" off `notifiedCount`, so the
+  // number has to be the people this edit actually reached: distinct across
+  // every occurrence it touched, and only those `createForRecipients` reports
+  // as holding a row.
+  describe('update notifiedCount', () => {
+    // Live RSVPs keyed by occurrence id, as `notifyEventUpdated` asks for them.
+    const answerRsvpsByEventId = (
+      rsvpUserIdsByEventId: Record<string, string[]>,
+    ) => {
+      rsvps.find.mockImplementation(
+        (findOptions: { where: { eventId: string } }) =>
+          Promise.resolve(
+            (rsvpUserIdsByEventId[findOptions.where.eventId] ?? []).map(
+              (userId) => ({ eventId: findOptions.where.eventId, userId }),
+            ),
+          ),
+      );
+    };
+
+    beforeEach(() => {
+      // Echo the requested recipients back: everyone gains a row.
+      notifications.createForRecipients.mockImplementation(
+        (recipientIds: string[]) => Promise.resolve(recipientIds),
+      );
+    });
+
+    it('counts a member who is both RSVPd and invited once on a location change', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      answerRsvpsByEventId({ e1: ['member-a', 'member-b'] });
+      invites.find.mockResolvedValue([
+        { eventId: 'e1', inviteeId: 'member-a' },
+      ]);
+
+      const detail = await service.update('x', 'u1', {
+        venue: 'The back room',
+      });
+
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['member-a', 'member-b'],
+        NotificationType.EventUpdated,
+        expect.objectContaining({ eventId: 'e1', changes: ['location'] }),
+      );
+      expect(detail.notifiedCount).toBe(2);
+    });
+
+    it('is 0 for a title-only edit', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      answerRsvpsByEventId({ e1: ['member-a', 'member-b'] });
+
+      const detail = await service.update('x', 'u1', { title: 'New title' });
+
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+      expect(detail.notifiedCount).toBe(0);
+    });
+
+    it('counts a member RSVPd to two occurrences of a future series edit once', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        seriesId: 'series-1',
+        seriesIndex: 0,
+      });
+      events.find.mockResolvedValue([
+        {
+          ...editableEvent(),
+          id: 'e2',
+          slug: 'x-2',
+          seriesId: 'series-1',
+          seriesIndex: 1,
+        },
+        {
+          ...editableEvent(),
+          id: 'e3',
+          slug: 'x-3',
+          seriesId: 'series-1',
+          seriesIndex: 2,
+        },
+      ]);
+      answerRsvpsByEventId({
+        e1: ['member-a'],
+        e2: ['member-a', 'member-b'],
+      });
+
+      const detail = await service.update(
+        'x',
+        'u1',
+        { venue: 'The back room' },
+        'future',
+      );
+
+      // e1 and e2 each fan out; e3 has nobody to tell.
+      expect(notifications.createForRecipients).toHaveBeenCalledTimes(2);
+      expect(detail.notifiedCount).toBe(2);
+    });
+
+    it('counts only the recipients createForRecipients reports as notified', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      answerRsvpsByEventId({ e1: ['member-a', 'member-b'] });
+      // `member-b` switched gathering updates off.
+      notifications.createForRecipients.mockResolvedValue(['member-a']);
+
+      const detail = await service.update('x', 'u1', {
+        venue: 'The back room',
+      });
+
+      expect(detail.notifiedCount).toBe(1);
+    });
+  });
+
   // M1 (storage-key impersonation): the event cover is a shared-upload surface
   // (cohosts edit the same event), so the interceptor exempts it and the service
   // draws the line — a foreign cover key is allowed only when it is already the
@@ -1821,9 +1946,266 @@ describe('EventsService', () => {
     });
   });
 
+  // "Run by": the business a gathering's host runs, named on the gathering.
+  describe('run-by listing', () => {
+    const RUN_BY_REF = {
+      ref: 'QPL-2026-0042',
+      slug: 'lisboa-a-pe',
+      name: 'Lisboa a Pé',
+    };
+    const walkCreate = {
+      title: 'Queer history walk',
+      description: 'Two hours through Alfama and Mouraria.',
+      startAt: '2099-01-01T10:00:00.000Z',
+      timezone: 'Europe/Lisbon',
+    };
+
+    beforeEach(() => {
+      runByListings.assertCanRunGatherings.mockResolvedValue({
+        id: 'listing-walk',
+        ...RUN_BY_REF,
+      });
+    });
+
+    it('checks the host on create and stores the listing on the gathering', async () => {
+      await service.create('host-1', {
+        ...walkCreate,
+        runByListingId: 'listing-walk',
+      });
+
+      expect(runByListings.assertCanRunGatherings).toHaveBeenCalledWith(
+        'listing-walk',
+        ['host-1'],
+      );
+      expect(events.create.mock.calls[0]![0].runByListingId).toBe(
+        'listing-walk',
+      );
+    });
+
+    it('copies the listing onto every occurrence of a series, checked once', async () => {
+      await service.create('host-1', {
+        ...walkCreate,
+        runByListingId: 'listing-walk',
+        recurrence: { cadence: 'weekly', endType: 'count', endCount: 3 },
+      });
+
+      expect(runByListings.assertCanRunGatherings).toHaveBeenCalledTimes(1);
+      expect(
+        events.create.mock.calls.map(
+          ([occurrence]) => occurrence.runByListingId,
+        ),
+      ).toEqual(['listing-walk', 'listing-walk', 'listing-walk']);
+    });
+
+    it('saves nothing when the host does not run the business', async () => {
+      runByListings.assertCanRunGatherings.mockRejectedValue(
+        new ForbiddenException({ code: 'RUN_BY_NOT_MANAGER' }),
+      );
+
+      await expect(
+        service.create('host-1', {
+          ...walkCreate,
+          runByListingId: 'listing-walk',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(events.save).not.toHaveBeenCalled();
+      expect(eventSeries.save).not.toHaveBeenCalled();
+    });
+
+    it('stores no listing and asks nothing when the create names none', async () => {
+      await service.create('host-1', walkCreate);
+
+      expect(runByListings.assertCanRunGatherings).not.toHaveBeenCalled();
+      expect(events.create.mock.calls[0]![0].runByListingId).toBeNull();
+    });
+
+    it('carries the resolved line on the created gathering', async () => {
+      runByListings.resolveForDisplay.mockResolvedValue(
+        new Map([['listing-walk', RUN_BY_REF]]),
+      );
+
+      const detail = await service.create('host-1', {
+        ...walkCreate,
+        runByListingId: 'listing-walk',
+      });
+
+      expect(detail.runByListing).toEqual(RUN_BY_REF);
+    });
+
+    it('checks both the host and the co-host making the edit', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      cohosts.exists.mockResolvedValue(true);
+
+      await service.update('x', 'cohost-1', { runByListingId: 'listing-walk' });
+
+      expect(runByListings.assertCanRunGatherings).toHaveBeenCalledWith(
+        'listing-walk',
+        ['u1', 'cohost-1'],
+      );
+      expect(events.save.mock.calls.at(-1)![0].runByListingId).toBe(
+        'listing-walk',
+      );
+    });
+
+    it('saves nothing when the edit names a business the host does not run', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      runByListings.assertCanRunGatherings.mockRejectedValue(
+        new ForbiddenException({ code: 'RUN_BY_NOT_MANAGER' }),
+      );
+
+      await expect(
+        service.update('x', 'u1', { runByListingId: 'listing-walk' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('keeps the stored listing without a check when the same id is re-sent', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        runByListingId: 'listing-walk',
+      });
+
+      await service.update('x', 'u1', {
+        runByListingId: 'listing-walk',
+        capacity: 12,
+      });
+
+      expect(runByListings.assertCanRunGatherings).not.toHaveBeenCalled();
+      expect(events.save.mock.calls.at(-1)![0].runByListingId).toBe(
+        'listing-walk',
+      );
+    });
+
+    it('clears the listing on null without a check', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        runByListingId: 'listing-walk',
+      });
+
+      await service.update('x', 'u1', { runByListingId: null });
+
+      expect(runByListings.assertCanRunGatherings).not.toHaveBeenCalled();
+      expect(events.save.mock.calls.at(-1)![0].runByListingId).toBeNull();
+    });
+
+    it('leaves the listing alone when the edit says nothing about it', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        runByListingId: 'listing-walk',
+      });
+
+      await service.update('x', 'u1', { capacity: 12 });
+
+      expect(events.save.mock.calls.at(-1)![0].runByListingId).toBe(
+        'listing-walk',
+      );
+    });
+
+    it('carries the line on the detail, and null once the listing stops resolving', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        runByListingId: 'listing-walk',
+      });
+      runByListings.resolveForDisplay.mockResolvedValue(
+        new Map([['listing-walk', RUN_BY_REF]]),
+      );
+
+      expect((await service.getBySlug('x', 'u1')).runByListing).toEqual(
+        RUN_BY_REF,
+      );
+      expect(runByListings.resolveForDisplay).toHaveBeenCalledWith([
+        'listing-walk',
+      ]);
+
+      runByListings.resolveForDisplay.mockResolvedValue(new Map());
+      expect((await service.getBySlug('x', 'u1')).runByListing).toBeNull();
+    });
+
+    it('shows the line on the guest preview', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        runByListingId: 'listing-walk',
+      });
+      runByListings.resolveForDisplay.mockResolvedValue(
+        new Map([['listing-walk', RUN_BY_REF]]),
+      );
+
+      const preview = await service.getBySlug('x', 'u1', 'going');
+
+      expect(preview.runByListing).toEqual(RUN_BY_REF);
+    });
+
+    it('maps the line on every list row from one batched lookup', async () => {
+      const listedRow = (id: string, runByListingId: string | null): Event =>
+        ({
+          id,
+          slug: id,
+          title: 'Queer history walk',
+          hostId: 'host-1',
+          startAt: new Date(Date.now() + 3_600_000),
+          endAt: null,
+          timezone: 'Europe/Lisbon',
+          venue: null,
+          isOnline: false,
+          coverImageUrl: null,
+          visibility: EventVisibility.Public,
+          status: EventStatus.Published,
+          capacity: null,
+          communityId: null,
+          listingId: null,
+          runByListingId,
+          neighbourhood: null,
+          eventType: null,
+          gatheringFamily: null,
+          formatDetails: null,
+          cost: null,
+          themes: [],
+          costKind: null,
+          seriesId: null,
+          seriesIndex: null,
+          showAttendeeCount: true,
+        }) as unknown as Event;
+      events.find.mockResolvedValue([
+        listedRow('walk-1', 'listing-walk'),
+        listedRow('walk-2', 'listing-walk'),
+        listedRow('supper-1', null),
+      ]);
+      rsvps.createQueryBuilder.mockImplementation(() => {
+        const goingTally: Record<string, jest.Mock> = {};
+        for (const method of [
+          'select',
+          'addSelect',
+          'where',
+          'andWhere',
+          'groupBy',
+        ]) {
+          goingTally[method] = jest.fn().mockReturnValue(goingTally);
+        }
+        goingTally.getRawMany = jest.fn().mockResolvedValue([]);
+        return goingTally;
+      });
+      runByListings.resolveForDisplay.mockResolvedValue(
+        new Map([['listing-walk', RUN_BY_REF]]),
+      );
+
+      const rows = await service.list('host-1', 'hosting', 1);
+
+      expect(runByListings.resolveForDisplay).toHaveBeenCalledTimes(1);
+      expect(runByListings.resolveForDisplay).toHaveBeenCalledWith([
+        'listing-walk',
+        'listing-walk',
+      ]);
+      expect(rows.map((row) => row.runByListing)).toEqual([
+        RUN_BY_REF,
+        RUN_BY_REF,
+        null,
+      ]);
+    });
+  });
+
   // A gathering's venue must be a place people visit. The lookup owns the
-  // predicate (`findAttachable` drops online-only and 18+ listings in-query,
-  // so either one arrives here as null); this block pins what the service does
+  // predicate (`findAttachable` drops online-only, out-and-about and 18+ listings in-query,
+  // so each arrives here as null); this block pins what the service does
   // with that answer, and that re-sending the CURRENT venue never re-asks.
   describe('update venue listing handling', () => {
     // A place that also sells online: `online = false`, `hasOnlineShop = true`.
@@ -1855,6 +2237,34 @@ describe('EventsService', () => {
       expect(listingLookup.findAttachable).toHaveBeenCalledWith(
         'listing-online',
       );
+    });
+
+    it('400s when the new venue is an out-and-about listing the lookup refuses', async () => {
+      events.findOne.mockResolvedValue(editableEvent());
+      listingLookup.findAttachable.mockResolvedValue(null);
+      await expect(
+        service.update('x', 'u1', { listingId: 'listing-mobile' }),
+      ).rejects.toThrow(new BadRequestException('Venue listing not found'));
+      expect(listingLookup.findAttachable).toHaveBeenCalledWith(
+        'listing-mobile',
+      );
+      expect(events.save).not.toHaveBeenCalled();
+    });
+
+    it('keeps an out-and-about venue the gathering already holds when it is re-sent', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        listingId: 'listing-mobile',
+      });
+      listingLookup.findAttachable.mockResolvedValue(null);
+      await service.update('x', 'u1', {
+        listingId: 'listing-mobile',
+        capacity: 14,
+      });
+      expect(listingLookup.findAttachable).not.toHaveBeenCalled();
+      const savedEvent = events.save.mock.calls.at(-1)![0];
+      expect(savedEvent.listingId).toBe('listing-mobile');
+      expect(savedEvent.capacity).toBe(14);
     });
 
     it('attaches a place that also sells online', async () => {
@@ -3088,6 +3498,10 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as ListingLookupService,
       {} as unknown as EventEmitter2,
       {} as unknown as MentionNotificationService,
+      {
+        assertCanRunGatherings: jest.fn(),
+        resolveForDisplay: jest.fn().mockResolvedValue(new Map()),
+      } as unknown as ListingRunByService,
     );
   });
 

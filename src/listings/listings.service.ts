@@ -142,6 +142,15 @@ import {
   resolveOnlineListingCity,
   resolveOnlineListingFields,
 } from './listing-online-rules';
+import { normalizeListingMobileDetails } from './listing-mobile-details';
+import {
+  MobileListingFieldName,
+  MobileListingFields,
+  assertSingleListingKind,
+  healStoredMobileDetails,
+  pickMobileListingFields,
+  resolveMobileListingFields,
+} from './listing-mobile-rules';
 import {
   defaultPricingModeForCats,
   normalizeListingMenu,
@@ -155,7 +164,9 @@ import {
   ListingDTO,
   ReviewDTO,
   SimilarListingDTO,
+  ManagedListingItem,
   toListingDTO,
+  toManagedListingItem,
   toReviewDTO,
   toSimilarListing,
 } from './listing-response';
@@ -504,6 +515,10 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
       adultTermsAcceptedAt: null,
     }),
     shopItems: normalizeListingShopItems(dto.shopItems),
+    // The mobile write rules (`resolveCreateKindFields`) decide what is
+    // stored; these are the plain values the row starts from.
+    mobile: dto.mobile === true,
+    mobileDetails: normalizeListingMobileDetails(dto.mobileDetails),
     address: dto.online ? '' : (dto.address ?? ''),
     geocoded: dto.online ? false : (dto.geocoded ?? false),
     latitude: dto.online ? null : (dto.latitude ?? null),
@@ -651,6 +666,13 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     // Replaced wholesale: an ordered list the owner arranged, like `services`.
     ...(dto.shopItems !== undefined
       ? { shopItems: normalizeListingShopItems(dto.shopItems) }
+      : {}),
+    ...(dto.mobile !== undefined ? { mobile: dto.mobile } : {}),
+    // Replaced wholesale, like `onlineDetails`. Stored here as sent; the
+    // mobile write rules check the names and normalise it in
+    // `applyListingEdit`.
+    ...(dto.mobileDetails !== undefined
+      ? { mobileDetails: dto.mobileDetails }
       : {}),
     ...(dto.address !== undefined ? { address: dto.address } : {}),
     ...(dto.geocoded !== undefined ? { geocoded: dto.geocoded } : {}),
@@ -805,6 +827,8 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   hasOnlineShop: 'the "also sells online" setting',
   onlineDetails: 'the ordering and delivery details',
   shopItems: 'the shop items',
+  mobile: 'the "out and about" setting',
+  mobileDetails: 'where the business works',
   address: 'the address',
   geocoded: 'the geocoded flag',
   latitude: 'the map pin',
@@ -1050,6 +1074,8 @@ export class ListingsService {
     submitterUserId: string,
     dto: CreateListingDto,
   ): Promise<ListingDTO> {
+    // The online+mobile rule answers first, ahead of every path rule.
+    assertSingleListingKind(dto);
     // Path-branched required fields whose shape is too nested for the DTO's
     // `@ValidateIf` to express (item #2): `hours` (≥1 open day) and the hero
     // photo are required on the `claim` path, optional on `suggest`.
@@ -1063,7 +1089,7 @@ export class ListingsService {
     // business they do not run, the same as staff and the affirming baseline,
     // and a later claim or owner offer does not ask again. A suggestion in
     // the 18+ category is therefore refused whatever the body says.
-    const onlineFields = this.resolveCreateOnlineFields(
+    const kindFields = this.resolveCreateKindFields(
       dto,
       !isSuggestion && dto.adultTermsAccepted === true,
     );
@@ -1083,9 +1109,9 @@ export class ListingsService {
             suggestedByUserId: submitterUserId,
             affirmingBaselineAcceptedAt: null,
             ...suggestionOwnerPersonalBlanks(),
-            ...onlineFields,
+            ...kindFields,
           }
-        : onlineFields,
+        : kindFields,
     );
     // Tell whoever works the listing-submission queue that a listing landed
     // for review. Awaited, but safe to await: `announce` catches everything
@@ -1125,12 +1151,13 @@ export class ListingsService {
     adminUserId: string,
     dto: AdminCreateListingDto,
   ): Promise<ListingDTO> {
+    assertSingleListingKind(dto);
     this.assertPathRequirements(dto);
     // Staff authoring picks from the same vocabulary as the member wizard.
     const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
     // Staff cannot accept the 18+ terms for a business (the admin body has no
     // such field), so a staff-authored listing in that category is refused.
-    const onlineFields = this.resolveCreateOnlineFields(dto, false);
+    const kindFields = this.resolveCreateKindFields(dto, false);
 
     const ref = await this.nextRef();
     const saved = await this.createWithUniqueSlug(
@@ -1144,7 +1171,7 @@ export class ListingsService {
             : ListingStatus.Review,
         affirmingBaselineAcceptedAt: null,
         createdByStaffId: adminUserId,
-        ...onlineFields,
+        ...kindFields,
       },
     );
 
@@ -1402,10 +1429,36 @@ export class ListingsService {
   }
 
   /**
+   * Every kind-of-listing field a create stores: the online write rules
+   * (`resolveCreateOnlineFields`), then the mobile write rules
+   * (`resolveMobileListingFields`) over their result, so a location the online
+   * rules blanked stays blank. `online` and `mobile` together are refused
+   * first, so that conflict is the error a caller sees ahead of any category
+   * or main-link rule. Runs before the ref is drawn, like the tag check, on
+   * both `create` and `adminCreate`.
+   */
+  private resolveCreateKindFields(
+    dto: ListingCreateInput,
+    isAdultTermsAcceptedNow: boolean,
+  ): OnlineListingFields & MobileListingFields {
+    assertSingleListingKind(dto);
+    const onlineFields = this.resolveCreateOnlineFields(
+      dto,
+      isAdultTermsAcceptedNow,
+    );
+    const mobileFields = resolveMobileListingFields({
+      ...onlineFields,
+      mobile: dto.mobile === true,
+      mobileDetails: dto.mobileDetails,
+    });
+    return { ...onlineFields, ...mobileFields };
+  }
+
+  /**
    * Claim-path presence checks the DTO cannot express (see `create`): opening
-   * hours for a place, a delivery option or session format for an online-only
-   * listing, and the cover photo with its alt text. No-op on the `suggest`
-   * path.
+   * hours for a place, opening hours or "by appointment only" for a mobile
+   * listing, a delivery option or session format for an online-only listing,
+   * and the cover photo with its alt text. No-op on the `suggest` path.
    */
   private assertPathRequirements(dto: ListingCreateInput): void {
     if (dto.path !== 'claim') return;
@@ -1429,7 +1482,15 @@ export class ListingsService {
       const hasOpenDay = days.some(
         (day) => day?.open && (day.intervals?.length ?? 0) >= 1,
       );
-      if (!hasOpenDay) missing.push('opening hours');
+      if (dto.mobile) {
+        // An out-and-about business may work by appointment only, which
+        // stands in for opening hours.
+        if (!hasOpenDay && dto.mobileDetails?.byAppointment !== true) {
+          missing.push('opening hours or "by appointment only"');
+        }
+      } else if (!hasOpenDay) {
+        missing.push('opening hours');
+      }
     }
     // The cover is the FIRST photo of the ordered gallery, whichever request
     // shape carried it. Its alt text is required too: a claimed listing's lead
@@ -1560,6 +1621,48 @@ export class ListingsService {
         ),
       );
     });
+  }
+
+  /**
+   * `GET /listings/managed`: the listings the member owns or co-manages that
+   * can take a new "Run by" link, for "Run by one of your businesses". Live,
+   * shown by their owner and still trading: the listings
+   * `ListingRunByService.assertCanRunGatherings` accepts, apart from a
+   * moderator takedown, which that check answers with a 400. Sorted by name
+   * and bounded by `DEFAULT_LIST_LIMIT`. Co-managed ids are folded in as an
+   * `IN` list, the same single-table shape `listMine` uses.
+   */
+  async listManaged(userId: string): Promise<ManagedListingItem[]> {
+    const coManagedListingIds =
+      await this.coManagers.listingIdsCoManagedBy(userId);
+    const runnableScope = {
+      status: ListingStatus.Live,
+      isHiddenByOwner: false,
+      operatingState: Not(ListingOperatingState.PermanentlyClosed),
+    };
+    const rows = await this.listings.find({
+      where: [
+        { ...runnableScope, ownerId: userId },
+        ...(coManagedListingIds.length > 0
+          ? [{ ...runnableScope, id: In(coManagedListingIds) }]
+          : []),
+      ],
+      select: [
+        'id',
+        'ref',
+        'slug',
+        'name',
+        'online',
+        'mobile',
+        'address',
+        'hood',
+        'latitude',
+        'longitude',
+      ],
+      order: { name: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    return rows.map((row) => toManagedListingItem(row));
   }
 
   /** Moderator/admin-only (`ListingsController.listQueue`'s `RolesGuard`
@@ -1949,6 +2052,7 @@ export class ListingsService {
     // the snapshot below and the edited row compare like with like, so an
     // unrelated PATCH writes no audit row and stamps no freshness.
     healStoredListingColumns(listing);
+    healStoredMobileDetails(listing);
     if (listing.online) {
       Object.assign(listing, {
         hood: '',
@@ -1961,6 +2065,9 @@ export class ListingsService {
     const listingBeforeEdit: Listing = { ...listing };
     const wasLive = listing.status === ListingStatus.Live;
     applyUpdate(listing, dto);
+    // Rule 1 of the mobile write rules, on the row as the PATCH leaves it and
+    // ahead of every other rule. A 400 here leaves nothing saved.
+    assertSingleListingKind(listing);
     // The online write rules run on the row as the PATCH leaves it: the
     // category vocabulary for its `online` flag, the main link, the 18+ terms
     // and the blanking for each kind of listing. A 400 here leaves nothing
@@ -1989,6 +2096,14 @@ export class ListingsService {
           dto.onlineDetails !== undefined,
         now: new Date(),
       }),
+    );
+    // The mobile write rules on the same row, after the online rules: the
+    // details reset for any other kind of listing, the parish and
+    // municipality names checked, and a mobile listing with no meeting point
+    // left with no location. Every owner and staff edit runs them.
+    Object.assign(
+      listing,
+      resolveMobileListingFields(pickMobileListingFields(listing)),
     );
 
     // An owner edit NEVER changes `listing.status`. Once a moderator has
@@ -3949,6 +4064,7 @@ export class ListingsService {
         | 'visibility'
         | 'ownedBy'
         | OnlineListingFieldName
+        | MobileListingFieldName
       >
     > = {},
   ): Promise<Listing> {

@@ -36,6 +36,13 @@ import {
 } from './listing-accessibility';
 import { isAdultListing } from './listing-categories';
 import {
+  ListingKind,
+  ListingMobileDetails,
+  hasListingMeetingPoint,
+  listingKindOf,
+  toListingMobileDetailsView,
+} from './listing-mobile-details';
+import {
   ListingOnlineDetails,
   ListingOnlineSummary,
   ListingPublicOnlineDetails,
@@ -450,6 +457,10 @@ export interface ListingDTO {
   onlineDetails: ListingOnlineDetails;
   /** "In the shop", photos resolved like `photoGallery`. `[]` when there are none. */
   shopItems: ListingShopItemView[];
+  /** An "out and about" listing with no fixed premises. Always false for an online-only listing. */
+  mobile: boolean;
+  /** Where a mobile listing works, complete. The default for any other kind of listing. */
+  mobileDetails: ListingMobileDetails;
   address: string;
   geocoded: boolean;
   latitude: number | null;
@@ -859,6 +870,12 @@ export interface DirectoryCardDTO {
   /** What the card's status slot and Visit action need, for a listing that
    * sells online (`online || hasOnlineShop`). `null` for every other listing. */
   onlineSummary: ListingOnlineSummary | null;
+  /** An "out and about" listing with no fixed premises. With a meeting point
+   * it carries a pin and a `hood`; without one both are blank and the map
+   * lists it under "Across Lisbon". `DirectoryDetailDTO` inherits it. */
+  mobile: boolean;
+  /** Where a mobile listing works, complete. The default for any other kind of listing. */
+  mobileDetails: ListingMobileDetails;
   /** Where an online-only business lives on the web, so the Online tab's card
    *  can print the site's own address in its browser bar. The same public
    *  `social` values the detail page already carries, trimmed; `''` when the
@@ -1058,6 +1075,8 @@ export function toDirectoryCard(
     hasOnlineShop: listing.online !== true && listing.hasOnlineShop === true,
     isAdultsOnly: isAdultListing(listing.cats),
     onlineSummary: toListingOnlineSummary(listing),
+    mobile: listingKindOf(listing) === 'mobile',
+    mobileDetails: toListingMobileDetailsView(listing),
     onlineLinks: listing.online
       ? {
           website: listing.social?.website?.trim() ?? '',
@@ -1168,9 +1187,32 @@ export interface UpcomingEventDTO {
    * reasoning behind the split.
    */
   venueConfirmed: boolean;
+  /**
+   * How the gathering is tied to this listing: `venue` when it is held there,
+   * `runBy` when the business runs it. A gathering tied both ways reads
+   * `runBy` and appears once.
+   */
+  role: UpcomingEventRole;
 }
 
-export function toUpcomingEvent(event: Event): UpcomingEventDTO {
+/** How an Upcoming item is tied to the listing whose page shows it. */
+export type UpcomingEventRole = 'venue' | 'runBy';
+
+/** An Upcoming item before it knows which listing's page it sits on. */
+export type UpcomingEventFields = Omit<UpcomingEventDTO, 'role'>;
+
+/** An Upcoming item on the page of the listing `listingId`, with its role. */
+export function toListingUpcomingEvent(
+  event: Event,
+  listingId: string,
+): UpcomingEventDTO {
+  return {
+    ...toUpcomingEvent(event),
+    role: event.runByListingId === listingId ? 'runBy' : 'venue',
+  };
+}
+
+export function toUpcomingEvent(event: Event): UpcomingEventFields {
   return {
     id: event.id,
     slug: event.slug,
@@ -1593,7 +1635,9 @@ export function toDirectoryDetail(
       ),
     ),
     questions,
-    upcoming: upcomingEvents.map(toUpcomingEvent),
+    upcoming: upcomingEvents.map((event) =>
+      toListingUpcomingEvent(event, listing.id),
+    ),
     savedCount,
     // Empty-string defaults (never-a-safe-space listings) read as "no value"
     // here, same as `safeSpaceTier` already does on the inherited card DTO.
@@ -1657,6 +1701,8 @@ export function toListingDTO(
     hasOnlineShop: listing.online !== true && listing.hasOnlineShop === true,
     onlineDetails: normalizeListingOnlineDetails(listing.onlineDetails),
     shopItems: toListingShopItemViews(listing.shopItems, crops),
+    mobile: listingKindOf(listing) === 'mobile',
+    mobileDetails: toListingMobileDetailsView(listing),
     address: listing.address,
     geocoded: listing.geocoded,
     latitude: listing.latitude ?? null,
@@ -1691,6 +1737,65 @@ export function toListingDTO(
         ? (listing.movedToListingId ?? null)
         : null,
     detailsConfirmedAt: listing.detailsConfirmedAt?.toISOString() ?? null,
+  };
+}
+
+/** Where a mobile listing meets people, for the gathering form to pre-fill. */
+export interface ManagedListingMeetingPoint {
+  address: string;
+  hood: string;
+  latitude: number;
+  longitude: number;
+}
+
+/**
+ * One row of `GET /listings/managed` ("Run by one of your businesses"): a
+ * listing the member owns or co-manages, with its kind and, for a mobile
+ * listing with a meeting point, that meeting point. A place's own address is
+ * its venue, which the gathering's venue field already covers, so a place
+ * carries none here.
+ */
+export interface ManagedListingItem {
+  /** The listing uuid: the value a gathering's `runByListingId` takes. */
+  id: string;
+  ref: string;
+  slug: string;
+  name: string;
+  kind: ListingKind;
+  meetingPoint: ManagedListingMeetingPoint | null;
+}
+
+export function toManagedListingItem(
+  listing: Pick<
+    Listing,
+    | 'id'
+    | 'ref'
+    | 'slug'
+    | 'name'
+    | 'online'
+    | 'mobile'
+    | 'address'
+    | 'hood'
+    | 'latitude'
+    | 'longitude'
+  >,
+): ManagedListingItem {
+  const { latitude, longitude } = listing;
+  return {
+    id: listing.id,
+    ref: listing.ref,
+    slug: listing.slug,
+    name: listing.name,
+    kind: listingKindOf(listing),
+    meetingPoint:
+      hasListingMeetingPoint(listing) && latitude !== null && longitude !== null
+        ? {
+            address: (listing.address ?? '').trim(),
+            hood: (listing.hood ?? '').trim(),
+            latitude,
+            longitude,
+          }
+        : null,
   };
 }
 

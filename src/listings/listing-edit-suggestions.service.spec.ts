@@ -249,6 +249,55 @@ describe('ListingEditSuggestionsService', () => {
       });
     });
 
+    it('refuses an address suggestion for a mobile listing with no meeting point', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'corte-movel',
+        ownerId: 'owner-1',
+        online: false,
+        mobile: true,
+        latitude: null,
+        longitude: null,
+      });
+
+      await expect(
+        service.submit('corte-movel', 'member-1', {
+          field: 'address',
+          message: 'They opened a salon on Rua X.',
+        }),
+      ).rejects.toThrow(
+        'This business works out and about with no meeting point, so it has no address to correct.',
+      );
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(adminQueueNotifications.announce).not.toHaveBeenCalled();
+    });
+
+    it('takes an address suggestion for a mobile listing that meets people at a set spot', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'lisboa-a-pe',
+        ownerId: 'owner-1',
+        online: false,
+        mobile: true,
+        latitude: 38.7075,
+        longitude: -9.1364,
+      });
+      suggestions.save.mockResolvedValue({
+        id: 'sugg-1',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+
+      await expect(
+        service.submit('lisboa-a-pe', 'member-1', {
+          field: 'address',
+          message: 'The walk starts at the Arco da Rua Augusta now.',
+        }),
+      ).resolves.toEqual({
+        id: 'sugg-1',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+    });
+
     it('stores a trimmed proposed replacement value alongside the prose', async () => {
       listings.findOne.mockResolvedValue({
         id: 'listing-1',
@@ -606,6 +655,103 @@ describe('ListingEditSuggestionsService', () => {
       expect(suggestions.save).not.toHaveBeenCalled();
       expect(suggestion.status).toBe(ListingEditSuggestionStatus.Pending);
       expect(listings.save).not.toHaveBeenCalled();
+    });
+
+    it('resolves an accepted address suggestion for a mobile listing with no meeting point without writing an address', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-mobile-address',
+        listingId: 'listing-1',
+        field: 'address',
+        message: '123 New Street',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ref: 'QPL-2026-0042',
+        ownerId: 'owner-1',
+        slug: 'corte-movel',
+        online: false,
+        mobile: true,
+        latitude: null,
+        longitude: null,
+        address: '',
+      });
+
+      const result = await service.resolve('sugg-mobile-address', 'mod-1', {
+        status: 'accepted',
+      });
+
+      expect(result.status).toBe(ListingEditSuggestionStatus.Accepted);
+      expect(listings.save).not.toHaveBeenCalled();
+      expect(moderationEvents.save).not.toHaveBeenCalled();
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner-1',
+        'listing_edit_suggestion_accepted',
+        { source: 'listing', listingSlug: 'corte-movel', field: 'address' },
+      );
+    });
+
+    it('refuses a moderator address value for a mobile listing with no meeting point, before resolving the row', async () => {
+      const suggestion = {
+        id: 'sugg-mobile-address-value',
+        listingId: 'listing-1',
+        field: 'address',
+        message: 'They have a salon now.',
+        status: ListingEditSuggestionStatus.Pending,
+      };
+      suggestions.findOne.mockResolvedValue(suggestion);
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'corte-movel',
+        online: false,
+        mobile: true,
+        latitude: null,
+        longitude: null,
+        address: '',
+      });
+
+      await expect(
+        service.resolve('sugg-mobile-address-value', 'mod-1', {
+          status: 'accepted',
+          value: '123 New Street',
+        }),
+      ).rejects.toThrow(
+        'This business works out and about with no meeting point, so it has no address to correct.',
+      );
+      expect(suggestions.save).not.toHaveBeenCalled();
+      expect(suggestion.status).toBe(ListingEditSuggestionStatus.Pending);
+    });
+
+    it('writes an accepted address correction onto the meeting point of a mobile listing', async () => {
+      suggestions.findOne.mockResolvedValue({
+        id: 'sugg-meeting-point',
+        listingId: 'listing-1',
+        field: 'address',
+        message: 'Arco da Rua Augusta',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+      suggestions.save.mockImplementation((row) => Promise.resolve(row));
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        ownerId: 'owner-1',
+        slug: 'lisboa-a-pe',
+        online: false,
+        mobile: true,
+        latitude: 38.7075,
+        longitude: -9.1364,
+        address: 'Praça do Comércio',
+        social: { phone: '', website: '', email: '', instagram: '' },
+      });
+
+      await service.resolve('sugg-meeting-point', 'mod-1', {
+        status: 'accepted',
+      });
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ address: 'Arco da Rua Augusta' }),
+      );
     });
 
     it('writes an accepted website correction for an online-only listing into its main link, keeping the kind', async () => {

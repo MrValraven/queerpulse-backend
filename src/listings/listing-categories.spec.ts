@@ -54,3 +54,35 @@ describe('listing categories by kind of listing', () => {
     expect(isAdultListing(null)).toBe(false);
   });
 });
+
+describe('the tours and home-services categories', () => {
+  it('closes the place list in the contract order', () => {
+    expect(LISTING_CATEGORY_SLUGS.slice(-3)).toEqual([
+      'nightlife',
+      'tours',
+      'home-services',
+    ]);
+    expect(LISTING_CATEGORY_SLUGS).toHaveLength(11);
+  });
+
+  it('are offered to places, and so to mobile listings, which use the place list', () => {
+    expect(isListingCategoryOffered('tours', false)).toBe(true);
+    expect(isListingCategoryOffered('home-services', false)).toBe(true);
+  });
+
+  it('are never offered to online-only listings', () => {
+    expect(isListingCategoryOffered('tours', true)).toBe(false);
+    expect(isListingCategoryOffered('home-services', true)).toBe(false);
+  });
+
+  it('pass the DTO vocabulary, each once', () => {
+    expect(ALL_LISTING_CATEGORY_SLUGS).toContain('tours');
+    expect(
+      ALL_LISTING_CATEGORY_SLUGS.filter((slug) => slug === 'home-services'),
+    ).toHaveLength(1);
+  });
+
+  it('carry no 18+ meaning', () => {
+    expect(isAdultListing(['tours', 'home-services'])).toBe(false);
+  });
+});

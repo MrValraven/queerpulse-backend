@@ -25,6 +25,7 @@ import {
   ListingModerationEvent,
 } from './entities/listing-moderation-event.entity';
 import { Listing } from './entities/listing.entity';
+import { clearUnmanagedFutureRunByLinks } from '../events/run-by-listing-links';
 import {
   ListingCoManagerDTO,
   ListingCoManagerInviteDTO,
@@ -805,6 +806,15 @@ export class ListingCoManagersService {
                 : 'was removed as a co-manager of this listing.'
             }`,
           });
+          // The member who just lost their seat stops naming this listing as
+          // "Run by" on their gatherings still ahead; past ones keep it. In
+          // this transaction, so a failed removal clears nothing. A member
+          // who is now the owner still runs the listing and keeps theirs.
+          await clearUnmanagedFutureRunByLinks(
+            manager,
+            { listingId: listing.id },
+            endedAt,
+          );
         }
 
         // An owner keeps their mailbox seat as the owner. Read inside the

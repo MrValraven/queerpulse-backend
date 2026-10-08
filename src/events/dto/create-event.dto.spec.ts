@@ -219,3 +219,40 @@ describe('CreateEventDto care fields', () => {
     ).toBe(true);
   });
 });
+
+describe('CreateEventDto run-by listing', () => {
+  const base = {
+    title: 'Queer history walk',
+    description: 'Two hours through Alfama and Mouraria.',
+    startAt: '2026-11-01T10:00:00.000Z',
+    timezone: 'Europe/Lisbon',
+  };
+
+  const runByErrors = async (runByListingId: unknown) => {
+    const dto = plainToInstance(CreateEventDto, { ...base, runByListingId });
+    const errors = await validate(dto);
+    return errors.filter((error) => error.property === 'runByListingId');
+  };
+
+  it('accepts a listing uuid', async () => {
+    expect(
+      await runByErrors('6b3f2a7e-1c4d-4e5f-8a9b-0c1d2e3f4a5b'),
+    ).toHaveLength(0);
+  });
+
+  it('accepts null, which clears the link on an update', async () => {
+    expect(await runByErrors(null)).toHaveLength(0);
+  });
+
+  it('accepts a body that leaves it out', async () => {
+    const dto = plainToInstance(CreateEventDto, base);
+    const errors = await validate(dto);
+    expect(
+      errors.filter((error) => error.property === 'runByListingId'),
+    ).toHaveLength(0);
+  });
+
+  it('refuses anything but a uuid', async () => {
+    expect(await runByErrors('lisboa-a-pe')).toHaveLength(1);
+  });
+});

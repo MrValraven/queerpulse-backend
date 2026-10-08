@@ -83,6 +83,7 @@ describe('ListingCoManagersService', () => {
   let transactionManager: {
     save: jest.Mock;
     getRepository: jest.Mock;
+    query: jest.Mock;
   };
 
   /** `MemberLookup.userIdForSlug` joins on `users.status = 'active'`, so this
@@ -101,6 +102,12 @@ describe('ListingCoManagersService', () => {
       where: jest.fn().mockReturnThis(),
       getMany: jest.fn().mockResolvedValue([]),
     });
+
+  /** The run-by clearing calls the transaction received, as `[sql, parameters]`. */
+  const runByClearingCalls = () =>
+    (transactionManager.query.mock.calls as [string, unknown[]][]).filter(
+      ([sql]) => sql.includes('"run_by_listing_id" = NULL'),
+    );
 
   beforeEach(async () => {
     coManagers = {
@@ -142,6 +149,8 @@ describe('ListingCoManagersService', () => {
       getRepository: jest.fn((entity: unknown) =>
         entity === Listing ? listings : coManagers,
       ),
+      // The run-by clearing pass a seat ending runs on this manager.
+      query: jest.fn().mockResolvedValue([[], 0]),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -553,6 +562,36 @@ describe('ListingCoManagersService', () => {
       );
     });
 
+    it('clears the future run-by links of a removed co-manager in the same transaction', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      const calls = runByClearingCalls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[1]).toEqual([expect.any(Date), LISTING.id]);
+    });
+
+    it('clears the run-by links when staff take a seat back too', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.staffRevokeCoManager('QPL-2026-0001', 'admin-1', 'mika');
+
+      expect(runByClearingCalls()).toHaveLength(1);
+    });
+
+    it('clears nothing when an unanswered invitation is withdrawn', async () => {
+      coManagers.findOne.mockResolvedValue(seat());
+
+      await service.revoke('QPL-2026-0001', OWNER_ID, 'mika');
+
+      expect(runByClearingCalls()).toHaveLength(0);
+    });
+
     it('withdraws an unanswered invitation without writing a history row', async () => {
       coManagers.findOne.mockResolvedValue(seat());
 
@@ -781,6 +820,18 @@ describe('ListingCoManagersService', () => {
           action: ListingModerationAction.CoManagerRemoved,
         }),
       );
+    });
+
+    it('clears the future run-by links of a member who stepped down', async () => {
+      coManagers.findOne.mockResolvedValue(
+        seat({ status: ListingCoManagerStatus.Active }),
+      );
+
+      await service.leave('QPL-2026-0001', INVITEE_ID);
+
+      const calls = runByClearingCalls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[1]).toEqual([expect.any(Date), LISTING.id]);
     });
 
     it('404s a member who holds no seat on the listing', async () => {

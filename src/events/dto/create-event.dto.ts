@@ -140,6 +140,12 @@ export class CreateEventDto {
   // ("leave the existing link, if any, unchanged"). `create()` has no
   // existing link to detach, so it treats `null`/absent identically.
   @IsOptional() @IsUUID() listingId?: string | null;
+  // "Run by": a directory listing the host owns or co-manages, independent of
+  // the venue `listingId` above and in the same three-way form: absent leaves
+  // it unchanged on update, `null` clears it, a uuid is checked by
+  // `EventsService` (400 for a listing that cannot run a gathering, 403
+  // `RUN_BY_NOT_MANAGER` for a member who does not run it).
+  @IsOptional() @IsUUID() runByListingId?: string | null;
   @IsOptional() @IsBoolean() isOnline?: boolean;
   @IsOptional()
   @IsUrl({ protocols: ['http', 'https'], require_protocol: true })

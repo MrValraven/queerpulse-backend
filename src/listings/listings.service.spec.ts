@@ -9,7 +9,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, EntityManager, IsNull, MoreThan, Not } from 'typeorm';
+import { DataSource, EntityManager, In, IsNull, MoreThan, Not } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { SafeSpaceVisitsService } from '../safe-space-vouches/safe-space-visits.service';
@@ -44,6 +44,7 @@ import {
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
 import { emptyListingOnlineDetails } from './listing-online-details';
+import { emptyListingMobileDetails } from './listing-mobile-details';
 import { ListingCoManagersService } from './listing-co-managers.service';
 import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { ListingsService } from './listings.service';
@@ -188,6 +189,8 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   hasOnlineShop: false,
   onlineDetails: emptyListingOnlineDetails(),
   shopItems: [],
+  mobile: false,
+  mobileDetails: emptyListingMobileDetails(),
   queerOwnedVerifier: '',
   queerOwnedReVerifiedAt: null,
   queerOwnedBasis: '',
@@ -676,6 +679,509 @@ describe('ListingsService', () => {
         await expect(attempt).rejects.toThrow(/"Dog-friendly"/);
         expect(dataSource.query).not.toHaveBeenCalled();
         expect(listings.save).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('listings with no fixed premises', () => {
+    const OWNER_ID = 'owner-1';
+    const MEETING_POINT = {
+      hood: 'Santa Maria Maior',
+      address: 'Praça do Comércio',
+      latitude: 38.7075,
+      longitude: -9.1364,
+    };
+    const SCISSORS_PHOTO_URL = 'https://images.unsplash.com/photo-scissors.jpg';
+    const ONLINE_AND_MOBILE =
+      'A listing that is out and about (mobile) cannot also be online only.';
+
+    const mobileBody = (overrides: Partial<CreateListingDto> = {}) =>
+      ({
+        name: 'Corte Móvel',
+        cats: ['grooming'],
+        mobile: true,
+        mobileDetails: {
+          allOfCity: false,
+          parishes: ['Arroios', 'Penha de França', 'Estrela'],
+        },
+        ...overrides,
+      }) as CreateListingDto;
+
+    const storedMobileListing = (overrides: Partial<Listing> = {}) =>
+      baseListing({
+        ownerId: OWNER_ID,
+        cats: ['tours'],
+        mobile: true,
+        hood: '',
+        address: '',
+        latitude: null,
+        longitude: null,
+        mobileDetails: emptyListingMobileDetails(),
+        ...overrides,
+      });
+
+    const savedRow = () =>
+      (listings.save.mock.calls.at(-1) as [Listing] | undefined)?.[0];
+
+    describe('create', () => {
+      it('stores a mobile listing with no meeting point and no location', async () => {
+        const result = await service.create(
+          OWNER_ID,
+          mobileBody({
+            hood: 'Arroios',
+            address: 'Rua do Benformoso 12',
+            latitude: 38.72,
+            city: 'Lisboa',
+          }),
+        );
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({
+            online: false,
+            mobile: true,
+            hood: '',
+            address: '',
+            geocoded: false,
+            latitude: null,
+            longitude: null,
+            city: 'Lisbon',
+          }),
+        );
+        expect(savedRow()?.mobileDetails).toEqual({
+          allOfCity: false,
+          parishes: ['Arroios', 'Estrela', 'Penha de França'],
+          alsoTravelsTo: [],
+          byAppointment: false,
+        });
+        expect(result.mobile).toBe(true);
+        expect(result.mobileDetails.parishes).toHaveLength(3);
+      });
+
+      it('keeps a meeting point that has both coordinates', async () => {
+        await service.create(
+          OWNER_ID,
+          mobileBody({
+            cats: ['tours'],
+            mobileDetails: { allOfCity: true },
+            geocoded: true,
+            ...MEETING_POINT,
+          }),
+        );
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({
+            mobile: true,
+            geocoded: true,
+            ...MEETING_POINT,
+          }),
+        );
+      });
+
+      it('refuses online and mobile together before drawing a ref, ahead of any category rule', async () => {
+        await expect(
+          service.create(OWNER_ID, mobileBody({ online: true })),
+        ).rejects.toThrow(ONLINE_AND_MOBILE);
+        expect(dataSource.query).not.toHaveBeenCalled();
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses "some parishes" with none picked', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            mobileBody({ mobileDetails: { allOfCity: false, parishes: [] } }),
+          ),
+        ).rejects.toThrow(
+          'mobileDetails.parishes needs at least one parish when allOfCity is false.',
+        );
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a parish outside the 24', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            mobileBody({
+              mobileDetails: { allOfCity: false, parishes: ['Anjos'] },
+            }),
+          ),
+        ).rejects.toThrow(
+          'mobileDetails.parishes holds a name outside the 24 Lisbon parishes: "Anjos".',
+        );
+      });
+
+      it('offers the place categories, the two new ones included, to a mobile listing', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            mobileBody({ cats: ['tours', 'home-services'] }),
+          ),
+        ).resolves.toBeDefined();
+        await expect(
+          service.create(OWNER_ID, mobileBody({ cats: ['apparel'] })),
+        ).rejects.toThrow(
+          'Category "apparel" is not offered to place listings',
+        );
+      });
+
+      it('lets a mobile listing also sell online, as a place does', async () => {
+        await service.create(
+          OWNER_ID,
+          mobileBody({
+            hasOnlineShop: true,
+            onlineDetails: {
+              mainLink: { url: 'cortemovel.pt', kind: 'booking' },
+            },
+          }),
+        );
+
+        expect(savedRow()?.hasOnlineShop).toBe(true);
+        expect(savedRow()?.onlineDetails.mainLink).toEqual({
+          url: 'https://cortemovel.pt',
+          kind: 'booking',
+        });
+      });
+
+      it('gives a place the default details whatever the body sent', async () => {
+        await service.create(OWNER_ID, {
+          name: 'Casa',
+          cats: ['food'],
+          mobileDetails: { allOfCity: false, parishes: ['Arroios'] },
+        } as CreateListingDto);
+
+        expect(savedRow()?.mobile).toBe(false);
+        expect(savedRow()?.mobileDetails).toEqual(emptyListingMobileDetails());
+      });
+
+      it('applies the mobile rules to a staff create', async () => {
+        await service.adminCreate('admin-1', {
+          name: 'Mudanças Arco-Íris',
+          cats: ['home-services'],
+          mobile: true,
+          mobileDetails: {
+            allOfCity: true,
+            alsoTravelsTo: ['Oeiras', 'Almada'],
+            byAppointment: true,
+          },
+          hood: 'Arroios',
+          address: 'Rua X 1',
+          publishState: 'review',
+        } as AdminCreateListingDto);
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({
+            mobile: true,
+            hood: '',
+            address: '',
+            latitude: null,
+            longitude: null,
+          }),
+        );
+        expect(savedRow()?.mobileDetails).toEqual({
+          allOfCity: true,
+          parishes: [],
+          alsoTravelsTo: ['Almada', 'Oeiras'],
+          byAppointment: true,
+        });
+      });
+
+      it('refuses online and mobile together on a staff create', async () => {
+        await expect(
+          service.adminCreate('admin-1', {
+            name: 'Both',
+            cats: ['tours'],
+            online: true,
+            mobile: true,
+            publishState: 'review',
+          } as AdminCreateListingDto),
+        ).rejects.toThrow(ONLINE_AND_MOBILE);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('the claim path', () => {
+      const claimedMobile = (overrides: Partial<CreateListingDto> = {}) =>
+        mobileBody({
+          path: 'claim',
+          photoGallery: [
+            { image: SCISSORS_PHOTO_URL, alt: 'Scissors on a towel' },
+          ],
+          ...overrides,
+        });
+
+      it('answers an online and mobile claim with the online+mobile rule, ahead of the claim-presence rule', async () => {
+        await expect(
+          service.create(OWNER_ID, claimedMobile({ online: true })),
+        ).rejects.toThrow(ONLINE_AND_MOBILE);
+      });
+
+      it('asks a mobile listing for opening hours or "by appointment only"', async () => {
+        await expect(service.create(OWNER_ID, claimedMobile())).rejects.toThrow(
+          'Claiming a listing requires opening hours or "by appointment only".',
+        );
+      });
+
+      it('takes "by appointment only" in place of opening hours', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimedMobile({
+              mobileDetails: { allOfCity: true, byAppointment: true },
+            }),
+          ),
+        ).resolves.toBeDefined();
+      });
+
+      it('takes one open day', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimedMobile({
+              hours: {
+                Mon: {
+                  open: true,
+                  intervals: [{ from: '09:00', to: '18:00' }],
+                },
+              },
+            }),
+          ),
+        ).resolves.toBeDefined();
+      });
+
+      it('asks nothing of a suggested mobile listing', async () => {
+        await expect(
+          service.create('member-1', mobileBody({ path: 'suggest' })),
+        ).resolves.toBeDefined();
+      });
+    });
+
+    describe('edits', () => {
+      it('blanks the location when a PATCH turns a place into a mobile listing with no coordinates', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            cats: ['grooming'],
+            address: 'Rua do Benformoso 12',
+            geocoded: true,
+            latitude: 38.72,
+            longitude: -9.135,
+          }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+          mobile: true,
+          mobileDetails: { allOfCity: true },
+          latitude: null as unknown as number,
+          longitude: null as unknown as number,
+        });
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({
+            mobile: true,
+            hood: '',
+            address: '',
+            geocoded: false,
+            latitude: null,
+            longitude: null,
+          }),
+        );
+        expect(dto.mobile).toBe(true);
+      });
+
+      it('keeps the stored pin as the meeting point when a PATCH turning a place mobile sends no coordinates', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            cats: ['tours'],
+            geocoded: true,
+            ...MEETING_POINT,
+          }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, { mobile: true });
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({ mobile: true, ...MEETING_POINT }),
+        );
+      });
+
+      it('resets the details when a mobile listing becomes a place', async () => {
+        listings.findOne.mockResolvedValue(
+          storedMobileListing({
+            mobileDetails: {
+              allOfCity: false,
+              parishes: ['Arroios'],
+              alsoTravelsTo: [],
+              byAppointment: true,
+            },
+          }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          mobile: false,
+          hood: 'Arroios',
+          address: 'Rua X 1',
+          latitude: 38.72,
+          longitude: -9.135,
+        });
+
+        expect(savedRow()?.mobile).toBe(false);
+        expect(savedRow()?.mobileDetails).toEqual(emptyListingMobileDetails());
+        expect(savedRow()?.address).toBe('Rua X 1');
+      });
+
+      it('refuses a PATCH that makes a mobile listing online and leaves mobile set', async () => {
+        listings.findOne.mockResolvedValue(storedMobileListing());
+
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            online: true,
+            cats: ['classes'],
+          }),
+        ).rejects.toThrow(ONLINE_AND_MOBILE);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('moves a mobile listing online when the same PATCH clears mobile', async () => {
+        listings.findOne.mockResolvedValue(storedMobileListing());
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          online: true,
+          mobile: false,
+          cats: ['classes'],
+          onlineDetails: {
+            mainLink: { url: 'lisboaape.pt', kind: 'booking' },
+          },
+        });
+
+        expect(savedRow()).toEqual(
+          expect.objectContaining({ online: true, mobile: false }),
+        );
+        expect(savedRow()?.mobileDetails).toEqual(emptyListingMobileDetails());
+      });
+
+      it.each([
+        [
+          'a place',
+          baseListing({
+            ownerId: OWNER_ID,
+            status: ListingStatus.Live,
+            blurb: 'Same blurb',
+            mobile: false,
+            mobileDetails: {} as Listing['mobileDetails'],
+          }),
+        ],
+        [
+          'a mobile listing',
+          storedMobileListing({
+            status: ListingStatus.Live,
+            blurb: 'Same blurb',
+            mobileDetails: {} as Listing['mobileDetails'],
+          }),
+        ],
+      ])(
+        'writes no audit row for an unrelated PATCH on %s from before the mobile fields',
+        async (_label, storedRow) => {
+          listings.findOne.mockResolvedValue(storedRow);
+
+          const dto = await service.update('QPL-2026-0001', OWNER_ID, {
+            blurb: 'Same blurb',
+          });
+
+          expect(dto.detailsConfirmedAt).toBeNull();
+          expect(transactionManager.save).not.toHaveBeenCalled();
+        },
+      );
+
+      it('names a change to where the business works in the owner_edited audit row', async () => {
+        listings.findOne.mockResolvedValue(
+          storedMobileListing({ status: ListingStatus.Live }),
+        );
+
+        await service.update('QPL-2026-0001', OWNER_ID, {
+          mobileDetails: { allOfCity: false, parishes: ['Belém'] },
+        });
+
+        expect(transactionManager.save).toHaveBeenCalledWith(
+          ListingModerationEvent,
+          expect.objectContaining({
+            changedFields: ['mobileDetails'],
+            reason: expect.stringContaining(
+              'where the business works',
+            ) as unknown,
+          }),
+        );
+      });
+    });
+
+    describe('listManaged', () => {
+      const runnableScope = {
+        status: ListingStatus.Live,
+        isHiddenByOwner: false,
+        operatingState: Not(ListingOperatingState.PermanentlyClosed),
+      };
+
+      it('lists the runnable listings the member owns or co-manages, by name, with kind and meeting point', async () => {
+        coManagers.listingIdsCoManagedBy.mockResolvedValue(['listing-co']);
+        listings.find.mockResolvedValue([
+          storedMobileListing({
+            id: 'listing-co',
+            ref: 'QPL-2026-0002',
+            slug: 'lisboa-a-pe',
+            name: 'Lisboa a Pé',
+            ...MEETING_POINT,
+          }),
+          baseListing({
+            id: 'listing-1',
+            ref: 'QPL-2026-0001',
+            slug: 'lux-cafe',
+            name: 'Lux Café',
+          }),
+        ]);
+
+        const items = await service.listManaged(OWNER_ID);
+
+        expect(listings.find).toHaveBeenCalledWith({
+          where: [
+            { ...runnableScope, ownerId: OWNER_ID },
+            { ...runnableScope, id: In(['listing-co']) },
+          ],
+          order: { name: 'ASC' },
+          take: DEFAULT_LIST_LIMIT,
+        });
+        expect(items).toEqual([
+          {
+            id: 'listing-co',
+            ref: 'QPL-2026-0002',
+            slug: 'lisboa-a-pe',
+            name: 'Lisboa a Pé',
+            kind: 'mobile',
+            meetingPoint: {
+              address: 'Praça do Comércio',
+              hood: 'Santa Maria Maior',
+              latitude: 38.7075,
+              longitude: -9.1364,
+            },
+          },
+          {
+            id: 'listing-1',
+            ref: 'QPL-2026-0001',
+            slug: 'lux-cafe',
+            name: 'Lux Café',
+            kind: 'place',
+            meetingPoint: null,
+          },
+        ]);
+      });
+
+      it('asks for the owned listings alone when the member co-manages none', async () => {
+        await service.listManaged(OWNER_ID);
+
+        expect(listings.find).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: [{ ...runnableScope, ownerId: OWNER_ID }],
+          }),
+        );
       });
     });
   });

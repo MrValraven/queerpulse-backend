@@ -40,14 +40,19 @@ describe('ListingOwnershipService.transferOwnership', () => {
     const save = jest.fn().mockResolvedValue(undefined);
     const withRepository = jest.fn().mockReturnValue(listings);
     const getRepository = jest.fn().mockReturnValue(offers);
+    // The run-by clearing pass (`clearUnmanagedFutureRunByLinks`) is a raw
+    // UPDATE on this manager.
+    const query = jest.fn().mockResolvedValue([[], 0]);
     return {
       save,
       withRepository,
       getRepository,
+      query,
     } as unknown as EntityManager & {
       save: jest.Mock;
       withRepository: jest.Mock;
       getRepository: jest.Mock;
+      query: jest.Mock;
     };
   };
 
@@ -124,6 +129,56 @@ describe('ListingOwnershipService.transferOwnership', () => {
     ];
     return row.reason ?? undefined;
   };
+
+  /** The run-by clearing calls a manager received, as `[sql, parameters]`. */
+  const runByClearingCalls = (manager: { query: jest.Mock }) =>
+    (manager.query.mock.calls as [string, unknown[]][]).filter(([sql]) =>
+      sql.includes('"run_by_listing_id" = NULL'),
+    );
+
+  it('clears the future run-by links of every host who no longer runs the listing, inside the transfer', async () => {
+    const listings = buildListingsRepository();
+    const manager = buildManager(listings);
+    const service = buildService(listings, buildCoManagers(1));
+
+    await service.transferOwnership(
+      manager,
+      buildListing('old-owner'),
+      'new-owner',
+      'actor-1',
+      'Claim approved.',
+      TRANSFERRED_AT,
+    );
+
+    const calls = runByClearingCalls(manager);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toEqual([TRANSFERRED_AT, 'listing-1']);
+  });
+
+  it('clears the run-by links after the owner moved and the seats were revoked', async () => {
+    const listings = buildListingsRepository();
+    const manager = buildManager(listings);
+    const coManagers = buildCoManagers(2);
+    const service = buildService(listings, coManagers);
+
+    await service.transferOwnership(
+      manager,
+      buildListing('old-owner'),
+      'new-owner',
+      'actor-1',
+      'Claim approved.',
+      TRANSFERRED_AT,
+    );
+
+    const clearingOrder = manager.query.mock.invocationCallOrder[0] ?? 0;
+    expect(clearingOrder).toBeGreaterThan(
+      listings.save.mock.invocationCallOrder[0] ?? Infinity,
+    );
+    expect(clearingOrder).toBeGreaterThan(
+      coManagers.revokeAllForOwnershipTransfer.mock.invocationCallOrder[0] ??
+        Infinity,
+    );
+  });
 
   it('clears the previous holder personal fields and sets the new owner', async () => {
     const listings = buildListingsRepository();

@@ -1,7 +1,7 @@
 /**
  * The canonical directory category vocabulary — the single set of slugs shared
  * by the frontend map pins, category filter, and this API. Listings store these
- * slugs verbatim in `listing.cats`. This first list is the PLACE vocabulary;
+ * slugs verbatim in `listing.cats`. This first list is the PLACE vocabulary, which mobile ("out and about") listings share;
  * online-only listings pick from `ONLINE_LISTING_CATEGORY_SLUGS` below.
  * Keeping the allowed set here, outside the DTO, means the create/update
  * validation and any category-keyed lookup reference one list.
@@ -19,6 +19,12 @@ export const LISTING_CATEGORY_SLUGS = [
   'grooming',
   'fitness',
   'nightlife',
+  // Tours & experiences: walking tours, outdoor classes, anything people
+  // join at a meeting point.
+  'tours',
+  // Home & moving: movers, cleaners, handypeople, plant care, the businesses
+  // that come to you.
+  'home-services',
 ] as const;
 
 export type ListingCategorySlug = (typeof LISTING_CATEGORY_SLUGS)[number];

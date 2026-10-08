@@ -250,6 +250,7 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   venueOwnerNotifiedAt: null,
   venueDetachedListingId: null,
   venueDetachedAt: null,
+  runByListingId: null,
   communityId: null,
   isOnline: false,
   onlineUrl: null,

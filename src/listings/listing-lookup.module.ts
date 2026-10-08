@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { ListingLookupService } from './listing-lookup.service';
+import { ListingRunByService } from './listing-run-by.service';
+import { ListingCoManager } from './entities/listing-co-manager.entity';
 import { Listing } from './entities/listing.entity';
 
 /**
@@ -15,10 +17,17 @@ import { Listing } from './entities/listing.entity';
  * `ContentModerationModule` is the one import beyond the repository, and it is
  * light (one `forFeature`, no further imports): `findLive` reads it so a venue
  * pin a moderator has taken down stays off every gathering page too.
+ *
+ * `ListingRunByService` rides here as well, for a gathering's "Run by" line:
+ * it reads `listing_co_managers` through this module's own read-only
+ * `forFeature`, so the events domain never imports `ListingsModule`.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Listing]), ContentModerationModule],
-  providers: [ListingLookupService],
-  exports: [ListingLookupService],
+  imports: [
+    TypeOrmModule.forFeature([Listing, ListingCoManager]),
+    ContentModerationModule,
+  ],
+  providers: [ListingLookupService, ListingRunByService],
+  exports: [ListingLookupService, ListingRunByService],
 })
 export class ListingLookupModule {}

@@ -10,6 +10,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { ListingLookupService } from '../listings/listing-lookup.service';
+import { ListingRunByService } from '../listings/listing-run-by.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -287,6 +288,13 @@ describe('EventsService venue confirmation (LOC-16)', () => {
         },
         { provide: ListingLookupService, useValue: listingLookup },
         { provide: EventEmitter2, useValue: { emitAsync: jest.fn() } },
+        {
+          provide: ListingRunByService,
+          useValue: {
+            assertCanRunGatherings: jest.fn(),
+            resolveForDisplay: jest.fn().mockResolvedValue(new Map()),
+          },
+        },
         {
           provide: MentionNotificationService,
           useValue: { notify: jest.fn().mockResolvedValue(new Set<string>()) },

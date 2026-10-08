@@ -889,8 +889,8 @@ export class DirectoryService {
     // The scope is lifted into its own object so the two schedule arms below
     // cannot drift apart. Every narrowing condition (listing, published,
     // visibility tier, and for a stranger the confirmed-only rule) is carried
-    // by BOTH arms, so the OR stays a conjunct of this scope and can widen
-    // nothing: the arms differ only in which timestamp they test.
+    // by both venue arms, so the OR stays a conjunct of this scope and can
+    // widen nothing: the venue arms differ only in which timestamp they test.
     const upcomingScope = {
       listingId: listing.id,
       status: EventStatus.Published,
@@ -907,10 +907,25 @@ export class DirectoryService {
     // `endAt: MoreThanOrEqual(now)` carries the `end_at IS NOT NULL` half for
     // free, since SQL never matches a NULL against `>=`.
     const now = new Date();
+    // "Run by" (this listing's business runs the gathering) is a second pair
+    // of arms. It carries every narrowing condition of the venue arms
+    // (published, the viewer's visibility tier) apart from the confirmed-venue
+    // rule: only the listing's own team can name it as running a gathering
+    // (`ListingRunByService`), so nothing waits on a venue owner's consent.
+    // It never names `listingId`, so it cannot pull a gathering in through
+    // its venue. A gathering matching both pairs is one row, which
+    // `toListingUpcomingEvent` reads as `runBy`.
+    const runByScope = {
+      runByListingId: listing.id,
+      status: EventStatus.Published,
+      visibility: upcomingScope.visibility,
+    };
     const upcoming = await this.events.find({
       where: [
         { ...upcomingScope, startAt: MoreThanOrEqual(now) },
         { ...upcomingScope, endAt: MoreThanOrEqual(now) },
+        { ...runByScope, startAt: MoreThanOrEqual(now) },
+        { ...runByScope, endAt: MoreThanOrEqual(now) },
       ],
       order: { startAt: 'ASC' },
       take: 4,
