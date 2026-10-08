@@ -25,4 +25,11 @@ export class ReviewJoinRequestDto {
   @IsString()
   @MaxLength(64)
   approvalReason?: string;
+
+  // Staff-only free text, required by `JoinRequestsService.review` when the
+  // approval reason is `other` and ignored (stored as NULL) otherwise.
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  approvalNote?: string;
 }

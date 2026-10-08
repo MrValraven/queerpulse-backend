@@ -40,6 +40,10 @@ export interface JoinRequestView {
   source: string | null;
   /** Self-reported "where did you hear about QueerPulse". Null on legacy rows. */
   heardFrom: string | null;
+  /** Optional handle or link the applicant shared, as typed. STAFF ONLY:
+   *  `PublicJoinRequestStatusView` and `SubmittedJoinRequestView` leave it out.
+   *  Null when they shared none. */
+  socialProfile: string | null;
   status: PlatformJoinRequestStatus;
   ageAttestedAt: Date;
   termsVersion: string;
@@ -69,6 +73,13 @@ export interface JoinRequestView {
    * out.
    */
   approvalReason: string | null;
+  /**
+   * The STAFF-ONLY free-text note the reviewer wrote when approving with reason
+   * `other`. Plain text (markup stripped and trimmed at write time). Null for
+   * every other reason and status, and for approvals that predate the column.
+   * `PublicJoinRequestStatusView` and the member data export leave it out.
+   */
+  approvalNote: string | null;
   /**
    * The STAFF-ONLY free-text note on a declined request, written through
    * `PATCH /admin/join-requests/:id/note`. Plain text (markup stripped and
@@ -306,6 +317,7 @@ export function toJoinRequestView(
     mutualMemberEmail: request.mutualMemberEmail,
     source: request.source,
     heardFrom: request.heardFrom,
+    socialProfile: request.socialProfile,
     status: request.status,
     ageAttestedAt: request.ageAttestedAt,
     termsVersion: request.termsVersion,
@@ -315,6 +327,7 @@ export function toJoinRequestView(
     ...(reviewedByName ? { reviewedByName } : {}),
     declineReason: request.declineReason,
     approvalReason: request.approvalReason,
+    approvalNote: request.approvalNote,
     internalNote: request.internalNote,
     internalNoteUpdatedAt: request.internalNoteUpdatedAt,
     internalNoteUpdatedBy: request.internalNoteUpdatedBy,

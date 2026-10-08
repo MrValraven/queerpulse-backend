@@ -104,6 +104,7 @@ export class AdminJoinRequestsController {
       dto.status,
       dto.declineReason,
       dto.approvalReason,
+      dto.approvalNote,
     );
   }
 
@@ -250,6 +251,7 @@ export class AdminJoinRequestsController {
       dto.status,
       dto.declineReason,
       dto.approvalReason,
+      dto.approvalNote,
     );
   }
 }

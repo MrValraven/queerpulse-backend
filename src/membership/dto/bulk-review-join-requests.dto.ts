@@ -26,7 +26,8 @@ export const JOIN_REQUEST_BULK_ACTION_CAP = 50;
  * a bulk decline lands every id in `failed`, not a single up-front 400.
  * `approvalReason` works the same way for `status: Approved`: `review`
  * requires it per-id, so a bulk approve with an empty reason also lands every
- * id in `failed`.
+ * id in `failed`. `approvalNote` is required per-id when `approvalReason` is
+ * `other`, and is stored as NULL for every other reason and status.
  */
 export class BulkReviewJoinRequestsDto {
   @IsArray()
@@ -54,4 +55,9 @@ export class BulkReviewJoinRequestsDto {
   @IsString()
   @MaxLength(64)
   approvalReason?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  approvalNote?: string;
 }

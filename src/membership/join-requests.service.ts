@@ -281,6 +281,9 @@ export class JoinRequestsService {
       // rather than an empty attribution the queue would have to special-case.
       source: dto.source?.trim() || null,
       heardFrom: dto.heardFrom.trim(),
+      // Optional. Trimmed to null so a blank field reads as "shared none" and
+      // the queue never renders an empty row.
+      socialProfile: dto.socialProfile?.trim() || null,
       statusTokenHash: hashStatusToken(statusToken),
     });
     try {
@@ -886,6 +889,10 @@ export class JoinRequestsService {
     // Required for an approval, enforced here the same way as the decline
     // reason. Staff-only.
     approvalReason?: string,
+    // Staff-only free text explaining an approval whose reason is `other`.
+    // Required for that reason, ignored (stored as NULL) for every other
+    // reason and status.
+    approvalNote?: string,
   ): Promise<JoinRequestView> {
     if (
       status === PlatformJoinRequestStatus.Declined &&
@@ -898,6 +905,15 @@ export class JoinRequestsService {
       !approvalReason?.trim()
     ) {
       throw new BadRequestException('An approval reason is required');
+    }
+    const isApprovedWithOtherReason =
+      status === PlatformJoinRequestStatus.Approved &&
+      approvalReason?.trim() === 'other';
+    const storedApprovalNote = toStoredPlainTextOrNull(approvalNote);
+    if (isApprovedWithOtherReason && storedApprovalNote === null) {
+      throw new BadRequestException(
+        'Say why when the approval reason is Other',
+      );
     }
 
     // The claim and the invite minting run in one transaction on the same
@@ -958,6 +974,10 @@ export class JoinRequestsService {
         status === PlatformJoinRequestStatus.Approved
           ? (approvalReason?.trim() ?? null)
           : null;
+      // The note travels only with an approval whose reason is `other`.
+      const resolvedApprovalNote = isApprovedWithOtherReason
+        ? storedApprovalNote
+        : null;
 
       // Conditional claim: only a reviewer who flips it out of an open state
       // wins; a concurrent reviewer sees affected === 0 and is rejected.
@@ -970,6 +990,7 @@ export class JoinRequestsService {
           inviteId,
           declineReason: resolvedDeclineReason,
           approvalReason: resolvedApprovalReason,
+          approvalNote: resolvedApprovalNote,
         },
       );
       if (claim.affected !== 1) {
@@ -981,6 +1002,7 @@ export class JoinRequestsService {
       current.inviteId = inviteId;
       current.declineReason = resolvedDeclineReason;
       current.approvalReason = resolvedApprovalReason;
+      current.approvalNote = resolvedApprovalNote;
       return toJoinRequestView(current, inviteRef);
     });
   }
@@ -991,7 +1013,8 @@ export class JoinRequestsService {
    * `VerificationService.bulkDecide`'s per-item pattern (batch size capped at
    * the DTO layer via `JOIN_REQUEST_BULK_ACTION_CAP`): a failure on one id
    * (not found, already reviewed, concurrently claimed, missing decline
-   * reason, missing approval reason) lands that id in `failed`, and every
+   * reason, missing approval reason, missing note on an `other` approval)
+   * lands that id in `failed`, and every
    * other id is still attempted.
    *
    * ONLY an `HttpException` message reaches `failed[].reason`. Those are our
@@ -1019,6 +1042,7 @@ export class JoinRequestsService {
       | PlatformJoinRequestStatus.Waitlisted,
     declineReason?: string,
     approvalReason?: string,
+    approvalNote?: string,
   ): Promise<{
     succeeded: string[];
     failed: { id: string; reason: string }[];
@@ -1033,6 +1057,7 @@ export class JoinRequestsService {
           status,
           declineReason,
           approvalReason,
+          approvalNote,
         );
         succeeded.push(id);
       } catch (err) {

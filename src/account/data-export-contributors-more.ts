@@ -533,10 +533,11 @@ export class VerificationExportContributor implements DataExportContribution {
  * `profile` -> `joinApplication`: the application the member sent before they
  * had an account, found through the invite its approval minted and the member
  * redeemed. Their name, email, city and message, where they heard about the
- * platform, the Terms revision and age attestation they gave, and how it was
- * decided. The mutual member's email is another person's data, and the status
- * token hash, the reviewer, and the decline and approval keys stay out. Null
- * when the member joined without an application.
+ * platform, the social profile they shared, the Terms revision and age
+ * attestation they gave, and how it was decided. The mutual member's email is
+ * another person's data, and the status token hash, the reviewer, and the
+ * decline and approval keys stay out. Null when the member joined without an
+ * application.
  */
 @Injectable()
 export class JoinApplicationExportContributor implements DataExportContribution {
@@ -563,6 +564,7 @@ export class JoinApplicationExportContributor implements DataExportContribution 
       city: application.city,
       message: application.message,
       heardFrom: application.heardFrom,
+      socialProfile: application.socialProfile,
       termsVersion: application.termsVersion,
       ageAttestedAt: application.ageAttestedAt.toISOString(),
       status: application.status,

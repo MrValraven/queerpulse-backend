@@ -108,6 +108,17 @@ export class PlatformJoinRequest extends QueueAssignmentColumns {
   @Column({ type: 'varchar', length: 200, nullable: true })
   heardFrom!: string | null;
 
+  /**
+   * An optional social profile the applicant chose to share: a handle or a
+   * link, as typed. Self-reported context for a reviewer checking someone
+   * nobody here knows yet. STAFF-ONLY: the public status view, the submit
+   * response and anything else applicant-facing map their fields explicitly
+   * and leave it out. Null when they shared none, and on every row older than
+   * `AddJoinRequestSocialProfile1830500000000`.
+   */
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  socialProfile!: string | null;
+
   @Column({
     type: 'enum',
     enum: PlatformJoinRequestStatus,
@@ -153,6 +164,16 @@ export class PlatformJoinRequest extends QueueAssignmentColumns {
    */
   @Column({ type: 'varchar', length: 64, nullable: true })
   approvalReason!: string | null;
+
+  /**
+   * STAFF-ONLY free-text note the reviewer wrote when approving with
+   * `approvalReason` `other`, the context the closed-set key cannot carry.
+   * Required on those approvals and stored as plain text (markup stripped,
+   * trimmed). NEVER applicant-facing. Null for every other reason and status,
+   * and for approvals that predate `AddJoinRequestApprovalNote1830600000000`.
+   */
+  @Column({ type: 'text', nullable: true })
+  approvalNote!: string | null;
 
   /**
    * STAFF-ONLY free-text note on a DECLINED request: the context a closed-set

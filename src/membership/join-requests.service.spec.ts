@@ -246,6 +246,27 @@ describe('JoinRequestsService', () => {
       );
     });
 
+    it('stores the social profile trimmed', async () => {
+      await service.submit(dto({ socialProfile: '  @sam.costa  ' }));
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ socialProfile: '@sam.costa' }),
+      );
+    });
+
+    it('stores an empty/whitespace social profile as null', async () => {
+      await service.submit(dto({ socialProfile: '   ' }));
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ socialProfile: null }),
+      );
+    });
+
+    it('stores an omitted social profile as null', async () => {
+      await service.submit(dto());
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ socialProfile: null }),
+      );
+    });
+
     it('stamps ageAttestedAt and the terms version', async () => {
       await service.submit(dto({ termsVersion: '3.0' }));
       expect(repo.create).toHaveBeenCalledWith(
@@ -1253,6 +1274,61 @@ describe('JoinRequestsService', () => {
         expect.anything(),
         expect.objectContaining({ approvalReason: null }),
       );
+    });
+
+    // An `other` approval carries no closed-set meaning, so the note is the
+    // only record of why: a blank one is refused before anything is minted.
+    it('refuses an approval with reason other and a blank note', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      await expect(
+        service.review(
+          'r1',
+          'admin-1',
+          PlatformJoinRequestStatus.Approved,
+          undefined,
+          'other',
+          '   ',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(invites.createInviteForApproval).not.toHaveBeenCalled();
+      expect(txRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('stores the trimmed note on an approval with reason other', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      const result = await service.review(
+        'r1',
+        'admin-1',
+        PlatformJoinRequestStatus.Approved,
+        undefined,
+        'other',
+        '  Met them at the spring picnic  ',
+      );
+      expect(txRepo.update).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          approvalReason: 'other',
+          approvalNote: 'Met them at the spring picnic',
+        }),
+      );
+      expect(result.approvalNote).toBe('Met them at the spring picnic');
+    });
+
+    it('writes a null approval note for any reason besides other', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      const result = await service.review(
+        'r1',
+        'admin-1',
+        PlatformJoinRequestStatus.Approved,
+        undefined,
+        'member_vouched',
+        'Stray note from a reason switch',
+      );
+      expect(txRepo.update).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ approvalNote: null }),
+      );
+      expect(result.approvalNote).toBeNull();
     });
   });
 

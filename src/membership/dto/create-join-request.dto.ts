@@ -89,6 +89,21 @@ export class CreateMembershipJoinRequestDto {
   heardFrom!: string;
 
   /**
+   * An optional social profile (a handle or a link, any platform) the applicant
+   * chose to share so the review team can get to know them. Free text, trimmed
+   * before validation, and deliberately not URL-validated: `@name` is as
+   * welcome as a link. The admin queue decides what is safe to render as a
+   * link. Blank after trimming is stored as null by the service.
+   */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MaxLength(200)
+  socialProfile?: string;
+
+  /**
    * Optional date of birth (`YYYY-MM-DD`). When supplied it is checked against
    * the 18+ gate and a minor is rejected with 403 `UNDER_18`. Optional because
    * the attestation checkbox — not a DOB field — is the primary gate the
