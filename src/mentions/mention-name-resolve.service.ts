@@ -11,6 +11,8 @@ import {
 } from '../communities/entities/community-member.entity';
 import { Listing, ListingStatus } from '../listings/entities/listing.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { isThreadPublished } from '../forum/forum-threads.service';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
@@ -22,6 +24,9 @@ import {
   memberNameOptionsFor,
 } from '../messaging/message-response';
 import { resolveMatchedChatMemberKeys } from '../messaging/matched-member-key';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { BlockFilterService } from '../social/block-filter.service';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import type { ResolvedMentionNameResponse } from './dto/resolved-mention-name.response';
@@ -30,6 +35,7 @@ import {
   type MentionNameKind,
 } from './dto/resolve-mention-names.query';
 import {
+  EVENT_MODERATION_SUBJECT_TYPE,
   holdsEffectiveCommunityRole,
   isThreadOpenToEveryMember,
 } from './mention-notification.service';
@@ -42,15 +48,29 @@ import {
  * already reach by its own route, so this never becomes a side door onto a name
  * the platform otherwise withholds:
  *
- *  - `member` — active users only, mirroring `MemberLookup.userIdsForSlugs`
- *    (and `ProfilesService.searchMembers`). A suspended or erased account keeps
- *    its raw `@slug`.
- *  - `community` — every tier except `private`, unless the viewer is on that
+ *  - `member`: active users only, mirroring `MemberLookup.userIdsForSlugs`
+ *    (and `ProfilesService.searchMembers`), and only members the viewer could
+ *    open by `GET /members/:slug`: a block either way, a member who hid their
+ *    profile from the viewer, a live "Hide me for 24 hours" and a moderator
+ *    takedown all leave the raw `@slug` (the gates of
+ *    `ProfilesService.assertVisibleOrNotFound`, applied here as one batch).
+ *    A `private` or `network` profile tier keeps its name, since that tier
+ *    only chooses between the full and the limited card, and the limited card
+ *    names the member. The viewer's own mention always resolves. A suspended
+ *    or erased account keeps its raw `@slug`.
+ *  - `community`: every tier except `private`, unless the viewer is on that
  *    private community's roster. Same predicate as `browseBaseQuery`'s
  *    `discover` filter, so a private community's existence stays unleaked.
- *  - `business` — `live` listings only; `review`/`question` are moderation
+ *  - `business`: `live` listings only; `review`/`question` are moderation
  *    states the public directory doesn't serve.
- *  - `event` — `published` only, matching every public events read.
+ *  - `event`: only a gathering the viewer could open by its page, under the
+ *    gates of `EventsService.assertCanView`, applied here as one batch.
+ *    `published` and `cancelled` only: a cancelled gathering's page stays
+ *    reachable, while a draft names itself to no one. A moderator takedown
+ *    names it to its organisers (host and co-hosts) alone. The audience tier
+ *    (`invite_only`, `network`, `extended_network`, `community`) runs through
+ *    `EventAudienceGateService.filterViewable`, so the tag of an invite-only
+ *    or members-only gathering names it only to the people its page admits.
  *  - `thread`: not deleted, past the forum's publish gate
  *    (`isThreadPublished`: a scheduled thread, or one pending or refused in
  *    review, names itself to its author alone), and readable by the viewer
@@ -61,7 +81,7 @@ import {
  *    (`holdsEffectiveCommunityRole`), so a title written inside a gated
  *    community or a space stays gated content.
  *
- * Unresolvable refs are simply omitted — the client renders the raw
+ * Unresolvable refs are simply omitted: the client renders the raw
  * `sigil + slug` it already parsed, which is the pre-existing behaviour.
  *
  * PRD-423: given the id of a matched Go together chat the viewer holds a
@@ -86,6 +106,16 @@ export class MentionNameResolveService {
     private readonly conversations: Repository<Conversation>,
     @InjectRepository(ConversationParticipant)
     private readonly participants: Repository<ConversationParticipant>,
+    private readonly blockFilter: BlockFilterService,
+    private readonly hiddenFrom: HiddenFromService,
+    private readonly contentModeration: ContentModerationService,
+    // Read-only: whether the viewer co-hosts a taken-down gathering, the one
+    // organiser the event row alone cannot name.
+    @InjectRepository(EventCohost)
+    private readonly eventCohosts: Repository<EventCohost>,
+    // Provided by `MentionsModule` itself (see its providers), so no import
+    // of `EventsModule` and no module cycle.
+    private readonly eventAudience: EventAudienceGateService,
   ) {}
 
   async resolve(
@@ -105,19 +135,13 @@ export class MentionNameResolveService {
         : new Set<string>();
     const isMatchedChatViewer = matchedChatUserIds.size > 0;
 
-    // Five independent reads of the same committed snapshot — they go out
-    // together rather than in series. Each is skipped entirely when the text
+    // Five independent reads of the same committed snapshot: they go out
+    // together in parallel. Each is skipped entirely when the text
     // mentioned nothing of that kind.
     const [memberRows, communityRows, listingRows, eventRows, threadRows] =
       await Promise.all([
         this.findBySlugs(isMatchedChatViewer ? [] : memberSlugs, (slugs) =>
-          this.profiles
-            .createQueryBuilder('p')
-            .innerJoin('p.user', 'u', 'u.status = :active', {
-              active: UserStatus.Active,
-            })
-            .where('p.slug IN (:...slugs)', { slugs })
-            .getMany(),
+          this.visibleMemberProfiles(viewerId, slugs),
         ),
         this.findBySlugs(this.kindSlugs(slugsByKind, 'community'), (slugs) =>
           this.communities.find({ where: { slug: In(slugs) } }),
@@ -128,9 +152,7 @@ export class MentionNameResolveService {
           }),
         ),
         this.findBySlugs(this.kindSlugs(slugsByKind, 'event'), (slugs) =>
-          this.events.find({
-            where: { slug: In(slugs), status: EventStatus.Published },
-          }),
+          this.viewableEvents(viewerId, slugs),
         ),
         this.findBySlugs(this.kindSlugs(slugsByKind, 'thread'), (slugs) =>
           this.threads.find({
@@ -243,6 +265,103 @@ export class MentionNameResolveService {
   }
 
   /**
+   * The active members behind `slugs` whom `viewerId` could open by slug:
+   * blocks either way, a hide from the viewer, a live "Hide me for 24 hours"
+   * and a moderator takedown each drop the member. The gates are the ones
+   * `ProfilesService.applyMemberVisibilityGates` and `excludeTakenDownMembers`
+   * apply, through the same services, so a name never reaches a viewer the
+   * profile itself is withheld from. Two reads for the whole batch, plus the
+   * takedown lookup; the viewer's own profile rides a second parallel read
+   * and skips every gate, as the owner does on their own profile.
+   */
+  private async visibleMemberProfiles(
+    viewerId: string,
+    slugs: string[],
+  ): Promise<Profile[]> {
+    const gatedQuery = this.profiles
+      .createQueryBuilder('p')
+      .innerJoin('p.user', 'u', 'u.status = :active', {
+        active: UserStatus.Active,
+      })
+      .where('p.slug IN (:...slugs)', { slugs })
+      .andWhere('p.user_id <> :mentionViewerId', {
+        mentionViewerId: viewerId,
+      })
+      .andWhere('(p.hidden_until IS NULL OR p.hidden_until <= now())');
+    this.blockFilter.excludeBlocked(gatedQuery, viewerId, '"p"."user_id"');
+    this.hiddenFrom.excludeHiddenFrom(gatedQuery, viewerId, '"p"."user_id"');
+    const [otherProfiles, ownProfiles] = await Promise.all([
+      gatedQuery.getMany(),
+      this.profiles.find({ where: { userId: viewerId, slug: In(slugs) } }),
+    ]);
+    const takedownStates = otherProfiles.length
+      ? await this.contentModeration.statesForAnyType(
+          [MEMBER_SUBJECT_TYPE],
+          otherProfiles.flatMap((profile) => [profile.slug, profile.userId]),
+        )
+      : new Map<string, { hidden: boolean; removed: boolean }>();
+    const isTakenDown = (profile: Profile): boolean =>
+      [profile.slug, profile.userId].some((subjectId) => {
+        const state = takedownStates.get(subjectId);
+        return !!state && (state.hidden || state.removed);
+      });
+    return [
+      ...otherProfiles.filter((profile) => !isTakenDown(profile)),
+      ...ownProfiles,
+    ];
+  }
+
+  /**
+   * The published or cancelled gatherings behind `slugs` that `viewerId`
+   * could open by their page: the gates of `EventsService.assertCanView`,
+   * applied to the whole batch. A moderator takedown keeps a gathering for
+   * its organisers alone, and the audience tier goes through
+   * `EventAudienceGateService.filterViewable` (organisers pass every tier
+   * there). One event read, then the tier filter and the takedown lookup in
+   * parallel, plus one co-host read only when a viewable gathering the
+   * viewer does not host was taken down.
+   */
+  private async viewableEvents(
+    viewerId: string,
+    slugs: string[],
+  ): Promise<Event[]> {
+    const eventRows = await this.events.find({
+      where: {
+        slug: In(slugs),
+        status: In([EventStatus.Published, EventStatus.Cancelled]),
+      },
+    });
+    if (!eventRows.length) return [];
+    const [audienceEvents, takedownStates] = await Promise.all([
+      this.eventAudience.filterViewable(eventRows, viewerId),
+      this.contentModeration.statesForAnyType(
+        [EVENT_MODERATION_SUBJECT_TYPE],
+        eventRows.map((event) => event.id),
+      ),
+    ]);
+    const isTakenDown = (event: Event): boolean => {
+      const state = takedownStates.get(event.id);
+      return !!state && (state.hidden || state.removed);
+    };
+    const takenDownEventIdsToCheck = audienceEvents
+      .filter((event) => isTakenDown(event) && event.hostId !== viewerId)
+      .map((event) => event.id);
+    const cohostRows = takenDownEventIdsToCheck.length
+      ? await this.eventCohosts.find({
+          where: { userId: viewerId, eventId: In(takenDownEventIdsToCheck) },
+          select: { eventId: true },
+        })
+      : [];
+    const cohostedEventIds = new Set(cohostRows.map((row) => row.eventId));
+    return audienceEvents.filter(
+      (event) =>
+        !isTakenDown(event) ||
+        event.hostId === viewerId ||
+        cohostedEventIds.has(event.id),
+    );
+  }
+
+  /**
    * PRD-423: the user ids of every seat in `conversationId` when it is a
    * matched Go together chat AND `viewerId` holds a seat in it (a former
    * member still reads its history, so a left seat counts). Empty otherwise,
@@ -339,6 +458,10 @@ export class MentionNameResolveService {
     );
   }
 }
+
+/** The `content_moderation` subject type a member takedown is filed under
+ *  (`ProfilesService.MEMBER_SUBJECT_TYPE`). */
+const MEMBER_SUBJECT_TYPE = 'member';
 
 /** `["member:ana", "member:bo", "event:pride"]` -> `{member: [ana, bo], …}`,
  *  de-duplicated. The query DTO has already rejected any ref that isn't a known

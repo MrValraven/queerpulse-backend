@@ -35,6 +35,13 @@ export interface NotificationResponse {
    * which is why the copy names them and counts the rest.
    */
   otherActorCount: number;
+  /**
+   * `true` once the member cleared this row from the bell dropdown
+   * (`POST /notifications/:id/hide`). The dropdown leaves such a row out and
+   * the /notifications page still lists it. Derived from the row's
+   * `hiddenFromBellAt`, so the timestamp itself stays on the server.
+   */
+  isHiddenFromBell: boolean;
 }
 
 /**
@@ -1024,6 +1031,9 @@ export function toNotificationResponse(
     read: notification.read,
     createdAt: notification.createdAt,
     otherActorCount: notification.otherActorCount ?? 0,
+    // A row inserted in this process carries no value in memory, which reads
+    // as "shows in the bell", the column's state for every new row.
+    isHiddenFromBell: Boolean(notification.hiddenFromBellAt),
     actor: actorProfile
       ? {
           slug: isGoTogetherChatMention ? '' : actorProfile.slug,

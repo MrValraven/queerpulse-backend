@@ -233,12 +233,27 @@ export interface EventDetail extends EventSummary {
     accessTier: AccessTier;
   } | null;
   // The linked venue's display name + public slug (or null when `listingId`
-  // is null, or the listing is no longer live) — resolved via
+  // is null, or the listing is no longer live), resolved via
   // `ListingLookupService.findLive` in `EventsService.buildDetail`, same
   // detail-only lookup shape as `communitySlug` immediately above. The
   // frontend builds the `/local/directory/:slug` link itself (see
   // `businessPath` in `routeMap.ts`) rather than the backend emitting a path.
-  venueListing: { slug: string; name: string } | null;
+  //
+  // `latitude`/`longitude` are the listing's OWN map pin (degrees, as numbers),
+  // for drawing the venue on a map. Unrelated to the gathering's attendee-only
+  // `address`: this is the business's public pin, the one its directory page
+  // already shows to every member, so it reveals nothing the venue name and
+  // its link do not. Both are null whenever that public page would not show
+  // the pin: the owner paused the listing, a moderator hid or removed it, it
+  // is online-only, or it was never pinned. A permanently closed venue keeps
+  // its pin, since its page stays up. See `VenueListingRef` in
+  // `listing-lookup.service.ts` for the full rule.
+  venueListing: {
+    slug: string;
+    name: string;
+    latitude: number | null;
+    longitude: number | null;
+  } | null;
   /**
    * ORGANISERS ONLY (LOC-16): whether the venue this gathering names has
    * agreed to carry it, so the host can see why their venue is or is not

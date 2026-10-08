@@ -10,6 +10,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { ListingLookupService } from '../listings/listing-lookup.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -255,7 +256,7 @@ describe('EventsService venue confirmation (LOC-16)', () => {
           useValue: {
             assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
             isMember: jest.fn().mockResolvedValue(false),
-            communityIdsForUser: jest.fn().mockResolvedValue([]),
+            effectiveCommunityIdsForUser: jest.fn().mockResolvedValue([]),
             slugById: jest.fn().mockResolvedValue(null),
             hostingRefById: jest.fn().mockResolvedValue(null),
           },
@@ -286,6 +287,10 @@ describe('EventsService venue confirmation (LOC-16)', () => {
         },
         { provide: ListingLookupService, useValue: listingLookup },
         { provide: EventEmitter2, useValue: { emitAsync: jest.fn() } },
+        {
+          provide: MentionNotificationService,
+          useValue: { notify: jest.fn().mockResolvedValue(new Set<string>()) },
+        },
       ],
     }).compile();
     service = module.get(EventsService);

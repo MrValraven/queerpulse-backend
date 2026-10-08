@@ -1633,6 +1633,11 @@ export class PushNotificationListener {
           : `/messages?c=${conversationParam}`;
       }
     }
+    if (source === 'event') {
+      // A mention written in a gathering's description opens that gathering.
+      const eventSlug = this.payloadString(notification, 'eventSlug');
+      if (eventSlug) return gatheringPath(eventSlug);
+    }
     return '/notifications';
   }
 

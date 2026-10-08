@@ -19,7 +19,8 @@ import { isCommunityStaffRole } from '../communities/community-staff-access';
 import { resolveEffectiveRole } from '../communities/subcommunity-rules';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Listing } from '../listings/entities/listing.entity';
-import { Event } from '../events/entities/event.entity';
+import { Event, EventStatus } from '../events/entities/event.entity';
+import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { seatExcludedFromMailboxPredicate } from '../messaging/mailbox-seats';
@@ -51,6 +52,13 @@ const REVIEW_STATE_APPROVED = 'approved';
 // `forum-threads.service.ts`, restated here for the module-cycle reason
 // `threadPassesPublishGate` documents below.
 const PLATFORM_STAFF_ROLES = [UserRole.Moderator, UserRole.Admin];
+
+/**
+ * `content_moderation.subject_type` a gathering is taken down under, keyed by
+ * the event's uuid. The same value as `EventsService.SUBJECT_TYPE`, which is
+ * private to that service, so it is repeated here; keep them in sync.
+ */
+export const EVENT_MODERATION_SUBJECT_TYPE = 'event';
 
 /**
  * The forum's member-facing publish gate for one loaded thread: published at
@@ -160,6 +168,9 @@ export class MentionNotificationService {
     private readonly notifications: NotificationsService,
     private readonly blockFilter: BlockFilterService,
     private readonly contentModeration: ContentModerationService,
+    // The gathering's own audience tier, for an `event` source (a mention
+    // written in a gathering's description). See `eventDescriptionReaders`.
+    private readonly eventAudience: EventAudienceGateService,
   ) {}
 
   /**
@@ -599,6 +610,9 @@ export class MentionNotificationService {
    *   its effective roster and platform staff unless its author cross-posted
    *   it; anyone blocked either way with the thread author is dropped.
    * - `message`: the conversation's current participants (below).
+   * - `event`: the people the gathering's detail page admits
+   *   (`eventDescriptionReaders`), the same gate `EventsService.assertCanView`
+   *   applies to `GET /events/:slug`.
    * - Any other source: nobody. Only a `community` payload with no
    *   `communitySlug` (a global post) stays open to every candidate.
    *
@@ -660,6 +674,12 @@ export class MentionNotificationService {
     if (source === 'forum') {
       return this.forumThreadReaders(payloadBase.threadSlug, candidateUserIds);
     }
+    if (source === 'event') {
+      return this.eventDescriptionReaders(
+        payloadBase.eventSlug,
+        candidateUserIds,
+      );
+    }
     if (source !== 'community') {
       // A source this check does not know has no audience it can state, so
       // it notifies nobody. A new caller adds its own branch above, with the
@@ -673,6 +693,57 @@ export class MentionNotificationService {
       return new Set(candidateUserIds);
     }
     return this.communityPostReaders(communitySlug, candidateUserIds);
+  }
+
+  /**
+   * Who of `candidateUserIds` can open the gathering `eventSlug`, by the gate
+   * `EventsService.assertCanView` applies to its detail page:
+   *
+   * 1. A moderator takedown admits its organizers (host and co-hosts) alone.
+   * 2. A draft admits its organizers alone.
+   * 3. Otherwise the gathering's audience tier (`invite_only`, `network`,
+   *    `extended_network`, `community`; `public` and `members` admit
+   *    everyone), read through `EventAudienceGateService.audienceAmong`, the
+   *    many-viewers form of the same `isViewable` decision.
+   *
+   * Fails closed on an unresolvable slug, like the forum branch: a gathering
+   * nobody can load is a gathering nobody can be shown to read. Three to five
+   * queries for any candidate count (the event, its takedown state, the
+   * co-host read, and the reads of its own tier). A read that throws
+   * propagates, so the caller's `try` drops the notification.
+   */
+  private async eventDescriptionReaders(
+    eventSlug: unknown,
+    candidateUserIds: string[],
+  ): Promise<Set<string>> {
+    if (typeof eventSlug !== 'string' || !eventSlug) {
+      return new Set();
+    }
+    const event = await this.events.findOne({
+      where: { slug: eventSlug },
+      select: {
+        id: true,
+        hostId: true,
+        status: true,
+        visibility: true,
+        communityId: true,
+      },
+    });
+    if (!event) {
+      return new Set();
+    }
+    const [audience, moderation] = await Promise.all([
+      this.eventAudience.audienceAmong(event, candidateUserIds),
+      this.contentModeration.stateFor(EVENT_MODERATION_SUBJECT_TYPE, event.id),
+    ]);
+    if (
+      moderation.hidden ||
+      moderation.removed ||
+      event.status === EventStatus.Draft
+    ) {
+      return audience.organizerUserIds;
+    }
+    return audience.viewerUserIds;
   }
 
   /**

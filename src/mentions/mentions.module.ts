@@ -5,8 +5,14 @@ import { Notification } from '../notifications/entities/notification.entity';
 import { Community } from '../communities/entities/community.entity';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { CommunityMembershipModule } from '../communities/community-membership.module';
+import { ConnectionsModule } from '../connections/connections.module';
 import { Listing } from '../listings/entities/listing.entity';
 import { Event } from '../events/entities/event.entity';
+import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventInvite } from '../events/entities/event-invite.entity';
+import { EventRsvp } from '../events/entities/event-rsvp.entity';
+import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
@@ -23,7 +29,7 @@ import { MentionsController } from './mentions.controller';
     // Exports `NotificationsService`, which every mention fan-out ultimately
     // calls to write + push the `mention` notification.
     NotificationsModule,
-    // Entity repos, not sibling services — resolving a mentioned entity's
+    // Entity repos for the read-only lookups: resolving a mentioned entity's
     // steward is a read-only lookup, and injecting each domain's service here
     // would risk circular module deps (e.g. forum -> mentions -> forum).
     // `Notification` is the read side's source of truth: mentions are persisted
@@ -47,6 +53,13 @@ import { MentionsController } from './mentions.controller';
       // fan-out lets moderators and admins past the publish and community
       // gates the way the forum's own read does.
       User,
+      // Read-only: the repositories `EventAudienceGateService` (provided
+      // below) reads, so a gathering-description mention reaches only the
+      // people the gathering's detail page admits. `MentionNameResolveService`
+      // reads `EventCohost` too, for the organiser exemption on a takedown.
+      EventCohost,
+      EventInvite,
+      EventRsvp,
     ]),
     // `BlockFilterService`, so a forum fan-out drops anyone blocked either way
     // with the thread's author. Plain import: nothing `SocialModule` imports,
@@ -57,10 +70,25 @@ import { MentionsController } from './mentions.controller';
     // only the staff of a community a moderator hid or removed. A leaf
     // module (its only import is its own entity repo), so no cycle.
     ContentModerationModule,
+    // `ConnectionsService` and `CommunityMembershipService`, the two services
+    // `EventAudienceGateService` depends on. `EventsModule` imports both
+    // already and neither reaches back to this module, so no cycle.
+    ConnectionsModule,
+    CommunityMembershipModule,
   ],
   controllers: [MentionsController],
   providers: [
     MentionNotificationService,
+    // The gathering audience gate, provided here as well as in `EventsModule`.
+    // `EventsModule` imports this module (an event description's mentions
+    // fan out through `MentionNotificationService`), so importing it back
+    // would close a cycle. The gate is stateless (repositories and two
+    // stateless services), so a second instance cannot drift from the first:
+    // the same precedent as `CardTokenService` in `EventsModule`. Injected by
+    // `MentionNotificationService`, `MentionsInboxService` and
+    // `MentionNameResolveService` (an `e/slug` tag names only a gathering the
+    // viewer could open).
+    EventAudienceGateService,
     MentionNameResolveService,
     MentionsInboxService,
   ],

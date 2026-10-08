@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { ListingLookupService } from '../listings/listing-lookup.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -107,6 +108,7 @@ describe('EventsService.rosterCounts', () => {
       {} as unknown as MediaCropService,
       {} as unknown as ListingLookupService,
       {} as unknown as EventEmitter2,
+      {} as unknown as MentionNotificationService,
     );
   });
 

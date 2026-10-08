@@ -1,5 +1,9 @@
 import { ArrayContains, FindOneOptions, Not, Repository } from 'typeorm';
 import {
+  ContentModerationService,
+  ContentModerationState,
+} from '../content-moderation/content-moderation.service';
+import {
   Listing,
   ListingOperatingState,
   ListingStatus,
@@ -15,6 +19,12 @@ import { ListingLookupService } from './listing-lookup.service';
 describe('ListingLookupService', () => {
   let listings: {
     findOne: jest.Mock<Promise<unknown>, [FindOneOptions<Listing>]>;
+  };
+  let contentModeration: {
+    statesForAnyType: jest.Mock<
+      Promise<Map<string, ContentModerationState>>,
+      [readonly string[], readonly string[]]
+    >;
   };
   let service: ListingLookupService;
 
@@ -39,8 +49,17 @@ describe('ListingLookupService', () => {
         .fn<Promise<unknown>, [FindOneOptions<Listing>]>()
         .mockResolvedValue(null),
     };
+    contentModeration = {
+      statesForAnyType: jest
+        .fn<
+          Promise<Map<string, ContentModerationState>>,
+          [readonly string[], readonly string[]]
+        >()
+        .mockResolvedValue(new Map()),
+    };
     service = new ListingLookupService(
       listings as unknown as Repository<Listing>,
+      contentModeration as unknown as ContentModerationService,
     );
   });
 
@@ -100,5 +119,77 @@ describe('ListingLookupService', () => {
       const where = whereOfLastLookup();
       expect(where).toEqual({ id: 'listing-1', status: ListingStatus.Live });
     });
+
+    // The pin follows the listing's own public page (see `VenueListingRef`).
+    const pinnedVenue = {
+      id: 'listing-pinned',
+      slug: 'casa-lux',
+      name: 'Casa Lux',
+      online: false,
+      isHiddenByOwner: false,
+      operatingState: ListingOperatingState.Open,
+      latitude: 38.7223,
+      longitude: -9.1393,
+    };
+
+    it('carries the pin of a venue whose public page shows it', async () => {
+      listings.findOne.mockResolvedValue(pinnedVenue);
+      await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
+        slug: 'casa-lux',
+        name: 'Casa Lux',
+        latitude: 38.7223,
+        longitude: -9.1393,
+      });
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledWith(
+        ['business', 'listing'],
+        ['casa-lux'],
+      );
+    });
+
+    it('keeps the pin of a permanently closed venue, whose page stays up', async () => {
+      listings.findOne.mockResolvedValue({
+        ...pinnedVenue,
+        operatingState: ListingOperatingState.PermanentlyClosed,
+      });
+      await expect(service.findLive(pinnedVenue.id)).resolves.toMatchObject({
+        latitude: 38.7223,
+        longitude: -9.1393,
+      });
+    });
+
+    it.each([
+      ['paused by its owner', { isHiddenByOwner: true }],
+      ['online-only', { online: true }],
+      ['missing half its pin', { longitude: null }],
+    ])(
+      'keeps the name and drops the pin of a venue %s',
+      async (_label, overrides) => {
+        listings.findOne.mockResolvedValue({ ...pinnedVenue, ...overrides });
+        await expect(service.findLive(pinnedVenue.id)).resolves.toEqual({
+          slug: 'casa-lux',
+          name: 'Casa Lux',
+          latitude: null,
+          longitude: null,
+        });
+      },
+    );
+
+    it.each([
+      ['hidden', { hidden: true, removed: false }],
+      ['removed', { hidden: false, removed: true }],
+    ])(
+      'drops the pin of a venue a moderator has %s',
+      async (_label, moderationState) => {
+        listings.findOne.mockResolvedValue(pinnedVenue);
+        contentModeration.statesForAnyType.mockResolvedValue(
+          new Map([['casa-lux', moderationState]]),
+        );
+        await expect(service.findLive(pinnedVenue.id)).resolves.toMatchObject({
+          name: 'Casa Lux',
+          latitude: null,
+          longitude: null,
+        });
+      },
+    );
   });
 });

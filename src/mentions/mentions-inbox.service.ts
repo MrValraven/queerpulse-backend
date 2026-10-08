@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
@@ -15,6 +15,9 @@ import {
 import { Profile } from '../users/entities/profile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { Community } from '../communities/entities/community.entity';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { Event, EventStatus } from '../events/entities/event.entity';
+import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { PAGE_SIZE, Paginated, normalizePage } from '../common/pagination';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { loadMatchedChatMentionRenderer } from '../messaging/matched-chat-mention-text';
@@ -24,6 +27,7 @@ import {
   MentionResponse,
   toMentionResponse,
 } from './dto/mention-response';
+import { EVENT_MODERATION_SUBJECT_TYPE } from './mention-notification.service';
 import {
   collectPayloadStrings,
   isReadableThread,
@@ -39,7 +43,9 @@ import {
  * Two batched enrichment queries per page (never one-per-row): the actor
  * profiles behind the rows' `payload.actorId`, and the source labels (forum
  * thread titles / community names) behind their `threadSlug`/`communitySlug` —
- * mirroring `NotificationsService.attachActors`.
+ * mirroring `NotificationsService.attachActors`. A page holding `event`
+ * mentions (a gathering's description) adds the batched gathering read of
+ * `readableMentionEvents`.
  *
  * ENG-411: a third batched step checks each row's source (one query per
  * source kind, see `staleMentionExcerptIds`, which the data export shares)
@@ -60,6 +66,12 @@ export class MentionsInboxService {
     private readonly communities: Repository<Community>,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
+    // Holds an `event` mention's label and excerpt to the gatherings this
+    // member can still open (`readableMentionEvents`). `MentionsModule`
+    // always provides it; a construction without it (a unit fixture) serves
+    // no gathering label or excerpt, the closed reading.
+    @Optional()
+    private readonly eventAudience?: EventAudienceGateService,
   ) {}
 
   async list(
@@ -94,7 +106,7 @@ export class MentionsInboxService {
       this.notifications.count({ where }),
     ]);
     return {
-      items: await this.mapRows(rows),
+      items: await this.mapRows(rows, userId),
       total,
       page,
       pageSize: PAGE_SIZE,
@@ -132,44 +144,59 @@ export class MentionsInboxService {
     return { ok: true };
   }
 
-  private async mapRows(rows: Notification[]): Promise<MentionResponse[]> {
+  private async mapRows(
+    rows: Notification[],
+    userId: string,
+  ): Promise<MentionResponse[]> {
     const actorIds = collectPayloadStrings(rows, 'actorId');
     const threadSlugs = collectPayloadStrings(rows, 'threadSlug');
     const communitySlugs = collectPayloadStrings(rows, 'communitySlug');
+    const eventSlugs = collectPayloadStrings(
+      rows.filter((row) => row.payload?.source === 'event'),
+      'eventSlug',
+    );
 
-    const [profiles, threadRows, communityRows] = await Promise.all([
-      actorIds.length
-        ? this.profiles.find({ where: { userId: In(actorIds) } })
-        : Promise.resolve([] as Profile[]),
-      threadSlugs.length
-        ? this.threads.find({
-            // A withdrawn thread's title never resolves here (PRD-160). The
-            // mention row survives its thread, so without this the inbox went
-            // on rendering the title of a thread its author had retracted, to
-            // exactly the person named in it. An unresolved slug falls through
-            // `toMentionResponse`'s existing "no source label" path, which is
-            // what a mention whose source is gone should read as.
-            where: { slug: In(threadSlugs), deletedAt: IsNull() },
-            select: { id: true, slug: true, title: true, reviewState: true },
-          })
-        : Promise.resolve([] as ForumThread[]),
-      communitySlugs.length
-        ? this.communities.find({
-            where: { slug: In(communitySlugs) },
-            select: {
-              slug: true,
-              name: true,
-              archivedAt: true,
-              parentId: true,
-            },
-          })
-        : Promise.resolve([] as Community[]),
-    ]);
+    const [profiles, threadRows, communityRows, readableEvents] =
+      await Promise.all([
+        actorIds.length
+          ? this.profiles.find({ where: { userId: In(actorIds) } })
+          : Promise.resolve([] as Profile[]),
+        threadSlugs.length
+          ? this.threads.find({
+              // A withdrawn thread's title never resolves here (PRD-160). The
+              // mention row survives its thread, so without this the inbox went
+              // on rendering the title of a thread its author had retracted, to
+              // exactly the person named in it. An unresolved slug falls through
+              // `toMentionResponse`'s existing "no source label" path, which is
+              // what a mention whose source is gone should read as.
+              where: { slug: In(threadSlugs), deletedAt: IsNull() },
+              select: { id: true, slug: true, title: true, reviewState: true },
+            })
+          : Promise.resolve([] as ForumThread[]),
+        communitySlugs.length
+          ? this.communities.find({
+              where: { slug: In(communitySlugs) },
+              select: {
+                slug: true,
+                name: true,
+                archivedAt: true,
+                parentId: true,
+              },
+            })
+          : Promise.resolve([] as Community[]),
+        this.readableMentionEvents(eventSlugs, userId),
+      ]);
 
+    // A gathering this member can no longer open serves no excerpt either:
+    // it is left out of `events`, which the freshness check reads as gone.
     const staleExcerptNotificationIds = await staleMentionExcerptIds(
       rows,
       this.dataSource,
-      { threads: threadRows, communities: communityRows },
+      {
+        threads: threadRows,
+        communities: communityRows,
+        events: readableEvents.map(({ event }) => event),
+      },
     );
 
     const resolvers: MentionResolvers = {
@@ -187,11 +214,65 @@ export class MentionsInboxService {
       communityNameBySlug: new Map(
         communityRows.map((community) => [community.slug, community.name]),
       ),
+      eventTitleBySlug: new Map(
+        readableEvents
+          .filter(({ isTakenDown }) => !isTakenDown)
+          .map(({ event }) => [event.slug, event.title]),
+      ),
       staleExcerptNotificationIds,
     };
 
     const readableRows = await this.withReadableMatchedChatExcerpts(rows);
     return readableRows.map((row) => toMentionResponse(row, resolvers));
+  }
+
+  /**
+   * The published gatherings among `eventSlugs` that `userId` can still open
+   * by their audience tier (`EventAudienceGateService.filterViewable`, the
+   * batched form of the detail page's gate), each with whether a platform
+   * moderator took it down. A takedown hides the label here; the freshness
+   * check blanks the excerpt for it on its own read. A draft or cancelled
+   * gathering never loads. Two queries plus the gate's own batched reads,
+   * and none when the page holds no `event` mention.
+   */
+  private async readableMentionEvents(
+    eventSlugs: string[],
+    userId: string,
+  ): Promise<Array<{ event: Event; isTakenDown: boolean }>> {
+    if (!eventSlugs.length || !this.eventAudience) return [];
+    const eventAudience = this.eventAudience;
+    const eventRows = await this.dataSource.getRepository(Event).find({
+      where: { slug: In(eventSlugs), status: EventStatus.Published },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        description: true,
+        hostId: true,
+        visibility: true,
+        communityId: true,
+      },
+    });
+    if (!eventRows.length) return [];
+    const [viewableEvents, moderationRows] = await Promise.all([
+      eventAudience.filterViewable(eventRows, userId),
+      this.dataSource.getRepository(ContentModeration).find({
+        where: {
+          subjectType: EVENT_MODERATION_SUBJECT_TYPE,
+          subjectId: In(eventRows.map((event) => event.id)),
+        },
+        select: { subjectId: true, hiddenAt: true, removedAt: true },
+      }),
+    ]);
+    const takenDownEventIds = new Set(
+      moderationRows
+        .filter((row) => !!row.hiddenAt || !!row.removedAt)
+        .map((row) => row.subjectId),
+    );
+    return viewableEvents.map((event) => ({
+      event,
+      isTakenDown: takenDownEventIds.has(event.id),
+    }));
   }
 
   /**

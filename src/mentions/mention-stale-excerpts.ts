@@ -3,6 +3,7 @@ import { CommunityPostReply } from '../communities/entities/community-post-reply
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { Event, EventStatus } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -11,6 +12,7 @@ import {
   NotificationType,
 } from '../notifications/entities/notification.entity';
 import {
+  MentionLiveEvent,
   MentionSourceContext,
   MentionSourceRepositories,
   mentionIdsWithStaleExcerpt,
@@ -48,10 +50,17 @@ export type MentionParentCommunityRow = Pick<
   'id' | 'slug' | 'archivedAt'
 >;
 
+/** The gathering fields the freshness check reads. */
+export type MentionEventRow = Pick<Event, 'id' | 'slug' | 'description'>;
+
 /** Threads and communities the rows name, when the caller already read them. */
 export interface LoadedMentionSources {
   threads: MentionThreadRow[];
   communities: MentionCommunityRow[];
+  /** The published gatherings the rows name, when the caller already read
+   *  them; a gathering left out reads as gone. Absent, each batch reads its
+   *  own through `loadLiveMentionEvents`. */
+  events?: MentionEventRow[];
 }
 
 /**
@@ -145,6 +154,38 @@ async function loadSpaceParents(
   });
 }
 
+/**
+ * The PUBLISHED gatherings the `event` mention rows among `rows` name, in one
+ * query, and no query when none of them is an `event` mention. A draft or
+ * cancelled gathering stays out, so its mention reads as gone.
+ */
+export async function loadLiveMentionEvents(
+  rows: Notification[],
+  dataSource: DataSource,
+): Promise<MentionEventRow[]> {
+  const eventSlugs = collectPayloadStrings(
+    rows.filter((row) => row.payload?.source === 'event'),
+    'eventSlug',
+  );
+  if (!eventSlugs.length) return [];
+  return dataSource.getRepository(Event).find({
+    where: { slug: In(eventSlugs), status: EventStatus.Published },
+    select: { id: true, slug: true, description: true },
+  });
+}
+
+/** The `liveEventBySlug` context entry for a set of published gatherings. */
+function liveEventBySlugOf(
+  events: MentionEventRow[],
+): Map<string, MentionLiveEvent> {
+  return new Map(
+    events.map((event) => [
+      event.slug,
+      { id: event.id, description: event.description },
+    ]),
+  );
+}
+
 /** The context for one batch: its sources plus the parents of its spaces. */
 async function batchContextOf(
   sources: LoadedMentionSources,
@@ -203,7 +244,9 @@ async function loadMentionSources(
  * deleted for everyone, edited after the mention, taken down (by a community
  * moderator's tombstone or a platform moderator's hide or removal), in an
  * archived or taken-down community (or a space whose parent is archived,
- * taken down or gone), or in a thread a member can no longer read.
+ * taken down or gone), or in a thread a member can no longer read. An
+ * `event` mention reads as gone once its gathering is no longer published,
+ * is taken down, or its description no longer begins with the excerpt.
  *
  * Rows of any other type are ignored. The rows are checked in batches, each
  * batch costing one query per source kind it contains, plus one for the
@@ -241,9 +284,11 @@ export async function staleMentionExcerptIds(
         dataSource,
       );
     }
+    const liveEvents =
+      loaded?.events ?? (await loadLiveMentionEvents(batch, dataSource));
     const batchStaleIds = await mentionIdsWithStaleExcerpt(
       batch,
-      context,
+      { ...context, liveEventBySlug: liveEventBySlugOf(liveEvents) },
       repositories,
     );
     for (const id of batchStaleIds) staleIds.add(id);

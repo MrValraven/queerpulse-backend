@@ -77,7 +77,29 @@ export class NotificationsController {
   }
 
   /**
-   * PRD-224. Clear one row from the caller's own bell. Scoped to
+   * The X in the bell dropdown: hides the row from the bell and marks it read,
+   * and the row stays on the /notifications page. Scoped to `{ id, userId }`
+   * in the service, so a row belonging to anybody else is a 404.
+   */
+  @Post(':id/hide')
+  @ApiOperation({ summary: 'Hide a single notification from the bell' })
+  @ApiCreatedResponse({
+    description: 'The notification was hidden from the bell and marked read.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiNotFoundResponse({
+    description: 'The notification does not exist, or is not yours.',
+  })
+  hide(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.notificationsService.hide(id, user.userId);
+  }
+
+  /**
+   * PRD-224. Delete one of the caller's own rows: the confirmed X on the
+   * /notifications page and the inline resolve actions. Scoped to
    * `{ id, userId }` in the service, so a row belonging to anybody else is a
    * 404 and nobody can dismiss someone else's notification.
    */

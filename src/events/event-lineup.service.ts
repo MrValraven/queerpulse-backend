@@ -33,6 +33,10 @@ import {
   EventLineupAnsweredEvent,
   EventLineupInvitedEvent,
 } from './event.events';
+import {
+  PREVIEW_STAND_IN_VIEWER_ID,
+  type GuestPreviewRole,
+} from './event-preview';
 import { EventsService } from './events.service';
 import { LineupInviteView, toLineupInviteView } from './lineup-invite-response';
 
@@ -79,10 +83,24 @@ export class EventLineupService {
 
   // Same visibility gate as attendees: a draft, gated or taken-down event
   // 404s for a viewer who cannot see it.
-  async getLineup(slug: string, viewerId: string): Promise<EventLineupDTO> {
+  async getLineup(
+    slug: string,
+    viewerId: string,
+    viewAs?: GuestPreviewRole,
+  ): Promise<EventLineupDTO> {
     const event = await this.loadEventOr404(slug);
     const isOrganizer = await this.eventsService.assertCanView(event, viewerId);
-    return this.buildLineupDTO(event.id, viewerId, isOrganizer);
+    if (viewAs === undefined) {
+      return this.buildLineupDTO(event.id, viewerId, isOrganizer);
+    }
+    if (!isOrganizer) {
+      throw new ForbiddenException(
+        'Only an organiser can preview this gathering as a guest',
+      );
+    }
+    // Every guest perspective reads the same lineup: accepted rows only, and
+    // the stand-in holds no row of its own.
+    return this.buildLineupDTO(event.id, PREVIEW_STAND_IN_VIEWER_ID, false);
   }
 
   async invite(

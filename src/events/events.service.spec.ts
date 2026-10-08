@@ -18,6 +18,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { ListingLookupService } from '../listings/listing-lookup.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -32,6 +33,7 @@ import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventSeries } from './entities/event-series.entity';
 import { EVENT_DELETING } from './event.events';
+import { PREVIEW_STAND_IN_VIEWER_ID } from './event-preview';
 import {
   Event,
   EventStatus,
@@ -54,8 +56,17 @@ describe('EventsService', () => {
     update: jest.Mock;
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
-    manager: { transaction: jest.Mock };
+    manager: { transaction: jest.Mock; getRepository: jest.Mock };
   };
+  // The `Mention` rows this gathering's description already produced, as
+  // `withoutAlreadyNotifiedMentions` reads them back (entityKind/entityRef).
+  let alreadyNotifiedMentionRows: Array<{
+    entityKind: string;
+    entityRef: string;
+    userId?: string;
+  }>;
+  // The conditions each Notification lookup added, to pin the series match.
+  let notificationLookupConditions: string[];
   let cohosts: { exists: jest.Mock; find: jest.Mock };
   let rsvps: {
     count: jest.Mock;
@@ -85,10 +96,11 @@ describe('EventsService', () => {
   let membership: {
     assertOwnerOrModBySlug: jest.Mock;
     isMember: jest.Mock;
-    communityIdsForUser: jest.Mock;
+    effectiveCommunityIdsForUser: jest.Mock;
     slugById: jest.Mock;
     hostingRefById: jest.Mock;
   };
+  let announcements: { find: jest.Mock };
   let bookmarks: {
     isBookmarked: jest.Mock;
     bookmarkedEventIds: jest.Mock;
@@ -110,6 +122,12 @@ describe('EventsService', () => {
   };
   // `remove()` announces a hard delete through `emitAsync` and waits for it.
   let eventEmitter: { emitAsync: jest.Mock };
+  let mentions: {
+    notify: jest.Mock<
+      Promise<Set<string>>,
+      Parameters<MentionNotificationService['notify']>
+    >;
+  };
   let listingLookup: {
     findLive: jest.Mock;
     findLinkable: jest.Mock;
@@ -258,8 +276,25 @@ describe('EventsService', () => {
               getRepository: () => events,
             }),
         ),
+        // The Notification repository `withoutAlreadyNotifiedMentions` reads.
+        getRepository: jest.fn(() => {
+          const notificationQueryBuilder: Record<string, unknown> = {
+            select: jest.fn().mockReturnThis(),
+            addSelect: jest.fn().mockReturnThis(),
+            distinct: jest.fn().mockReturnThis(),
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn((condition: string) => {
+              notificationLookupConditions.push(condition);
+              return notificationQueryBuilder;
+            }),
+            getRawMany: jest.fn(async () => alreadyNotifiedMentionRows),
+          };
+          return { createQueryBuilder: () => notificationQueryBuilder };
+        }),
       },
     };
+    alreadyNotifiedMentionRows = [];
+    notificationLookupConditions = [];
     cohosts = {
       exists: jest.fn().mockResolvedValue(false),
       find: jest.fn().mockResolvedValue([]),
@@ -296,10 +331,11 @@ describe('EventsService', () => {
     membership = {
       assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
       isMember: jest.fn().mockResolvedValue(false),
-      communityIdsForUser: jest.fn().mockResolvedValue([]),
+      effectiveCommunityIdsForUser: jest.fn().mockResolvedValue([]),
       slugById: jest.fn().mockResolvedValue(null),
       hostingRefById: jest.fn().mockResolvedValue(null),
     };
+    announcements = { find: jest.fn().mockResolvedValue([]) };
     bookmarks = {
       isBookmarked: jest.fn().mockResolvedValue(false),
       bookmarkedEventIds: jest.fn().mockResolvedValue(new Set<string>()),
@@ -313,6 +349,14 @@ describe('EventsService', () => {
       }),
     };
     eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
+    mentions = {
+      notify: jest
+        .fn<
+          Promise<Set<string>>,
+          Parameters<MentionNotificationService['notify']>
+        >()
+        .mockResolvedValue(new Set<string>()),
+    };
     listingLookup = {
       findLive: jest.fn().mockResolvedValue(null),
       findLinkable: jest.fn().mockResolvedValue(null),
@@ -341,7 +385,7 @@ describe('EventsService', () => {
         // fixture here posts one, so the detail carries an empty list.
         {
           provide: getRepositoryToken(EventAnnouncement),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
+          useValue: announcements,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
@@ -360,6 +404,7 @@ describe('EventsService', () => {
         // resolves to "no such live listing"; the venue tests below override it.
         { provide: ListingLookupService, useValue: listingLookup },
         { provide: EventEmitter2, useValue: eventEmitter },
+        { provide: MentionNotificationService, useValue: mentions },
       ],
     }).compile();
     service = module.get(EventsService);
@@ -953,6 +998,149 @@ describe('EventsService', () => {
     });
   });
 
+  // Host "Preview as guest" (`viewAs`): the detail is rebuilt for a
+  // stand-in viewer with a pretend RSVP, so every guest gate runs as is.
+  describe('guest preview (viewAs)', () => {
+    const previewedEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      cost: null,
+      visibility: EventVisibility.Public,
+      capacity: null,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
+      showAttendeeCount: true,
+      address: 'Rua das Flores 12',
+      arrivalNotes: 'Ring twice',
+      onlineUrl: null,
+    };
+    const announcementRow = {
+      id: 'a1',
+      eventId: 'e1',
+      authorId: 'host-1',
+      body: 'We moved to the back room',
+      createdAt: new Date(),
+      recipientCount: 3,
+    };
+
+    beforeEach(() => {
+      events.findOne.mockResolvedValue(previewedEvent);
+      announcements.find.mockResolvedValue([announcementRow]);
+      rsvps.count.mockImplementation(
+        ({ where }: { where: { status: RsvpStatus } }) =>
+          Promise.resolve(where.status === RsvpStatus.Waitlisted ? 2 : 3),
+      );
+    });
+
+    it('refuses somebody who does not organise the gathering', async () => {
+      await expect(
+        service.getBySlug('party', 'stranger-1', 'going'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('shows a member who has not RSVPd the venue only', async () => {
+      const detail = await service.getBySlug('party', 'host-1', 'member');
+
+      expect(detail.isOrganizer).toBe(false);
+      expect(detail.address).toBeNull();
+      expect(detail.arrivalNotes).toBeNull();
+      expect(detail.locationPrecision).toBe('venue');
+      expect(detail.announcements).toEqual([]);
+      expect(detail.myRsvpStatus).toBeNull();
+      expect(detail.myRsvpDetails).toBeNull();
+      expect(detail.venueAttachment).toBeUndefined();
+      expect(rsvps.findOne).not.toHaveBeenCalled();
+      expect(bookmarks.isBookmarked).not.toHaveBeenCalled();
+    });
+
+    it('shows a going guest the address and the announcements', async () => {
+      const detail = await service.getBySlug('party', 'host-1', 'going');
+
+      expect(detail.myRsvpStatus).toBe(RsvpStatus.Going);
+      expect(detail.address).toBe('Rua das Flores 12');
+      expect(detail.arrivalNotes).toBe('Ring twice');
+      expect(detail.locationPrecision).toBe('exact');
+      expect(detail.announcements).toHaveLength(1);
+      expect(detail.myRsvpDetails).toBeNull();
+    });
+
+    it('shows a waitlisted guest the announcements and the next place in line', async () => {
+      const detail = await service.getBySlug('party', 'host-1', 'waitlisted');
+
+      expect(detail.myRsvpStatus).toBe(RsvpStatus.Waitlisted);
+      expect(detail.address).toBeNull();
+      expect(detail.announcements).toHaveLength(1);
+      expect(detail.myWaitlistPosition).toBe(3);
+    });
+
+    it('withholds tallies and faces when the host hides the count', async () => {
+      events.findOne.mockResolvedValue({
+        ...previewedEvent,
+        showAttendeeCount: false,
+      });
+      // Faces exist, so an empty preview proves the count gate held.
+      const qb = attendeesQbStub();
+      qb.getCount!.mockResolvedValue(2);
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+
+      const detail = await service.getBySlug('party', 'host-1', 'going');
+
+      expect(detail.goingCount).toBeNull();
+      expect(detail.waitlistCount).toBeNull();
+      expect(detail.goingAttendeesPreview).toEqual([]);
+    });
+
+    it('filters the faces for the stand-in viewer', async () => {
+      const qb = attendeesQbStub();
+      qb.getCount!.mockResolvedValue(2);
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getBySlug('party', 'host-1', 'going');
+
+      const visibilityCalls = rosterVisibilityCalls(qb);
+      expect(visibilityCalls).toHaveLength(1);
+      expect(visibilityCalls[0]![1]).toEqual(
+        expect.objectContaining({
+          attendeeVisibilityViewerId: PREVIEW_STAND_IN_VIEWER_ID,
+        }),
+      );
+    });
+
+    it('names a private hosting community on a community-only gathering', async () => {
+      events.findOne.mockResolvedValue({
+        ...previewedEvent,
+        visibility: EventVisibility.Community,
+        communityId: 'community-9',
+      });
+      const privateRef = {
+        slug: 'queer-devs',
+        name: 'Queer Devs',
+        accessTier: AccessTier.Private,
+      };
+      membership.hostingRefById.mockResolvedValue(privateRef);
+      membership.isMember.mockResolvedValue(false);
+
+      const detail = await service.getBySlug('party', 'host-1', 'going');
+
+      expect(detail.community).toEqual(privateRef);
+      expect(detail.communitySlug).toBe('queer-devs');
+      expect(detail.communityId).toBe('community-9');
+      expect(membership.isMember).not.toHaveBeenCalledWith(
+        'community-9',
+        PREVIEW_STAND_IN_VIEWER_ID,
+      );
+    });
+
+    it('leaves the host view unchanged without viewAs', async () => {
+      const detail = await service.getBySlug('party', 'host-1');
+
+      expect(detail.isOrganizer).toBe(true);
+      expect(detail.address).toBe('Rua das Flores 12');
+    });
+  });
+
   // The door list CSV carries what attendees typed into their RSVP details.
   // It follows the organiser's dashboard view, so every answer is filled
   // whatever the attendee picked for "Who can see you're going?".
@@ -1478,6 +1666,158 @@ describe('EventsService', () => {
         'lisbon-hikers',
         'u1',
       );
+    });
+  });
+
+  describe('description mentions', () => {
+    const notifiedText = () => mentions.notify.mock.calls[0]?.[0];
+
+    it('notifies every mention when a draft is published', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        status: EventStatus.Draft,
+        description: 'Bring snacks @ana and say hi to b/corner-cafe',
+      });
+      await service.update('x', 'u1', { status: EventStatus.Published });
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(notifiedText()).toBe('@ana b/corner-cafe');
+      expect(mentions.notify.mock.calls[0]?.[1]).toBe('u1');
+      expect(mentions.notify.mock.calls[0]?.[2]).toEqual({
+        actorId: 'u1',
+        source: 'event',
+        eventSlug: 'x',
+        eventId: 'e1',
+        excerpt: 'Bring snacks @ana and say hi to b/corner-cafe',
+      });
+    });
+
+    it('notifies only the newly added mentions when a published description is edited', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        description: 'Hosted with @ana',
+      });
+      await service.update('x', 'u1', {
+        description: 'Hosted with @ana and @bea, food by b/corner-cafe',
+      });
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(notifiedText()).toBe('@bea b/corner-cafe');
+    });
+
+    it('notifies nobody when a published description keeps the same mentions', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        description: 'Hosted with @ana',
+      });
+      await service.update('x', 'u1', {
+        description: 'Hosted with @ana, doors at eight',
+      });
+
+      expect(mentions.notify).not.toHaveBeenCalled();
+    });
+
+    it('notifies nobody when a draft is saved', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        status: EventStatus.Draft,
+        description: 'Hosted with @ana',
+      });
+      await service.update('x', 'u1', {
+        description: 'Hosted with @ana and @bea',
+      });
+
+      expect(mentions.notify).not.toHaveBeenCalled();
+    });
+
+    it('notifies nobody on a republish when every mention was already notified', async () => {
+      alreadyNotifiedMentionRows = [
+        { entityKind: 'member', entityRef: 'ana' },
+        { entityKind: 'business', entityRef: 'corner-cafe' },
+      ];
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        status: EventStatus.Draft,
+        description: 'Bring snacks @ana and say hi to b/corner-cafe',
+      });
+      await service.update('x', 'u1', { status: EventStatus.Published });
+
+      expect(mentions.notify).not.toHaveBeenCalled();
+    });
+
+    it('notifies only the new mention on a republish after one was added', async () => {
+      alreadyNotifiedMentionRows = [{ entityKind: 'member', entityRef: 'ana' }];
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        status: EventStatus.Draft,
+        description: 'Hosted with @ana and @bea',
+      });
+      await service.update('x', 'u1', { status: EventStatus.Published });
+
+      expect(mentions.notify).toHaveBeenCalledTimes(1);
+      expect(notifiedText()).toBe('@bea');
+    });
+
+    it('excludes members already notified through another tag', async () => {
+      alreadyNotifiedMentionRows = [
+        { entityKind: 'member', entityRef: 'ana', userId: 'ana-id' },
+      ];
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        status: EventStatus.Draft,
+        description: '@ana c/pride',
+      });
+      await service.update('x', 'u1', { status: EventStatus.Published });
+
+      expect(notifiedText()).toBe('c/pride');
+      expect(mentions.notify.mock.calls[0]?.[3]).toEqual(['ana-id']);
+    });
+
+    it('counts every occurrence of a series as one gathering', async () => {
+      alreadyNotifiedMentionRows = [
+        { entityKind: 'member', entityRef: 'ana', userId: 'ana-id' },
+      ];
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        id: 'occurrence-3',
+        seriesId: 'series-1',
+        status: EventStatus.Draft,
+        description: 'Hosted with @ana',
+      });
+      await service.update('x', 'u1', { status: EventStatus.Published });
+
+      expect(
+        notificationLookupConditions.some((condition) =>
+          condition.includes('"sibling"."series_id" = :seriesId'),
+        ),
+      ).toBe(true);
+      expect(mentions.notify).not.toHaveBeenCalled();
+    });
+
+    it('does not notify a mention that was removed and added back', async () => {
+      alreadyNotifiedMentionRows = [{ entityKind: 'member', entityRef: 'ana' }];
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        description: 'Doors at eight',
+      });
+      await service.update('x', 'u1', { description: 'Hosted with @ana' });
+
+      expect(mentions.notify).not.toHaveBeenCalled();
+    });
+
+    it('still saves the gathering when the mention fan-out fails', async () => {
+      events.findOne.mockResolvedValue({
+        ...editableEvent(),
+        status: EventStatus.Draft,
+        description: 'Hosted with @ana',
+      });
+      mentions.notify.mockRejectedValueOnce(new Error('notify down'));
+
+      const detail = await service.update('x', 'u1', {
+        status: EventStatus.Published,
+      });
+
+      expect(detail.status).toBe(EventStatus.Published);
     });
   });
 
@@ -2747,6 +3087,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as MediaCropService,
       {} as unknown as ListingLookupService,
       {} as unknown as EventEmitter2,
+      {} as unknown as MentionNotificationService,
     );
   });
 

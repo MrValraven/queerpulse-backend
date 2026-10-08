@@ -8,10 +8,15 @@ import {
   RosterRole,
 } from '../communities/entities/community-member.entity';
 import { Event } from '../events/entities/event.entity';
+import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { BlockFilterService } from '../social/block-filter.service';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { Profile } from '../users/entities/profile.entity';
 import { MentionNameResolveService } from './mention-name-resolve.service';
 
@@ -162,6 +167,11 @@ function buildService(roster: RosterRow[] = []) {
     threads as unknown as Repository<ForumThread>,
     { findOne: jest.fn() } as unknown as Repository<Conversation>,
     empty as unknown as Repository<ConversationParticipant>,
+    {} as unknown as BlockFilterService,
+    {} as unknown as HiddenFromService,
+    {} as unknown as ContentModerationService,
+    empty as unknown as Repository<EventCohost>,
+    {} as unknown as EventAudienceGateService,
   );
   return { service, communities, communityMembers };
 }

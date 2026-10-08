@@ -33,6 +33,7 @@ import { ListEventsQuery } from './dto/list-events.query';
 import { RespondCohostInviteDto } from './dto/respond-cohost-invite.dto';
 import { RespondEventInviteDto } from './dto/respond-event-invite.dto';
 import { RsvpDto } from './dto/rsvp.dto';
+import { GuestPreviewQuery } from './dto/guest-preview.query';
 import { SeriesScopeQuery } from './dto/series-scope.query';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
@@ -135,8 +136,15 @@ export class EventsController {
   @ApiNotFoundResponse({
     description: 'No event with that slug, or not visible to you.',
   })
-  get(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.eventsService.getBySlug(slug, user.userId);
+  @ApiForbiddenResponse({
+    description: '`viewAs` sent by somebody who does not organise this event.',
+  })
+  get(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() query: GuestPreviewQuery,
+  ) {
+    return this.eventsService.getBySlug(slug, user.userId, query.viewAs);
   }
 
   @Patch(':slug')
@@ -744,8 +752,15 @@ export class EventsController {
   @ApiNotFoundResponse({
     description: 'No event with that slug, or not visible to you.',
   })
-  getLineup(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.eventLineupService.getLineup(slug, user.userId);
+  @ApiForbiddenResponse({
+    description: '`viewAs` sent by somebody who does not organise this event.',
+  })
+  getLineup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() query: GuestPreviewQuery,
+  ) {
+    return this.eventLineupService.getLineup(slug, user.userId, query.viewAs);
   }
 }
 

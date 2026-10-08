@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ArrayContains, Not, Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
   Listing,
   ListingOperatingState,
@@ -11,6 +12,38 @@ import { ADULT_LISTING_CATEGORY_SLUG } from './listing-categories';
 export interface ListingRef {
   slug: string;
   name: string;
+}
+
+/**
+ * What the DISPLAY path (`findLive`) returns on top of the display ref: the
+ * listing's own map pin, so a gathering's page can draw its venue on a map
+ * (`EventDetail.venueListing`). Decimal degrees, read straight off the
+ * `double precision` columns, which the pg driver already hands back as JS
+ * numbers, so no conversion is needed (`toDirectoryCard` reads them the same
+ * way).
+ *
+ * The pin follows the listing's own public page exactly. `toDirectoryCard`
+ * prints the stored pair with no condition of its own, so the rule is decided
+ * by whether that page renders at all, and both values are null whenever it
+ * would not show the pin:
+ *  - the owner has paused the listing (`isHiddenByOwner`): its page 404s;
+ *  - a moderator has hidden or removed it: its page 404s;
+ *  - it is online-only: it has no premises, its card never pins the map, and
+ *    the write path already blanks its coordinates;
+ *  - the owner never placed a pin (or only half of one).
+ * A permanently closed business keeps its pin, because its page stays up so
+ * its reviews and history stay where every link points. An 18+ listing keeps
+ * it too: its page is readable by any signed-in active member, and every
+ * reader of a gathering is one (`ActiveMemberGuard` on `EventsController`).
+ *
+ * Kept OFF `ListingRef` on purpose. `findLinkable` and `findAttachable` share
+ * that ref for the create/update path, which never draws a map and skips the
+ * takedown check above, so a pin there would be an ungated copy waiting for a
+ * caller to publish it.
+ */
+export interface VenueListingRef extends ListingRef {
+  latitude: number | null;
+  longitude: number | null;
 }
 
 /**
@@ -43,8 +76,14 @@ export interface AttachableListingRef extends ListingRef {
  */
 @Injectable()
 export class ListingLookupService {
+  // A directory business is reported (and taken down) under either the
+  // `business` or the `listing` code, both keyed by the listing slug. The same
+  // pair `DirectoryService.SUBJECT_TYPES` checks before it renders the page.
+  private static readonly MODERATION_SUBJECT_TYPES = ['business', 'listing'];
+
   constructor(
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /**
@@ -54,15 +93,43 @@ export class ListingLookupService {
    * shut, and blanking the name would erase that rather than correct it. The
    * same holds for a listing its owner has paused: the gathering was at that
    * venue, and the pause is about the directory entry rather than about the
-   * event's history. Only the venue's NAME is surfaced from here, never a
-   * browsable listing. Use `findLinkable` for the create/update path, where a
-   * closed or paused venue is a real error.
+   * event's history. Only the venue's NAME and, where its own public page
+   * shows one, its map pin are surfaced from here, never a browsable listing
+   * (see `VenueListingRef` for the pin rule). Use `findLinkable` for the
+   * create/update path, where a closed or paused venue is a real error.
    */
-  async findLive(listingId: string): Promise<ListingRef | null> {
+  async findLive(listingId: string): Promise<VenueListingRef | null> {
     const listing = await this.listings.findOne({
       where: { id: listingId, status: ListingStatus.Live },
     });
-    return listing ? { slug: listing.slug, name: listing.name } : null;
+    if (!listing) return null;
+    const isPinShown = await this.isPinOnPublicPage(listing);
+    return {
+      slug: listing.slug,
+      name: listing.name,
+      latitude: isPinShown ? listing.latitude : null,
+      longitude: isPinShown ? listing.longitude : null,
+    };
+  }
+
+  /**
+   * Whether the listing's own public page would show its map pin, by the rule
+   * `VenueListingRef` spells out. The cheap column checks run first, so the
+   * moderation read only happens for a listing that has a pin to withhold.
+   */
+  private async isPinOnPublicPage(listing: Listing): Promise<boolean> {
+    const hasPin =
+      typeof listing.latitude === 'number' &&
+      typeof listing.longitude === 'number';
+    if (!hasPin || listing.isHiddenByOwner || listing.online) return false;
+    const states = await this.contentModeration.statesForAnyType(
+      ListingLookupService.MODERATION_SUBJECT_TYPES,
+      [listing.slug],
+    );
+    const moderationState = states.get(listing.slug);
+    return (
+      !moderationState || (!moderationState.hidden && !moderationState.removed)
+    );
   }
 
   /**

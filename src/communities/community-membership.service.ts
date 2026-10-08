@@ -383,10 +383,10 @@ export class CommunityMembershipService {
   }
 
   /**
-   * Every community id the given user is on the roster of — backs the
-   * `community` OR-in predicate on the gatherings browse/search queries
-   * (`EventsService.list`/`searchByText`), computed once per request via the
-   * indexed `IDX_community_members_user_id` lookup.
+   * Every community id the given user is on the roster of: their own roster
+   * rows only, read through the indexed `IDX_community_members_user_id`
+   * lookup. Spaces reached through parent staff standing are left out, so
+   * gathering visibility reads `effectiveCommunityIdsForUser`.
    *
    * A space id is kept only when the parent's id is in the set too: a space
    * row left behind after the caller left the parent grants nothing.
@@ -409,6 +409,54 @@ export class CommunityMembershipService {
     return rosterIds.filter(
       (communityId) => !orphanedSpaceIds.has(communityId),
     );
+  }
+
+  /**
+   * Every community id the given user holds an effective role in: the set
+   * `isMember` answers true for, one community at a time. That is their own
+   * top-level roster rows, each space row kept only under a parent row (as in
+   * `communityIdsForUser`), plus every space under a parent whose role
+   * inherits into spaces. Which parent roles inherit is decided by
+   * `resolveEffectiveRole` in `./subcommunity-rules` (owner, co-owner and mod
+   * today), called here per community so the two can never disagree.
+   *
+   * Backs the `community` tier of the batch gathering paths
+   * (`EventAudienceGateService.filterViewable` and `scopedVisibilityWhere`),
+   * so a tag, a saved list, the pulse, browse and search admit exactly the
+   * community-tier gatherings the detail page opens.
+   *
+   * Two queries, whatever the roster size: the user's roster rows with their
+   * roles, then every community those rows name plus every space under them.
+   */
+  async effectiveCommunityIdsForUser(userId: string): Promise<string[]> {
+    const memberships = await this.members.find({
+      where: { userId },
+      select: { communityId: true, role: true },
+    });
+    if (!memberships.length) return [];
+    const ownRoleById = new Map(
+      memberships.map((membership) => [
+        membership.communityId,
+        membership.role,
+      ]),
+    );
+    const rosterIds = [...ownRoleById.keys()];
+    const candidateCommunities = await this.communities.find({
+      where: [{ id: In(rosterIds) }, { parentId: In(rosterIds) }],
+      select: { id: true, parentId: true },
+    });
+    const effectiveIds = new Set<string>();
+    for (const community of candidateCommunities) {
+      const role = resolveEffectiveRole({
+        isSpace: community.parentId !== null,
+        ownRole: ownRoleById.get(community.id) ?? null,
+        parentRole: community.parentId
+          ? (ownRoleById.get(community.parentId) ?? null)
+          : null,
+      });
+      if (role !== null) effectiveIds.add(community.id);
+    }
+    return [...effectiveIds];
   }
 
   /**

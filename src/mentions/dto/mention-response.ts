@@ -25,11 +25,12 @@ export interface MentionActor {
  * needs and drops everything else. No entity is ever returned raw (repo
  * API-response-mapping convention).
  *
- * `sourceLabel` is the human name of *where* the mention happened — the forum
- * thread's title or the community's name — resolved server-side so the client
- * doesn't have to guess it from a slug. `threadSlug`/`communitySlug`/`postId`
- * are handed through so the client can build the deep-link with its own router
- * map (routing stays a frontend concern).
+ * `sourceLabel` is the human name of *where* the mention happened (the forum
+ * thread's title, the community's name or the gathering's title), resolved
+ * server-side so the client doesn't have to guess it from a slug.
+ * `threadSlug`/`communitySlug`/`postId`/`eventSlug` are handed through so the
+ * client can build the deep-link with its own router map (routing stays a
+ * frontend concern).
  */
 export interface MentionResponse {
   /** The backing notification id — also the id the client marks read via
@@ -38,7 +39,8 @@ export interface MentionResponse {
   createdAt: Date;
   read: boolean;
   actor: MentionActor | null;
-  /** Where the mention was written: `'forum'` | `'community'` | `null`. */
+  /** Where the mention was written: `'forum'` | `'community'` | `'message'`
+   *  | `'event'` (a gathering's description) | `null`. */
   source: string | null;
   /** What was `@`-tagged: `member` | `community` | `business` | `event` |
    *  `thread` | `null`. */
@@ -51,8 +53,12 @@ export interface MentionResponse {
   threadSlug: string | null;
   communitySlug: string | null;
   postId: string | null;
-  /** Resolved title/name of the source thread or community; `null` when it
-   *  could not be resolved (deleted, or no slug in the payload). */
+  /** The gathering whose description carried the mention, for an `'event'`
+   *  source; `null` for every other source. */
+  eventSlug: string | null;
+  /** Resolved title/name of the source thread, community or gathering;
+   *  `null` when it could not be resolved (deleted, missing its slug in the payload,
+   *  or a gathering that is unpublished or the reader can no longer open). */
   sourceLabel: string | null;
 }
 
@@ -69,6 +75,9 @@ export interface MentionResolvers {
   profileByUserId: Map<string, Profile>;
   threadTitleBySlug: Map<string, string>;
   communityNameBySlug: Map<string, string>;
+  /** Titles of the published gatherings on the page the reader can open, by
+   *  slug. Absent when the page names none. */
+  eventTitleBySlug?: Map<string, string>;
   /** Ids of the page's rows whose excerpt must not be served (ENG-411). */
   staleExcerptNotificationIds: Set<string>;
 }
@@ -90,13 +99,17 @@ export function toMentionResponse(
     source === 'message' && payload?.isGoTogetherChat === true;
   const threadSlug = stringOrNull(payload, 'threadSlug');
   const communitySlug = stringOrNull(payload, 'communitySlug');
+  const eventSlug =
+    source === 'event' ? stringOrNull(payload, 'eventSlug') : null;
 
   const sourceLabel =
     source === 'forum' && threadSlug
       ? (resolvers.threadTitleBySlug.get(threadSlug) ?? null)
       : source === 'community' && communitySlug
         ? (resolvers.communityNameBySlug.get(communitySlug) ?? null)
-        : null;
+        : eventSlug
+          ? (resolvers.eventTitleBySlug?.get(eventSlug) ?? null)
+          : null;
 
   return {
     id: notification.id,
@@ -127,6 +140,7 @@ export function toMentionResponse(
     threadSlug,
     communitySlug,
     postId: stringOrNull(payload, 'postId'),
+    eventSlug,
     sourceLabel,
   };
 }

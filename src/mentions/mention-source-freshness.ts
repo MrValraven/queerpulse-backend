@@ -1,6 +1,7 @@
 import { FindOptionsWhere, In, Repository } from 'typeorm';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
+import { truncateCharacters } from '../common/text-characters';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { Message } from '../messaging/entities/message.entity';
@@ -25,6 +26,20 @@ const POST_MODERATION_SUBJECT_TYPES: readonly string[] = ['post', 'reply'];
 const COMMUNITY_MODERATION_SUBJECT_TYPE = 'community';
 
 /**
+ * `content_moderation.subject_type` for a gathering, keyed by the event's
+ * uuid. The same value as `EventsService.SUBJECT_TYPE`, which is private to
+ * that service, so it is repeated here; keep them in sync.
+ */
+const EVENT_MODERATION_SUBJECT_TYPE = 'event';
+
+/**
+ * Characters of a gathering's description an `event` mention copies into its
+ * `excerpt` (`EventsService`, through `truncateCharacters`). The freshness
+ * check rebuilds the excerpt from the live description at the same length.
+ */
+export const EVENT_MENTION_EXCERPT_LENGTH = 140;
+
+/**
  * Postgres refuses a `uuid` comparison against a non-uuid literal with a
  * `22P02` error, which would fail the whole inbox page. A payload id that
  * cannot be a uuid is left out of every lookup, so its row reads as a source
@@ -45,6 +60,8 @@ const UUID_PATTERN =
  *    `replyId`.
  *  - `MessagesService.sendMessage`: `source: 'message'` + `conversationId` +
  *    `messageId`.
+ *  - `EventsService` (a gathering's description, once published):
+ *    `source: 'event'` + `eventSlug` + `eventId`.
  * Anything else is `unknown`, whose excerpt is never served.
  */
 export type MentionSource =
@@ -58,6 +75,7 @@ export type MentionSource =
       replyId: string;
     }
   | { kind: 'message'; messageId: string }
+  | { kind: 'event'; eventSlug: string; excerpt: string | null }
   | { kind: 'unknown' };
 
 function payloadString(
@@ -104,6 +122,12 @@ export function mentionSourceOf(notification: Notification): MentionSource {
       ? { kind: 'communityReply', communitySlug, postId, replyId }
       : { kind: 'communityPost', communitySlug, postId };
   }
+  if (source === 'event') {
+    const eventSlug = payloadString(payload, 'eventSlug');
+    return eventSlug
+      ? { kind: 'event', eventSlug, excerpt: payloadString(payload, 'excerpt') }
+      : { kind: 'unknown' };
+  }
   return { kind: 'unknown' };
 }
 
@@ -136,6 +160,17 @@ export interface MentionSourceContext {
    *  as gone (the other two cases `assertParentViewable` and
    *  `assertCommunityInteriorReadable` answer with a 404). */
   spaceSlugsWithUnviewableParent: Set<string>;
+  /** Published gatherings on the page, by slug, with the id the takedown
+   *  lookup reads and the live description the excerpt is compared against.
+   *  A gathering absent here (deleted, cancelled, back in draft, or not
+   *  loaded) reads as gone. Absent as a whole when the page names none. */
+  liveEventBySlug?: Map<string, MentionLiveEvent>;
+}
+
+/** A published gathering, as the `event` freshness check reads it. */
+export interface MentionLiveEvent {
+  id: string;
+  description: string;
 }
 
 interface SourceRowState {
@@ -162,6 +197,8 @@ interface TakenDownSourceIds {
   messages: Set<string>;
   /** Community slugs a platform moderator took down as a whole. */
   communitySlugs: Set<string>;
+  /** Gathering ids a platform moderator hid or removed. */
+  events: Set<string>;
 }
 
 /**
@@ -180,11 +217,13 @@ async function takenDownSourceIdsOf(
   postIds: string[],
   messageIds: string[],
   communitySlugs: string[],
+  eventIds: string[] = [],
 ): Promise<TakenDownSourceIds> {
   const takenDown: TakenDownSourceIds = {
     posts: new Set<string>(),
     messages: new Set<string>(),
     communitySlugs: new Set<string>(),
+    events: new Set<string>(),
   };
   const where: FindOptionsWhere<ContentModeration>[] = [
     ...(postIds.length
@@ -203,6 +242,14 @@ async function takenDownSourceIdsOf(
           {
             subjectType: COMMUNITY_MODERATION_SUBJECT_TYPE,
             subjectId: In(communitySlugs),
+          },
+        ]
+      : []),
+    ...(eventIds.length
+      ? [
+          {
+            subjectType: EVENT_MODERATION_SUBJECT_TYPE,
+            subjectId: In(eventIds),
           },
         ]
       : []),
@@ -225,11 +272,27 @@ async function takenDownSourceIdsOf(
       moderationRow.subjectType === COMMUNITY_MODERATION_SUBJECT_TYPE
     ) {
       takenDown.communitySlugs.add(moderationRow.subjectId);
+    } else if (moderationRow.subjectType === EVENT_MODERATION_SUBJECT_TYPE) {
+      takenDown.events.add(moderationRow.subjectId);
     } else {
       takenDown.posts.add(moderationRow.subjectId);
     }
   }
   return takenDown;
+}
+
+/** The ids of the live gatherings the page's `event` mentions name. */
+function pageLiveEventIds(
+  sources: { source: MentionSource }[],
+  context: MentionSourceContext,
+): string[] {
+  const eventIds = new Set<string>();
+  for (const { source } of sources) {
+    if (source.kind !== 'event') continue;
+    const liveEvent = context.liveEventBySlug?.get(source.eventSlug);
+    if (liveEvent) eventIds.add(liveEvent.id);
+  }
+  return [...eventIds];
 }
 
 /**
@@ -248,6 +311,13 @@ async function takenDownSourceIdsOf(
  *    tombstoned or edited;
  *  - message: the message is deleted for everyone (its `@DeleteDateColumn`
  *    keeps it out of the lookup) or edited;
+ *  - event: the gathering is deleted, cancelled or back in draft (it is
+ *    absent from `context.liveEventBySlug`), taken down by a platform
+ *    moderator, or its description was edited so the excerpt rebuilt from it
+ *    no longer matches the stored one. A gathering keeps no edit timestamp of
+ *    its description (its `updatedAt` moves on every reminder and venue
+ *    stamp), so the copied words themselves are the comparison: the excerpt
+ *    is served exactly while the description still begins with it;
  *  - any kind: a platform moderator hid or removed the post, the reply, a
  *    reply's parent post or the message (`content_moderation`, read through
  *    `takenDownSourceIdsOf`);
@@ -295,6 +365,7 @@ export async function mentionIdsWithStaleExcerpt(
       case 'message':
         messageIds.add(source.messageId);
         break;
+      case 'event':
       case 'unknown':
         break;
     }
@@ -376,6 +447,7 @@ export async function mentionIdsWithStaleExcerpt(
     ],
     messages.map((message) => message.id),
     [...pageCommunitySlugs],
+    pageLiveEventIds(sources, context),
   );
   const isPostStanding = (postId: string | undefined): boolean =>
     !!postId && !takenDown.posts.has(postId);
@@ -445,6 +517,18 @@ export async function mentionIdsWithStaleExcerpt(
             },
             writtenAt,
           );
+        break;
+      }
+      case 'event': {
+        const liveEvent = context.liveEventBySlug?.get(source.eventSlug);
+        isFresh =
+          !!liveEvent &&
+          !takenDown.events.has(liveEvent.id) &&
+          source.excerpt !== null &&
+          truncateCharacters(
+            liveEvent.description,
+            EVENT_MENTION_EXCERPT_LENGTH,
+          ) === source.excerpt;
         break;
       }
       case 'unknown':

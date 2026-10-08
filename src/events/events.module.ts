@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Community } from '../communities/entities/community.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { ListingLookupModule } from '../listings/listing-lookup.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
+import { MentionsModule } from '../mentions/mentions.module';
 import { CardTokenService } from '../membership-cards/card-token.service';
 import { CommunityCard } from '../membership-cards/entities/community-card.entity';
 import { MembershipCard } from '../membership-cards/entities/membership-card.entity';
@@ -78,6 +80,9 @@ import { RsvpService } from './rsvp.service';
       MembershipCard,
       CommunityCard,
       Community,
+      // Read-only: `EventAudienceGateService.audienceAmong` answers the
+      // `community` tier for a whole candidate set with one roster read.
+      CommunityMember,
     ]),
     UsersModule,
     NotificationsModule,
@@ -116,6 +121,11 @@ import { RsvpService } from './rsvp.service';
     // resolves+validates against a real, live directory listing before the
     // event's venue is linked to it. Read-only module; closes no cycle.
     ListingLookupModule,
+    // `MentionNotificationService`: tagging `@member`, `b/business` and the
+    // other sigils in a gathering's description notifies them once it is
+    // published. Plain import: `MentionsModule` imports none of the modules
+    // that import this one, so it closes no cycle.
+    MentionsModule,
   ],
   controllers: [
     EventsController,

@@ -734,6 +734,34 @@ describe('NotificationsService', () => {
     );
   });
 
+  // The bell's X hides the row from the dropdown and keeps it for the
+  // /notifications page, so it is an update scoped to the caller that leaves
+  // the row in place. It marks the row read in the same write so the badge
+  // stays in step with the dropdown.
+  describe('hide', () => {
+    it('stamps hiddenFromBellAt and marks the row read, scoped to the owner', async () => {
+      await expect(service.hide('n1', 'u1')).resolves.toEqual({ ok: true });
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'n1', userId: 'u1' },
+        { read: true, hiddenFromBellAt: expect.any(Date) },
+      );
+      expect(repo.delete).not.toHaveBeenCalled();
+    });
+
+    it("404s when the row is not the caller's", async () => {
+      repo.update.mockResolvedValue({ affected: 0 });
+      await expect(service.hide('n1', 'someone-else')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('returns ok again for a row the caller already hid', async () => {
+      await service.hide('n1', 'u1');
+      await expect(service.hide('n1', 'u1')).resolves.toEqual({ ok: true });
+      expect(repo.update).toHaveBeenCalledTimes(2);
+    });
+  });
+
   // The member's other tabs and devices learn about a read or dismiss only
   // through this event, which the chat gateway relays as
   // `notification:changed`. It fires after a write that touched a row, and
@@ -777,6 +805,21 @@ describe('NotificationsService', () => {
     it('dismiss stays silent on the 404 path', async () => {
       repo.delete.mockResolvedValue({ affected: 0 });
       await expect(service.dismiss('n1', 'u1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('hide announces the change to the owner', async () => {
+      await service.hide('n1', 'u1');
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_STATE_CHANGED, {
+        userId: 'u1',
+      });
+    });
+
+    it('hide stays silent on the 404 path', async () => {
+      repo.update.mockResolvedValue({ affected: 0 });
+      await expect(service.hide('n1', 'u1')).rejects.toBeInstanceOf(
         NotFoundException,
       );
       expect(emit).not.toHaveBeenCalled();

@@ -1,4 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
+import { FindOperator } from 'typeorm';
+import { CommunityMembershipService } from '../communities/community-membership.service';
+import { RosterRole } from '../communities/entities/community-member.entity';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventVisibility } from './entities/event.entity';
 import { EventCohost } from './entities/event-cohost.entity';
@@ -21,19 +24,34 @@ function build() {
     areConnected: jest.fn().mockResolvedValue(false),
     mutualCountsByUserIds: jest.fn().mockResolvedValue(new Map()),
     allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
+    acceptedConnectionsAmong: jest.fn().mockResolvedValue(new Set<string>()),
   };
   const membership = {
     isMember: jest.fn().mockResolvedValue(false),
-    communityIdsForUser: jest.fn().mockResolvedValue([]),
+    effectiveCommunityIdsForUser: jest.fn().mockResolvedValue([]),
   };
+  // Read by `audienceAmong` alone (the `community` tier for a candidate set).
+  const communityMembers = { find: jest.fn().mockResolvedValue([]) };
+  const communities = { findOne: jest.fn().mockResolvedValue(null) };
   const service = new EventAudienceGateService(
     invites as never,
     rsvps as never,
     cohosts as never,
     connectionsService as never,
     membership as never,
+    communityMembers as never,
+    communities as never,
   );
-  return { service, invites, rsvps, cohosts, connectionsService, membership };
+  return {
+    service,
+    invites,
+    rsvps,
+    cohosts,
+    connectionsService,
+    membership,
+    communityMembers,
+    communities,
+  };
 }
 
 const HOST_ID = 'host-1';
@@ -48,6 +66,83 @@ function baseEvent(overrides: Partial<Record<string, unknown>> = {}) {
     visibility: EventVisibility.Public,
     ...overrides,
   } as never;
+}
+
+const PARENT_COMMUNITY_ID = 'parent-1';
+const SPACE_COMMUNITY_ID = 'space-1';
+const SEEDED_COMMUNITIES = [
+  { id: PARENT_COMMUNITY_ID, parentId: null },
+  { id: SPACE_COMMUNITY_ID, parentId: PARENT_COMMUNITY_ID },
+];
+
+type WhereShape = Record<string, unknown> | Record<string, unknown>[];
+
+/**
+ * Whether a seeded row passes a TypeORM-style `where`: a plain value compares
+ * equal, an `In(...)` operator checks membership, and an array is an OR of
+ * its branches.
+ */
+function matchesWhere(
+  where: WhereShape,
+  row: Record<string, unknown>,
+): boolean {
+  const branches = Array.isArray(where) ? where : [where];
+  return branches.some((branch) =>
+    Object.entries(branch).every(([key, expected]) =>
+      expected instanceof FindOperator
+        ? (expected.value as unknown[]).includes(row[key])
+        : expected === row[key],
+    ),
+  );
+}
+
+/**
+ * The gate over a REAL `CommunityMembershipService` reading the viewer's
+ * seeded roster in a parent and its space, so `assertViewable` and the batch
+ * paths are held to one effective-role rule.
+ */
+function buildWithRoster(
+  rosterRows: Array<{ communityId: string; role: RosterRole }>,
+) {
+  const built = build();
+  const seededRoster = rosterRows.map((row) => ({
+    ...row,
+    userId: VIEWER_ID,
+  }));
+  const communityRepository = {
+    find: jest.fn(({ where }: { where: WhereShape }) =>
+      Promise.resolve(
+        SEEDED_COMMUNITIES.filter((row) => matchesWhere(where, row)),
+      ),
+    ),
+    findOne: jest.fn(({ where }: { where: WhereShape }) =>
+      Promise.resolve(
+        SEEDED_COMMUNITIES.find((row) => matchesWhere(where, row)) ?? null,
+      ),
+    ),
+  };
+  const memberRepository = {
+    find: jest.fn(({ where }: { where: WhereShape }) =>
+      Promise.resolve(seededRoster.filter((row) => matchesWhere(where, row))),
+    ),
+  };
+  const membership = new CommunityMembershipService(
+    communityRepository as never,
+    memberRepository as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  const service = new EventAudienceGateService(
+    built.invites as never,
+    built.rsvps as never,
+    built.cohosts as never,
+    built.connectionsService as never,
+    membership,
+    built.communityMembers as never,
+    built.communities as never,
+  );
+  return { service };
 }
 
 describe('EventAudienceGateService', () => {
@@ -189,7 +284,7 @@ describe('EventAudienceGateService', () => {
       expect(
         connectionsService.allAcceptedConnectionUserIds,
       ).not.toHaveBeenCalled();
-      expect(membership.communityIdsForUser).not.toHaveBeenCalled();
+      expect(membership.effectiveCommunityIdsForUser).not.toHaveBeenCalled();
     });
 
     // The five cases fix round 2's `scopedVisibilityWhere`-based filter
@@ -246,7 +341,7 @@ describe('EventAudienceGateService', () => {
         visibility: EventVisibility.Community,
         communityId: 'community-1',
       });
-      membership.communityIdsForUser.mockResolvedValue([]); // no longer a member of anything
+      membership.effectiveCommunityIdsForUser.mockResolvedValue([]); // no longer a member of anything
 
       const result = await service.filterViewable([event], VIEWER_ID);
       expect(result).toEqual([event]);
@@ -305,7 +400,7 @@ describe('EventAudienceGateService', () => {
       expect(
         connectionsService.allAcceptedConnectionUserIds,
       ).not.toHaveBeenCalled();
-      expect(membership.communityIdsForUser).not.toHaveBeenCalled();
+      expect(membership.effectiveCommunityIdsForUser).not.toHaveBeenCalled();
     });
 
     it('batches the co-host lookup ONCE for the whole page (no N+1)', async () => {
@@ -369,7 +464,7 @@ describe('EventAudienceGateService', () => {
 
     it('admits space gatherings through the viewer community set', async () => {
       const { service, membership } = build();
-      membership.communityIdsForUser.mockResolvedValue(['space-1']);
+      membership.effectiveCommunityIdsForUser.mockResolvedValue(['space-1']);
 
       const { clause, params } = await service.scopedVisibilityWhere(VIEWER_ID);
 
@@ -377,6 +472,163 @@ describe('EventAudienceGateService', () => {
         /"evc"\."parent_id" IS NOT NULL\s*\)\s*OR e\.community_id IN \(:\.\.\.viewerCommunityIds\)/,
       );
       expect(params.viewerCommunityIds).toEqual(['space-1']);
+    });
+  });
+
+  describe('audienceAmong', () => {
+    const CANDIDATES = [HOST_ID, 'cohost-1', 'member-a', 'member-b'];
+
+    it('admits every candidate of a public gathering and names its organizers', async () => {
+      const { service, cohosts, invites, connectionsService } = build();
+      cohosts.find.mockResolvedValueOnce([{ userId: 'cohost-1' }] as never);
+
+      const audience = await service.audienceAmong(baseEvent(), CANDIDATES);
+
+      expect([...audience.organizerUserIds].sort()).toEqual(
+        ['cohost-1', HOST_ID].sort(),
+      );
+      expect([...audience.viewerUserIds].sort()).toEqual(
+        [...CANDIDATES].sort(),
+      );
+      expect(invites.find).not.toHaveBeenCalled();
+      expect(
+        connectionsService.acceptedConnectionsAmong,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('admits invited members and live RSVPs of an invite-only gathering, in one read each', async () => {
+      const { service, invites, rsvps } = build();
+      invites.find.mockResolvedValueOnce([{ inviteeId: 'member-a' }]);
+      rsvps.find.mockResolvedValueOnce([]);
+
+      const audience = await service.audienceAmong(
+        baseEvent({ visibility: EventVisibility.InviteOnly }),
+        CANDIDATES,
+      );
+
+      expect([...audience.viewerUserIds].sort()).toEqual(
+        [HOST_ID, 'member-a'].sort(),
+      );
+      expect(invites.find).toHaveBeenCalledTimes(1);
+      expect(rsvps.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('admits the host connections and mutuals of an extended-network gathering', async () => {
+      const { service, connectionsService } = build();
+      connectionsService.acceptedConnectionsAmong.mockResolvedValueOnce(
+        new Set(['member-a']),
+      );
+      connectionsService.mutualCountsByUserIds.mockResolvedValueOnce(
+        new Map([['member-b', 2]]),
+      );
+
+      const audience = await service.audienceAmong(
+        baseEvent({ visibility: EventVisibility.ExtendedNetwork }),
+        ['member-a', 'member-b', 'stranger'],
+      );
+
+      expect([...audience.viewerUserIds].sort()).toEqual(
+        ['member-a', 'member-b'].sort(),
+      );
+      expect(connectionsService.mutualCountsByUserIds).toHaveBeenCalledWith(
+        HOST_ID,
+        ['member-b', 'stranger'],
+      );
+    });
+
+    it('admits the effective roster of a community gathering from one roster read', async () => {
+      const { service, communities, communityMembers } = build();
+      communities.findOne.mockResolvedValueOnce({
+        id: 'community-1',
+        parentId: null,
+      });
+      communityMembers.find.mockResolvedValueOnce([
+        { userId: 'member-a', communityId: 'community-1', role: 'member' },
+      ]);
+
+      const audience = await service.audienceAmong(
+        baseEvent({
+          visibility: EventVisibility.Community,
+          communityId: 'community-1',
+        }),
+        ['member-a', 'member-b'],
+      );
+
+      expect([...audience.viewerUserIds]).toEqual(['member-a']);
+      expect(communityMembers.find).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('community tier in a space, over the real membership rule', () => {
+    const spaceEvent = baseEvent({
+      id: 'space-event',
+      visibility: EventVisibility.Community,
+      communityId: SPACE_COMMUNITY_ID,
+    });
+
+    it.each([RosterRole.Owner, RosterRole.CoOwner, RosterRole.Mod])(
+      'admits a parent %s with no space row on the detail page, filterViewable and scopedVisibilityWhere',
+      async (parentRole) => {
+        const { service } = buildWithRoster([
+          { communityId: PARENT_COMMUNITY_ID, role: parentRole },
+        ]);
+
+        await expect(
+          service.assertViewable(spaceEvent, VIEWER_ID, false),
+        ).resolves.toBeUndefined();
+        await expect(
+          service.filterViewable([spaceEvent], VIEWER_ID),
+        ).resolves.toEqual([spaceEvent]);
+        const { params } = await service.scopedVisibilityWhere(VIEWER_ID);
+        expect(params.communityVisibility).toBe(EventVisibility.Community);
+        expect(params.viewerCommunityIds).toEqual(
+          expect.arrayContaining([SPACE_COMMUNITY_ID]),
+        );
+      },
+    );
+
+    it('keeps a plain parent member out of a space they have not joined, on every path', async () => {
+      const { service } = buildWithRoster([
+        { communityId: PARENT_COMMUNITY_ID, role: RosterRole.Member },
+      ]);
+
+      await expect(
+        service.assertViewable(spaceEvent, VIEWER_ID, false),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.filterViewable([spaceEvent], VIEWER_ID),
+      ).resolves.toEqual([]);
+      const { params } = await service.scopedVisibilityWhere(VIEWER_ID);
+      expect(params.viewerCommunityIds).toEqual([PARENT_COMMUNITY_ID]);
+    });
+
+    it('refuses a space row whose parent row is gone, on every path', async () => {
+      const { service } = buildWithRoster([
+        { communityId: SPACE_COMMUNITY_ID, role: RosterRole.Mod },
+      ]);
+
+      await expect(
+        service.assertViewable(spaceEvent, VIEWER_ID, false),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.filterViewable([spaceEvent], VIEWER_ID),
+      ).resolves.toEqual([]);
+      const { params } = await service.scopedVisibilityWhere(VIEWER_ID);
+      expect(params.viewerCommunityIds).toBeUndefined();
+    });
+
+    it('still rejects a stranger on every path', async () => {
+      const { service } = buildWithRoster([]);
+
+      await expect(
+        service.assertViewable(spaceEvent, VIEWER_ID, false),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.filterViewable([spaceEvent], VIEWER_ID),
+      ).resolves.toEqual([]);
+      const { clause, params } = await service.scopedVisibilityWhere(VIEWER_ID);
+      expect(clause).not.toContain(':communityVisibility');
+      expect(params.viewerCommunityIds).toBeUndefined();
     });
   });
 });

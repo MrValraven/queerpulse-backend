@@ -459,11 +459,17 @@ export class NotificationsService {
   }
 
   /**
-   * PRD-224. Clear one row from the member's own bell, for good and on every
+   * PRD-224. Delete one of the member's own rows, for good and on every
    * device: a real DELETE, scoped to `{ id, userId }` so the row has to belong
    * to the caller. A row that is not theirs (or no longer exists) affects
    * nothing and 404s, exactly like `markRead`, so the endpoint can never be
    * used to probe or clear somebody else's notifications.
+   *
+   * Two callers use it: the X on the /notifications page, once the member
+   * confirms the delete, and the inline resolve actions (accepting or
+   * declining a connection request and the like), which finish with the row.
+   * The X in the bell dropdown calls `hide` instead, which keeps the row on
+   * the page.
    *
    * A DELETE rather than a soft `dismissedAt` flag, deliberately. Deletion is
    * already this table's normal end state: `NotificationRetentionService`
@@ -480,6 +486,35 @@ export class NotificationsService {
    */
   async dismiss(id: string, userId: string): Promise<{ ok: true }> {
     const result = await this.notifications.delete({ id, userId });
+    if (!result.affected) {
+      throw new NotFoundException('Notification not found');
+    }
+    this.announceStateChanged(userId);
+    return { ok: true };
+  }
+
+  /**
+   * Clear one row from the member's bell dropdown only, on every device. The
+   * row stays in the table and on the /notifications page, which lists it
+   * with `isHiddenFromBell: true`. Scoped to `{ id, userId }` like `markRead`
+   * and `dismiss`, so a row that is not the caller's (or no longer exists)
+   * affects nothing and 404s.
+   *
+   * The same write marks the row read, so the bell's unread badge never counts
+   * a row its dropdown has stopped showing. Being read also keeps the row out
+   * of both bundle-absorb lookups, which only match unread rows: a later
+   * event on the same subject writes a fresh row, and that row shows in the
+   * bell. A hidden row then ages out through `NotificationRetentionService`
+   * like any other read row.
+   *
+   * Idempotent. Hiding a row that is already hidden stamps the time again and
+   * returns ok, since Postgres counts the matched row as affected.
+   */
+  async hide(id: string, userId: string): Promise<{ ok: true }> {
+    const result = await this.notifications.update(
+      { id, userId },
+      { read: true, hiddenFromBellAt: new Date() },
+    );
     if (!result.affected) {
       throw new NotFoundException('Notification not found');
     }
@@ -590,14 +625,20 @@ export class NotificationsService {
     if (!existing) return null;
     const now = new Date();
     const otherActorCount = existing.otherActorCount + 1;
+    // The lookup matched an unread row, so it was showing in the bell. A
+    // `hide` landing between that lookup and this write would leave the new
+    // event on a row the dropdown skips, so the write puts the row back in
+    // the bell. On the usual path the column is already null.
     await this.notifications.update({ id: existing.id }, {
       payload,
       otherActorCount,
       createdAt: now,
+      hiddenFromBellAt: null,
     } as QueryDeepPartialEntity<Notification>);
     existing.payload = payload;
     existing.otherActorCount = otherActorCount;
     existing.createdAt = now;
+    existing.hiddenFromBellAt = null;
     return existing;
   }
 
@@ -637,6 +678,8 @@ export class NotificationsService {
     }
     if (!absorbed.size) return absorbed;
     const now = new Date();
+    // Clears `hiddenFromBellAt` for the same reason `absorbIntoBundle` does: a
+    // `hide` racing the lookup above must not bury the new event.
     await this.notifications
       .createQueryBuilder()
       .update(Notification)
@@ -644,6 +687,7 @@ export class NotificationsService {
         payload,
         createdAt: now,
         otherActorCount: () => '"other_actor_count" + 1',
+        hiddenFromBellAt: null,
       } as QueryDeepPartialEntity<Notification>)
       .whereInIds([...absorbed.values()].map((row) => row.id))
       .execute();
@@ -651,6 +695,7 @@ export class NotificationsService {
       row.payload = payload;
       row.otherActorCount += 1;
       row.createdAt = now;
+      row.hiddenFromBellAt = null;
     }
     return absorbed;
   }

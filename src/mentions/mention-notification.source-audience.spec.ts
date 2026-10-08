@@ -367,6 +367,7 @@ function build(
     notifications as never,
     blockFilter as never,
     contentModeration as never,
+    {} as never,
   );
 
   const notifiedRecipients = () =>

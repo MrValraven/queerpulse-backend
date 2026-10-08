@@ -3,6 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { CommunityMember } from '../communities/entities/community-member.entity';
+import { Community } from '../communities/entities/community.entity';
+import { resolveEffectiveRole } from '../communities/subcommunity-rules';
 import { ConnectionsService } from '../connections/connections.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
@@ -33,6 +36,21 @@ const NO_SIGNAL: Omit<ViewabilityContext, 'isOrganizer'> = {
   hasMutualConnectionWithHost: false,
   isCommunityMember: false,
 };
+
+/** The event fields `audienceAmong` reads. */
+export type EventAudienceSubject = Pick<
+  Event,
+  'id' | 'hostId' | 'visibility' | 'communityId'
+>;
+
+/**
+ * Who among a candidate set organizes one event, and who passes its audience
+ * tier (organizers included). Returned by `audienceAmong`.
+ */
+export interface EventAudienceAmong {
+  organizerUserIds: Set<string>;
+  viewerUserIds: Set<string>;
+}
 
 /**
  * The gathering-audience-scope tier check — the single source of truth for
@@ -72,6 +90,13 @@ export class EventAudienceGateService {
     private readonly cohosts: Repository<EventCohost>,
     private readonly connectionsService: ConnectionsService,
     private readonly membership: CommunityMembershipService,
+    // Read by `audienceAmong` alone: one roster read answers the `community`
+    // tier for a whole candidate set, by the same effective-role rule
+    // `CommunityMembershipService.isMember` applies to one viewer.
+    @InjectRepository(CommunityMember)
+    private readonly communityMembers: Repository<CommunityMember>,
+    @InjectRepository(Community)
+    private readonly communities: Repository<Community>,
   ) {}
 
   /**
@@ -132,12 +157,15 @@ export class EventAudienceGateService {
    *  - extended_network's mutual-connection fallback: one batched
    *    `mutualCountsByUserIds` call over exactly the host ids that still need
    *    it (i.e. not already directly connected),
-   *  - community: the viewer's own community-membership id-set, fetched
-   *    once.
+   *  - community: the ids of every community the viewer holds an effective
+   *    role in, fetched once (`effectiveCommunityIdsForUser`: their own
+   *    roster rows, a space row only under a parent row, plus every space
+   *    under a parent where they are owner, co-owner or mod), the same set
+   *    `isMember` admits one community at a time.
    *
    * Any of the five preload queries is skipped entirely if nothing in the
    * page needs it (e.g. a saved list with no `community` events never calls
-   * `communityIdsForUser`).
+   * `effectiveCommunityIdsForUser`).
    *
    * Post-fetch filtering means a page can come back SHORTER than the
    * requested `take` when some bookmarks are no longer viewable — accepted
@@ -232,7 +260,7 @@ export class EventAudienceGateService {
         needsTierCheck(event) && event.visibility === EventVisibility.Community,
     );
     const viewerCommunityIds = needsCommunity
-      ? new Set(await this.membership.communityIdsForUser(viewerId))
+      ? new Set(await this.membership.effectiveCommunityIdsForUser(viewerId))
       : new Set<string>();
 
     return events.filter((event) => {
@@ -255,7 +283,205 @@ export class EventAudienceGateService {
     });
   }
 
+  /**
+   * The many-viewers form of `assertViewable`: for ONE event, which of
+   * `candidateUserIds` organize it (host or co-host) and which pass its
+   * audience tier, organizers included. Backs the mention fan-out of a
+   * gathering's description (`MentionNotificationService`), which has to
+   * hold every tagged member to the audience the detail page admits.
+   *
+   * The same `isViewable` decision as the other two entry points, with every
+   * fact preloaded once for the whole candidate set, so the cost does not
+   * grow with the number of candidates:
+   *  - organizers: the host id compare plus one co-host read;
+   *  - `invite_only`: one invite read and one live-RSVP read;
+   *  - `network`: one read of the host's connections among the candidates;
+   *  - `extended_network`: that read, plus one mutual-connection count over
+   *    the candidates it left out (a mutual connection is symmetric, so
+   *    counting from the host's side answers the viewer's question);
+   *  - `community`: the community row plus one roster read covering the
+   *    parent too when it is a space.
+   * Only the event's own tier is read, and only for non-organizers.
+   *
+   * Draft workspace and moderator takedown stay with the caller, exactly as
+   * for `assertViewable`: the caller narrows to `organizerUserIds` when
+   * either applies.
+   */
+  async audienceAmong(
+    event: EventAudienceSubject,
+    candidateUserIds: string[],
+  ): Promise<EventAudienceAmong> {
+    const candidates = [...new Set(candidateUserIds)];
+    if (!candidates.length) {
+      return { organizerUserIds: new Set(), viewerUserIds: new Set() };
+    }
+    const cohostRows = await this.cohosts.find({
+      where: { eventId: event.id, userId: In(candidates) },
+      select: { userId: true },
+    });
+    const organizerUserIds = new Set(cohostRows.map((row) => row.userId));
+    if (event.hostId !== null && candidates.includes(event.hostId)) {
+      organizerUserIds.add(event.hostId);
+    }
+    const tierCandidates = candidates.filter(
+      (userId) => !organizerUserIds.has(userId),
+    );
+    const contextByUserId = await this.buildContextsForCandidates(
+      event,
+      tierCandidates,
+    );
+    const viewerUserIds = new Set(organizerUserIds);
+    for (const userId of tierCandidates) {
+      const context = contextByUserId.get(userId) ?? {
+        isOrganizer: false,
+        ...NO_SIGNAL,
+      };
+      if (this.isViewable(event, context)) viewerUserIds.add(userId);
+    }
+    return { organizerUserIds, viewerUserIds };
+  }
+
   // --- internals ---
+
+  /**
+   * The `ViewabilityContext` of each non-organizer in `candidateUserIds` for
+   * one event, reading only the facts the event's own tier needs (see
+   * `audienceAmong`). A candidate with no signal is absent from the map.
+   */
+  private async buildContextsForCandidates(
+    event: EventAudienceSubject,
+    candidateUserIds: string[],
+  ): Promise<Map<string, ViewabilityContext>> {
+    const contextByUserId = new Map<string, ViewabilityContext>();
+    if (!candidateUserIds.length) return contextByUserId;
+    const withSignal = (
+      userIds: Iterable<string>,
+      signal: Partial<Omit<ViewabilityContext, 'isOrganizer'>>,
+    ): void => {
+      for (const userId of userIds) {
+        contextByUserId.set(userId, {
+          isOrganizer: false,
+          ...NO_SIGNAL,
+          ...contextByUserId.get(userId),
+          ...signal,
+        });
+      }
+    };
+
+    switch (event.visibility) {
+      case EventVisibility.InviteOnly: {
+        const [invitedRows, rsvpedRows] = await Promise.all([
+          this.invites.find({
+            where: { eventId: event.id, inviteeId: In(candidateUserIds) },
+            select: { inviteeId: true },
+          }),
+          this.rsvps.find({
+            where: {
+              eventId: event.id,
+              userId: In(candidateUserIds),
+              status: Not(RsvpStatus.Cancelled),
+            },
+            select: { userId: true },
+          }),
+        ]);
+        withSignal(
+          invitedRows.map((row) => row.inviteeId),
+          { isInvited: true },
+        );
+        withSignal(
+          rsvpedRows.map((row) => row.userId),
+          { hasLiveRsvp: true },
+        );
+        return contextByUserId;
+      }
+      case EventVisibility.Network:
+      case EventVisibility.ExtendedNetwork: {
+        // An erased host (NULL `hostId`) has no connections, so both network
+        // tiers stay closed, as in `buildContextForOne`.
+        const hostId = event.hostId;
+        if (hostId === null) return contextByUserId;
+        const connectedUserIds =
+          await this.connectionsService.acceptedConnectionsAmong(
+            hostId,
+            candidateUserIds,
+          );
+        withSignal(connectedUserIds, { isConnectedToHost: true });
+        if (event.visibility === EventVisibility.Network) {
+          return contextByUserId;
+        }
+        const unconnectedUserIds = candidateUserIds.filter(
+          (userId) => !connectedUserIds.has(userId),
+        );
+        const mutualCounts = unconnectedUserIds.length
+          ? await this.connectionsService.mutualCountsByUserIds(
+              hostId,
+              unconnectedUserIds,
+            )
+          : new Map<string, number>();
+        withSignal(
+          unconnectedUserIds.filter(
+            (userId) => (mutualCounts.get(userId) ?? 0) > 0,
+          ),
+          { hasMutualConnectionWithHost: true },
+        );
+        return contextByUserId;
+      }
+      case EventVisibility.Community: {
+        if (event.communityId === null) return contextByUserId;
+        withSignal(
+          await this.communityMembersAmong(event.communityId, candidateUserIds),
+          { isCommunityMember: true },
+        );
+        return contextByUserId;
+      }
+      default:
+        // `public` / `members` admit everyone; nothing to read.
+        return contextByUserId;
+    }
+  }
+
+  /**
+   * The subset of `candidateUserIds` holding an effective role in
+   * `communityId`: `CommunityMembershipService.isMember` for a whole set, by
+   * the same `resolveEffectiveRole` rule (a top-level roster row; inside a
+   * space, a space row under a parent row, or parent staff standing). An
+   * unknown community admits nobody, as `isMember` answers false for it.
+   */
+  private async communityMembersAmong(
+    communityId: string,
+    candidateUserIds: string[],
+  ): Promise<string[]> {
+    const community = await this.communities.findOne({
+      where: { id: communityId },
+      select: { id: true, parentId: true },
+    });
+    if (!community) return [];
+    const parentId = community.parentId ?? null;
+    const rosterRows = await this.communityMembers.find({
+      where: {
+        communityId: parentId ? In([community.id, parentId]) : community.id,
+        userId: In(candidateUserIds),
+      },
+      select: { userId: true, communityId: true, role: true },
+    });
+    return candidateUserIds.filter((userId) => {
+      const ownRow = rosterRows.find(
+        (row) => row.userId === userId && row.communityId === community.id,
+      );
+      const parentRow = parentId
+        ? rosterRows.find(
+            (row) => row.userId === userId && row.communityId === parentId,
+          )
+        : undefined;
+      return (
+        resolveEffectiveRole({
+          isSpace: parentId !== null,
+          ownRole: ownRow?.role ?? null,
+          parentRole: parentRow?.role ?? null,
+        }) !== null
+      );
+    });
+  }
 
   /**
    * The shared per-tier decision, pure and synchronous — no queries, just
@@ -264,7 +490,10 @@ export class EventAudienceGateService {
    * (keep-on-true) evaluate against, so the tier logic itself can never
    * drift between a "check one" and "filter many" caller.
    */
-  private isViewable(event: Event, context: ViewabilityContext): boolean {
+  private isViewable(
+    event: Pick<Event, 'visibility'>,
+    context: ViewabilityContext,
+  ): boolean {
     if (context.isOrganizer) return true;
 
     switch (event.visibility) {
@@ -394,9 +623,10 @@ export class EventAudienceGateService {
    * full per-event viewability, not this cheaper discovery predicate.
    *
    * `public`/`members` always qualify. `network`/`community` gatherings
-   * additionally qualify when the viewer's OWN id-sets admit them — a host
-   * the viewer is connected to, or a community the viewer is on the roster
-   * of — computed ONCE per call, not per row.
+   * additionally qualify when the viewer's OWN id-sets admit them: a host
+   * the viewer is connected to, or a community the viewer holds an effective
+   * role in (`effectiveCommunityIdsForUser`, the same set `assertViewable`
+   * admits for the `community` tier). Both sets are computed ONCE per call.
    *
    * `invite_only` stays excluded (it surfaces only through
    * going/hosting/invited contexts, never an open list).
@@ -430,7 +660,7 @@ export class EventAudienceGateService {
   ): Promise<{ clause: string; params: Record<string, unknown> }> {
     const [viewerConnectionIds, viewerCommunityIds] = await Promise.all([
       this.connectionsService.allAcceptedConnectionUserIds(viewerId),
-      this.membership.communityIdsForUser(viewerId),
+      this.membership.effectiveCommunityIdsForUser(viewerId),
     ]);
 
     const clauses = ['e.visibility IN (:...vis)'];
@@ -454,10 +684,11 @@ export class EventAudienceGateService {
     // Spaces never appear in Discover. The visibility arms above admit a
     // space's `public`/`members`/`network` gathering to everyone, so every
     // gathering hosted by a space is ANDed down to viewers who stand in that
-    // space. `communityIdsForUser` already applies the space rules (a space
-    // row counts only with the parent row, and parent staff reach every
-    // space), so it is the right set to admit by. Mirrors the feed's
-    // gathering arm.
+    // space. `effectiveCommunityIdsForUser` applies the space rules through
+    // `resolveEffectiveRole`: a space row counts only with the parent row, and
+    // a parent owner, co-owner or mod reaches every space under that parent
+    // with no space row of their own. That makes it the right set to admit
+    // by. Mirrors the feed's gathering arm.
     const spaceScope =
       viewerCommunityIds.length > 0
         ? ' OR e.community_id IN (:...viewerCommunityIds)'

@@ -130,17 +130,28 @@ describe('CommunityMembershipService', () => {
     );
   }
 
-  /** Seeds the communities `communities.find` resolves by id or parent id. */
+  /**
+   * Seeds the communities `communities.find` resolves by id or parent id. A
+   * `where` array is an OR of its branches, as in TypeORM.
+   */
   function givenCommunities(rows: Community[]): void {
     communities.find.mockImplementation(
-      ({ where }: { where: Record<string, unknown> }) =>
-        Promise.resolve(
-          rows.filter(
-            (row) =>
-              matchesWhereValue(where.id, row.id) &&
-              matchesWhereValue(where.parentId, row.parentId),
+      ({
+        where,
+      }: {
+        where: Record<string, unknown> | Record<string, unknown>[];
+      }) => {
+        const branches = Array.isArray(where) ? where : [where];
+        return Promise.resolve(
+          rows.filter((row) =>
+            branches.some(
+              (branch) =>
+                matchesWhereValue(branch.id, row.id) &&
+                matchesWhereValue(branch.parentId, row.parentId),
+            ),
           ),
-        ),
+        );
+      },
     );
     communities.findOne.mockImplementation(
       ({ where }: { where: Record<string, unknown> }) =>
@@ -667,6 +678,128 @@ describe('CommunityMembershipService', () => {
       expect(members.find).toHaveBeenCalledTimes(1);
       expect(roles.get(COMMUNITY.id)).toBe(RosterRole.Mod);
       expect(roles.get(SPACE.id)).toBe(RosterRole.Mod);
+    });
+
+    describe('effectiveCommunityIdsForUser', () => {
+      const OTHER_PARENT: Community = {
+        ...COMMUNITY,
+        id: 'community-2',
+        slug: 'other-parent',
+      };
+
+      const OTHER_SPACE: Community = {
+        ...COMMUNITY,
+        id: 'space-2',
+        slug: 'other-space',
+        parentId: OTHER_PARENT.id,
+      };
+
+      beforeEach(() => {
+        givenCommunities([COMMUNITY, SPACE, OTHER_PARENT, OTHER_SPACE]);
+      });
+
+      it.each([RosterRole.Owner, RosterRole.CoOwner, RosterRole.Mod])(
+        'adds every space under a parent where the user is %s, with no space row',
+        async (parentRole) => {
+          givenRoster([{ ...PARENT_MOD_ROW, role: parentRole }]);
+
+          const communityIds =
+            await service.effectiveCommunityIdsForUser('user-1');
+
+          expect([...communityIds].sort()).toEqual(
+            [COMMUNITY.id, SPACE.id].sort(),
+          );
+        },
+      );
+
+      it('leaves out the spaces of a parent where the user is a plain member', async () => {
+        givenRoster([PARENT_MEMBER_ROW]);
+
+        await expect(
+          service.effectiveCommunityIdsForUser('user-1'),
+        ).resolves.toEqual([COMMUNITY.id]);
+      });
+
+      it('keeps a space row that sits under a parent row', async () => {
+        givenRoster([PARENT_MEMBER_ROW, SPACE_MEMBER_ROW]);
+
+        const communityIds =
+          await service.effectiveCommunityIdsForUser('user-1');
+
+        expect([...communityIds].sort()).toEqual(
+          [COMMUNITY.id, SPACE.id].sort(),
+        );
+      });
+
+      it('drops a space row whose parent row is gone, staff role or not', async () => {
+        givenRoster([SPACE_MOD_ROW]);
+
+        await expect(
+          service.effectiveCommunityIdsForUser('user-1'),
+        ).resolves.toEqual([]);
+      });
+
+      it('reaches only the spaces of the parent the user is staff of', async () => {
+        givenRoster([
+          PARENT_MOD_ROW,
+          {
+            ...PARENT_MEMBER_ROW,
+            id: 'membership-other-parent',
+            communityId: OTHER_PARENT.id,
+          },
+        ]);
+
+        const communityIds =
+          await service.effectiveCommunityIdsForUser('user-1');
+
+        expect([...communityIds].sort()).toEqual(
+          [COMMUNITY.id, SPACE.id, OTHER_PARENT.id].sort(),
+        );
+      });
+
+      it('answers in one roster read and one community read', async () => {
+        givenRoster([PARENT_MOD_ROW, SPACE_MEMBER_ROW]);
+
+        await service.effectiveCommunityIdsForUser('user-1');
+
+        expect(members.find).toHaveBeenCalledTimes(1);
+        expect(communities.find).toHaveBeenCalledTimes(1);
+      });
+
+      it('skips the community read for a user with no roster rows', async () => {
+        givenRoster([]);
+
+        await expect(
+          service.effectiveCommunityIdsForUser('user-1'),
+        ).resolves.toEqual([]);
+        expect(communities.find).not.toHaveBeenCalled();
+      });
+
+      it('agrees with isMember for every community in the tree', async () => {
+        const rosters: CommunityMember[][] = [
+          [PARENT_MOD_ROW],
+          [PARENT_MEMBER_ROW],
+          [SPACE_MEMBER_ROW],
+          [PARENT_MEMBER_ROW, SPACE_MOD_ROW],
+          [],
+        ];
+        for (const roster of rosters) {
+          givenRoster(roster);
+          const communityIds = new Set(
+            await service.effectiveCommunityIdsForUser('user-1'),
+          );
+          for (const community of [
+            COMMUNITY,
+            SPACE,
+            OTHER_PARENT,
+            OTHER_SPACE,
+          ]) {
+            await expect(
+              service.isMember(community.id, 'user-1'),
+            ).resolves.toBe(communityIds.has(community.id));
+          }
+        }
+      });
     });
   });
 });

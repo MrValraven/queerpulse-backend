@@ -320,6 +320,40 @@ describe('EventLineupService (lineup invites)', () => {
       expect(lineup.entries.map((entry) => entry.slug)).toEqual(['accepted']);
     });
 
+    it('previews the lineup as a guest for an organizer', async () => {
+      lineupEntries.find.mockResolvedValue([
+        ...rows,
+        entryFor({
+          id: 'entry-host',
+          userId: 'host-user',
+          status: EventLineupEntryStatus.Accepted,
+        }),
+      ]);
+      profiles.find.mockResolvedValue([
+        profileFor('accepted-user', 'accepted'),
+        profileFor('pending-user', 'pending'),
+        profileFor('host-user', 'host'),
+      ]);
+
+      const lineup = await service.getLineup(
+        'drag-brunch',
+        'host-user',
+        'going',
+      );
+
+      expect(lineup.entries.map((entry) => entry.slug)).toEqual([
+        'accepted',
+        'host',
+      ]);
+      expect(lineup.viewerEntry).toBeNull();
+    });
+
+    it('refuses a guest preview from somebody who does not organize it', async () => {
+      await expect(
+        service.getLineup('drag-brunch', 'guest-user', 'member'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
     it("returns the viewer's own pending row as viewerEntry", async () => {
       const lineup = await service.getLineup('drag-brunch', 'pending-user');
       expect(lineup.viewerEntry).toEqual(

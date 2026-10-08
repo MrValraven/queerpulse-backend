@@ -13,6 +13,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
+  type ExtractedMentions,
+  extractMentions,
+  mentionsAddedIn,
+  mentionTokensText,
+} from '../common/mentions';
+import { truncateCharacters } from '../common/text-characters';
+import {
   EVENT_DISCOVERY_SEARCH_COLUMNS,
   EVENT_SEARCH_COLUMNS,
   foldedHaystack,
@@ -45,7 +52,12 @@ import {
   normalizeAccessibilityAnswers,
 } from '../listings/listing-accessibility';
 import { MediaCropService } from '../media-crops/media-crops.service';
-import { NotificationType } from '../notifications/entities/notification.entity';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
+import { EVENT_MENTION_EXCERPT_LENGTH } from '../mentions/mention-source-freshness';
+import {
+  Notification,
+  NotificationType,
+} from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -92,6 +104,13 @@ import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
+import {
+  PREVIEW_STAND_IN_VIEWER_ID,
+  previewRsvpRow,
+  previewRsvpStatus,
+  type DetailPreview,
+  type GuestPreviewRole,
+} from './event-preview';
 import { isAttendanceCleared } from './event-attendance-window';
 import {
   EventSeries,
@@ -140,6 +159,13 @@ interface AppliedEventUpdate {
    *  other notification here: an ask that cannot be un-sent must not describe
    *  a write that rolled back. `null` when there is nothing to ask. */
   venueOwnerToNotify: AttachableListingRef | null;
+  /** The mentions this patch should notify, spelled as tokens for
+   *  `MentionNotificationService.notify`: every mention in the description
+   *  when the patch published the gathering, only the newly added ones when
+   *  it edited a published description, and '' otherwise (a draft, a
+   *  cancelled gathering, or an unchanged description). Fanned out after the
+   *  transaction commits, like the rest of this record. */
+  descriptionMentionText: string;
 }
 
 export interface CreateEventInput {
@@ -297,6 +323,10 @@ export class EventsService {
     // waits for it, so modules whose rows the cascade removes (Go together's
     // matched groups) wind down first without this module importing them.
     private readonly eventEmitter: EventEmitter2,
+    // Tagging `@member`, `b/business` and the other sigils in a description
+    // notifies them once the gathering is published
+    // (`notifyDescriptionMentions`).
+    private readonly mentions: MentionNotificationService,
   ) {}
 
   private readonly logger = new Logger(EventsService.name);
@@ -504,6 +534,17 @@ export class EventsService {
     if (shouldAskVenueOwner && venueListing) {
       await this.notifyVenueOwnerBestEffort(firstSaved!, venueListing);
     }
+    // Created published: everybody the description tags hears about it, once
+    // for the whole series (it names the first occurrence), for the same
+    // reason the venue ask above is raised once. A draft tells nobody until
+    // it is published through `update()`.
+    if (status === EventStatus.Published) {
+      await this.notifyDescriptionMentions(
+        firstSaved!,
+        firstSaved!.description,
+        hostId,
+      );
+    }
     const detail = await this.buildDetail(firstSaved!, hostId);
     return { ...detail, occurrenceSlugs };
   }
@@ -587,10 +628,26 @@ export class EventsService {
     return occurrenceStartAt(base, cadence, index, timeZone);
   }
 
-  async getBySlug(slug: string, viewerId: string): Promise<EventDetail> {
+  async getBySlug(
+    slug: string,
+    viewerId: string,
+    viewAs?: GuestPreviewRole,
+  ): Promise<EventDetail> {
     const event = await this.loadEventOr404(slug);
-    await this.assertCanView(event, viewerId);
-    return this.buildDetail(event, viewerId);
+    const isOrganizer = await this.assertCanView(event, viewerId);
+    if (viewAs === undefined) return this.buildDetail(event, viewerId);
+    // A guest preview is the organisers' own tool. Anyone else asking for
+    // one is refused outright, so the parameter can never change what a
+    // guest is shown.
+    if (!isOrganizer) {
+      throw new ForbiddenException(
+        'Only an organiser can preview this gathering as a guest',
+      );
+    }
+    return this.buildDetail(event, PREVIEW_STAND_IN_VIEWER_ID, {
+      rsvpStatus: previewRsvpStatus(viewAs),
+      isStandInOnRoster: event.visibility === EventVisibility.Community,
+    });
   }
 
   /**
@@ -681,6 +738,21 @@ export class EventsService {
           { venueOwnerNotifiedAt: new Date() },
         );
       }
+    }
+
+    // A description's mentions fan out once per edit, whatever the scope: a
+    // `'future'` series edit carries the same description to every later
+    // occurrence, and one tag is one notification. The first occurrence with
+    // something to tell names the gathering.
+    const mentionOutcome = applied.find(
+      (outcome) => outcome.descriptionMentionText !== '',
+    );
+    if (mentionOutcome) {
+      await this.notifyDescriptionMentions(
+        mentionOutcome.event,
+        mentionOutcome.descriptionMentionText,
+        userId,
+      );
     }
 
     const saved = applied[0]?.event ?? event;
@@ -779,6 +851,10 @@ export class EventsService {
 
     const oldStartAt = event.startAt;
     const oldCapacity = event.capacity;
+    // Read before the patch lands, so the mention fan-out can tell a publish
+    // and a description edit from everything else (`descriptionMentionText`).
+    const oldStatus = event.status;
+    const oldDescription = event.description;
     // Snapshot the material fields (when + where) before the patch so we can
     // tell afterwards whether the edit is worth notifying attendees about.
     const oldVenue = event.venue;
@@ -1004,6 +1080,156 @@ export class EventsService {
       materialChanges:
         saved.status === EventStatus.Published ? materialChanges : [],
       venueOwnerToNotify,
+      descriptionMentionText: EventsService.descriptionMentionText(
+        oldStatus,
+        oldDescription,
+        saved,
+      ),
+    };
+  }
+
+  /**
+   * The mentions a patch should notify, as `AppliedEventUpdate`
+   * `descriptionMentionText` documents. A gathering that is not published
+   * after the patch notifies nobody; one that just became published notifies
+   * every mention its description carries; a published one whose description
+   * changed notifies only the mentions the previous description lacked, since
+   * everyone it tagged before was told then.
+   */
+  private static descriptionMentionText(
+    oldStatus: EventStatus,
+    oldDescription: string,
+    saved: Pick<Event, 'status' | 'description'>,
+  ): string {
+    if (saved.status !== EventStatus.Published) return '';
+    if (oldStatus !== EventStatus.Published) return saved.description;
+    if (saved.description === oldDescription) return '';
+    return mentionTokensText(
+      mentionsAddedIn(oldDescription, saved.description),
+    );
+  }
+
+  /**
+   * Fans the mentions in `mentionText` out as `Mention` notifications from
+   * `authorId`, the organizer whose save published or edited the
+   * description, who is never notified of their own tag. `mentionText` is the
+   * whole description on a publish, or just the newly added tokens on an
+   * edit; the excerpt is always the live description's opening.
+   *
+   * Payload: `source: 'event'`, `eventSlug`, `eventId`, `actorId` and
+   * `excerpt`, plus the `entityKind` and `entityRef` every mention row gets.
+   * `MentionNotificationService` holds each recipient to the people the
+   * gathering's own detail page admits.
+   *
+   * Runs after the save has committed and NEVER THROWS: `notify` is
+   * best-effort on its own, and this guard keeps a failure anywhere on the
+   * way from reaching the organizer's create or edit.
+   */
+  private async notifyDescriptionMentions(
+    event: Event,
+    mentionText: string,
+    authorId: string,
+  ): Promise<void> {
+    try {
+      if (!mentionText.trim()) return;
+      const unnotified = await this.withoutAlreadyNotifiedMentions(
+        event,
+        mentionText,
+      );
+      if (!unnotified.text.trim()) return;
+      await this.mentions.notify(
+        unnotified.text,
+        authorId,
+        {
+          actorId: authorId,
+          source: 'event',
+          eventSlug: event.slug,
+          eventId: event.id,
+          excerpt: truncateCharacters(
+            event.description,
+            EVENT_MENTION_EXCERPT_LENGTH,
+          ),
+        },
+        unnotified.alreadyNotifiedUserIds,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Description mention fan-out failed for event ${event.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * `mentionText` minus every mention this gathering's description already
+   * notified, read back from the `Mention` rows the earlier fan-outs wrote
+   * (payload `source: 'event'`, `eventId`, `entityKind`, `entityRef`). Keeps
+   * one description tag to one notification across any number of
+   * publish, unpublish and republish cycles, and a tag that was removed and
+   * typed again stays quiet.
+   *
+   * A recurring series counts as one gathering: the rows of every occurrence
+   * of `event.seriesId` count. `alreadyNotifiedUserIds` lists everyone those
+   * rows reached, so a member first told through `@ana` is not told again
+   * through a `c/` tag that also names them.
+   */
+  private async withoutAlreadyNotifiedMentions(
+    event: Pick<Event, 'id' | 'seriesId'>,
+    mentionText: string,
+  ): Promise<{ text: string; alreadyNotifiedUserIds: string[] }> {
+    const lookup = this.events.manager
+      .getRepository(Notification)
+      .createQueryBuilder('notification')
+      .select(`"notification"."payload" ->> 'entityKind'`, 'entityKind')
+      .addSelect(`"notification"."payload" ->> 'entityRef'`, 'entityRef')
+      .addSelect(`"notification"."user_id"`, 'userId')
+      .distinct(true)
+      .where('"notification"."type" = :type', {
+        type: NotificationType.Mention,
+      })
+      .andWhere(`"notification"."payload" ->> 'source' = :source`, {
+        source: 'event',
+      });
+    if (event.seriesId) {
+      lookup.andWhere(
+        `("notification"."payload" ->> 'eventId') IN (SELECT "sibling"."id"::text FROM "events" "sibling" WHERE "sibling"."series_id" = :seriesId)`,
+        { seriesId: event.seriesId },
+      );
+    } else {
+      lookup.andWhere(`"notification"."payload" ->> 'eventId' = :eventId`, {
+        eventId: event.id,
+      });
+    }
+    const notifiedRows: Array<{
+      entityKind: string;
+      entityRef: string;
+      userId: string;
+    }> = await lookup.getRawMany();
+    const notifiedRefs = new Set(
+      notifiedRows.map((row) => `${row.entityKind}:${row.entityRef}`),
+    );
+    const bucketKindByKey: Record<keyof ExtractedMentions, string> = {
+      members: 'member',
+      communities: 'community',
+      businesses: 'business',
+      events: 'event',
+      threads: 'thread',
+    };
+    const extracted = extractMentions(mentionText);
+    const remaining = { ...extracted };
+    for (const bucketKey of Object.keys(bucketKindByKey) as Array<
+      keyof ExtractedMentions
+    >) {
+      remaining[bucketKey] = extracted[bucketKey].filter(
+        (slug) => !notifiedRefs.has(`${bucketKindByKey[bucketKey]}:${slug}`),
+      );
+    }
+    return {
+      text: mentionTokensText(remaining),
+      alreadyNotifiedUserIds: [
+        ...new Set(notifiedRows.map((row) => row.userId)),
+      ],
     };
   }
 
@@ -2503,17 +2729,20 @@ export class EventsService {
    * of a private space count, through `isMember`'s effective role). A private
    * community's existence is withheld everywhere else, and a public gathering
    * naming it would give it away. Costs one roster lookup, and only in that
-   * one case.
+   * one case. `isViewerKnownOnRoster` skips the lookup for a guest preview's
+   * stand-in on a community-only gathering, whose real viewers are all on
+   * the roster.
    */
   private async isHostingCommunityWithheld(
     event: Event,
     hostingCommunityRef: { accessTier: AccessTier } | null,
     viewerId: string,
     isOrganizer: boolean,
+    isViewerKnownOnRoster = false,
   ): Promise<boolean> {
     if (!event.communityId || !hostingCommunityRef) return false;
     if (hostingCommunityRef.accessTier !== AccessTier.Private) return false;
-    if (isOrganizer) return false;
+    if (isOrganizer || isViewerKnownOnRoster) return false;
     return !(await this.membership.isMember(event.communityId, viewerId));
   }
 
@@ -2529,6 +2758,7 @@ export class EventsService {
   private async buildDetail(
     event: Event,
     viewerId: string,
+    preview?: DetailPreview,
   ): Promise<EventDetail> {
     // First wave: these six lookups are all independent of one another — only
     // `profilesByUserIds` below depends on `cohostRows`'s ids, so it waits for
@@ -2541,7 +2771,7 @@ export class EventsService {
     const [
       goingCount,
       waitlistCount,
-      myRsvp,
+      storedRsvp,
       cohostRows,
       isBookmarked,
       hostingCommunityRef,
@@ -2557,13 +2787,19 @@ export class EventsService {
       this.rsvps.count({
         where: { eventId: event.id, status: RsvpStatus.Waitlisted },
       }),
-      this.rsvps.findOne({
-        where: { eventId: event.id, userId: viewerId },
-      }),
+      // A preview reads no row of the host's own: its RSVP is the pretend
+      // one below, and it has no bookmarks.
+      preview
+        ? Promise.resolve(null)
+        : this.rsvps.findOne({
+            where: { eventId: event.id, userId: viewerId },
+          }),
       this.cohosts.find({
         where: { eventId: event.id },
       }),
-      this.bookmarks.isBookmarked(viewerId, event.id),
+      preview
+        ? Promise.resolve(false)
+        : this.bookmarks.isBookmarked(viewerId, event.id),
       event.communityId
         ? this.membership.hostingRefById(event.communityId)
         : Promise.resolve(null),
@@ -2585,6 +2821,9 @@ export class EventsService {
         take: EventsService.ANNOUNCEMENT_DETAIL_LIMIT,
       }),
     ]);
+    const myRsvp = preview
+      ? previewRsvpRow(preview.rsvpStatus, waitlistCount)
+      : storedRsvp;
     const organizerIds = presentActorIds([
       event.hostId,
       ...cohostRows.map((c) => c.userId),
@@ -2603,6 +2842,7 @@ export class EventsService {
       hostingCommunityRef,
       viewerId,
       isOrganizer,
+      preview?.isStandInOnRoster === true,
     );
     const hostingCommunity = isHostingCommunityWithheld
       ? null
@@ -2706,7 +2946,7 @@ export class EventsService {
       showAttendeeCount: event.showAttendeeCount,
       allowWaitlist: event.allowWaitlist,
       myRsvpDetails:
-        myRsvp && myRsvp.status !== RsvpStatus.Cancelled
+        !preview && myRsvp && myRsvp.status !== RsvpStatus.Cancelled
           ? toRsvpDetailsView(myRsvp)
           : null,
       goingAttendeesPreview: attendeesPreview.attendees,

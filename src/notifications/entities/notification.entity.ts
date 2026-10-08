@@ -1683,6 +1683,20 @@ export class Notification {
   otherActorCount!: number;
 
   /**
+   * When the member cleared this row from the bell dropdown with its X, or
+   * `null` while it still shows there. Hiding is bell-only: the row stays on
+   * the /notifications page, and `NotificationsService.hide` marks it read in
+   * the same write, so the unread badge only counts rows the dropdown shows.
+   * Stored on the row so the bell matches on every device.
+   *
+   * Optional on the type because a row this process just inserted carries no
+   * value for it in memory (the column has no default to read back), so the
+   * mapper treats a missing value as "shows in the bell".
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  hiddenFromBellAt?: Date | null;
+
+  /**
    * Set on insert, and bumped again every time this row absorbs another event,
    * so a bundle returns to the top of the feed as it grows. The feed orders on
    * this column, so it has to move; the first event's time is not kept, because

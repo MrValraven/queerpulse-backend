@@ -1976,6 +1976,7 @@ describe('ChatGateway', () => {
         // Bundling count. An ordinary row carries none, and the mapper
         // defaults it to 0 rather than leaving the field off the wire.
         otherActorCount: 0,
+        isHiddenFromBell: false,
       });
     });
 
