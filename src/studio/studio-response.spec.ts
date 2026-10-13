@@ -5,9 +5,12 @@ import {
 } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import {
+  EMPTY_RELEASE_STATS,
   StudioArtistPersona,
   statsForTracks,
   toStudioArtistRef,
+  toStudioOwnerReleaseCard,
+  toStudioReleaseCard,
   toStudioReleaseResponse,
 } from './studio-response';
 
@@ -134,5 +137,38 @@ describe('Studio response mappers', () => {
     expect(owner.isOwner).toBe(true);
     expect(staff.takedownReason).toBe('Uploaded twice');
     expect(staff.isOwner).toBe(false);
+  });
+
+  // Studio v2: Play all keeps the server's order, so every card carries the
+  // publish time the feed sorts on, and the genre the browse page filters on.
+  it('carries the publish time and the genre on every release card', () => {
+    const card = toStudioReleaseCard(release({ genre: 'fado' }), persona(), {
+      trackCount: 1,
+      totalDurationSeconds: 200,
+    });
+    expect(card.publishedAt).toBe('2026-10-01T09:00:00.000Z');
+    expect(card.genre).toBe('fado');
+  });
+
+  it('writes null for a draft that has no publish time and no genre', () => {
+    const card = toStudioOwnerReleaseCard(
+      release({ status: StudioReleaseStatus.Draft, publishedAt: null }),
+      persona(),
+      EMPTY_RELEASE_STATS,
+    );
+    expect(card.publishedAt).toBeNull();
+    expect(card.genre).toBeNull();
+    expect(card.status).toBe('draft');
+  });
+
+  it('keeps the publish time and genre on the full release response', () => {
+    const response = toStudioReleaseResponse(
+      release({ genre: 'ambient' }),
+      persona(),
+      [],
+      { isOwner: false, isStaff: false },
+    );
+    expect(response.publishedAt).toBe('2026-10-01T09:00:00.000Z');
+    expect(response.genre).toBe('ambient');
   });
 });

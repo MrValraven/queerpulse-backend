@@ -60,9 +60,17 @@ export class StudioOwnershipService {
     return persona;
   }
 
-  /** Musician and DJ personas the member co-owns whose releases can be heard. */
-  listUploadablePersonas(userId: string): Promise<Subprofile[]> {
-    return this.subprofiles
+  /** Musician and DJ personas the member co-owns whose releases can be heard.
+   *  Pass the caller's transaction `manager` to read on its connection, so a
+   *  read under a lock that transaction holds needs no second connection. */
+  listUploadablePersonas(
+    userId: string,
+    manager?: EntityManager,
+  ): Promise<Subprofile[]> {
+    const subprofiles = manager
+      ? manager.getRepository(Subprofile)
+      : this.subprofiles;
+    return subprofiles
       .createQueryBuilder('persona')
       .select([
         'persona.id',

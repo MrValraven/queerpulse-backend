@@ -27,11 +27,16 @@ import { SearchStudioQuery } from './dto/search-studio.query';
 import { StudioAccessGuard } from './studio-access.guard';
 import { StudioCatalogService } from './studio-catalog.service';
 import {
-  StudioArtistResponse,
+  StudioArtistWithPlaylists,
+  StudioPlaylistCard,
+  StudioSearchResultWithPlaylists,
+} from './studio-playlist-response';
+import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
+import {
+  StudioGenres,
   StudioPage,
   StudioReleaseCard,
   StudioReleaseResponse,
-  StudioSearchResult,
   StudioStream,
   StudioTrackResponse,
 } from './studio-response';
@@ -44,26 +49,45 @@ import {
 @Controller('studio')
 @UseGuards(ActiveMemberGuard, StudioAccessGuard)
 export class StudioListeningController {
-  constructor(private readonly catalog: StudioCatalogService) {}
+  constructor(
+    private readonly catalog: StudioCatalogService,
+    private readonly playlistReads: StudioPlaylistReadsService,
+  ) {}
 
   @Get('releases')
-  @ApiOperation({ summary: 'Published releases, newest first.' })
+  @ApiOperation({ summary: 'Published releases, newest first, by genre.' })
   @ApiOkResponse({ description: '`StudioPage<StudioReleaseCard>`.' })
   listReleases(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListStudioReleasesQuery,
   ): Promise<StudioPage<StudioReleaseCard>> {
-    return this.catalog.listReleases(user.userId, query.cursor);
+    return this.catalog.listReleases(user.userId, query.cursor, query.genre);
   }
 
+  @Get('genres')
+  @ApiOperation({ summary: 'Genres with a release the caller can hear.' })
+  @ApiOkResponse({ description: '`StudioGenres`.' })
+  listGenres(@CurrentUser() user: CurrentUserData): Promise<StudioGenres> {
+    return this.catalog.listGenres(user.userId);
+  }
+
+  // Playlists are merged here so the catalog never depends on the playlist
+  // reads, which depend on it.
   @Get('search')
-  @ApiOperation({ summary: 'Search releases, tracks and artists.' })
+  @ApiOperation({ summary: 'Search releases, tracks, artists and playlists.' })
   @ApiOkResponse({ description: '`StudioSearchResult`.' })
-  search(
+  async search(
     @CurrentUser() user: CurrentUserData,
     @Query() query: SearchStudioQuery,
-  ): Promise<StudioSearchResult> {
-    return this.catalog.search(user.userId, query.q, query.type ?? 'all');
+  ): Promise<StudioSearchResultWithPlaylists> {
+    const type = query.type ?? 'all';
+    const [catalogResult, playlists] = await Promise.all([
+      this.catalog.search(user.userId, query.q, type, query.genre),
+      type === 'all' || type === 'playlists'
+        ? this.playlistReads.searchPlaylists(user.userId, query.q)
+        : Promise.resolve<StudioPlaylistCard[]>([]),
+    ]);
+    return { ...catalogResult, playlists };
   }
 
   @Get('releases/:id')
@@ -81,11 +105,18 @@ export class StudioListeningController {
   @ApiOperation({ summary: "A persona's Studio page." })
   @ApiOkResponse({ description: '`StudioArtist`.' })
   @ApiNotFoundResponse({ description: 'Missing, or not visible to you.' })
-  getArtist(
+  async getArtist(
     @CurrentUser() user: CurrentUserData,
     @Param('subprofileId', ParseUUIDPipe) subprofileId: string,
-  ): Promise<StudioArtistResponse> {
-    return this.catalog.getArtist(user.userId, subprofileId);
+  ): Promise<StudioArtistWithPlaylists> {
+    // The artist read answers 404 first, so playlists are only read for a
+    // persona the caller can see.
+    const artist = await this.catalog.getArtist(user.userId, subprofileId);
+    const playlists = await this.playlistReads.listForArtistView(
+      user.userId,
+      subprofileId,
+    );
+    return { ...artist, playlists };
   }
 
   @Get('tracks/:id')

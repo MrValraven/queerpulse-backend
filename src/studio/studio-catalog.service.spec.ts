@@ -3,6 +3,7 @@ import { Repository } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { StorageService } from '../storage/storage.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
 import {
   StudioRelease,
   StudioReleaseStatus,
@@ -111,6 +112,10 @@ describe('StudioCatalogService', () => {
   let ownership: { isPersonaMember: jest.Mock };
   let blockFilter: { excludeBlocked: jest.Mock };
   let storage: { createPresignedAudioStream: jest.Mock };
+  let followers: {
+    loadFollowerCountsFor: jest.Mock;
+    viewerFollowingFor: jest.Mock;
+  };
   let service: StudioCatalogService;
 
   beforeEach(() => {
@@ -134,6 +139,10 @@ describe('StudioCatalogService', () => {
         expiresAt: '2026-10-08T12:15:00.000Z',
       }),
     };
+    followers = {
+      loadFollowerCountsFor: jest.fn().mockResolvedValue(new Map()),
+      viewerFollowingFor: jest.fn().mockResolvedValue(new Set()),
+    };
     service = new StudioCatalogService(
       releases as unknown as Repository<StudioRelease>,
       tracks as unknown as Repository<StudioTrack>,
@@ -141,6 +150,7 @@ describe('StudioCatalogService', () => {
       ownership as unknown as StudioOwnershipService,
       blockFilter as unknown as BlockFilterService,
       storage as unknown as StorageService,
+      followers as unknown as SubprofileFollowersService,
     );
   });
 
@@ -210,6 +220,53 @@ describe('StudioCatalogService', () => {
         ),
       ).toBe(false);
     });
+
+    it('narrows the feed to one genre and leaves it whole without one', async () => {
+      const narrowed = queryBuilderMock();
+      releases.createQueryBuilder.mockReturnValueOnce(narrowed);
+      await service.listReleases(VIEWER_ID, undefined, 'fado');
+      expect(narrowed.andWhere).toHaveBeenCalledWith(
+        '"release"."genre" = :studioGenre',
+        { studioGenre: 'fado' },
+      );
+
+      const whole = queryBuilderMock();
+      releases.createQueryBuilder.mockReturnValueOnce(whole);
+      await service.listReleases(VIEWER_ID, undefined);
+      expect(
+        andWherePredicates(whole).some((predicate) =>
+          predicate.includes('studioGenre'),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe('listGenres', () => {
+    it('lists the genres of releases the viewer can hear, in the contract order', async () => {
+      const queryBuilder = queryBuilderMock();
+      queryBuilder.getRawMany.mockResolvedValue([
+        { genre: 'rock' },
+        { genre: 'fado' },
+        { genre: 'polka' },
+      ]);
+      releases.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      const result = await service.listGenres(VIEWER_ID);
+
+      expect(result).toEqual({ genres: ['fado', 'rock'] });
+      expect(queryBuilder.select).toHaveBeenCalledWith(
+        'DISTINCT "release"."genre"',
+        'genre',
+      );
+      expect(andWherePredicates(queryBuilder)).toContain(
+        '"release"."genre" IS NOT NULL',
+      );
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        VIEWER_ID,
+        '"persona"."user_id"',
+      );
+    });
   });
 
   describe('search', () => {
@@ -250,6 +307,36 @@ describe('StudioCatalogService', () => {
           ),
         ),
       ).toBe(true);
+    });
+
+    it('applies a genre to releases and tracks and leaves artists alone', async () => {
+      const releaseSearch = queryBuilderMock();
+      const artistSearch = queryBuilderMock();
+      releases.createQueryBuilder.mockReturnValue(releaseSearch);
+      subprofiles.createQueryBuilder.mockReturnValue(artistSearch);
+
+      await service.search(VIEWER_ID, 'night', 'all', 'fado');
+
+      const trackSearch = tracks.createQueryBuilder.mock.results[0]!
+        .value as QueryBuilderMock;
+      for (const queryBuilder of [releaseSearch, trackSearch]) {
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+          '"release"."genre" = :studioGenre',
+          { studioGenre: 'fado' },
+        );
+      }
+      expect(
+        andWherePredicates(artistSearch).some((predicate) =>
+          predicate.includes('studioGenre'),
+        ),
+      ).toBe(false);
+    });
+
+    it('answers empty catalog arrays for a playlist search, without querying', async () => {
+      const result = await service.search(VIEWER_ID, 'night', 'playlists');
+      expect(result).toEqual({ releases: [], tracks: [], artists: [] });
+      expect(releases.createQueryBuilder).not.toHaveBeenCalled();
+      expect(subprofiles.createQueryBuilder).not.toHaveBeenCalled();
     });
   });
 
@@ -389,6 +476,62 @@ describe('StudioCatalogService', () => {
       const listenerView = await service.getArtist(VIEWER_ID, PERSONA_ID);
       expect(listenerView.ownerReleases).toBeNull();
       expect(listenerView.releases).toHaveLength(1);
+    });
+
+    it('carries the follower total and the viewer follow state', async () => {
+      releases.find.mockResolvedValue([releaseRow(1)]);
+      subprofiles.createQueryBuilder.mockReturnValue(
+        queryBuilderMock({ exists: true }),
+      );
+      followers.loadFollowerCountsFor.mockResolvedValue(
+        new Map([[PERSONA_ID, 12]]),
+      );
+      followers.viewerFollowingFor.mockResolvedValue(new Set([PERSONA_ID]));
+
+      const artist = await service.getArtist(VIEWER_ID, PERSONA_ID);
+
+      expect(artist.followerCount).toBe(12);
+      expect(artist.isFollowing).toBe(true);
+      expect(followers.viewerFollowingFor).toHaveBeenCalledWith(VIEWER_ID, [
+        PERSONA_ID,
+      ]);
+    });
+
+    it('reads followers by the stored persona id when the link carries it in capitals', async () => {
+      releases.find.mockResolvedValue([releaseRow(1)]);
+      subprofiles.createQueryBuilder.mockReturnValue(
+        queryBuilderMock({ exists: true }),
+      );
+      followers.loadFollowerCountsFor.mockResolvedValue(
+        new Map([[PERSONA_ID, 12]]),
+      );
+      followers.viewerFollowingFor.mockResolvedValue(new Set([PERSONA_ID]));
+
+      const artist = await service.getArtist(
+        VIEWER_ID,
+        PERSONA_ID.toUpperCase(),
+      );
+
+      expect(followers.loadFollowerCountsFor).toHaveBeenCalledWith([
+        PERSONA_ID,
+      ]);
+      expect(followers.viewerFollowingFor).toHaveBeenCalledWith(VIEWER_ID, [
+        PERSONA_ID,
+      ]);
+      expect(artist.followerCount).toBe(12);
+      expect(artist.isFollowing).toBe(true);
+    });
+
+    it('reads a persona nobody follows as zero followers and unfollowed', async () => {
+      releases.find.mockResolvedValue([releaseRow(1)]);
+      subprofiles.createQueryBuilder.mockReturnValue(
+        queryBuilderMock({ exists: true }),
+      );
+
+      const artist = await service.getArtist(VIEWER_ID, PERSONA_ID);
+
+      expect(artist.followerCount).toBe(0);
+      expect(artist.isFollowing).toBe(false);
     });
   });
 });

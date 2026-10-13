@@ -130,6 +130,10 @@ import { SubprofilesService } from './subprofiles.service';
     SubprofilesService,
     SubprofileEndorsementsService,
     SubprofileMembershipService,
+    // Studio v2: the artist page and the stats page read follower totals and
+    // the viewer's follow state through it (`StudioModule` imports this
+    // module; nothing here imports Studio back).
+    SubprofileFollowersService,
   ],
 })
 export class SubprofilesModule {}

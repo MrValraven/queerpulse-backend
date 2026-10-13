@@ -40,7 +40,7 @@ import { StickersModule } from './stickers/stickers.module';
 import { AdminStickersModule } from './admin-stickers/admin-stickers.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { StudioModule } from './studio/studio.module';
-import { isStudioTrackRequest } from './studio/studio-request-log';
+import { isStudioListeningRequest } from './studio/studio-request-log';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
@@ -168,7 +168,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
           level: configService.get<string>('logging.level'),
           // Studio records nothing about what a member plays; see the helper.
           autoLogging: {
-            ignore: (req: IncomingMessage) => isStudioTrackRequest(req.url),
+            ignore: (req: IncomingMessage) => isStudioListeningRequest(req.url),
           },
           // Correlate every request with an id (honour an inbound one behind a proxy).
           genReqId: (req: IncomingMessage, res: ServerResponse) => {

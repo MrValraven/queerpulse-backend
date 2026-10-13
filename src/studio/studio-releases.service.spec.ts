@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   HttpException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
@@ -15,6 +16,7 @@ import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { StudioReleasesService } from './studio-releases.service';
+import { STUDIO_RELEASE_PUBLISHED } from './studio.events';
 
 const USER_ID = 'a2000000-0000-4000-8000-000000000001';
 const OTHER_USER_ID = 'a2000000-0000-4000-8000-000000000009';
@@ -69,6 +71,7 @@ describe('StudioReleasesService', () => {
   };
   let studioAudioUploads: { deleteObjectsAndForget: jest.Mock };
   let releases: { create: jest.Mock; save: jest.Mock };
+  let eventEmitter: { emit: jest.Mock };
   let service: StudioReleasesService;
 
   beforeEach(() => {
@@ -110,6 +113,7 @@ describe('StudioReleasesService', () => {
         Promise.resolve(work(manager as unknown as EntityManager)),
       ),
     };
+    eventEmitter = { emit: jest.fn() };
     service = new StudioReleasesService(
       dataSource as unknown as DataSource,
       releases as unknown as Repository<StudioRelease>,
@@ -117,6 +121,7 @@ describe('StudioReleasesService', () => {
       catalog as unknown as StudioCatalogService,
       personaImageKeys as unknown as PersonaImageKeysService,
       studioAudioUploads as unknown as StudioAudioUploadsService,
+      eventEmitter as unknown as EventEmitter2,
     );
   });
 
@@ -224,6 +229,26 @@ describe('StudioReleasesService', () => {
         'studio_release_not_draft',
       );
     });
+
+    // Studio v2: the alert listener hears about a publish only once it has
+    // committed, and a refused publish tells it nothing.
+    it('tells the alert listener once the publish has committed', async () => {
+      await service.publish(USER_ID, RELEASE_ID);
+
+      expect(eventEmitter.emit).toHaveBeenCalledTimes(1);
+      expect(eventEmitter.emit).toHaveBeenCalledWith(STUDIO_RELEASE_PUBLISHED, {
+        releaseId: RELEASE_ID,
+      });
+      const saveOrder = manager.save.mock.invocationCallOrder[0] ?? 0;
+      const emitOrder = eventEmitter.emit.mock.invocationCallOrder[0] ?? 0;
+      expect(saveOrder).toBeLessThan(emitOrder);
+    });
+
+    it('tells the alert listener nothing when the publish rule refuses', async () => {
+      tracks = [];
+      await codeOf(service.publish(USER_ID, RELEASE_ID));
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
   });
 
   describe('unpublish', () => {
@@ -248,6 +273,15 @@ describe('StudioReleasesService', () => {
       expect(await codeOf(service.unpublish(USER_ID, RELEASE_ID))).toBe(
         'studio_release_not_draft',
       );
+    });
+
+    it('emits no new-release event when a release goes back to draft', async () => {
+      release = draftRelease({
+        status: StudioReleaseStatus.Published,
+        publishedAt: new Date(),
+      });
+      await service.unpublish(USER_ID, RELEASE_ID);
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
     });
   });
 

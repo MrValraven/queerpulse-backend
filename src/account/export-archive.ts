@@ -137,6 +137,9 @@ export const EXPORT_CSV_CATEGORIES = [
   'volunteeringRoles',
   'personaActivity',
   'personaContent',
+  // Studio v2: the member's playlists, one row per playlist with its tracks
+  // flattened into indexed columns.
+  'studioPlaylists',
 ] as const;
 
 /**

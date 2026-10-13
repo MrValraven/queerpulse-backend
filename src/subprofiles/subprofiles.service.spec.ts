@@ -224,6 +224,12 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
   };
 }
 
+/** Studio v2: the persona credit release statements this service issues. */
+const playlistCreditCalls = (query: jest.Mock): [string, unknown[]][] =>
+  (query.mock.calls as [string, unknown[]][]).filter(([sql]) =>
+    String(sql).includes('UPDATE "studio_playlists"'),
+  );
+
 // A subprofile that passes every unlinked publish requirement.
 function completeUnlinked(overrides: Partial<Subprofile> = {}): Subprofile {
   return makeSubprofile({
@@ -3512,6 +3518,28 @@ describe('SubprofilesService', () => {
       expect(handlesService.release).not.toHaveBeenCalled();
       expect(manager.update).not.toHaveBeenCalled();
     });
+
+    // Studio v2: a draft persona is not listenable, so its playlist credits
+    // are released in the same transaction that drafts it.
+    it('releases the playlist credits of the drafted persona after the status write', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        completeUnlinked({ status: SubprofileStatus.Published }),
+      );
+
+      await service.unpublish('user-1', 'sp-1');
+
+      const releaseCalls = playlistCreditCalls(manager.query);
+      expect(releaseCalls).toHaveLength(1);
+      expect(releaseCalls[0]?.[0]).toContain('NOT EXISTS');
+      expect(releaseCalls[0]?.[1]).toEqual(['sp-1']);
+      const releaseIndex = manager.query.mock.calls.findIndex(([sql]) =>
+        String(sql).includes('UPDATE "studio_playlists"'),
+      );
+      const releaseOrder =
+        manager.query.mock.invocationCallOrder[releaseIndex] ?? 0;
+      const updateOrder = manager.update.mock.invocationCallOrder[0] ?? 0;
+      expect(updateOrder).toBeLessThan(releaseOrder);
+    });
   });
 
   // The creator role can move to another co-owner (`transferCreatorWithin`)
@@ -4062,6 +4090,27 @@ describe('SubprofilesService', () => {
       expect(dataSource.transaction).not.toHaveBeenCalled();
       expect(manager.remove).not.toHaveBeenCalled();
     });
+
+    // Studio v2: a playlist credited to this persona turns private and loses
+    // the credit inside the delete, so it never reads as the owner's own.
+    it('releases the playlists credited to the persona before the row goes', async () => {
+      subprofiles.findOne.mockResolvedValue(makeSubprofile());
+      rosterWith('user-1');
+
+      await service.remove('user-1', 'sp-1');
+
+      const releaseCalls = playlistCreditCalls(manager.query);
+      expect(releaseCalls).toHaveLength(1);
+      expect(releaseCalls[0]?.[0]).not.toContain('NOT EXISTS');
+      expect(releaseCalls[0]?.[1]).toEqual(['sp-1']);
+      const releaseIndex = manager.query.mock.calls.findIndex(([sql]) =>
+        String(sql).includes('UPDATE "studio_playlists"'),
+      );
+      const releaseOrder =
+        manager.query.mock.invocationCallOrder[releaseIndex] ?? 0;
+      const removeOrder = manager.remove.mock.invocationCallOrder[0] ?? 0;
+      expect(releaseOrder).toBeLessThan(removeOrder);
+    });
   });
 
   describe('update', () => {
@@ -4080,6 +4129,34 @@ describe('SubprofilesService', () => {
       expect(manager.findOne).toHaveBeenCalledWith(Profile, {
         where: { userId: 'user-1' },
       });
+    });
+
+    // Studio v2: any saved edit can take the persona out of Studio (a
+    // visibility change here), so every save checks its playlist credits
+    // after the row is written.
+    it('checks the playlist credits after saving a visibility change', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+        }),
+      );
+
+      await service.update('user-1', 'sp-1', {
+        visibility: SubprofileVisibility.Private,
+      });
+
+      const releaseCalls = playlistCreditCalls(manager.query);
+      expect(releaseCalls.length).toBeGreaterThanOrEqual(1);
+      expect(releaseCalls[0]?.[0]).toContain('NOT EXISTS');
+      expect(releaseCalls[0]?.[1]).toEqual(['sp-1']);
+      const releaseIndex = manager.query.mock.calls.findIndex(([sql]) =>
+        String(sql).includes('UPDATE "studio_playlists"'),
+      );
+      const releaseOrder =
+        manager.query.mock.invocationCallOrder[releaseIndex] ?? 0;
+      const saveOrder = manager.save.mock.invocationCallOrder[0] ?? 0;
+      expect(saveOrder).toBeLessThan(releaseOrder);
     });
 
     it('drops back to draft when switching to unlinked', async () => {

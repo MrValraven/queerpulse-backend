@@ -2,6 +2,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import {
+  creditPersonaCreatorIdSql,
+  ownerHoldsGrantSql,
+  personaCreatorBlockExemptSql,
+} from '../studio/studio-playlist-visibility';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { SavedAvailabilityService } from './saved-availability.service';
 
@@ -366,6 +371,81 @@ describe('SavedAvailabilityService', () => {
           )
         ).size,
       ).toBe(0);
+      expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    // Studio v2: a saved playlist reads as available exactly when the viewer
+    // could open it by link today.
+    it('resolves a saved playlist through the playlist link rule and the viewer grant', async () => {
+      const PLAYLIST_ID = '9e000000-0000-4000-8000-000000000003';
+      await build({ playlist: [PLAYLIST_ID] });
+
+      const available = await service.availableRefs(
+        [ref(SavedKind.StudioPlaylist, PLAYLIST_ID)],
+        'viewer-1',
+      );
+
+      expect(available.has(`studio_playlist:${PLAYLIST_ID}`)).toBe(true);
+      const queryBuilder = manager.createQueryBuilder.mock.results[0]!
+        .value as Record<string, jest.Mock>;
+      const playlistRuleCall = queryBuilder.andWhere?.mock.calls.find(
+        ([predicate]) =>
+          String(predicate).includes('"playlist_connection"."status"'),
+      );
+      expect(playlistRuleCall?.[1]).toEqual({
+        savedPlaylistViewerId: 'viewer-1',
+      });
+      expect(
+        predicatesOf(queryBuilder).some((predicate) =>
+          predicate.includes('"saved_playlist_grant"'),
+        ),
+      ).toBe(true);
+      expect(excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        'viewer-1',
+        '"playlist"."user_id"',
+      );
+    });
+
+    it('reads a saved playlist as unavailable once its owner is inactive or the persona creator is blocked either way', async () => {
+      const PLAYLIST_ID = '9e000000-0000-4000-8000-000000000003';
+      await build({ playlist: [PLAYLIST_ID] });
+
+      await service.availableRefs(
+        [ref(SavedKind.StudioPlaylist, PLAYLIST_ID)],
+        'viewer-1',
+      );
+
+      const queryBuilder = manager.createQueryBuilder.mock.results[0]!
+        .value as Record<string, jest.Mock>;
+      const playlistRule = predicatesOf(queryBuilder).find((predicate) =>
+        predicate.includes('"playlist_connection"."status"'),
+      );
+      expect(playlistRule).toContain(ownerHoldsGrantSql('playlist'));
+      expect(playlistRule).toContain(`"playlist_owner"."status" = 'active'`);
+      expect(excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        'viewer-1',
+        creditPersonaCreatorIdSql('playlist'),
+        {
+          unless: personaCreatorBlockExemptSql(
+            'playlist',
+            'savedPlaylistViewerId',
+          ),
+        },
+      );
+      expect(
+        personaCreatorBlockExemptSql('playlist', 'savedPlaylistViewerId'),
+      ).toContain('"playlist"."credit_subprofile_id" IS NULL');
+    });
+
+    it('reads a saved playlist as unavailable to a signed-out viewer, without querying', async () => {
+      await build({ playlist: ['9e000000-0000-4000-8000-000000000003'] });
+      const available = await service.availableRefs(
+        [ref(SavedKind.StudioPlaylist, '9e000000-0000-4000-8000-000000000003')],
+        null,
+      );
+      expect(available.size).toBe(0);
       expect(manager.createQueryBuilder).not.toHaveBeenCalled();
     });
   });

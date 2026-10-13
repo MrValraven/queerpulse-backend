@@ -26,8 +26,22 @@ export const STUDIO_SEARCH_TYPES = [
   'releases',
   'tracks',
   'artists',
+  'playlists',
 ] as const;
 export type StudioSearchType = (typeof STUDIO_SEARCH_TYPES)[number];
+
+// Studio v2 (QUEERPULSE-STUDIO-V2-CONTRACT-2026-10-13.md): who can open a
+// playlist. Chosen at creation and changeable later.
+export const STUDIO_PLAYLIST_VISIBILITIES = [
+  'public',
+  'connections',
+  'private',
+] as const;
+export type StudioPlaylistVisibilityValue =
+  (typeof STUDIO_PLAYLIST_VISIBILITIES)[number];
+
+/** Stats counts from 1 to `STUDIO_STATS_THRESHOLD - 1` are withheld. */
+export const STUDIO_STATS_THRESHOLD = 5;
 
 export const STUDIO_GENRES = [
   'fado',
@@ -59,6 +73,20 @@ export const STUDIO_LIMITS = {
   tracksPerRelease: 50,
   artistReleasesShown: 100,
   takedownReasonMaxLength: 500,
+  playlistNameMaxLength: 80,
+  playlistDescriptionMaxLength: 500,
+  playlistsPerMember: 100,
+  tracksPerPlaylist: 500,
+  tracksPerPlaylistAdd: 50,
+  playlistsPerPage: 24,
+  playlistsOnTrackPage: 6,
+  playlistCoverCount: 4,
+  // The new-release fan-out mirrors `SubprofileUpdatesService`: a bound far
+  // above any real audience, chunks of one multi-row insert each, and a
+  // small pool so the fan-out leaves most database connections free.
+  followerAlertMaxRecipients: 5000,
+  followerAlertChunkSize: 500,
+  followerAlertConcurrentChunks: 3,
 } as const;
 
 export const STUDIO_RELEASE_TYPES_BY_PERSONA_KIND: Readonly<
@@ -108,7 +136,12 @@ export type StudioErrorCode =
   | 'studio_track_order_mismatch'
   | 'studio_track_limit'
   | 'studio_audio_unreadable'
-  | 'studio_audio_wrong_owner';
+  | 'studio_audio_wrong_owner'
+  | 'studio_playlist_limit'
+  | 'studio_playlist_track_limit'
+  | 'studio_playlist_order_mismatch'
+  | 'studio_playlist_credit_not_allowed'
+  | 'studio_playlist_track_unavailable';
 
 const STUDIO_ERRORS: Readonly<
   Record<StudioErrorCode, { status: HttpStatus; message: string }>
@@ -168,6 +201,27 @@ const STUDIO_ERRORS: Readonly<
   studio_audio_wrong_owner: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,
     message: 'This upload belongs to a different persona or track.',
+  },
+  studio_playlist_limit: {
+    status: HttpStatus.CONFLICT,
+    message: 'You can keep up to 100 playlists.',
+  },
+  studio_playlist_track_limit: {
+    status: HttpStatus.CONFLICT,
+    message: 'A playlist holds up to 500 tracks.',
+  },
+  studio_playlist_order_mismatch: {
+    status: HttpStatus.CONFLICT,
+    message: 'The new order must list every entry of the playlist once.',
+  },
+  studio_playlist_credit_not_allowed: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message:
+      'Show this playlist as yourself or as a musician or DJ persona you run that is live in Studio.',
+  },
+  studio_playlist_track_unavailable: {
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    message: 'One of these tracks cannot be played right now.',
   },
 };
 

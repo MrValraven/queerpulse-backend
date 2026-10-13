@@ -1,6 +1,6 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import { isStudioTrackRequest } from '../studio/studio-request-log';
+import { isStudioListeningRequest } from '../studio/studio-request-log';
 import { MetricsService } from './metrics.service';
 
 /**
@@ -14,15 +14,15 @@ import { MetricsService } from './metrics.service';
  * always is. Unmatched requests (404 before a route binds) fall back to a single
  * `unmatched` bucket so a scanner probing random paths can't explode cardinality.
  *
- * Studio track requests are left out entirely: nothing records what a member
- * plays, aggregate counts included.
+ * Studio track and playlist requests are left out entirely: nothing records
+ * what a member plays, aggregate counts included.
  */
 @Injectable()
 export class HttpMetricsMiddleware implements NestMiddleware {
   constructor(private readonly metrics: MetricsService) {}
 
   use(request: Request, response: Response, next: NextFunction): void {
-    if (isStudioTrackRequest(request.originalUrl ?? request.url)) {
+    if (isStudioListeningRequest(request.originalUrl ?? request.url)) {
       next();
       return;
     }

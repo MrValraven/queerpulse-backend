@@ -40,6 +40,16 @@ export enum StudioReleaseStatus {
   'id',
 ])
 @Index('IDX_studio_releases_subprofile_status', ['subprofileId', 'status'])
+// Studio v2 browse by genre: the home feed filtered to one genre, in its own
+// order. Partial on published rows, the only ones the feed reads.
+// Migration `1831500100000-AddStudioReleaseFollowersNotifiedAt`.
+@Index(
+  'IDX_studio_releases_genre_published_at',
+  ['genre', 'publishedAt', 'id'],
+  {
+    where: `"status" = 'published'`,
+  },
+)
 @Check(
   'CHK_studio_releases_published_at',
   `"status" <> 'published' OR "published_at" IS NOT NULL`,
@@ -114,6 +124,15 @@ export class StudioRelease {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   takedownReason!: string | null;
+
+  /**
+   * Studio v2: when this release's followers were told about it. Claimed by
+   * `StudioReleaseAlertsListener` with one conditional update, so a
+   * republish, a restore or a repeated event never alerts twice.
+   * Migration `1831500100000-AddStudioReleaseFollowersNotifiedAt`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  followersNotifiedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -143,6 +143,22 @@ describe('issueFreshPersonaId', () => {
     expect(trackIndex).toBeGreaterThan(releaseIndex);
     expect(query.mock.calls[trackIndex]?.[1]).toEqual([freshId]);
   });
+
+  // Studio v2: an unlink ends the named persona, so a playlist credited to it
+  // turns private and loses the credit. The foreign key has already carried
+  // the credit to the fresh id when this runs.
+  it('releases the playlist credits once the persona row has moved', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const [sql, parameters] = statementTouching('studio_playlists') ?? [];
+    expect(sql).toContain(`"visibility" = 'private'`);
+    expect(sql).toContain(`"is_credited_to_persona" = false`);
+    expect(parameters).toEqual([freshId]);
+    const releaseIndex = query.mock.calls.findIndex(([statement]) =>
+      statement.includes('UPDATE "studio_playlists"'),
+    );
+    expect(releaseIndex).toBeGreaterThan(0);
+  });
 });
 
 /**

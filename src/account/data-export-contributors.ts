@@ -60,6 +60,7 @@ import {
   ReportsFiledExportContributor,
 } from './data-export-contributors-safety';
 import { MORE_EXPORT_CONTRIBUTORS } from './data-export-contributors-more';
+import { StudioPlaylistsExportContributor } from './data-export-contributors-studio';
 import {
   ExportMediaContribution,
   MEDIA_EXPORT_MAX_TOTAL_BYTES,
@@ -1082,5 +1083,7 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   // (settings, profile sections, requests, votes, reactions and follows), see
   // data-export-contributors-more.ts.
   ...MORE_EXPORT_CONTRIBUTORS,
+  // Studio v2: the member's playlists (data-export-contributors-studio.ts).
+  StudioPlaylistsExportContributor,
   MediaExportContributor,
 ] as const;

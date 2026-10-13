@@ -8,6 +8,7 @@ import {
 import { StudioCredit, StudioTrack } from './entities/studio-track.entity';
 import {
   StudioArtistPersonaKind,
+  StudioGenre,
   isStudioArtistPersonaKind,
 } from './studio.constants';
 
@@ -47,6 +48,11 @@ export interface StudioReleaseCard {
   trackCount: number;
   totalDurationSeconds: number;
   artist: StudioArtistRef;
+  /** Studio v2: the server's publish time. Play all keeps the server order
+   *  (`published_at desc, id desc`), so the client never sorts. */
+  publishedAt: string | null;
+  /** Studio v2: on every card, for the browse page. */
+  genre: string | null;
 }
 
 export type StudioOwnerReleaseCard = StudioReleaseCard & {
@@ -56,9 +62,7 @@ export type StudioOwnerReleaseCard = StudioReleaseCard & {
 
 export interface StudioReleaseResponse extends StudioReleaseCard {
   description: string | null;
-  genre: string | null;
   status: StudioReleaseStatus;
-  publishedAt: string | null;
   tracks: StudioTrackSummary[];
   isOwner: boolean;
   rightsConfirmedAt: string | null;
@@ -76,6 +80,10 @@ export interface StudioArtistResponse {
   artist: StudioArtistRef & { bio: string | null; city: string | null };
   releases: StudioReleaseCard[];
   ownerReleases: StudioOwnerReleaseCard[] | null;
+  /** Studio v2: every follower of the persona, already public on its page. */
+  followerCount: number;
+  /** Studio v2: whether the caller follows the persona. */
+  isFollowing: boolean;
 }
 
 export interface StudioMe {
@@ -92,6 +100,12 @@ export interface StudioSearchResult {
   releases: StudioReleaseCard[];
   tracks: (StudioTrackSummary & { release: StudioReleaseCard })[];
   artists: StudioArtistRef[];
+}
+
+/** `GET /studio/genres`: genres with at least one release the caller can
+ *  hear, in `STUDIO_GENRES` order. No counts. */
+export interface StudioGenres {
+  genres: StudioGenre[];
 }
 
 export interface StudioStream {
@@ -165,6 +179,8 @@ export function toStudioReleaseCard(
     trackCount: stats.trackCount,
     totalDurationSeconds: stats.totalDurationSeconds,
     artist: toStudioArtistRef(persona),
+    publishedAt: release.publishedAt ? release.publishedAt.toISOString() : null,
+    genre: release.genre,
   };
 }
 
@@ -195,9 +211,7 @@ export function toStudioReleaseResponse(
   return {
     ...toStudioReleaseCard(release, persona, statsForTracks(tracks)),
     description: release.description,
-    genre: release.genre,
     status: release.status,
-    publishedAt: release.publishedAt ? release.publishedAt.toISOString() : null,
     tracks: orderedTracks.map(toStudioTrackSummary),
     isOwner: viewer.isOwner,
     rightsConfirmedAt:

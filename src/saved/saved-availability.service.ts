@@ -35,7 +35,13 @@ import {
   StudioRelease,
   StudioReleaseStatus,
 } from '../studio/entities/studio-release.entity';
+import { StudioPlaylist } from '../studio/entities/studio-playlist.entity';
 import { StudioTrack } from '../studio/entities/studio-track.entity';
+import {
+  creditPersonaCreatorIdSql,
+  personaCreatorBlockExemptSql,
+  playlistOpenToViewerSql,
+} from '../studio/studio-playlist-visibility';
 import { listenablePersonaSql } from '../studio/studio-visibility';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { toSavedId } from './saved-ref.util';
@@ -78,6 +84,7 @@ const FEATURE_BY_KIND: Record<SavedKind, FeatureKey> = {
   [SavedKind.Listing]: 'listings',
   [SavedKind.StudioRelease]: 'studio',
   [SavedKind.StudioTrack]: 'studio',
+  [SavedKind.StudioPlaylist]: 'studio',
 };
 
 /**
@@ -207,6 +214,8 @@ export class SavedAvailabilityService {
         return this.resolveStudioReleases(subjectIds, viewerId);
       case SavedKind.StudioTrack:
         return this.resolveStudioTracks(subjectIds, viewerId);
+      case SavedKind.StudioPlaylist:
+        return this.resolveStudioPlaylists(subjectIds, viewerId);
     }
   }
 
@@ -585,6 +594,55 @@ export class SavedAvailabilityService {
       .where('track.id IN (:...ids)', { ids });
     this.applyStudioListeningGate(queryBuilder, viewerId);
     return this.subjectKeys(queryBuilder, 'track.id');
+  }
+
+  /**
+   * Studio v2: a saved playlist is available when the viewer holds a Studio
+   * grant and could open the playlist by link: their own, or one whose owner
+   * holds a grant, whose credit stands, and which is public or shared with
+   * them as a connection (`playlistOpenToViewerSql`, the rule
+   * `StudioPlaylistReadsService.getPlaylist` applies), with blocks either way
+   * on the owner and, for a persona credit, on the member who created the
+   * persona. Anything else reads as unavailable, which is what the playlist
+   * link answers.
+   */
+  private async resolveStudioPlaylists(
+    subjectIds: string[],
+    viewerId: SavedViewerId,
+  ): Promise<string[]> {
+    if (viewerId === null) return [];
+    const ids = subjectIds.filter((subjectId) => UUID_PATTERN.test(subjectId));
+    if (!ids.length) return [];
+    const queryBuilder = this.queryBuilderFor(StudioPlaylist, 'playlist')
+      .where('playlist.id IN (:...ids)', { ids })
+      .andWhere(playlistOpenToViewerSql('playlist', 'savedPlaylistViewerId'), {
+        savedPlaylistViewerId: viewerId,
+      })
+      .andWhere(
+        `EXISTS (
+          SELECT 1 FROM "studio_access_grants" "saved_playlist_grant"
+           WHERE "saved_playlist_grant"."user_id" = :savedPlaylistViewerId
+        )`,
+        { savedPlaylistViewerId: viewerId },
+      );
+    this.blockFilter.excludeBlocked(
+      queryBuilder,
+      viewerId,
+      '"playlist"."user_id"',
+    );
+    // Binds `blockFilterActorId` to the same viewer as the call above.
+    this.blockFilter.excludeBlocked(
+      queryBuilder,
+      viewerId,
+      creditPersonaCreatorIdSql('playlist'),
+      {
+        unless: personaCreatorBlockExemptSql(
+          'playlist',
+          'savedPlaylistViewerId',
+        ),
+      },
+    );
+    return this.subjectKeys(queryBuilder, 'playlist.id');
   }
 
   // Expects the builder to join the release as `release` and its persona as

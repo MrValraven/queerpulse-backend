@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { assertNoForeignUploadIntroducedForPersona } from '../storage/assert-no-foreign-upload';
@@ -21,6 +22,10 @@ import {
   isReleaseTypeAllowedForPersonaKind,
   studioError,
 } from './studio.constants';
+import {
+  STUDIO_RELEASE_PUBLISHED,
+  StudioReleasePublishedEvent,
+} from './studio.events';
 
 /** An uploaded image key a cover may come from: not a message attachment,
  *  and an image extension a persona-scoped copy can carry. */
@@ -47,6 +52,7 @@ export class StudioReleasesService {
     private readonly catalog: StudioCatalogService,
     private readonly personaImageKeys: PersonaImageKeysService,
     private readonly studioAudioUploads: StudioAudioUploadsService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async create(
@@ -181,6 +187,12 @@ export class StudioReleasesService {
       release.releasedOn ??= toIsoDate(publishedAt);
       await manager.save(release);
     });
+    // Studio v2: after the commit, so the alert listener never reads a
+    // publish that could still roll back. The listener claims the release
+    // once (`followers_notified_at`), so a republish sends nothing more.
+    this.eventEmitter.emit(STUDIO_RELEASE_PUBLISHED, {
+      releaseId,
+    } satisfies StudioReleasePublishedEvent);
     return this.catalog.getRelease(userId, releaseId);
   }
 

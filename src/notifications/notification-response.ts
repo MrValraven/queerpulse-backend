@@ -419,6 +419,17 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'newItemCount',
       'deepLink',
     ],
+    // Studio v2, a release from a persona you follow. The persona's public
+    // name and address and the release's own id, title and type, all public
+    // on the release page every recipient can open. `subprofileId` stays off
+    // the wire (it only keys the bundle), and so does the owner.
+    [NotificationType.StudioReleasePublished]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'releaseId',
+      'releaseTitle',
+      'releaseType',
+    ],
     [NotificationType.SubprofileInvite]: [
       'subprofileName',
       'subprofileSlugOrHandle',

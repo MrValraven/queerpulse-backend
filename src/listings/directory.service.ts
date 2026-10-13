@@ -490,12 +490,18 @@ export class DirectoryService {
   // rows. The id is cast to text because `content_moderation.subject_id` is
   // varchar while an event id is uuid. Mirrors
   // `EventsService.excludeModeratedEvents`.
+  //
+  // The cast is `CAST(... AS text)`, never `::text`: inside a `find()` the
+  // column arrives as `Event.id`, and TypeORM only rewrites that path into a
+  // quoted column when a space, `=`, `)` or `,` follows it. `Event.id::text`
+  // reached Postgres raw, folded to `event.id`, and 500'd every venue page
+  // with "missing FROM-clause entry for table "event"".
   private static notTakenDownEventId() {
     return Raw(
       (eventIdColumn) => `NOT EXISTS (
         SELECT 1 FROM "content_moderation" "cme"
         WHERE "cme"."subject_type" = :eventSubjectType
-          AND "cme"."subject_id" = ${eventIdColumn}::text
+          AND "cme"."subject_id" = CAST(${eventIdColumn} AS text)
           AND ("cme"."hidden_at" IS NOT NULL OR "cme"."removed_at" IS NOT NULL)
       )`,
       { eventSubjectType: DirectoryService.EVENT_SUBJECT_TYPE },

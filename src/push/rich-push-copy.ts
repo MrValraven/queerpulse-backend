@@ -70,6 +70,8 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:personaUpdate.title': 'Novidades de uma persona que segues',
   'push:personaUpdate.body': '{persona} publicou algo novo.',
   'push:personaUpdate.bodyWithTitle': '{persona} publicou {itemTitle}.',
+  'push:studioReleasePublished.title': 'Novidade de quem segues',
+  'push:studioReleasePublished.body': '{persona} lançou {title}',
   'push:housing.decision.approved.title': 'A tua casa está publicada',
   'push:housing.decision.approved.body':
     '{title} já está no quadro de alojamento.',

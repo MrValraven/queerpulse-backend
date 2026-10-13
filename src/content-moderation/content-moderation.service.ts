@@ -8,6 +8,7 @@ import {
   SelectQueryBuilder,
 } from 'typeorm';
 import { ContentModeration } from './entities/content-moderation.entity';
+import { releasePlaylistCreditsOnTakedown } from '../studio/studio-playlist-credit-release';
 
 /** The resolved moderation state of one subject, as read paths consume it. */
 export interface ContentModerationState {
@@ -106,6 +107,14 @@ export class ContentModerationService {
         ['subject_type', 'subject_id'],
       )
       .execute();
+    // Studio v2: a persona under a takedown is not listenable, so playlists
+    // credited to it turn private in this same transaction. Every other
+    // subject type returns at once.
+    await releasePlaylistCreditsOnTakedown(
+      manager,
+      input.subjectType,
+      input.subjectId,
+    );
   }
 
   /**

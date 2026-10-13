@@ -1188,4 +1188,110 @@ describe('PushNotificationListener', () => {
     });
     expect(payload.data.url).toBe('/notifications');
   });
+
+  // Studio v2: a release from a persona the member follows.
+  describe('StudioReleasePublished', () => {
+    const releasePayload = {
+      subprofileName: 'Night Shift',
+      subprofileSlugOrHandle: 'night-shift',
+      subprofileId: 'persona-1',
+      releaseId: 'release-1',
+      releaseTitle: 'Lisbon at four',
+      releaseType: 'mix',
+    };
+
+    it('pushes behind the Personas you follow switch, naming the persona and opening the album', async () => {
+      const { listener, push, notificationPreferences, profilesRepo } = build(
+        {},
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioReleasePublished,
+            releasePayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'persona_follows');
+      expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+      const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(userIds).toEqual(['recipient-1']);
+      expect(payload.title).toBe('New from an artist you follow');
+      expect(payload.body).toBe('Night Shift released Lisbon at four');
+      expect(payload.data.url).toBe('/studio/album?id=release-1');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:studioReleasePublished.title',
+        bodyKey: 'push:studioReleasePublished.body',
+        params: { persona: 'Night Shift', title: 'Lisbon at four' },
+      });
+      // The persona owner is never looked up, so no face rides along.
+      expect(payload.icon).toBeUndefined();
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+      expect(payload.timestamp).toBe(NOTIFICATION_CREATED_AT.getTime());
+    });
+
+    it('sends nothing when Personas you follow is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['persona_follows'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioReleasePublished,
+            releasePayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it('opens Studio when the payload names no release id', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioReleasePublished, {
+            subprofileName: 'Night Shift',
+            releaseTitle: 'Lisbon at four',
+          }),
+        ),
+      );
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.data.url).toBe('/studio');
+    });
+
+    it('sends no push when the release title is empty', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioReleasePublished, {
+            ...releasePayload,
+            releaseTitle: '',
+          }),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it('sends no push when the persona name is empty', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioReleasePublished, {
+            ...releasePayload,
+            subprofileName: '',
+          }),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+  });
 });

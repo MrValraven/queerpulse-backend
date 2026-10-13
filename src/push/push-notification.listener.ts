@@ -165,6 +165,11 @@ export class PushNotificationListener {
         case NotificationType.PersonaUpdate:
           await this.pushPersonaUpdate(userIds, notification);
           return;
+        // Studio v2: a persona this member follows put out a release. Same
+        // `PersonaFollows` switch as the update above.
+        case NotificationType.StudioReleasePublished:
+          await this.pushStudioReleasePublished(userIds, notification);
+          return;
         // Platform staff offering a struggling community help (OPS-05).
         // Always-on, no category gate, for the same reason as the types
         // above: it is the platform reaching the people running a room that
@@ -814,6 +819,48 @@ export class PushNotificationListener {
           ? 'push:personaUpdate.bodyWithTitle'
           : 'push:personaUpdate.body',
         params: { persona, itemTitle: itemTitle ?? '' },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "A persona you follow put out a release" (Studio v2).
+   *
+   * NAMES THE PERSONA AND THE RELEASE AND LEAVES THE OWNER OUT: `resolveActor`
+   * is not called and no avatar rides along, for the reason
+   * `pushPersonaUpdate` gives. Opens the release page; a recipient whose grant
+   * has gone lands on the Studio teaser there.
+   *
+   * Persona name and release title are both required to publish, so a
+   * notification missing either is malformed and sends no push. The bell row
+   * is unaffected. No English fallback text feeds the localized params.
+   */
+  private async pushStudioReleasePublished(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'subprofileName');
+    const title = this.payloadString(notification, 'releaseTitle');
+    if (!persona || !title) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.PersonaFollows,
+    );
+    if (recipientUserIds.length === 0) return;
+    const releaseId = this.payloadString(notification, 'releaseId');
+    const url = releaseId
+      ? `/studio/album?id=${encodeURIComponent(releaseId)}`
+      : '/studio';
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'New from an artist you follow',
+      body: `${persona} released ${title}`,
+      tag: `notification:${notification.id}`,
+      data: { url },
+      l10n: {
+        titleKey: 'push:studioReleasePublished.title',
+        bodyKey: 'push:studioReleasePublished.body',
+        params: { persona, title },
       },
       timestamp: notification.createdAt.getTime(),
     });

@@ -141,6 +141,10 @@ function subjectFor(
     // and floats back to the top, so the row stays worth opening.
     case NotificationType.PersonaUpdate:
       return stringField(payload, 'subprofileId');
+    // Studio v2: releases from a persona you follow collapse onto that
+    // persona, so a label putting out three singles in an evening is one row.
+    case NotificationType.StudioReleasePublished:
+      return stringField(payload, 'subprofileId');
     // New podcast episodes waiting for review collapse onto the PERSONA, so
     // several feeds on one persona syncing within the window stay one row.
     case NotificationType.PersonaImportReady:

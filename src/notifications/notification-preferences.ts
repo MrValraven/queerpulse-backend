@@ -200,6 +200,9 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   // separately from `Personas` above.
   [NotificationType.PersonaUpdate]:
     NotificationPreferenceCategory.PersonaFollows,
+  // Studio v2: a release from a persona you follow, behind the same switch.
+  [NotificationType.StudioReleasePublished]:
+    NotificationPreferenceCategory.PersonaFollows,
 
   // --- Invitations and introductions ----------------------------------------
   [NotificationType.InviteAccepted]: NotificationPreferenceCategory.Invitations,

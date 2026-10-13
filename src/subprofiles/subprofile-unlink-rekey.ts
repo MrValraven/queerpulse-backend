@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 import { ReportSubjectType } from '../reports/entities/report.entity';
+import { releasePlaylistCreditsOfPersona } from '../studio/studio-playlist-credit-release';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 
 /**
@@ -40,6 +41,11 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * `FK_studio_tracks_release` (on update cascade) and then get fresh ids of
  * their own. Covers are re-homed by `rehomeUnlinkedPersona`; audio keys are
  * random and registered to the persona, whose id the registry follows.
+ *
+ * Studio v2 playlists credited to the persona turn private and lose the
+ * credit, and an entry of anyone's playlist that held one of its tracks keeps
+ * a null track (`FK_studio_playlist_tracks_track` sets null on update), so
+ * neither ties the pseudonymous persona to its named past.
  *
  * Three references hold the persona id with no foreign key and are moved
  * here:
@@ -82,6 +88,11 @@ export async function issueFreshPersonaId(
       WHERE "subprofile_id" = $1`,
     [freshSubprofileId],
   );
+  // Studio v2: playlists credited to the named persona turn private and lose
+  // the credit. `FK_studio_playlists_credit_subprofile` carried the credit to
+  // the fresh id with the persona row move above. Runs after the items, which
+  // stay the statement right behind the row move.
+  await releasePlaylistCreditsOfPersona(manager, freshSubprofileId);
   await manager.query(
     `UPDATE "subprofile_item_revisions"
         SET "subprofile_id" = $1

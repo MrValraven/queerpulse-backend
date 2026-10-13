@@ -6,6 +6,7 @@ import { foldedHaystack, foldedSearchTerm } from '../search/search-text';
 import { BlockFilterService } from '../social/block-filter.service';
 import { StorageService } from '../storage/storage.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
 import {
   StudioRelease,
   StudioReleaseStatus,
@@ -17,6 +18,7 @@ import {
   EMPTY_RELEASE_STATS,
   StudioArtistRef,
   StudioArtistResponse,
+  StudioGenres,
   StudioPage,
   StudioReleaseCard,
   StudioReleaseResponse,
@@ -35,7 +37,9 @@ import {
 import { listenablePersonaSql } from './studio-visibility';
 import {
   STUDIO_ARTIST_PERSONA_KINDS,
+  STUDIO_GENRES,
   STUDIO_LIMITS,
+  StudioGenre,
   StudioSearchType,
   isStudioArtistPersonaKind,
 } from './studio.constants';
@@ -74,16 +78,25 @@ export class StudioCatalogService {
     private readonly ownership: StudioOwnershipService,
     private readonly blockFilter: BlockFilterService,
     private readonly storage: StorageService,
+    private readonly followers: SubprofileFollowersService,
   ) {}
 
   async listReleases(
     viewerId: string,
     cursor: string | undefined,
+    genre?: StudioGenre,
   ): Promise<StudioPage<StudioReleaseCard>> {
     const pageSize = STUDIO_LIMITS.releasesPerPage;
     const queryBuilder = this.listenableReleases(viewerId).addSelect(
       ARTIST_PERSONA_COLUMNS,
     );
+    // Studio v2 browse by genre, served by
+    // `IDX_studio_releases_genre_published_at`.
+    if (genre) {
+      queryBuilder.andWhere('"release"."genre" = :studioGenre', {
+        studioGenre: genre,
+      });
+    }
     const decodedCursor = decodeStudioCursor(cursor);
     if (decodedCursor) {
       queryBuilder.andWhere(
@@ -117,18 +130,38 @@ export class StudioCatalogService {
     };
   }
 
+  /**
+   * Studio v2: the genres with at least one release this viewer can hear
+   * (blocks apply), in `STUDIO_GENRES` order. A genre stored before the list
+   * changed is dropped. No counts reach the wire.
+   */
+  async listGenres(viewerId: string): Promise<StudioGenres> {
+    const rows = await this.listenableReleases(viewerId)
+      .select('DISTINCT "release"."genre"', 'genre')
+      .andWhere('"release"."genre" IS NOT NULL')
+      .getRawMany<{ genre: string }>();
+    const presentGenres = new Set(rows.map((row) => row.genre));
+    return {
+      genres: STUDIO_GENRES.filter((genre) => presentGenres.has(genre)),
+    };
+  }
+
+  /** Releases, tracks and artists. Playlists are merged in by the listening
+   *  controller (`StudioPlaylistReadsService.searchPlaylists`), so a
+   *  `playlists` search answers empty arrays here. */
   async search(
     viewerId: string,
     query: string,
     type: StudioSearchType,
+    genre?: StudioGenre,
   ): Promise<StudioSearchResult> {
     const searchPattern = `%${escapeLikeTerm(query.trim())}%`;
     const [releases, tracks, artists] = await Promise.all([
       type === 'all' || type === 'releases'
-        ? this.searchReleases(viewerId, searchPattern)
+        ? this.searchReleases(viewerId, searchPattern, genre)
         : Promise.resolve([]),
       type === 'all' || type === 'tracks'
-        ? this.searchTracks(viewerId, searchPattern)
+        ? this.searchTracks(viewerId, searchPattern, genre)
         : Promise.resolve([]),
       type === 'all' || type === 'artists'
         ? this.searchArtists(viewerId, searchPattern)
@@ -232,6 +265,11 @@ export class StudioCatalogService {
     );
     const statsOf = (release: StudioRelease): StudioReleaseStats =>
       statsByReleaseId.get(release.id) ?? EMPTY_RELEASE_STATS;
+    // Keyed by the stored id: a link may carry the id in any letter case.
+    const [followerCounts, followedPersonaIds] = await Promise.all([
+      this.followers.loadFollowerCountsFor([persona.id]),
+      this.followers.viewerFollowingFor(viewerId, [persona.id]),
+    ]);
     return {
       artist: { ...toStudioArtistRef(persona), bio: persona.bio, city: null },
       releases: publishedReleases.map((release) =>
@@ -242,6 +280,8 @@ export class StudioCatalogService {
             toStudioOwnerReleaseCard(release, persona, statsOf(release)),
           )
         : null,
+      followerCount: followerCounts.get(persona.id) ?? 0,
+      isFollowing: followedPersonaIds.has(persona.id),
     };
   }
 
@@ -368,14 +408,21 @@ export class StudioCatalogService {
   private async searchReleases(
     viewerId: string,
     searchPattern: string,
+    genre: StudioGenre | undefined,
   ): Promise<StudioReleaseCard[]> {
-    const rows = await this.listenableReleases(viewerId)
+    const queryBuilder = this.listenableReleases(viewerId)
       .addSelect(ARTIST_PERSONA_COLUMNS)
       .andWhere(
         `(${foldedHaystack('release', ['title'])} LIKE ${foldedSearchTerm('studioSearchPattern')} ESCAPE '\\'
           OR ${foldedHaystack('persona', ['display_name'])} LIKE ${foldedSearchTerm('studioSearchPattern')} ESCAPE '\\')`,
         { studioSearchPattern: searchPattern },
-      )
+      );
+    if (genre) {
+      queryBuilder.andWhere('"release"."genre" = :studioGenre', {
+        studioGenre: genre,
+      });
+    }
+    const rows = await queryBuilder
       .orderBy('release.publishedAt', 'DESC')
       .addOrderBy('release.id', 'DESC')
       .limit(STUDIO_LIMITS.searchResultsPerType)
@@ -386,6 +433,7 @@ export class StudioCatalogService {
   private async searchTracks(
     viewerId: string,
     searchPattern: string,
+    genre: StudioGenre | undefined,
   ): Promise<StudioSearchResult['tracks']> {
     const queryBuilder = this.tracks
       .createQueryBuilder('track')
@@ -403,6 +451,11 @@ export class StudioCatalogService {
       .addOrderBy('release.id', 'DESC')
       .addOrderBy('track.position', 'ASC')
       .limit(STUDIO_LIMITS.searchResultsPerType);
+    if (genre) {
+      queryBuilder.andWhere('"release"."genre" = :studioGenre', {
+        studioGenre: genre,
+      });
+    }
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,
@@ -453,7 +506,9 @@ export class StudioCatalogService {
     return (await queryBuilder.getMany()).map(toStudioArtistRef);
   }
 
-  private async cardsByReleaseId(
+  /** Cards for releases already known to be readable by the caller. Public
+   *  for the playlist reads (Studio v2), which check playability first. */
+  async cardsByReleaseId(
     releaseIds: string[],
   ): Promise<Map<string, StudioReleaseCard>> {
     if (!releaseIds.length) {

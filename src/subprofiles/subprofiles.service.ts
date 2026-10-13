@@ -121,6 +121,10 @@ import {
   SubprofileDeletedEvent,
 } from './subprofile.events';
 import {
+  releasePlaylistCreditsIfPersonaUnlistenable,
+  releasePlaylistCreditsOfPersona,
+} from '../studio/studio-playlist-credit-release';
+import {
   SUBPROFILE_PUBLISHED,
   SubprofilePublishedEvent,
 } from '../profiles/activity.listener';
@@ -2284,6 +2288,9 @@ export class SubprofilesService {
           { id: sp.id },
           { status: SubprofileStatus.Draft, handle: handleAfterUnpublish },
         );
+        // Studio v2: a draft is not listenable, so playlists credited to it
+        // turn private here, with the status write.
+        await releasePlaylistCreditsIfPersonaUnlistenable(m, sp.id);
       });
       sp.status = SubprofileStatus.Draft;
       sp.handle = handleAfterUnpublish;
@@ -2348,6 +2355,10 @@ export class SubprofilesService {
         manager,
         current.id,
       );
+      // Studio v2: the foreign key alone would only null the credit, so
+      // playlists credited to this persona turn private here, inside the
+      // delete, and never read as their owner's own.
+      await releasePlaylistCreditsOfPersona(manager, current.id);
       // `subprofile_items` cascade via their FK on `subprofile_id`.
       await manager.remove(current);
       return { coOwnerIds, displayName, personaStorageKeys };
@@ -2735,6 +2746,11 @@ export class SubprofilesService {
       sp.coverUrl,
     );
     await manager.save(sp);
+    // Studio v2: every edit (status, visibility, link, handle) saves here, so
+    // this is the one place a save that takes the persona out of Studio
+    // releases its playlist credits, in the same transaction. A save that
+    // keeps the persona listenable changes nothing.
+    await releasePlaylistCreditsIfPersonaUnlistenable(manager, sp.id);
   }
 
   /** The `<creatorSlug>-<personaSlug>` handle a linked DRAFT stores on its

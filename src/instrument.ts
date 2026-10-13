@@ -9,6 +9,11 @@ import {
   redactSensitiveQueryString,
   REDACTED_QUERY_VALUE,
 } from './common/redact-url';
+// Also import-free, for the same reason.
+import {
+  dropStudioListeningReferer,
+  dropStudioListeningUrl,
+} from './studio/studio-request-log';
 
 /**
  * Sentry initialization, isolated in its own module so it runs BEFORE anything
@@ -64,11 +69,18 @@ export function initSentry(): void {
  * Returning the event (never null) keeps every error reportable; this only
  * changes what the report is allowed to say.
  */
-function scrubSensitiveQueryParameters(
+export function scrubSensitiveQueryParameters(
   event: Sentry.ErrorEvent,
 ): Sentry.ErrorEvent {
   const request = event.request;
-  if (request) {
+  // The Referer header can name the same listening page the URL would.
+  dropStudioListeningReferer(request);
+  // A referer that survives can still carry an invite code or a token.
+  redactKeptReferer(request);
+  // Studio records nothing about what a member listens to, so the URL and
+  // query string of a track, playlist or search request are removed from the
+  // event: the same paths the request log and the HTTP metrics skip.
+  if (request && !dropStudioListeningUrl(request)) {
     if (typeof request.url === 'string') {
       request.url = redactSensitiveQueryParameters(request.url);
     }
@@ -102,6 +114,26 @@ function scrubSensitiveQueryParameters(
   }
 
   return event;
+}
+
+/**
+ * Runs the query redaction over every `Referer` header (any key casing) left on
+ * a Sentry request, so a page such as `/feed?invite=<code>` keeps its path and
+ * loses only the sensitive values.
+ */
+function redactKeptReferer(
+  request: { headers?: Record<string, unknown> } | undefined,
+): void {
+  const headers = request?.headers;
+  if (!headers) {
+    return;
+  }
+  for (const headerName of Object.keys(headers)) {
+    const value = headers[headerName];
+    if (headerName.toLowerCase() === 'referer' && typeof value === 'string') {
+      headers[headerName] = redactSensitiveQueryParameters(value);
+    }
+  }
 }
 
 initSentry();

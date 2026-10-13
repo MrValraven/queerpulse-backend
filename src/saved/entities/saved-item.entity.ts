@@ -26,6 +26,8 @@ export enum SavedKind {
   // track, each addressed by its uuid.
   StudioRelease = 'studio_release',
   StudioTrack = 'studio_track',
+  // Studio v2 (`AddStudioV2EnumValues1831500200000`): a playlist, by uuid.
+  StudioPlaylist = 'studio_playlist',
 }
 
 /**

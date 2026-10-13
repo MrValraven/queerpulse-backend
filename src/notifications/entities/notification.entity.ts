@@ -1639,6 +1639,29 @@ export enum NotificationType {
    * See migration `AddForumCoAuthorCreditNotificationType1830000000000`.
    */
   ForumCoAuthorCredit = 'forum_co_author_credit',
+
+  /**
+   * Studio v2. A persona this member follows put out a Studio release.
+   *
+   * ONCE PER RELEASE. `StudioReleaseAlertsListener` claims
+   * `studio_releases.followers_notified_at` with one conditional update, so
+   * a republish, a restore after a takedown or a repeated event sends
+   * nothing more. Only followers holding a Studio grant receive it, and the
+   * persona's own creator and co-owners are left out.
+   *
+   * NO ACTOR IN THE PAYLOAD, like `PersonaUpdate`: the fan-out passes the
+   * persona owner's id to `createForRecipients` for block and mute filtering
+   * only, and this type appears under no key in `ACTOR_PAYLOAD_KEY`.
+   *
+   * BUNDLES on `subprofileId` and answers to the `persona_follows` category
+   * in both channels.
+   *
+   * PAYLOAD: `{ subprofileName, subprofileSlugOrHandle, subprofileId,
+   * releaseId, releaseTitle, releaseType }`.
+   *
+   * See migration `AddStudioV2EnumValues1831500200000`.
+   */
+  StudioReleasePublished = 'studio_release_published',
 }
 
 @Entity('notifications')

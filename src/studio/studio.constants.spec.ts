@@ -3,12 +3,16 @@ import {
   StudioReleaseStatus,
   StudioReleaseType,
 } from './entities/studio-release.entity';
+import { StudioPlaylistVisibility } from './entities/studio-playlist.entity';
 import {
   STUDIO_ERROR_CODES,
   STUDIO_GENRES,
   STUDIO_LIMITS,
+  STUDIO_PLAYLIST_VISIBILITIES,
   STUDIO_RELEASE_STATUSES,
   STUDIO_RELEASE_TYPES,
+  STUDIO_SEARCH_TYPES,
+  STUDIO_STATS_THRESHOLD,
   isReleaseTypeAllowedForPersonaKind,
   isStudioArtistPersonaKind,
   isStudioAudioContentType,
@@ -65,6 +69,52 @@ describe('Studio vocabulary', () => {
   it('caps audio at 50 MB', () => {
     expect(STUDIO_LIMITS.audioMaxBytes).toBe(52428800);
   });
+
+  it('keeps the playlist visibility enum identical to the wire vocabulary', () => {
+    expect(Object.values(StudioPlaylistVisibility)).toEqual([
+      ...STUDIO_PLAYLIST_VISIBILITIES,
+    ]);
+    expect(STUDIO_PLAYLIST_VISIBILITIES).toEqual([
+      'public',
+      'connections',
+      'private',
+    ]);
+  });
+
+  it('offers playlists as a search type', () => {
+    expect(STUDIO_SEARCH_TYPES).toEqual([
+      'all',
+      'releases',
+      'tracks',
+      'artists',
+      'playlists',
+    ]);
+  });
+
+  it('withholds stats counts below five', () => {
+    expect(STUDIO_STATS_THRESHOLD).toBe(5);
+  });
+
+  it('holds the playlist limits the contract sets', () => {
+    expect(STUDIO_LIMITS).toEqual(
+      expect.objectContaining({
+        playlistNameMaxLength: 80,
+        playlistDescriptionMaxLength: 500,
+        playlistsPerMember: 100,
+        tracksPerPlaylist: 500,
+        tracksPerPlaylistAdd: 50,
+        playlistsPerPage: 24,
+        playlistsOnTrackPage: 6,
+        playlistCoverCount: 4,
+      }),
+    );
+  });
+
+  it('bounds the new-release fan-out like the persona update fan-out', () => {
+    expect(STUDIO_LIMITS.followerAlertMaxRecipients).toBe(5000);
+    expect(STUDIO_LIMITS.followerAlertChunkSize).toBe(500);
+    expect(STUDIO_LIMITS.followerAlertConcurrentChunks).toBe(3);
+  });
 });
 
 describe('studioError', () => {
@@ -83,6 +133,11 @@ describe('studioError', () => {
     ['studio_track_limit', HttpStatus.CONFLICT],
     ['studio_audio_unreadable', HttpStatus.UNPROCESSABLE_ENTITY],
     ['studio_audio_wrong_owner', HttpStatus.UNPROCESSABLE_ENTITY],
+    ['studio_playlist_limit', HttpStatus.CONFLICT],
+    ['studio_playlist_track_limit', HttpStatus.CONFLICT],
+    ['studio_playlist_order_mismatch', HttpStatus.CONFLICT],
+    ['studio_playlist_credit_not_allowed', HttpStatus.UNPROCESSABLE_ENTITY],
+    ['studio_playlist_track_unavailable', HttpStatus.UNPROCESSABLE_ENTITY],
   ] as const)(
     'answers %s with HTTP %i and the code in the body',
     (code, status) => {
@@ -95,6 +150,6 @@ describe('studioError', () => {
   );
 
   it('lists every contract code exactly once', () => {
-    expect(new Set(STUDIO_ERROR_CODES).size).toBe(14);
+    expect(new Set(STUDIO_ERROR_CODES).size).toBe(19);
   });
 });

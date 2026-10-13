@@ -86,6 +86,50 @@ describe('ContentModerationService', () => {
       expect(calls.orUpdateColumns).toContain('removed_at');
       expect(calls.orUpdateColumns).toContain('hidden_at');
     });
+
+    // Studio v2: a persona takedown turns the playlists credited to that
+    // persona private, in the same moderation transaction.
+    it('releases the playlist credits of a persona it takes down', async () => {
+      const { service } = build();
+      const { qb } = insertQbStub();
+      const query = jest.fn().mockResolvedValue(undefined);
+      const manager = {
+        createQueryBuilder: jest.fn().mockReturnValue(qb),
+        query,
+      } as unknown as EntityManager;
+
+      await service.applyAction(manager, {
+        subjectType: 'subprofile',
+        subjectId: '0b9f3c1e-5a52-4c51-9d6e-2f1a7c3b8e40',
+        action: 'hide_content',
+        actorId: 'mod-1',
+      });
+
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls[0]?.[0]).toContain('UPDATE "studio_playlists"');
+      expect(query.mock.calls[0]?.[1]).toEqual([
+        '0b9f3c1e-5a52-4c51-9d6e-2f1a7c3b8e40',
+      ]);
+    });
+
+    it('leaves playlists alone when the subject is anything else', async () => {
+      const { service } = build();
+      const { qb } = insertQbStub();
+      const query = jest.fn().mockResolvedValue(undefined);
+      const manager = {
+        createQueryBuilder: jest.fn().mockReturnValue(qb),
+        query,
+      } as unknown as EntityManager;
+
+      await service.applyAction(manager, {
+        subjectType: 'post',
+        subjectId: 'p1',
+        action: 'remove_content',
+        actorId: 'mod-1',
+      });
+
+      expect(query).not.toHaveBeenCalled();
+    });
   });
 
   describe('stateFor', () => {
