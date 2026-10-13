@@ -1063,7 +1063,7 @@ describe('PushNotificationListener', () => {
       );
 
       const [, payload] = sentCall();
-      expect(payload.body).toBe('Someone left your group for a gathering');
+      expect(payload.body).toBe('Someone left your group for an event');
       expect(payload.l10n?.bodyKey).toBe('push:goTogether.memberLeft.body');
     });
 
@@ -1115,7 +1115,7 @@ describe('PushNotificationListener', () => {
 
       const [, payload] = sentCall();
       expect(payload.body).toBe(
-        'The host switched Go together off for this gathering',
+        'The host switched Go together off for this event',
       );
       expect(payload.l10n?.bodyKey).toBe(
         'push:goTogether.unmatched.bodyHostSwitchedOff',

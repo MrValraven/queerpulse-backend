@@ -530,7 +530,7 @@ export class PushNotificationListener {
     // The emitter already resolved and carried `title` + `eventSlug` in the
     // payload (see events.service.ts), so these are read from there rather than
     // via an extra event lookup. A missing title degrades to a neutral fallback.
-    const title = this.payloadString(notification, 'title') ?? 'A gathering';
+    const title = this.payloadString(notification, 'title') ?? 'An event';
     const eventSlug = this.payloadString(notification, 'eventSlug');
     // `/gatherings/<slug>` — the SPA's own detail route. This used to say
     // `/events/<slug>`, which the frontend router has no match for, so every
@@ -670,13 +670,13 @@ export class PushNotificationListener {
     const listingName =
       this.payloadString(notification, 'listingName') ?? 'Your venue';
     const eventTitle =
-      this.payloadString(notification, 'eventTitle') ?? 'a gathering';
+      this.payloadString(notification, 'eventTitle') ?? 'an event';
     const listingSlug = this.payloadString(notification, 'listingSlug');
     const url = listingSlug
       ? `/local/directory/${listingSlug}`
       : '/local/directory';
     await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
-      title: 'A gathering at your venue',
+      title: 'An event at your venue',
       body: `${listingName} has been named as the venue for "${eventTitle}".`,
       tag: `notification:${notification.id}`,
       data: { url },
@@ -1258,7 +1258,7 @@ export class PushNotificationListener {
       recipientUserIds,
       {
         title: 'Go together',
-        body: `${name} wants to go to a gathering together`,
+        body: `${name} wants to go to an event together`,
         tag: `notification:${notification.id}`,
         data: { url },
         ...this.iconOf(actor),
@@ -1303,7 +1303,7 @@ export class PushNotificationListener {
       recipientUserIds,
       {
         title: 'Go together',
-        body: 'Your group for a gathering is ready',
+        body: 'Your group for an event is ready',
         tag: `notification:${notification.id}`,
         data: { url },
         l10n: {
@@ -1392,7 +1392,7 @@ export class PushNotificationListener {
         title: 'Go together',
         body: hasMergeOffer
           ? 'Someone left your group. Another group has room for you'
-          : 'Someone left your group for a gathering',
+          : 'Someone left your group for an event',
         tag: `notification:${notification.id}`,
         data: { url: eventSlug ? gatheringPath(eventSlug) : '/notifications' },
         l10n: {
@@ -1461,7 +1461,7 @@ export class PushNotificationListener {
       this.payloadString(notification, 'reason') === HOST_SWITCHED_OFF_REASON
     ) {
       return {
-        body: 'The host switched Go together off for this gathering',
+        body: 'The host switched Go together off for this event',
         bodyKey: 'push:goTogether.unmatched.bodyHostSwitchedOff',
       };
     }

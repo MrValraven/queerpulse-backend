@@ -95,7 +95,7 @@ export class EventLineupService {
     }
     if (!isOrganizer) {
       throw new ForbiddenException(
-        'Only an organiser can preview this gathering as a guest',
+        'Only an organiser can preview this event as a guest',
       );
     }
     // Every guest perspective reads the same lineup: accepted rows only, and
@@ -434,7 +434,7 @@ export class EventLineupService {
     );
     if (isBlocked) {
       throw new ForbiddenException(
-        'You can invite your connections or people going to this gathering',
+        'You can invite your connections or people going to this event',
       );
     }
     const [isConnected, isGoing] = await Promise.all([
@@ -445,7 +445,7 @@ export class EventLineupService {
     ]);
     if (!isConnected && !isGoing) {
       throw new ForbiddenException(
-        'You can invite your connections or people going to this gathering',
+        'You can invite your connections or people going to this event',
       );
     }
   }

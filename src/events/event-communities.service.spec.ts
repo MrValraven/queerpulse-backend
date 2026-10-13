@@ -291,7 +291,7 @@ describe('EventCommunitiesService', () => {
 
       expect(error).toBeInstanceOf(ConflictException);
       expect((error as ConflictException).message).toBe(
-        'This community already leads the gathering',
+        'This community already leads the event',
       );
       expect(eventCommunities.count).not.toHaveBeenCalled();
       expect(insertBuilder.execute).not.toHaveBeenCalled();

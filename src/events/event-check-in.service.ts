@@ -256,7 +256,7 @@ export class EventCheckInService {
       statusCode: 403,
       error: 'Forbidden',
       code: EVENT_ATTENDANCE_WINDOW_CLOSED_CODE,
-      message: `Arrivals are only recorded for ${retentionDays} days after a gathering. This one is past that, so its check-in records have been cleared and no new ones can be added.`,
+      message: `Arrivals are only recorded for ${retentionDays} days after an event. This one is past that, so its check-in records have been cleared and no new ones can be added.`,
     });
   }
 

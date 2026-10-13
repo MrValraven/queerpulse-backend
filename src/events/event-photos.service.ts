@@ -307,7 +307,7 @@ export class EventPhotosService {
   private assertGatheringPhotoKey(key: string): void {
     const kind = parseStorageKey(key);
     if (!kind || kind.prefix !== GATHERING_PHOTO_PREFIX) {
-      throw new ForbiddenException('Not a gathering photo');
+      throw new ForbiddenException('Not an event photo');
     }
   }
 

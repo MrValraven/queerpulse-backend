@@ -789,7 +789,7 @@ const EVENT_PHOTO_SQL = `
          concat_ws(
            ' ',
            CASE
-             WHEN e.id IS NULL THEN '(photo, gathering not found)'
+             WHEN e.id IS NULL THEN '(photo, event not found)'
              ELSE concat('(photo in the album for: ',
                          COALESCE(NULLIF(btrim(e.title), ''), e.slug), ')')
            END,

@@ -55,7 +55,7 @@ export { HOST_SWITCHED_OFF_REASON };
 function lockedError(): ConflictException {
   return new ConflictException({
     statusCode: 409,
-    message: 'Matching has already run for this gathering',
+    message: 'Matching has already run for this event',
     code: 'GO_TOGETHER_LOCKED',
   });
 }
@@ -148,7 +148,7 @@ export class GoTogetherHostService {
     if (!stored) {
       throw new ConflictException({
         statusCode: 409,
-        message: 'Go together is off for this gathering',
+        message: 'Go together is off for this event',
         code: 'GO_TOGETHER_UNAVAILABLE',
         reason: 'notEnabled',
       });
@@ -181,7 +181,7 @@ export class GoTogetherHostService {
     if (now.getTime() >= optInClosesAt(event).getTime()) {
       throw new ConflictException({
         statusCode: 409,
-        message: 'Opt-in for this gathering has already closed',
+        message: 'Opt-in for this event has already closed',
         code: 'GO_TOGETHER_UNAVAILABLE',
         reason: 'closed',
       });

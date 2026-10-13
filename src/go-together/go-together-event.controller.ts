@@ -49,7 +49,7 @@ export class GoTogetherEventController {
 
   @Get(':slug/go-together')
   @ApiOperation({
-    summary: "The caller's Go together card for this gathering.",
+    summary: "The caller's Go together card for this event.",
   })
   @ApiOkResponse({ description: 'The card state and what it needs.' })
   card(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
@@ -122,7 +122,7 @@ export class GoTogetherEventController {
 
   @Get(':slug/go-together/config')
   @ApiOperation({
-    summary: 'The Go together settings for this gathering. Hosts only.',
+    summary: 'The Go together settings for this event. Hosts only.',
   })
   @ApiOkResponse({ description: 'The host settings.' })
   getConfig(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {

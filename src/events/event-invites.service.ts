@@ -180,7 +180,7 @@ export class EventInvitesService {
         where: { id: invite.eventId },
       });
       if (!event || event.status === EventStatus.Cancelled) {
-        throw new ConflictException('This gathering has been cancelled');
+        throw new ConflictException('This event has been cancelled');
       }
       // Past the host's RSVP cutoff, accepting is the first half of an RSVP
       // the second half would refuse. Refused here with the same message, so

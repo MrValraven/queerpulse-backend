@@ -361,7 +361,7 @@ describe('RecognitionAwardingService.recompute', () => {
       await service.recompute(USER, { force: true });
       expect(insertedLedgerRows).toContainEqual({
         userId: 'u1',
-        description: 'Badge earned: First Gathering',
+        description: 'Badge earned: First Event',
         xp: 40,
       });
     });

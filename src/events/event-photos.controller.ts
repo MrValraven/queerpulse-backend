@@ -50,7 +50,7 @@ export class EventPhotosController {
   @ApiCreatedResponse({ description: 'The attached photo view.' })
   @ApiForbiddenResponse({
     description:
-      'Only organizers can add photos, or the key is not a gathering photo.',
+      'Only organizers can add photos, or the key is not an event photo.',
   })
   @ApiNotFoundResponse({ description: 'No event with that slug.' })
   @ApiConflictResponse({

@@ -45,7 +45,7 @@ export class MeCommunityDigestController {
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @ApiOperation({
     summary:
-      "The last seven days across the caller's communities: new posts, new members, upcoming gatherings, a couple of post excerpts each, and (where the caller moderates) what is waiting in that community's queues.",
+      "The last seven days across the caller's communities: new posts, new members, upcoming events, a couple of post excerpts each, and (where the caller moderates) what is waiting in that community's queues.",
   })
   @ApiOkResponse({
     description:

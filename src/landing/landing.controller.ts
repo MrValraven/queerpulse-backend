@@ -27,7 +27,7 @@ export class LandingController {
   @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary:
-      'Get the live landing page payload: featured members, communities, changemakers, gatherings and stories.',
+      'Get the live landing page payload: featured members, communities, changemakers, events and stories.',
   })
   @ApiOkResponse({
     description:

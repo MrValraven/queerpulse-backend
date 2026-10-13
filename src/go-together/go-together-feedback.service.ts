@@ -138,7 +138,7 @@ export class GoTogetherFeedbackService {
     if (!feedbackWindow(config, now).isOpen) {
       throw new ConflictException({
         statusCode: 409,
-        message: 'The questions for this gathering have closed',
+        message: 'The questions for this event have closed',
         code: 'GO_TOGETHER_FEEDBACK_CLOSED',
       });
     }

@@ -65,7 +65,7 @@ export class EventBansService {
 
     if (target.userId === event.hostId) {
       throw new BadRequestException(
-        'The host cannot be barred from their own gathering',
+        'The host cannot be barred from their own event',
       );
     }
     if (target.userId === actorId) {

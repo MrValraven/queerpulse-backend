@@ -32,7 +32,7 @@ export interface RunnableListingRef extends RunByListingRef {
 export const RUN_BY_NOT_MANAGER_CODE = 'RUN_BY_NOT_MANAGER';
 
 export const RUN_BY_NOT_MANAGER_MESSAGE =
-  'Only someone who runs this business can name it as running a gathering.';
+  'Only someone who runs this business can name it as running an event.';
 
 /**
  * "Run by" on gatherings, from the listings side: who may name a listing as

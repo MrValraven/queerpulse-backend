@@ -128,10 +128,10 @@ export class EventCommunitiesService {
       );
     }
     if (event.status === EventStatus.Cancelled) {
-      throw new ConflictException('This gathering was cancelled');
+      throw new ConflictException('This event was cancelled');
     }
     if (hasEnded(event)) {
-      throw new ConflictException('This gathering has already happened');
+      throw new ConflictException('This event has already happened');
     }
     const community = await this.communities.findOne({
       where: { slug: communitySlug, archivedAt: IsNull() },
@@ -150,11 +150,11 @@ export class EventCommunitiesService {
       throw new NotFoundException('Community not found');
     }
     if (community.id === event.communityId) {
-      throw new ConflictException('This community already leads the gathering');
+      throw new ConflictException('This community already leads the event');
     }
     if (community.frozenAt !== null) {
       throw new ConflictException(
-        'This community is frozen and cannot join a gathering right now',
+        'This community is frozen and cannot join an event right now',
       );
     }
     const existing = await this.eventCommunities.findOne({
@@ -162,7 +162,7 @@ export class EventCommunitiesService {
     });
     if (existing) {
       throw new ConflictException(
-        'This community has already been invited to this gathering',
+        'This community has already been invited to this event',
       );
     }
     // Spec decision 4: a community the inviter already runs or moderates
@@ -184,9 +184,7 @@ export class EventCommunitiesService {
           lock: { mode: 'pessimistic_write' },
         });
         if (locked?.communityId === community.id) {
-          throw new ConflictException(
-            'This community already leads the gathering',
-          );
+          throw new ConflictException('This community already leads the event');
         }
         const activeGuestCount = await manager.count(EventCommunity, {
           where: {
@@ -199,7 +197,7 @@ export class EventCommunitiesService {
         });
         if (activeGuestCount >= MAX_GUEST_COMMUNITIES) {
           throw new BadRequestException(
-            `A gathering can have at most ${MAX_GUEST_COMMUNITIES} guest communities`,
+            `An event can have at most ${MAX_GUEST_COMMUNITIES} guest communities`,
           );
         }
         const result = await manager
@@ -223,7 +221,7 @@ export class EventCommunitiesService {
     );
     if (!inserted) {
       throw new ConflictException(
-        'This community has already been invited to this gathering',
+        'This community has already been invited to this event',
       );
     }
     if (!isAutoAccepted) {
@@ -252,7 +250,7 @@ export class EventCommunitiesService {
         guestsById.get(candidate.communityId)?.slug === communitySlug,
     );
     if (!row) {
-      throw new NotFoundException('This community is not on this gathering');
+      throw new NotFoundException('This community is not on this event');
     }
     // A decline is final: the row stays so the community cannot be re-invited.
     // The delete matches only a pending or accepted row, so a guest that
@@ -300,10 +298,10 @@ export class EventCommunitiesService {
       throw new ConflictException('This invite has already been answered');
     }
     if (event.status === EventStatus.Cancelled) {
-      throw new ConflictException('This gathering was cancelled');
+      throw new ConflictException('This event was cancelled');
     }
     if (hasEnded(event)) {
-      throw new ConflictException('This gathering has already happened');
+      throw new ConflictException('This event has already happened');
     }
     if (community.frozenAt !== null) {
       throw new ConflictException(

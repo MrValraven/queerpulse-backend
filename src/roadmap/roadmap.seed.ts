@@ -102,8 +102,8 @@ export const ROADMAP_ITEMS: SeedItem[] = [
   // Shipped — sortOrder follows the order SHIPPED appears in roadmap.data.ts.
   {
     column: RoadmapColumn.Shipped,
-    category: 'Gatherings',
-    name: 'Gathering dashboard',
+    category: 'Events',
+    name: 'Event dashboard',
     description:
       'Live check-in and attendance management for hosts, including QR scanning and waitlist promotion.',
     date: 'May 2026',
@@ -140,7 +140,7 @@ export const ROADMAP_ITEMS: SeedItem[] = [
   },
   {
     column: RoadmapColumn.Shipped,
-    category: 'Gatherings',
+    category: 'Events',
     name: 'RSVP ticket',
     description:
       'Shareable post-RSVP confirmation with QR code, calendar integration, and waitlist state.',
@@ -153,7 +153,7 @@ export const ROADMAP_ITEMS: SeedItem[] = [
     category: 'Platform',
     name: 'Mobile app beta',
     description:
-      'iOS and Android apps, starting with gatherings and messaging. Beta invites go to Level 4+ members first.',
+      'iOS and Android apps, starting with events and messaging. Beta invites go to Level 4+ members first.',
     stage: 'In progress',
     eta: '~Q3 2026',
     progress: 60,
@@ -173,8 +173,8 @@ export const ROADMAP_ITEMS: SeedItem[] = [
   },
   {
     column: RoadmapColumn.Building,
-    category: 'Gatherings',
-    name: 'Map view for gatherings',
+    category: 'Events',
+    name: 'Map view for events',
     description:
       'Browse upcoming events on a city map. Filter by date, type, and distance.',
     stage: 'Early design',
@@ -219,7 +219,7 @@ export const ROADMAP_ITEMS: SeedItem[] = [
     category: 'Messaging',
     name: 'Group messaging',
     description:
-      'Create threads with multiple members — for planning gatherings, projects, or just chatting.',
+      'Create threads with multiple members — for planning events, projects, or just chatting.',
     votes: 76,
     sortOrder: 2,
   },
@@ -247,7 +247,7 @@ export const ROADMAP_IDEAS: SeedIdea[] = [
   { text: 'Event reminders via SMS', votes: 34, sortOrder: 0 },
   { text: 'Dark mode', votes: 29, sortOrder: 1 },
   { text: 'Sub-communities within communities', votes: 22, sortOrder: 2 },
-  { text: 'Recurring gatherings (monthly series)', votes: 18, sortOrder: 3 },
+  { text: 'Recurring events (monthly series)', votes: 18, sortOrder: 3 },
   { text: 'Shared event costs / ticket splitting', votes: 15, sortOrder: 4 },
 ];
 
@@ -330,9 +330,10 @@ export interface RoadmapAdminSeedItem {
 export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
   // --- Shipped ---------------------------------------------------------
   {
-    name: 'Gathering dashboard',
+    name: 'Event dashboard',
+    matchName: 'Gathering dashboard',
     column: RoadmapColumn.Shipped,
-    category: 'Gatherings',
+    category: 'Events',
     description:
       'Live check-in and attendance management for hosts, including QR scanning and waitlist promotion.',
     date: 'May 2026',
@@ -553,7 +554,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Building,
     category: 'Platform',
     description:
-      'iOS and Android apps, starting with gatherings and messaging. Beta invites go to Level 4+ members first.',
+      'iOS and Android apps, starting with events and messaging. Beta invites go to Level 4+ members first.',
     stage: 'In progress',
     eta: '~Q3 2026',
     progress: 60,
@@ -600,9 +601,10 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     ownerSlug: 'ana-duarte',
   },
   {
-    name: 'Map view for gatherings',
+    name: 'Map view for events',
+    matchName: 'Map view for gatherings',
     column: RoadmapColumn.Building,
-    category: 'Gatherings',
+    category: 'Events',
     description:
       'Browse upcoming events on a city map. Filter by date, type, and distance.',
     stage: 'Early design',
@@ -733,7 +735,7 @@ export const ROADMAP_ADMIN_SEED_ITEMS: RoadmapAdminSeedItem[] = [
     column: RoadmapColumn.Planned,
     category: 'Messaging',
     description:
-      'Create threads with multiple members — for planning gatherings, projects, or just chatting.',
+      'Create threads with multiple members — for planning events, projects, or just chatting.',
     votes: 76,
     publicNote: 'Small rooms inside the room.',
     targetQuarter: 'Q1 2027',
@@ -878,8 +880,8 @@ export const ROADMAP_ADMIN_SEED_PENDING_IDEAS: RoadmapAdminSeedPendingIdea[] = [
     duplicateOfName: 'Queer-owned business directory',
   },
   {
-    text: 'Buddy system for first gatherings',
-    category: 'Gatherings',
+    text: 'Buddy system for first events',
+    category: 'Events',
     votes: 51,
     note: 'Submitted by Sofia A. — "Walking in alone the first time is the hardest part."',
   },
@@ -897,8 +899,8 @@ export const ROADMAP_ADMIN_SEED_PENDING_IDEAS: RoadmapAdminSeedPendingIdea[] = [
     note: 'Submitted by Nuno F. — "I will do your brand identity, you do my accounting."',
   },
   {
-    text: 'Sober-friendly gathering tag',
-    category: 'Gatherings',
+    text: 'Sober-friendly event tag',
+    category: 'Events',
     votes: 33,
     note: 'Submitted by Beatriz L. — "Not everything has to happen in a bar."',
   },
@@ -1029,7 +1031,7 @@ function buildGuideSteps(
   return steps;
 }
 
-// UPDATE-or-INSERT every rich item, keyed on `matchName ?? name`. Existing
+// UPDATE-or-INSERT every rich item, keyed on `name`, falling back to `matchName`. Existing
 // rows (the base 14's design counterparts) are enriched via a targeted
 // `update()` that never touches `sortOrder` — new rows are appended after
 // the current max `sortOrder` in their column, mirroring
@@ -1043,8 +1045,13 @@ async function seedRoadmapAdminItems(
   const nameToId = new Map<string, string>();
 
   for (const seedItem of ROADMAP_ADMIN_SEED_ITEMS) {
-    const lookupName = seedItem.matchName ?? seedItem.name;
-    const existing = await items.findOne({ where: { name: lookupName } });
+    // Match the current name first (the live row once a rename migration has
+    // run), then fall back to `matchName` (the pre-rename name).
+    const existing =
+      (await items.findOne({ where: { name: seedItem.name } })) ??
+      (seedItem.matchName
+        ? await items.findOne({ where: { name: seedItem.matchName } })
+        : null);
 
     const ownerId = seedItem.ownerSlug
       ? (memberIdBySlug.get(seedItem.ownerSlug) ?? null)

@@ -70,7 +70,7 @@ type AnswerFields = Pick<
 function unavailableError(reason: string): ConflictException {
   return new ConflictException({
     statusCode: 409,
-    message: 'Go together is not open for this gathering',
+    message: 'Go together is not open for this event',
     code: 'GO_TOGETHER_UNAVAILABLE',
     reason,
   });
@@ -79,7 +79,7 @@ function unavailableError(reason: string): ConflictException {
 function notWaitingError(): ConflictException {
   return new ConflictException({
     statusCode: 409,
-    message: 'You are not waiting for a group for this gathering',
+    message: 'You are not waiting for a group for this event',
     code: 'GO_TOGETHER_NOT_WAITING',
   });
 }
@@ -87,7 +87,7 @@ function notWaitingError(): ConflictException {
 function partnerUnavailableError(): ConflictException {
   return new ConflictException({
     statusCode: 409,
-    message: 'That friend cannot join you for this gathering',
+    message: 'That friend cannot join you for this event',
     code: 'GO_TOGETHER_PARTNER_UNAVAILABLE',
   });
 }
@@ -532,7 +532,7 @@ export class GoTogetherEntryService {
     if (existing?.status === 'grouped') {
       throw new ConflictException({
         statusCode: 409,
-        message: 'You already have a group for this gathering',
+        message: 'You already have a group for this event',
         code: 'GO_TOGETHER_ALREADY_GROUPED',
       });
     }
@@ -565,7 +565,7 @@ export class GoTogetherEntryService {
     if (memberBlocker) {
       throw new ForbiddenException({
         statusCode: 403,
-        message: 'You cannot join Go together for this gathering',
+        message: 'You cannot join Go together for this event',
         code: 'GO_TOGETHER_INELIGIBLE',
         reason: memberBlocker,
       });

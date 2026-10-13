@@ -154,7 +154,7 @@ describe('RsvpService', () => {
   // open.
   describe('RSVP cutoff', () => {
     const HOUR_IN_MILLISECONDS = 60 * 60 * 1000;
-    const CLOSED_MESSAGE = 'RSVPs for this gathering have closed';
+    const CLOSED_MESSAGE = 'RSVPs for this event have closed';
     // Starts in two hours with a day-before cutoff, so RSVPs closed 22 hours
     // ago. Unlimited capacity keeps the seat arithmetic out of the way.
     const closedEvent = () => ({
@@ -321,7 +321,7 @@ describe('RsvpService', () => {
   // keep raising, as they keep RSVPing.
   describe('updateRsvpDetails guest count after the RSVP cutoff', () => {
     const HOUR_IN_MILLISECONDS = 60 * 60 * 1000;
-    const CLOSED_MESSAGE = 'RSVPs for this gathering have closed';
+    const CLOSED_MESSAGE = 'RSVPs for this event have closed';
     // Starts in two hours with a day-before cutoff, so RSVPs closed 22 hours
     // ago. Unlimited capacity keeps the seat arithmetic out of the way.
     const closedEvent = () => ({

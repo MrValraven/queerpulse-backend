@@ -91,7 +91,7 @@ export class EventsController {
       '(LOC-17), applied in SQL so a filtered browse survives pagination; ' +
       'they narrow `filter=upcoming` (and `from`/`to`/`q` also narrow ' +
       '`filter=past`). `filter=hosting` honours `to` alone, as an upper ' +
-      'bound on the start, so a host can ask for the gatherings they have ' +
+      'bound on the start, so a host can ask for the events they have ' +
       'already started.',
   })
   @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
@@ -121,7 +121,7 @@ export class EventsController {
     description:
       'The created event detail (the first occurrence of a series), plus ' +
       '`occurrenceSlugs`: the slug of every saved occurrence in series ' +
-      'order, `[slug]` for a single gathering.',
+      'order, `[slug]` for a single event.',
   })
   @ApiBadRequestResponse({
     description: 'Invalid schedule (past start, or end before start).',
@@ -222,7 +222,7 @@ export class EventsController {
   })
   @ApiServiceUnavailableResponse({
     description:
-      'One of its Go together group chats could not be closed, so the gathering was kept. A later retry of the same delete can succeed.',
+      'One of its Go together group chats could not be closed, so the event was kept. A later retry of the same delete can succeed.',
   })
   remove(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.remove(slug, user.userId);
@@ -589,7 +589,7 @@ export class EventsController {
     description:
       'Reaches everyone holding a live RSVP (going, maybe or waitlisted) ' +
       'plus everyone holding a standing invite, minus the sender. Delivered ' +
-      'as an in-app notification and a push, and stored on the gathering so ' +
+      'as an in-app notification and a push, and stored on the event so ' +
       'a host can see what they already sent and an attendee can find it ' +
       'again at the door.',
   })
@@ -616,7 +616,7 @@ export class EventsController {
   })
   @ApiOkResponse({ description: 'The announcements.' })
   @ApiForbiddenResponse({
-    description: 'You have no stake in this gathering.',
+    description: 'You have no stake in this event.',
   })
   @ApiNotFoundResponse({ description: 'No event with that slug.' })
   listAnnouncements(
@@ -864,7 +864,7 @@ export class EventLineupInvitesController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Get a lineup invite (the invited member only).' })
-  @ApiOkResponse({ description: 'The invite, its gathering and inviter.' })
+  @ApiOkResponse({ description: 'The invite, its event and inviter.' })
   @ApiNotFoundResponse({ description: 'Invite not found.' })
   get(
     @CurrentUser() user: CurrentUserData,

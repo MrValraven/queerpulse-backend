@@ -49,7 +49,7 @@ export class RsvpService {
   // (stepping down to maybe, cancelling, being removed), so the client can
   // show the same explanation whichever button led there.
   private static readonly HOST_ALWAYS_GOING_MESSAGE =
-    'The host is always going to their own gathering';
+    'The host is always going to their own event';
 
   constructor(
     private readonly dataSource: DataSource,
@@ -106,7 +106,7 @@ export class RsvpService {
       // the host set one and falls back to `startAt`, so a gathering with no
       // stated end closes at its start time rather than staying open forever.
       if (hasEnded(event)) {
-        throw new BadRequestException('This gathering has already happened');
+        throw new BadRequestException('This event has already happened');
       }
       const isOrganizer = await this.assertMayRsvp(manager, event, userId);
       // The HOST (never a co-host, who RSVPs like anyone else) always holds
@@ -781,9 +781,7 @@ export class RsvpService {
       where: { eventId: event.id, userId },
     });
     if (isBanned) {
-      throw new ForbiddenException(
-        'The host has removed you from this gathering',
-      );
+      throw new ForbiddenException('The host has removed you from this event');
     }
 
     // A block, in EITHER direction, between this member and the host. The
@@ -797,7 +795,7 @@ export class RsvpService {
       );
       if (isBlocked) {
         throw new ForbiddenException(
-          'You cannot RSVP to a gathering hosted by someone you have blocked, or who has blocked you',
+          'You cannot RSVP to an event hosted by someone you have blocked, or who has blocked you',
         );
       }
     }
@@ -815,9 +813,7 @@ export class RsvpService {
       removed.status === RsvpStatus.Cancelled &&
       removed.removedByHostAt !== null
     ) {
-      throw new ForbiddenException(
-        'The host has removed you from this gathering',
-      );
+      throw new ForbiddenException('The host has removed you from this event');
     }
     return false;
   }

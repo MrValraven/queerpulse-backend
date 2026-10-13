@@ -215,7 +215,7 @@ export function hasRsvpCutoffPassed(
   return closesAt !== null && now.getTime() >= closesAt.getTime();
 }
 
-export const RSVPS_CLOSED_MESSAGE = 'RSVPs for this gathering have closed';
+export const RSVPS_CLOSED_MESSAGE = 'RSVPs for this event have closed';
 
 /**
  * The one cutoff guard every member-initiated way onto a roster calls: a

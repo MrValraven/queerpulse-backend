@@ -50,7 +50,7 @@ export class EventGuestCommunitiesController {
 
   @Get(':slug/communities')
   @ApiOperation({
-    summary: 'List the guest communities of a gathering you organise.',
+    summary: 'List the guest communities of an event you organise.',
     description: 'Every status: pending, accepted and declined.',
   })
   @ApiOkResponse({ description: 'Every guest row with its status.' })
@@ -66,14 +66,13 @@ export class EventGuestCommunitiesController {
   @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
-    summary: 'Invite a guest community onto a gathering you organise.',
+    summary: 'Invite a guest community onto an event you organise.',
     description:
       'Accepted on the spot when the caller is an owner, co-owner or mod of that community.',
   })
   @ApiCreatedResponse({ description: 'The guest row and its status.' })
   @ApiBadRequestResponse({
-    description:
-      'The gathering has no lead community, or already has 5 guests.',
+    description: 'The event has no lead community, or already has 5 guests.',
   })
   @ApiForbiddenResponse({
     description: 'Only the host or a co-host can do that.',
@@ -81,7 +80,7 @@ export class EventGuestCommunitiesController {
   @ApiNotFoundResponse({ description: 'No such event or community.' })
   @ApiConflictResponse({
     description:
-      'The community leads the gathering, was already invited (a decline included), or is frozen.',
+      'The community leads the event, was already invited (a decline included), or is frozen.',
   })
   invite(
     @CurrentUser() user: CurrentUserData,
@@ -94,7 +93,7 @@ export class EventGuestCommunitiesController {
   @Delete(':slug/communities/:communitySlug')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
-    summary: 'Remove a guest community from a gathering you organise.',
+    summary: 'Remove a guest community from an event you organise.',
   })
   @ApiNoContentResponse({ description: 'The guest was removed.' })
   @ApiForbiddenResponse({
@@ -154,7 +153,7 @@ export class EventCommunityInvitesController {
   @ApiNotFoundResponse({ description: 'Invite not found.' })
   @ApiConflictResponse({
     description:
-      'Already answered, the gathering was cancelled or has happened, or the community is frozen.',
+      'Already answered, the event was cancelled or has happened, or the community is frozen.',
   })
   respond(
     @CurrentUser() user: CurrentUserData,
@@ -167,7 +166,7 @@ export class EventCommunityInvitesController {
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Take your community off an accepted collab.' })
-  @ApiNoContentResponse({ description: 'The community left the gathering.' })
+  @ApiNoContentResponse({ description: 'The community left the event.' })
   @ApiForbiddenResponse({
     description:
       'Only the owner, a co-owner or a moderator of this community can do that.',

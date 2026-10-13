@@ -3002,7 +3002,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Illustrative community partnership — a monthly workshop is one of the few hands-on, low-pressure gathering spaces we co-host.',
+        body: 'Illustrative community partnership — a monthly workshop is one of the few hands-on, low-pressure event spaces we co-host.',
       },
     ],
     jointWork: [
@@ -3054,7 +3054,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     region: PartnerRegion.Pt,
     regionLabel: 'Portugal',
     city: 'Lisbon',
-    desc: 'An illustrative applicant offering a shared studio and gathering space.',
+    desc: 'An illustrative applicant offering a shared studio and event space.',
     tags: ['Arts', 'Space'],
     tier: 'Applicant',
     since: 'Illustrative applicant',

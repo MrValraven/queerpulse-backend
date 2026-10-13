@@ -90,7 +90,7 @@ export class CommunityPublicController {
   })
   @ApiOkResponse({
     description:
-      'Name, tagline, purpose, type, tags, place, languages, member count, images, and the next public gathering. Never the roster, any post, the owner, or the rules.',
+      'Name, tagline, purpose, type, tags, place, languages, member count, images, and the next public event. Never the roster, any post, the owner, or the rules.',
   })
   @ApiNotFoundResponse({
     description:
@@ -121,7 +121,7 @@ export class CommunityPublicController {
   })
   @ApiOkResponse({
     description:
-      "Name, tagline, purpose, type, tier, tags, place, languages, member count, images, the next public gathering, and the caller's own join-request status. Never the roster, any post, the owner, or the rules.",
+      "Name, tagline, purpose, type, tier, tags, place, languages, member count, images, the next public event, and the caller's own join-request status. Never the roster, any post, the owner, or the rules.",
   })
   @ApiNotFoundResponse({
     description:
@@ -188,11 +188,11 @@ export class CommunityPublicController {
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiOperation({
     summary:
-      "A community's upcoming gatherings, for a signed-in member who is not on its roster.",
+      "A community's upcoming events, for a signed-in member who is not on its roster.",
   })
   @ApiOkResponse({
     description:
-      'One bounded page of published, upcoming, public- or members-visibility gatherings, soonest first. Never a members-only gathering, never a post, never the roster.',
+      'One bounded page of published, upcoming, public- or members-visibility events, soonest first. Never a members-only event, never a post, never the roster.',
   })
   @ApiNotFoundResponse({
     description:

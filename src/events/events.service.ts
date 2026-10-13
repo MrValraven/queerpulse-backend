@@ -405,7 +405,7 @@ export class EventsService {
     const visibility = dto.visibility ?? EventVisibility.Public;
     if (visibility === EventVisibility.Community && !communityId) {
       throw new BadRequestException(
-        'Community-only gatherings require a community',
+        'Community-only events require a community',
       );
     }
 
@@ -631,7 +631,7 @@ export class EventsService {
         until.getTime() <= startAt.getTime()
       ) {
         throw new BadRequestException(
-          "endUntil must be after the gathering's start",
+          "endUntil must be after the event's start",
         );
       }
       untilMs = until.getTime();
@@ -683,7 +683,7 @@ export class EventsService {
     // guest is shown.
     if (!isOrganizer) {
       throw new ForbiddenException(
-        'Only an organiser can preview this gathering as a guest',
+        'Only an organiser can preview this event as a guest',
       );
     }
     return this.buildDetail(event, PREVIEW_STAND_IN_VIEWER_ID, {
@@ -876,7 +876,7 @@ export class EventsService {
     const nextVisibility = dto.visibility ?? event.visibility;
     if (nextVisibility === EventVisibility.Community && !communityId) {
       throw new BadRequestException(
-        'Community-only gatherings require a community',
+        'Community-only events require a community',
       );
     }
 
@@ -1555,7 +1555,7 @@ export class EventsService {
   async remove(slug: string, userId: string): Promise<{ ok: true }> {
     const event = await this.loadEventOr404(slug);
     if (event.hostId !== userId) {
-      throw new ForbiddenException('Only the host can delete a gathering');
+      throw new ForbiddenException('Only the host can delete an event');
     }
 
     // An already-cancelled gathering skips the stake check entirely: its
@@ -1591,7 +1591,7 @@ export class EventsService {
           hasPendingInvites ? 'invitations still open' : null,
         ].filter(Boolean);
         throw new ConflictException(
-          `People still have a stake in this gathering (${stakes.join(', ')}). Cancel it first so they are told it is off, then delete it.`,
+          `People still have a stake in this event (${stakes.join(', ')}). Cancel it first so they are told it is off, then delete it.`,
         );
       }
     }
@@ -1616,7 +1616,7 @@ export class EventsService {
         `Could not wind down gathering ${eventId} before deleting it: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
       );
       throw new ServiceUnavailableException(
-        "This gathering's Go together group chats could not be closed, so it was kept. Try deleting it again in a moment.",
+        "This event's Go together group chats could not be closed, so it was kept. Try deleting it again in a moment.",
       );
     }
   }
@@ -2691,7 +2691,7 @@ export class EventsService {
   ): Promise<AttachableListingRef> {
     if (event && event.venueDetachedListingId === listingId) {
       throw new BadRequestException(
-        'This venue removed this gathering from its page',
+        'This venue removed this event from its page',
       );
     }
     const listing = await this.listingLookup.findAttachable(listingId);

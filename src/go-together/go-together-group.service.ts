@@ -226,7 +226,7 @@ export class GoTogetherGroupService {
     if (!isCheckInOpen(event, now)) {
       throw new ConflictException({
         statusCode: 409,
-        message: 'Check-in is not open for this gathering',
+        message: 'Check-in is not open for this event',
         code: 'GO_TOGETHER_CHECKIN_CLOSED',
       });
     }

@@ -250,7 +250,7 @@ export class ListingVenueEventsService {
       },
     });
     if (!event) {
-      throw new NotFoundException('Gathering not found at this venue');
+      throw new NotFoundException('Event not found at this venue');
     }
     return event;
   }

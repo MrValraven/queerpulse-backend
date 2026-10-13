@@ -215,9 +215,7 @@ describe('EventInvitesService', () => {
       );
       const attempt = service.respondInvite('i1', 'u1', 'accept');
       await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
-      await expect(attempt).rejects.toThrow(
-        'RSVPs for this gathering have closed',
-      );
+      await expect(attempt).rejects.toThrow('RSVPs for this event have closed');
       expect(invites.save).not.toHaveBeenCalled();
     });
 

@@ -101,7 +101,7 @@ describe('buildBadges', () => {
       {
         key: 'first-gathering',
         cat: 'Attendance',
-        name: 'First Gathering',
+        name: 'First Event',
         context: 'Pride Brunch · Jun 2025',
         rarity: 'common',
         tint: 'jade',
@@ -180,7 +180,7 @@ describe('buildBadges', () => {
     const result = buildBadges([
       { badgeKey: 'first-gathering', context: null },
     ]);
-    expect(result.earned[0]!.context).toBe('Attended a QueerPulse gathering');
+    expect(result.earned[0]!.context).toBe('Attended a QueerPulse event');
   });
 
   it('locked badges surface the catalogue lockedContext (how to earn it)', () => {

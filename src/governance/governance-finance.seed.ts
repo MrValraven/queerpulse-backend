@@ -74,7 +74,7 @@ export const financeIncomeSeed: FinanceLine[] = [
     total: { label: '99 contributing members', amount: '€1,840' },
   },
   {
-    label: 'Gathering ticket sales',
+    label: 'Event ticket sales',
     amount: '€2,180',
     note: 'Net figure. QueerPulse takes 0% of ticket revenue — 100% goes to hosts. This line covers only events we organise ourselves.',
     width: 94,
@@ -181,7 +181,7 @@ export const financeExpenseSeed: FinanceLine[] = [
   {
     label: 'Community events',
     amount: '€1,240',
-    note: 'Venue hire, equipment, and materials for platform-organised gatherings. Newcomer events, mental health sessions, and community dinners.',
+    note: 'Venue hire, equipment, and materials for platform-organised events. Newcomer events, mental health sessions, and community dinners.',
     width: 60,
     items: [
       {
@@ -339,7 +339,7 @@ export const financeEventNotesSeed: FinanceEventNote[] = [
   },
   {
     title: 'Sliding scale is mandatory.',
-    body: 'Every paid gathering must offer a reduced rate. Members request it privately, no explanation asked.',
+    body: 'Every paid event must offer a reduced rate. Members request it privately, no explanation asked.',
   },
   {
     title: 'QueerPulse subsidises specific event types.',
@@ -351,7 +351,7 @@ export const financeEventNotesSeed: FinanceEventNote[] = [
   },
   {
     title: 'This quarter:',
-    body: '34 gatherings hosted. ~€8,400 in ticket revenue — all of which went directly to hosts.',
+    body: '34 events hosted. ~€8,400 in ticket revenue — all of which went directly to hosts.',
   },
 ];
 

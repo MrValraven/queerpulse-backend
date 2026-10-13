@@ -150,7 +150,7 @@ function photoExcerptSource(
 ): string {
   const album = gathering
     ? `(photo in the album for: ${gathering.title.trim() || gathering.slug})`
-    : '(photo, gathering not found)';
+    : '(photo, event not found)';
   const caption = photo.caption?.trim();
   return `${album} ${caption ? `caption: ${caption}` : 'no caption'}`;
 }

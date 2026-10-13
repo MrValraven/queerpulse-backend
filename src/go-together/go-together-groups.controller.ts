@@ -67,7 +67,7 @@ export class GoTogetherGroupsController {
   @Post(':groupId/checkin')
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
-    summary: 'Say "I\'m here" or "I\'ve left" around the gathering.',
+    summary: 'Say "I\'m here" or "I\'ve left" around the event.',
   })
   @ApiOkResponse({ description: 'The updated group card.' })
   checkIn(
@@ -82,9 +82,9 @@ export class GoTogetherGroupsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary:
-      'Leave the group and its chat for this gathering. From the start onward, leave the chat only.',
+      'Leave the group and its chat for this event. From the start onward, leave the chat only.',
     description:
-      'Before the gathering starts, the caller leaves Go together for it. From the start onward (the card reports `isLeaveChatOnly: true`) only their chat seat ends: they stay in the group, on the meet-again page, with their own reveal and feedback.',
+      'Before the event starts, the caller leaves Go together for it. From the start onward (the card reports `isLeaveChatOnly: true`) only their chat seat ends: they stay in the group, on the meet-again page, with their own reveal and feedback.',
   })
   @ApiNoContentResponse({
     description: 'The caller left the group, or its chat after the start.',

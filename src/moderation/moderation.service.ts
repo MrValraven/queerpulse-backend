@@ -868,7 +868,7 @@ export class ModerationService {
   > = new Map<ReportSubjectType, string>([
     [
       ReportSubjectType.EventPhoto,
-      'The reported photograph cannot be shown to you here, so the decision on it belongs to platform staff, who can see the image. Escalate the report and they will pick it up. Add what you know about the gathering and the people in it to your note, because that travels up with the report.',
+      'The reported photograph cannot be shown to you here, so the decision on it belongs to platform staff, who can see the image. Escalate the report and they will pick it up. Add what you know about the event and the people in it to your note, because that travels up with the report.',
     ],
   ]);
 
@@ -1052,7 +1052,7 @@ export class ModerationService {
     );
     if (rows.length) {
       throw new ForbiddenException(
-        'You cannot close a report about a photo from a gathering you host. Platform staff will decide it.',
+        'You cannot close a report about a photo from an event you host. Platform staff will decide it.',
       );
     }
   }

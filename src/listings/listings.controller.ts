@@ -145,7 +145,7 @@ export class ListingsController {
   @Get('managed')
   @ApiOperation({
     summary:
-      'List the listings the current member can name as running a gathering',
+      'List the listings the current member can name as running an event',
   })
   @ApiOkResponse({
     description:
@@ -349,11 +349,11 @@ export class ListingsController {
   // declared above; the declaration order here is not load-bearing.
   @Get(':ref/venue-events')
   @ApiOperation({
-    summary: 'List the gatherings attached to a venue the caller owns',
+    summary: 'List the events attached to a venue the caller owns',
   })
   @ApiOkResponse({
     description:
-      'Upcoming gatherings at this venue, split pending vs confirmed, soonest first.',
+      'Upcoming events at this venue, split pending vs confirmed, soonest first.',
   })
   @ApiNotFoundResponse({
     description: 'No listing with that reference owned by the caller.',
@@ -372,11 +372,11 @@ export class ListingsController {
   // so a double press is not an error.
   @Post(':ref/venue-events/:eventId/confirm')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Confirm a gathering attached to a venue you own' })
+  @ApiOperation({ summary: 'Confirm an event attached to a venue you own' })
   @ApiOkResponse({ description: 'The confirmed attachment.' })
-  @ApiBadRequestResponse({ description: 'Malformed gathering id.' })
+  @ApiBadRequestResponse({ description: 'Malformed event id.' })
   @ApiNotFoundResponse({
-    description: 'No such listing owned by the caller, or no such gathering.',
+    description: 'No such listing owned by the caller, or no such event.',
   })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
@@ -394,13 +394,13 @@ export class ListingsController {
   // business's name is copied into it when the host left it empty).
   @Delete(':ref/venue-events/:eventId')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Detach a gathering from a venue you own' })
+  @ApiOperation({ summary: 'Detach an event from a venue you own' })
   @ApiOkResponse({
-    description: 'The detached gathering and the venue string it kept.',
+    description: 'The detached event and the venue string it kept.',
   })
-  @ApiBadRequestResponse({ description: 'Malformed gathering id.' })
+  @ApiBadRequestResponse({ description: 'Malformed event id.' })
   @ApiNotFoundResponse({
-    description: 'No such listing owned by the caller, or no such gathering.',
+    description: 'No such listing owned by the caller, or no such event.',
   })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
