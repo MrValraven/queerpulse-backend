@@ -23,6 +23,10 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
+import {
+  ACCEPTED_GUEST_STATUS_SQL,
+  acceptedGuestExistsSql,
+} from '../events/event-community-hosting';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumPostVote } from '../forum/entities/forum-post-vote.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
@@ -1201,14 +1205,34 @@ export class FeedService {
         // longer be reached through the feed instead.
         this.excludeModerated(qb, FeedService.EVENT_SUBJECT_TYPES, '"e"."id"');
         if (membershipScoped) {
-          // `communities` tab (Task 6): restrict to gatherings hosted by
-          // communities the viewer belongs to.
+          // `communities` tab (Task 6): gatherings that reach the viewer
+          // through a community they belong to. Two ways in (2026-10-08
+          // guest communities): the lead's roster, or the roster of any
+          // ACCEPTED guest. Pending and declined guests reach nobody. A
+          // muted community stops counting as a way in, inside each arm, so
+          // a gathering stays while some unmuted hosting community the viewer
+          // belongs to still carries it.
+          const hasMutes = mutedCommunityIds.length > 0;
+          const leadMuteSql = hasMutes
+            ? ' AND e.community_id NOT IN (:...mutedCommunityIds)'
+            : '';
+          const guestMuteSql = hasMutes
+            ? ' AND "feed_guest"."community_id" NOT IN (:...mutedCommunityIds)'
+            : '';
           qb.andWhere(
-            `e.community_id IS NOT NULL AND EXISTS (
+            `((e.community_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM "community_members" "mem"
                WHERE "mem"."community_id" = e.community_id AND "mem"."user_id" = :viewerId
-                 AND ${ownRosterRowCountsSql('e.community_id', 'viewerId')})`,
-            { viewerId },
+                 AND ${ownRosterRowCountsSql('e.community_id', 'viewerId')})${leadMuteSql})
+             OR EXISTS (
+               SELECT 1 FROM "event_communities" "feed_guest"
+               JOIN "community_members" "guest_mem"
+                 ON "guest_mem"."community_id" = "feed_guest"."community_id"
+               WHERE "feed_guest"."event_id" = "e"."id"
+                 AND "feed_guest"."status" = ${ACCEPTED_GUEST_STATUS_SQL}
+                 AND "guest_mem"."user_id" = :viewerId
+                 AND ${ownRosterRowCountsSql('"feed_guest"."community_id"', 'viewerId')}${guestMuteSql}))`,
+            hasMutes ? { viewerId, mutedCommunityIds } : { viewerId },
           );
         } else {
           // This arm filters gatherings purely on `EventVisibility`, so a
@@ -1238,9 +1262,17 @@ export class FeedService {
             { viewerId },
           );
         }
-        if (mutedCommunityIds.length) {
+        if (mutedCommunityIds.length && !membershipScoped) {
+          // General tabs: hidden only when EVERY hosting community is muted
+          // (2026-10-08), the lead when there is one plus each accepted
+          // guest. A gathering with no hosting community at all stays. The
+          // `communities` tab folded its mutes into the roster arms above.
           qb.andWhere(
-            '(e.community_id IS NULL OR e.community_id NOT IN (:...mutedCommunityIds))',
+            `(
+              (e.community_id IS NULL AND NOT ${acceptedGuestExistsSql('"e"."id"', 'mute_any_guest', 'TRUE')})
+              OR (e.community_id IS NOT NULL AND e.community_id NOT IN (:...mutedCommunityIds))
+              OR ${acceptedGuestExistsSql('"e"."id"', 'mute_guest', '"mute_guest"."community_id" NOT IN (:...mutedCommunityIds)')}
+            )`,
             { mutedCommunityIds },
           );
         }
@@ -1252,6 +1284,21 @@ export class FeedService {
             qb,
             'e.community_id',
             excludedCommunityTags,
+          );
+          // ...and the same tags on any ACCEPTED guest (2026-10-08): a
+          // gathering co-hosted by a community the viewer opted out of is
+          // classified by that community too.
+          qb.andWhere(
+            `NOT ${acceptedGuestExistsSql(
+              '"e"."id"',
+              'sensitive_guest',
+              `EXISTS (
+                SELECT 1 FROM "communities" "sensitive_guest_com"
+                WHERE "sensitive_guest_com"."id" = "sensitive_guest"."community_id"
+                  AND "sensitive_guest_com"."tags" && :feedExcludedGuestCommunityTags
+              )`,
+            )}`,
+            { feedExcludedGuestCommunityTags: excludedCommunityTags },
           );
         }
         if (connectionAuthorIds !== null) {

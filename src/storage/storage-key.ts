@@ -1,6 +1,7 @@
 import {
   DOCUMENT_UPLOAD_TYPES,
   IMAGE_UPLOAD_TYPES,
+  STUDIO_AUDIO_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKindSpec } from './upload-kinds';
 
@@ -14,9 +15,13 @@ import { UPLOAD_KIND_SPECS, UploadKindSpec } from './upload-kinds';
 // is rejected the same way, and the caller turns that into a 404 so the route
 // never reveals which keys exist.
 
-const UPLOAD_PREFIXES = Object.values(UPLOAD_KIND_SPECS).map(
-  (spec) => spec.prefix,
-);
+// Studio audio keys stay out of this pattern on purpose: `GET /files/*` never
+// serves them (a track streams through a presigned GET after the grant
+// check), and their middle segment is random, so the ownership check below
+// must never read it as a user id. `isStudioAudioKey` is their shape check.
+const UPLOAD_PREFIXES = Object.values(UPLOAD_KIND_SPECS)
+  .filter((spec) => spec !== UPLOAD_KIND_SPECS.studio_audio)
+  .map((spec) => spec.prefix);
 
 const IMAGE_EXTENSIONS = Object.values(IMAGE_UPLOAD_TYPES).map(
   (spec) => spec.extension,
@@ -148,4 +153,30 @@ export function storageKeyOwnerId(value: string): string | null {
     return null;
   }
   return match[2] ?? null;
+}
+
+const STUDIO_AUDIO_EXTENSIONS = Object.values(STUDIO_AUDIO_UPLOAD_TYPES).map(
+  (spec) => spec.extension,
+);
+
+/** `studio-audio/<uuid>/<uuid>.mp3|.m4a`, as `presignStudioAudioUpload` mints it. */
+export const STUDIO_AUDIO_KEY_PATTERN = new RegExp(
+  `^${escapeForRegex(UPLOAD_KIND_SPECS.studio_audio.prefix)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${STUDIO_AUDIO_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+);
+
+/** Whether a value is a Studio audio key. */
+export function isStudioAudioKey(value: string): boolean {
+  return typeof value === 'string' && STUDIO_AUDIO_KEY_PATTERN.test(value);
+}
+
+/** The content type a Studio audio key's extension stands for, or null. */
+export function studioAudioContentTypeForKey(value: string): string | null {
+  if (!isStudioAudioKey(value)) {
+    return null;
+  }
+  const extension = value.slice(value.lastIndexOf('.'));
+  const matchingEntry = Object.entries(STUDIO_AUDIO_UPLOAD_TYPES).find(
+    ([, spec]) => spec.extension === extension,
+  );
+  return matchingEntry ? matchingEntry[0] : null;
 }

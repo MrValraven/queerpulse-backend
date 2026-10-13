@@ -2,9 +2,11 @@ import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
   InternalServerErrorException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { StorageService } from './storage.service';
+import { STUDIO_AUDIO_KEY_PATTERN } from './storage-key';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 
 const CONFIG_VALUES: Record<string, string> = {
@@ -450,6 +452,88 @@ describe('StorageService', () => {
       await expect(
         service.createPresignedDownload('avatars/user-1/abc.jpg'),
       ).rejects.toThrow(InternalServerErrorException);
+    });
+  });
+
+  describe('Studio audio', () => {
+    const STUDIO_KEY =
+      'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3';
+
+    it('mints a key with two random segments and the extension of its type', async () => {
+      const service = buildService();
+      const mp3 = await service.presignStudioAudioUpload({
+        contentType: 'audio/mpeg',
+        byteSize: 1024,
+      });
+      const m4a = await service.presignStudioAudioUpload({
+        contentType: 'audio/mp4',
+        byteSize: 1024,
+      });
+      expect(mp3.key).toMatch(STUDIO_AUDIO_KEY_PATTERN);
+      expect(mp3.key.endsWith('.mp3')).toBe(true);
+      expect(m4a.key.endsWith('.m4a')).toBe(true);
+      expect(mp3.key).not.toContain('user-1');
+    });
+
+    it('accepts a file exactly at 50 MB and answers one byte more with a 413', async () => {
+      const service = buildService();
+      await expect(
+        service.presignStudioAudioUpload({
+          contentType: 'audio/mpeg',
+          byteSize: UPLOAD_KIND_SPECS.studio_audio.maxBytes,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ expiresIn: 300 }));
+      await expect(
+        service.presignStudioAudioUpload({
+          contentType: 'audio/mpeg',
+          byteSize: UPLOAD_KIND_SPECS.studio_audio.maxBytes + 1,
+        }),
+      ).rejects.toBeInstanceOf(PayloadTooLargeException);
+    });
+
+    it('refuses an image type for a track', async () => {
+      await expect(
+        buildService().presignStudioAudioUpload({
+          contentType: 'image/png',
+          byteSize: 1024,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('keeps Studio audio away from the user-scoped presign', async () => {
+      await expect(
+        buildService().presignImageUpload({
+          kind: 'studio_audio',
+          userId: 'user-1',
+          contentType: 'audio/mpeg',
+          byteSize: 1024,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('signs a stream URL that expires in 900 seconds with the stored type', async () => {
+      const startedAt = Date.now();
+      const stream = await buildService().createPresignedAudioStream(
+        STUDIO_KEY,
+        'audio/mpeg',
+      );
+      const signedUrl = new URL(stream.url);
+      expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('900');
+      expect(signedUrl.searchParams.get('response-content-type')).toBe(
+        'audio/mpeg',
+      );
+      expect(new Date(stream.expiresAt).getTime()).toBeGreaterThanOrEqual(
+        startedAt + 900_000,
+      );
+    });
+
+    it('refuses to sign a stream for a key outside the Studio shape', async () => {
+      await expect(
+        buildService().createPresignedAudioStream(
+          'avatars/user-1/abc.jpg',
+          'audio/mpeg',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 });

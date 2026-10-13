@@ -241,6 +241,13 @@ export enum NotificationType {
   EventLineupInvite = 'event_lineup_invite',
   EventLineupAccepted = 'event_lineup_accepted',
   EventLineupDeclined = 'event_lineup_declined',
+  // Guest communities (2026-10-08). `EventCommunityInvite` reaches every
+  // owner, co-owner and mod of the invited community, actor = the organiser
+  // who invited it. `EventCommunityInviteResponse` reaches the gathering's
+  // organisers when the guest's team accepts or declines, actor = whoever
+  // answered. See migration `AddEventCommunityNotificationTypes1831300100000`.
+  EventCommunityInvite = 'event_community_invite',
+  EventCommunityInviteResponse = 'event_community_invite_response',
   // Sent to a magazine writer applicant when an admin approves or declines
   // their application (SDD 2026-08-18 "magazine writer applications").
   // System-driven — no actor — payload carries `{ reviewNote }`. See

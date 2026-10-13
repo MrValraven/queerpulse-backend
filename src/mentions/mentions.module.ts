@@ -10,6 +10,7 @@ import { ConnectionsModule } from '../connections/connections.module';
 import { Listing } from '../listings/entities/listing.entity';
 import { Event } from '../events/entities/event.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventCommunity } from '../events/entities/event-community.entity';
 import { EventInvite } from '../events/entities/event-invite.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { EventAudienceGateService } from '../events/event-audience-gate.service';
@@ -60,6 +61,9 @@ import { MentionsController } from './mentions.controller';
       EventCohost,
       EventInvite,
       EventRsvp,
+      // Guest communities (2026-10-08): the gate reads accepted guests for
+      // the `community` tier.
+      EventCommunity,
     ]),
     // `BlockFilterService`, so a forum fan-out drops anyone blocked either way
     // with the thread's author. Plain import: nothing `SocialModule` imports,

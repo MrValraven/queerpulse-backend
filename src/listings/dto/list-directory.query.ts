@@ -17,6 +17,18 @@ import {
   ListingAccessibilityQuestionSlug,
 } from '../listing-accessibility';
 import {
+  FILTERABLE_LISTING_ATTRIBUTE_SLUGS,
+  LISTING_ENTRY_MODES,
+  LISTING_INCLUSION_PRACTICES,
+  LISTING_LANGUAGE_CODES,
+  LISTING_PAYMENT_METHODS,
+  ListingEntryMode,
+  ListingInclusionPractice,
+  ListingLanguageCode,
+  ListingPaymentMethod,
+  MAX_LISTING_ATTRIBUTES,
+} from '../listing-attributes';
+import {
   LISTING_OWNED_BY_VALUES,
   ListingOwnedBy,
   isListingOwnedBy,
@@ -134,7 +146,7 @@ export class ListListingDirectoryQuery {
 
   /**
    * Who owns the business, as its owner declared it (`LISTING_OWNED_BY_VALUES`:
-   * `women`, `trans`, `nonbinary`, `bipoc`). Repeatable, and also accepted
+   * `women`, `trans`, `nonbinary`, `bipoc`, `migrant`). Repeatable, and also accepted
    * comma-joined, like `access`. Several values are an OR: a listing matches
    * when its `ownedBy` holds ANY of them, because someone looking for
    * businesses run by women or by trans people wants both sets.
@@ -150,6 +162,57 @@ export class ListListingDirectoryQuery {
   @ArrayMaxSize(LISTING_OWNED_BY_VALUES.length)
   @IsIn(LISTING_OWNED_BY_VALUES as readonly string[], { each: true })
   owned?: ListingOwnedBy[];
+
+  /**
+   * Attributes the listing must ALL carry, as filterable slugs
+   * (`FILTERABLE_LISTING_ATTRIBUTE_SLUGS`). Repeatable, and also accepted
+   * comma-joined, like `access`. A sensitive or unknown slug is a 400: the
+   * sensitive health facts are shown on a listing's own page and never
+   * searched for. Applied in the query, so the paged `total` counts only
+   * matching rows.
+   */
+  @IsOptional()
+  @Transform(({ value }) => toQueryValueList(value))
+  @IsArray()
+  @ArrayMaxSize(MAX_LISTING_ATTRIBUTES)
+  @IsIn(FILTERABLE_LISTING_ATTRIBUTE_SLUGS, {
+    each: true,
+    message:
+      'attr holds an attribute the directory cannot filter on. Pick a filterable slug from GET /directory/attributes.',
+  })
+  attr?: string[];
+
+  /** How people get in: exactly one of `LISTING_ENTRY_MODES`. */
+  @IsOptional()
+  @IsIn(LISTING_ENTRY_MODES)
+  entry?: ListingEntryMode;
+
+  /** Ways to pay the listing must ALL accept. Repeatable or comma-joined. */
+  @IsOptional()
+  @Transform(({ value }) => toQueryValueList(value))
+  @IsArray()
+  @ArrayMaxSize(LISTING_PAYMENT_METHODS.length)
+  @IsIn(LISTING_PAYMENT_METHODS as readonly string[], { each: true })
+  pay?: ListingPaymentMethod[];
+
+  /**
+   * Languages, as codes. Several values are an OR: a member who speaks
+   * Portuguese or English is served by either. Repeatable or comma-joined.
+   */
+  @IsOptional()
+  @Transform(({ value }) => toQueryValueList(value))
+  @IsArray()
+  @ArrayMaxSize(LISTING_LANGUAGE_CODES.length)
+  @IsIn(LISTING_LANGUAGE_CODES as readonly string[], { each: true })
+  lang?: ListingLanguageCode[];
+
+  /** Inclusion practices the listing must ALL follow. Repeatable or comma-joined. */
+  @IsOptional()
+  @Transform(({ value }) => toQueryValueList(value))
+  @IsArray()
+  @ArrayMaxSize(LISTING_INCLUSION_PRACTICES.length)
+  @IsIn(LISTING_INCLUSION_PRACTICES as readonly string[], { each: true })
+  practice?: ListingInclusionPractice[];
 
   /**
    * `true` narrows the grid to listings that sell online: online-only ones and

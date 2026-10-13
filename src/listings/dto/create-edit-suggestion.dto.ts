@@ -19,6 +19,10 @@ export const EDIT_SUGGESTION_FIELDS = [
   'phone',
   'website',
   'description',
+  // "Details and amenities": the listing's attributes and getting-in facts.
+  // A list of facts has no single replacement value, so it takes prose only,
+  // the way `other` does.
+  'attributes',
   'other',
 ] as const;
 export type EditSuggestionField = (typeof EDIT_SUGGESTION_FIELDS)[number];
@@ -60,7 +64,7 @@ export class CreateEditSuggestionDto {
    * accepted and quietly changed nothing. Checking here hands them the error
    * while the form is still open.
    *
-   * THE `other` BUCKET REFUSES A PROPOSED VALUE. `other` is the catch-all for
+   * THE `other` AND `attributes` BUCKETS REFUSE A PROPOSED VALUE. `other` is the catch-all for
    * corrections that map to no single listing column, so there is nothing a
    * typed replacement value could be written to; accepting one would mean
    * storing a value that can never be applied and showing moderators a

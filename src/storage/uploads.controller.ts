@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   ForbiddenException,
@@ -20,6 +21,7 @@ import { SaveCropDto } from './dto/save-crop.dto';
 import { isPersonaScopedKey, storageKeyOwnerId } from './storage-key';
 import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService, PresignedUpload } from './storage.service';
+import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
 import { UserRole } from '../users/entities/user.entity';
 import {
@@ -50,6 +52,7 @@ export class UploadsController {
     private readonly storage: StorageService,
     private readonly mediaCropService: MediaCropService,
     private readonly personaImageKeys: PersonaImageKeysService,
+    private readonly studioAudioUploads: StudioAudioUploadsService,
   ) {}
 
   // pending-ok: avatar upload supports editing your own draft profile.
@@ -131,6 +134,27 @@ export class UploadsController {
     // lives here rather than there.
     if (dto.kind === 'sticker' && (user.role as UserRole) !== UserRole.Admin) {
       throw new ForbiddenException('Only an admin may upload a sticker');
+    }
+    // Studio v1: a track's audio is presigned for a persona under a key that
+    // names nobody. `StudioAudioUploadsService` checks the Studio grant, the
+    // caller's membership of the persona and its kind, and records which
+    // persona the key belongs to.
+    if (dto.kind === 'studio_audio') {
+      if (!dto.subprofileId) {
+        throw new BadRequestException(
+          'subprofileId is required for studio_audio uploads',
+        );
+      }
+      return this.studioAudioUploads.presign(user.userId, {
+        subprofileId: dto.subprofileId,
+        contentType: dto.contentType,
+        byteSize: dto.byteSize,
+      });
+    }
+    if (dto.subprofileId !== undefined) {
+      throw new BadRequestException(
+        'subprofileId is accepted for studio_audio uploads only',
+      );
     }
     return this.storage.presignImageUpload({
       kind: dto.kind,

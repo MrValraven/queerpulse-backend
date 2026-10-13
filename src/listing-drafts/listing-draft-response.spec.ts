@@ -236,6 +236,49 @@ describe('toAdminListingDraftDetailDTO', () => {
     });
   });
 
+  it('carries the attribute fields, and the retired tags a draft may still hold, to the staff console', () => {
+    const dto = toAdminListingDraftDetailDTO(
+      draftRow({
+        step: 2,
+        draft: {
+          name: 'Purex',
+          tags: ['Terrace'],
+          goodFor: ['Solo-friendly'],
+          attributes: ['terrace', 'dj-nights'],
+          highlights: ['dj-nights'],
+          entryMode: 'walkIn',
+          coverPolicy: 'freeBefore',
+          coverFreeBefore: '23:00',
+          payments: ['card'],
+          issuesNifInvoices: true,
+          inclusionPractices: ['safer-space-policy'],
+          saferSpacePolicyUrl: 'https://purex.pt/safer-space',
+          langs: ['pt', 'en'],
+          langsOther: 'Tetum',
+          ownedBy: ['migrant'],
+        },
+      }),
+      ownerRef,
+    );
+
+    expect(dto.payload).toEqual({
+      name: 'Purex',
+      tags: ['Terrace'],
+      goodFor: ['Solo-friendly'],
+      attributes: ['terrace', 'dj-nights'],
+      highlights: ['dj-nights'],
+      entryMode: 'walkIn',
+      coverPolicy: 'freeBefore',
+      coverFreeBefore: '23:00',
+      payments: ['card'],
+      issuesNifInvoices: true,
+      inclusionPractices: ['safer-space-policy'],
+      saferSpacePolicyUrl: 'https://purex.pt/safer-space',
+      langs: ['pt', 'en'],
+      langsOther: 'Tetum',
+    });
+  });
+
   it('reads a flat payload and keeps an empty one empty', () => {
     expect(
       toAdminListingDraftDetailDTO(

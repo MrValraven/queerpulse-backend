@@ -5,6 +5,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { ConnectionsService } from '../connections/connections.service';
 import { EventAudienceGateService } from '../events/event-audience-gate.service';
 import { EventCohost } from '../events/entities/event-cohost.entity';
+import { EventCommunity } from '../events/entities/event-community.entity';
 import { EventInvite } from '../events/entities/event-invite.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import {
@@ -485,6 +486,9 @@ describe('MentionNameResolveService, event mentions', () => {
       } as unknown as CommunityMembershipService,
       { find: jest.fn() } as unknown as Repository<CommunityMember>,
       { findOne: jest.fn() } as unknown as Repository<Community>,
+      {
+        find: jest.fn().mockResolvedValue([]),
+      } as unknown as Repository<EventCommunity>,
     );
     const empty = { find: jest.fn().mockResolvedValue([]) };
     const service = new MentionNameResolveService(

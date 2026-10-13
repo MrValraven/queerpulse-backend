@@ -17,6 +17,7 @@ import {
   IsNull,
   MoreThanOrEqual,
   Not,
+  Raw,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
@@ -54,6 +55,7 @@ import {
 } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReportSubjectType } from '../reports/entities/report.entity';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
 import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateListingReviewDto } from './dto/create-review.dto';
@@ -66,7 +68,10 @@ import {
   ADULT_LISTING_CATEGORY_SLUG,
   isAdultListing,
 } from './listing-categories';
-import { LISTING_TAG_GROUPS } from './listing-tags';
+import {
+  ListingAttributeVocabularyDTO,
+  toListingAttributeVocabularyDTO,
+} from './listing-attributes';
 import {
   ListingPublicQuestionDTO,
   ListingQuestionAsker,
@@ -88,7 +93,6 @@ import {
   DIRECTORY_DETAIL_QUESTION_LIMIT,
   DirectoryCardDTO,
   DirectoryDetailDTO,
-  ListingTagGroupDTO,
   MovedToListingView,
   PartnerSpaceDTO,
   RemovedSpaceCardDTO,
@@ -101,7 +105,6 @@ import {
   listingPhotoKeys,
   toDirectoryCard,
   toDirectoryDetail,
-  toListingTagGroupDTO,
   toPartnerSpace,
   toRemovedSpaceCard,
   toRemovedSpaceDetail,
@@ -154,6 +157,13 @@ function toBusinessSearchRow(
  * small, and the Online tab merges it into the page it already holds.
  */
 export const ADULT_DIRECTORY_LIMIT = 100;
+
+/**
+ * How far back a gathering still makes a listing "host gatherings"
+ * (`DirectoryCardDTO.hostsGatherings`): any published public gathering that
+ * starts within the last 180 days, or later.
+ */
+export const HOSTED_GATHERING_LOOKBACK_DAYS = 180;
 
 /**
  * Public, read-only views over the `listings` (businesses) table for the
@@ -430,6 +440,68 @@ export class DirectoryService {
     qualifyColumn('listing', 'name'),
   );
 
+  // Which of a page's listings host gatherings, as ONE query per page: an
+  // EXISTS probe per listing id, so a listing with fifty gatherings costs the
+  // same as one with a single gathering, served by
+  // `IDX_events_run_by_listing_id` and `IDX_events_listing_venue_confirmation`.
+  //
+  // Only `public` gatherings count. Every card is CDN-cached and identical for
+  // every caller, so a members, invite-only, network or community gathering
+  // must not reveal itself through this flag: the audience rule the detail's
+  // Upcoming block applies to an anonymous viewer. A venue attachment counts
+  // once the listing's owner confirmed it; a "run by" link needs no
+  // confirmation, since only the listing's own team can set it. A gathering a
+  // moderator took down (hidden OR removed, `$6`) never counts.
+  //
+  // Quoted snake_case throughout: raw SQL handed to `query` is never
+  // rewritten by TypeORM.
+  private static readonly HOSTED_GATHERINGS_SQL = `
+    SELECT "listing"."id" AS "listingId"
+      FROM "listings" "listing"
+     WHERE "listing"."id" = ANY($1::uuid[])
+       AND EXISTS (
+         SELECT 1
+           FROM "events" "event"
+          WHERE "event"."status" = $2
+            AND "event"."visibility" = $3
+            AND "event"."start_at" >= now() - ($5::int * interval '1 day')
+            AND (
+              "event"."run_by_listing_id" = "listing"."id"
+              OR (
+                "event"."listing_id" = "listing"."id"
+                AND "event"."venue_confirmation" = $4
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+                FROM "content_moderation" "cm"
+               WHERE "cm"."subject_type" = $6
+                 AND "cm"."subject_id" = "event"."id"::text
+                 AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+            )
+       )`;
+
+  // Gatherings are reported (and taken down) under the `event` code, keyed by
+  // the event's uuid, the same code `EventsService` filters its public reads on.
+  private static readonly EVENT_SUBJECT_TYPE: string = ReportSubjectType.Event;
+
+  // `find`-options twin of the takedown clause in `HOSTED_GATHERINGS_SQL`, for
+  // the detail's Upcoming block, in-query so `take` still fills with visible
+  // rows. The id is cast to text because `content_moderation.subject_id` is
+  // varchar while an event id is uuid. Mirrors
+  // `EventsService.excludeModeratedEvents`.
+  private static notTakenDownEventId() {
+    return Raw(
+      (eventIdColumn) => `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cme"
+        WHERE "cme"."subject_type" = :eventSubjectType
+          AND "cme"."subject_id" = ${eventIdColumn}::text
+          AND ("cme"."hidden_at" IS NOT NULL OR "cme"."removed_at" IS NOT NULL)
+      )`,
+      { eventSubjectType: DirectoryService.EVENT_SUBJECT_TYPE },
+    );
+  }
+
   /**
    * Which of these listings currently have their safe-space badge suspended,
    * as ONE query for the whole page.
@@ -449,6 +521,28 @@ export class DirectoryService {
     const openSuspensions =
       await this.safeSpaceBadges.openSuspensionsByListing(badgedListingIds);
     return new Set(openSuspensions.keys());
+  }
+
+  /**
+   * Which of these listings host gatherings, as ONE query for the whole page
+   * (`HOSTED_GATHERINGS_SQL`). An empty page costs no query.
+   */
+  private async hostedGatheringListingIds(
+    rows: Pick<Listing, 'id'>[],
+  ): Promise<Set<string>> {
+    if (!rows.length) return new Set<string>();
+    const hostingRows: { listingId: string }[] = await this.listings.query(
+      DirectoryService.HOSTED_GATHERINGS_SQL,
+      [
+        rows.map((row) => row.id),
+        EventStatus.Published,
+        EventVisibility.Public,
+        EventVenueConfirmation.Confirmed,
+        HOSTED_GATHERING_LOOKBACK_DAYS,
+        DirectoryService.EVENT_SUBJECT_TYPE,
+      ],
+    );
+    return new Set(hostingRows.map((row) => row.listingId));
   }
 
   /**
@@ -473,14 +567,14 @@ export class DirectoryService {
   }
 
   /**
-   * The curated tag vocabulary (`LISTING_TAG_GROUPS`), for the "list your
-   * business" wizard's tag picker (`GET /directory/tags`). The write paths in
-   * `ListingsService` validate against the same list, so the picker can only
-   * offer tags a save will accept. Copied per call so a caller cannot mutate
-   * the shared constant.
+   * The listing attribute vocabulary (`listing-attributes.ts`) for the owner
+   * wizard, the editor and the directory filters (`GET /directory/attributes`).
+   * The write rules in `ListingsService` read the same constants, so the
+   * picker can only offer what a save accepts. A fresh copy per call, so a
+   * caller cannot mutate the shared constants.
    */
-  listTagVocabulary(): ListingTagGroupDTO[] {
-    return LISTING_TAG_GROUPS.map(toListingTagGroupDTO);
+  listAttributeVocabulary(): ListingAttributeVocabularyDTO {
+    return toListingAttributeVocabularyDTO();
   }
 
   /**
@@ -494,7 +588,17 @@ export class DirectoryService {
   private buildDirectoryQuery(
     query: Pick<
       ListListingDirectoryQuery,
-      'cat' | 'q' | 'safe' | 'owned' | 'access' | 'online'
+      | 'cat'
+      | 'q'
+      | 'safe'
+      | 'owned'
+      | 'access'
+      | 'online'
+      | 'attr'
+      | 'entry'
+      | 'pay'
+      | 'lang'
+      | 'practice'
     >,
     // `exclude` for every public read, which is anonymous-readable and
     // CDN-cached. `only` for the members-only `GET /directory/adult`.
@@ -537,6 +641,48 @@ export class DirectoryService {
       // the owner, never verified. Filtered in the query so
       // `listDirectoryPage`'s `total` counts only matching rows.
       qb.andWhere('listing.ownedBy && :ownedBy', { ownedBy: query.owned });
+    }
+
+    if (query.attr?.length) {
+      // ONE containment test: the listing carries every requested attribute
+      // (an AND), served by the GIN index `IDX_listings_attributes`. The
+      // query DTO answers 400 to a sensitive or unknown slug, so neither
+      // reaches here. In the query, so the paged `total` counts only matches.
+      qb.andWhere(
+        '"listing"."attributes" @> CAST(:attributeFilter AS text[])',
+        {
+          attributeFilter: query.attr,
+        },
+      );
+    }
+
+    if (query.entry) {
+      qb.andWhere('"listing"."entry_mode" = :entryModeFilter', {
+        entryModeFilter: query.entry,
+      });
+    }
+
+    if (query.pay?.length) {
+      // Every requested way to pay (an AND).
+      qb.andWhere('"listing"."payments" @> CAST(:paymentFilter AS text[])', {
+        paymentFilter: query.pay,
+      });
+    }
+
+    if (query.lang?.length) {
+      // Overlap (`&&`): any requested language is enough, so several are an OR.
+      qb.andWhere('"listing"."langs" && CAST(:languageFilter AS text[])', {
+        languageFilter: query.lang,
+      });
+    }
+
+    if (query.practice?.length) {
+      // Every requested practice (an AND), served by the GIN index
+      // `IDX_listings_inclusion_practices`.
+      qb.andWhere(
+        '"listing"."inclusion_practices" @> CAST(:practiceFilter AS text[])',
+        { practiceFilter: query.practice },
+      );
     }
 
     if (query.access?.length) {
@@ -693,14 +839,17 @@ export class DirectoryService {
    * as its crop Map.
    */
   private async toDirectoryCards(rows: Listing[]): Promise<DirectoryCardDTO[]> {
-    // A card shows gallery photos only, so shop item photos stay out of the
-    // lookup (`listingCardPhotoKeys`).
+    // A card shows its cover photo (own cover or first gallery photo) and no
+    // shop items, so shop item photos stay out of the lookup
+    // (`listingCardPhotoKeys`).
     const crops = await this.mediaCropService.getMany(
       rows.flatMap((row) => listingCardPhotoKeys(row)),
     );
     const ownerAvatars = await this.resolveOwnerAvatars(rows);
     // ONE query for the page's suspensions, never one per card.
     const suspendedBadges = await this.suspendedBadgeListingIds(rows);
+    // ONE query answers hosted gatherings for the whole page.
+    const hostedGatherings = await this.hostedGatheringListingIds(rows);
     return rows.map((row) =>
       toDirectoryCard(
         row,
@@ -708,6 +857,7 @@ export class DirectoryService {
         undefined,
         ownerAvatarFor(row, ownerAvatars),
         suspendedBadges.has(row.id),
+        hostedGatherings.has(row.id),
       ),
     );
   }
@@ -792,6 +942,7 @@ export class DirectoryService {
     const ownerAvatars = await this.resolveOwnerAvatars(visibleRows);
     // ONE query for the strip's suspensions, never one per card.
     const suspendedBadges = await this.suspendedBadgeListingIds(visibleRows);
+    const hostedGatherings = await this.hostedGatheringListingIds(visibleRows);
     return visibleRows.map((row) =>
       toDirectoryCard(
         row,
@@ -799,6 +950,7 @@ export class DirectoryService {
         undefined,
         ownerAvatarFor(row, ownerAvatars),
         suspendedBadges.has(row.id),
+        hostedGatherings.has(row.id),
       ),
     );
   }
@@ -891,7 +1043,12 @@ export class DirectoryService {
     // visibility tier, and for a stranger the confirmed-only rule) is carried
     // by both venue arms, so the OR stays a conjunct of this scope and can
     // widen nothing: the venue arms differ only in which timestamp they test.
+    //
+    // A gathering a moderator took down never shows, on either pair of arms.
+    // Both scopes spread this one object so no arm can lose the exclusion.
+    const notTakenDownScope = { id: DirectoryService.notTakenDownEventId() };
     const upcomingScope = {
+      ...notTakenDownScope,
       listingId: listing.id,
       status: EventStatus.Published,
       visibility: isActiveMemberViewer
@@ -916,6 +1073,7 @@ export class DirectoryService {
     // its venue. A gathering matching both pairs is one row, which
     // `toListingUpcomingEvent` reads as `runBy`.
     const runByScope = {
+      ...notTakenDownScope,
       runByListingId: listing.id,
       status: EventStatus.Published,
       visibility: upcomingScope.visibility,
@@ -956,6 +1114,8 @@ export class DirectoryService {
     // same suspension the grid does. One row, one query, and only when the
     // listing actually carries a badge.
     const suspendedBadges = await this.suspendedBadgeListingIds([listing]);
+    // The same one-query lookup the grid uses, so a card and its page agree.
+    const hostedGatherings = await this.hostedGatheringListingIds([listing]);
     return toDirectoryDetail(
       listing,
       reviews,
@@ -969,6 +1129,7 @@ export class DirectoryService {
       movedToListing,
       questions,
       suspendedBadges.has(listing.id),
+      hostedGatherings.has(listing.id),
     );
   }
 

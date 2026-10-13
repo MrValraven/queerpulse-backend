@@ -19,8 +19,9 @@ export const ALLOWED_IMAGE_TYPES: readonly string[] =
 
 /**
  * Accepted DOCUMENT content types for a message-composer document attachment
- * (PRD-226: a lease PDF, a flyer, a spreadsheet, a plain-text file — never a
- * video/audio/voice format, which stays deliberately out of scope). Same
+ * (PRD-226: a lease PDF, a flyer, a spreadsheet, a plain-text file). Video and
+ * voice formats stay out of scope here; audio has exactly one home, a Studio
+ * track (`studio_audio`, `STUDIO_AUDIO_UPLOAD_TYPES` at the end of this file). Same
  * whitelist-then-extension-from-the-same-entry contract as
  * `IMAGE_UPLOAD_TYPES`: the DTO validates the requested Content-Type against
  * these keys, the controller derives the object-key extension from the same
@@ -63,3 +64,22 @@ export const LISTING_MENU_UPLOAD_TYPES: Readonly<
   ...IMAGE_UPLOAD_TYPES,
   'application/pdf': { extension: '.pdf' },
 };
+
+/**
+ * Studio v1: the audio a Studio track accepts, MP3 and AAC in an M4A, and
+ * the extension each one's key ends in. The only audio this API stores.
+ */
+export interface AudioUploadSpec {
+  extension: string;
+}
+
+export const STUDIO_AUDIO_UPLOAD_TYPES: Readonly<
+  Record<string, AudioUploadSpec>
+> = {
+  'audio/mpeg': { extension: '.mp3' },
+  'audio/mp4': { extension: '.m4a' },
+};
+
+export const ALLOWED_STUDIO_AUDIO_TYPES: readonly string[] = Object.keys(
+  STUDIO_AUDIO_UPLOAD_TYPES,
+);

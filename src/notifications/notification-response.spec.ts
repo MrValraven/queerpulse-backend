@@ -408,3 +408,70 @@ describe('toNotificationResponse', () => {
     expect(JSON.stringify(response)).not.toContain('owner-user-id');
   });
 });
+
+describe('toClientPayload (guest communities)', () => {
+  it('forwards the collab invite copy and routing keys and keeps the inviter id server-side', () => {
+    const projected = toClientPayload(
+      notificationRow(NotificationType.EventCommunityInvite, {
+        actorId: 'host-1',
+        source: 'community_collab_invite',
+        inviteId: 'invite-1',
+        eventSlug: 'pride-picnic',
+        eventTitle: 'Pride Picnic',
+        communitySlug: 'drag-club',
+        communityName: 'Drag Club',
+        leadCommunityName: 'QueerPulse Social',
+      }),
+    );
+
+    expect(projected).toEqual({
+      source: 'community_collab_invite',
+      inviteId: 'invite-1',
+      eventSlug: 'pride-picnic',
+      eventTitle: 'Pride Picnic',
+      communitySlug: 'drag-club',
+      communityName: 'Drag Club',
+      leadCommunityName: 'QueerPulse Social',
+    });
+  });
+
+  it('forwards the decision on a collab answer', () => {
+    const projected = toClientPayload(
+      notificationRow(NotificationType.EventCommunityInviteResponse, {
+        actorId: 'mod-3',
+        source: 'community_collab_response',
+        eventSlug: 'pride-picnic',
+        eventTitle: 'Pride Picnic',
+        communitySlug: 'drag-club',
+        communityName: 'Drag Club',
+        decision: 'accepted',
+      }),
+    );
+
+    expect(projected).toEqual({
+      source: 'community_collab_response',
+      eventSlug: 'pride-picnic',
+      eventTitle: 'Pride Picnic',
+      communitySlug: 'drag-club',
+      communityName: 'Drag Club',
+      decision: 'accepted',
+    });
+  });
+
+  it('resolves the inviter and the responder as the actor', () => {
+    expect(
+      actorIdOf(
+        notificationRow(NotificationType.EventCommunityInvite, {
+          actorId: 'host-1',
+        }),
+      ),
+    ).toBe('host-1');
+    expect(
+      actorIdOf(
+        notificationRow(NotificationType.EventCommunityInviteResponse, {
+          actorId: 'mod-3',
+        }),
+      ),
+    ).toBe('mod-3');
+  });
+});

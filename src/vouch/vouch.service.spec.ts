@@ -279,6 +279,7 @@ describe('VouchService', () => {
       expect(emitter.emit).toHaveBeenCalledWith(VOUCH_CREATED, {
         voucherId: 'u1',
         voucheeId: 'u2',
+        anonymous: false,
       });
     });
 
@@ -409,6 +410,13 @@ describe('VouchService', () => {
           anonymous: true,
         }),
       );
+      // The flag reaches the event so the notifications listener can keep the
+      // voucher off the vouchee's bell payload.
+      expect(emitter.emit).toHaveBeenCalledWith(VOUCH_CREATED, {
+        voucherId: 'u1',
+        voucheeId: 'u2',
+        anonymous: true,
+      });
     });
 
     it('de-dupes relationships and drops unknown values', async () => {

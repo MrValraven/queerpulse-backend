@@ -115,6 +115,34 @@ describe('issueFreshPersonaId', () => {
     );
     expect(query).toHaveBeenCalledTimes(1);
   });
+
+  // Studio v1: the Studio pages, saved cards and stream routes address a
+  // release and a track by id, so neither keeps the named persona's id.
+  it('gives every Studio release a fresh id and moves its open reports with it', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const [sql, parameters] = statementTouching('studio_releases') ?? [];
+    expect(sql).toContain('AS MATERIALIZED');
+    expect(sql).toContain('gen_random_uuid() AS "fresh_id"');
+    expect(sql).toContain(
+      'UPDATE "reports" SET "subject_id" = "remapped"."fresh_id"::text',
+    );
+    expect(sql).toContain('"published_at" = CASE WHEN');
+    expect(parameters).toEqual([freshId, 'studio_release']);
+  });
+
+  it('gives every Studio track a fresh id once its release has moved', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const releaseIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_releases"'),
+    );
+    const trackIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_tracks"'),
+    );
+    expect(trackIndex).toBeGreaterThan(releaseIndex);
+    expect(query.mock.calls[trackIndex]?.[1]).toEqual([freshId]);
+  });
 });
 
 /**

@@ -14,6 +14,7 @@ import {
   SafeSpaceStatus,
   SafeSpaceVouch,
 } from '../listings/entities/listing.entity';
+import type { ListingInclusionPractice } from '../listings/listing-attributes';
 
 /**
  * Dedicated seed for Task 5 ("Safe Spaces live data"): marks a handful of
@@ -133,10 +134,12 @@ const OPEN_DAILY_MORNING_TO_EVENING: Record<string, ListingDayHours> = {
 
 /**
  * Ported from the frontend mock's `VERIFIED_SPACES` / `REMOVED_SPACES`
- * (`queerpulse/src/features/safety/safeSpaces.ts`). `cats`/`tags` are chosen
- * so `mapSafeSpaceCategory` (`src/listings/listing-response.ts`) derives the
- * same facet the frontend hardcoded: primary cat `food` + a tag containing
- * "bar" -> Bar; primary cat `food` with no bar/club tag -> Cafe.
+ * (`queerpulse/src/features/safety/safeSpaces.ts`). `cats`/`attributes` are
+ * chosen so `mapSafeSpaceCategory` (`src/listings/listing-response.ts`)
+ * derives the same facet the frontend hardcoded: `food` + `nightlife` with no
+ * dancefloor or DJ nights -> Bar; `food` alone -> Cafe. The bars keep `food`
+ * first, matching what `MoveSafeSpaceFacetOffTags1831400000000` gives an
+ * already-seeded row.
  */
 interface SafeSpaceListingSeed {
   ref: string;
@@ -144,10 +147,13 @@ interface SafeSpaceListingSeed {
   name: string;
   cats: string[];
   hood: string;
-  tags: string[];
   blurb: string;
   address: string;
   langs: string[];
+  /** Attribute slugs offered to a place in `cats`; they also pick Bar or Club for a `nightlife` space. */
+  attributes: string[];
+  highlights: string[];
+  inclusionPractices: ListingInclusionPractice[];
   hoursNote: string;
   hours: Record<string, ListingDayHours>;
   safeSpaceStatus: SafeSpaceStatus;
@@ -166,13 +172,15 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
     ref: 'QPL-2026-9001',
     slug: 'purex',
     name: 'Purex',
-    cats: ['food'],
+    cats: ['food', 'nightlife'],
     hood: 'Intendente',
-    tags: ['Bar', 'Gender-neutral bathrooms', 'Accessible', 'Trans-welcoming'],
     blurb:
       "One of Lisbon's longest-running queer bars — staff step in fast, bathrooms are gender-neutral, entrance is step-free.",
     address: 'R. de São Lázaro 11, Intendente, Lisbon',
     langs: ['pt', 'en'],
+    attributes: ['alcohol-free-drinks', 'solo-friendly'],
+    highlights: ['solo-friendly', 'alcohol-free-drinks'],
+    inclusionPractices: ['chosen-name', 'named-contact'],
     hoursNote: 'Open late, Wed–Sun',
     hours: OPEN_LATE_WED_TO_SUN,
     safeSpaceStatus: SafeSpaceStatus.Verified,
@@ -222,11 +230,18 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
     name: "Linha d'Água",
     cats: ['food'],
     hood: 'Príncipe Real',
-    tags: ['Queer-owned', 'Sober-friendly', 'Accessible', 'Community board'],
     blurb:
       'A calm, queer-owned café good for laptop work or a quiet coffee, with a community notice board and a fully accessible room.',
     address: 'R. da Escola Politécnica 56, Príncipe Real, Lisbon',
     langs: ['pt', 'en', 'es'],
+    attributes: [
+      'wifi',
+      'laptop-friendly',
+      'alcohol-free-drinks',
+      'vegan-options',
+    ],
+    highlights: ['laptop-friendly', 'alcohol-free-drinks', 'wifi'],
+    inclusionPractices: ['chosen-name'],
     hoursNote: 'Open 7 days',
     hours: OPEN_DAILY_MORNING_TO_EVENING,
     safeSpaceStatus: SafeSpaceStatus.Verified,
@@ -274,13 +289,15 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
     ref: 'QPL-2026-9003',
     slug: 'bar-atlas',
     name: 'Bar Atlas',
-    cats: ['food'],
+    cats: ['food', 'nightlife'],
     hood: 'Santos',
-    tags: ['Bar'],
     blurb:
       'Formerly a listed queer bar in Santos; the safe-space badge was removed in May 2026 after a door-discrimination incident.',
     address: 'R. de Santos-o-Velho 22, Santos, Lisbon',
     langs: ['pt', 'en'],
+    attributes: [],
+    highlights: [],
+    inclusionPractices: [],
     hoursNote: '',
     hours: {},
     safeSpaceStatus: SafeSpaceStatus.Removed,
@@ -368,7 +385,7 @@ async function seedSafeSpaces(): Promise<void> {
           // this slug exists — bring its safe-space fields and status up to
           // date without touching the rest of its listing data. NOTE: this
           // intentionally only refreshes `status` + the `safeSpace*` columns.
-          // Core listing fields (`cats`/`tags`/`blurb`/`hours`/etc.) are
+          // Core listing fields (`cats`/`attributes`/`blurb`/`hours`/etc.) are
           // NEVER re-applied on an existing row, so if you edit those fields
           // in `SAFE_SPACE_LISTINGS` above, re-running this seed against a
           // database that already has the row will NOT propagate the change
@@ -390,10 +407,12 @@ async function seedSafeSpaces(): Promise<void> {
             name: seed.name,
             cats: seed.cats,
             hood: seed.hood,
-            tags: seed.tags,
             blurb: seed.blurb,
             address: seed.address,
             langs: seed.langs,
+            attributes: seed.attributes,
+            highlights: seed.highlights,
+            inclusionPractices: seed.inclusionPractices,
             hoursNote: seed.hoursNote,
             hours: seed.hours,
             // These seeded safe spaces carry no photos of their own: an

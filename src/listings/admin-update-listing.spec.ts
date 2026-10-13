@@ -101,6 +101,16 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   tags: [],
   goodFor: [],
   langs: [],
+  attributes: [],
+  highlights: [],
+  entryMode: null,
+  coverPolicy: null,
+  coverFreeBefore: null,
+  payments: [],
+  issuesNifInvoices: null,
+  inclusionPractices: [],
+  saferSpacePolicyUrl: null,
+  langsOther: '',
   online: false,
   address: '',
   geocoded: false,
@@ -111,6 +121,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   hoursExceptions: [],
   social: { instagram: '', website: '', email: '', phone: '' },
   photoGallery: [],
+  coverPhoto: null,
   photos: { wide: '', d1: '', d2: '', vibe: '' },
   alt: { wide: '', d1: '', d2: '', vibe: '' },
   rel: '',
@@ -674,6 +685,39 @@ describe('ListingsService.adminUpdate', () => {
       expect(rows[0]?.reason).toContain('The owner edited this live listing');
       // The owner's real edit still confirms the details.
       expect(savedListings()[0]?.detailsConfirmedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('listing attributes', () => {
+    it('runs the attribute rules on a staff edit', async () => {
+      lockedListings.findOne.mockResolvedValue(
+        baseListing({ cats: ['grooming'] }),
+      );
+
+      await expect(
+        service.adminUpdate(LISTING_REF, STAFF_ID, {
+          attributes: ['dj-nights'],
+        }),
+      ).rejects.toThrow(
+        'Attribute "dj-nights" is not offered to this listing.',
+      );
+      expect(transactionManager.save).not.toHaveBeenCalled();
+    });
+
+    it('stores the attributes a staff edit sends', async () => {
+      lockedListings.findOne.mockResolvedValue(
+        baseListing({ cats: ['grooming'] }),
+      );
+
+      await service.adminUpdate(LISTING_REF, STAFF_ID, {
+        attributes: ['priced-by-service'],
+        highlights: ['priced-by-service'],
+      });
+
+      expect(savedListings()[0]).toMatchObject({
+        attributes: ['priced-by-service'],
+        highlights: ['priced-by-service'],
+      });
     });
   });
 });

@@ -1,4 +1,4 @@
-import { EventSummary } from '../events/event-response';
+import { CommunityUpcomingEventSummary } from '../events/event-response';
 import { ForumThreadResponse } from '../forum/forum-response';
 import { OpportunityCardDTO } from '../volunteering/opportunity-response';
 
@@ -10,10 +10,12 @@ import { OpportunityCardDTO } from '../volunteering/opportunity-response';
  * Every lane reuses its feature module's own existing card/summary shape
  * rather than inventing a new one: `EventSummary` (`events/event-response`),
  * `ForumThreadResponse` (`forum/forum-response`), `OpportunityCardDTO`
- * (`volunteering/opportunity-response`).
+ * (`volunteering/opportunity-response`). Each gathering row also says
+ * whether this community leads it or joined it as an accepted guest
+ * (`hostedAs`, `leadCommunity`).
  */
 export interface CommunityPulseResponse {
-  upcomingEvents: EventSummary[];
+  upcomingEvents: CommunityUpcomingEventSummary[];
   recentThreads: ForumThreadResponse[];
   openOpportunities: OpportunityCardDTO[];
 }

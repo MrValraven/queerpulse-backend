@@ -8,8 +8,10 @@ import { FilesController } from './files.controller';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { StorageMaintenanceService } from './storage-maintenance.service';
 import { PersonaStorageKey } from './entities/persona-storage-key.entity';
+import { StudioAudioUpload } from './entities/studio-audio-upload.entity';
 import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService } from './storage.service';
+import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UploadsController } from './uploads.controller';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
 
@@ -27,9 +29,16 @@ import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
   // referenced by any image column?". `MediaCropsModule` supplies
   // `MediaCropService` for `POST /uploads/crop`. `PersonaStorageKey` (T17)
   // records which persona each persona-scoped key belongs to, read by both
-  // controllers and written by `PersonaImageKeysService`.
+  // controllers and written by `PersonaImageKeysService`. `StudioAudioUpload`
+  // (Studio v1) records which persona each Studio audio key was presigned for,
+  // written by `StudioAudioUploadsService` and read by the Studio module.
   imports: [
-    TypeOrmModule.forFeature([User, Message, PersonaStorageKey]),
+    TypeOrmModule.forFeature([
+      User,
+      Message,
+      PersonaStorageKey,
+      StudioAudioUpload,
+    ]),
     MediaCropsModule,
     MediaReferencesModule,
   ],
@@ -37,10 +46,11 @@ import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
   providers: [
     StorageService,
     PersonaImageKeysService,
+    StudioAudioUploadsService,
     StorageMaintenanceService,
     UserPresignThrottlerGuard,
     OptionalJwtAuthGuard,
   ],
-  exports: [StorageService, PersonaImageKeysService],
+  exports: [StorageService, PersonaImageKeysService, StudioAudioUploadsService],
 })
 export class StorageModule {}

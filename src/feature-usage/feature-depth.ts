@@ -49,10 +49,13 @@ export type DepthSpec =
  * them, they have no depth entry, and the admin usage panel does not list
  * them. Go together is here because its rows hold special-category
  * questionnaire data and its design allows no behavioural analytics of any
- * Go together action, aggregate counts included.
+ * Go together action, aggregate counts included. Studio is here because its
+ * design records nothing about what a member listens to or browses, aggregate
+ * counts included.
  */
 export const UNTRACKED_FEATURES = [
   'goTogether',
+  'studio',
 ] as const satisfies readonly FeatureKey[];
 
 export type UntrackedFeatureKey = (typeof UNTRACKED_FEATURES)[number];

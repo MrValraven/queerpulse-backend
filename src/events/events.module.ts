@@ -29,6 +29,7 @@ import { EventBan } from './entities/event-ban.entity';
 import { EventBookmark } from './entities/event-bookmark.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventCohostInvite } from './entities/event-cohost-invite.entity';
+import { EventCommunity } from './entities/event-community.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventPhoto } from './entities/event-photo.entity';
@@ -43,6 +44,11 @@ import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCapacityAlertsService } from './event-capacity-alerts.service';
 import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
+import {
+  EventCommunityInvitesController,
+  EventGuestCommunitiesController,
+} from './event-communities.controller';
+import { EventCommunitiesService } from './event-communities.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventLineupService } from './event-lineup.service';
 import { EventPhotosService } from './event-photos.service';
@@ -58,6 +64,9 @@ import { RsvpService } from './rsvp.service';
       Event,
       EventCohost,
       EventCohostInvite,
+      // Guest communities (2026-10-08). Read by `EventsService` (detail,
+      // community lane, lead moves) and `EventAudienceGateService` too.
+      EventCommunity,
       EventRsvp,
       EventInvite,
       EventLineupEntry,
@@ -131,6 +140,8 @@ import { RsvpService } from './rsvp.service';
     EventsController,
     EventInvitesController,
     EventCohostInvitesController,
+    EventGuestCommunitiesController,
+    EventCommunityInvitesController,
     EventLineupInvitesController,
     EventPhotosController,
     EventReminderPreferencesController,
@@ -145,6 +156,7 @@ import { RsvpService } from './rsvp.service';
     RsvpService,
     EventInvitesService,
     EventCohostInvitesService,
+    EventCommunitiesService,
     EventLineupService,
     EventRemindersService,
     // Daily cron clearing attendance detail on gatherings that ended over the

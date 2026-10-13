@@ -35,6 +35,7 @@ import { Message } from '../messaging/entities/message.entity';
 import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
 import { PersonaImageKeysService } from '../storage/persona-image-keys.service';
+import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportunity.entity';
 import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
@@ -972,6 +973,9 @@ export class MediaExportContributor implements DataExportContribution {
     // T17: images the member uploaded to an unlinked persona live under
     // persona-scoped keys no prefix listing reaches.
     private readonly personaImageKeys: PersonaImageKeysService,
+    // Studio v1: track audio a member uploaded lives under keys that name
+    // nobody, recorded in `studio_audio_uploads`.
+    private readonly studioAudioUploads: StudioAudioUploadsService,
   ) {}
 
   async buildContribution(userId: string): Promise<ExportMediaContribution> {
@@ -979,6 +983,7 @@ export class MediaExportContributor implements DataExportContribution {
       const objects = [
         ...(await this.storage.listUserObjects(userId)),
         ...(await this.personaImageKeys.listObjectsUploadedBy(userId)),
+        ...(await this.studioAudioUploads.listObjectsUploadedBy(userId)),
       ];
       const messageIdByStorageKey = await this.messageIdsForStorageKeys(
         userId,

@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
+import {
+  EventCommunity,
+  EventCommunityStatus,
+} from '../events/entities/event-community.entity';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { toImageUrl } from '../common/image-url';
 import { truncateCharacters } from '../common/text-characters';
@@ -57,13 +61,15 @@ interface ExcerptRow {
  * query.
  *
  * Query budget, fixed regardless of how many communities the caller belongs
- * to. Six for a caller who moderates none of them, eight for a caller who
- * moderates any number of them:
+ * to. Seven for a caller who moderates none of them, nine for a caller who
+ * moderates any number of them. The upcoming lane runs one grouped query for
+ * led gatherings and one for accepted-guest gatherings:
  *   1. the caller's roster rows (not muted)
  *   2. the communities themselves, by id
  *   3. new posts per community, GROUP BY community_id
  *   4. new members per community, GROUP BY community_id
- *   5. upcoming gatherings per community, GROUP BY community_id
+ *   5. upcoming gatherings per community, GROUP BY community_id (two
+ *      queries: led gatherings, then accepted-guest gatherings)
  *   6. up to `DIGEST_EXCERPTS_PER_COMMUNITY` posts per community, via one
  *      ROW_NUMBER() window partitioned by community_id
  *   7. pending join requests per community, GROUP BY community_id, over the
@@ -292,8 +298,12 @@ export class CommunityDigestService {
    * Lane 3: gatherings still ahead, one grouped query for all ids. Looks
    * FORWARD rather than back (the other two lanes are a review of the week,
    * this one is the reason to open the app), and counts only published events.
+   * Gatherings a community joined as an ACCEPTED guest count for it too
+   * (2026-10-08): a second grouped query over `event_communities`, summed with
+   * the first. A gathering never holds both seats of one community, so nothing
+   * is counted twice.
    */
-  private countUpcomingGatherings(
+  private async countUpcomingGatherings(
     communityIds: string[],
     now: Date,
   ): Promise<CountRow[]> {
@@ -301,18 +311,56 @@ export class CommunityDigestService {
     // 'upcoming' branch): a gathering that is UNDERWAY is still ahead, so a
     // three-day festival that opened last night is still a reason to open the
     // app tonight.
-    return this.events
-      .createQueryBuilder('e')
-      .select('e.community_id', 'communityId')
-      .addSelect('COUNT(*)', 'count')
-      .where('e.community_id IN (:...communityIds)', { communityIds })
-      .andWhere('e.status = :published', { published: EventStatus.Published })
-      .andWhere(
-        '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))',
-        { now },
-      )
-      .groupBy('e.community_id')
-      .getRawMany<CountRow>();
+    const upcomingSchedule =
+      '(e.start_at >= :now OR (e.end_at IS NOT NULL AND e.end_at >= :now))';
+    const [ledRows, guestRows] = await Promise.all([
+      this.events
+        .createQueryBuilder('e')
+        .select('e.community_id', 'communityId')
+        .addSelect('COUNT(*)', 'count')
+        .where('e.community_id IN (:...communityIds)', { communityIds })
+        .andWhere('e.status = :published', {
+          published: EventStatus.Published,
+        })
+        .andWhere(upcomingSchedule, { now })
+        .groupBy('e.community_id')
+        .getRawMany<CountRow>(),
+      this.events
+        .createQueryBuilder('e')
+        .innerJoin(
+          EventCommunity,
+          'guest',
+          '"guest"."event_id" = "e"."id" AND "guest"."status" = :acceptedGuestStatus',
+          { acceptedGuestStatus: EventCommunityStatus.Accepted },
+        )
+        .select('"guest"."community_id"', 'communityId')
+        .addSelect('COUNT(*)', 'count')
+        .where('"guest"."community_id" IN (:...communityIds)', {
+          communityIds,
+        })
+        .andWhere('e.status = :published', {
+          published: EventStatus.Published,
+        })
+        .andWhere(upcomingSchedule, { now })
+        .groupBy('"guest"."community_id"')
+        .getRawMany<CountRow>(),
+    ]);
+    return CommunityDigestService.sumCountRows([...ledRows, ...guestRows]);
+  }
+
+  /** Adds up `CountRow`s that name the same community. */
+  private static sumCountRows(rows: CountRow[]): CountRow[] {
+    const totals = new Map<string, number>();
+    for (const row of rows) {
+      totals.set(
+        row.communityId,
+        (totals.get(row.communityId) ?? 0) + Number(row.count),
+      );
+    }
+    return [...totals].map(([communityId, total]) => ({
+      communityId,
+      count: String(total),
+    }));
   }
 
   /**

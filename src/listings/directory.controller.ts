@@ -61,7 +61,7 @@ import {
  * The difference is the stale window, and only the stale window. The shared
  * default is `s-maxage=60, stale-while-revalidate=300`: 60 seconds fresh, then
  * up to five more minutes in which the CDN knowingly serves the stale copy and
- * refreshes behind it. For static data such as the tag vocabulary that is
+ * refreshes behind it. For static data such as the attribute vocabulary that is
  * exactly right, and it is why it is the default.
  *
  * Two facts here are designed to take effect promptly. A badge suspension:
@@ -98,14 +98,14 @@ const MEMBER_ONLY_READ_CACHE = 'private, no-store';
  * it. Every read here is `@Public()` except `GET /directory/adult`, and there
  * is no class guard.
  *
- * `spaces` and `tags` are static segments declared before the `:slug` detail
+ * `spaces`, `attributes` and `adult` are static segments declared before the `:slug` detail
  * route (added in a later sub-project) so route matching resolves them
  * literally.
  *
  * Every public read here carries a positive cache header (AUDIT-2026-07-30.md
  * §I "No CDN cache headers on public GETs"), so Vercel's CDN can answer repeat
  * anonymous requests without invoking the Function or touching Postgres at all
- * for up to 60s (see `caching-and-cost.md`). Only `GET /directory/tags` adds
+ * for up to 60s (see `caching-and-cost.md`). Only `GET /directory/attributes` adds
  * the shared stale window on top (`PUBLIC_READ_CDN_CACHE`: one more stale
  * response while revalidating for up to 5 more minutes), because its static
  * vocabulary names no listing. Every other public read uses the 60s window
@@ -156,23 +156,24 @@ export class DirectoryController {
     return this.directoryService.listPartnerSpaces();
   }
 
-  // The curated listing tag vocabulary, grouped, for the "list your business"
-  // wizard and the listing editor's tag picker. Static data, so it caches like
-  // every other public read here. A static segment, so it sits above the
-  // `:slug` detail route.
+  // The listing attribute vocabulary, grouped and scoped, for the "list your
+  // business" wizard, the listing editor and the directory filters. Static
+  // data, so it keeps the shared stale window. A static segment, so it sits
+  // above the `:slug` detail route. Replaced `GET /directory/tags` on
+  // 2026-10-08.
   @Public()
-  @Get('tags')
+  @Get('attributes')
   @Header('Cache-Control', PUBLIC_READ_CACHE)
   @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
-    summary: 'List the curated listing tag vocabulary, grouped',
+    summary: 'List the listing attribute vocabulary, grouped and scoped',
   })
   @ApiOkResponse({
     description:
-      "Every `{ id, tags, onlineTags }` group a listing may pick tags from, in display order. `tags` are offered to listings with a physical place and `onlineTags` to online-only listings; either may be empty. Tags are the stored English values. Create and update accept any tag from either list, whatever the listing's `online` flag, and reject everything else.",
+      'Every attribute group with the kinds of listing and the categories it is offered to, in display order; the premises-only and sensitive slugs; the inclusion practices with their scopes; and the language codes. Create and update accept an attribute only when it is offered to the listing or already on it.',
   })
-  listTagVocabulary() {
-    return this.directoryService.listTagVocabulary();
+  listAttributeVocabulary() {
+    return this.directoryService.listAttributeVocabulary();
   }
 
   // Public directory grid — every live listing, optionally filtered. Bare

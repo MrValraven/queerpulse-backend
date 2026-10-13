@@ -11,8 +11,17 @@ import type { ListingStoredAccessibilityAnswerMap } from '../listing-accessibili
 import type { ListingMobileDetails } from '../listing-mobile-details';
 import type { ListingOnlineDetails } from '../listing-online-details';
 import type { ListingShopItem } from '../listing-shop-items';
-import type { ListingGalleryPhoto } from '../listing-photo-gallery';
+import type {
+  ListingCoverPhoto,
+  ListingGalleryPhoto,
+} from '../listing-photo-gallery';
 import type { ListingOwnedBy } from '../listing-owned-by';
+import type {
+  ListingCoverPolicy,
+  ListingEntryMode,
+  ListingInclusionPractice,
+  ListingPaymentMethod,
+} from '../listing-attributes';
 
 /**
  * Moderation lifecycle for a member-submitted business directory listing.
@@ -363,23 +372,72 @@ export class Listing {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   whatItIs!: ListingWitLine[];
 
+  /**
+   * RETIRED 2026-10-08 (`AddListingAttributes1830800000000`): replaced by
+   * `attributes`. No write path stores it and no listing response serves it;
+   * the column stays mapped for one release so the data can be recovered, and
+   * a later migration drops it. Its only remaining readers are the deprecated
+   * safe-space `tags` (`toSafeSpaceCard`) and `metaPills`
+   * (`toSafeSpaceDetail`) fields, which go with the column drop.
+   */
   @Column({ type: 'text', array: true, default: '{}' })
   tags!: string[];
 
   /**
-   * ATMOSPHERE and service tags only ("Walk-ins welcome", "Solo-friendly",
-   * "Dog-friendly", "Budget-friendly"), rendered as positive checks.
-   *
-   * Accessibility used to live here too and no longer does. A flat tag list
-   * can only ever say yes: a missing "Wheelchair accessible" tag meant either
-   * "no" or "nobody asked", and the reader could not tell which. Accessibility
-   * moved to `accessibilityAnswers` below, which can say no. The migration
-   * that added it also stripped the accessibility-flavoured tags out of this
-   * column (see `LEGACY_GOOD_FOR_ACCESSIBILITY_TAGS`) so they stopped
-   * rendering twice. Do not put an access claim back in here.
+   * RETIRED 2026-10-08 with `tags`, for `attributes`. Unread and unwritten;
+   * kept for one release so the data can be recovered.
    */
   @Column({ type: 'text', array: true, default: '{}' })
   goodFor!: string[];
+
+  /**
+   * Yes facts the owner ticked, as slugs from `LISTING_ATTRIBUTE_GROUPS`
+   * (`listing-attributes.ts`), in the order the owner sent them. A new slug
+   * must be offered to the listing's kind and categories; a slug the row
+   * already carries stays valid after a category change
+   * (`resolveListingAttributeFields`). The directory's `attr=` filter tests
+   * containment, served by the GIN index `IDX_listings_attributes`
+   * (`AddListingAttributeIndexes1830800100000`; `@Index` cannot express an
+   * index method).
+   */
+  @Column({ type: 'text', array: true, default: '{}' })
+  attributes!: string[];
+
+  /** Up to three of `attributes`, never a sensitive one, shown on the card. */
+  @Column({ type: 'text', array: true, default: '{}' })
+  highlights!: string[];
+
+  /** How people get in (`LISTING_ENTRY_MODES`). `null` is "not said"; always `null` online. */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  entryMode!: ListingEntryMode | null;
+
+  /** The entry charge (`LISTING_COVER_POLICIES`), kept only on a `nightlife` or `culture` listing. */
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  coverPolicy!: ListingCoverPolicy | null;
+
+  /** `HH:MM`, set only when `coverPolicy` is `freeBefore`. */
+  @Column({ type: 'varchar', length: 5, nullable: true })
+  coverFreeBefore!: string | null;
+
+  /** Ways to pay in person, in vocabulary order. Always `[]` online (online keeps `onlineDetails.payments`). */
+  @Column({ type: 'text', array: true, default: '{}' })
+  payments!: ListingPaymentMethod[];
+
+  /** Issues invoices with the customer's NIF: yes, no, or `null` for "not said". */
+  @Column({ type: 'boolean', nullable: true })
+  issuesNifInvoices!: boolean | null;
+
+  /**
+   * Practices above the affirming baseline (`LISTING_INCLUSION_PRACTICES`),
+   * in vocabulary order. Served by the GIN index
+   * `IDX_listings_inclusion_practices` for the `practice=` filter.
+   */
+  @Column({ type: 'text', array: true, default: '{}' })
+  inclusionPractices!: ListingInclusionPractice[];
+
+  /** The published policy, `https://` prefixed; set exactly when `safer-space-policy` is practised. */
+  @Column({ type: 'varchar', length: 300, nullable: true })
+  saferSpacePolicyUrl!: string | null;
 
   /**
    * The venue's answers to the canonical accessibility questions
@@ -439,8 +497,17 @@ export class Listing {
   @Column({ type: 'varchar', length: 16, default: 'services' })
   pricingMode!: ListingPricingMode;
 
+  /**
+   * Languages spoken, as codes from `LISTING_LANGUAGE_CODES` since
+   * `AddListingAttributes1830800000000` (names before it). The directory's
+   * `lang=` filter tests overlap.
+   */
   @Column({ type: 'text', array: true, default: '{}' })
   langs!: string[];
+
+  /** Any other language, as the owner wrote it. `''` when none. */
+  @Column({ type: 'varchar', length: 80, default: '' })
+  langsOther!: string;
 
   /** Online-only business (no physical location). When true the listing has no
    *  address or coordinates and never appears as a map pin. Its categories
@@ -541,6 +608,16 @@ export class Listing {
   photoGallery!: ListingGalleryPhoto[];
 
   /**
+   * The owner's chosen cover for directory cards, or `null` when they have not
+   * picked one. Every card read goes through `toCoverPhoto`, which falls back
+   * to the first `photoGallery` entry, so `null` is the normal state for most
+   * listings. The detail page never reads this: its lead image stays the
+   * gallery's first photo.
+   */
+  @Column({ type: 'jsonb', nullable: true, default: null })
+  coverPhoto!: ListingCoverPhoto | null;
+
+  /**
    * LEGACY compatibility mirror of the first four `photoGallery` entries,
    * kept through the transition to the ordered gallery
    * (`AddListingPhotoGallery1794310000000` explains why the columns were kept
@@ -598,15 +675,16 @@ export class Listing {
 
   /**
    * Who owns and runs the business, as the OWNER declares it: any of
-   * `LISTING_OWNED_BY_VALUES` (`women`, `trans`, `nonbinary`, `bipoc`), each
-   * at most once, in canonical order. Empty when the owner declared none.
+   * `LISTING_OWNED_BY_VALUES` (`women`, `trans`, `nonbinary`, `bipoc`,
+   * `migrant`), each at most once, in canonical order. Empty when the owner
+   * declared none.
    *
    * Self-declared and never moderator-verified. OWNER-PERSONAL: every tag
-   * discloses the owner's gender or racial identity, so it is one of
-   * `OWNER_PERSONAL_LISTING_FIELDS` (co-managers neither read nor write it, a
-   * suggestion and a staff-authored listing never store it, and a handover
-   * clears it). Public on the directory card and detail once set, and the
-   * directory's `owned=` filter matches on overlap. See
+   * discloses the owner's gender, racial identity or migration history, so it
+   * is one of `OWNER_PERSONAL_LISTING_FIELDS` (co-managers neither read nor
+   * write it, a suggestion and a staff-authored listing never store it, and a
+   * handover clears it). Public on the directory card and detail once set,
+   * and the directory's `owned=` filter matches on overlap. See
    * `AddListingOwnedBy1827800000000`.
    */
   @Column({ type: 'text', array: true, default: '{}' })

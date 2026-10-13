@@ -127,6 +127,9 @@ const CATEGORY_BY_REASON_CODE: Partial<
   funding_scam: 'space_safety',
   not_affirming: 'space_safety',
   off_platform: 'other',
+  // Studio reports for music or artwork used without permission. No public
+  // category fits yet, so the code joins "other" on purpose.
+  copyright: 'other',
   other: 'other',
 };
 

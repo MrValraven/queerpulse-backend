@@ -1,3 +1,5 @@
+import type { CommunityHostingFields } from '../events/event-community-hosting';
+
 /**
  * `GET /communities/:slug/upcoming-gatherings` — PRD-145.
  *
@@ -17,7 +19,13 @@
  * community's roster. The list is closed:
  *
  *   slug, title, startAt, endAt, isOnline, venue, neighbourhood, eventType,
- *   cost, coverImageUrl, goingCount
+ *   cost, coverImageUrl, goingCount, hostedAs, leadCommunity
+ *
+ * `hostedAs` and `leadCommunity` (2026-10-08 guest communities) say whether
+ * this community leads the gathering or joined it as a guest, and name the
+ * lead the gathering page itself names. A private lead stays null for a
+ * viewer who is neither on its roster nor an organiser, the rule the
+ * gathering page applies.
  *
  * It must NEVER carry:
  *   - the roster, or any part of it, in any arm.
@@ -29,7 +37,7 @@
  *     and a prospective member has none by definition.
  * ==========================================================
  */
-export interface CommunityUpcomingGathering {
+export interface CommunityUpcomingGathering extends CommunityHostingFields {
   slug: string;
   title: string;
   startAt: Date;

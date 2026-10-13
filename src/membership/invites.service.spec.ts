@@ -151,6 +151,20 @@ describe('toPublicInviteView', () => {
     const view = toPublicInviteView(invite, inviter, 247, now, true);
     expect(view.inviter.isAmbassador).toBe(true);
   });
+
+  // The private note is the inviter's own label, and this view is reachable by
+  // anyone holding the link, so the key must be absent even when a note exists.
+  it("never carries the inviter's private note", () => {
+    const view = toPublicInviteView(
+      { ...invite, privateNote: 'Sam from the climbing gym' },
+      inviter,
+      247,
+      now,
+      false,
+    );
+    expect(view).not.toHaveProperty('privateNote');
+    expect(JSON.stringify(view)).not.toContain('Sam from the climbing gym');
+  });
 });
 
 describe('InvitesService.resolveInvite', () => {
@@ -532,6 +546,30 @@ describe('InvitesService.createInvite', () => {
     );
   });
 
+  it('trims the private note and stores empty/whitespace as null', async () => {
+    await service.createInvite('inviter', {
+      privateNote: '  Sam from the climbing gym  ',
+    });
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
+      expect.objectContaining({ privateNote: 'Sam from the climbing gym' }),
+    );
+
+    manager.create.mockClear();
+    await service.createInvite('inviter', { privateNote: '   ' });
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
+      expect.objectContaining({ privateNote: null }),
+    );
+
+    manager.create.mockClear();
+    await service.createInvite('inviter');
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
+      expect.objectContaining({ privateNote: null }),
+    );
+  });
+
   // ENG-496: the mint used to 409 an erasure-suppressed address, which told any
   // member that the address once had an account and erased it. The mock
   // DataSource here has no `getRepository`, so a lookup through it would throw,
@@ -631,6 +669,7 @@ describe('InvitesService.createInvite', () => {
           inviterId: 'admin-1',
           email: 'applicant@x.com',
           status: InviteStatus.Pending,
+          privateNote: null,
         }),
       );
       expect(result.id).toBe('inv-new');
@@ -786,6 +825,7 @@ describe('InvitesService.listMyInvites', () => {
         'expiresAt',
         'id',
         'note',
+        'privateNote',
         'status',
         'vouch',
       ].sort(),
@@ -918,6 +958,190 @@ describe('InvitesService.listMyInvites', () => {
         expect(repo.count).toHaveBeenCalledWith({ where: findWhere() });
       }
     });
+  });
+});
+
+describe('InvitesService.updatePrivateNote', () => {
+  let service: InvitesService;
+  let repo: { findOne: jest.Mock; update: jest.Mock };
+  // A 'used' invite's returned row carries `acceptedBy`, so the redeemer is
+  // loaded with profile for that status only.
+  let users: { findByIdWithProfile: jest.Mock };
+
+  const buildInvite = (overrides: Partial<Invite> = {}): Invite => ({
+    id: 'invite-1',
+    inviterId: 'inviter',
+    code: 'QP-AAAA-BBBB',
+    email: null,
+    note: null,
+    vouch: null,
+    privateNote: null,
+    personal: true,
+    status: InviteStatus.Pending,
+    acceptedBy: null,
+    usedAt: null,
+    expiresAt: new Date(Date.now() + 60_000),
+    createdAt: new Date('2026-10-01T00:00:00.000Z'),
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    repo = {
+      findOne: jest.fn().mockResolvedValue(buildInvite()),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    users = { findByIdWithProfile: jest.fn().mockResolvedValue(null) };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InvitesService,
+        { provide: getRepositoryToken(Invite), useValue: repo },
+        { provide: UsersService, useValue: users },
+        { provide: DataSource, useValue: {} },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
+        {
+          provide: AmbassadorStatusService,
+          useValue: { getInviteBonus: jest.fn().mockResolvedValue(0) },
+        },
+        { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
+      ],
+    }).compile();
+    service = module.get(InvitesService);
+  });
+
+  it('sets the trimmed note, scoped to the caller, writing only that column', async () => {
+    const view = await service.updatePrivateNote(
+      'inviter',
+      'QP-AAAA-BBBB',
+      '  Sam from the climbing gym  ',
+    );
+
+    expect(repo.findOne).toHaveBeenCalledWith({
+      where: { code: 'QP-AAAA-BBBB', inviterId: 'inviter' },
+    });
+    expect(repo.update).toHaveBeenCalledWith(
+      { id: 'invite-1', inviterId: 'inviter' },
+      { privateNote: 'Sam from the climbing gym' },
+    );
+    expect(view.privateNote).toBe('Sam from the climbing gym');
+    expect(view.status).toBe('valid');
+  });
+
+  it('clears the note with null', async () => {
+    repo.findOne.mockResolvedValue(buildInvite({ privateNote: 'Old label' }));
+
+    const view = await service.updatePrivateNote(
+      'inviter',
+      'QP-AAAA-BBBB',
+      null,
+    );
+
+    expect(repo.update).toHaveBeenCalledWith(
+      { id: 'invite-1', inviterId: 'inviter' },
+      { privateNote: null },
+    );
+    expect(view.privateNote).toBeNull();
+  });
+
+  it('clears the note with an empty or whitespace-only string', async () => {
+    repo.findOne.mockResolvedValue(buildInvite({ privateNote: 'Old label' }));
+
+    const view = await service.updatePrivateNote(
+      'inviter',
+      'QP-AAAA-BBBB',
+      '   ',
+    );
+
+    expect(repo.update).toHaveBeenCalledWith(
+      { id: 'invite-1', inviterId: 'inviter' },
+      { privateNote: null },
+    );
+    expect(view.privateNote).toBeNull();
+  });
+
+  // Another member's code and an unknown code get the same answer, with the
+  // same message revoke gives, so the route reveals nothing about either.
+  it("404s for another member's code without writing", async () => {
+    repo.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.updatePrivateNote('inviter', 'QP-THEI-RCODE', 'Label'),
+    ).rejects.toThrow(new NotFoundException('Invite not found'));
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('works on a used invite and still carries who accepted it', async () => {
+    repo.findOne.mockResolvedValue(
+      buildInvite({
+        status: InviteStatus.Accepted,
+        acceptedBy: 'redeemer-1',
+        usedAt: new Date('2026-10-02T00:00:00.000Z'),
+      }),
+    );
+    users.findByIdWithProfile.mockResolvedValue({
+      id: 'redeemer-1',
+      profile: {
+        firstName: 'Sam',
+        lastName: 'Rivera',
+        slug: 'sam-rivera',
+        avatarUrl: null,
+      },
+    });
+
+    const view = await service.updatePrivateNote(
+      'inviter',
+      'QP-AAAA-BBBB',
+      'Sam from the climbing gym',
+    );
+
+    expect(users.findByIdWithProfile).toHaveBeenCalledWith('redeemer-1');
+    expect(view.status).toBe('used');
+    expect(view.privateNote).toBe('Sam from the climbing gym');
+    expect(view.acceptedBy).toEqual({
+      firstName: 'Sam',
+      lastName: 'Rivera',
+      slug: 'sam-rivera',
+      avatarUrl: null,
+    });
+  });
+
+  it('works on a revoked invite', async () => {
+    repo.findOne.mockResolvedValue(
+      buildInvite({ status: InviteStatus.Revoked }),
+    );
+
+    const view = await service.updatePrivateNote(
+      'inviter',
+      'QP-AAAA-BBBB',
+      'Never sent it',
+    );
+
+    expect(repo.update).toHaveBeenCalledWith(
+      { id: 'invite-1', inviterId: 'inviter' },
+      { privateNote: 'Never sent it' },
+    );
+    expect(view.status).toBe('revoked');
+    expect(view.privateNote).toBe('Never sent it');
+    expect(view.acceptedBy).toBeNull();
+    expect(users.findByIdWithProfile).not.toHaveBeenCalled();
+  });
+
+  it('works on an expired invite', async () => {
+    repo.findOne.mockResolvedValue(
+      buildInvite({ expiresAt: new Date('2000-01-01T00:00:00.000Z') }),
+    );
+
+    const view = await service.updatePrivateNote(
+      'inviter',
+      'QP-AAAA-BBBB',
+      'Ask again next month',
+    );
+
+    expect(view.status).toBe('expired');
+    expect(view.privateNote).toBe('Ask again next month');
   });
 });
 

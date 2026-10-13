@@ -27,6 +27,25 @@ import {
   MAX_ACCESSIBILITY_NOTE_LENGTH,
 } from '../listing-accessibility';
 import { ALL_LISTING_CATEGORY_SLUGS } from '../listing-categories';
+import {
+  COVER_FREE_BEFORE_PATTERN,
+  LISTING_COVER_POLICIES,
+  LISTING_ENTRY_MODES,
+  LISTING_INCLUSION_PRACTICES,
+  LISTING_LANGUAGE_CODES,
+  LISTING_PAYMENT_METHODS,
+  ListingCoverPolicy,
+  ListingEntryMode,
+  ListingInclusionPractice,
+  ListingLanguageCode,
+  ListingPaymentMethod,
+  MAX_LISTING_ATTRIBUTES,
+  MAX_LISTING_ATTRIBUTE_SLUG_LENGTH,
+  MAX_LISTING_HIGHLIGHTS,
+  MAX_LISTING_LANGS_OTHER_LENGTH,
+  MAX_SAFER_SPACE_POLICY_URL_LENGTH,
+  legacyLanguageNamesToCodes,
+} from '../listing-attributes';
 import { LISTING_OWNED_BY_VALUES, ListingOwnedBy } from '../listing-owned-by';
 import { MAX_LISTING_GALLERY_PHOTOS } from '../listing-photo-gallery';
 import type {
@@ -40,6 +59,7 @@ import {
   ListingShopItemDto,
 } from './listing-online-details.dto';
 import { IsListingAccessibilityAnswerMap } from './accessibility-answers.validator';
+import { IsOnlineListingUrl } from './online-listing-url.validator';
 import { IsValidDayHours } from './day-hours.validator';
 import {
   HasUniqueExceptionDates,
@@ -89,8 +109,9 @@ export class ListingSocialDto {
  *   it cannot be dropped from a body and silently defaulted away. The empty
  *   string is accepted, and only because the four-slot model that came before
  *   allowed a photo with no alt text and the backfill carries those rows
- *   forward verbatim; on the `claim` path an empty cover alt is refused
- *   outright (`ListingsService.assertPathRequirements`).
+ *   forward verbatim; on the `claim` path an empty alt on the first gallery
+ *   photo, the page's lead photo, is refused outright
+ *   (`ListingsService.assertPathRequirements`).
  * - `caption` is copy shown to everyone under the photo, and is genuinely
  *   optional. It is NOT a place to put alt text: a caption is read by people
  *   who can already see the picture.
@@ -101,6 +122,19 @@ export class ListingGalleryPhotoDto {
   @IsString() @MaxLength(2000) alt!: string;
 
   @IsOptional() @IsString() @MaxLength(300) caption?: string;
+}
+
+/**
+ * The listing's own cover photo for directory cards. Optional: without one,
+ * cards show the first gallery photo. `alt` is required on the wire, as on a
+ * gallery photo, so a client always states it; the empty string is allowed
+ * here and refused on the claim path when the cover is the card's image
+ * (`ListingsService.assertPathRequirements`).
+ */
+export class ListingCoverPhotoDto {
+  @IsImageReference() image!: string;
+
+  @IsString() @MaxLength(100) alt!: string;
 }
 
 /**
@@ -517,6 +551,11 @@ export class CreateListingDto {
   @Type(() => ListingWitLineDto)
   whatItIs!: ListingWitLineDto[];
 
+  /**
+   * @deprecated Retired 2026-10-08 for `attributes`. Still accepted for one
+   * release, so a cached older client does not 400 under
+   * `forbidNonWhitelisted`, and ignored by every write path.
+   */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(6)
@@ -524,13 +563,88 @@ export class CreateListingDto {
   @MaxLength(40, { each: true })
   tags?: string[];
 
-  // ATMOSPHERE tags only. Accessibility claims belong in `accessibility`
-  // below, which can also say no.
+  /**
+   * @deprecated Retired 2026-10-08 for `attributes`, with `tags`. Accepted
+   * for one release and ignored.
+   */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(20)
   @IsString({ each: true })
   goodFor?: string[];
+
+  /**
+   * Yes facts about the business, as slugs from `GET /directory/attributes`.
+   * The service checks each one against the vocabulary and the listing's kind
+   * and categories (`resolveListingAttributeFields`); this only bounds the
+   * shape. Replaced wholesale on PATCH.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(MAX_LISTING_ATTRIBUTES)
+  @IsString({ each: true })
+  @MaxLength(MAX_LISTING_ATTRIBUTE_SLUG_LENGTH, { each: true })
+  attributes?: string[];
+
+  /** Up to three of `attributes` for the card, in the order sent. Never a sensitive slug. */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(MAX_LISTING_HIGHLIGHTS)
+  @IsString({ each: true })
+  @MaxLength(MAX_LISTING_ATTRIBUTE_SLUG_LENGTH, { each: true })
+  highlights?: string[];
+
+  /** How people get in. `null` clears it ("not saying"); forced `null` online. */
+  @IsOptional()
+  @IsIn(LISTING_ENTRY_MODES)
+  entryMode?: ListingEntryMode | null;
+
+  /** The entry charge. Kept only for a `nightlife` or `culture` listing. */
+  @IsOptional()
+  @IsIn(LISTING_COVER_POLICIES)
+  coverPolicy?: ListingCoverPolicy | null;
+
+  /** `HH:MM`, required when `coverPolicy` is `freeBefore`. */
+  @IsOptional()
+  @IsString()
+  @Matches(COVER_FREE_BEFORE_PATTERN, {
+    message: 'coverFreeBefore must be a 24-hour time such as 23:00',
+  })
+  coverFreeBefore?: string | null;
+
+  /** Ways to pay in person. Forced `[]` online. */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(LISTING_PAYMENT_METHODS.length)
+  @IsIn(LISTING_PAYMENT_METHODS as readonly string[], { each: true })
+  payments?: ListingPaymentMethod[];
+
+  /** Issues invoices with the customer's NIF. `null` is "not saying". */
+  @IsOptional()
+  @IsBoolean()
+  issuesNifInvoices?: boolean | null;
+
+  /** Practices above the affirming baseline, each within its own scope. */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(LISTING_INCLUSION_PRACTICES.length)
+  @IsIn(LISTING_INCLUSION_PRACTICES as readonly string[], { each: true })
+  inclusionPractices?: ListingInclusionPractice[];
+
+  /**
+   * The published safer-space policy, required when `safer-space-policy` is
+   * practised. A web address with or without `https://`; stored with it.
+   * `''` and `null` both mean none.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_SAFER_SPACE_POLICY_URL_LENGTH)
+  @IsOnlineListingUrl()
+  saferSpacePolicyUrl?: string | null;
 
   // The venue's structured accessibility answers plus its free-text note.
   // Optional here: every unanswered question stores as `unknown`, so omitting
@@ -561,11 +675,29 @@ export class CreateListingDto {
   @Type(() => ListingMenuDto)
   menu?: ListingMenuDto;
 
+  /**
+   * Languages spoken, as codes (`LISTING_LANGUAGE_CODES`, exact case: `pt-BR`).
+   * For one release the six legacy names an old cached frontend sends map to
+   * their codes first (`legacyLanguageNamesToCodes`).
+   */
+  @Transform(({ value }: { value: unknown }) =>
+    legacyLanguageNamesToCodes(value),
+  )
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(20)
-  @IsString({ each: true })
-  langs?: string[];
+  @ArrayUnique()
+  @ArrayMaxSize(LISTING_LANGUAGE_CODES.length)
+  @IsIn(LISTING_LANGUAGE_CODES as readonly string[], { each: true })
+  langs?: ListingLanguageCode[];
+
+  /** Any other language, as the owner writes it. Trimmed before the length check. */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MaxLength(MAX_LISTING_LANGS_OTHER_LENGTH)
+  langsOther?: string;
 
   // Required for both paths — unless this is an online-only listing, which has
   // no street address at all. A mobile listing gives one only for its
@@ -624,7 +756,8 @@ export class CreateListingDto {
   @Type(() => ListingSocialDto)
   social?: ListingSocialDto;
 
-  // The listing's photos, in the owner's chosen order — index 0 is the cover.
+  // The listing's photos, in the owner's chosen order. Index 0 is the detail
+  // page's lead photo; the card cover is the separate `coverPhoto`.
   // Supersedes the `photos`/`alt` pair below; when both are sent, this wins.
   @IsOptional()
   @IsArray()
@@ -632,6 +765,14 @@ export class CreateListingDto {
   @ValidateNested({ each: true })
   @Type(() => ListingGalleryPhotoDto)
   photoGallery?: ListingGalleryPhotoDto[];
+
+  // The owner's cover for directory cards. Omitted leaves it as it is on a
+  // PATCH; `null`, or an empty `image`, clears it and the card falls back to
+  // the first gallery photo.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingCoverPhotoDto)
+  coverPhoto?: ListingCoverPhotoDto | null;
 
   // LEGACY four-slot photo pair, still accepted during the transition to
   // `photoGallery`. Converted to the ordered gallery in slot order when
@@ -678,11 +819,11 @@ export class CreateListingDto {
 
   /**
    * Who owns and runs the business, as the owner declares it: any of
-   * `women`, `trans`, `nonbinary`, `bipoc`, each at most once. Self-declared,
-   * never verified. OWNER-PERSONAL (it discloses the owner's gender or racial
-   * identity): a co-manager PATCH carrying it is refused, a suggestion
-   * accepts it and stores none of it, and `AdminCreateListingDto` omits it.
-   * See `Listing.ownedBy`.
+   * `women`, `trans`, `nonbinary`, `bipoc`, `migrant`, each at most once.
+   * Self-declared, never verified. OWNER-PERSONAL (it discloses the owner's
+   * gender, racial identity or migration history): a co-manager PATCH
+   * carrying it is refused, a suggestion accepts it and stores none of it,
+   * and `AdminCreateListingDto` omits it. See `Listing.ownedBy`.
    */
   @IsOptional()
   @IsArray()

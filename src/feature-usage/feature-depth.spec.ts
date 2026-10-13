@@ -21,6 +21,11 @@ describe('FEATURE_DEPTH', () => {
     expect(isTrackedFeature('events')).toBe(true);
   });
 
+  it('never measures Studio', () => {
+    expect(UNTRACKED_FEATURES).toContain('studio');
+    expect(isTrackedFeature('studio')).toBe(false);
+  });
+
   it('gives every reach-only feature a stated reason', () => {
     for (const [featureKey, spec] of Object.entries(FEATURE_DEPTH)) {
       if (spec.kind === 'reach-only') {

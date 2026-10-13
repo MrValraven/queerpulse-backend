@@ -22,6 +22,10 @@ export enum SavedKind {
   Flatmate = 'flatmate',
   Landlord = 'landlord',
   Listing = 'listing',
+  // Studio v1 (`AddStudioReportAndSavedKinds1830900100000`): a release and a
+  // track, each addressed by its uuid.
+  StudioRelease = 'studio_release',
+  StudioTrack = 'studio_track',
 }
 
 /**

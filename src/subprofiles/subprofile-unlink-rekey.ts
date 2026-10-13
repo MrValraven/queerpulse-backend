@@ -31,6 +31,16 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * keys to `subprofile_items.id`, which cascade on update as well. Nothing
  * else stores an item id.
  *
+ * Studio v1 releases and tracks get fresh ids for the same reason: the
+ * Studio pages, saved cards and stream routes address them by id. Each
+ * release's `created_at` restarts and a set `published_at` moves to the
+ * unlink, since the named persona's exact publish times would match its
+ * releases to these. Open reports on a release move with it, so a takedown
+ * decided on one still lands. Tracks follow their release through
+ * `FK_studio_tracks_release` (on update cascade) and then get fresh ids of
+ * their own. Covers are re-homed by `rehomeUnlinkedPersona`; audio keys are
+ * random and registered to the persona, whose id the registry follows.
+ *
  * Three references hold the persona id with no foreign key and are moved
  * here:
  * - `subprofile_item_revisions.subprofile_id`, the owner's item history.
@@ -104,6 +114,33 @@ export async function issueFreshPersonaId(
           SELECT "user_id" FROM "subprofile_members" WHERE "subprofile_id" = $3
         )`,
     [freshSubprofileId, previousSubprofileId, freshSubprofileId],
+  );
+  await manager.query(
+    `WITH "remapped" AS MATERIALIZED (
+       SELECT "id" AS "previous_id", gen_random_uuid() AS "fresh_id"
+         FROM "studio_releases"
+        WHERE "subprofile_id" = $1
+     ), "moved_reports" AS (
+       UPDATE "reports" SET "subject_id" = "remapped"."fresh_id"::text
+         FROM "remapped"
+        WHERE "reports"."subject_type" = $2
+          AND "reports"."subject_id" = "remapped"."previous_id"::text
+     )
+     UPDATE "studio_releases"
+        SET "id" = "remapped"."fresh_id",
+            "created_at" = now(),
+            "published_at" = CASE WHEN "studio_releases"."published_at" IS NULL THEN NULL ELSE now() END
+       FROM "remapped"
+      WHERE "studio_releases"."id" = "remapped"."previous_id"`,
+    [freshSubprofileId, ReportSubjectType.StudioRelease],
+  );
+  await manager.query(
+    `UPDATE "studio_tracks"
+        SET "id" = gen_random_uuid(), "created_at" = now()
+      WHERE "release_id" IN (
+        SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
+      )`,
+    [freshSubprofileId],
   );
   return freshSubprofileId;
 }

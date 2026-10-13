@@ -26,6 +26,7 @@ import {
   LISTING_NAME_SEARCH_COLUMNS,
 } from '../search/search-text';
 import { CreateListingDto } from './dto/create-listing.dto';
+import { UpdateListingDto } from './dto/update-listing.dto';
 import { AdminCreateListingDto } from './dto/admin-create-listing.dto';
 import { AdminUpdateListingDto } from './dto/admin-update-listing.dto';
 import { Profile } from '../users/entities/profile.entity';
@@ -139,6 +140,16 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   tags: [],
   goodFor: [],
   langs: [],
+  attributes: [],
+  highlights: [],
+  entryMode: null,
+  coverPolicy: null,
+  coverFreeBefore: null,
+  payments: [],
+  issuesNifInvoices: null,
+  inclusionPractices: [],
+  saferSpacePolicyUrl: null,
+  langsOther: '',
   online: false,
   address: '',
   geocoded: false,
@@ -149,6 +160,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   hoursExceptions: [],
   social: { instagram: '', website: '', email: '', phone: '' },
   photoGallery: [],
+  coverPhoto: null,
   // LEGACY derived mirror of the first four `photoGallery` entries.
   photos: { wide: '', d1: '', d2: '', vibe: '' },
   alt: { wide: '', d1: '', d2: '', vibe: '' },
@@ -467,7 +479,7 @@ describe('ListingsService', () => {
       expect(listings.save).toHaveBeenCalledWith(
         expect.objectContaining({
           cats: [],
-          tags: [],
+          attributes: [],
           social: { instagram: '', website: '', email: '', phone: '' },
           photos: { wide: '', d1: '', d2: '', vibe: '' },
           consentOuting: false,
@@ -657,28 +669,96 @@ describe('ListingsService', () => {
       });
     });
 
-    describe('curated tags', () => {
-      it('stores vocabulary tags in their canonical spelling', async () => {
+    describe('listing attributes', () => {
+      it('stores the attribute fields as the rules resolve them', async () => {
         await service.create('owner-1', {
           name: 'Lux Café',
-          tags: ['  vegan options ', 'TERRACE', 'terrace'],
+          cats: ['nightlife'],
+          attributes: [' DJ-nights', 'terrace'],
+          highlights: ['dj-nights'],
+          entryMode: 'walkIn',
+          coverPolicy: 'freeBefore',
+          coverFreeBefore: '23:00',
+          payments: ['cash', 'card'],
+          inclusionPractices: ['safer-space-policy', 'chosen-name'],
+          saferSpacePolicyUrl: 'luxcafe.pt/safer-space',
+          langs: ['pt', 'en'],
+          langsOther: ' Tetum ',
         } as CreateListingDto);
 
         expect(listings.save).toHaveBeenCalledWith(
-          expect.objectContaining({ tags: ['Vegan options', 'Terrace'] }),
+          expect.objectContaining({
+            attributes: ['dj-nights', 'terrace'],
+            highlights: ['dj-nights'],
+            entryMode: 'walkIn',
+            coverPolicy: 'freeBefore',
+            coverFreeBefore: '23:00',
+            payments: ['card', 'cash'],
+            inclusionPractices: ['chosen-name', 'safer-space-policy'],
+            saferSpacePolicyUrl: 'https://luxcafe.pt/safer-space',
+            langs: ['pt', 'en'],
+            langsOther: 'Tetum',
+          }),
         );
       });
 
-      it('400s a tag outside the vocabulary, before drawing a ref or saving', async () => {
+      it('400s an unknown attribute before drawing a ref or saving', async () => {
         const attempt = service.create('owner-1', {
           name: 'Lux Café',
-          tags: ['Terrace', 'Dog-friendly'],
+          cats: ['food'],
+          attributes: ['terrace', 'rooftop-pool'],
         } as CreateListingDto);
 
         await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
-        await expect(attempt).rejects.toThrow(/"Dog-friendly"/);
+        await expect(attempt).rejects.toThrow(
+          'Unknown listing attributes: "rooftop-pool". Pick from GET /directory/attributes.',
+        );
         expect(dataSource.query).not.toHaveBeenCalled();
         expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('400s an attribute the categories are not offered', async () => {
+        await expect(
+          service.create('owner-1', {
+            name: 'Navalha',
+            cats: ['grooming'],
+            attributes: ['dj-nights'],
+          } as CreateListingDto),
+        ).rejects.toThrow(
+          'Attribute "dj-nights" is not offered to this listing.',
+        );
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('accepts the retired tags and goodFor and stores neither', async () => {
+        await service.create('owner-1', {
+          name: 'Lux Café',
+          tags: ['Terrace'],
+          goodFor: ['Solo-friendly'],
+        } as CreateListingDto);
+
+        const [savedListing] = listings.save.mock.calls[0] as [Listing];
+        expect(savedListing).not.toHaveProperty('tags');
+        expect(savedListing).not.toHaveProperty('goodFor');
+      });
+
+      it('stores a suggestion’s attributes like any other listing, and none of its ownedBy', async () => {
+        await service.create('member-1', {
+          name: 'Lux Café',
+          path: 'suggest',
+          cats: ['food'],
+          attributes: ['vegan-options'],
+          highlights: ['vegan-options'],
+          ownedBy: ['migrant'],
+        } as CreateListingDto);
+
+        expect(listings.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            attributes: ['vegan-options'],
+            highlights: ['vegan-options'],
+            ownedBy: [],
+          }),
+        );
       });
     });
   });
@@ -1350,62 +1430,271 @@ describe('ListingsService', () => {
       expect(transactionManager.save).not.toHaveBeenCalled();
     });
 
-    // Finding M1: `ListingsController.update` keeps the interceptor's
-    // foreign-upload exemption (a claimed listing has more than one editor),
-    // so the service is the line that stops a member introducing a NEW photo
-    // that is not theirs while still letting a co-editor re-save one a
-    // different collaborator uploaded.
-    describe('curated tags', () => {
-      it('400s a tag outside the vocabulary and writes nothing', async () => {
+    describe('listing attributes', () => {
+      it('saves an unrelated edit on a listing that carries an attribute it is no longer offered', async () => {
         listings.findOne.mockResolvedValue(
-          baseListing({ ownerId: 'owner-1', tags: ['Terrace'] }),
-        );
-
-        await expect(
-          service.update('QPL-2026-0001', 'owner-1', {
-            tags: ['Terrace', 'Dog-friendly'],
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['grooming'],
+            attributes: ['dj-nights'],
+            highlights: ['dj-nights'],
           }),
-        ).rejects.toBeInstanceOf(BadRequestException);
-        expect(listings.save).not.toHaveBeenCalled();
-      });
-
-      it('keeps a legacy tag the listing already carries, in its stored spelling', async () => {
-        listings.findOne.mockResolvedValue(
-          baseListing({ ownerId: 'owner-1', tags: ['Walk-ins welcome'] }),
         );
 
         const result = await service.update('QPL-2026-0001', 'owner-1', {
-          tags: ['walk-ins welcome', 'late opening'],
+          blurb: 'Now a barbershop.',
         });
 
-        expect(result.tags).toEqual(['Walk-ins welcome', 'Late opening']);
+        expect(result).toMatchObject({
+          attributes: ['dj-nights'],
+          highlights: ['dj-nights'],
+        });
       });
 
-      it('rejects a legacy tag the listing does not already carry', async () => {
+      it('leaves every attribute field alone when the patch does not mention them', async () => {
         listings.findOne.mockResolvedValue(
-          baseListing({ ownerId: 'owner-1', tags: [] }),
-        );
-
-        await expect(
-          service.update('QPL-2026-0001', 'owner-1', {
-            tags: ['Walk-ins welcome'],
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['nightlife'],
+            attributes: ['dj-nights', 'terrace'],
+            highlights: ['dj-nights'],
+            entryMode: 'membersOnly',
+            coverPolicy: 'freeBefore',
+            coverFreeBefore: '23:00',
+            payments: ['card', 'cash'],
+            issuesNifInvoices: true,
+            inclusionPractices: ['chosen-name', 'safer-space-policy'],
+            saferSpacePolicyUrl: 'https://luxcafe.pt/safer-space',
+            langs: ['pt', 'en'],
+            langsOther: 'Tetum',
           }),
-        ).rejects.toBeInstanceOf(BadRequestException);
-      });
-
-      it('leaves the tags alone when the patch does not mention them', async () => {
-        listings.findOne.mockResolvedValue(
-          baseListing({ ownerId: 'owner-1', tags: ['Walk-ins welcome'] }),
         );
 
         const result = await service.update('QPL-2026-0001', 'owner-1', {
           blurb: 'new blurb',
         });
 
-        expect(result.tags).toEqual(['Walk-ins welcome']);
+        expect(result).toMatchObject({
+          attributes: ['dj-nights', 'terrace'],
+          highlights: ['dj-nights'],
+          entryMode: 'membersOnly',
+          coverPolicy: 'freeBefore',
+          coverFreeBefore: '23:00',
+          payments: ['card', 'cash'],
+          issuesNifInvoices: true,
+          inclusionPractices: ['chosen-name', 'safer-space-policy'],
+          saferSpacePolicyUrl: 'https://luxcafe.pt/safer-space',
+          langs: ['pt', 'en'],
+          langsOther: 'Tetum',
+        });
+      });
+
+      it('keeps a carried attribute when the owner re-sends it beside a new one', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['grooming'],
+            attributes: ['dj-nights'],
+          }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          attributes: ['dj-nights', 'priced-by-service'],
+        });
+
+        expect(result.attributes).toEqual(['dj-nights', 'priced-by-service']);
+      });
+
+      it('400s a new attribute the categories are not offered and writes nothing', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', cats: ['grooming'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            attributes: ['dj-nights'],
+          }),
+        ).rejects.toThrow(
+          'Attribute "dj-nights" is not offered to this listing.',
+        );
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('drops the highlight of an attribute the owner unticked', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['nightlife'],
+            attributes: ['dj-nights', 'live-music'],
+            highlights: ['dj-nights', 'live-music'],
+          }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          attributes: ['live-music'],
+        });
+
+        expect(result).toMatchObject({
+          attributes: ['live-music'],
+          highlights: ['live-music'],
+        });
+      });
+
+      it('checks a highlight-only PATCH against the stored attributes', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['nightlife'],
+            attributes: ['dj-nights'],
+          }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            highlights: ['live-music'],
+          }),
+        ).rejects.toThrow(
+          'Highlight "live-music" is not one of this listing\'s attributes.',
+        );
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('refuses a sensitive highlight', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['health'],
+            attributes: ['sexual-health-prep', 'takes-insurance'],
+          }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            highlights: ['sexual-health-prep'],
+          }),
+        ).rejects.toThrow('"sexual-health-prep" cannot be a highlight.');
+      });
+
+      it('forces the in-person facts empty on an online listing', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            online: true,
+            cats: ['classes'],
+            hood: '',
+          }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          entryMode: 'walkIn',
+          payments: ['cash'],
+          issuesNifInvoices: true,
+        });
+
+        expect(result).toMatchObject({
+          entryMode: null,
+          payments: [],
+          issuesNifInvoices: true,
+        });
+      });
+
+      it('clears the cover when the PATCH drops the nightlife category', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            cats: ['nightlife'],
+            coverPolicy: 'freeBefore',
+            coverFreeBefore: '23:00',
+          }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          cats: ['food'],
+        });
+
+        expect(result).toMatchObject({
+          coverPolicy: null,
+          coverFreeBefore: null,
+        });
+      });
+
+      it('asks for the time when the cover becomes freeBefore', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', cats: ['nightlife'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            coverPolicy: 'freeBefore',
+          }),
+        ).rejects.toThrow(
+          'coverFreeBefore is required when coverPolicy is freeBefore.',
+        );
+      });
+
+      it('stores the safer-space policy link with https://', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', cats: ['food'] }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          inclusionPractices: ['safer-space-policy'],
+          saferSpacePolicyUrl: 'luxcafe.pt/safer-space',
+        });
+
+        expect(result.saferSpacePolicyUrl).toBe(
+          'https://luxcafe.pt/safer-space',
+        );
+      });
+
+      it('asks for the policy link when safer-space-policy is set without one', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', cats: ['food'] }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', 'owner-1', {
+            inclusionPractices: ['safer-space-policy'],
+          }),
+        ).rejects.toThrow(
+          'saferSpacePolicyUrl is required when safer-space-policy is set.',
+        );
+      });
+
+      it('stores language codes and the other languages trimmed', async () => {
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          langs: ['pt', 'kea'],
+          langsOther: '  Tetum ',
+        });
+
+        expect(result).toMatchObject({
+          langs: ['pt', 'kea'],
+          langsOther: 'Tetum',
+        });
+      });
+
+      it('stores an empty other-languages line when the PATCH sends null', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', langsOther: 'Tetum' }),
+        );
+
+        const result = await service.update('QPL-2026-0001', 'owner-1', {
+          langsOther: null,
+        } as unknown as UpdateListingDto);
+
+        const [savedListing] = listings.save.mock.calls[0] as [Listing];
+        expect(savedListing.langsOther).toBe('');
+        expect(result.langsOther).toBe('');
       });
     });
 
+    // Finding M1: `ListingsController.update` keeps the interceptor's
+    // foreign-upload exemption (a claimed listing has more than one editor),
+    // so the service is the line that stops a member introducing a NEW photo
+    // that is not theirs while still letting a co-editor re-save one a
+    // different collaborator uploaded.
     describe('foreign photo ownership (M1)', () => {
       const OWNER_ID = 'owner-1';
       const OTHER_ID = '22222222-2222-2222-2222-222222222222';
@@ -4224,6 +4513,318 @@ describe('ListingsService', () => {
           'Yes.',
         ),
       ).resolves.toEqual(expect.objectContaining({ answer: 'Yes.' }));
+    });
+  });
+
+  // The owner's cover is one optional photo kept apart from the ordered
+  // gallery. Cards show it, falling back to the first gallery photo.
+  describe('cover photo', () => {
+    // Real user ids, so the cover keys below parse as storage keys and the
+    // foreign-upload rule reads their uploader segment.
+    const OWNER_ID = '11111111-1111-4111-8111-111111111111';
+    const CO_MANAGER_ID = '44444444-4444-4444-8444-444444444444';
+    const OTHER_USER_ID = '22222222-2222-4222-8222-222222222222';
+    const coverKeyOf = (userId: string) =>
+      `listing-covers/${userId}/33333333-3333-4333-8333-333333333333.webp`;
+    const replacementCoverKeyOf = (userId: string) =>
+      `listing-covers/${userId}/55555555-5555-4555-8555-555555555555.webp`;
+
+    /** The minimum a claim-path create needs to pass the claim gate. */
+    const claimBody = (overrides: Partial<CreateListingDto> = {}) =>
+      ({
+        name: 'Lux Café',
+        path: 'claim',
+        hours: {
+          Mon: { open: true, intervals: [{ from: '09:00', to: '17:00' }] },
+        },
+        photoGallery: [
+          { image: 'https://example.com/front.jpg', alt: 'The front door' },
+        ],
+        ...overrides,
+      }) as CreateListingDto;
+
+    /** What `listings.save` was last handed, which is the row as written. */
+    const lastSavedRow = (): Listing => {
+      const saveCalls = listings.save.mock.calls as [Listing][];
+      const lastCall = saveCalls[saveCalls.length - 1];
+      expect(lastCall).toBeDefined();
+      return lastCall![0];
+    };
+
+    const storage = () =>
+      (
+        service as unknown as {
+          storage: { deleteObjectByReference: jest.Mock };
+        }
+      ).storage;
+
+    it('stores the cover on create', async () => {
+      await service.create(
+        OWNER_ID,
+        claimBody({
+          coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+        }),
+      );
+
+      expect(lastSavedRow().coverPhoto).toEqual({
+        image: coverKeyOf(OWNER_ID),
+        alt: 'Front door',
+      });
+    });
+
+    it('stores no cover on create when the body leaves it out', async () => {
+      await service.create(OWNER_ID, claimBody());
+
+      expect(lastSavedRow().coverPhoto).toBeNull();
+    });
+
+    it('leaves the cover alone when a PATCH omits it', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+        }),
+      );
+
+      await service.update('QPL-2026-0001', OWNER_ID, { name: 'Renamed' });
+
+      expect(lastSavedRow().coverPhoto).toEqual({
+        image: coverKeyOf(OWNER_ID),
+        alt: 'Front door',
+      });
+      expect(storage().deleteObjectByReference).not.toHaveBeenCalledWith(
+        coverKeyOf(OWNER_ID),
+      );
+    });
+
+    it('clears the cover on null and deletes the old object', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+        }),
+      );
+
+      await service.update('QPL-2026-0001', OWNER_ID, { coverPhoto: null });
+
+      expect(lastSavedRow().coverPhoto).toBeNull();
+      expect(storage().deleteObjectByReference).toHaveBeenCalledWith(
+        coverKeyOf(OWNER_ID),
+      );
+    });
+
+    it('clears the cover when the PATCH sends an empty image', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+        }),
+      );
+
+      await service.update('QPL-2026-0001', OWNER_ID, {
+        coverPhoto: { image: '', alt: 'Front door' },
+      });
+
+      expect(lastSavedRow().coverPhoto).toBeNull();
+    });
+
+    it('deletes the old object when the cover is replaced', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+        }),
+      );
+
+      await service.update('QPL-2026-0001', OWNER_ID, {
+        coverPhoto: { image: replacementCoverKeyOf(OWNER_ID), alt: ' Bar ' },
+      });
+
+      expect(lastSavedRow().coverPhoto).toEqual({
+        image: replacementCoverKeyOf(OWNER_ID),
+        alt: 'Bar',
+      });
+      expect(storage().deleteObjectByReference).toHaveBeenCalledWith(
+        coverKeyOf(OWNER_ID),
+      );
+      expect(storage().deleteObjectByReference).not.toHaveBeenCalledWith(
+        replacementCoverKeyOf(OWNER_ID),
+      );
+    });
+
+    it('keeps a key that moves from the cover into the gallery', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+        }),
+      );
+
+      await service.update('QPL-2026-0001', OWNER_ID, {
+        coverPhoto: null,
+        photoGallery: [{ image: coverKeyOf(OWNER_ID), alt: 'Front door' }],
+      });
+
+      const savedRow = lastSavedRow();
+      expect(savedRow.coverPhoto).toBeNull();
+      expect(savedRow.photoGallery).toEqual([
+        { image: coverKeyOf(OWNER_ID), alt: 'Front door', caption: '' },
+      ]);
+      expect(storage().deleteObjectByReference).not.toHaveBeenCalledWith(
+        coverKeyOf(OWNER_ID),
+      );
+    });
+
+    it('keeps a key that moves from the gallery into the cover', async () => {
+      listings.findOne.mockResolvedValue(
+        baseListing({
+          ownerId: OWNER_ID,
+          photoGallery: [
+            { image: coverKeyOf(OWNER_ID), alt: 'Front door', caption: '' },
+          ],
+        }),
+      );
+
+      await service.update('QPL-2026-0001', OWNER_ID, {
+        photoGallery: [],
+        coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+      });
+
+      const savedRow = lastSavedRow();
+      expect(savedRow.photoGallery).toEqual([]);
+      expect(savedRow.coverPhoto).toEqual({
+        image: coverKeyOf(OWNER_ID),
+        alt: 'Front door',
+      });
+      expect(storage().deleteObjectByReference).not.toHaveBeenCalledWith(
+        coverKeyOf(OWNER_ID),
+      );
+    });
+
+    describe('co-editors', () => {
+      beforeEach(() => {
+        coManagers.isActiveCoManager.mockResolvedValue(true);
+      });
+
+      it('refuses a co-editor pointing the cover at a new upload of someone else', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, coverPhoto: null }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', CO_MANAGER_ID, {
+            coverPhoto: { image: coverKeyOf(OTHER_USER_ID), alt: 'Front door' },
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('lets a co-editor re-send the stored cover', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            coverPhoto: {
+              image: coverKeyOf(OTHER_USER_ID),
+              alt: 'Front door',
+            },
+          }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', CO_MANAGER_ID, {
+            coverPhoto: { image: coverKeyOf(OTHER_USER_ID), alt: 'Front door' },
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('lets a co-editor move a stored gallery photo into the cover', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            photoGallery: [
+              {
+                image: coverKeyOf(OTHER_USER_ID),
+                alt: 'Front door',
+                caption: '',
+              },
+            ],
+          }),
+        );
+
+        await expect(
+          service.update('QPL-2026-0001', CO_MANAGER_ID, {
+            coverPhoto: { image: coverKeyOf(OTHER_USER_ID), alt: 'Front door' },
+          }),
+        ).resolves.toBeDefined();
+      });
+    });
+
+    describe('claim gate', () => {
+      it('passes with a cover and no gallery', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimBody({
+              photoGallery: [],
+              photos: undefined,
+              coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+            }),
+          ),
+        ).resolves.toBeDefined();
+      });
+
+      it('fails on a cover with blank alt even when the gallery photo has alt', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimBody({
+              photoGallery: [{ image: coverKeyOf(OWNER_ID), alt: 'Bar' }],
+              coverPhoto: { image: coverKeyOf(OWNER_ID), alt: '   ' },
+            }),
+          ),
+        ).rejects.toThrow('alt text for the cover photo');
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('fails with neither a cover nor a gallery photo', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimBody({
+              photoGallery: [],
+              photos: undefined,
+              coverPhoto: null,
+            }),
+          ),
+        ).rejects.toThrow('a main photo');
+      });
+
+      it('still asks for alt text on the first gallery photo when there is no cover', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimBody({
+              photoGallery: [{ image: coverKeyOf(OWNER_ID), alt: '  ' }],
+              coverPhoto: null,
+            }),
+          ),
+        ).rejects.toThrow('alt text for the main photo');
+      });
+
+      // The detail page leads with the first gallery photo whatever the cover
+      // is, so a described cover leaves that lead photo still needing alt.
+      it('asks for alt text on the first gallery photo when the cover has alt', async () => {
+        await expect(
+          service.create(
+            OWNER_ID,
+            claimBody({
+              photoGallery: [{ image: coverKeyOf(OWNER_ID), alt: '  ' }],
+              coverPhoto: { image: coverKeyOf(OWNER_ID), alt: 'Front door' },
+            }),
+          ),
+        ).rejects.toThrow('alt text for the main photo');
+        expect(listings.save).not.toHaveBeenCalled();
+      });
     });
   });
 });

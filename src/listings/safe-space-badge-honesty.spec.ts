@@ -178,6 +178,7 @@ describe('DirectoryService safe-space badge suspension', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
+    query: jest.Mock;
   };
   let reviews: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let openSuspensionsByListing: jest.Mock;
@@ -215,6 +216,7 @@ describe('DirectoryService safe-space badge suspension', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
       createQueryBuilder: jest.fn(() => directoryQueryBuilder),
+      query: jest.fn().mockResolvedValue([]),
     };
     reviews = {
       find: jest.fn().mockResolvedValue([]),

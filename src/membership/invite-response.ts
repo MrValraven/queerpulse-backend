@@ -76,6 +76,9 @@ export interface MyInviteView {
   code: string;
   note: string | null;
   vouch: string | null;
+  // The inviter's own label for the invite (who it is for). Carried only on
+  // this inviter-facing view and the admin row.
+  privateNote: string | null;
   email: string | null;
   status: PublicInviteStatus;
   expiresAt: string | null;
@@ -119,6 +122,7 @@ export function toMyInviteView(
     code: invite.code,
     note: invite.note ?? null,
     vouch: invite.vouch ?? null,
+    privateNote: invite.privateNote ?? null,
     email: invite.email ?? null,
     status,
     expiresAt: invite.expiresAt ? invite.expiresAt.toISOString() : null,

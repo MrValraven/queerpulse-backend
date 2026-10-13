@@ -2869,4 +2869,162 @@ describe('FeedService', () => {
       ]);
     });
   });
+
+  describe('guest communities on the gathering arm (2026-10-08)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    it('admits a gathering through the roster of an accepted guest on the "communities" tab', async () => {
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      const membershipCall = predicateOf(eventQueryBuilder, '"feed_guest"');
+      expect(membershipCall).toBeDefined();
+      const membershipSql = String(membershipCall?.[0]);
+      expect(membershipSql).toMatch(
+        /\)\s*OR EXISTS \(\s*SELECT 1 FROM "event_communities" "feed_guest"/,
+      );
+      expect(membershipSql).toContain(`"feed_guest"."status" = 'accepted'`);
+      expect(membershipSql).toContain('"feed_guest"."event_id" = "e"."id"');
+      expect(membershipSql).toContain('"guest_mem"."user_id" = :viewerId');
+      expect(membershipSql).toMatch(
+        /"own_c"\."id" = "feed_guest"\."community_id"/,
+      );
+      expect(membershipCall?.[1]).toEqual({ viewerId: 'viewer-1' });
+    });
+
+    it('folds mutes into each way in on the "communities" tab', async () => {
+      feedMutes.mutedSources.mockResolvedValue({
+        communityIds: ['community-9'],
+        forumThreadIds: [],
+      });
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      const membershipCall = predicateOf(eventQueryBuilder, '"feed_guest"');
+      const membershipSql = String(membershipCall?.[0]);
+      expect(membershipSql).toContain(
+        'e.community_id NOT IN (:...mutedCommunityIds)',
+      );
+      expect(membershipSql).toContain(
+        '"feed_guest"."community_id" NOT IN (:...mutedCommunityIds)',
+      );
+      expect(membershipCall?.[1]).toEqual({
+        viewerId: 'viewer-1',
+        mutedCommunityIds: ['community-9'],
+      });
+      expect(predicateOf(eventQueryBuilder, '"mute_guest"')).toBeUndefined();
+    });
+
+    it('hides a gathering on the general feed only when every hosting community is muted', async () => {
+      feedMutes.mutedSources.mockResolvedValue({
+        communityIds: ['community-9'],
+        forumThreadIds: [],
+      });
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      const muteCall = predicateOf(eventQueryBuilder, '"mute_guest"');
+      expect(muteCall).toBeDefined();
+      const muteSql = String(muteCall?.[0]);
+      expect(muteSql).toContain(
+        '(e.community_id IS NOT NULL AND e.community_id NOT IN (:...mutedCommunityIds))',
+      );
+      expect(muteSql).toMatch(
+        /\)\s*OR EXISTS \(\s*SELECT 1 FROM "event_communities" "mute_guest"/,
+      );
+      expect(muteSql).toContain(`"mute_guest"."status" = 'accepted'`);
+      expect(muteSql).toContain(
+        '"mute_guest"."community_id" NOT IN (:...mutedCommunityIds)',
+      );
+      expect(muteCall?.[1]).toEqual({ mutedCommunityIds: ['community-9'] });
+    });
+
+    it('classifies a gathering by the tags of every accepted guest too', async () => {
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: false,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: false,
+      });
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      expect(
+        predicateOf(eventQueryBuilder, 'feedExcludedCommunityTags'),
+      ).toBeDefined();
+      const guestTagCall = predicateOf(
+        eventQueryBuilder,
+        'feedExcludedGuestCommunityTags',
+      );
+      expect(guestTagCall).toBeDefined();
+      const guestTagSql = String(guestTagCall?.[0]);
+      expect(guestTagSql.startsWith('NOT EXISTS')).toBe(true);
+      expect(guestTagSql).toContain(`"sensitive_guest"."status" = 'accepted'`);
+      expect(guestTagSql).toContain(
+        '"sensitive_guest_com"."id" = "sensitive_guest"."community_id"',
+      );
+      const guestTagParams = guestTagCall?.[1] as
+        { feedExcludedGuestCommunityTags: string[] } | undefined;
+      expect(guestTagParams?.feedExcludedGuestCommunityTags).toContain(
+        'mental-health',
+      );
+    });
+
+    it('keeps the space rule on the lead alone', async () => {
+      const eventQueryBuilder = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(eventQueryBuilder);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      const spaceCall = predicateOf(eventQueryBuilder, '"evc"');
+      expect(spaceCall).toBeDefined();
+      expect(String(spaceCall?.[0])).not.toContain('event_communities');
+    });
+
+    it('names no camelCase column inside any guest fragment', async () => {
+      feedMutes.mutedSources.mockResolvedValue({
+        communityIds: ['community-9'],
+        forumThreadIds: [],
+      });
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: true,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: true,
+      });
+      const scopedQueryBuilder = qbStub([]);
+      const generalQueryBuilder = qbStub([]);
+      events.createQueryBuilder
+        .mockReturnValueOnce(scopedQueryBuilder)
+        .mockReturnValueOnce(generalQueryBuilder);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      const guestFragments = [
+        ...scopedQueryBuilder.andWhere.mock.calls,
+        ...generalQueryBuilder.andWhere.mock.calls,
+      ]
+        .map((call) => call[0])
+        .filter(
+          (clause): clause is string =>
+            typeof clause === 'string' && clause.includes('event_communities'),
+        );
+      expect(guestFragments.length).toBeGreaterThanOrEqual(3);
+      for (const fragment of guestFragments) {
+        expect(fragment).not.toMatch(
+          /\.(communityId|eventId)\b|"communityId"|"eventId"/,
+        );
+      }
+    });
+  });
 });

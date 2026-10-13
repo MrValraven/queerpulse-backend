@@ -145,6 +145,10 @@ export function toAdminListingDraftDTO(
  * Also the wizard-only state `path`, `managementRole` and `isStaffAuthored`.
  * The 18+ acceptance (`adultTermsAccepted`) stays behind too: it is the
  * business's own promise, and the staff create path stamps nothing from a draft.
+ *
+ * `tags` and `goodFor` stay on the list after their retirement (2026-10-08): a
+ * draft saved before it still carries them, and the frontend heals them onto
+ * `attributes` and `entryMode` when the console loads the draft.
  */
 export const LISTING_DRAFT_BUSINESS_KEYS = [
   'name',
@@ -161,6 +165,16 @@ export const LISTING_DRAFT_BUSINESS_KEYS = [
   'pricingMode',
   'menu',
   'langs',
+  'langsOther',
+  'attributes',
+  'highlights',
+  'entryMode',
+  'coverPolicy',
+  'coverFreeBefore',
+  'payments',
+  'issuesNifInvoices',
+  'inclusionPractices',
+  'saferSpacePolicyUrl',
   'online',
   'city',
   'hasOnlineShop',

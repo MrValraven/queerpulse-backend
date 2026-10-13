@@ -39,6 +39,8 @@ import { ChatModule } from './chat/chat.module';
 import { StickersModule } from './stickers/stickers.module';
 import { AdminStickersModule } from './admin-stickers/admin-stickers.module';
 import { CinemaModule } from './cinema/cinema.module';
+import { StudioModule } from './studio/studio.module';
+import { isStudioTrackRequest } from './studio/studio-request-log';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
@@ -164,6 +166,10 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
       useFactory: (configService: ConfigService) => ({
         pinoHttp: {
           level: configService.get<string>('logging.level'),
+          // Studio records nothing about what a member plays; see the helper.
+          autoLogging: {
+            ignore: (req: IncomingMessage) => isStudioTrackRequest(req.url),
+          },
           // Correlate every request with an id (honour an inbound one behind a proxy).
           genReqId: (req: IncomingMessage, res: ServerResponse) => {
             const inbound = req.headers['x-request-id'];
@@ -296,6 +302,7 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     PushModule,
     StorageModule,
     CinemaModule,
+    StudioModule,
     HealthModule,
     MetricsModule,
     SecurityModule,

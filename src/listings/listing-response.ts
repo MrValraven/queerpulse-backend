@@ -29,7 +29,14 @@ import {
 } from './entities/listing.entity';
 import { toListingMenuView } from './listing-menu';
 import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
-import type { ListingTagGroup } from './listing-tags';
+import {
+  ListingCoverPolicy,
+  ListingEntryMode,
+  ListingInclusionPractice,
+  ListingPaymentMethod,
+  isSensitiveListingAttribute,
+  listingLanguageLabels,
+} from './listing-attributes';
 import {
   ListingFullAccessibilityAnswerMap,
   normalizeListingAccessibilityAnswers,
@@ -56,6 +63,7 @@ import {
   toListingShopItemViews,
 } from './listing-shop-items';
 import {
+  coverImageReferences,
   galleryImageReferences,
   legacySlotsFromGallery,
 } from './listing-photo-gallery';
@@ -109,14 +117,50 @@ export function toGalleryView(
 }
 
 /**
- * The listing's cover photo (the first entry of its ordered gallery), or
- * `null` for a listing with no photos at all.
+ * The image every directory card shows: the owner's own cover when they
+ * picked one, else the first entry of the ordered gallery, else `null`.
+ *
+ * The cover's alt is used as stored, even when empty. Borrowing the gallery
+ * photo's alt would describe a different picture.
  */
 export function toCoverPhoto(
   listing: Listing,
   crops: Map<string, CropRect> = new Map(),
 ): ListingGalleryPhotoView | null {
+  const ownCover = listing.coverPhoto;
+  if (ownCover?.image) {
+    const crop = cropFor(ownCover.image, crops);
+    return {
+      image: toImageUrl(ownCover.image),
+      alt: ownCover.alt ?? '',
+      caption: '',
+      ...(crop ? { crop } : {}),
+    };
+  }
   return toGalleryView(listing, crops)[0] ?? null;
+}
+
+/** The owner's own cover on the owner/editor wire. `null` when they have not
+ * picked one, so the editor can tell "no cover" apart from "the card is using
+ * your first photo". */
+export interface ListingCoverPhotoView {
+  image: string | null;
+  alt: string;
+  crop?: CropRect;
+}
+
+function toOwnCoverPhotoView(
+  listing: Listing,
+  crops: Map<string, CropRect>,
+): ListingCoverPhotoView | null {
+  const ownCover = listing.coverPhoto;
+  if (!ownCover?.image) return null;
+  const crop = cropFor(ownCover.image, crops);
+  return {
+    image: toImageUrl(ownCover.image),
+    alt: ownCover.alt ?? '',
+    ...(crop ? { crop } : {}),
+  };
 }
 
 /**
@@ -167,26 +211,31 @@ function toPhotoCrops(
  * `MediaCropService.getMany` can batch-resolve every crop for a page (or a
  * single listing) in ONE query.
  *
- * Reads the ordered gallery, which is the source of truth. The legacy
- * `photos` slots are a derived mirror of the first four entries, so they add
- * nothing here. Shop item photos are read too: they carry crops the same way
- * the gallery's do.
+ * Reads the owner's cover photo and the ordered gallery, which is the source
+ * of truth. The legacy `photos` slots are a derived mirror of the first four
+ * entries, so they add nothing here. Shop item photos are read too: they carry
+ * crops the same way the gallery's do.
  */
 export function listingPhotoKeys(listing: Listing): string[] {
   return [
+    ...coverImageReferences(listing.coverPhoto),
     ...galleryImageReferences(listing.photoGallery),
     ...shopItemImageReferences(listing.shopItems),
   ];
 }
 
 /**
- * The raw references a directory card emits: the gallery's only. A card
- * carries no shop items (they reach the detail page and the owner wire, which
- * read `listingPhotoKeys`), so a card grid's batched crop lookup leaves their
- * photos out.
+ * The raw references a directory card emits: the owner's cover photo and the
+ * gallery (the card falls back to the first gallery photo when there is no
+ * cover). A card carries no shop items (they reach the detail page and the
+ * owner wire, which read `listingPhotoKeys`), so a card grid's batched crop
+ * lookup leaves their photos out.
  */
 export function listingCardPhotoKeys(listing: Listing): string[] {
-  return galleryImageReferences(listing.photoGallery);
+  return [
+    ...coverImageReferences(listing.coverPhoto),
+    ...galleryImageReferences(listing.photoGallery),
+  ];
 }
 
 /** The legacy four-slot photo/alt pair a response still emits, derived from
@@ -434,9 +483,31 @@ export interface ListingDTO {
   blurb: string;
   tagline: string;
   whatItIs: ListingWitLine[];
+  /** Yes facts the owner ticked (slugs from `GET /directory/attributes`), in
+   * the order sent, the sensitive ones included. Replaces `tags` and `goodFor`. */
+  attributes: string[];
+  /** Always `[]`, so an old cached owner editor still finds the field.
+   * @deprecated Contract amendment 2: remove with the tags/good_for column drop. */
   tags: string[];
-  /** Atmosphere tags only. Access claims live on `accessibility` below. */
+  /** Always `[]`, so an old cached owner editor still finds the field.
+   * @deprecated Contract amendment 2: remove with the tags/good_for column drop. */
   goodFor: string[];
+  /** Up to three of `attributes`, shown on the card. Never a sensitive slug. */
+  highlights: string[];
+  /** How people get in. `null` is "not said"; always `null` online. */
+  entryMode: ListingEntryMode | null;
+  /** The entry charge. Only ever set on a `nightlife` or `culture` listing. */
+  coverPolicy: ListingCoverPolicy | null;
+  /** `HH:MM` when `coverPolicy` is `freeBefore`, else `null`. */
+  coverFreeBefore: string | null;
+  /** Ways to pay in person, in vocabulary order. `[]` online. */
+  payments: ListingPaymentMethod[];
+  /** Issues invoices with the customer's NIF: yes, no, or `null` for not said. */
+  issuesNifInvoices: boolean | null;
+  /** Practices above the affirming baseline, in vocabulary order. */
+  inclusionPractices: ListingInclusionPractice[];
+  /** The published safer-space policy (`https://...`), set exactly when that practice is. */
+  saferSpacePolicyUrl: string | null;
   /** The venue's structured accessibility answers plus its free-text note.
    * Every question is present, `unknown` included. */
   accessibility: ListingAccessibilityView;
@@ -447,7 +518,10 @@ export interface ListingDTO {
   pricingMode: ListingPricingMode;
   /** The menu, with `file.url` resolved to its served URL. */
   menu: ListingMenu;
+  /** Languages spoken, as codes (`LISTING_LANGUAGE_CODES`). */
   langs: string[];
+  /** Any other language, as the owner wrote it. `''` when none. */
+  langsOther: string;
   /** Online-only business (no physical location). */
   online: boolean;
   /** A place that also sells online. Always false for an online-only listing. */
@@ -471,10 +545,14 @@ export interface ListingDTO {
    * Same shape the owner PATCHes back. */
   hoursExceptions: ListingHoursException[];
   social: ListingSocial;
-  /** The listing's photos, in the owner's chosen order. Index 0 is the cover.
+  /** The listing's photos, in the owner's chosen order. Index 0 is the card
+   * cover when the owner has not picked a `coverPhoto`.
    * Each entry carries its own `alt` (accessibility description) and its own
    * `caption` (copy shown to everyone). See `ListingGalleryPhotoView`. */
   photoGallery: ListingGalleryPhotoView[];
+  /** The owner's own cover photo, `null` when they have not picked one. See
+   * `ListingCoverPhotoView`. */
+  coverPhoto: ListingCoverPhotoView | null;
   /** LEGACY four-slot view, derived from the first four `photoGallery`
    * entries. Superseded by `photoGallery`; it cannot represent a fifth photo,
    * an owner-chosen order or a caption. */
@@ -494,7 +572,7 @@ export interface ListingDTO {
   consentOuting: boolean;
   consentGuide: boolean;
   /** Who owns and runs the business, as the owner declared it (`women`,
-   * `trans`, `nonbinary`, `bipoc`). OWNER-PERSONAL: omitted from a
+   * `trans`, `nonbinary`, `bipoc`, `migrant`). OWNER-PERSONAL: omitted from a
    * co-manager's copy like the seven fields above. Always an array. */
   ownedBy: ListingOwnedBy[];
   /** Moderator-verified confirmation of the "queer-owned" badge as it
@@ -597,29 +675,6 @@ export function toPartnerSpace(listing: Listing): PartnerSpaceDTO {
     spaceType: listing.spaceType,
     capacity: listing.capacity,
     hostNote: listing.hostNote,
-  };
-}
-
-/**
- * One group of the curated listing tag vocabulary (`GET /directory/tags`).
- * `id` names the group for the frontend's heading. `tags` are offered to
- * listings with a physical place and `onlineTags` to online-only listings;
- * both hold the stored English values, in display order, and either may be
- * empty.
- */
-export interface ListingTagGroupDTO {
-  id: string;
-  tags: string[];
-  onlineTags: string[];
-}
-
-export function toListingTagGroupDTO(
-  group: ListingTagGroup,
-): ListingTagGroupDTO {
-  return {
-    id: group.id,
-    tags: [...group.tags],
-    onlineTags: [...group.onlineTags],
   };
 }
 
@@ -819,10 +874,35 @@ export interface DirectoryCardDTO {
   cat: string;
   hood: string;
   blurb: string;
-  /** The listing's pills: its `price` band first when one is set, then its own
-   * tags. The card renders the first three and the detail page renders them
-   * all; `DirectoryDetailDTO` inherits this via `extends`. */
+  /** The stored price band, `''` when unset. Replaces the band the old
+   * `pills` led with. `DirectoryDetailDTO` inherits it. */
+  price: string;
+  /** `[price]` when a price band is set, else `[]`, for an old cached
+   * frontend. `DirectoryDetailDTO` inherits it.
+   * @deprecated Contract amendment 2: remove with the tags/good_for column drop. */
   pills: string[];
+  /** The listing's attributes without the sensitive ones, which only the
+   * detail page shows (`DirectoryDetailDTO` re-declares this with every
+   * slug). The grid counts its "More filters" chips over these. */
+  attributes: string[];
+  /** Up to three attributes the owner picked for the card. Never sensitive. */
+  highlights: string[];
+  /** How people get in. `null` is "not said"; always `null` online. */
+  entryMode: ListingEntryMode | null;
+  /** Ways to pay in person, in vocabulary order. `[]` online. */
+  payments: ListingPaymentMethod[];
+  /** Languages spoken, as codes. `DirectoryDetailDTO` inherits it. */
+  langs: string[];
+  /** Practices above the affirming baseline, in vocabulary order. */
+  inclusionPractices: ListingInclusionPractice[];
+  /** True when, in the last 180 days or later, a published public gathering
+   * was run by this listing or held here with the venue confirmed. Worked out
+   * from the gatherings by `DirectoryService`, in one query per page. */
+  hostsGatherings: boolean;
+  /** Every category the listing carries, in stored order (`cat` stays the
+   * first one). The card's "Open late" badge is hidden when any is
+   * `nightlife`. Amendment 1 (2026-10-08). */
+  cats: string[];
   tint: DirectoryTint;
   av: string;
   /** The submitter's OWN "queer-owned" claim (wizard step 1's `badge`), which
@@ -839,8 +919,8 @@ export interface DirectoryCardDTO {
    * — no separate detail mapping needed. */
   queerOwnedVerified: boolean;
   /** Who owns and runs the business, as the OWNER declared it: any of
-   * `women`, `trans`, `nonbinary`, `bipoc`, in canonical order. `[]` when
-   * they declared none, never undefined. Self-declared: nobody verifies it,
+   * `women`, `trans`, `nonbinary`, `bipoc`, `migrant`, in canonical order.
+   * `[]` when they declared none, never undefined. Self-declared: nobody verifies it,
    * so a surface must not render it the way it renders `queerOwnedVerified`.
    * Public by the owner's own choice, and the directory's `owned=` filter
    * matches on it. `DirectoryDetailDTO` inherits it. */
@@ -926,10 +1006,10 @@ export interface DirectoryCardDTO {
    * out); the value can still be seen here through `DirectoryDetailDTO`,
    * which inherits this shape and does still resolve for a closed business. */
   operatingState: OperatingStateView;
-  /** The listing's cover photo: the FIRST entry of its ordered gallery, which
-   * is the one the owner put first. `null` for a listing with no photos, which
-   * is when the card falls back to its `tint` + `av` initials. Carries the
-   * photo's own `alt` so the grid image is never unlabelled. */
+  /** The image the card shows: the owner's own `coverPhoto` when they picked
+   * one (with that cover's own alt, possibly empty), else the first gallery
+   * entry. `null` with neither, which is when the card falls back to its
+   * `tint` + `av` initials. See `toCoverPhoto`. */
   coverPhoto: ListingGalleryPhotoView | null;
   /**
    * IANA timezone the venue's `hours` are expressed in. `null` ⇒ the client
@@ -1039,6 +1119,10 @@ export function toDirectoryCard(
   // lookup here so this mapper stays synchronous and never fans out per card.
   // Defaulted to `false`, which is the honest default: no suspension known.
   isBadgeSuspended = false,
+  // Whether the listing hosts gatherings, resolved by the caller for the
+  // whole page in one query (`DirectoryService.hostedGatheringListingIds`).
+  // Defaulted to `false`, the honest answer when nobody asked.
+  hasHostedGatherings = false,
 ): DirectoryCardDTO {
   const owner = ownerIdentity(listing);
   const safeSpaceStatus = directorySafeSpaceStatus(listing, isBadgeSuspended);
@@ -1049,8 +1133,22 @@ export function toDirectoryCard(
     cat: listing.cats[0] ?? '',
     hood: listing.hood,
     blurb: listing.blurb,
-    // Price tier first (when set), then the listing's own tags.
-    pills: [...(listing.price ? [listing.price] : []), ...listing.tags],
+    price: listing.price ?? '',
+    pills: listing.price ? [listing.price] : [],
+    // The sensitive attributes are for the listing's own page alone: the card
+    // feeds the grid's filter counts, which never name them.
+    attributes: (listing.attributes ?? []).filter(
+      (slug) => !isSensitiveListingAttribute(slug),
+    ),
+    highlights: (listing.highlights ?? []).filter(
+      (slug) => !isSensitiveListingAttribute(slug),
+    ),
+    entryMode: listing.entryMode ?? null,
+    payments: listing.payments ?? [],
+    langs: listing.langs ?? [],
+    inclusionPractices: listing.inclusionPractices ?? [],
+    hostsGatherings: hasHostedGatherings,
+    cats: [...listing.cats],
     tint: tintForSlug(listing.slug),
     av: initialsForName(listing.name),
     // The submitter's own answer to "how are you connected to this place?"
@@ -1135,12 +1233,6 @@ const CATEGORY_HOURS_TYPE: Record<string, DirectoryHoursType> = {
 
 function hoursTypeForCategory(cat: string): DirectoryHoursType {
   return CATEGORY_HOURS_TYPE[cat] ?? 'appointment';
-}
-
-/** A "good for" bullet — the listing stores positive bullets only. */
-export interface DirectoryGoodFor {
-  label: string;
-  yes: boolean;
 }
 
 /** Who-runs-it card. Presentation primitives (`initials`, `tint`) come from the server. */
@@ -1390,7 +1482,9 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * listings/demo places without images. Superseded by `photoGallery`, where
    * caption and alt stay the separate things they are. */
   gallery: string[];
-  /** The listing's photos, in the owner's chosen order. Index 0 is the cover.
+  /** The listing's photos, in the owner's chosen order. Index 0 is the page's
+   * lead image, and the card cover when the owner has not picked a
+   * `coverPhoto`.
    * Each entry carries its own image URL, alt text, optional caption and crop
    * rect. See `ListingGalleryPhotoView`. */
   photoGallery: ListingGalleryPhotoView[];
@@ -1409,18 +1503,32 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * last. The frontend does the "open now" arithmetic: an entry whose `date`
    * is today overrides that weekday's grid entry outright. */
   hoursExceptions: ListingHoursException[];
-  langs: string[];
   whatItIs: string[];
-  /** Atmosphere bullets only, every one a positive check. Accessibility is no
-   * longer in here: it moved to `accessibility` below, which can answer no. */
-  goodFor: DirectoryGoodFor[];
+  /** Every attribute, the sensitive ones included: this page is where they
+   * show, grouped under their headings. Re-declares the card's field, which
+   * leaves the sensitive ones out. */
+  attributes: string[];
+  /** Always `[]`, so an old cached frontend still finds the field.
+   * @deprecated Contract amendment 2: remove with the tags/good_for column drop. */
+  goodFor: [];
+  /** The entry charge, for the "Getting in" block. `null` unless the listing
+   * is in `nightlife` or `culture` and said. */
+  coverPolicy: ListingCoverPolicy | null;
+  /** `HH:MM` when `coverPolicy` is `freeBefore`, else `null`. */
+  coverFreeBefore: string | null;
+  /** Issues invoices with the customer's NIF: yes, no, or `null` for not said. */
+  issuesNifInvoices: boolean | null;
+  /** The published safer-space policy, linked from the inclusion practices. */
+  saferSpacePolicyUrl: string | null;
+  /** Any other language, as the owner wrote it. `''` when none. */
+  langsOther: string;
   /** The venue's structured accessibility answers plus its free-text note.
    * All six questions are always present; `unknown` is a real answer and must
    * not be rendered as a negative or dropped. */
   accessibility: ListingAccessibilityView;
   /** What the business sells and what it costs, in the owner's own words
    * ("from 25 EUR", "sliding scale"). Empty when it prices nothing. The
-   * inherited `pills` still lead with the at-a-glance `price` band. */
+   * inherited `price` is the at-a-glance band. */
   services: ListingServiceOffering[];
   /** Which list the page shows: `services`, `menu` or `shop`. */
   pricingMode: ListingPricingMode;
@@ -1552,6 +1660,9 @@ export function toDirectoryDetail(
    * straight into the inherited card fields, so the detail page and the grid
    * card can never disagree about whether the badge currently speaks. */
   isBadgeSuspended = false,
+  /** Whether the listing hosts gatherings, resolved by `DirectoryService`
+   * with the same one-query lookup the grid uses. */
+  hasHostedGatherings = false,
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   const galleryPhotos = toGalleryView(listing, crops);
@@ -1566,6 +1677,7 @@ export function toDirectoryDetail(
       undefined,
       ownerAvatarUrl,
       isBadgeSuspended,
+      hasHostedGatherings,
     ),
     ref: listing.ref,
     tagline: listing.tagline,
@@ -1585,12 +1697,16 @@ export function toDirectoryDetail(
     alt: legacyPhotos.alt,
     hours: listing.hours,
     hoursExceptions: listing.hoursExceptions ?? [],
-    langs: listing.langs,
     whatItIs: listing.whatItIs.map((line) => line.text),
-    // Atmosphere tags are stored as positive claims only, so every one is a
-    // "yes". Anything that can also be answered "no" belongs in
-    // `accessibility` below rather than here.
-    goodFor: listing.goodFor.map((label) => ({ label, yes: true })),
+    // Every attribute, the sensitive ones included: the card spread above
+    // leaves those out, and this page is where they show.
+    attributes: listing.attributes ?? [],
+    goodFor: [],
+    coverPolicy: listing.coverPolicy ?? null,
+    coverFreeBefore: listing.coverFreeBefore ?? null,
+    issuesNifInvoices: listing.issuesNifInvoices ?? null,
+    saferSpacePolicyUrl: listing.saferSpacePolicyUrl ?? null,
+    langsOther: listing.langsOther ?? '',
     accessibility: accessibilityView(listing),
     services: listing.services ?? [],
     pricingMode: listing.pricingMode ?? 'services',
@@ -1690,13 +1806,23 @@ export function toListingDTO(
     blurb: listing.blurb,
     tagline: listing.tagline,
     whatItIs: listing.whatItIs,
-    tags: listing.tags,
-    goodFor: listing.goodFor,
+    attributes: listing.attributes ?? [],
+    tags: [],
+    goodFor: [],
+    highlights: listing.highlights ?? [],
+    entryMode: listing.entryMode ?? null,
+    coverPolicy: listing.coverPolicy ?? null,
+    coverFreeBefore: listing.coverFreeBefore ?? null,
+    payments: listing.payments ?? [],
+    issuesNifInvoices: listing.issuesNifInvoices ?? null,
+    inclusionPractices: listing.inclusionPractices ?? [],
+    saferSpacePolicyUrl: listing.saferSpacePolicyUrl ?? null,
     accessibility: accessibilityView(listing),
     services: listing.services ?? [],
     pricingMode: listing.pricingMode ?? 'services',
     menu: toListingMenuView(listing.menu),
-    langs: listing.langs,
+    langs: listing.langs ?? [],
+    langsOther: listing.langsOther ?? '',
     online: listing.online ?? false,
     hasOnlineShop: listing.online !== true && listing.hasOnlineShop === true,
     onlineDetails: normalizeListingOnlineDetails(listing.onlineDetails),
@@ -1712,6 +1838,7 @@ export function toListingDTO(
     hoursExceptions: listing.hoursExceptions ?? [],
     social: listing.social,
     photoGallery: toGalleryView(listing, crops),
+    coverPhoto: toOwnCoverPhotoView(listing, crops),
     photos: legacyPhotoSetView(legacyPhotos.photos),
     photoCrops: toPhotoCrops(legacyPhotos.photos, crops),
     alt: legacyPhotos.alt,
@@ -1802,25 +1929,32 @@ export function toManagedListingItem(
 export type SafeSpaceCategory =
   'Bar' | 'Club' | 'Cafe' | 'Health' | 'Services' | 'Arts';
 
-/** Map a listing's own category vocabulary to the coarse safe-space facet. */
+/** The nightlife attributes that make a venue read as a Club on the safe-spaces hub. */
+const SAFE_SPACE_CLUB_ATTRIBUTES: readonly string[] = [
+  'dancefloor',
+  'dj-nights',
+];
+
+/**
+ * Map a listing's categories and attribute slugs to the coarse safe-space
+ * facet. The primary category decides first; a `nightlife` listing is a Club
+ * when it has a dancefloor or DJ nights and a Bar otherwise.
+ */
 export function mapSafeSpaceCategory(
   cats: string[],
-  tags: string[],
+  attributes: string[],
 ): SafeSpaceCategory {
   const primary = (cats[0] ?? '').toLowerCase();
-  const tagText = tags.join(' ').toLowerCase();
   if (primary === 'culture') return 'Arts';
   if (primary === 'health') return 'Health';
   if (primary === 'grooming') return 'Services';
-  if (primary === 'food') {
-    if (tagText.includes('club')) return 'Club';
-    if (tagText.includes('bar')) return 'Bar';
-    return 'Cafe';
+  if (cats.includes('nightlife')) {
+    const isClub = SAFE_SPACE_CLUB_ATTRIBUTES.some((slug) =>
+      attributes.includes(slug),
+    );
+    return isClub ? 'Club' : 'Bar';
   }
-  if (tagText.includes('club')) return 'Club';
-  if (tagText.includes('bar')) return 'Bar';
-  if (tagText.includes('cafe') || tagText.includes('café')) return 'Cafe';
-  if (tagText.includes('art')) return 'Arts';
+  if (cats.includes('food')) return 'Cafe';
   return 'Services';
 }
 
@@ -1847,7 +1981,13 @@ export interface SafeSpaceCardDTO {
   name: string;
   hood: string;
   desc: string;
+  /** The retired `tags` column, served so a deployed hub bundle still renders its pills.
+   * @deprecated For one release only: remove with the tags/good_for column drop. */
   tags: string[];
+  /** Up to three attribute slugs the owner picked for the card. Never sensitive. */
+  highlights: string[];
+  /** Practices above the affirming baseline, in vocabulary order. */
+  inclusionPractices: ListingInclusionPractice[];
   rating: string;
   reviews: number;
   tier: number | null;
@@ -1898,6 +2038,11 @@ export interface SafeSpaceDetailDTO extends SafeSpaceCardDTO {
   sub: string;
   verifier: string;
   reVerified: string;
+  /** Every attribute slug, the sensitive ones included, the same way the
+   * directory detail page serves them: this page is where they show. */
+  attributes: string[];
+  /** Pills built from the retired `tags` column, for a deployed hub bundle.
+   * @deprecated For one release only: remove with the tags/good_for column drop. */
   metaPills: { label: string; accent?: boolean }[];
   promises: { title: string; desc: string }[];
   vouches: SafeSpaceVouchDTO[];
@@ -1951,7 +2096,7 @@ export function toSafeSpaceCard(
   // pin the clock.
   now: Date = new Date(),
 ): SafeSpaceCardDTO {
-  const cat = mapSafeSpaceCategory(listing.cats, listing.tags);
+  const cat = mapSafeSpaceCategory(listing.cats, listing.attributes ?? []);
   const rating = ratingFromReviews(reviews);
   return {
     status: 'verified',
@@ -1962,6 +2107,12 @@ export function toSafeSpaceCard(
     hood: listing.hood,
     desc: listing.blurb,
     tags: listing.tags,
+    // Filtered the way `toDirectoryCard` filters them: the write path already
+    // refuses a sensitive highlight, and a card never names one.
+    highlights: (listing.highlights ?? []).filter(
+      (slug) => !isSensitiveListingAttribute(slug),
+    ),
+    inclusionPractices: listing.inclusionPractices ?? [],
     rating: rating.score,
     reviews: rating.count,
     tier: listing.safeSpaceTier,
@@ -1974,7 +2125,7 @@ export function toSafeSpaceCard(
 }
 
 export function toRemovedSpaceCard(listing: Listing): RemovedSpaceCardDTO {
-  const cat = mapSafeSpaceCategory(listing.cats, listing.tags);
+  const cat = mapSafeSpaceCategory(listing.cats, listing.attributes ?? []);
   const removal = listing.safeSpaceRemoval;
   return {
     status: 'removed',
@@ -2006,7 +2157,12 @@ export function toSafeSpaceDetail(
   const glance: { label: string; value: string; accent?: boolean }[] = [
     { label: 'Type', value: card.typeLabel },
     { label: 'Neighbourhood', value: listing.hood, accent: true },
-    { label: 'Languages', value: listing.langs.join(' · ') },
+    {
+      label: 'Languages',
+      value: listingLanguageLabels(listing.langs, listing.langsOther).join(
+        ' · ',
+      ),
+    },
   ];
   if (listing.safeSpaceReVerifiedAt) {
     glance.push({
@@ -2026,6 +2182,9 @@ export function toSafeSpaceDetail(
     sub: listing.safeSpaceSub || listing.blurb,
     verifier: listing.safeSpaceVerifier,
     reVerified: listing.safeSpaceReVerifiedAt ?? '',
+    // Every attribute, the sensitive ones included, as `toDirectoryDetail`
+    // serves them: the detail page is where they show.
+    attributes: listing.attributes ?? [],
     metaPills: listing.tags.map((label, index) => ({
       label,
       accent: index % 2 === 1,

@@ -584,9 +584,12 @@ export class AuthService {
     // survive a rollback): fans out the "VouchReceived" notification and keeps
     // vouch counts consistent, exactly as a normal vouch does.
     if (vouched) {
+      // The signup auto-vouch is always named: `createVouchInTransaction`
+      // never sets `anonymous`, so the row keeps the column default of false.
       this.eventEmitter.emit(VOUCH_CREATED, {
         voucherId: inviterId,
         voucheeId: user.id,
+        anonymous: false,
       } satisfies VouchCreatedEvent);
     }
 

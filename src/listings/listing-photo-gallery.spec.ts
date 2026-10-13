@@ -1,9 +1,11 @@
 import {
   MAX_LISTING_GALLERY_PHOTOS,
+  coverImageReferences,
   galleryFromLegacySlots,
   galleryImageReferences,
   galleryWithLegacySlotPatch,
   legacySlotsFromGallery,
+  normalizeCoverPhoto,
   normalizeGallery,
 } from './listing-photo-gallery';
 
@@ -160,5 +162,39 @@ describe('galleryImageReferences', () => {
     ).toEqual(['a.jpg', 'b.jpg']);
     expect(galleryImageReferences(null)).toEqual([]);
     expect(galleryImageReferences(undefined)).toEqual([]);
+  });
+});
+
+describe('normalizeCoverPhoto', () => {
+  it('returns null for null, undefined and an empty image', () => {
+    expect(normalizeCoverPhoto(null)).toBeNull();
+    expect(normalizeCoverPhoto(undefined)).toBeNull();
+    expect(normalizeCoverPhoto({ image: '', alt: 'a terrace' })).toBeNull();
+  });
+
+  it('keeps the image and trims the alt text', () => {
+    expect(
+      normalizeCoverPhoto({
+        image: 'listing-covers/u/k.webp',
+        alt: '  a terrace  ',
+      }),
+    ).toEqual({ image: 'listing-covers/u/k.webp', alt: 'a terrace' });
+  });
+
+  it('fills a missing alt with the empty string', () => {
+    expect(normalizeCoverPhoto({ image: 'listing-covers/u/k.webp' })).toEqual({
+      image: 'listing-covers/u/k.webp',
+      alt: '',
+    });
+  });
+});
+
+describe('coverImageReferences', () => {
+  it('lists the cover image, or nothing', () => {
+    expect(
+      coverImageReferences({ image: 'listing-covers/u/k.webp', alt: '' }),
+    ).toEqual(['listing-covers/u/k.webp']);
+    expect(coverImageReferences(null)).toEqual([]);
+    expect(coverImageReferences({ image: '', alt: 'x' })).toEqual([]);
   });
 });

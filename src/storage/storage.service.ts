@@ -3,6 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -22,6 +23,7 @@ import {
   DOCUMENT_UPLOAD_TYPES,
   IMAGE_UPLOAD_TYPES,
   LISTING_MENU_UPLOAD_TYPES,
+  STUDIO_AUDIO_UPLOAD_TYPES,
 } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import {
@@ -29,6 +31,7 @@ import {
   isPersonaScopedExtension,
   isPersonaScopedKey,
   isStorageKey,
+  isStudioAudioKey,
   parseStorageKey,
 } from './storage-key';
 import {
@@ -40,6 +43,11 @@ import {
 } from './served-object';
 
 export const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
+
+// Studio v1: how long a track's stream URL stays valid. A URL already handed
+// out keeps working until then even if the listener's grant is revoked; every
+// new stream request re-checks the grant.
+export const STUDIO_STREAM_EXPIRY_SECONDS = 900; // 15 minutes
 
 // Orphan cleanup is UNSOLVED and deliberately out of scope. A presigned upload
 // can be abandoned (a user gets the URL and never uploads, or uploads then
@@ -88,6 +96,7 @@ export class StorageService {
   private static contentTypeTableFor(
     kind: UploadKind,
   ): Readonly<Record<string, { extension: string }>> {
+    if (kind === 'studio_audio') return STUDIO_AUDIO_UPLOAD_TYPES;
     if (kind === 'listing-menu') return LISTING_MENU_UPLOAD_TYPES;
     return StorageService.DOCUMENT_KINDS.has(kind)
       ? DOCUMENT_UPLOAD_TYPES
@@ -119,6 +128,12 @@ export class StorageService {
     byteSize?: number;
   }): Promise<PresignedUpload> {
     const { kind, userId, contentType, byteSize } = params;
+    // A track's key carries no user id and needs a persona, so it has its
+    // own presign (`presignStudioAudioUpload`, reached through
+    // `StudioAudioUploadsService`).
+    if (kind === 'studio_audio') {
+      throw new BadRequestException('Studio audio is presigned for a persona');
+    }
     const contentTypeTable = StorageService.contentTypeTableFor(kind);
     const typeSpec = contentTypeTable[contentType];
     if (!typeSpec) {
@@ -213,6 +228,64 @@ export class StorageService {
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
+  }
+
+  /**
+   * Studio v1: presign a track upload under `studio-audio/<uuid>/<uuid><ext>`,
+   * both segments random, so the key names neither the member nor the
+   * persona. `StudioAudioUploadsService` authorizes the caller first and
+   * records the persona the key belongs to. An over-cap size is a 413, the
+   * status the Studio contract names; other kinds keep their 400.
+   */
+  async presignStudioAudioUpload(params: {
+    contentType: string;
+    byteSize: number;
+  }): Promise<PresignedUpload> {
+    const typeSpec = STUDIO_AUDIO_UPLOAD_TYPES[params.contentType];
+    if (!typeSpec) {
+      throw new BadRequestException(
+        `Unsupported content type: ${params.contentType}`,
+      );
+    }
+    const kindSpec = UPLOAD_KIND_SPECS.studio_audio;
+    if (params.byteSize > kindSpec.maxBytes) {
+      throw new PayloadTooLargeException(
+        `File too large for studio_audio: max ${kindSpec.maxBytes} bytes`,
+      );
+    }
+    const key = `${kindSpec.prefix}/${randomUUID()}/${randomUUID()}${typeSpec.extension}`;
+    return this.createPresignedUpload(key, params.contentType, params.byteSize);
+  }
+
+  /**
+   * Studio v1: a presigned GET for one track, valid for
+   * `STUDIO_STREAM_EXPIRY_SECONDS`. The stored content type is signed in, so
+   * the bucket always answers `audio/mpeg` or `audio/mp4`. `<audio>` loads
+   * the URL directly and its byte-range requests need no CORS, since the
+   * element never sets `crossOrigin`. `expiresAt` is read before signing, so
+   * it never runs past the URL's real expiry.
+   */
+  async createPresignedAudioStream(
+    key: string,
+    contentType: string,
+  ): Promise<{ url: string; expiresAt: string }> {
+    if (!isStudioAudioKey(key)) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const expiresAt = new Date(
+      Date.now() + STUDIO_STREAM_EXPIRY_SECONDS * 1000,
+    ).toISOString();
+    const command = new GetObjectCommand({
+      Bucket: this.requireConfig('storage.bucket'),
+      Key: key,
+      ResponseContentType: contentType,
+      ResponseContentDisposition: 'inline',
+      ResponseCacheControl: `private, max-age=${STUDIO_STREAM_EXPIRY_SECONDS}`,
+    });
+    const url = await getSignedUrl(this.storageClient(), command, {
+      expiresIn: STUDIO_STREAM_EXPIRY_SECONDS,
+    });
+    return { url, expiresAt };
   }
 
   /**

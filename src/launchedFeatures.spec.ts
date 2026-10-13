@@ -20,6 +20,10 @@ describe('launchedFeatures registry', () => {
     expect(isFeatureLaunched('goTogether')).toBe(true);
   });
 
+  it('ships Studio launched under its own key', () => {
+    expect(isFeatureLaunched('studio')).toBe(true);
+  });
+
   it('ships cinema disabled (its Mux env is not provisioned by default)', () => {
     expect(isFeatureLaunched('cinema')).toBe(false);
   });

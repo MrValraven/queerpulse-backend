@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -20,6 +21,7 @@ import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateInviteDto } from './dto/create-invite.dto';
 import { ListMyInvitesQuery } from './dto/list-my-invites.query';
+import { UpdateInvitePrivateNoteDto } from './dto/update-invite-private-note.dto';
 import {
   InviteQuotaView,
   MyInviteCountsView,
@@ -71,6 +73,7 @@ export class InvitesController {
       email: dto.email,
       note: dto.note,
       vouch: dto.vouch,
+      privateNote: dto.privateNote,
     });
   }
 
@@ -177,6 +180,40 @@ export class InvitesController {
     @Param('code') code: string,
   ): Promise<MyInviteView> {
     return this.invitesService.resendInvite(user.userId, code);
+  }
+
+  // Set or clear the member's own private note on one of their invites (their
+  // label for who it is for), addressed by the code its invite list exposes.
+  // Works on every status, since the label changes nothing about the invite.
+  // 404 if it isn't theirs or is unknown (one answer for both, matching
+  // revoke). ActiveMemberGuard only: a private label reaches nobody else, so a
+  // restricted member may still keep their own list tidy. Returns the updated
+  // invite row (same shape as GET /).
+  @Patch(':code/private-note')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ActiveMemberGuard)
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @ApiOperation({
+    summary:
+      "Set or clear the private note on one of the current member's invites",
+  })
+  @ApiOkResponse({ description: 'The invite with its updated private note.' })
+  @ApiNotFoundResponse({
+    description: 'No invite with that code belongs to the caller.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  updatePrivateNote(
+    @CurrentUser() user: CurrentUserData,
+    @Param('code') code: string,
+    @Body() dto: UpdateInvitePrivateNoteDto,
+  ): Promise<MyInviteView> {
+    return this.invitesService.updatePrivateNote(
+      user.userId,
+      code,
+      dto.privateNote,
+    );
   }
 
   // Public, unauthenticated: the recipient's landing page resolves their invite

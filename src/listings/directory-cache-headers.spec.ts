@@ -1,6 +1,7 @@
 import {
   HEADERS_METADATA,
   INTERCEPTORS_METADATA,
+  PATH_METADATA,
 } from '@nestjs/common/constants';
 import {
   NO_STALE_READ_CDN_CACHE,
@@ -49,11 +50,20 @@ describe('DirectoryController cache headers', () => {
     });
   });
 
-  it('keeps the stale window on the static tag vocabulary', () => {
-    expect(declaredHeaders('listTagVocabulary')).toEqual({
+  it('keeps the stale window on the static attribute vocabulary', () => {
+    expect(declaredHeaders('listAttributeVocabulary')).toEqual({
       'Cache-Control': PUBLIC_READ_CACHE,
       'CDN-Cache-Control': PUBLIC_READ_CDN_CACHE,
     });
+    expect(
+      Reflect.getMetadata(PATH_METADATA, handlerOf('listAttributeVocabulary')),
+    ).toBe('attributes');
+  });
+
+  it('no longer serves the tag vocabulary', () => {
+    expect(
+      Object.getOwnPropertyNames(DirectoryController.prototype),
+    ).not.toContain('listTagVocabulary');
   });
 
   it.each([

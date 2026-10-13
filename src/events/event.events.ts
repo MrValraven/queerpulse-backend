@@ -53,6 +53,48 @@ export interface EventCohostInvitedEvent {
   inviteeId: string;
 }
 
+export const EVENT_COMMUNITY_INVITED = 'event.community_invited';
+
+/**
+ * An organiser invited a guest community onto a gathering and the row is
+ * pending (2026-10-08 guest communities). An invite the inviter's own
+ * standing accepted on the spot emits nothing. `recipientUserIds` is the
+ * guest community's owners, co-owners and mods minus the inviter, resolved
+ * by `EventCommunitiesService`, so the listener reads no roster.
+ * `leadCommunityName` is null when the lead is private: a guest team off the
+ * lead's roster must not learn it from the bell.
+ */
+export interface EventCommunityInvitedEvent {
+  inviteId: string;
+  eventId: string;
+  eventSlug: string;
+  eventTitle: string;
+  communitySlug: string;
+  communityName: string;
+  leadCommunityName: string | null;
+  inviterId: string;
+  recipientUserIds: string[];
+}
+
+export const EVENT_COMMUNITY_INVITE_RESPONDED =
+  'event.community_invite_responded';
+
+/**
+ * A guest community's owner, co-owner or mod accepted or declined. Reaches
+ * the gathering's organisers (host and co-hosts) minus the responder.
+ */
+export interface EventCommunityInviteRespondedEvent {
+  inviteId: string;
+  eventId: string;
+  eventSlug: string;
+  eventTitle: string;
+  communitySlug: string;
+  communityName: string;
+  decision: 'accepted' | 'declined';
+  responderId: string;
+  recipientUserIds: string[];
+}
+
 export const EVENT_LINEUP_INVITED = 'event.lineup_invited';
 
 /** An organizer invited a member onto an event's lineup (2026-10-06). */

@@ -2,6 +2,7 @@ import type { Repository } from 'typeorm';
 import type { Message } from '../messaging/entities/message.entity';
 import type { PersonaImageKeysService } from '../storage/persona-image-keys.service';
 import type { StorageService } from '../storage/storage.service';
+import type { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import { MediaExportContributor } from './data-export-contributors';
 import {
   PERSONA_EXPORT_FOLDER,
@@ -62,10 +63,14 @@ describe('persona-scoped images in the media export (T17)', () => {
         },
       ]),
     };
+    const studioAudioUploads = {
+      listObjectsUploadedBy: jest.fn().mockResolvedValue([]),
+    };
     const contributor = new MediaExportContributor(
       storage as unknown as StorageService,
       {} as Repository<Message>,
       personaImageKeys as unknown as PersonaImageKeysService,
+      studioAudioUploads as unknown as StudioAudioUploadsService,
     );
 
     const result = await contributor.buildContribution(USER_ID);
@@ -78,5 +83,39 @@ describe('persona-scoped images in the media export (T17)', () => {
       PERSONA_KEY,
     ]);
     expect(result.totalBytes).toBe(12);
+  });
+
+  it('carries the Studio audio the member uploaded, in a folder of its own', async () => {
+    const STUDIO_KEY =
+      'studio-audio/0b6f2a4c-1d2e-4f30-9a8b-7c6d5e4f3a2b/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d.mp3';
+    const contributor = new MediaExportContributor(
+      {
+        listUserObjects: jest.fn().mockResolvedValue([]),
+      } as unknown as StorageService,
+      {} as Repository<Message>,
+      {
+        listObjectsUploadedBy: jest.fn().mockResolvedValue([]),
+      } as unknown as PersonaImageKeysService,
+      {
+        listObjectsUploadedBy: jest.fn().mockResolvedValue([
+          {
+            key: STUDIO_KEY,
+            size: 4096,
+            lastModified: '2026-10-08T00:00:00.000Z',
+            uploadKind: 'studio_audio',
+          },
+        ]),
+      } as unknown as StudioAudioUploadsService,
+    );
+
+    const result = await contributor.buildContribution(USER_ID);
+
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        name: 'studio-audio/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d.mp3',
+        storageKey: STUDIO_KEY,
+        uploadKind: 'studio_audio',
+      }),
+    ]);
   });
 });

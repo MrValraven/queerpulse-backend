@@ -361,6 +361,32 @@ describe('PersonaImageKeysService (T17)', () => {
       );
       expect(writes).toEqual([]);
     });
+
+    it('moves every Studio release cover to a fresh key on unlink', async () => {
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('FROM "studio_releases"')
+            ? [{ cover_key: OWN_PERSONA_KEY }]
+            : [],
+        ),
+      );
+      const persona = { id: PERSONA_ID, avatarUrl: null, coverUrl: null };
+
+      const rehomed = await service.rehomeUnlinkedPersona(
+        asManager(),
+        persona,
+        'unlink',
+      );
+
+      expect(rehomed.get(OWN_PERSONA_KEY)).toBe(mintedKey(1));
+      const statements = manager.query.mock.calls.map(
+        ([sql, parameters]: [string, unknown[]]) => ({ sql, parameters }),
+      );
+      expect(statements).toContainEqual({
+        sql: expect.stringContaining('UPDATE "studio_releases"') as unknown,
+        parameters: [PERSONA_ID, OWN_PERSONA_KEY, mintedKey(1)],
+      });
+    });
   });
 
   describe('serving and membership reads', () => {
@@ -442,6 +468,25 @@ describe('PersonaImageKeysService (T17)', () => {
 
       expect(registry.delete).not.toHaveBeenCalled();
       expect(registry.query).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listKeysOf', () => {
+    const STUDIO_AUDIO_KEY =
+      'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3';
+
+    it('lists the persona images and the Studio audio of a persona being deleted', async () => {
+      manager.find.mockResolvedValue([{ storageKey: OWN_PERSONA_KEY }]);
+      manager.query.mockResolvedValue([{ storage_key: STUDIO_AUDIO_KEY }]);
+
+      expect(await service.listKeysOf(asManager(), PERSONA_ID)).toEqual([
+        OWN_PERSONA_KEY,
+        STUDIO_AUDIO_KEY,
+      ]);
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM "studio_audio_uploads"'),
+        [PERSONA_ID],
+      );
     });
   });
 });

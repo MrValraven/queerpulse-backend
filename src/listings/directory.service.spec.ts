@@ -43,7 +43,7 @@ import {
  */
 describe('DirectoryService', () => {
   let service: DirectoryService;
-  let listings: { findOne: jest.Mock };
+  let listings: { findOne: jest.Mock; query: jest.Mock };
   let reviews: { findOne: jest.Mock; save: jest.Mock; find: jest.Mock };
   let helpfulVotes: Record<string, jest.Mock>;
   let publicQuestions: {
@@ -107,7 +107,10 @@ describe('DirectoryService', () => {
   };
 
   beforeEach(async () => {
-    listings = { findOne: jest.fn().mockResolvedValue(LIVE_LISTING) };
+    listings = {
+      findOne: jest.fn().mockResolvedValue(LIVE_LISTING),
+      query: jest.fn().mockResolvedValue([]),
+    };
     reviews = {
       findOne: jest.fn(),
       save: jest.fn((row: object) => Promise.resolve(row)),

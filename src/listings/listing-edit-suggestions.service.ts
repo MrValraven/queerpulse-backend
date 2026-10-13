@@ -447,7 +447,7 @@ export class ListingEditSuggestionsService {
    * time this runs, so a lookup/save/notify failure here must not undo or
    * appear to undo that decision.
    *
-   * Only 3 of the 6 `EDIT_SUGGESTION_FIELDS` map onto a plain string column
+   * Only 3 of the 7 `EDIT_SUGGESTION_FIELDS` map onto a plain string column
    * the free-text `message` can be applied to: `address` ->
    * `Listing.address`, `phone`/`website` -> the matching key in
    * `Listing.social`. `hours` has no safe auto-apply target — `Listing.hours`
@@ -466,7 +466,10 @@ export class ListingEditSuggestionsService {
    * outright. `other` is an intentional catch-all with no column to target —
    * accepting it still resolves the queue row and still notifies the owner
    * with the suggested message, it just leaves every listing column
-   * untouched (there's nothing safe to overwrite).
+   * untouched (there's nothing safe to overwrite). `attributes` is a
+   * no-column bucket like `other`: a list of facts has no single replacement
+   * value, so accepting it resolves the row and notifies the owner in the
+   * same way, leaving every column as it was.
    *
    * BE-HSG-04: the value is NEVER written verbatim any more. Every target runs
    * through `isAcceptedSuggestionValueValid`, which re-applies that column's

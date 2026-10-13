@@ -11,6 +11,7 @@ import { forumThreadVisibleSql } from '../forum/forum-threads.service';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
+import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -81,6 +82,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
   let contentOwnerErasure: { eraseFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
   let subprofileMembership: { handOverCreatedPersonasFor: jest.Mock };
+  let studioAudioUploads: { deleteObjectsAndForget: jest.Mock };
   let service: AccountDeletionProcessorService;
 
   /** Entities whose repository throws, to force a degraded resolution. */
@@ -215,6 +217,9 @@ describe('AccountDeletionProcessorService storage erasure', () => {
     subprofileMembership = {
       handOverCreatedPersonasFor: jest.fn().mockResolvedValue(undefined),
     };
+    studioAudioUploads = {
+      deleteObjectsAndForget: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new AccountDeletionProcessorService(
       deletionRequests as unknown as Repository<DeletionRequest>,
@@ -225,6 +230,7 @@ describe('AccountDeletionProcessorService storage erasure', () => {
       notifications as unknown as NotificationsService,
       new MediaReferenceResolver(dataSource as unknown as DataSource),
       subprofileMembership as unknown as SubprofileMembershipService,
+      studioAudioUploads as unknown as StudioAudioUploadsService,
     );
   });
 
@@ -320,6 +326,88 @@ describe('AccountDeletionProcessorService storage erasure', () => {
 
       expect(deletedKeys()).not.toContain(UNUSED_PERSONA_KEY);
       expect(personaRegistryDelete).not.toHaveBeenCalled();
+    });
+  });
+
+  // Studio audio keys (`studio-audio/<uuid>/<uuid>.<ext>`) name nobody, and
+  // step 3 cascades away the rows that tie them to the member, so step 2f
+  // reads them inside the transaction and step 4b deletes them after commit.
+  describe('Studio audio the member uploaded', () => {
+    const STUDIO_AUDIO_SQL_MARKER = 'FROM "studio_audio_uploads" "upload"';
+    const SOLE_PERSONA_AUDIO_KEY =
+      'studio-audio/1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f/2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a.mp3';
+    const UNCONFIRMED_AUDIO_KEY =
+      'studio-audio/3e4f5a6b-7c8d-4e9f-0a1b-2c3d4e5f6a7b/4f5a6b7c-8d9e-4f0a-1b2c-3d4e5f6a7b8c.flac';
+
+    const studioAudioQueryIndex = (): number =>
+      (manager.query.mock.calls as Array<[string, unknown[]]>).findIndex(
+        ([sql]) => sql.includes(STUDIO_AUDIO_SQL_MARKER),
+      );
+
+    it('reads the keys after the persona hand-over and deletes them after the transaction commits', async () => {
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes(STUDIO_AUDIO_SQL_MARKER)
+            ? [
+                { storage_key: SOLE_PERSONA_AUDIO_KEY },
+                { storage_key: UNCONFIRMED_AUDIO_KEY },
+              ]
+            : [],
+        ),
+      );
+      const commit = jest.fn();
+      dataSource.transaction.mockImplementation(
+        async (run: (entityManager: unknown) => Promise<unknown>) => {
+          const result = await run(manager);
+          commit();
+          return result;
+        },
+      );
+
+      await service.processDueDeletions();
+
+      const queryIndex = studioAudioQueryIndex();
+      expect(queryIndex).toBeGreaterThanOrEqual(0);
+      const [studioSql, studioParams] = (
+        manager.query.mock.calls as Array<[string, unknown[]]>
+      )[queryIndex]!;
+      expect(studioSql).toContain('"persona"."user_id" = $1');
+      expect(studioSql).toContain('"upload"."uploaded_by_id" = $1');
+      expect(studioSql).toContain(
+        '"track"."audio_key" = "upload"."storage_key"',
+      );
+      expect(studioParams).toEqual([USER_ID]);
+
+      // Read after step 0c, so `persona.user_id` names only the personas the
+      // cascade removes, and before the user delete nulls `uploaded_by_id`.
+      const queryOrder = manager.query.mock.invocationCallOrder[queryIndex]!;
+      expect(
+        firstCallOrder(subprofileMembership.handOverCreatedPersonasFor),
+      ).toBeLessThan(queryOrder);
+      expect(queryOrder).toBeLessThan(firstCallOrder(manager.delete));
+
+      // Deleted after commit: object deletion cannot roll back.
+      expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledWith([
+        SOLE_PERSONA_AUDIO_KEY,
+        UNCONFIRMED_AUDIO_KEY,
+      ]);
+      expect(firstCallOrder(commit)).toBeLessThan(
+        firstCallOrder(studioAudioUploads.deleteObjectsAndForget),
+      );
+      // Kept out of the media reference gate, which has no Studio audio
+      // source and would misjudge a key a track still holds.
+      expect(deletedKeys()).not.toContain(SOLE_PERSONA_AUDIO_KEY);
+      expect(deletedKeys()).not.toContain(UNCONFIRMED_AUDIO_KEY);
+    });
+
+    it('deletes no Studio audio when the member has none', async () => {
+      await service.processDueDeletions();
+
+      expect(studioAudioQueryIndex()).toBeGreaterThanOrEqual(0);
+      expect(studioAudioUploads.deleteObjectsAndForget).not.toHaveBeenCalled();
     });
   });
 

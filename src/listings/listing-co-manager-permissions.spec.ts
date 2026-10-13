@@ -82,6 +82,16 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   tags: [],
   goodFor: [],
   langs: [],
+  attributes: [],
+  highlights: [],
+  entryMode: null,
+  coverPolicy: null,
+  coverFreeBefore: null,
+  payments: [],
+  issuesNifInvoices: null,
+  inclusionPractices: [],
+  saferSpacePolicyUrl: null,
+  langsOther: '',
   online: false,
   address: '',
   geocoded: false,
@@ -92,6 +102,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   hoursExceptions: [],
   social: { instagram: '', website: '', email: '', phone: '' },
   photoGallery: [],
+  coverPhoto: null,
   photos: { wide: '', d1: '', d2: '', vibe: '' },
   alt: { wide: '', d1: '', d2: '', vibe: '' },
   rel: 'owner',
@@ -407,10 +418,25 @@ describe('listing co-manager permission boundary', () => {
       expect(result.managementRole).toBe(ListingManagementRole.CoManager);
     });
 
+    it('lets the co-manager edit the attributes, which describe the business', async () => {
+      const result = await service.update('QPL-2026-0001', CO_MANAGER_ID, {
+        attributes: ['terrace'],
+        highlights: ['terrace'],
+        payments: ['cash'],
+      });
+
+      expect(hasSavedTheListing()).toBe(true);
+      expect(result).toMatchObject({
+        attributes: ['terrace'],
+        highlights: ['terrace'],
+        payments: ['cash'],
+      });
+    });
+
     // Every value discloses the owner's gender or racial identity, so a
     // co-manager can neither set nor clear it, and a valid value is refused
     // as firmly as a bogus one.
-    it.each([[['women']], [[]]])(
+    it.each([[['women']], [['migrant']], [[]]])(
       'rejects a co-manager PATCH carrying ownedBy %j with 403 and saves nothing',
       async (ownedBy) => {
         await expect(

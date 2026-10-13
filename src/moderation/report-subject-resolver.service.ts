@@ -360,6 +360,10 @@ export class ReportSubjectResolverService {
       // different table, so the two never collide. See `GROUP_LISTING_SQL`.
       case ReportSubjectType.GroupListing:
         return this.queryByUuid(GROUP_LISTING_SQL, subjectIds);
+
+      // Studio v1: one release, keyed by its uuid. See `STUDIO_RELEASE_SQL`.
+      case ReportSubjectType.StudioRelease:
+        return this.queryByUuid(STUDIO_RELEASE_SQL, subjectIds);
     }
   }
 
@@ -924,6 +928,22 @@ const GROUP_LISTING_SQL = `
          NULL::uuid             AS community_id
   FROM group_listings gl
   WHERE gl.id = ANY($1::uuid[])
+`;
+
+/**
+ * Studio v1: one release. The author is the persona's creator, the person
+ * `SUBPROFILE_BY_ID_SQL` names for the persona itself, and moderators alone
+ * read it. The excerpt is "<title> by <artist name>", what a moderator needs
+ * to find the release in Studio.
+ */
+const STUDIO_RELEASE_SQL = `
+  SELECT r.id::text AS key,
+         s.user_id  AS author_user_id,
+         NULLIF(btrim(r.title), '') || ' by ' || s.display_name AS excerpt,
+         NULL::uuid AS community_id
+  FROM studio_releases r
+  JOIN subprofiles s ON s.id = r.subprofile_id
+  WHERE r.id = ANY($1::uuid[])
 `;
 
 /**

@@ -1,5 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import {
+  EventCommunity,
+  EventCommunityStatus,
+} from '../events/entities/event-community.entity';
 import { Event } from '../events/entities/event.entity';
 import { Report } from '../reports/entities/report.entity';
 import { DIGEST_EXCERPT_LENGTH } from './community-digest-response';
@@ -25,6 +29,7 @@ function qbStub() {
     'where',
     'andWhere',
     'groupBy',
+    'innerJoin',
   ]) {
     queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
   }
@@ -174,6 +179,52 @@ describe('CommunityDigestService', () => {
       expect(result.communities[0]?.excerpts).toEqual([
         expect.objectContaining({ postId: 'post-1', excerpt: body }),
       ]);
+    });
+
+    it('counts gatherings a community joined as an accepted guest beside the ones it leads', async () => {
+      members.find.mockResolvedValue([
+        {
+          communityId: 'community-1',
+          role: RosterRole.Member,
+          notificationLevel: CommunityNotificationLevel.All,
+        },
+      ]);
+      communities.find.mockResolvedValueOnce([
+        {
+          id: 'community-1',
+          slug: 'drag-club',
+          name: 'Drag Club',
+          parentId: null,
+          avatarImageUrl: null,
+        },
+      ]);
+      const leadQueryBuilder = qbStub();
+      leadQueryBuilder.getRawMany!.mockResolvedValue([
+        { communityId: 'community-1', count: '2' },
+      ]);
+      const guestQueryBuilder = qbStub();
+      guestQueryBuilder.getRawMany!.mockResolvedValue([
+        { communityId: 'community-1', count: '1' },
+      ]);
+      events.createQueryBuilder
+        .mockReturnValueOnce(leadQueryBuilder)
+        .mockReturnValueOnce(guestQueryBuilder);
+
+      const result = await service.getDigest('user-1');
+
+      expect(result.communities[0]).toEqual(
+        expect.objectContaining({ upcomingGatheringCount: 3 }),
+      );
+      expect(guestQueryBuilder.innerJoin).toHaveBeenCalledWith(
+        EventCommunity,
+        'guest',
+        '"guest"."event_id" = "e"."id" AND "guest"."status" = :acceptedGuestStatus',
+        { acceptedGuestStatus: EventCommunityStatus.Accepted },
+      );
+      expect(guestQueryBuilder.where).toHaveBeenCalledWith(
+        '"guest"."community_id" IN (:...communityIds)',
+        { communityIds: ['community-1'] },
+      );
     });
   });
 });

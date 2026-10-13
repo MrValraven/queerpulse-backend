@@ -40,7 +40,7 @@ import {
   toPublicInviteView,
 } from './invite-response';
 
-const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /**
  * PRD-02. How long an approval-minted invite sits on the shelf BEFORE the
@@ -85,6 +85,16 @@ function nextMonthStart(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
 }
 
+// The inviter's private note as stored: trimmed, and null for a missing,
+// empty or whitespace-only value. Shared by the create and edit paths so both
+// store the same shape.
+function normalizePrivateNote(
+  privateNote: string | null | undefined,
+): string | null {
+  const trimmedPrivateNote = privateNote?.trim();
+  return trimmedPrivateNote ? trimmedPrivateNote : null;
+}
+
 export interface PageParams {
   limit?: number;
   offset?: number;
@@ -115,6 +125,7 @@ export class InvitesService {
       email?: string | null;
       note?: string | null;
       vouch?: string | null;
+      privateNote?: string | null;
     } = {},
   ): Promise<CreatedInviteView> {
     // Empty or whitespace-only notes/vouch are stored as null, not "".
@@ -122,6 +133,7 @@ export class InvitesService {
     const note = trimmedNote ? trimmedNote : null;
     const trimmedVouch = opts.vouch?.trim();
     const vouch = trimmedVouch ? trimmedVouch : null;
+    const privateNote = normalizePrivateNote(opts.privateNote);
     const email = opts.email ?? null;
     // ENG-496. The mint skips the erasure suppression list on purpose. It used
     // to refuse a suppressed address with a 409, which turned this route into
@@ -140,6 +152,7 @@ export class InvitesService {
       email,
       note,
       vouch,
+      privateNote,
       skipQuota: false,
       personal: true,
       ttlMs: INVITE_TTL_MS,
@@ -203,6 +216,7 @@ export class InvitesService {
         email,
         note: null,
         vouch: null,
+        privateNote: null,
         skipQuota: true,
         personal: false,
         // The shelf life, not the redemption window. See
@@ -257,6 +271,7 @@ export class InvitesService {
       email: string | null;
       note: string | null;
       vouch: string | null;
+      privateNote: string | null;
       skipQuota: boolean;
       personal: boolean;
       /** How long from now the invite lapses. `INVITE_TTL_MS` for a member's
@@ -282,6 +297,7 @@ export class InvitesService {
       email: fields.email ? fields.email.trim().toLowerCase() : null,
       note: fields.note,
       vouch: fields.vouch,
+      privateNote: fields.privateNote,
       personal: fields.personal,
       status: InviteStatus.Pending,
       expiresAt: new Date(Date.now() + fields.ttlMs),
@@ -533,6 +549,42 @@ export class InvitesService {
     // Just-refreshed to Pending with a future expiry, so it resolves to 'valid'
     // and is never 'used' — acceptedBy is null.
     return toMyInviteView(refreshed, now);
+  }
+
+  /**
+   * Set or clear the inviter's own private note on one of their invites,
+   * addressed by its `code`. The note is the inviter's label for who the
+   * invite is for, so it can change on every status (valid, used, expired,
+   * revoked) and changes nothing else about the invite.
+   *
+   * 404 if no invite with that code exists FOR THIS MEMBER, with the same
+   * message `revokeInvite` uses, so the route reveals nothing about other
+   * members' codes. Blank or whitespace-only input is stored as null.
+   *
+   * Only the one column is written. For a 'used' invite the redeemer is loaded
+   * with profile (the single-row form of `listMyInvites`' batch lookup), so the
+   * returned row still carries `acceptedBy`.
+   */
+  async updatePrivateNote(
+    inviterId: string,
+    code: string,
+    privateNote: string | null,
+  ): Promise<MyInviteView> {
+    const invite = await this.invites.findOne({ where: { code, inviterId } });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    const storedPrivateNote = normalizePrivateNote(privateNote);
+    await this.invites.update(
+      { id: invite.id, inviterId },
+      { privateNote: storedPrivateNote },
+    );
+    invite.privateNote = storedPrivateNote;
+    const acceptedByUser =
+      invite.status === InviteStatus.Accepted && invite.acceptedBy
+        ? await this.usersService.findByIdWithProfile(invite.acceptedBy)
+        : null;
+    return toMyInviteView(invite, new Date(), acceptedByUser);
   }
 
   /**

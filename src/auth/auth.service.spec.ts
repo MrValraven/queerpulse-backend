@@ -942,6 +942,7 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
       expect.objectContaining({
         voucherId: 'inviter-1',
         voucheeId: 'new-user',
+        anonymous: false,
       }),
     );
   });

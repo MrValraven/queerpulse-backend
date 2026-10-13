@@ -145,6 +145,18 @@ export enum ReportSubjectType {
   // Backed by `AddGroupListingReportSubject1829500200000` (adds the value to
   // `reports_subject_type_enum`).
   GroupListing = 'group_listing',
+
+  // Studio v1. ONE Studio release (`studio_releases`), addressed by the
+  // release's uuid; filing needs a published release. Resolved by
+  // `ReportSubjectResolverService` to the persona's creator, with
+  // "<title> by <artist>" as the excerpt. Staff act through
+  // `POST /admin/studio/releases/:id/takedown`, so this subject stays out of
+  // `ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES`: a generic
+  // `hide_content` on it would write a row no Studio read consults.
+  //
+  // Backed by `AddStudioReportAndSavedKinds1830900100000` (adds the value to
+  // `reports_subject_type_enum`).
+  StudioRelease = 'studio_release',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

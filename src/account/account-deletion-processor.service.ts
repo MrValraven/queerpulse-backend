@@ -24,6 +24,7 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
+import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
 import { SubprofileMembershipService } from '../subprofiles/subprofile-membership.service';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { releaseHandleWithin } from '../handles/handles.service';
@@ -98,6 +99,11 @@ export class AccountDeletionProcessorService {
     // not import `AccountModule`, directly or transitively, so this needs no
     // `forwardRef`.
     private readonly subprofileMembership: SubprofileMembershipService,
+    // Deletes the member's Studio audio objects after commit (step 4b). Their
+    // keys (`studio-audio/<uuid>/<uuid>.<ext>`) name nobody, so step 4's
+    // per-prefix listing cannot find them. `StorageModule` exports it and
+    // `AccountModule` already imports `StorageModule`.
+    private readonly studioAudioUploads: StudioAudioUploadsService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -261,6 +267,8 @@ export class AccountDeletionProcessorService {
    * BEFORE any of that, resolve community ownership and the content other
    * members depend on (step 0) — see the calls below.
    * Step 0c hands over the shared personas the member created.
+   * Step 2f reads the member's Studio audio keys, and step 4b deletes those
+   * objects after commit.
    */
   private async eraseAccount(userId: string): Promise<void> {
     // 0. Resolve any community ownership BEFORE the user row is deleted.
@@ -337,6 +345,10 @@ export class AccountDeletionProcessorService {
         select: { storageKey: true },
       })
     ).map((row) => row.storageKey);
+
+    // Step 2f fills this inside the transaction; step 4b deletes the objects
+    // after commit.
+    let studioAudioKeys: string[] = [];
 
     await this.dataSource.transaction(async (manager) => {
       // `addSelect('user.email')` re-includes the `select: false` email column:
@@ -433,6 +445,18 @@ export class AccountDeletionProcessorService {
         `UPDATE "dsar_request" SET "details" = '', "context" = NULL WHERE "user_id" = $1`,
         [userId],
       );
+
+      // 2f. Studio audio (Art. 17). Keys are `studio-audio/<uuid>/<uuid>.<ext>`
+      //     and name nobody, so step 4 cannot find them, and step 3 cascades
+      //     away most of the `studio_audio_uploads` rows that record them,
+      //     leaving the objects attached to nothing in the bucket. Read them
+      //     here while `uploaded_by_id` still names the member (that FK is
+      //     `ON DELETE SET NULL`). After step 0c, `persona.user_id = $1`
+      //     names exactly the personas step 3 cascades away. The second arm
+      //     catches the member's unconfirmed uploads to a persona step 0c
+      //     handed over. Audio a live track on a handed-over persona still
+      //     holds is kept on purpose: content other members rely on survives.
+      studioAudioKeys = await this.studioAudioKeysOf(manager, userId);
 
       // 3. Hard-delete the user. Every other member-owned table carries an
       //    `ON DELETE CASCADE` FK to `users("id")` and goes with it — 70+ FKs
@@ -583,6 +607,38 @@ export class AccountDeletionProcessorService {
         `Storage object erasure failed for account ${userId} (DB erasure already committed): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     }
+
+    // 4b. Delete the Studio audio objects step 2f read, after commit for the
+    //     reason step 4 gives. These skip `eraseUnreferencedStorageObjects`:
+    //     `MediaReferenceResolver` has no Studio audio source, and 2f already
+    //     left out every key a surviving track holds. `deleteObjectsAndForget`
+    //     logs each failure itself, so the committed erasure stays committed.
+    if (studioAudioKeys.length > 0) {
+      await this.studioAudioUploads.deleteObjectsAndForget(studioAudioKeys);
+    }
+  }
+
+  /**
+   * Step 2f of `eraseAccount`: the Studio audio keys to delete with this
+   * member, read inside the erasure transaction before step 3. Every upload
+   * on a persona the member still creates, plus the member's own uploads that
+   * no track holds (unconfirmed ones on a persona step 0c handed over).
+   */
+  private async studioAudioKeysOf(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<string[]> {
+    const rows: { storage_key: string }[] = await manager.query(
+      `SELECT "upload"."storage_key" AS "storage_key"
+         FROM "studio_audio_uploads" "upload"
+         JOIN "subprofiles" "persona" ON "persona"."id" = "upload"."subprofile_id"
+        WHERE "persona"."user_id" = $1
+           OR ("upload"."uploaded_by_id" = $1 AND NOT EXISTS (
+                 SELECT 1 FROM "studio_tracks" "track"
+                  WHERE "track"."audio_key" = "upload"."storage_key"))`,
+      [userId],
+    );
+    return rows.map((row) => row.storage_key);
   }
 
   /**

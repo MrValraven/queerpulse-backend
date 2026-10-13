@@ -1368,7 +1368,8 @@ export class SuggestionDismissalsExportContributor implements DataExportContribu
 
 /**
  * `connections` -> `invitesSent`: the platform invites the member sent, with
- * their note and vouch. The invite code is a credential and the invitee's
+ * their note, vouch and private note (the member's own label for who each
+ * invite was for). The invite code is a credential and the invitee's
  * email is the invitee's own data, so both stay out; a used invite names the
  * member who joined by id.
  */
@@ -1391,6 +1392,7 @@ export class InvitesSentExportContributor implements DataExportContribution {
       id: invite.id,
       note: invite.note,
       vouch: invite.vouch,
+      privateNote: invite.privateNote,
       personal: invite.personal,
       status: invite.status,
       acceptedByUserId: invite.acceptedBy,

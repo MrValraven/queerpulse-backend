@@ -41,6 +41,8 @@ import {
   SelectQueryBuilder,
 } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { isCommunityStaffRole } from '../communities/community-staff-access';
+import { RosterRole } from '../communities/entities/community-member.entity';
 import { AccessTier } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
@@ -80,8 +82,10 @@ import type {
 import {
   areAttendeeCountsWithheld,
   AttendeesPageDTO,
+  CommunityUpcomingEventSummary,
   CreatedEventDetail,
   EventDetail,
+  EventDetailGuestCommunity,
   EventOrganizerView,
   EventSummary,
   toAttendeeView,
@@ -107,6 +111,15 @@ import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
+import {
+  EventCommunity,
+  EventCommunityStatus,
+} from './entities/event-community.entity';
+import {
+  acceptedGuestExistsSql,
+  isPrivateCommunityWithheld,
+  toCommunityHostingFields,
+} from './event-community-hosting';
 import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import {
@@ -307,6 +320,11 @@ export class EventsService {
     // `EventAnnouncementsService`.
     @InjectRepository(EventAnnouncement)
     private readonly announcements: Repository<EventAnnouncement>,
+    // Guest communities (2026-10-08): the accepted guests on a detail, the
+    // community lane's guest rows, and the guest row a lead move removes.
+    // Writing invites and answers belongs to `EventCommunitiesService`.
+    @InjectRepository(EventCommunity)
+    private readonly eventCommunities: Repository<EventCommunity>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly usersService: UsersService,
     private readonly rsvpService: RsvpService,
@@ -862,6 +880,18 @@ export class EventsService {
       );
     }
 
+    // Guest communities (2026-10-08). A community moving into the lead seat
+    // leaves its guest seat in the same transaction, so one community never
+    // holds both. Clearing the lead leaves every guest where it is. The delete
+    // runs after the event save below, while the save's write holds the event
+    // row lock that a guest invite also takes, so an invite racing this move
+    // either lands first and is removed here or reads the new lead and is
+    // refused.
+    const leadCommunityIdMovingIn =
+      communityId !== null && communityId !== event.communityId
+        ? communityId
+        : null;
+
     // Same absent/null/uuid three-way as `communitySlug` above: absent
     // leaves the existing link (if any) unchanged, `null` explicitly
     // detaches it (falling back to plain-text `venue`), a uuid
@@ -1083,6 +1113,13 @@ export class EventsService {
     const saved = manager
       ? await manager.save(Event, event)
       : await this.events.save(event);
+
+    if (leadCommunityIdMovingIn !== null) {
+      await (manager ?? this.events.manager).delete(EventCommunity, {
+        eventId: event.id,
+        communityId: leadCommunityIdMovingIn,
+      });
+    }
 
     // Growing capacity (or lifting it entirely) can free seats — pull the
     // waitlist head(s) up. Skip on non-published events (nothing to admit into).
@@ -2505,16 +2542,31 @@ export class EventsService {
    * `myRsvpStatus` and `isBookmarked` are real rather than always
    * `null`/`false` — see `CommunityPulseService`, which has the caller's id
    * and simply was not passing it on.
+   *
+   * GUEST ROWS (2026-10-08). Gatherings this community joined as an accepted
+   * guest list here too, each carrying `hostedAs: 'guest'` and the lead it
+   * names. A private lead is withheld, `communityId` included, from a viewer
+   * who is neither on its roster nor an organiser.
    */
   async listUpcomingByCommunity(
     communityId: string,
     viewerId: string,
     limit = 5,
-  ): Promise<EventSummary[]> {
+  ): Promise<CommunityUpcomingEventSummary[]> {
     const now = new Date();
     const qb = this.events
       .createQueryBuilder('e')
-      .where('e.community_id = :communityId', { communityId })
+      // The community's own gatherings and the ones it joined as an
+      // ACCEPTED guest (2026-10-08). Quoted snake_case inside the raw
+      // fragment: TypeORM leaves a camelCase path there unrewritten.
+      .where(
+        `(e.community_id = :communityId OR ${acceptedGuestExistsSql(
+          '"e"."id"',
+          'upcoming_guest',
+          '"upcoming_guest"."community_id" = :communityId',
+        )})`,
+        { communityId },
+      )
       .andWhere('e.status = :status', { status: EventStatus.Published })
       // Underway counts as upcoming here too, so a community's own pulse
       // keeps showing tonight's party while it is happening. See `list`'s
@@ -2542,7 +2594,8 @@ export class EventsService {
     // already fallen behind: it hardcoded both to `null`/`false`, so a member
     // reading their own community's pulse could not see they were already
     // going to one of its gatherings.
-    return this.summarize(events, viewerId);
+    const summaries = await this.summarize(events, viewerId);
+    return this.withCommunityHosting(events, summaries, communityId, viewerId);
   }
 
   async isOrganizer(eventId: string, userId: string): Promise<boolean> {
@@ -2815,6 +2868,132 @@ export class EventsService {
     return !(await this.membership.isMember(event.communityId, viewerId));
   }
 
+  /**
+   * `hostedAs` and `leadCommunity` for a community's own upcoming lane
+   * (2026-10-08). A led row is `lead`. A guest row names its lead through
+   * the private-naming rule `isHostingCommunityWithheld` applies on the
+   * detail; a withheld lead also takes the summary's `communityId` with it.
+   * One community read for the page's leads, plus one roster read and one
+   * co-host read only when a private lead is involved.
+   */
+  private async withCommunityHosting(
+    events: Event[],
+    summaries: EventSummary[],
+    listedCommunityId: string,
+    viewerId: string,
+  ): Promise<CommunityUpcomingEventSummary[]> {
+    const guestEvents = events.filter(
+      (event): event is Event & { communityId: string } =>
+        event.communityId !== null && event.communityId !== listedCommunityId,
+    );
+    const leadRefs = await this.membership.tierRefsByIds(
+      guestEvents.map((event) => event.communityId),
+    );
+    const privateLeadRefs = [...leadRefs.values()].filter(
+      (leadRef) => leadRef.accessTier === AccessTier.Private,
+    );
+    const viewerLeadRoles = privateLeadRefs.length
+      ? await this.membership.effectiveRolesFor(privateLeadRefs, viewerId)
+      : new Map<string, RosterRole>();
+    const eventsNeedingCohostCheck = guestEvents.filter(
+      (event) =>
+        event.hostId !== viewerId &&
+        leadRefs.get(event.communityId)?.accessTier === AccessTier.Private &&
+        !viewerLeadRoles.has(event.communityId),
+    );
+    const cohostedEventIds = eventsNeedingCohostCheck.length
+      ? new Set(
+          (
+            await this.cohosts.find({
+              where: {
+                userId: viewerId,
+                eventId: In(eventsNeedingCohostCheck.map((event) => event.id)),
+              },
+              select: { eventId: true },
+            })
+          ).map((row) => row.eventId),
+        )
+      : new Set<string>();
+    const eventsBySlug = new Map(events.map((event) => [event.slug, event]));
+    return summaries.map((summary) => {
+      const event = eventsBySlug.get(summary.slug);
+      const leadCommunityId = event?.communityId ?? null;
+      const leadRef = leadCommunityId
+        ? leadRefs.get(leadCommunityId)
+        : undefined;
+      const isLeadWithheld =
+        event !== undefined &&
+        leadRef !== undefined &&
+        isPrivateCommunityWithheld({
+          accessTier: leadRef.accessTier,
+          isOrganizer:
+            event.hostId === viewerId || cohostedEventIds.has(event.id),
+          isOnRoster: viewerLeadRoles.has(leadRef.id),
+        });
+      return {
+        ...summary,
+        ...(isLeadWithheld ? { communityId: null } : {}),
+        ...toCommunityHostingFields(
+          leadCommunityId,
+          listedCommunityId,
+          leadRef && !isLeadWithheld ? leadRef : null,
+        ),
+      };
+    });
+  }
+
+  /**
+   * `EventDetail.guestCommunities` (2026-10-08): the ACCEPTED guests in
+   * invite order. Each private guest passes through the rule the lead
+   * follows (`isHostingCommunityWithheld`): dropped for a viewer who is
+   * neither on its roster nor an organiser. Two reads beyond the row read
+   * when the gathering has guests, none when it has none.
+   */
+  private async visibleGuestCommunities(
+    event: Event,
+    viewerId: string,
+    isOrganizer: boolean,
+  ): Promise<EventDetailGuestCommunity[]> {
+    const acceptedRows = await this.eventCommunities.find({
+      where: { eventId: event.id, status: EventCommunityStatus.Accepted },
+      order: { createdAt: 'ASC' },
+      select: { id: true, communityId: true },
+    });
+    if (!acceptedRows.length) return [];
+    const guestRefs = await this.membership.tierRefsByIds(
+      acceptedRows.map((row) => row.communityId),
+    );
+    const viewerRoles = await this.membership.effectiveRolesFor(
+      [...guestRefs.values()],
+      viewerId,
+    );
+    return acceptedRows.flatMap((row) => {
+      const guestRef = guestRefs.get(row.communityId);
+      if (!guestRef) return [];
+      const viewerRole = viewerRoles.get(guestRef.id) ?? null;
+      if (
+        isPrivateCommunityWithheld({
+          accessTier: guestRef.accessTier,
+          isOrganizer,
+          isOnRoster: viewerRole !== null,
+        })
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: row.id,
+          slug: guestRef.slug,
+          name: guestRef.name,
+          accessTier: guestRef.accessTier,
+          avatarImageUrl: guestRef.avatarImageUrl,
+          viewerManages:
+            viewerRole !== null && isCommunityStaffRole(viewerRole),
+        },
+      ];
+    });
+  }
+
   private async eventSeriesByIds(
     seriesIds: string[],
   ): Promise<Map<string, EventSeries>> {
@@ -2922,6 +3101,11 @@ export class EventsService {
     const hostingCommunity = isHostingCommunityWithheld
       ? null
       : hostingCommunityRef;
+    const guestCommunities = await this.visibleGuestCommunities(
+      event,
+      viewerId,
+      isOrganizer,
+    );
 
     // The host's "Show attendee count" toggle governs the detail exactly as
     // it governs every list row: a viewer who is not an organiser gets null
@@ -3006,6 +3190,7 @@ export class EventsService {
       ...(isHostingCommunityWithheld ? { communityId: null } : {}),
       communitySlug: hostingCommunity?.slug ?? null,
       community: hostingCommunity,
+      guestCommunities,
       venueListing,
       // LOC-16. Organisers only, and only when there is (or was) a listed
       // venue to describe. See `EventDetail.venueAttachment`.

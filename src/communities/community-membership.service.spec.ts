@@ -802,4 +802,49 @@ describe('CommunityMembershipService', () => {
       });
     });
   });
+
+  describe('tierRefsByIds', () => {
+    it('resolves each id to its slug, name, tier, resolved avatar and parent in one query', async () => {
+      communities.find.mockResolvedValue([
+        {
+          id: 'guest-1',
+          parentId: null,
+          slug: 'drag-club',
+          name: 'Drag Club',
+          accessTier: AccessTier.Private,
+          avatarImageUrl: 'https://images.example/drag-club.jpg',
+        },
+      ]);
+
+      const tierRefs = await service.tierRefsByIds(['guest-1', 'guest-1']);
+
+      expect(communities.find).toHaveBeenCalledTimes(1);
+      expect(communities.find).toHaveBeenCalledWith({
+        where: { id: In(['guest-1']) },
+        select: {
+          id: true,
+          parentId: true,
+          slug: true,
+          name: true,
+          accessTier: true,
+          avatarImageUrl: true,
+        },
+      });
+      expect(tierRefs.get('guest-1')).toEqual({
+        id: 'guest-1',
+        parentId: null,
+        slug: 'drag-club',
+        name: 'Drag Club',
+        accessTier: AccessTier.Private,
+        avatarImageUrl: 'https://images.example/drag-club.jpg',
+      });
+    });
+
+    it('asks nothing for an empty id list', async () => {
+      const tierRefs = await service.tierRefsByIds([]);
+
+      expect(tierRefs.size).toBe(0);
+      expect(communities.find).not.toHaveBeenCalled();
+    });
+  });
 });

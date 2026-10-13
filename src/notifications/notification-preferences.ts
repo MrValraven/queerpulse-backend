@@ -116,6 +116,11 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventLineupDeclined]:
     NotificationPreferenceCategory.EventActivity,
+  // Guest communities: the same switch as the co-host invite.
+  [NotificationType.EventCommunityInvite]:
+    NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventCommunityInviteResponse]:
+    NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventNearlyFull]:
     NotificationPreferenceCategory.EventCapacity,
   // Go together. The pair invite is an invitation; the group lifecycle is the

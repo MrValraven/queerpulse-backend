@@ -11,6 +11,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { In, LessThanOrEqual, Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { RosterRole } from '../communities/entities/community-member.entity';
 import { AccessTier } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
@@ -29,6 +30,10 @@ import { UsersService } from '../users/users.service';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
+import {
+  EventCommunity,
+  EventCommunityStatus,
+} from './entities/event-community.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
@@ -101,8 +106,15 @@ describe('EventsService', () => {
     effectiveCommunityIdsForUser: jest.Mock;
     slugById: jest.Mock;
     hostingRefById: jest.Mock;
+    tierRefsByIds: jest.Mock;
+    effectiveRolesFor: jest.Mock;
   };
   let announcements: { find: jest.Mock };
+  // Accepted guest communities (2026-10-08). None by default.
+  let eventCommunities: { find: jest.Mock };
+  // `applyUpdate` deletes a guest row through the update transaction's
+  // manager when the lead moves onto that community.
+  let transactionDelete: jest.Mock;
   let bookmarks: {
     isBookmarked: jest.Mock;
     bookmarkedEventIds: jest.Mock;
@@ -121,6 +133,7 @@ describe('EventsService', () => {
   let audienceGate: {
     assertViewable: jest.Mock;
     scopedVisibilityWhere: jest.Mock;
+    filterViewable: jest.Mock;
   };
   // `remove()` announces a hard delete through `emitAsync` and waits for it.
   let eventEmitter: { emitAsync: jest.Mock };
@@ -246,6 +259,8 @@ describe('EventsService', () => {
   });
 
   beforeEach(async () => {
+    transactionDelete = jest.fn().mockResolvedValue({ affected: 0 });
+    eventCommunities = { find: jest.fn().mockResolvedValue([]) };
     events = {
       findOne: jest.fn(),
       // The real repository hands back an entity instance built from the
@@ -281,6 +296,7 @@ describe('EventsService', () => {
               save: (_entity: unknown, entityLike: Event) =>
                 events.save(entityLike),
               getRepository: () => events,
+              delete: transactionDelete,
             }),
         ),
         // The Notification repository `withoutAlreadyNotifiedMentions` reads.
@@ -346,6 +362,8 @@ describe('EventsService', () => {
       effectiveCommunityIdsForUser: jest.fn().mockResolvedValue([]),
       slugById: jest.fn().mockResolvedValue(null),
       hostingRefById: jest.fn().mockResolvedValue(null),
+      tierRefsByIds: jest.fn().mockResolvedValue(new Map()),
+      effectiveRolesFor: jest.fn().mockResolvedValue(new Map()),
     };
     announcements = { find: jest.fn().mockResolvedValue([]) };
     bookmarks = {
@@ -359,6 +377,7 @@ describe('EventsService', () => {
         clause: 'e.visibility IN (:...vis)',
         params: { vis: [EventVisibility.Public, EventVisibility.Members] },
       }),
+      filterViewable: jest.fn((rows: Event[]) => Promise.resolve(rows)),
     };
     eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
     mentions = {
@@ -402,6 +421,10 @@ describe('EventsService', () => {
         {
           provide: getRepositoryToken(EventAnnouncement),
           useValue: announcements,
+        },
+        {
+          provide: getRepositoryToken(EventCommunity),
+          useValue: eventCommunities,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
@@ -3441,6 +3464,390 @@ describe('EventsService', () => {
       expect(row.seatsTaken).toBeNull();
     });
   });
+
+  describe('guest communities (2026-10-08)', () => {
+    describe('lead moves', () => {
+      it('drops the guest row of the community that becomes the lead, inside the update transaction', async () => {
+        events.findOne.mockResolvedValue(editableEvent());
+        membership.assertOwnerOrModBySlug.mockResolvedValue('community-9');
+
+        await service.update('x', 'u1', { communitySlug: 'queer-devs' });
+
+        expect(transactionDelete).toHaveBeenCalledWith(EventCommunity, {
+          eventId: 'e1',
+          communityId: 'community-9',
+        });
+        // The delete follows the event save, whose write holds the event row
+        // lock a racing guest invite also waits on.
+        expect(events.save.mock.invocationCallOrder[0]).toBeLessThan(
+          transactionDelete.mock.invocationCallOrder[0]!,
+        );
+      });
+
+      it('leaves every guest in place when the lead is cleared', async () => {
+        events.findOne.mockResolvedValue({
+          ...editableEvent(),
+          communityId: 'community-9',
+        });
+
+        await service.update('x', 'u1', { communitySlug: null });
+
+        expect(transactionDelete).not.toHaveBeenCalled();
+      });
+
+      it('deletes nothing when the same lead is sent again', async () => {
+        events.findOne.mockResolvedValue({
+          ...editableEvent(),
+          communityId: 'community-9',
+        });
+        membership.slugById.mockResolvedValue('queer-devs');
+
+        await service.update('x', 'u1', { communitySlug: 'queer-devs' });
+
+        expect(transactionDelete).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('detail guestCommunities', () => {
+      const hostedEvent = () => ({
+        ...editableEvent(),
+        hostId: 'host',
+        communityId: 'community-9',
+      });
+      const tierRef = (id: string, accessTier: AccessTier) => ({
+        id,
+        parentId: null,
+        slug: `${id}-slug`,
+        name: `${id} name`,
+        accessTier,
+        avatarImageUrl: `https://images.example/${id}.jpg`,
+      });
+
+      beforeEach(() => {
+        events.findOne.mockResolvedValue(hostedEvent());
+        membership.hostingRefById.mockResolvedValue({
+          slug: 'queer-devs',
+          name: 'Queer Devs',
+          accessTier: AccessTier.Public,
+          avatarImageUrl: null,
+        });
+      });
+
+      it('lists accepted guests in invite order, reading accepted rows only', async () => {
+        eventCommunities.find.mockResolvedValue([
+          { id: 'row-1', communityId: 'guest-a' },
+          { id: 'row-2', communityId: 'guest-b' },
+        ]);
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([
+            ['guest-a', tierRef('guest-a', AccessTier.Public)],
+            ['guest-b', tierRef('guest-b', AccessTier.Request)],
+          ]),
+        );
+        membership.effectiveRolesFor.mockResolvedValue(
+          new Map([['guest-b', RosterRole.Mod]]),
+        );
+
+        const detail = await service.getBySlug('x', 'stranger');
+
+        expect(eventCommunities.find).toHaveBeenCalledWith({
+          where: { eventId: 'e1', status: EventCommunityStatus.Accepted },
+          order: { createdAt: 'ASC' },
+          select: { id: true, communityId: true },
+        });
+        expect(detail.guestCommunities).toEqual([
+          {
+            id: 'row-1',
+            slug: 'guest-a-slug',
+            name: 'guest-a name',
+            accessTier: AccessTier.Public,
+            avatarImageUrl: 'https://images.example/guest-a.jpg',
+            viewerManages: false,
+          },
+          {
+            id: 'row-2',
+            slug: 'guest-b-slug',
+            name: 'guest-b name',
+            accessTier: AccessTier.Request,
+            avatarImageUrl: 'https://images.example/guest-b.jpg',
+            viewerManages: true,
+          },
+        ]);
+      });
+
+      it('drops a private guest for a viewer off its roster who does not organise', async () => {
+        eventCommunities.find.mockResolvedValue([
+          { id: 'row-1', communityId: 'guest-private' },
+        ]);
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([
+            ['guest-private', tierRef('guest-private', AccessTier.Private)],
+          ]),
+        );
+
+        const detail = await service.getBySlug('x', 'stranger');
+
+        expect(detail.guestCommunities).toEqual([]);
+      });
+
+      it('names a private guest to a plain member of it', async () => {
+        eventCommunities.find.mockResolvedValue([
+          { id: 'row-1', communityId: 'guest-private' },
+        ]);
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([
+            ['guest-private', tierRef('guest-private', AccessTier.Private)],
+          ]),
+        );
+        membership.effectiveRolesFor.mockResolvedValue(
+          new Map([['guest-private', RosterRole.Member]]),
+        );
+
+        const detail = await service.getBySlug('x', 'member');
+
+        expect(detail.guestCommunities).toEqual([
+          expect.objectContaining({
+            slug: 'guest-private-slug',
+            viewerManages: false,
+          }),
+        ]);
+      });
+
+      it('names a private guest to the organisers', async () => {
+        eventCommunities.find.mockResolvedValue([
+          { id: 'row-1', communityId: 'guest-private' },
+        ]);
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([
+            ['guest-private', tierRef('guest-private', AccessTier.Private)],
+          ]),
+        );
+
+        const detail = await service.getBySlug('x', 'host');
+
+        expect(detail.guestCommunities).toHaveLength(1);
+      });
+
+      it('carries an empty list and reads nothing more when there are no accepted guests', async () => {
+        const detail = await service.getBySlug('x', 'stranger');
+
+        expect(detail.guestCommunities).toEqual([]);
+        expect(membership.tierRefsByIds).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('listUpcomingByCommunity', () => {
+      const LISTED_COMMUNITY_ID = 'listed-community';
+
+      const upcomingRow = (overrides: Partial<Event>): Event =>
+        ({
+          id: 'upcoming-1',
+          slug: 'upcoming-gathering',
+          title: 'Upcoming gathering',
+          hostId: 'host-1',
+          startAt: new Date(Date.now() + 3_600_000),
+          endAt: null,
+          timezone: 'Europe/Lisbon',
+          venue: null,
+          isOnline: false,
+          coverImageUrl: null,
+          visibility: EventVisibility.Public,
+          status: EventStatus.Published,
+          capacity: null,
+          communityId: LISTED_COMMUNITY_ID,
+          listingId: null,
+          runByListingId: null,
+          neighbourhood: null,
+          eventType: null,
+          gatheringFamily: GatheringFamily.Care,
+          formatDetails: {},
+          cost: null,
+          themes: [],
+          costKind: null,
+          seriesId: null,
+          seriesIndex: null,
+          showAttendeeCount: true,
+          ...overrides,
+        }) as unknown as Event;
+
+      // `summarize`'s grouped tally: nobody going yet.
+      const emptyTallyQueryBuilder = () => {
+        const queryBuilder: Record<string, jest.Mock> = {};
+        for (const method of [
+          'select',
+          'addSelect',
+          'where',
+          'andWhere',
+          'groupBy',
+        ]) {
+          queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+        }
+        queryBuilder.getRawMany = jest.fn().mockResolvedValue([]);
+        return queryBuilder;
+      };
+
+      const runLane = async (rows: Event[], viewerId = 'viewer-1') => {
+        const { queryBuilder, recordedWhereCalls } =
+          recordingListQueryBuilder();
+        queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+        events.createQueryBuilder.mockReturnValue(queryBuilder);
+        rsvps.createQueryBuilder.mockImplementation(emptyTallyQueryBuilder);
+        const lane = await service.listUpcomingByCommunity(
+          LISTED_COMMUNITY_ID,
+          viewerId,
+          5,
+        );
+        return { lane, recordedWhereCalls };
+      };
+
+      const leadRef = (accessTier: AccessTier) => ({
+        id: 'lead-community',
+        parentId: null,
+        slug: 'queerpulse-social',
+        name: 'QueerPulse Social',
+        accessTier,
+        avatarImageUrl: null,
+      });
+
+      it('reads the gatherings the community leads or joined as an accepted guest', async () => {
+        const { recordedWhereCalls } = await runLane([]);
+
+        const hostingCall = recordedWhereCalls.find((call) =>
+          call.clause.includes(':communityId'),
+        );
+        expect(hostingCall?.clause).toContain('e.community_id = :communityId');
+        expect(hostingCall?.clause).toContain(
+          `"upcoming_guest"."status" = 'accepted'`,
+        );
+        expect(hostingCall?.clause).toContain(
+          '"upcoming_guest"."event_id" = "e"."id"',
+        );
+        expect(hostingCall?.clause).toContain(
+          '"upcoming_guest"."community_id" = :communityId',
+        );
+        expect(hostingCall?.clause).not.toMatch(/\.communityId|"communityId"/);
+        expect(hostingCall?.parameters).toEqual({
+          communityId: LISTED_COMMUNITY_ID,
+        });
+      });
+
+      it('marks a led gathering as lead with no lead community', async () => {
+        const { lane } = await runLane([upcomingRow({})]);
+
+        expect(lane[0]).toEqual(
+          expect.objectContaining({
+            slug: 'upcoming-gathering',
+            hostedAs: 'lead',
+            leadCommunity: null,
+            communityId: LISTED_COMMUNITY_ID,
+          }),
+        );
+      });
+
+      it('names a listed lead on a guest gathering', async () => {
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([['lead-community', leadRef(AccessTier.Public)]]),
+        );
+
+        const { lane } = await runLane([
+          upcomingRow({ communityId: 'lead-community' }),
+        ]);
+
+        expect(lane[0]).toEqual(
+          expect.objectContaining({
+            hostedAs: 'guest',
+            leadCommunity: {
+              slug: 'queerpulse-social',
+              name: 'QueerPulse Social',
+            },
+            communityId: 'lead-community',
+          }),
+        );
+      });
+
+      it('withholds a private lead, its id included, from a viewer off its roster', async () => {
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([['lead-community', leadRef(AccessTier.Private)]]),
+        );
+
+        const { lane } = await runLane([
+          upcomingRow({ communityId: 'lead-community' }),
+        ]);
+
+        expect(lane[0]).toEqual(
+          expect.objectContaining({
+            hostedAs: 'guest',
+            leadCommunity: null,
+            communityId: null,
+          }),
+        );
+        expect(membership.effectiveRolesFor).toHaveBeenCalledWith(
+          [leadRef(AccessTier.Private)],
+          'viewer-1',
+        );
+      });
+
+      it('names a private lead to the gathering host', async () => {
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([['lead-community', leadRef(AccessTier.Private)]]),
+        );
+
+        const { lane } = await runLane(
+          [upcomingRow({ communityId: 'lead-community' })],
+          'host-1',
+        );
+
+        expect(lane[0]?.leadCommunity).toEqual({
+          slug: 'queerpulse-social',
+          name: 'QueerPulse Social',
+        });
+      });
+
+      it('names a private lead to a member of it', async () => {
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([['lead-community', leadRef(AccessTier.Private)]]),
+        );
+        membership.effectiveRolesFor.mockResolvedValue(
+          new Map([['lead-community', RosterRole.Member]]),
+        );
+
+        const { lane } = await runLane([
+          upcomingRow({ communityId: 'lead-community' }),
+        ]);
+
+        expect(lane[0]?.leadCommunity).toEqual({
+          slug: 'queerpulse-social',
+          name: 'QueerPulse Social',
+        });
+      });
+
+      it('names a private lead, its id kept, to a co-host off its roster', async () => {
+        membership.tierRefsByIds.mockResolvedValue(
+          new Map([['lead-community', leadRef(AccessTier.Private)]]),
+        );
+        cohosts.find.mockResolvedValue([{ eventId: 'upcoming-1' }]);
+
+        const { lane } = await runLane([
+          upcomingRow({ communityId: 'lead-community' }),
+        ]);
+
+        expect(lane[0]).toEqual(
+          expect.objectContaining({
+            hostedAs: 'guest',
+            leadCommunity: {
+              slug: 'queerpulse-social',
+              name: 'QueerPulse Social',
+            },
+            communityId: 'lead-community',
+          }),
+        );
+        expect(cohosts.find).toHaveBeenCalledWith({
+          where: { userId: 'viewer-1', eventId: In(['upcoming-1']) },
+          select: { eventId: true },
+        });
+      });
+    });
+  });
 });
 
 describe('EventsService.addCohostByUserId', () => {
@@ -3485,6 +3892,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as Repository<EventInvite>,
       {} as unknown as Repository<EventSeries>,
       {} as unknown as Repository<EventAnnouncement>,
+      {} as unknown as Repository<EventCommunity>,
       {} as unknown as Repository<Profile>,
       {} as unknown as UsersService,
       {} as unknown as RsvpService,

@@ -31,6 +31,12 @@ import { Listing, ListingStatus } from '../listings/entities/listing.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { FeatureKey, isFeatureLaunched } from '../launchedFeatures';
 import { BlockFilterService } from '../social/block-filter.service';
+import {
+  StudioRelease,
+  StudioReleaseStatus,
+} from '../studio/entities/studio-release.entity';
+import { StudioTrack } from '../studio/entities/studio-track.entity';
+import { listenablePersonaSql } from '../studio/studio-visibility';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { toSavedId } from './saved-ref.util';
 
@@ -70,6 +76,8 @@ const FEATURE_BY_KIND: Record<SavedKind, FeatureKey> = {
   [SavedKind.Flatmate]: 'flatmateProfiles',
   [SavedKind.Landlord]: 'landlords',
   [SavedKind.Listing]: 'listings',
+  [SavedKind.StudioRelease]: 'studio',
+  [SavedKind.StudioTrack]: 'studio',
 };
 
 /**
@@ -195,6 +203,10 @@ export class SavedAvailabilityService {
         return this.resolveLandlords(subjectIds);
       case SavedKind.Listing:
         return this.resolveListings(subjectIds);
+      case SavedKind.StudioRelease:
+        return this.resolveStudioReleases(subjectIds, viewerId);
+      case SavedKind.StudioTrack:
+        return this.resolveStudioTracks(subjectIds, viewerId);
     }
   }
 
@@ -535,6 +547,69 @@ export class SavedAvailabilityService {
       { exemptWhen: null, viewerId: null },
     );
     return this.subjectKeys(queryBuilder, 'listing.slug');
+  }
+
+  /**
+   * Studio v1: the Studio pages' own gate. A release is available to a viewer
+   * holding a Studio grant when it is published, its persona passes
+   * `listenablePersonaSql` (the predicate every Studio read applies) and its
+   * creator is not blocked either way. A member whose grant was revoked sees
+   * every Studio card as unavailable, which is what Studio itself shows them.
+   * Owners of a draft get "unavailable" too: the card is a listener's card.
+   */
+  private async resolveStudioReleases(
+    subjectIds: string[],
+    viewerId: SavedViewerId,
+  ): Promise<string[]> {
+    if (viewerId === null) return [];
+    const ids = subjectIds.filter((subjectId) => UUID_PATTERN.test(subjectId));
+    if (!ids.length) return [];
+    const queryBuilder = this.queryBuilderFor(StudioRelease, 'release')
+      .innerJoin('release.subprofile', 'persona')
+      .where('release.id IN (:...ids)', { ids });
+    this.applyStudioListeningGate(queryBuilder, viewerId);
+    return this.subjectKeys(queryBuilder, 'release.id');
+  }
+
+  /** A track is available exactly when its release is. */
+  private async resolveStudioTracks(
+    subjectIds: string[],
+    viewerId: SavedViewerId,
+  ): Promise<string[]> {
+    if (viewerId === null) return [];
+    const ids = subjectIds.filter((subjectId) => UUID_PATTERN.test(subjectId));
+    if (!ids.length) return [];
+    const queryBuilder = this.queryBuilderFor(StudioTrack, 'track')
+      .innerJoin('track.release', 'release')
+      .innerJoin('release.subprofile', 'persona')
+      .where('track.id IN (:...ids)', { ids });
+    this.applyStudioListeningGate(queryBuilder, viewerId);
+    return this.subjectKeys(queryBuilder, 'track.id');
+  }
+
+  // Expects the builder to join the release as `release` and its persona as
+  // `persona`.
+  private applyStudioListeningGate<Subject extends ObjectLiteral>(
+    queryBuilder: SelectQueryBuilder<Subject>,
+    viewerId: string,
+  ): void {
+    queryBuilder
+      .andWhere('release.status = :savedStudioPublished', {
+        savedStudioPublished: StudioReleaseStatus.Published,
+      })
+      .andWhere(listenablePersonaSql('persona'))
+      .andWhere(
+        `EXISTS (
+          SELECT 1 FROM "studio_access_grants" "saved_studio_grant"
+           WHERE "saved_studio_grant"."user_id" = :savedStudioViewerId
+        )`,
+        { savedStudioViewerId: viewerId },
+      );
+    this.blockFilter.excludeBlocked(
+      queryBuilder,
+      viewerId,
+      '"persona"."user_id"',
+    );
   }
 
   // --- internals ---

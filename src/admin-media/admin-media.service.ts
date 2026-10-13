@@ -86,11 +86,17 @@ const MAX_LIMIT = 200;
 /** The upload-kind prefixes the console may browse, e.g. { avatars, work, ... }.
  *  Private message prefixes are left out: DM attachments are served only to
  *  conversation participants (`PRIVATE_MESSAGE_PREFIXES`), so the console never
- *  lists, signs, inspects or deletes them. */
+ *  lists, signs, inspects or deletes them. Studio audio is left out too:
+ *  staff act on a release through the Studio takedown, and an audio object
+ *  has no thumbnail to show. */
 const KNOWN_PREFIXES: ReadonlySet<string> = new Set([
   ...Object.values(UPLOAD_KIND_SPECS)
     .map((spec) => spec.prefix)
-    .filter((prefix) => !PRIVATE_MESSAGE_PREFIXES.has(prefix)),
+    .filter(
+      (prefix) =>
+        !PRIVATE_MESSAGE_PREFIXES.has(prefix) &&
+        prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix,
+    ),
   // T17: unlinked persona images (`persona/<uuid>/<uuid><ext>`). Not an
   // upload kind (nothing presigns under it), but staff browse and moderate
   // it like the rest.

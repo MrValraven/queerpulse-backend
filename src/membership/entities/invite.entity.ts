@@ -40,6 +40,12 @@ export class Invite {
   @Column({ type: 'varchar', length: 280, nullable: true })
   vouch!: string | null;
 
+  // The inviter's own label for the invite (who it is for), written at
+  // POST /invites or later via PATCH /invites/:code/private-note. Seen only by
+  // the inviter and admins. Capped at 120 chars.
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  privateNote!: string | null;
+
   // True for an invite a member created themselves; false for one the system
   // minted for them (admin join-request approval, genesis bootstrap). Only
   // personal invites auto-vouch the inviter for the redeeming member at signup.

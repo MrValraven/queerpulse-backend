@@ -73,6 +73,13 @@ import {
   PartnerTimelineItem,
 } from '../partners/entities/partner.entity';
 import { Listing, ListingStatus } from '../listings/entities/listing.entity';
+import type {
+  ListingCoverPolicy,
+  ListingEntryMode,
+  ListingInclusionPractice,
+  ListingLanguageCode,
+  ListingPaymentMethod,
+} from '../listings/listing-attributes';
 import { ListingReview } from '../listings/entities/listing-review.entity';
 import {
   Event,
@@ -3208,9 +3215,17 @@ interface ListingSeedDefinition {
   ownerBio: string;
   address: string;
   hoursNote: string;
-  tags: string[];
   whatItIs: string[];
-  goodFor: string[];
+  /** Attribute slugs, each offered to this listing's (place) categories. */
+  attributes: string[];
+  /** Up to three of `attributes`, none sensitive. */
+  highlights: string[];
+  entryMode: ListingEntryMode | null;
+  /** Only on a `culture` or `nightlife` listing. */
+  coverPolicy?: ListingCoverPolicy;
+  payments: ListingPaymentMethod[];
+  inclusionPractices: ListingInclusionPractice[];
+  langs: ListingLanguageCode[];
   /** Gallery caption cells (the prototype renders captions, not images). */
   gallery: string[];
   social: {
@@ -3245,15 +3260,20 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Designer for cultural institutions and small presses. Believes good design is a form of care.',
     address: 'R. da Escola Politécnica 84 · Príncipe Real',
     hoursNote: 'Open by appointment — message to arrange a time.',
-    tags: ['Design studio', 'By appointment', 'Step-free entrance'],
+    attributes: [
+      'made-to-order',
+      'custom-commissions',
+      'local-makers',
+      'workshops',
+    ],
+    highlights: ['made-to-order', 'custom-commissions', 'workshops'],
+    entryMode: 'appointmentOnly',
+    payments: ['card', 'mbway'],
+    inclusionPractices: ['chosen-name'],
+    langs: ['pt', 'en'],
     whatItIs: [
       'Inês runs Atelier Pulso as a small studio doing brand identity and editorial design — mostly for cultural institutions, small presses, and queer projects.',
       'It is genuinely open by appointment: message ahead to see the print archive or talk about a project. Riso and letterpress on site.',
-    ],
-    goodFor: [
-      'Brand identity for a queer project',
-      'Editorial & book design',
-      'Seeing a working print archive',
     ],
     gallery: [
       'Studio · main desk',
@@ -3288,15 +3308,21 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Chef and supper-club host. Cooks the way his avó did, for people who need a table.',
     address: 'Address shared with ticket · Mouraria',
     hoursNote: 'Monthly seatings — book a seat for the next dinner.',
-    tags: ['Supper club', 'Monthly · ticketed', 'Dietary-friendly'],
+    attributes: [
+      'vegetarian-options',
+      'vegan-options',
+      'alcohol-free-drinks',
+      'solo-friendly',
+      'hosts-events',
+    ],
+    highlights: ['solo-friendly', 'vegetarian-options', 'hosts-events'],
+    entryMode: 'bookingRecommended',
+    payments: ['card', 'mbway'],
+    inclusionPractices: ['chosen-name', 'named-contact'],
+    langs: ['pt', 'en'],
     whatItIs: [
       'Once a month Tomás opens his Mouraria home and cooks a seasonal menu for twelve strangers who leave as something closer to friends.',
       'Tickets go fast and the list is half community, half newcomers placed deliberately next to people they should meet.',
-    ],
-    goodFor: [
-      'Meeting people without the bar',
-      'A special-occasion dinner',
-      'Solo diners (you’ll be seated well)',
     ],
     gallery: [
       'The long table',
@@ -3328,15 +3354,16 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Run by an artist collective; several members are on QueerPulse and overlap with Rainbow Arts.',
     address: 'R. do Açúcar 76 · Marvila',
     hoursNote: 'Open Wed–Sun afternoons. Openings run late.',
-    tags: ['Gallery', 'Free entry', 'Step-free · large'],
+    attributes: ['exhibitions', 'readings-and-talks', 'hosts-events'],
+    highlights: ['exhibitions', 'hosts-events', 'readings-and-talks'],
+    entryMode: 'walkIn',
+    coverPolicy: 'free',
+    payments: ['card'],
+    inclusionPractices: ['chosen-name'],
+    langs: ['pt', 'en'],
     whatItIs: [
       'Lume is an artist-run gallery in a Marvila warehouse, programming queer and feminist work with a bias toward emerging artists.',
       'Entry is free, the openings are generous, and the project room is often someone’s first-ever solo show.',
-    ],
-    goodFor: [
-      'Seeing emerging queer art',
-      'Generous, social openings',
-      'A first solo show as an artist',
     ],
     gallery: ['Main hall', 'Current show', 'Project room', 'Marvila exterior'],
     social: {
@@ -3366,15 +3393,20 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Run as a small worker co-operative. Several of the booksellers are QueerPulse members.',
     address: 'R. da Imprensa Nacional 48 · Príncipe Real',
     hoursNote: 'Open Tue–Sun. Event nights run later.',
-    tags: ['Bookshop', 'Events space', 'Step-free'],
+    attributes: [
+      'lgbtq-section',
+      'book-club',
+      'readings-and-talks',
+      'second-hand',
+    ],
+    highlights: ['lgbtq-section', 'book-club', 'readings-and-talks'],
+    entryMode: 'walkIn',
+    payments: ['card', 'mbway', 'multibanco', 'cash'],
+    inclusionPractices: ['chosen-name'],
+    langs: ['pt', 'en', 'es'],
     whatItIs: [
       'Bertha is a small queer-run independent bookshop where the feminist and LGBTQ+ titles are the front table, curated by people who’ve read them.',
       'Most weeks there’s a reading, a launch, or a book club squeezed between the stacks.',
-    ],
-    goodFor: [
-      'Finding queer & feminist titles',
-      'Readings and launches',
-      'A staff recommendation',
     ],
     gallery: [
       'Front table',
@@ -3405,15 +3437,20 @@ const LISTINGS: ListingSeedDefinition[] = [
       'A couple who left restaurant kitchens to open the room they wanted to drink in. One is a QueerPulse member.',
     address: 'R. de Arroios 142 · Arroios',
     hoursNote: 'Evenings, Tue–Sun. Closed Mondays.',
-    tags: ['Wine bar · small plates', 'Evenings', 'Ground floor'],
+    attributes: [
+      'vegan-options',
+      'vegetarian-options',
+      'alcohol-free-drinks',
+      'kitchen-open-late',
+    ],
+    highlights: ['kitchen-open-late', 'vegan-options', 'alcohol-free-drinks'],
+    entryMode: 'bookingRecommended',
+    payments: ['card', 'mbway'],
+    inclusionPractices: [],
+    langs: ['pt', 'en', 'fr'],
     whatItIs: [
       'A Farinha is a queer-owned natural wine bar and small-plates kitchen in Arroios — a short seasonal menu and a long, opinionated wine list.',
       'It’s the place for a second date, a celebration, or a slow Tuesday that turns into something.',
-    ],
-    goodFor: [
-      'A great second date',
-      'Natural wine guidance',
-      'Celebrating something',
     ],
     gallery: ['The bar', 'Small plates', 'Wine wall', 'Arroios corner'],
     social: {
@@ -3440,15 +3477,15 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Music producer and Queer Runners regular. Specialises in electronic and experimental work.',
     address: 'R. da Atalaia 90 · Bairro Alto',
     hoursNote: 'Session hire by booking, day and night slots.',
-    tags: ['Music studio', 'Session hire', 'Lift access'],
+    attributes: ['space-for-hire', 'beginner-help', 'sliding-scale'],
+    highlights: ['space-for-hire', 'sliding-scale', 'beginner-help'],
+    entryMode: 'appointmentOnly',
+    payments: ['card', 'mbway'],
+    inclusionPractices: ['chosen-name'],
+    langs: ['pt', 'en'],
     whatItIs: [
       'Diogo runs a session-hire production studio leaning electronic and experimental, with a serious modular wall and a punchy live room.',
       'Rates are fair, and community members get priority booking and a sliding scale for first records.',
-    ],
-    goodFor: [
-      'Recording an electronic record',
-      'Mixing & mastering',
-      'First-record sliding scale',
     ],
     gallery: ['The desk', 'Live room', 'Modular wall', 'Bairro Alto rooftop'],
     social: {
@@ -3474,15 +3511,24 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Opened Navalha after years of sending friends across town for a safe cut. QueerPulse member from day one.',
     address: 'R. do Século 120 · Príncipe Real',
     hoursNote: 'Tue–Sat, walk-ins welcome, booking advised.',
-    tags: ['Barbershop', 'Walk-in & booking', 'Ground floor'],
+    attributes: [
+      'priced-by-service',
+      'curly-textured-hair',
+      'shaves-and-beards',
+      'private-room',
+    ],
+    highlights: [
+      'priced-by-service',
+      'curly-textured-hair',
+      'shaves-and-beards',
+    ],
+    entryMode: 'walkIn',
+    payments: ['card', 'mbway', 'cash'],
+    inclusionPractices: ['chosen-name', 'named-contact'],
+    langs: ['pt', 'pt-BR', 'en'],
     whatItIs: [
       'Navalha is a queer-owned barbershop built on giving trans and non-binary clients the haircut they actually asked for, without the interrogation.',
       'Pricing is by service, never by gender or hair length.',
-    ],
-    goodFor: [
-      'Trans & non-binary cuts done right',
-      'A first big chop, held gently',
-      'Gender-neutral pricing',
     ],
     gallery: [
       'The chairs',
@@ -3514,15 +3560,26 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Two friends who wanted one room for all the ways they move. Queer-run, sliding-scale on principle.',
     address: 'Beco do Mexias 4 · Alfama',
     hoursNote: 'Class schedule Mon–Sat; weights room open daily.',
-    tags: ['Movement studio', 'Sliding scale', 'Ramp access'],
+    attributes: [
+      'drop-in-classes',
+      'class-packs',
+      'memberships',
+      'beginner-sessions',
+      'trans-nonbinary-sessions',
+      'sliding-scale',
+    ],
+    highlights: [
+      'sliding-scale',
+      'trans-nonbinary-sessions',
+      'drop-in-classes',
+    ],
+    entryMode: 'walkIn',
+    payments: ['card', 'mbway', 'multibanco'],
+    inclusionPractices: ['chosen-name'],
+    langs: ['pt', 'en'],
     whatItIs: [
       'Movimento is a queer-run movement space in a converted Alfama warehouse: yoga at dawn, capoeira in the evening, free weights in between.',
       'Memberships are sliding-scale and nobody checks your maths, so the room ends up genuinely mixed.',
-    ],
-    goodFor: [
-      'Mixing yoga, capoeira & weights',
-      'Pay-what-you-can access',
-      'A genuinely mixed room',
     ],
     gallery: [
       'Warehouse floor',
@@ -3768,8 +3825,13 @@ async function seedListings(
         price: listing.price,
         blurb: listing.blurb,
         tagline: listing.tagline,
-        tags: listing.tags,
-        goodFor: listing.goodFor,
+        attributes: listing.attributes,
+        highlights: listing.highlights,
+        entryMode: listing.entryMode,
+        coverPolicy: listing.coverPolicy ?? null,
+        payments: listing.payments,
+        inclusionPractices: listing.inclusionPractices,
+        langs: listing.langs,
         whatItIs: listing.whatItIs.map((text, index) => ({
           id: `wit-${index}`,
           text,

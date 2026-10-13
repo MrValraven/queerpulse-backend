@@ -47,6 +47,9 @@ export interface AdminInviteDTO {
   // Both are optional free text the inviter typed; surfaced here for oversight.
   note: string | null;
   vouch: string | null;
+  // The inviter's own label for the invite (who it is for). Seen only by the
+  // inviter and admins.
+  privateNote: string | null;
   // True for a member's own personal invite; false for a system-minted one
   // (join-request approval, genesis bootstrap).
   personal: boolean;
@@ -96,6 +99,7 @@ export function toAdminInviteDTO(
     email: invite.email ?? null,
     note: invite.note ?? null,
     vouch: invite.vouch ?? null,
+    privateNote: invite.privateNote ?? null,
     personal: invite.personal,
     createdAt: invite.createdAt.toISOString(),
     expiresAt: invite.expiresAt ? invite.expiresAt.toISOString() : null,

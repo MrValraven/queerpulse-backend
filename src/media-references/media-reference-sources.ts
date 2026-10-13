@@ -36,6 +36,7 @@ import { Company } from '../companies/entities/company.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { PressContact } from '../press-kit/entities/press-contact.entity';
 import { Sticker } from '../stickers/entities/sticker.entity';
+import { StudioRelease } from '../studio/entities/studio-release.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
 
 // Re-exported so every existing importer of `toBareKey` from this module
@@ -258,6 +259,16 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     idColumn: 'id',
     labelColumns: ['title'],
     // No slug column on CinemaTitle — label-only reference on the frontend.
+  }),
+  // Studio v1: a release cover, always a persona-scoped key. Without this the
+  // orphan sweep and My uploads would read a live cover as unused.
+  plainSource({
+    type: 'studio-cover',
+    field: 'StudioRelease.coverKey',
+    entity: StudioRelease,
+    column: 'coverKey',
+    idColumn: 'id',
+    labelColumns: ['title'],
   }),
   plainSource({
     type: 'landlord',
@@ -656,6 +667,25 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
       ((row.photoGallery ?? []) as Array<{ image?: unknown }>)
         .map((photo) => photo?.image)
         .filter((value): value is string => typeof value === 'string'),
+  }),
+
+  arraySource({
+    type: 'listing',
+    field: 'Listing.coverPhoto.image',
+    entity: Listing,
+    // Raw SQL column name (see the gallery source above).
+    column: 'cover_photo',
+    idColumn: 'id',
+    labelColumns: ['name'],
+    slugColumn: 'slug',
+    // The owner's card cover: `{ image, alt }`. Only `image` holds a storage
+    // ref. A key that is both the cover and a gallery photo is reported by
+    // both sources, which names the same listing twice for that key; that is
+    // accepted, since dropping either source would hide a real reference.
+    extractRefs: (row) => {
+      const image = (row.coverPhoto as { image?: unknown } | null)?.image;
+      return typeof image === 'string' ? [image] : [];
+    },
   }),
 
   arraySource({

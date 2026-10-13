@@ -20,11 +20,19 @@ import {
  *   - '1:1'      avatar, group-avatar, and the "Square" freeform chip
  *   - '2:1'      story-cover, community-cover, event-cover, listing-photo
  *   - '3:1'      persona-cover
+ *   - '7:3'      listing-cover
  *   - 'original' the "Original" freeform chip (the source's own ratio)
  *   - 'free'     the identity crop's label
  * Adding a locked aspect to `CROP_CONFIG` means adding its label here too.
  */
-export const CROP_ASPECTS = ['1:1', '2:1', '3:1', 'original', 'free'] as const;
+export const CROP_ASPECTS = [
+  '1:1',
+  '2:1',
+  '3:1',
+  '7:3',
+  'original',
+  'free',
+] as const;
 
 export class CropRectDto {
   @IsNumber() @Min(0) @Max(1) x!: number;

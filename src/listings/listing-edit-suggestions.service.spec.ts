@@ -323,6 +323,27 @@ describe('ListingEditSuggestionsService', () => {
       );
     });
 
+    it('files a "Details and amenities" correction under the attributes field', async () => {
+      listings.findOne.mockResolvedValue({
+        id: 'listing-1',
+        slug: 'galeria-lume',
+        ownerId: 'owner-1',
+      });
+      suggestions.save.mockResolvedValue({
+        id: 'sugg-1',
+        status: ListingEditSuggestionStatus.Pending,
+      });
+
+      await service.submit('galeria-lume', 'member-1', {
+        field: 'attributes',
+        message: 'Something here is wrong: entry is no longer free.',
+      });
+
+      expect(suggestions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ field: 'attributes', proposedValue: null }),
+      );
+    });
+
     it('stores null when the proposed value is only whitespace, keeping prose-only submissions valid', async () => {
       listings.findOne.mockResolvedValue({
         id: 'listing-1',
@@ -409,6 +430,25 @@ describe('ListingEditSuggestionsService', () => {
       });
 
       expect(messages.join(' ')).toContain('other');
+    });
+
+    it('accepts the "attributes" bucket with prose alone', async () => {
+      expect(
+        await validateBody({
+          field: 'attributes',
+          message: 'The terrace closed last spring.',
+        }),
+      ).toEqual([]);
+    });
+
+    it('rejects a proposed value on the "attributes" bucket, which has no writable column', async () => {
+      const messages = await validateBody({
+        field: 'attributes',
+        message: 'They stopped doing drag shows.',
+        proposedValue: 'no drag shows',
+      });
+
+      expect(messages.join(' ')).toContain('attributes');
     });
 
     it('treats a blank proposed value as absent rather than as an error', async () => {

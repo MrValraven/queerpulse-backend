@@ -1,6 +1,7 @@
 import {
   ALWAYS_DELIVERED_NOTIFICATION_TYPES,
   NOTIFICATION_TYPE_CATEGORY,
+  NotificationPreferenceCategory,
   categoryForType,
 } from './notification-preferences';
 import { NotificationType } from './entities/notification.entity';
@@ -155,5 +156,19 @@ describe('bundle keys', () => {
 
   it('writes its own row when the subject field is missing', () => {
     expect(bundleKeyFor(NotificationType.ForumReply, {})).toBeNull();
+  });
+});
+
+describe('guest community notification classification', () => {
+  it.each([
+    NotificationType.EventCommunityInvite,
+    NotificationType.EventCommunityInviteResponse,
+  ])('files %s under gathering activity beside the co-host invite', (type) => {
+    expect(categoryForType(type)).toBe(
+      NotificationPreferenceCategory.EventActivity,
+    );
+    expect(categoryForType(type)).toBe(
+      categoryForType(NotificationType.EventCohostInvite),
+    );
   });
 });

@@ -14,8 +14,9 @@ import { AdminInvitesService } from './admin-invites.service';
   // `AdminMembersModule`. `User` backs `listInviters`' quota-override lookup
   // (read-only here; the write path is `AdminMembersService.updateInviteQuota`).
   // `ModAuditLog` is registered the same overlapping way (its owner is
-  // `ModerationModule`): the admin revoke writes an `invite_revoked` row through
-  // the transaction's own `EntityManager`, mirroring how `AdminMembersModule`
+  // `ModerationModule`): the admin revoke writes an `invite_revoked` row and
+  // the admin refresh writes an `invite_refreshed` row, each through the
+  // transaction's own `EntityManager`, mirroring how `AdminMembersModule`
   // registers it for `updateRole`/`grantStaffRole`/`updateInviteQuota`.
   imports: [TypeOrmModule.forFeature([Invite, ModAuditLog, Profile, User])],
   controllers: [AdminInvitesController],

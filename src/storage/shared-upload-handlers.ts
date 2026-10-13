@@ -115,6 +115,12 @@ export function allowsSharedUploads(
  *   `MyMediaService.deleteMine` accepts a persona-scoped key only when its
  *   registry row names the caller as the uploader, and only once nothing
  *   references it.
+ * - `StudioReleasesController.update` (Studio v1) re-sends a release's stored
+ *   cover, which is always persona-scoped. `StudioReleasesService` keeps it
+ *   when it is the stored value, and otherwise allows a persona-scoped key
+ *   only when the requester co-owns the persona it is registered to
+ *   (`assertNoForeignUploadIntroducedForPersona`), then copies it to a key of
+ *   the release's own persona.
  *
  * A new handler belongs here only with a check of the same strength.
  */
@@ -123,6 +129,7 @@ export const PERSONA_SCOPED_KEY_HANDLERS: ReadonlySet<string> = new Set([
   'SubprofilesController.replaceSection',
   'UploadsController.saveCrop',
   'MyMediaController.remove',
+  'StudioReleasesController.update',
 ]);
 
 /** Whether this controller+handler pair may carry a persona-scoped key.

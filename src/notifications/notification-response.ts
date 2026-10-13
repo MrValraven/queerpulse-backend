@@ -61,6 +61,11 @@ export interface NotificationResponse {
 export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.ConnectionRequest]: 'fromUserId',
   [NotificationType.ConnectionAccepted]: 'byUserId',
+  // The voucher, resolved for the bell + push. An ANONYMOUS vouch omits
+  // `voucherId` from the payload entirely (`onVouchCreated` only writes it for
+  // a named vouch), so this yields `null` and the row/push read as "Someone",
+  // while the listener still passes the voucher as the block/mute `actorId`
+  // argument, keeping that safety gate intact.
   [NotificationType.VouchReceived]: 'voucherId',
   [NotificationType.IntroductionMade]: 'requesterId',
   [NotificationType.EventInvite]: 'inviterId',
@@ -121,6 +126,12 @@ export const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.EventLineupInvite]: 'actorId',
   [NotificationType.EventLineupAccepted]: 'actorId',
   [NotificationType.EventLineupDeclined]: 'actorId',
+  // Guest communities. The organiser who invited the community, resolved for
+  // the guest team's bell, and the team member who answered, resolved for
+  // the organisers' bell. Each emit site passes the same id as the trailing
+  // `actorId` argument, so block and mute apply either way.
+  [NotificationType.EventCommunityInvite]: 'actorId',
+  [NotificationType.EventCommunityInviteResponse]: 'actorId',
   // The voucher, resolved for the bell + push. An ANONYMOUS safe-space vouch
   // omits `voucherId` from the payload entirely (the emit site only spreads it
   // for a named vouch), so this yields `null` and the row/push read as
@@ -344,6 +355,22 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.EventLineupInvite]: ['role'],
     [NotificationType.EventLineupAccepted]: ['role'],
     [NotificationType.EventLineupDeclined]: ['role'],
+    // Guest communities. The gathering's own title and the guest
+    // community's name for the copy, plus `leadCommunityName` when the emit
+    // site carried it (a private lead is left off there). `decision` picks the
+    // answer's sentence. `inviteId`, `eventSlug`, `communitySlug` and `source`
+    // ride in COMMON_PAYLOAD_KEYS and build `/collab-invites/:inviteId` or
+    // the gathering link.
+    [NotificationType.EventCommunityInvite]: [
+      'eventTitle',
+      'communityName',
+      'leadCommunityName',
+    ],
+    [NotificationType.EventCommunityInviteResponse]: [
+      'eventTitle',
+      'communityName',
+      'decision',
+    ],
     // LOC-06, a host's announcement to the people coming. `title` is the
     // GATHERING's own title (announcements have none of their own), and every
     // recipient holds a live RSVP or a standing invite to it, so they already

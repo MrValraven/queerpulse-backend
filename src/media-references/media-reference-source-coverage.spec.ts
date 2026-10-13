@@ -66,6 +66,9 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // Its own source, so a photo moved from the gallery into a shop item stays
   // referenced.
   'ListingShopItemPhotoDto.image': 'Listing.shopItems[].photo.image',
+  // The owner's card cover. Its own source, so a cover kept out of the
+  // gallery stays referenced.
+  'ListingCoverPhotoDto.image': 'Listing.coverPhoto.image',
   'UpdateSubprofileDTO.avatarUrl': 'Subprofile.avatarUrl',
   'UpdateSubprofileDTO.coverUrl': 'Subprofile.coverUrl',
   'SubprofileItemInputDTO.imageUrl': 'SubprofileItem.imageUrl',
@@ -104,6 +107,7 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // other required image slot is (see `ForumPostPhotoDto.image`). The source
   // was wired in an earlier task; this entry is the one this DTO needed.
   'CreateStickerDto.storageKey': 'Sticker.storageKey',
+  'UpdateStudioReleaseDto.coverKey': 'StudioRelease.coverKey',
 };
 
 /** Recursively lists every `.ts` file under a `dto/` directory beneath `root`
@@ -221,5 +225,14 @@ describe('shop item photos', () => {
       (source) => source.field === 'Listing.shopItems[].photo.image',
     );
     expect(shopItemSource?.type).toBe('listing');
+  });
+});
+
+describe('Studio release covers', () => {
+  it('are a studio-cover reference, so the orphan sweep and My uploads see them in use', () => {
+    const coverSource = MEDIA_REFERENCE_SOURCES.find(
+      (source) => source.field === 'StudioRelease.coverKey',
+    );
+    expect(coverSource?.type).toBe('studio-cover');
   });
 });

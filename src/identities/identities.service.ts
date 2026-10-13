@@ -207,10 +207,11 @@ export class IdentitiesService {
    *   exactly (the same fields the existing profile-author path already
    *   uses).
    * - `Listing`: `name` for `displayName`, `slug` for `handle`, and the
-   *   COVER photo, `photoGallery[0].image` resolved through `toImageUrl`,
-   *   for `avatarUrl`. The legacy `photos`/`alt` columns are explicitly
-   *   documented on the entity as not the source of truth for "what photos
-   *   does this listing have"; `photoGallery` is.
+   *   cover photo when the owner picked one, else `photoGallery[0].image`,
+   *   resolved through `toImageUrl`, for `avatarUrl`. The legacy
+   *   `photos`/`alt` columns are explicitly documented on the entity as not
+   *   the source of truth for "what photos does this listing have";
+   *   `photoGallery` is.
    * - `Subprofile`: `displayName` for `displayName`, `handle` for `handle`
    *   (nullable: a linked, unpublished persona may carry no global handle,
    *   only the nested `slug`, which is not independently routable without
@@ -335,7 +336,9 @@ export class IdentitiesService {
       result.set(identity.id, {
         displayName: listing.name,
         handle: listing.slug,
-        avatarUrl: toImageUrl(listing.photoGallery[0]?.image ?? null),
+        avatarUrl: toImageUrl(
+          listing.coverPhoto?.image || listing.photoGallery[0]?.image || null,
+        ),
       });
     }
 

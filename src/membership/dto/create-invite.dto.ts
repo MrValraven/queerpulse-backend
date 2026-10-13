@@ -17,4 +17,11 @@ export class CreateInviteDto {
   @IsString()
   @MaxLength(280)
   vouch?: string;
+
+  // The inviter's own label for the invite (who it is for). Seen only by the
+  // inviter and admins.
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  privateNote?: string;
 }

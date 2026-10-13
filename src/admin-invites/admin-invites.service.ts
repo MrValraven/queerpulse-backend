@@ -8,6 +8,7 @@ import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { resolveInviteStatus } from '../membership/invite-response';
+import { INVITE_TTL_MS } from '../membership/invites.service';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -272,6 +273,124 @@ export class AdminInvitesService {
     }
     throw new ConflictException(
       'This invite has already expired, so there is nothing to revoke.',
+    );
+  }
+
+  /**
+   * Refresh any expired invite platform-wide: `POST /admin/invites/:id/refresh`.
+   *
+   * The unscoped admin counterpart to the member-side resend
+   * (`InvitesService.resendInvite`), which only lets an inviter refresh their
+   * OWN expired invites. Addressed by the internal `id` the admin list already
+   * carries, the same way `revoke` is, and deliberately unscoped to an owner.
+   *
+   * The refresh reuses the SAME row: the status flips back to `pending` and
+   * `expiresAt` moves to now + `INVITE_TTL_MS`, so the link the inviter already
+   * shared keeps working under its original code. `createdAt` is untouched,
+   * which keeps it quota-neutral: the inviter's monthly allowance counts mints,
+   * and this is the same invitation given more time.
+   *
+   * Semantics, mirroring `revoke`:
+   *  - 404 when no invite carries that id;
+   *  - 409 unless the RESOLVED status (`resolveInviteStatus`) is 'expired', so
+   *    a lapsed-but-unswept `pending` row qualifies exactly as the admin list
+   *    shows it. Accepted, revoked, and still-valid invites each answer with
+   *    their own reason.
+   *
+   * The flip is a conditional update over `status IN (pending, expired)`, so a
+   * concurrent revoke or redemption that lands first makes this call lose
+   * cleanly; the loser re-reads and reports the state that actually won.
+   *
+   * AUDITED like `revoke`: a `mod_audit_logs` row with `action =
+   * 'invite_refreshed'`, the inviter as `targetUserId` + `targetName`, and the
+   * invite code in `note`, written in the SAME transaction as the update so the
+   * trail and the column always agree.
+   */
+  async refresh(
+    inviteId: string,
+    actorUserId: string,
+  ): Promise<AdminInviteDTO> {
+    const now = new Date();
+    const invite = await this.invites.findOne({ where: { id: inviteId } });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    this.assertRefreshable(invite, now);
+
+    const inviterRef =
+      (await new MemberLookup(this.profiles).byUserIds([invite.inviterId])).get(
+        invite.inviterId,
+      ) ?? null;
+
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.update(
+        Invite,
+        {
+          id: invite.id,
+          status: In([InviteStatus.Pending, InviteStatus.Expired]),
+        },
+        {
+          status: InviteStatus.Pending,
+          expiresAt: new Date(now.getTime() + INVITE_TTL_MS),
+        },
+      );
+      if (result.affected !== 1) {
+        // Lost a race with a revoke or a redemption that landed between the
+        // read and the update. Re-read and report the state that won.
+        const current = await manager.findOne(Invite, {
+          where: { id: invite.id },
+        });
+        if (!current) {
+          throw new NotFoundException('Invite not found');
+        }
+        this.assertRefreshable(current, new Date());
+        throw new ConflictException('Only an expired invite can be refreshed.');
+      }
+
+      const auditLogs = manager.getRepository(ModAuditLog);
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: actorUserId,
+          targetUserId: invite.inviterId,
+          targetName: inviterRef
+            ? `${inviterRef.firstName} ${inviterRef.lastName}`.trim()
+            : null,
+          action: 'invite_refreshed',
+          reasonCode: null,
+          note: invite.code,
+          duration: null,
+        }),
+      );
+    });
+
+    const refreshed = await this.invites.findOne({ where: { id: invite.id } });
+    if (!refreshed) {
+      throw new NotFoundException('Invite not found');
+    }
+    // Only an expired invite reaches this point, and an expired invite was
+    // never redeemed, so `acceptedBy` is null and there is no invitee.
+    return toAdminInviteDTO(refreshed, inviterRef, null, now);
+  }
+
+  /** 409 with the reason an invite cannot be refreshed, or return quietly when
+   *  it can. Reads the RESOLVED status so a lapsed-but-unswept `pending` row
+   *  counts as expired, exactly as the admin list renders it. */
+  private assertRefreshable(invite: Invite, now: Date): void {
+    const status = resolveInviteStatus(invite, now);
+    if (status === 'expired') return;
+    if (status === 'used') {
+      throw new ConflictException(
+        'This invite has already been accepted, so there is nothing to refresh.',
+      );
+    }
+    if (status === 'revoked') {
+      throw new ConflictException(
+        'This invite was revoked, so it stays revoked.',
+      );
+    }
+    throw new ConflictException(
+      'This invite is still active, so there is nothing to refresh.',
     );
   }
 

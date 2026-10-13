@@ -10,6 +10,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventBan } from './entities/event-ban.entity';
 import { Event, EventVenueConfirmation } from './entities/event.entity';
+import type { CommunityHostingFields } from './event-community-hosting';
 import type { FormatDetails, GatheringFamily } from './gathering-family';
 import {
   mergeRsvpQuestions,
@@ -228,7 +229,8 @@ export interface EventDetail extends EventSummary {
   // row of a hot browse/search page for a field only the edit flow needs.
   communitySlug: string | null;
   // The community this gathering is hosted with, for the event page's "with
-  // <community>" line: its slug, display name and access tier. Independent of
+  // <community>" line: its slug, display name, access tier and resolved
+  // (`toImageUrl`) avatar, null when it has none. Independent of
   // `visibility`, so a `public` gathering can carry one. Resolved in
   // `EventsService.buildDetail` alongside `communitySlug`.
   //
@@ -241,7 +243,15 @@ export interface EventDetail extends EventSummary {
     slug: string;
     name: string;
     accessTier: AccessTier;
+    avatarImageUrl: string | null;
   } | null;
+  // Guest communities (2026-10-08): the ACCEPTED guests in invite order.
+  // Pending and declined rows reach organisers only, through
+  // `GET /events/:slug/communities`. A private guest drops out for a viewer
+  // who is neither on its roster nor an organiser, the rule `community`
+  // follows above. `viewerManages` drives the guest team's "Remove our
+  // community" action.
+  guestCommunities: EventDetailGuestCommunity[];
   // The linked venue's display name + public slug (or null when `listingId`
   // is null, or the listing is no longer live), resolved via
   // `ListingLookupService.findLive` in `EventsService.buildDetail`, same
@@ -873,3 +883,21 @@ export function isFreeCost(cost: string | null): boolean {
     normalized === 'no cost'
   );
 }
+
+/** One accepted guest community on a gathering's detail. `id` is the
+ *  `event_communities` row id, which `DELETE /event-communities/:id` takes.
+ *  `avatarImageUrl` is resolved (`toImageUrl`), as on `EventDetail.community`. */
+export interface EventDetailGuestCommunity {
+  id: string;
+  slug: string;
+  name: string;
+  accessTier: AccessTier;
+  avatarImageUrl: string | null;
+  /** The viewer is an owner, co-owner or mod of this guest community. */
+  viewerManages: boolean;
+}
+
+/** A row of a community's own upcoming lane (the pulse): the summary plus
+ *  whether this community leads the gathering or joined it as a guest. */
+export type CommunityUpcomingEventSummary = EventSummary &
+  CommunityHostingFields;

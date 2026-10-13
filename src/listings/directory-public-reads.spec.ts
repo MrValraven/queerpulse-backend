@@ -1,7 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, FindOperator } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import {
   Event,
@@ -16,7 +16,11 @@ import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
-import { ADULT_DIRECTORY_LIMIT, DirectoryService } from './directory.service';
+import {
+  ADULT_DIRECTORY_LIMIT,
+  DirectoryService,
+  HOSTED_GATHERING_LOOKBACK_DAYS,
+} from './directory.service';
 import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
@@ -29,7 +33,7 @@ import {
   DIRECTORY_CARD_HOURS_EXCEPTION_DAYS_AHEAD,
   toDirectoryCard,
 } from './listing-response';
-import { LISTING_TAG_GROUPS } from './listing-tags';
+import { LISTING_ATTRIBUTE_GROUPS } from './listing-attributes';
 
 /**
  * The public directory reads that changed with the 2026-08-25 "Local" build:
@@ -120,7 +124,11 @@ function makeEvent(overrides: Partial<Event> = {}): Event {
 
 describe('DirectoryService public reads', () => {
   let service: DirectoryService;
-  let listings: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  let listings: {
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    query: jest.Mock;
+  };
   let events: { find: jest.Mock };
   let queryBuilder: Record<string, jest.Mock>;
 
@@ -153,6 +161,7 @@ describe('DirectoryService public reads', () => {
     listings = {
       findOne: jest.fn().mockResolvedValue(makeListing()),
       createQueryBuilder: jest.fn(() => queryBuilder),
+      query: jest.fn().mockResolvedValue([]),
     };
     events = { find: jest.fn().mockResolvedValue([]) };
 
@@ -476,6 +485,32 @@ describe('DirectoryService public reads', () => {
       expect(arms[0]?.['listingId']).toBe('listing-1');
     });
 
+    it('drops taken-down gatherings in-query on every arm, signed in or not', async () => {
+      // A post-filter would let `take: 4` come back short, so the exclusion
+      // has to ride on each OR arm as a Raw operator on `id`.
+      for (const isActiveMemberViewer of [false, true]) {
+        events.find.mockClear();
+        await service.getDirectoryBySlug('casa-t', isActiveMemberViewer);
+
+        const arms = upcomingArms();
+        expect(arms).toHaveLength(4);
+        for (const arm of arms) {
+          const idFilter = arm['id'] as FindOperator<unknown>;
+          expect(idFilter).toBeInstanceOf(FindOperator);
+          expect(idFilter.type).toBe('raw');
+          expect(idFilter.objectLiteralParameters).toEqual({
+            eventSubjectType: 'event',
+          });
+          const sql = idFilter.getSql?.('"Event"."id"') ?? '';
+          expect(sql).toContain('NOT EXISTS');
+          expect(sql).toContain('"content_moderation"');
+          expect(sql).toContain('= "Event"."id"::text');
+          expect(sql).toContain('"hidden_at" IS NOT NULL');
+          expect(sql).toContain('"removed_at" IS NOT NULL');
+        }
+      }
+    });
+
     it('still takes four, soonest first', async () => {
       await service.getDirectoryBySlug('casa-t');
 
@@ -625,6 +660,12 @@ describe('DirectoryService public reads', () => {
       ).toHaveLength(1);
     });
 
+    it('filters on migrant like any other owned value', async () => {
+      await service.listDirectory({ owned: ['migrant'] });
+
+      expect(overlapCall()?.[1]).toEqual({ ownedBy: ['migrant'] });
+    });
+
     it('applies the filter in the paged query, so `total` counts only matches', async () => {
       queryBuilder['skip'] = jest.fn().mockReturnValue(queryBuilder);
       queryBuilder['getManyAndCount'] = jest.fn().mockResolvedValue([[], 0]);
@@ -640,58 +681,204 @@ describe('DirectoryService public reads', () => {
     });
   });
 
-  // --- "list your business" wizard: the curated tag vocabulary -------------
-  describe('listTagVocabulary', () => {
-    it('returns every curated group with its place and online tags, in order', () => {
-      expect(service.listTagVocabulary()).toEqual(
-        LISTING_TAG_GROUPS.map((group) => ({
-          id: group.id,
-          tags: [...group.tags],
-          onlineTags: [...group.onlineTags],
-        })),
+  // --- the attribute vocabulary for the owner picker and the filters --------
+  describe('listAttributeVocabulary', () => {
+    it('serves every attribute group in contract order, with its scope', () => {
+      const vocabulary = service.listAttributeVocabulary();
+
+      expect(vocabulary.groups.map((group) => group.id)).toEqual(
+        LISTING_ATTRIBUTE_GROUPS.map((group) => group.id),
       );
-    });
-
-    it('lists the groups in display order, from visiting to sessions', () => {
-      const groupIds = service.listTagVocabulary().map((group) => group.id);
-
-      expect(groupIds).toEqual([
-        'visiting',
-        'happening',
-        'foodDrink',
-        'pricing',
-        'ordering',
-        'sessions',
+      expect(
+        vocabulary.groups.find((group) => group.id === 'grooming'),
+      ).toMatchObject({ kinds: ['place', 'mobile'], categories: ['grooming'] });
+      expect(vocabulary.sensitive).toEqual([
+        'sexual-health-prep',
+        'trans-care-experience',
       ]);
-    });
-
-    it('carries the online-only groups with an empty place list', () => {
-      const sessionsGroup = service
-        .listTagVocabulary()
-        .find((group) => group.id === 'sessions');
-
-      expect(sessionsGroup).toEqual({
-        id: 'sessions',
-        tags: [],
-        onlineTags: ['Free first call'],
-      });
+      expect(vocabulary.languages).toHaveLength(17);
     });
 
     it('hands out copies, so a caller mutating the response leaves the vocabulary intact', () => {
-      const [firstGroup] = service.listTagVocabulary();
-      firstGroup?.tags.push('Invented tag');
-      firstGroup?.onlineTags.push('Invented online tag');
+      service.listAttributeVocabulary().groups[0]?.attributes.push('invented');
 
-      expect(LISTING_TAG_GROUPS[0]?.tags).not.toContain('Invented tag');
-      expect(LISTING_TAG_GROUPS[0]?.onlineTags).not.toContain(
-        'Invented online tag',
-      );
+      expect(LISTING_ATTRIBUTE_GROUPS[0]?.attributes).not.toContain('invented');
     });
 
     it('never reads the database', () => {
-      service.listTagVocabulary();
+      service.listAttributeVocabulary();
 
       expect(listings.createQueryBuilder).not.toHaveBeenCalled();
+      expect(listings.query).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- the attribute and getting-in filters -----------------------------------
+  describe('listDirectory attribute, entry, payment, language and practice filters', () => {
+    it('ANDs attributes in one containment test on the attributes column', async () => {
+      await service.listDirectory({ attr: ['terrace', 'wifi'] });
+
+      expect(andWhereCalls()).toContainEqual([
+        '"listing"."attributes" @> CAST(:attributeFilter AS text[])',
+        { attributeFilter: ['terrace', 'wifi'] },
+      ]);
+    });
+
+    it('matches one way in exactly', async () => {
+      await service.listDirectory({ entry: 'walkIn' });
+
+      expect(andWhereCalls()).toContainEqual([
+        '"listing"."entry_mode" = :entryModeFilter',
+        { entryModeFilter: 'walkIn' },
+      ]);
+    });
+
+    it('ANDs ways to pay in one containment test', async () => {
+      await service.listDirectory({ pay: ['mbway', 'cash'] });
+
+      expect(andWhereCalls()).toContainEqual([
+        '"listing"."payments" @> CAST(:paymentFilter AS text[])',
+        { paymentFilter: ['mbway', 'cash'] },
+      ]);
+    });
+
+    it('ORs languages in one overlap test', async () => {
+      await service.listDirectory({ lang: ['pt', 'pt-BR'] });
+
+      expect(andWhereCalls()).toContainEqual([
+        '"listing"."langs" && CAST(:languageFilter AS text[])',
+        { languageFilter: ['pt', 'pt-BR'] },
+      ]);
+    });
+
+    it('ANDs inclusion practices in one containment test', async () => {
+      await service.listDirectory({ practice: ['chosen-name'] });
+
+      expect(andWhereCalls()).toContainEqual([
+        '"listing"."inclusion_practices" @> CAST(:practiceFilter AS text[])',
+        { practiceFilter: ['chosen-name'] },
+      ]);
+    });
+
+    it('adds none of these conditions when the query carries none, or empty lists', async () => {
+      await service.listDirectory({
+        attr: [],
+        pay: [],
+        lang: [],
+        practice: [],
+      });
+
+      const conditions = andWhereCalls().map(([condition]) =>
+        String(condition),
+      );
+      for (const column of [
+        '"listing"."attributes"',
+        '"listing"."entry_mode"',
+        '"listing"."payments"',
+        '"listing"."langs"',
+        '"listing"."inclusion_practices"',
+      ]) {
+        expect(conditions.some((condition) => condition.includes(column))).toBe(
+          false,
+        );
+      }
+    });
+
+    it('applies the filters in the paged query, so total counts only matches', async () => {
+      queryBuilder['skip'] = jest.fn().mockReturnValue(queryBuilder);
+      queryBuilder['getManyAndCount'] = jest.fn().mockResolvedValue([[], 0]);
+
+      const page = await service.listDirectoryPage({
+        attr: ['terrace'],
+        lang: ['en'],
+        page: 1,
+      });
+
+      expect(andWhereCalls()).toContainEqual([
+        '"listing"."attributes" @> CAST(:attributeFilter AS text[])',
+        { attributeFilter: ['terrace'] },
+      ]);
+      expect(queryBuilder['getManyAndCount']).toHaveBeenCalledTimes(1);
+      expect(page.total).toBe(0);
+    });
+  });
+
+  // --- hostsGatherings: worked out from the gatherings themselves ---------
+  describe('hostsGatherings', () => {
+    it('asks only about public, published gatherings in the window, with confirmed venues, in one query per page', async () => {
+      (queryBuilder['getMany'] as jest.Mock).mockResolvedValue([
+        makeListing({ id: 'listing-1' }),
+        makeListing({ id: 'listing-2', slug: 'b-side' }),
+      ]);
+      listings.query.mockResolvedValue([{ listingId: 'listing-2' }]);
+
+      const cards = await service.listDirectory({});
+
+      expect(listings.query).toHaveBeenCalledTimes(1);
+      const [sql, parameters] = listings.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(parameters).toEqual([
+        ['listing-1', 'listing-2'],
+        EventStatus.Published,
+        EventVisibility.Public,
+        EventVenueConfirmation.Confirmed,
+        HOSTED_GATHERING_LOOKBACK_DAYS,
+        'event',
+      ]);
+      expect(HOSTED_GATHERING_LOOKBACK_DAYS).toBe(180);
+      expect(sql).toContain('"event"."status" = $2');
+      expect(sql).toContain('"event"."visibility" = $3');
+      expect(sql).toContain('"event"."run_by_listing_id" = "listing"."id"');
+      expect(sql).toContain('"event"."listing_id" = "listing"."id"');
+      expect(sql).toContain('"event"."venue_confirmation" = $4');
+      expect(sql).toContain('"event"."start_at" >= now()');
+      expect(sql).toContain("($5::int * interval '1 day')");
+      expect(cards.map((card) => card.hostsGatherings)).toEqual([false, true]);
+    });
+
+    it('never counts a gathering a moderator took down', async () => {
+      (queryBuilder['getMany'] as jest.Mock).mockResolvedValue([
+        makeListing({ id: 'listing-1' }),
+      ]);
+
+      await service.listDirectory({});
+
+      const [sql, parameters] = listings.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(parameters[5]).toBe('event');
+      expect(sql).toContain('NOT EXISTS');
+      expect(sql).toContain('"content_moderation" "cm"');
+      expect(sql).toContain('"cm"."subject_type" = $6');
+      expect(sql).toContain('"cm"."subject_id" = "event"."id"::text');
+      expect(sql).toContain(
+        '("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)',
+      );
+    });
+
+    it('makes no gatherings query for an empty page', async () => {
+      await service.listDirectory({});
+
+      expect(listings.query).not.toHaveBeenCalled();
+    });
+
+    it('carries hostsGatherings on the detail', async () => {
+      listings.query.mockResolvedValue([{ listingId: 'listing-1' }]);
+
+      const detail = await service.getDirectoryBySlug('casa-t');
+
+      expect(detail.hostsGatherings).toBe(true);
+      expect(listings.query).toHaveBeenCalledWith(expect.any(String), [
+        ['listing-1'],
+        EventStatus.Published,
+        EventVisibility.Public,
+        EventVenueConfirmation.Confirmed,
+        HOSTED_GATHERING_LOOKBACK_DAYS,
+        'event',
+      ]);
     });
   });
 

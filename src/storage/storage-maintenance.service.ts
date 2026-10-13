@@ -2,10 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { Message } from '../messaging/entities/message.entity';
 import { toBareKey } from './bare-key';
+import { isStudioAudioKey } from './storage-key';
 import { StorageService, StoredObject } from './storage.service';
 
 // How many keys are checked for references per resolver call. The resolver's
@@ -35,7 +36,8 @@ const ORPHAN_SWEEP_CRON =
  *  - REFERENCE CHECK: every candidate is run through `MediaReferenceResolver`
  *    (which answers "is this key referenced by any image column?") AND a
  *    `Message.attachment` lookup — message-image keys have NO resolver source,
- *    so without that second check a referenced DM image would be swept.
+ *    so without that second check a referenced DM image would be swept;
+ *    and, for Studio audio, a `studio_tracks.audio_key` lookup (Studio v1).
  *  - DEGRADED GUARD: if the resolver reports `degraded` (a source query threw),
  *    the batch is skipped entirely — an incomplete reference set is never
  *    treated as a green light to delete.
@@ -58,6 +60,7 @@ export class StorageMaintenanceService {
     private readonly storage: StorageService,
     private readonly mediaReferenceResolver: MediaReferenceResolver,
     @InjectRepository(Message) private readonly messages: Repository<Message>,
+    private readonly dataSource: DataSource,
   ) {}
 
   private get isEnabled(): boolean {
@@ -148,6 +151,14 @@ export class StorageMaintenanceService {
             this.logger.log(`Orphan (dry-run, not deleted): ${orphanKey}`);
           } else {
             await this.storage.deleteObjectByKey(orphanKey);
+            // Studio v1: an unconfirmed track upload also leaves a registry
+            // row naming its persona; it goes with the object.
+            if (isStudioAudioKey(orphanKey)) {
+              await this.dataSource.query(
+                `DELETE FROM "studio_audio_uploads" WHERE "storage_key" = $1`,
+                [orphanKey],
+              );
+            }
             deletedCount += 1;
           }
         }
@@ -171,6 +182,8 @@ export class StorageMaintenanceService {
       return [];
     }
     const messageReferencedKeys = await this.keysReferencedByMessages(bareKeys);
+    const studioTrackReferencedKeys =
+      await this.keysReferencedByStudioTracks(bareKeys);
     const orphans: string[] = [];
     for (const object of batch) {
       const bareKey = toBareKey(object.key);
@@ -178,6 +191,9 @@ export class StorageMaintenanceService {
         continue;
       }
       if (messageReferencedKeys.has(bareKey)) {
+        continue;
+      }
+      if (studioTrackReferencedKeys.has(bareKey)) {
         continue;
       }
       orphans.push(object.key);
@@ -218,6 +234,25 @@ export class StorageMaintenanceService {
       }
     }
     return referenced;
+  }
+
+  // Studio v1: a track's audio has no `MediaReferenceSource` (it is no
+  // image), so without this check the sweep would delete a live track's
+  // audio. Only Studio audio keys are asked about.
+  private async keysReferencedByStudioTracks(
+    bareKeys: string[],
+  ): Promise<Set<string>> {
+    const studioAudioKeys = bareKeys.filter((bareKey) =>
+      isStudioAudioKey(bareKey),
+    );
+    if (studioAudioKeys.length === 0) {
+      return new Set();
+    }
+    const rows: { audio_key: string }[] = await this.dataSource.query(
+      `SELECT "audio_key" FROM "studio_tracks" WHERE "audio_key" = ANY($1)`,
+      [studioAudioKeys],
+    );
+    return new Set(rows.map((row) => row.audio_key));
   }
 
   private logSummary(

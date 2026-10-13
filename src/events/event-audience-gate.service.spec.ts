@@ -5,6 +5,7 @@ import { RosterRole } from '../communities/entities/community-member.entity';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventVisibility } from './entities/event.entity';
 import { EventCohost } from './entities/event-cohost.entity';
+import { EventCommunityStatus } from './entities/event-community.entity';
 
 function build() {
   const invites = {
@@ -33,6 +34,8 @@ function build() {
   // Read by `audienceAmong` alone (the `community` tier for a candidate set).
   const communityMembers = { find: jest.fn().mockResolvedValue([]) };
   const communities = { findOne: jest.fn().mockResolvedValue(null) };
+  // Accepted guest communities widen the `community` tier. None by default.
+  const eventCommunities = { find: jest.fn().mockResolvedValue([]) };
   const service = new EventAudienceGateService(
     invites as never,
     rsvps as never,
@@ -41,6 +44,7 @@ function build() {
     membership as never,
     communityMembers as never,
     communities as never,
+    eventCommunities as never,
   );
   return {
     service,
@@ -51,6 +55,7 @@ function build() {
     membership,
     communityMembers,
     communities,
+    eventCommunities,
   };
 }
 
@@ -141,6 +146,7 @@ function buildWithRoster(
     membership,
     built.communityMembers as never,
     built.communities as never,
+    built.eventCommunities as never,
   );
   return { service };
 }
@@ -629,6 +635,183 @@ describe('EventAudienceGateService', () => {
       const { clause, params } = await service.scopedVisibilityWhere(VIEWER_ID);
       expect(clause).not.toContain(':communityVisibility');
       expect(params.viewerCommunityIds).toBeUndefined();
+    });
+  });
+
+  describe('accepted guest communities (2026-10-08)', () => {
+    const LEAD_ID = 'lead-1';
+    const GUEST_ID = 'guest-1';
+    const PENDING_GUEST_ID = 'guest-pending';
+    const DECLINED_GUEST_ID = 'guest-declined';
+
+    type GuestRow = {
+      eventId: string;
+      communityId: string;
+      status: EventCommunityStatus;
+    };
+
+    // A fake honouring the `where` it is handed, so a pending or declined
+    // row only stays out if the gate actually asked for accepted rows.
+    const seedGuestRows = (
+      eventCommunities: { find: jest.Mock },
+      rows: GuestRow[],
+    ): void => {
+      eventCommunities.find.mockImplementation(
+        ({ where }: { where: WhereShape }) =>
+          Promise.resolve(rows.filter((row) => matchesWhere(where, row))),
+      );
+    };
+
+    const communityEvent = (id = EVENT_ID) =>
+      baseEvent({
+        id,
+        visibility: EventVisibility.Community,
+        communityId: LEAD_ID,
+      });
+
+    it('admits a member of an accepted guest on the detail page', async () => {
+      const { service, eventCommunities, membership } = build();
+      seedGuestRows(eventCommunities, [
+        {
+          eventId: EVENT_ID,
+          communityId: GUEST_ID,
+          status: EventCommunityStatus.Accepted,
+        },
+      ]);
+      membership.effectiveCommunityIdsForUser.mockResolvedValue([GUEST_ID]);
+
+      await expect(
+        service.assertViewable(communityEvent(), VIEWER_ID, false),
+      ).resolves.toBeUndefined();
+    });
+
+    it('keeps members of a pending or a declined guest out of the detail page', async () => {
+      const { service, eventCommunities, membership } = build();
+      seedGuestRows(eventCommunities, [
+        {
+          eventId: EVENT_ID,
+          communityId: PENDING_GUEST_ID,
+          status: EventCommunityStatus.Pending,
+        },
+        {
+          eventId: EVENT_ID,
+          communityId: DECLINED_GUEST_ID,
+          status: EventCommunityStatus.Declined,
+        },
+      ]);
+      membership.effectiveCommunityIdsForUser.mockResolvedValue([
+        PENDING_GUEST_ID,
+        DECLINED_GUEST_ID,
+      ]);
+
+      await expect(
+        service.assertViewable(communityEvent(), VIEWER_ID, false),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('reads no guest rows for a viewer already on the lead roster', async () => {
+      const { service, eventCommunities, membership } = build();
+      membership.isMember.mockResolvedValue(true);
+
+      await service.assertViewable(communityEvent(), VIEWER_ID, false);
+
+      expect(eventCommunities.find).not.toHaveBeenCalled();
+    });
+
+    it('keeps an accepted guest gathering on a filtered page and drops a pending one, in one read', async () => {
+      const { service, eventCommunities, membership } = build();
+      seedGuestRows(eventCommunities, [
+        {
+          eventId: 'event-accepted',
+          communityId: GUEST_ID,
+          status: EventCommunityStatus.Accepted,
+        },
+        {
+          eventId: 'event-pending',
+          communityId: GUEST_ID,
+          status: EventCommunityStatus.Pending,
+        },
+      ]);
+      membership.effectiveCommunityIdsForUser.mockResolvedValue([GUEST_ID]);
+      const acceptedEvent = communityEvent('event-accepted');
+      const pendingEvent = communityEvent('event-pending');
+
+      const visible = await service.filterViewable(
+        [acceptedEvent, pendingEvent],
+        VIEWER_ID,
+      );
+
+      expect(visible).toEqual([acceptedEvent]);
+      expect(eventCommunities.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads no guest rows for a page with no community-tier gathering', async () => {
+      const { service, eventCommunities } = build();
+
+      await service.filterViewable([baseEvent()], VIEWER_ID);
+
+      expect(eventCommunities.find).not.toHaveBeenCalled();
+    });
+
+    it('admits the roster of an accepted guest among mention candidates, and only that guest', async () => {
+      const { service, eventCommunities, communities, communityMembers } =
+        build();
+      seedGuestRows(eventCommunities, [
+        {
+          eventId: EVENT_ID,
+          communityId: GUEST_ID,
+          status: EventCommunityStatus.Accepted,
+        },
+        {
+          eventId: EVENT_ID,
+          communityId: PENDING_GUEST_ID,
+          status: EventCommunityStatus.Pending,
+        },
+      ]);
+      communities.findOne.mockImplementation(
+        ({ where }: { where: { id: string } }) =>
+          Promise.resolve({ id: where.id, parentId: null }),
+      );
+      const roster = [
+        { userId: 'lead-member', communityId: LEAD_ID, role: 'member' },
+        { userId: 'guest-member', communityId: GUEST_ID, role: 'member' },
+        {
+          userId: 'pending-member',
+          communityId: PENDING_GUEST_ID,
+          role: 'member',
+        },
+      ];
+      communityMembers.find.mockImplementation(
+        ({ where }: { where: WhereShape }) =>
+          Promise.resolve(roster.filter((row) => matchesWhere(where, row))),
+      );
+
+      const audience = await service.audienceAmong(communityEvent(), [
+        'lead-member',
+        'guest-member',
+        'pending-member',
+        'stranger',
+      ]);
+
+      expect([...audience.viewerUserIds].sort()).toEqual(
+        ['guest-member', 'lead-member'].sort(),
+      );
+    });
+
+    it('admits accepted guests through the viewer community set in browse', async () => {
+      const { service, membership } = build();
+      membership.effectiveCommunityIdsForUser.mockResolvedValue([GUEST_ID]);
+
+      const { clause, params } = await service.scopedVisibilityWhere(VIEWER_ID);
+
+      expect(clause).toContain('e.community_id IN (:...viewerCommunityIds)');
+      expect(clause).toContain(`"scope_guest"."status" = 'accepted'`);
+      expect(clause).toContain('"scope_guest"."event_id" = "e"."id"');
+      expect(clause).toContain(
+        '"scope_guest"."community_id" IN (:...viewerCommunityIds)',
+      );
+      expect(clause).not.toMatch(/\.communityId|"communityId"/);
+      expect(params.viewerCommunityIds).toEqual([GUEST_ID]);
     });
   });
 });

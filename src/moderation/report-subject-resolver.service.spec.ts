@@ -801,4 +801,49 @@ describe('ReportSubjectResolverService', () => {
       expect(resolution.communityId).toBeNull();
     });
   });
+
+  describe('a Studio release', () => {
+    const RELEASE_ID = '9d000000-0000-4000-8000-000000000001';
+
+    it('names the persona creator and quotes the title and artist', async () => {
+      const { service, query } = build((sql, keys) =>
+        sql.includes('FROM studio_releases r')
+          ? [
+              {
+                key: keys[0]!,
+                author_user_id: 'creator-1',
+                excerpt: 'Lisbon at four by Night Shift',
+                community_id: null,
+              },
+            ]
+          : [],
+      );
+
+      const resolution = await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.StudioRelease,
+          subjectId: RELEASE_ID,
+        }),
+      );
+
+      expect(resolution).toEqual({
+        authorUserId: 'creator-1',
+        excerpt: 'Lisbon at four by Night Shift',
+        communityId: null,
+        isAuthorAmbiguous: false,
+      });
+      expect(askedKeys(query)).toEqual([[RELEASE_ID]]);
+    });
+
+    it('sends no non-uuid subject id to Postgres', async () => {
+      const { service, query } = build();
+      await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.StudioRelease,
+          subjectId: 'lisbon-at-four',
+        }),
+      );
+      expect(query).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -15,7 +15,11 @@ import {
   resolveListingLocation,
   resolveListingTimezone,
 } from './listing-city';
-import { resolveListingTagsOrThrow } from './listing-tags';
+import {
+  ListingAttributeFieldName,
+  ListingAttributeFields,
+  resolveListingAttributeFields,
+} from './listing-attribute-rules';
 import { ListingOwnedBy, normalizeListingOwnedBy } from './listing-owned-by';
 import { toImageUrl } from '../common/image-url';
 import {
@@ -172,10 +176,12 @@ import {
 } from './listing-response';
 import {
   ListingGalleryPhoto,
+  coverImageReferences,
   galleryFromLegacySlots,
   galleryImageReferences,
   galleryWithLegacySlotPatch,
   legacySlotsFromGallery,
+  normalizeCoverPhoto,
   normalizeGallery,
 } from './listing-photo-gallery';
 
@@ -433,6 +439,10 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
   | 'verify'
   | 'notify'
   | 'contactEmail'
+  // Retired 2026-10-08 (`AddListingAttributes1830800000000`): no write path
+  // stores them any more, so a new row keeps the column default `{}`.
+  | 'tags'
+  | 'goodFor'
   // Partner-space fields are an ops/moderation concern, never part of the
   // member-submission wizard — they default at the DB level on create.
   | 'isPartneredWithQueerpulse'
@@ -487,8 +497,6 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
     blurb: dto.blurb ?? '',
     tagline: dto.tagline ?? '',
     whatItIs: (dto.whatItIs ?? []) as ListingWitLine[],
-    tags: dto.tags ?? [],
-    goodFor: dto.goodFor ?? [],
     // Always the COMPLETE question set: an omitted question is stored as a
     // real `unknown`, which is a different stored value from `no` and reads
     // as "we have not said" rather than as a denial.
@@ -504,6 +512,18 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
       dto.pricingMode ??
       (dto.online ? 'services' : defaultPricingModeForCats(dto.cats ?? [])),
     langs: dto.langs ?? [],
+    // The attribute fields as sent. `resolveCreateKindFields` runs the
+    // attribute rules over them before anything is stored.
+    attributes: dto.attributes ?? [],
+    highlights: dto.highlights ?? [],
+    entryMode: dto.entryMode ?? null,
+    coverPolicy: dto.coverPolicy ?? null,
+    coverFreeBefore: dto.coverFreeBefore ?? null,
+    payments: dto.payments ?? [],
+    issuesNifInvoices: dto.issuesNifInvoices ?? null,
+    inclusionPractices: dto.inclusionPractices ?? [],
+    saferSpacePolicyUrl: dto.saferSpacePolicyUrl ?? null,
+    langsOther: (dto.langsOther ?? '').trim(),
     // An online-only listing carries no location, whatever the client sent.
     online: dto.online ?? false,
     // Stored false for an online-only listing, which sells online by
@@ -528,6 +548,7 @@ function normalizeCreate(dto: ListingCreateInput): Omit<
     hoursExceptions: normalizeHoursExceptions(dto.hoursExceptions),
     social: normalizeSocial(dto.social),
     photoGallery: gallery,
+    coverPhoto: normalizeCoverPhoto(dto.coverPhoto),
     // The legacy `photos`/`alt` columns are a DERIVED mirror of the first four
     // gallery entries, rewritten from the gallery on every write and never
     // authored directly. See `AddListingPhotoGallery1794310000000` for why
@@ -616,8 +637,27 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.whatItIs !== undefined
       ? { whatItIs: dto.whatItIs as ListingWitLine[] }
       : {}),
-    ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
-    ...(dto.goodFor !== undefined ? { goodFor: dto.goodFor } : {}),
+    // The attribute fields as sent, each replacing the stored value; `null`
+    // clears a single answer. `applyListingEdit` runs the attribute rules on
+    // the merged row before anything is saved. A body may still carry the
+    // retired `tags` and `goodFor`; nothing writes them.
+    ...(dto.attributes !== undefined ? { attributes: dto.attributes } : {}),
+    ...(dto.highlights !== undefined ? { highlights: dto.highlights } : {}),
+    ...(dto.entryMode !== undefined ? { entryMode: dto.entryMode } : {}),
+    ...(dto.coverPolicy !== undefined ? { coverPolicy: dto.coverPolicy } : {}),
+    ...(dto.coverFreeBefore !== undefined
+      ? { coverFreeBefore: dto.coverFreeBefore }
+      : {}),
+    ...(dto.payments !== undefined ? { payments: dto.payments } : {}),
+    ...(dto.issuesNifInvoices !== undefined
+      ? { issuesNifInvoices: dto.issuesNifInvoices }
+      : {}),
+    ...(dto.inclusionPractices !== undefined
+      ? { inclusionPractices: dto.inclusionPractices }
+      : {}),
+    ...(dto.saferSpacePolicyUrl !== undefined
+      ? { saferSpacePolicyUrl: dto.saferSpacePolicyUrl }
+      : {}),
     // Answers MERGE per question (the `social` idiom), so an owner correcting
     // one answer does not blank the other five back to `unknown`. The result
     // is re-normalized, so the stored map stays complete and every value stays
@@ -645,6 +685,10 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.menu !== undefined ? { menu: normalizeListingMenu(dto.menu) } : {}),
     ...(dto.pricingMode !== undefined ? { pricingMode: dto.pricingMode } : {}),
     ...(dto.langs !== undefined ? { langs: dto.langs } : {}),
+    // A `null` the validator lets through stores the column default `''`.
+    ...(dto.langsOther !== undefined
+      ? { langsOther: (dto.langsOther ?? '').trim() }
+      : {}),
     ...(dto.online !== undefined ? { online: dto.online } : {}),
     ...(dto.hasOnlineShop !== undefined
       ? { hasOnlineShop: dto.hasOnlineShop }
@@ -698,6 +742,11 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     // truth (see `AddListingPhotoGallery1794310000000`).
     ...(nextGallery !== null
       ? { photoGallery: nextGallery, ...legacySlotsFromGallery(nextGallery) }
+      : {}),
+    // The cover is one value: replaced when the body names it, untouched when
+    // it does not. `null` or an empty image clears it.
+    ...(dto.coverPhoto !== undefined
+      ? { coverPhoto: normalizeCoverPhoto(dto.coverPhoto) }
       : {}),
     ...(dto.rel !== undefined ? { rel: dto.rel } : {}),
     ...(dto.ownerName !== undefined ? { ownerName: dto.ownerName } : {}),
@@ -815,14 +864,26 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   blurb: 'the one-line blurb',
   tagline: 'the tagline',
   whatItIs: 'the description',
+  // Retired 2026-10-08 and never written by `applyUpdate` since; kept because
+  // stored history rows from past edits still name them.
   tags: 'the tags',
   goodFor: 'the "good for" tags',
+  attributes: 'the details and amenities',
+  highlights: 'the highlights on the card',
+  entryMode: 'how people get in',
+  coverPolicy: 'the entry charge',
+  coverFreeBefore: 'the free entry time',
+  payments: 'the ways to pay',
+  issuesNifInvoices: 'whether it issues invoices with a NIF',
+  inclusionPractices: 'the inclusion practices',
+  saferSpacePolicyUrl: 'the safer-space policy link',
   accessibilityAnswers: 'the accessibility answers',
   accessibilityNote: 'the accessibility note',
   services: 'the services and prices',
   menu: 'the menu',
   pricingMode: 'whether the page shows services, a menu or shop items',
   langs: 'the languages spoken',
+  langsOther: 'the other languages spoken',
   online: 'the online-only setting',
   hasOnlineShop: 'the "also sells online" setting',
   onlineDetails: 'the ordering and delivery details',
@@ -842,6 +903,7 @@ const OWNER_EDITABLE_FIELD_LABELS: Partial<Record<keyof Listing, string>> = {
   // them would report the same edit twice and would still miss a reordering, a
   // caption or a fifth photo.
   photoGallery: 'the photos',
+  coverPhoto: 'the cover photo',
   rel: 'the relationship to the business',
   ownerName: 'the owner name',
   ownerRole: 'the owner role',
@@ -1080,9 +1142,6 @@ export class ListingsService {
     // `@ValidateIf` to express (item #2): `hours` (≥1 open day) and the hero
     // photo are required on the `claim` path, optional on `suggest`.
     this.assertPathRequirements(dto);
-    // Tags are pick-only from `LISTING_TAG_GROUPS`. Checked before the ref is
-    // drawn, so a rejected submission does not burn a sequence number.
-    const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
     const isSuggestion = dto.path === 'suggest';
     // The 18+ terms are the business's own promise, so only a claimant (who
     // runs the business) can accept them. A suggester cannot make it for a
@@ -1103,7 +1162,7 @@ export class ListingsService {
     const saved = await this.createWithUniqueSlug(
       isSuggestion ? null : submitterUserId,
       ref,
-      { ...dto, tags },
+      dto,
       isSuggestion
         ? {
             suggestedByUserId: submitterUserId,
@@ -1153,27 +1212,18 @@ export class ListingsService {
   ): Promise<ListingDTO> {
     assertSingleListingKind(dto);
     this.assertPathRequirements(dto);
-    // Staff authoring picks from the same vocabulary as the member wizard.
-    const tags = resolveListingTagsOrThrow(dto.tags ?? [], []);
     // Staff cannot accept the 18+ terms for a business (the admin body has no
     // such field), so a staff-authored listing in that category is refused.
     const kindFields = this.resolveCreateKindFields(dto, false);
 
     const ref = await this.nextRef();
-    const saved = await this.createWithUniqueSlug(
-      null,
-      ref,
-      { ...dto, tags },
-      {
-        status:
-          dto.publishState === 'live'
-            ? ListingStatus.Live
-            : ListingStatus.Review,
-        affirmingBaselineAcceptedAt: null,
-        createdByStaffId: adminUserId,
-        ...kindFields,
-      },
-    );
+    const saved = await this.createWithUniqueSlug(null, ref, dto, {
+      status:
+        dto.publishState === 'live' ? ListingStatus.Live : ListingStatus.Review,
+      affirmingBaselineAcceptedAt: null,
+      createdByStaffId: adminUserId,
+      ...kindFields,
+    });
 
     await this.recordStaffCreated(saved, adminUserId);
 
@@ -1404,7 +1454,7 @@ export class ListingsService {
    * The online fields a create stores, after the online write rules
    * (`resolveOnlineListingFields`): categories per kind of listing, the main
    * link, the 18+ terms and the blanking for each kind. Run before the ref is
-   * drawn, like the tag check, so a refused submission burns no sequence
+   * drawn, so a refused submission burns no sequence
    * number. A new listing has no stored acceptance, so the 18+ stamp comes
    * only from `isAdultTermsAcceptedNow` and the server clock; a stamp in the
    * body is discarded. `isAdultTermsAcceptedNow` is the body's flag on the
@@ -1432,15 +1482,18 @@ export class ListingsService {
    * Every kind-of-listing field a create stores: the online write rules
    * (`resolveCreateOnlineFields`), then the mobile write rules
    * (`resolveMobileListingFields`) over their result, so a location the online
-   * rules blanked stays blank. `online` and `mobile` together are refused
-   * first, so that conflict is the error a caller sees ahead of any category
-   * or main-link rule. Runs before the ref is drawn, like the tag check, on
-   * both `create` and `adminCreate`.
+   * rules blanked stays blank, then the attribute rules
+   * (`resolveListingAttributeFields`) over the kind and categories those two
+   * settled. `online` and `mobile` together are refused first, so that
+   * conflict is the error a caller sees ahead of any category, main-link or
+   * attribute rule. Runs before the ref is drawn, so a refused submission
+   * burns no sequence number, on `create` (claims and suggestions alike) and
+   * `adminCreate`.
    */
   private resolveCreateKindFields(
     dto: ListingCreateInput,
     isAdultTermsAcceptedNow: boolean,
-  ): OnlineListingFields & MobileListingFields {
+  ): OnlineListingFields & MobileListingFields & ListingAttributeFields {
     assertSingleListingKind(dto);
     const onlineFields = this.resolveCreateOnlineFields(
       dto,
@@ -1451,14 +1504,30 @@ export class ListingsService {
       mobile: dto.mobile === true,
       mobileDetails: dto.mobileDetails,
     });
-    return { ...onlineFields, ...mobileFields };
+    // A new listing carries nothing yet, so no attribute or practice is
+    // grandfathered: every one must be offered.
+    const attributeFields = resolveListingAttributeFields(
+      {
+        ...normalizeCreate(dto),
+        online: mobileFields.online,
+        mobile: mobileFields.mobile,
+        cats: onlineFields.cats,
+      },
+      {
+        storedAttributes: [],
+        storedInclusionPractices: [],
+        hasHighlightsInWrite: dto.highlights !== undefined,
+      },
+    );
+    return { ...onlineFields, ...mobileFields, ...attributeFields };
   }
 
   /**
    * Claim-path presence checks the DTO cannot express (see `create`): opening
    * hours for a place, opening hours or "by appointment only" for a mobile
    * listing, a delivery option or session format for an online-only listing,
-   * and the cover photo with its alt text. No-op on the `suggest` path.
+   * and the card's photo (the cover, else the first gallery photo) with its alt
+   * text. No-op on the `suggest` path.
    */
   private assertPathRequirements(dto: ListingCreateInput): void {
     if (dto.path !== 'claim') return;
@@ -1492,17 +1561,21 @@ export class ListingsService {
         missing.push('opening hours');
       }
     }
-    // The cover is the FIRST photo of the ordered gallery, whichever request
-    // shape carried it. Its alt text is required too: a claimed listing's lead
-    // image is the one every card and detail page renders, and shipping it
-    // undescribed is exactly the accessibility hole the per-photo `alt` field
-    // exists to close. Backfilled rows keep their empty alt untouched — this
-    // gate only runs on the `claim` submission path.
-    const gallery = galleryFromCreateInput(dto);
-    const coverPhoto = gallery[0];
-    if (!coverPhoto) {
+    // The card shows the owner's cover when there is one, else the FIRST photo
+    // of the ordered gallery. Either satisfies "a main photo". The detail page
+    // leads with that first gallery photo whatever the cover is. Both the card
+    // image and the page's lead image must be described: an undescribed one is
+    // the accessibility hole the per-photo `alt` field exists to close.
+    // Backfilled rows keep their empty alt untouched; this gate only runs on
+    // the `claim` submission path.
+    const coverPhoto = normalizeCoverPhoto(dto.coverPhoto);
+    const firstGalleryPhoto = galleryFromCreateInput(dto)[0];
+    if (coverPhoto && !coverPhoto.alt) {
+      missing.push('alt text for the cover photo');
+    }
+    if (!coverPhoto && !firstGalleryPhoto) {
       missing.push('a main photo');
-    } else if (!coverPhoto.alt.trim()) {
+    } else if (firstGalleryPhoto && !firstGalleryPhoto.alt.trim()) {
       missing.push('alt text for the main photo');
     }
 
@@ -1831,7 +1904,7 @@ export class ListingsService {
    * CO-MANAGER-ALLOWED (`loadOwnedOrCoManagedOr404`): editing the listing's
    * content, which is the single largest thing a co-manager exists to do. The
    * hours, the hours exceptions, the photos and the gallery, the services, the
-   * accessibility answers and the tags are all fields on this one PATCH, so
+   * accessibility answers and the attributes are all fields on this one PATCH, so
    * opening this route is what opens all of them.
    *
    * A CO-MANAGER MAY NOT WRITE THE OWNER'S PERSONAL FIELDS, and that is
@@ -1861,26 +1934,20 @@ export class ListingsService {
     // the listing currently carries, so anything stored and re-sent verbatim
     // passes while a brand-new foreign key is refused.
     //
-    // Both request shapes are checked, because both can introduce a reference:
-    // the ordered `photoGallery` and the legacy `photos` slot pair. And both
-    // stored shapes go into the comparison set, so a listing whose row predates
-    // the backfill still recognises its own photos.
+    // All three request shapes are checked, because each can introduce a
+    // reference: the ordered `photoGallery`, the legacy `photos` slot pair and
+    // the `coverPhoto`. Every stored shape goes into the comparison set, so a
+    // listing whose row predates the backfill still recognises its own photos,
+    // and a key moved between the cover and the gallery is still its own.
     this.assertNoForeignListingPhotoIntroduced(listing, userId, dto);
 
-    // Tags are pick-only from `LISTING_TAG_GROUPS`. A tag the listing already
-    // carries from before the vocabulary stays savable, so an unrelated edit
-    // never forces the owner to delete it first.
-    const normalizedDto: UpdateListingDto =
-      dto.tags !== undefined
-        ? {
-            ...dto,
-            tags: resolveListingTagsOrThrow(dto.tags, listing.tags ?? []),
-          }
-        : dto;
+    // The attribute rules run inside `applyListingEdit`, on the row as this
+    // PATCH leaves it; an attribute the listing already carries stays
+    // savable, so an unrelated edit never forces the owner to delete it first.
     const { saved, orphanedImageKeys } = await this.applyListingEdit(
       listing,
       userId,
-      normalizedDto,
+      dto,
       ListingModerationAction.OwnerEdited,
       true, // shouldAuditOnlyWhenLive
       true, // shouldStampDetailsConfirmed
@@ -1943,17 +2010,10 @@ export class ListingsService {
         // `SHARED_UPLOAD_HANDLERS` for that, so this keeps the owner's rule:
         // a stored photo passes, a new upload from anybody else is refused.
         this.assertNoForeignListingPhotoIntroduced(listing, staffUserId, dto);
-        const normalizedDto: UpdateListingDto =
-          dto.tags !== undefined
-            ? {
-                ...dto,
-                tags: resolveListingTagsOrThrow(dto.tags, listing.tags ?? []),
-              }
-            : dto;
         return this.applyListingEdit(
           listing,
           staffUserId,
-          normalizedDto,
+          dto,
           ListingModerationAction.StaffEdited,
           false, // shouldAuditOnlyWhenLive
           false, // shouldStampDetailsConfirmed
@@ -1970,8 +2030,8 @@ export class ListingsService {
    * editors on `SHARED_UPLOAD_HANDLERS` (`ListingsController.update` and
    * `AdminListingsController.update`). An incoming photo key uploaded by
    * somebody else passes only when the listing already carries it; see the
-   * call site in `update` for why both request shapes and both stored shapes
-   * are compared. Shop item photos are uploads too, so both their stored and
+   * call site in `update` for why every request shape and every stored shape
+   * is compared. Shop item photos are uploads too, so both their stored and
    * incoming keys take part.
    */
   private assertNoForeignListingPhotoIntroduced(
@@ -1982,10 +2042,12 @@ export class ListingsService {
     if (
       dto.photoGallery !== undefined ||
       dto.photos !== undefined ||
+      dto.coverPhoto !== undefined ||
       dto.shopItems !== undefined
     ) {
       const alreadyStoredPhotoKeys = [
         ...galleryImageReferences(listing.photoGallery),
+        ...coverImageReferences(listing.coverPhoto),
         ...shopItemImageReferences(listing.shopItems),
         listing.photos?.wide,
         listing.photos?.d1,
@@ -1994,6 +2056,7 @@ export class ListingsService {
       ];
       const incomingPhotoKeys = [
         ...(dto.photoGallery ?? []).map((photo) => photo.image),
+        ...(dto.coverPhoto?.image ? [dto.coverPhoto.image] : []),
         ...(dto.shopItems ?? []).flatMap((item) =>
           item.photo ? [item.photo.image] : [],
         ),
@@ -2104,6 +2167,20 @@ export class ListingsService {
     Object.assign(
       listing,
       resolveMobileListingFields(pickMobileListingFields(listing)),
+    );
+    // The attribute rules on the same row, after the online and mobile rules
+    // settled its kind and categories: an unknown or newly unfit attribute or
+    // practice is refused, a stored one stays valid, highlights follow the
+    // attributes, and the in-person facts a kind or category no longer allows
+    // are cleared. Every owner, co-manager and staff edit runs them. A 400
+    // here leaves nothing saved.
+    Object.assign(
+      listing,
+      resolveListingAttributeFields(listing, {
+        storedAttributes: listingBeforeEdit.attributes,
+        storedInclusionPractices: listingBeforeEdit.inclusionPractices,
+        hasHighlightsInWrite: dto.highlights !== undefined,
+      }),
     );
 
     // An owner edit NEVER changes `listing.status`. Once a moderator has
@@ -3880,7 +3957,9 @@ export class ListingsService {
    * `photos`/`alt` mirror, so a row written before the backfill is still
    * cleaned up correctly. Shop item photos count as well, so a photo moved
    * from the gallery into a shop item survives the edit, and a removed
-   * listing's shop photos are cleaned up with it.
+   * listing's shop photos are cleaned up with it. The cover counts too, so a
+   * replaced cover is deleted and a key moved between the cover and the
+   * gallery survives.
    *
    * Non-key values (external URLs, alt strings that were never keys) are
    * collected too and simply no-op at delete time —
@@ -3890,6 +3969,7 @@ export class ListingsService {
   private collectListingImageKeys(listing: Listing): string[] {
     const keys: string[] = [
       ...galleryImageReferences(listing.photoGallery),
+      ...coverImageReferences(listing.coverPhoto),
       ...shopItemImageReferences(listing.shopItems),
     ];
     for (const set of [listing.photos, listing.alt]) {
@@ -4065,6 +4145,7 @@ export class ListingsService {
         | 'ownedBy'
         | OnlineListingFieldName
         | MobileListingFieldName
+        | ListingAttributeFieldName
       >
     > = {},
   ): Promise<Listing> {

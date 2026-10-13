@@ -25,6 +25,7 @@ export type ReasonCode =
   | 'housing_unsafe'
   | 'housing_scam'
   | 'funding_scam'
+  | 'copyright'
   | 'not_affirming'
   | 'off_platform'
   // System-filed listing-domain codes (NOT member-selectable — deliberately
@@ -56,6 +57,7 @@ export const REASON_CODES: readonly ReasonCode[] = [
   'housing_unsafe',
   'housing_scam',
   'funding_scam',
+  'copyright',
   'not_affirming',
   'off_platform',
   'other',
@@ -85,6 +87,7 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   housing_scam: 'Scam or fake listing',
   // Funding & Grants: a fake fundraiser, or a "grant" that charges to apply.
   funding_scam: 'Scam or fake fundraiser or grant',
+  copyright: "Uses someone else's music or artwork without permission",
   not_affirming: 'Not LGBTQ+ affirming — broke the community pledge',
   off_platform: 'Asked to pay or move off-platform',
   // System-filed listing codes (see the `ReasonCode` union comment) — labelled
@@ -448,6 +451,20 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'discrimination',
     'off_platform',
     'harassment',
+    'other',
+  ],
+  // Studio v1: one release. Its lyrics, liner notes and cover are a member's
+  // own words and images, so it carries the outing and doxxing codes a post
+  // does, plus `impersonation` for music posted under someone else's name.
+  [ReportSubjectType.StudioRelease]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'impersonation',
+    'copyright',
+    'discrimination',
+    'spam',
     'other',
   ],
 };

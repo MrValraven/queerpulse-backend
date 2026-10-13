@@ -10,12 +10,16 @@ import {
 } from '../connections/connection.events';
 import {
   EVENT_COHOST_INVITED,
+  EVENT_COMMUNITY_INVITE_RESPONDED,
+  EVENT_COMMUNITY_INVITED,
   EVENT_INVITED,
   EVENT_LINEUP_ANSWERED,
   EVENT_LINEUP_INVITED,
   EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
   EventCohostInvitedEvent,
+  EventCommunityInviteRespondedEvent,
+  EventCommunityInvitedEvent,
   EventInvitedEvent,
   EventLineupAnsweredEvent,
   EventLineupInvitedEvent,
@@ -116,10 +120,14 @@ export class NotificationsListener {
 
   @OnEvent(VOUCH_CREATED)
   async onVouchCreated(e: VouchCreatedEvent): Promise<void> {
+    // The voucher's id rides in the payload only for a NAMED vouch, so an
+    // anonymous vouch is never attributed in the bell or push (the row reads
+    // as "Someone"), while the block/mute gate still fires: the `actorId`
+    // argument is always the voucher. Same split `SafeSpaceVouch` uses.
     await this.notifications.create(
       e.voucheeId,
       NotificationType.VouchReceived,
-      { voucherId: e.voucherId },
+      e.anonymous ? {} : { voucherId: e.voucherId },
       e.voucherId,
     );
   }
@@ -203,6 +211,60 @@ export class NotificationsListener {
         role: e.role,
       },
       e.performerId,
+    );
+  }
+
+  // Guest communities (2026-10-08). Every owner, co-owner and mod of the
+  // invited community hears about it; `EventCommunitiesService` resolved
+  // that roster and left the inviter out. `source: 'community_collab_invite'`
+  // routes the row to `/collab-invites/:inviteId`. `actorId` names the
+  // inviting organiser through `ACTOR_PAYLOAD_KEY`. A withheld (private) lead
+  // arrives as null and its key stays off the payload.
+  @OnEvent(EVENT_COMMUNITY_INVITED)
+  async onEventCommunityInvited(
+    invited: EventCommunityInvitedEvent,
+  ): Promise<void> {
+    if (!invited.recipientUserIds.length) return;
+    await this.notifications.createForRecipients(
+      invited.recipientUserIds,
+      NotificationType.EventCommunityInvite,
+      {
+        actorId: invited.inviterId,
+        source: 'community_collab_invite',
+        inviteId: invited.inviteId,
+        eventSlug: invited.eventSlug,
+        eventTitle: invited.eventTitle,
+        communitySlug: invited.communitySlug,
+        communityName: invited.communityName,
+        ...(invited.leadCommunityName
+          ? { leadCommunityName: invited.leadCommunityName }
+          : {}),
+      },
+      invited.inviterId,
+    );
+  }
+
+  // The guest team's answer reaches the gathering's organisers (host and
+  // co-hosts, minus the responder), with the responder as actor. Opens the
+  // gathering page on the client.
+  @OnEvent(EVENT_COMMUNITY_INVITE_RESPONDED)
+  async onEventCommunityInviteResponded(
+    responded: EventCommunityInviteRespondedEvent,
+  ): Promise<void> {
+    if (!responded.recipientUserIds.length) return;
+    await this.notifications.createForRecipients(
+      responded.recipientUserIds,
+      NotificationType.EventCommunityInviteResponse,
+      {
+        actorId: responded.responderId,
+        source: 'community_collab_response',
+        eventSlug: responded.eventSlug,
+        eventTitle: responded.eventTitle,
+        communitySlug: responded.communitySlug,
+        communityName: responded.communityName,
+        decision: responded.decision,
+      },
+      responded.responderId,
     );
   }
 

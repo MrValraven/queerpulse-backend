@@ -251,6 +251,7 @@ describe('recognition XP and business identities', () => {
       await eventEmitter.emitAsync(VOUCH_CREATED, {
         voucherId: HUMAN_USER_ID,
         voucheeId: '00000000-0000-4000-8000-000000000002',
+        anonymous: false,
       });
 
       expect(recomputeByUserId).toHaveBeenCalledWith(HUMAN_USER_ID);

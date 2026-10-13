@@ -92,6 +92,7 @@ export const MOD_STAFF_ACTIONS: readonly string[] = [
   'staff_role_revoked',
   'invite_quota_changed',
   'invite_revoked',
+  'invite_refreshed',
   'conversation_context_viewed',
   'report_message_attachment_viewed',
   'member_sign_in_email_viewed',

@@ -208,6 +208,66 @@ describe('MediaReferenceResolver', () => {
     ]);
   });
 
+  // Without this source `StorageMaintenanceService` reads every cover kept
+  // out of the gallery as unreferenced and deletes it on the next sweep.
+  it('resolves a listing reference from the cover photo', async () => {
+    const bareKey =
+      'listing-covers/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.webp';
+    const dataSource = createMockDataSource([
+      [
+        Listing,
+        makeMockRepository({
+          queryBuilderRows: [
+            {
+              id: 'listing-3',
+              name: 'Cover Listing',
+              slug: 'cover-listing',
+              photoGallery: [],
+              coverPhoto: { image: bareKey, alt: 'The front door' },
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references } = await resolver.resolve([bareKey]);
+
+    expect(references.get(bareKey)).toEqual([
+      {
+        type: 'listing',
+        entityId: 'listing-3',
+        label: 'Cover Listing',
+        slug: 'cover-listing',
+      },
+    ]);
+  });
+
+  it('reports no cover reference for a listing without a cover photo', async () => {
+    const bareKey = 'listing-covers/owner-1/unused.webp';
+    const dataSource = createMockDataSource([
+      [
+        Listing,
+        makeMockRepository({
+          queryBuilderRows: [
+            {
+              id: 'listing-4',
+              name: 'Bar',
+              slug: 'bar',
+              photoGallery: [],
+              coverPhoto: null,
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references } = await resolver.resolve([bareKey]);
+
+    expect(references.has(bareKey)).toBe(false);
+  });
+
   // Without this source `StorageMaintenanceService` reads every menu file's
   // storage key as unreferenced and deletes it on the next sweep.
   it('resolves a listing-menu reference from menu.file.url', async () => {

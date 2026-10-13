@@ -69,13 +69,36 @@ describe('NotificationsListener', () => {
   });
 
   it('notifies the vouchee on a vouch', async () => {
-    await listener.onVouchCreated({ voucherId: 'v', voucheeId: 'u' });
+    await listener.onVouchCreated({
+      voucherId: 'v',
+      voucheeId: 'u',
+      anonymous: false,
+    });
     expect(notifications.create).toHaveBeenCalledWith(
       'u',
       NotificationType.VouchReceived,
       expect.objectContaining({ voucherId: 'v' }),
       'v',
     );
+  });
+
+  // An anonymous voucher must never be named in the vouchee's bell or push:
+  // the payload carries no `voucherId`, so the actor resolves to null. The
+  // voucher is still the `actorId` argument, so a vouchee who blocked or muted
+  // them is still shielded by the write-time gate.
+  it('keeps an anonymous voucher off the payload while still passing them as the actor', async () => {
+    await listener.onVouchCreated({
+      voucherId: 'v',
+      voucheeId: 'u',
+      anonymous: true,
+    });
+    expect(notifications.create).toHaveBeenCalledTimes(1);
+    const [recipientId, type, payload, actorId] = notifications.create.mock
+      .calls[0] as [string, NotificationType, Record<string, unknown>, string];
+    expect(recipientId).toBe('u');
+    expect(type).toBe(NotificationType.VouchReceived);
+    expect(payload).not.toHaveProperty('voucherId');
+    expect(actorId).toBe('v');
   });
 
   it('notifies an invitee on an event invite, carrying the invite id', async () => {
@@ -399,6 +422,90 @@ describe('NotificationsListener', () => {
       });
 
       expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('guest communities', () => {
+    const invited = {
+      inviteId: 'invite-1',
+      eventId: 'event-1',
+      eventSlug: 'pride-picnic',
+      eventTitle: 'Pride Picnic',
+      communitySlug: 'drag-club',
+      communityName: 'Drag Club',
+      leadCommunityName: 'QueerPulse Social' as string | null,
+      inviterId: 'host-1',
+      recipientUserIds: ['owner-2', 'mod-3'],
+    };
+
+    it('tells every listed member of the guest team, inviter as actor', async () => {
+      await listener.onEventCommunityInvited(invited);
+
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['owner-2', 'mod-3'],
+        NotificationType.EventCommunityInvite,
+        {
+          actorId: 'host-1',
+          source: 'community_collab_invite',
+          inviteId: 'invite-1',
+          eventSlug: 'pride-picnic',
+          eventTitle: 'Pride Picnic',
+          communitySlug: 'drag-club',
+          communityName: 'Drag Club',
+          leadCommunityName: 'QueerPulse Social',
+        },
+        'host-1',
+      );
+    });
+
+    it('leaves the lead name out of the payload when it was withheld', async () => {
+      await listener.onEventCommunityInvited({
+        ...invited,
+        leadCommunityName: null,
+      });
+
+      const calls = notifications.createForRecipients.mock.calls as unknown[][];
+      const payload = calls[0]?.[2] as Record<string, unknown> | undefined;
+      expect(payload).toBeDefined();
+      expect(payload).not.toHaveProperty('leadCommunityName');
+    });
+
+    it('writes nothing when the guest team has nobody else to tell', async () => {
+      await listener.onEventCommunityInvited({
+        ...invited,
+        recipientUserIds: [],
+      });
+
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+
+    it('tells the organisers how the guest team answered, responder as actor', async () => {
+      await listener.onEventCommunityInviteResponded({
+        inviteId: 'invite-1',
+        eventId: 'event-1',
+        eventSlug: 'pride-picnic',
+        eventTitle: 'Pride Picnic',
+        communitySlug: 'drag-club',
+        communityName: 'Drag Club',
+        decision: 'declined',
+        responderId: 'mod-3',
+        recipientUserIds: ['host-1', 'cohost-1'],
+      });
+
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['host-1', 'cohost-1'],
+        NotificationType.EventCommunityInviteResponse,
+        {
+          actorId: 'mod-3',
+          source: 'community_collab_response',
+          eventSlug: 'pride-picnic',
+          eventTitle: 'Pride Picnic',
+          communitySlug: 'drag-club',
+          communityName: 'Drag Club',
+          decision: 'declined',
+        },
+        'mod-3',
+      );
     });
   });
 });

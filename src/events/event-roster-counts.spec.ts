@@ -17,6 +17,7 @@ import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
+import { EventCommunity } from './entities/event-community.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { EventSeries } from './entities/event-series.entity';
@@ -97,6 +98,7 @@ describe('EventsService.rosterCounts', () => {
       {} as unknown as Repository<EventInvite>,
       {} as unknown as Repository<EventSeries>,
       {} as unknown as Repository<EventAnnouncement>,
+      {} as unknown as Repository<EventCommunity>,
       {} as unknown as Repository<Profile>,
       {} as unknown as UsersService,
       {} as unknown as RsvpService,

@@ -89,6 +89,10 @@ export const launchedFeatures = {
     launched: false,
     requiredEnv: ['MUX_TOKEN_ID', 'MUX_TOKEN_SECRET', 'MUX_WEBHOOK_SECRET'],
   },
+  // Studio v1: listening and uploads for members holding a Studio access
+  // grant. Every Studio controller is tagged `@Feature('studio')`; the grant
+  // itself is checked per request by `StudioAccessGuard`.
+  studio: { launched: true },
 } satisfies Record<string, FeatureConfig>;
 
 export type FeatureKey = keyof typeof launchedFeatures;

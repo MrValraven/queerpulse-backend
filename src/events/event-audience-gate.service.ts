@@ -8,9 +8,14 @@ import { Community } from '../communities/entities/community.entity';
 import { resolveEffectiveRole } from '../communities/subcommunity-rules';
 import { ConnectionsService } from '../connections/connections.service';
 import { EventCohost } from './entities/event-cohost.entity';
+import {
+  EventCommunity,
+  EventCommunityStatus,
+} from './entities/event-community.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventVisibility } from './entities/event.entity';
+import { acceptedGuestExistsSql } from './event-community-hosting';
 
 /**
  * The per-event facts `isViewable` needs to decide one event's tier —
@@ -78,6 +83,10 @@ export interface EventAudienceAmong {
  * an intentional behavior change for the RSVP path's prior `invite_only`
  * rejection, which threw `ForbiddenException('This event is invite-only')`;
  * unifying on one shared method means unifying on one exception shape too.
+ *
+ * Since 2026-10-08 the `community` tier admits the lead's roster and the
+ * roster of every ACCEPTED guest community (`event_communities`); the space
+ * rule in `scopedVisibilityWhere` stays on the lead.
  */
 @Injectable()
 export class EventAudienceGateService {
@@ -97,6 +106,11 @@ export class EventAudienceGateService {
     private readonly communityMembers: Repository<CommunityMember>,
     @InjectRepository(Community)
     private readonly communities: Repository<Community>,
+    // Guest communities (2026-10-08). The `community` tier admits the lead's
+    // roster and the roster of every ACCEPTED guest. Pending and declined
+    // rows admit nobody. Read only for community-tier gatherings.
+    @InjectRepository(EventCommunity)
+    private readonly eventCommunities: Repository<EventCommunity>,
   ) {}
 
   /**
@@ -255,13 +269,21 @@ export class EventAudienceGateService {
         )
       : new Map<string, number>();
 
-    const needsCommunity = events.some(
-      (event) =>
-        needsTierCheck(event) && event.visibility === EventVisibility.Community,
-    );
-    const viewerCommunityIds = needsCommunity
+    const communityTierEventIds = events
+      .filter(
+        (event) =>
+          needsTierCheck(event) &&
+          event.visibility === EventVisibility.Community,
+      )
+      .map((event) => event.id);
+    const viewerCommunityIds = communityTierEventIds.length
       ? new Set(await this.membership.effectiveCommunityIdsForUser(viewerId))
       : new Set<string>();
+    const eventIdsReachedThroughGuest =
+      await this.eventIdsReachedThroughAcceptedGuest(
+        communityTierEventIds,
+        viewerCommunityIds,
+      );
 
     return events.filter((event) => {
       const isOrganizer = isOrganizerFor(event);
@@ -276,8 +298,9 @@ export class EventAudienceGateService {
             hasMutualConnectionWithHost:
               (actorFromLookup(mutualCounts, event.hostId) ?? 0) > 0,
             isCommunityMember:
-              event.communityId !== null &&
-              viewerCommunityIds.has(event.communityId),
+              (event.communityId !== null &&
+                viewerCommunityIds.has(event.communityId)) ||
+              eventIdsReachedThroughGuest.has(event.id),
           };
       return this.isViewable(event, context);
     });
@@ -299,8 +322,9 @@ export class EventAudienceGateService {
    *  - `extended_network`: that read, plus one mutual-connection count over
    *    the candidates it left out (a mutual connection is symmetric, so
    *    counting from the host's side answers the viewer's question);
-   *  - `community`: the community row plus one roster read covering the
-   *    parent too when it is a space.
+   *  - `community`: one accepted-guest read, then per hosting community (the
+   *    lead and each ACCEPTED guest) the community row plus one roster read
+   *    covering the parent too when it is a space.
    * Only the event's own tier is read, and only for non-organizers.
    *
    * Draft workspace and moderator takedown stay with the caller, exactly as
@@ -427,11 +451,14 @@ export class EventAudienceGateService {
         return contextByUserId;
       }
       case EventVisibility.Community: {
-        if (event.communityId === null) return contextByUserId;
-        withSignal(
-          await this.communityMembersAmong(event.communityId, candidateUserIds),
-          { isCommunityMember: true },
-        );
+        // The lead's roster and each accepted guest's roster, one roster
+        // read per hosting community (at most six).
+        for (const communityId of await this.hostingCommunityIdsOf(event)) {
+          withSignal(
+            await this.communityMembersAmong(communityId, candidateUserIds),
+            { isCommunityMember: true },
+          );
+        }
         return contextByUserId;
       }
       default:
@@ -484,6 +511,64 @@ export class EventAudienceGateService {
   }
 
   /**
+   * Of `eventIds` (community-tier gatherings on one page), the ones the
+   * viewer reaches through an ACCEPTED guest community they hold an
+   * effective role in. One read for the whole page, none when there is
+   * nothing to ask.
+   */
+  private async eventIdsReachedThroughAcceptedGuest(
+    eventIds: string[],
+    viewerCommunityIds: ReadonlySet<string>,
+  ): Promise<Set<string>> {
+    if (!eventIds.length || !viewerCommunityIds.size) return new Set();
+    const guestRows = await this.eventCommunities.find({
+      where: {
+        eventId: In(eventIds),
+        communityId: In([...viewerCommunityIds]),
+        status: EventCommunityStatus.Accepted,
+      },
+      select: { eventId: true },
+    });
+    return new Set(guestRows.map((row) => row.eventId));
+  }
+
+  /** The lead (when set) plus every ACCEPTED guest of one gathering. */
+  private async hostingCommunityIdsOf(
+    event: Pick<Event, 'id' | 'communityId'>,
+  ): Promise<string[]> {
+    const guestRows = await this.eventCommunities.find({
+      where: { eventId: event.id, status: EventCommunityStatus.Accepted },
+      select: { communityId: true },
+    });
+    return [
+      ...new Set([
+        ...(event.communityId ? [event.communityId] : []),
+        ...guestRows.map((row) => row.communityId),
+      ]),
+    ];
+  }
+
+  /**
+   * Whether the viewer holds an effective role in any ACCEPTED guest of one
+   * gathering. Reached only after the lead check failed, so a lead member
+   * costs nothing extra.
+   */
+  private async isOnAnyAcceptedGuestRoster(
+    eventId: string,
+    viewerId: string,
+  ): Promise<boolean> {
+    const guestRows = await this.eventCommunities.find({
+      where: { eventId, status: EventCommunityStatus.Accepted },
+      select: { communityId: true },
+    });
+    if (!guestRows.length) return false;
+    const viewerCommunityIds = new Set(
+      await this.membership.effectiveCommunityIdsForUser(viewerId),
+    );
+    return guestRows.some((row) => viewerCommunityIds.has(row.communityId));
+  }
+
+  /**
    * The shared per-tier decision, pure and synchronous — no queries, just
    * `event.visibility` + the pre-loaded `context`. This is the single source
    * of truth both `assertViewable` (throw-on-false) and `filterViewable`
@@ -519,6 +604,9 @@ export class EventAudienceGateService {
         // is reachable — `create`/`update` reject `Community` visibility
         // with no community attached (400). `context.isCommunityMember`
         // already folds in the null-check where it's computed.
+        // Since 2026-10-08 the `community` tier admits the lead's roster and
+        // the roster of every ACCEPTED guest community (`event_communities`);
+        // the space rule in `scopedVisibilityWhere` stays on the lead.
         return context.isCommunityMember;
       default:
         // `public` / `members` — no tier predicate, everyone admitted.
@@ -599,13 +687,16 @@ export class EventAudienceGateService {
         };
       }
       case EventVisibility.Community: {
-        const isMember =
+        const isLeadMember =
           event.communityId !== null &&
           (await this.membership.isMember(event.communityId, viewerId));
+        const isCommunityMember =
+          isLeadMember ||
+          (await this.isOnAnyAcceptedGuestRoster(event.id, viewerId));
         return {
           isOrganizer: false,
           ...NO_SIGNAL,
-          isCommunityMember: isMember,
+          isCommunityMember,
         };
       }
       default:
@@ -676,7 +767,11 @@ export class EventAudienceGateService {
     }
     if (viewerCommunityIds.length > 0) {
       clauses.push(
-        '(e.visibility = :communityVisibility AND e.community_id IN (:...viewerCommunityIds))',
+        `(e.visibility = :communityVisibility AND (e.community_id IN (:...viewerCommunityIds) OR ${acceptedGuestExistsSql(
+          '"e"."id"',
+          'scope_guest',
+          '"scope_guest"."community_id" IN (:...viewerCommunityIds)',
+        )}))`,
       );
       params.communityVisibility = EventVisibility.Community;
       params.viewerCommunityIds = viewerCommunityIds;

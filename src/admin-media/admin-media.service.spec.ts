@@ -26,7 +26,11 @@ const messageDocumentKey = `message-documents/${ownerId}/55555555-5555-5555-5555
 const publicPrefixes = [
   ...Object.values(UPLOAD_KIND_SPECS)
     .map((spec) => spec.prefix)
-    .filter((prefix) => !PRIVATE_MESSAGE_PREFIXES.has(prefix)),
+    .filter(
+      (prefix) =>
+        !PRIVATE_MESSAGE_PREFIXES.has(prefix) &&
+        prefix !== UPLOAD_KIND_SPECS.studio_audio.prefix,
+    ),
   // T17: unlinked persona images.
   PERSONA_SCOPED_PREFIX,
 ];
@@ -305,7 +309,7 @@ describe('AdminMediaService.list', () => {
     );
   });
 
-  it.each(['message-images', 'message-documents'])(
+  it.each(['message-images', 'message-documents', 'studio-audio'])(
     'rejects the %s prefix filter as an unknown kind',
     async (prefix) => {
       const { service, storage } = await makeService();

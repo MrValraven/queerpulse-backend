@@ -774,6 +774,7 @@ describe('InvitesSentExportContributor', () => {
             email: 'friend@example.com',
             note: 'See you there',
             vouch: 'Known them for years',
+            privateNote: 'Sam from the climbing gym',
             personal: true,
             status: 'accepted',
             acceptedBy: 'member-9',
@@ -790,8 +791,10 @@ describe('InvitesSentExportContributor', () => {
       unknown
     >[];
 
+    // The private note is the member's own label, so it travels with them.
     expect(row).toMatchObject({
       vouch: 'Known them for years',
+      privateNote: 'Sam from the climbing gym',
       acceptedByUserId: 'member-9',
       usedAt: '2026-05-02T00:00:00.000Z',
       expiresAt: null,

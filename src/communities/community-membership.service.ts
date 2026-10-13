@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
+import { toImageUrl } from '../common/image-url';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { assertCommunityInteriorReadable } from './community-read-gate';
 import {
@@ -42,6 +43,21 @@ const STANDING_ROLES: readonly RosterRole[] = [
   RosterRole.CoOwner,
   RosterRole.Mod,
 ];
+
+/**
+ * A community's display fields plus what the private-naming rule and the
+ * effective-role lookup need: its tier and its parent. Returned by
+ * `tierRefsByIds`.
+ */
+export interface CommunityTierRef {
+  id: string;
+  parentId: string | null;
+  slug: string;
+  name: string;
+  accessTier: AccessTier;
+  /** Resolved through `toImageUrl`, like `hostingRefById`'s avatar. */
+  avatarImageUrl: string | null;
+}
 
 /**
  * Shared "resolve a community by slug, then assert the caller is on its
@@ -564,24 +580,67 @@ export class CommunityMembershipService {
    * (`EventsService.buildDetail`'s `community`), or `null` for an unknown id.
    * `accessTier` rides along so the caller can withhold a `private` community
    * from a viewer outside it. Like `slugById`, a display convenience, not a
-   * guard: the caller applies that rule.
+   * guard: the caller applies that rule. `avatarImageUrl` is already resolved
+   * through `toImageUrl`, since this ref goes straight onto the wire.
    */
   async hostingRefById(communityId: string): Promise<{
     slug: string;
     name: string;
     accessTier: AccessTier;
+    avatarImageUrl: string | null;
   } | null> {
     const community = await this.communities.findOne({
       where: { id: communityId },
-      select: { slug: true, name: true, accessTier: true },
+      select: {
+        slug: true,
+        name: true,
+        accessTier: true,
+        avatarImageUrl: true,
+      },
     });
     return community
       ? {
           slug: community.slug,
           name: community.name,
           accessTier: community.accessTier,
+          avatarImageUrl: toImageUrl(community.avatarImageUrl),
         }
       : null;
+  }
+
+  /**
+   * Batched `hostingRefById` for the guest communities of a gathering
+   * (2026-10-08): one query for every id, keyed by id, with the parent id
+   * riding along so the caller can hand the refs straight to
+   * `effectiveRolesFor`. A display convenience, so no archived or roster
+   * gate: the caller applies the private-community rule.
+   */
+  async tierRefsByIds(ids: string[]): Promise<Map<string, CommunityTierRef>> {
+    const tierRefs = new Map<string, CommunityTierRef>();
+    const uniqueIds = [...new Set(ids)];
+    if (!uniqueIds.length) return tierRefs;
+    const rows = await this.communities.find({
+      where: { id: In(uniqueIds) },
+      select: {
+        id: true,
+        parentId: true,
+        slug: true,
+        name: true,
+        accessTier: true,
+        avatarImageUrl: true,
+      },
+    });
+    for (const row of rows) {
+      tierRefs.set(row.id, {
+        id: row.id,
+        parentId: row.parentId,
+        slug: row.slug,
+        name: row.name,
+        accessTier: row.accessTier,
+        avatarImageUrl: toImageUrl(row.avatarImageUrl),
+      });
+    }
+    return tierRefs;
   }
 
   /**

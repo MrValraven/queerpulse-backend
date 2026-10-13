@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { Message } from '../messaging/entities/message.entity';
 import { StorageMaintenanceService } from './storage-maintenance.service';
@@ -18,6 +18,8 @@ describe('StorageMaintenanceService.sweepOrphanedObjects', () => {
   let resolver: { resolve: jest.Mock };
   let rawMany: jest.Mock;
   let messages: { createQueryBuilder: jest.Mock };
+  let dataSource: { query: jest.Mock };
+  let studioTrackRows: { audio_key: string }[];
   let service: StorageMaintenanceService;
 
   const envValues: Record<string, string> = {};
@@ -50,11 +52,20 @@ describe('StorageMaintenanceService.sweepOrphanedObjects', () => {
         getRawMany: rawMany,
       }),
     };
+    studioTrackRows = [];
+    dataSource = {
+      query: jest.fn((sql: string) =>
+        Promise.resolve(
+          sql.trimStart().startsWith('SELECT') ? studioTrackRows : [],
+        ),
+      ),
+    };
     service = new StorageMaintenanceService(
       config as unknown as ConfigService,
       storage as unknown as StorageService,
       resolver as unknown as MediaReferenceResolver,
       messages as unknown as Repository<Message>,
+      dataSource as unknown as DataSource,
     );
   });
 
@@ -147,5 +158,52 @@ describe('StorageMaintenanceService.sweepOrphanedObjects', () => {
   it('swallows errors so a failing tick never crashes the scheduler', async () => {
     storage.listObjects.mockRejectedValue(new Error('bucket down'));
     await expect(service.sweepOrphanedObjects()).resolves.toBeUndefined();
+  });
+
+  describe('Studio audio', () => {
+    const STUDIO_KEY =
+      'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3';
+
+    it('keeps a Studio audio object a track still holds', async () => {
+      storage.listObjects.mockResolvedValue({
+        objects: [object(STUDIO_KEY, OLD)],
+        nextContinuationToken: null,
+      });
+      studioTrackRows = [{ audio_key: STUDIO_KEY }];
+
+      await service.sweepOrphanedObjects();
+
+      expect(dataSource.query).toHaveBeenCalledWith(
+        `SELECT "audio_key" FROM "studio_tracks" WHERE "audio_key" = ANY($1)`,
+        [[STUDIO_KEY]],
+      );
+      expect(storage.deleteObjectByKey).not.toHaveBeenCalled();
+    });
+
+    it('deletes an unreferenced Studio audio object and forgets its registry row', async () => {
+      storage.listObjects.mockResolvedValue({
+        objects: [object(STUDIO_KEY, OLD)],
+        nextContinuationToken: null,
+      });
+
+      await service.sweepOrphanedObjects();
+
+      expect(storage.deleteObjectByKey).toHaveBeenCalledWith(STUDIO_KEY);
+      expect(dataSource.query).toHaveBeenCalledWith(
+        `DELETE FROM "studio_audio_uploads" WHERE "storage_key" = $1`,
+        [STUDIO_KEY],
+      );
+    });
+
+    it('asks the tracks table nothing when a batch holds no Studio audio', async () => {
+      storage.listObjects.mockResolvedValue({
+        objects: [object('avatars/u/f.jpg', OLD)],
+        nextContinuationToken: null,
+      });
+
+      await service.sweepOrphanedObjects();
+
+      expect(dataSource.query).not.toHaveBeenCalled();
+    });
   });
 });

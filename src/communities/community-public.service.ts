@@ -1,7 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { EventCohost } from '../events/entities/event-cohost.entity';
+import {
+  CommunityHostingFields,
+  LeadCommunityRef,
+  acceptedGuestExistsSql,
+  isPrivateCommunityWithheld,
+  toCommunityHostingFields,
+} from '../events/event-community-hosting';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import {
   Event,
@@ -27,6 +35,7 @@ import {
 } from './entities/community-member.entity';
 import { AccessTier, Community } from './entities/community.entity';
 import { isGatedTier } from './community-gate';
+import { resolveEffectiveRole } from './subcommunity-rules';
 
 /**
  * The only access tiers a signed-out teaser can ever describe. `invite` and
@@ -304,6 +313,10 @@ export class CommunityPublicService {
    * page of gatherings, and ONE grouped RSVP tally across that whole page.
    * Ordering is soonest first with `id` as the tiebreak, so a page boundary
    * between two gatherings sharing a start time is stable.
+   *
+   * GUEST ROWS (2026-10-08). Gatherings this community joined as an accepted
+   * guest list here too, under the same visibility allow-list. Each row says
+   * `hostedAs` and names its lead when the viewer may see it.
    */
   async listUpcomingGatherings(
     slug: string,
@@ -336,9 +349,17 @@ export class CommunityPublicService {
     // COUNT over the same predicate; it is sliced off before mapping.
     const rows = await this.events
       .createQueryBuilder('gathering')
-      .where('gathering.communityId = :communityId', {
-        communityId: community.id,
-      })
+      // The community's own gatherings and the ones it joined as an
+      // ACCEPTED guest (2026-10-08). Quoted snake_case inside the raw
+      // fragment: TypeORM leaves a camelCase path there unrewritten.
+      .where(
+        `("gathering"."community_id" = :communityId OR ${acceptedGuestExistsSql(
+          '"gathering"."id"',
+          'public_guest',
+          '"public_guest"."community_id" = :communityId',
+        )})`,
+        { communityId: community.id },
+      )
       .andWhere('gathering.status = :publishedStatus', {
         publishedStatus: EventStatus.Published,
       })
@@ -385,11 +406,22 @@ export class CommunityPublicService {
     const gatherings = hasMore
       ? rows.slice(0, UPCOMING_GATHERINGS_PAGE_SIZE)
       : rows;
-    const goingCounts = await this.goingCountsFor(gatherings);
+    const [goingCounts, leadByGatheringId] = await Promise.all([
+      this.goingCountsFor(gatherings),
+      this.leadCommunityByGatheringId(gatherings, community.id, viewerId),
+    ]);
 
     return {
       items: gatherings.map((gathering) =>
-        this.toUpcomingGathering(gathering, goingCounts),
+        this.toUpcomingGathering(
+          gathering,
+          goingCounts,
+          toCommunityHostingFields(
+            gathering.communityId,
+            community.id,
+            leadByGatheringId.get(gathering.id) ?? null,
+          ),
+        ),
       ),
       page,
       hasMore,
@@ -594,6 +626,7 @@ export class CommunityPublicService {
   private toUpcomingGathering(
     gathering: Event,
     goingCounts: Map<string, number>,
+    hosting: CommunityHostingFields,
   ): CommunityUpcomingGathering {
     return {
       slug: gathering.slug,
@@ -609,6 +642,126 @@ export class CommunityPublicService {
       goingCount: gathering.showAttendeeCount
         ? (goingCounts.get(gathering.id) ?? 0)
         : null,
+      hostedAs: hosting.hostedAs,
+      leadCommunity: hosting.leadCommunity,
     };
+  }
+
+  /**
+   * The lead each guest gathering on this page names, keyed by gathering id,
+   * for the Events tab's "With {lead}" label (2026-10-08). A gathering this
+   * community leads is absent. A private lead is absent for a viewer who is
+   * neither on its roster nor an organiser of that gathering, the rule
+   * `EventsService.buildDetail` applies on the gathering page. Nothing is
+   * read on a page with no guest gatherings; one community read otherwise,
+   * plus a roster read and a co-host read only when a private lead is there.
+   */
+  private async leadCommunityByGatheringId(
+    gatherings: Event[],
+    listedCommunityId: string,
+    viewerId: string,
+  ): Promise<Map<string, LeadCommunityRef>> {
+    const visibleLeads = new Map<string, LeadCommunityRef>();
+    const guestGatherings = gatherings.filter(
+      (gathering): gathering is Event & { communityId: string } =>
+        gathering.communityId !== null &&
+        gathering.communityId !== listedCommunityId,
+    );
+    if (!guestGatherings.length) return visibleLeads;
+    const leads = await this.communities.find({
+      where: {
+        id: In([
+          ...new Set(guestGatherings.map((gathering) => gathering.communityId)),
+        ]),
+      },
+      select: {
+        id: true,
+        parentId: true,
+        slug: true,
+        name: true,
+        accessTier: true,
+      },
+    });
+    const leadById = new Map(leads.map((lead) => [lead.id, lead]));
+    const privateLeads = leads.filter(
+      (lead) => lead.accessTier === AccessTier.Private,
+    );
+    const rosterLeadIds = privateLeads.length
+      ? await this.leadIdsOnViewerRoster(privateLeads, viewerId)
+      : new Set<string>();
+    const gatheringsNeedingCohostCheck = guestGatherings.filter(
+      (gathering) =>
+        gathering.hostId !== viewerId &&
+        leadById.get(gathering.communityId)?.accessTier ===
+          AccessTier.Private &&
+        !rosterLeadIds.has(gathering.communityId),
+    );
+    const cohostedGatheringIds = gatheringsNeedingCohostCheck.length
+      ? new Set(
+          (
+            await this.events.manager.find(EventCohost, {
+              where: {
+                userId: viewerId,
+                eventId: In(
+                  gatheringsNeedingCohostCheck.map((gathering) => gathering.id),
+                ),
+              },
+              select: { eventId: true },
+            })
+          ).map((row) => row.eventId),
+        )
+      : new Set<string>();
+    for (const gathering of guestGatherings) {
+      const lead = leadById.get(gathering.communityId);
+      if (!lead) continue;
+      const isWithheld = isPrivateCommunityWithheld({
+        accessTier: lead.accessTier,
+        isOrganizer:
+          gathering.hostId === viewerId ||
+          cohostedGatheringIds.has(gathering.id),
+        isOnRoster: rosterLeadIds.has(lead.id),
+      });
+      if (!isWithheld) {
+        visibleLeads.set(gathering.id, { slug: lead.slug, name: lead.name });
+      }
+    }
+    return visibleLeads;
+  }
+
+  /**
+   * Of `leads`, the ones the viewer holds an effective role in: their own
+   * roster row at top level; inside a space, a space row under a parent row
+   * or parent staff standing (`resolveEffectiveRole`). One roster read.
+   */
+  private async leadIdsOnViewerRoster(
+    leads: Pick<Community, 'id' | 'parentId'>[],
+    viewerId: string,
+  ): Promise<Set<string>> {
+    const lookupIds = new Set<string>();
+    for (const lead of leads) {
+      lookupIds.add(lead.id);
+      if (lead.parentId) lookupIds.add(lead.parentId);
+    }
+    const rosterRows = await this.members.find({
+      where: { userId: viewerId, communityId: In([...lookupIds]) },
+      select: { communityId: true, role: true },
+    });
+    const roleByCommunityId = new Map(
+      rosterRows.map((row) => [row.communityId, row.role]),
+    );
+    return new Set(
+      leads
+        .filter(
+          (lead) =>
+            resolveEffectiveRole({
+              isSpace: lead.parentId !== null,
+              ownRole: roleByCommunityId.get(lead.id) ?? null,
+              parentRole: lead.parentId
+                ? (roleByCommunityId.get(lead.parentId) ?? null)
+                : null,
+            }) !== null,
+        )
+        .map((lead) => lead.id),
+    );
   }
 }

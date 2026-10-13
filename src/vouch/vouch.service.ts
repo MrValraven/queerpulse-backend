@@ -334,9 +334,12 @@ export class VouchService {
         where: { voucheeId, withdrawnAt: IsNull() },
       });
     });
+    // `anonymous` rides along so the notifications listener can leave the
+    // voucher off the vouchee's bell payload for an anonymous vouch.
     this.eventEmitter.emit(VOUCH_CREATED, {
       voucherId,
       voucheeId,
+      anonymous,
     } satisfies VouchCreatedEvent);
     return { vouchCount };
   }

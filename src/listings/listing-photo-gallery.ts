@@ -8,7 +8,8 @@ import type { ListingPhotoSet } from './entities/listing.entity';
  * three detail shots, five photos, a cover the owner picked, or a caption, and
  * they kept an image and its own alt text in two separate columns that could
  * drift apart. Here every photo carries its own description, and the ORDER of
- * the array is the order the owner arranged: index 0 is the cover.
+ * the array is the order the owner arranged: index 0 is the page's lead photo
+ * and the card's fallback when no `coverPhoto` is set.
  *
  * The three fields do three different jobs and must stay separate:
  *
@@ -58,7 +59,8 @@ interface GalleryPhotoInput {
  * `normalizeServices` do for their columns.
  *
  * Order is preserved exactly as sent: the owner arranged this list, and the
- * first entry is the cover, so re-sorting it would silently repick their cover
+ * first entry is the page's lead photo and the card's fallback when no
+ * `coverPhoto` is set, so re-sorting it would silently change the page's lead
  * photo.
  *
  * An entry with no `image` is dropped. A gallery slot with nothing in it is not
@@ -184,4 +186,36 @@ export function galleryImageReferences(
   return (gallery ?? [])
     .map((photo) => photo?.image)
     .filter((image): image is string => Boolean(image));
+}
+
+/**
+ * The listing's own cover photo: the image every directory card shows.
+ *
+ * Optional and separate from the gallery. A cover only has to fill the card's
+ * 7:3 frame, so owners can use a far smaller picture than a gallery photo
+ * needs. A listing without one shows its first gallery photo on the card
+ * (`toCoverPhoto`), so this is never backfilled.
+ */
+export interface ListingCoverPhoto {
+  image: string;
+  alt: string;
+}
+
+/**
+ * The stored shape of a submitted cover, or `null` for no cover. An empty
+ * `image` is no cover at all: alt text alone describes nothing.
+ */
+export function normalizeCoverPhoto(
+  input: { image?: string | null; alt?: string | null } | null | undefined,
+): ListingCoverPhoto | null {
+  if (!input?.image) return null;
+  return { image: input.image, alt: (input.alt ?? '').trim() };
+}
+
+/** The cover's image reference as a list, so callers can spread it beside
+ * `galleryImageReferences`. */
+export function coverImageReferences(
+  cover: ListingCoverPhoto | null | undefined,
+): string[] {
+  return cover?.image ? [cover.image] : [];
 }

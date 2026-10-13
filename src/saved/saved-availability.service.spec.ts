@@ -13,7 +13,7 @@ import { SavedAvailabilityService } from './saved-availability.service';
 const makeManager = (rowsByAlias: Record<string, string[]> = {}) => {
   const createQueryBuilder = jest.fn((_entity: unknown, alias: string) => {
     const queryBuilder: Record<string, jest.Mock> = {};
-    for (const method of ['where', 'andWhere', 'select']) {
+    for (const method of ['where', 'andWhere', 'select', 'innerJoin']) {
       queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
     }
     queryBuilder.getRawMany = jest
@@ -288,5 +288,85 @@ describe('SavedAvailabilityService', () => {
     // navigate to means no availability to claim.
     expect(available.size).toBe(0);
     expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  describe('Studio cards', () => {
+    const RELEASE_ID = '9e000000-0000-4000-8000-000000000001';
+    const TRACK_ID = '9e000000-0000-4000-8000-000000000002';
+
+    const predicatesOf = (queryBuilder: Record<string, jest.Mock>) =>
+      (queryBuilder.andWhere?.mock.calls ?? []).map(
+        ([predicate]) => predicate as string,
+      );
+
+    it('resolves a saved release through the Studio listening gate and the viewer grant', async () => {
+      await build({ release: [RELEASE_ID] });
+
+      const available = await service.availableRefs(
+        [ref(SavedKind.StudioRelease, RELEASE_ID)],
+        'viewer-1',
+      );
+
+      expect(available.has(`studio_release:${RELEASE_ID}`)).toBe(true);
+      const queryBuilder = manager.createQueryBuilder.mock.results[0]!
+        .value as Record<string, jest.Mock>;
+      expect(queryBuilder.innerJoin).toHaveBeenCalledWith(
+        'release.subprofile',
+        'persona',
+      );
+      expect(
+        predicatesOf(queryBuilder).some((predicate) =>
+          predicate.includes('content_moderation'),
+        ),
+      ).toBe(true);
+      expect(
+        predicatesOf(queryBuilder).some((predicate) =>
+          predicate.includes('"studio_access_grants"'),
+        ),
+      ).toBe(true);
+      expect(excludeBlocked).toHaveBeenCalledWith(
+        queryBuilder,
+        'viewer-1',
+        '"persona"."user_id"',
+      );
+    });
+
+    it('resolves a saved track through its release', async () => {
+      await build({ track: [TRACK_ID] });
+
+      const available = await service.availableRefs(
+        [ref(SavedKind.StudioTrack, TRACK_ID)],
+        'viewer-1',
+      );
+
+      expect(available.has(`studio_track:${TRACK_ID}`)).toBe(true);
+      const queryBuilder = manager.createQueryBuilder.mock.results[0]!
+        .value as Record<string, jest.Mock>;
+      expect(queryBuilder.innerJoin).toHaveBeenCalledWith(
+        'track.release',
+        'release',
+      );
+    });
+
+    it('answers nothing, without querying, for a signed-out viewer or an id that is no uuid', async () => {
+      await build({ release: [RELEASE_ID] });
+      expect(
+        (
+          await service.availableRefs(
+            [ref(SavedKind.StudioRelease, RELEASE_ID)],
+            null,
+          )
+        ).size,
+      ).toBe(0);
+      expect(
+        (
+          await service.availableRefs(
+            [ref(SavedKind.StudioRelease, 'lisbon-at-four')],
+            'viewer-1',
+          )
+        ).size,
+      ).toBe(0);
+      expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
   });
 });

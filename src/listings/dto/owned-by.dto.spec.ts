@@ -42,7 +42,8 @@ describe.each([
     [['trans']],
     [['nonbinary']],
     [['bipoc']],
-    [['women', 'trans', 'nonbinary', 'bipoc']],
+    [['migrant']],
+    [['women', 'trans', 'nonbinary', 'bipoc', 'migrant']],
   ])('accepts %j', async (value) => {
     expect(await ownedByErrors(dtoClass, value)).toHaveLength(0);
   });
@@ -105,6 +106,11 @@ describe('ListListingDirectoryQuery owned', () => {
   it('accepts a comma-joined list', async () => {
     const query = await run({ owned: 'trans,women' });
     expect(query.owned).toEqual(['women', 'trans']);
+  });
+
+  it('accepts migrant and sorts it last, in canonical order', async () => {
+    const query = await run({ owned: 'migrant,women' });
+    expect(query.owned).toEqual(['women', 'migrant']);
   });
 
   it('accepts a repeated parameter, meaning the same as the comma-joined one', async () => {

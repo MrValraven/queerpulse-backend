@@ -37,6 +37,10 @@ import { isCoveredByMailboxStaffFloor } from '../messaging/mailbox-seats';
 import { isEvidenceHoldActive } from '../messaging/message-evidence-hold';
 import { MESSAGE_SUBJECT_TYPE } from '../messaging/message-visibility-predicates';
 import { MAX_GROUP_MEMBERS } from '../messaging/messaging.constants';
+import {
+  StudioRelease,
+  StudioReleaseStatus,
+} from '../studio/entities/studio-release.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
   Report,
@@ -397,6 +401,12 @@ export class ReportsService {
     // dedupe lookup and the insert both read it.
     if (input.subjectType === ReportSubjectType.Subprofile) {
       input = await this.withCanonicalPersonaSubject(input);
+    }
+
+    // Studio v1: a release report names a live release by its uuid,
+    // canonicalised before the dedupe lookup and the insert read it.
+    if (input.subjectType === ReportSubjectType.StudioRelease) {
+      input = await this.withCanonicalStudioReleaseSubject(input);
     }
 
     // A member can't report their own message — mirrors the DTO's `canReport`
@@ -784,6 +794,30 @@ export class ReportsService {
       throw new NotFoundException('Subprofile not found');
     }
     return { ...input, subjectId: subprofileId };
+  }
+
+  /**
+   * Studio v1: a release report names a release that is live on Studio, by
+   * its uuid. A slug, an unknown id, a draft and a taken-down release all get
+   * the same 404, so filing never confirms that a hidden release exists. The
+   * uuid is lowercased so an uppercase spelling lands on the key
+   * `studio_releases.id::text` produces. Read through the report
+   * repository's own manager, so no extra `forFeature` is needed.
+   */
+  private async withCanonicalStudioReleaseSubject(
+    input: CreateReportInput,
+  ): Promise<CreateReportInput> {
+    if (!UUID_RE.test(input.subjectId)) {
+      throw new NotFoundException('Release not found');
+    }
+    const releaseId = input.subjectId.toLowerCase();
+    const isLiveRelease = await this.reports.manager.exists(StudioRelease, {
+      where: { id: releaseId, status: StudioReleaseStatus.Published },
+    });
+    if (!isLiveRelease) {
+      throw new NotFoundException('Release not found');
+    }
+    return { ...input, subjectId: releaseId };
   }
 
   /**

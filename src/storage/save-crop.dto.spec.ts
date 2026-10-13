@@ -32,7 +32,7 @@ describe('SaveCropDto', () => {
     ).toBeGreaterThan(0);
   });
 
-  it.each(['1:1', '2:1', '3:1', 'original', 'free'])(
+  it.each(['1:1', '2:1', '3:1', '7:3', 'original', 'free'])(
     'accepts the %s frame label the reframe editor emits',
     (aspect) => {
       expect(

@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
@@ -8,6 +9,7 @@ import { PersonaImageKeysService } from './persona-image-keys.service';
 import { StorageService, PresignedUpload } from './storage.service';
 import { ALLOWED_IMAGE_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
+import { StudioAudioUploadsService } from './studio-audio-uploads.service';
 import { UploadsController } from './uploads.controller';
 
 const user: CurrentUserData = {
@@ -24,15 +26,27 @@ const PRESIGNED: PresignedUpload = {
   expiresIn: 300,
 };
 
+const STUDIO_PRESIGNED: PresignedUpload = {
+  uploadUrl:
+    'https://queerpulse-prod.storage.railway.app/studio-audio/key?X-Amz-Signature=abc',
+  key: 'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3',
+  expiresIn: 300,
+};
+const PERSONA_ID = '7a000000-0000-4000-8000-000000000001';
+
 describe('UploadsController', () => {
   let controller: UploadsController;
   let storage: { presignImageUpload: jest.Mock };
+  let studioAudioUploads: { presign: jest.Mock };
   let mediaCropService: { upsert: jest.Mock };
   let personaImageKeys: { isMemberOfKeyPersona: jest.Mock };
 
   beforeEach(() => {
     storage = {
       presignImageUpload: jest.fn().mockResolvedValue(PRESIGNED),
+    };
+    studioAudioUploads = {
+      presign: jest.fn().mockResolvedValue(STUDIO_PRESIGNED),
     };
     mediaCropService = {
       upsert: jest.fn().mockResolvedValue(undefined),
@@ -44,6 +58,7 @@ describe('UploadsController', () => {
       storage as unknown as StorageService,
       mediaCropService as unknown as MediaCropService,
       personaImageKeys as unknown as PersonaImageKeysService,
+      studioAudioUploads as unknown as StudioAudioUploadsService,
     );
   });
 
@@ -169,7 +184,9 @@ describe('UploadsController', () => {
 
   describe('presign body gate (PresignRequestDto)', () => {
     it('accepts a valid body for every kind', async () => {
-      for (const kind of Object.keys(UPLOAD_KIND_SPECS)) {
+      for (const kind of Object.keys(UPLOAD_KIND_SPECS).filter(
+        (kindName) => kindName !== 'studio_audio',
+      )) {
         const dto = plainToInstance(PresignRequestDto, {
           kind,
           contentType: 'image/png',
@@ -231,6 +248,58 @@ describe('UploadsController', () => {
         contentType: 'image/png',
       });
       expect(await validate(dto)).not.toHaveLength(0);
+    });
+
+    it('requires a persona id on a studio_audio body', async () => {
+      const dto = plainToInstance(PresignRequestDto, {
+        kind: 'studio_audio',
+        contentType: 'audio/mpeg',
+        byteSize: 1024,
+      });
+      const errors = await validate(dto);
+      expect(errors.some((error) => error.property === 'subprofileId')).toBe(
+        true,
+      );
+    });
+
+    it('accepts a studio_audio body with a persona id and an audio type', async () => {
+      const dto = plainToInstance(PresignRequestDto, {
+        kind: 'studio_audio',
+        contentType: 'audio/mp4',
+        byteSize: 1024,
+        subprofileId: PERSONA_ID,
+      });
+      expect(await validate(dto)).toHaveLength(0);
+    });
+  });
+
+  describe('Studio audio presign', () => {
+    it('hands a studio_audio request to the Studio presign with the caller and persona', async () => {
+      const result = await controller.presign(user, {
+        kind: 'studio_audio',
+        contentType: 'audio/mpeg',
+        byteSize: 4096,
+        subprofileId: PERSONA_ID,
+      });
+      expect(studioAudioUploads.presign).toHaveBeenCalledWith('user-1', {
+        subprofileId: PERSONA_ID,
+        contentType: 'audio/mpeg',
+        byteSize: 4096,
+      });
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
+      expect(result).toBe(STUDIO_PRESIGNED);
+    });
+
+    it('refuses a persona id on any other kind', () => {
+      expect(() =>
+        controller.presign(user, {
+          kind: 'avatar',
+          contentType: 'image/png',
+          byteSize: 4096,
+          subprofileId: PERSONA_ID,
+        }),
+      ).toThrow(BadRequestException);
+      expect(storage.presignImageUpload).not.toHaveBeenCalled();
     });
   });
 

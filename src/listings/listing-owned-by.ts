@@ -1,7 +1,7 @@
 /**
  * The ownership-identity tags a listing's OWNER may declare about who owns and
  * runs the business: women (cis and trans), trans people, non-binary people,
- * and BIPOC people (Black, Indigenous and people of colour). Stored on
+ * BIPOC people (Black, Indigenous and people of colour), and migrants. Stored on
  * `Listing.ownedBy`, written by `CreateListingDto` / `UpdateListingDto`, and
  * filtered on by the directory's `owned=` query, so all three read this one
  * list.
@@ -12,7 +12,8 @@
  *
  * OWNER-PERSONAL. Each tag discloses something about the person who owns the
  * business: their gender identity (`women`, `trans`, `nonbinary`), which is an
- * outing risk, or their racial or ethnic identity (`bipoc`). That disclosure
+ * outing risk, their racial or ethnic identity (`bipoc`), or their migration
+ * history (`migrant`). That disclosure
  * is the owner's alone to make, so `ownedBy` is one of
  * `OWNER_PERSONAL_LISTING_FIELDS`: only the owner writes it, a co-manager
  * neither sees nor sends it, a suggestion and a staff-authored listing never
@@ -26,6 +27,7 @@ export const LISTING_OWNED_BY_VALUES = [
   'trans',
   'nonbinary',
   'bipoc',
+  'migrant',
 ] as const;
 
 export type ListingOwnedBy = (typeof LISTING_OWNED_BY_VALUES)[number];

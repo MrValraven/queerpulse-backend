@@ -1,9 +1,12 @@
 import {
   PERSONA_SCOPED_KIND_SPEC,
+  STUDIO_AUDIO_KEY_PATTERN,
   isPersonaScopedKey,
   isStorageKey,
+  isStudioAudioKey,
   parseStorageKey,
   storageKeyOwnerId,
+  studioAudioContentTypeForKey,
 } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';
 
@@ -140,5 +143,38 @@ describe('persona-scoped keys', () => {
         'persona-covers/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg',
       ),
     ).toBe(false);
+  });
+});
+
+describe('Studio audio keys', () => {
+  const STUDIO_MP3_KEY =
+    'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3';
+  const STUDIO_M4A_KEY =
+    'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.m4a';
+
+  it('recognises a minted key and the content type its extension stands for', () => {
+    expect(isStudioAudioKey(STUDIO_MP3_KEY)).toBe(true);
+    expect(STUDIO_AUDIO_KEY_PATTERN.test(STUDIO_M4A_KEY)).toBe(true);
+    expect(studioAudioContentTypeForKey(STUDIO_MP3_KEY)).toBe('audio/mpeg');
+    expect(studioAudioContentTypeForKey(STUDIO_M4A_KEY)).toBe('audio/mp4');
+  });
+
+  it('keeps Studio audio out of the served key shape, so GET /files never serves it', () => {
+    expect(parseStorageKey(STUDIO_MP3_KEY)).toBeNull();
+    expect(storageKeyOwnerId(STUDIO_MP3_KEY)).toBeNull();
+    expect(
+      parseStorageKey(
+        'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.jpg',
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    'studio-audio/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.wav',
+    'studio-audio/../66666666-7777-4888-9999-000000000000.mp3',
+    'avatars/11111111-2222-4333-8444-555555555555/66666666-7777-4888-9999-000000000000.mp3',
+  ])('refuses %s', (value) => {
+    expect(isStudioAudioKey(value)).toBe(false);
+    expect(studioAudioContentTypeForKey(value)).toBeNull();
   });
 });

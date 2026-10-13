@@ -2,8 +2,11 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -90,5 +93,31 @@ export class AdminInvitesController {
     @CurrentUser() current: CurrentUserData,
   ): Promise<AdminInviteDTO> {
     return this.adminInvites.revoke(id, current.userId);
+  }
+
+  /**
+   * Refresh any expired invite platform-wide. The member route
+   * (`POST /invites/:code/resend`) is scoped to the inviter, so this is how
+   * staff give someone else's lapsed invite another 7 days. Same row, same
+   * code, so the link already shared starts working again, and the inviter's
+   * monthly quota is left alone.
+   *
+   * Addressed by the internal `id`, like the revoke route above. `@HttpCode(200)`
+   * because it returns the updated row and creates nothing.
+   */
+  @ApiOperation({ summary: 'Refresh an expired invite (admin, audited).' })
+  @ApiOkResponse({ description: 'The invite, valid again for another 7 days.' })
+  @ApiNotFoundResponse({ description: 'No invite with that id.' })
+  @ApiConflictResponse({
+    description:
+      'Only an expired invite can be refreshed (it was accepted, revoked, or is still valid).',
+  })
+  @Post(':id/refresh')
+  @HttpCode(HttpStatus.OK)
+  refresh(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() current: CurrentUserData,
+  ): Promise<AdminInviteDTO> {
+    return this.adminInvites.refresh(id, current.userId);
   }
 }

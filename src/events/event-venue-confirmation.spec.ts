@@ -22,6 +22,7 @@ import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
+import { EventCommunity } from './entities/event-community.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
@@ -226,6 +227,10 @@ describe('EventsService venue confirmation (LOC-16)', () => {
         },
         {
           provide: getRepositoryToken(EventAnnouncement),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
+        {
+          provide: getRepositoryToken(EventCommunity),
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         {

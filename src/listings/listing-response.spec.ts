@@ -10,26 +10,45 @@ import { emptyAccessibilityAnswers } from './listing-accessibility';
 import { emptyListingMobileDetails } from './listing-mobile-details';
 import { emptyListingOnlineDetails } from './listing-online-details';
 import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+  toImageUrl,
+} from '../common/image-url';
+import type { CropRect } from '../media-crops/crop-rect';
+import {
   listingCardPhotoKeys,
   listingPhotoKeys,
   mapSafeSpaceCategory,
+  toCoverPhoto,
   toDirectoryCard,
   toDirectoryDetail,
   toListingDTO,
   toManagedListingItem,
+  toRemovedSpaceCard,
   toReviewDTO,
   toSafeSpaceCard,
   toSafeSpaceDetail,
 } from './listing-response';
 
+// Real storage keys, so `toImageUrl` resolves them to `/files/<key>` URLs.
+// Shared by the cover photo tests below.
+const coverKey =
+  'listing-covers/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222.webp';
+const galleryKey =
+  'listing-photos/11111111-1111-4111-8111-111111111111/33333333-3333-4333-8333-333333333333.webp';
+
 function makeListing(): Listing {
   return {
     slug: 'purex',
     name: 'Purex',
-    cats: ['food'],
+    cats: ['food', 'nightlife'],
     hood: 'Intendente',
     blurb: 'A long-running queer bar.',
+    // The retired column, still served by the deprecated `tags`/`metaPills`.
     tags: ['Bar', 'Trans-welcoming'],
+    attributes: ['solo-friendly', 'alcohol-free-drinks', 'sexual-health-prep'],
+    highlights: ['solo-friendly'],
+    inclusionPractices: ['chosen-name', 'named-contact'],
     address: 'R. de São Lázaro 11',
     langs: ['PT', 'EN'],
     safeSpaceStatus: SafeSpaceStatus.Verified,
@@ -272,12 +291,74 @@ describe('toDirectoryDetail', () => {
 });
 
 describe('safe-space adapters', () => {
-  it('maps a bar listing to the Bar category via tags', () => {
-    expect(mapSafeSpaceCategory(['food'], ['Bar'])).toBe('Bar');
+  it('maps a nightlife listing with no club attribute to Bar', () => {
+    expect(mapSafeSpaceCategory(['nightlife'], ['karaoke'])).toBe('Bar');
+  });
+
+  it('maps a nightlife listing with a dancefloor or DJ nights to Club', () => {
+    expect(mapSafeSpaceCategory(['nightlife'], ['dancefloor'])).toBe('Club');
+    expect(mapSafeSpaceCategory(['food', 'nightlife'], ['dj-nights'])).toBe(
+      'Club',
+    );
+  });
+
+  it('maps a food listing without nightlife to Cafe', () => {
+    expect(mapSafeSpaceCategory(['food'], ['dancefloor'])).toBe('Cafe');
+  });
+
+  it('lets a culture primary win over nightlife', () => {
+    expect(mapSafeSpaceCategory(['culture', 'nightlife'], ['dancefloor'])).toBe(
+      'Arts',
+    );
+  });
+
+  it('keeps the health and grooming primaries', () => {
+    expect(mapSafeSpaceCategory(['health', 'nightlife'], [])).toBe('Health');
+    expect(mapSafeSpaceCategory(['grooming', 'food'], [])).toBe('Services');
   });
 
   it('falls back to Services for unmapped categories', () => {
     expect(mapSafeSpaceCategory(['mystery'], [])).toBe('Services');
+  });
+
+  it('no longer reads the retired tags for the facet', () => {
+    const listing = {
+      ...makeListing(),
+      cats: ['food'],
+      tags: ['Club night', 'Bar'],
+      attributes: [],
+    } as unknown as Listing;
+    expect(toSafeSpaceCard(listing, []).cat).toBe('Cafe');
+  });
+
+  it('serves highlights and inclusion practices on the card, with the deprecated tags', () => {
+    const card = toSafeSpaceCard(makeListing(), []);
+    expect(card.highlights).toEqual(['solo-friendly']);
+    expect(card.inclusionPractices).toEqual(['chosen-name', 'named-contact']);
+    expect(card.tags).toEqual(['Bar', 'Trans-welcoming']);
+  });
+
+  it('serves every attribute on the detail, the sensitive ones included, as the directory detail does', () => {
+    const detail = toSafeSpaceDetail(makeListing(), []);
+    expect(detail.attributes).toEqual([
+      'solo-friendly',
+      'alcohol-free-drinks',
+      'sexual-health-prep',
+    ]);
+    expect(detail.metaPills).toEqual([
+      { label: 'Bar', accent: false },
+      { label: 'Trans-welcoming', accent: true },
+    ]);
+  });
+
+  it('derives the removed card facet from attributes', () => {
+    const listing = {
+      ...makeListing(),
+      cats: ['nightlife'],
+      attributes: ['dancefloor'],
+      safeSpaceStatus: SafeSpaceStatus.Removed,
+    };
+    expect(toRemovedSpaceCard(listing).cat).toBe('Club');
   });
 
   it('builds a card with derived rating from reviews', () => {
@@ -698,6 +779,92 @@ describe('toListingDTO (the owner/managed response)', () => {
     expect(dto.mobile).toBe(false);
     expect(dto.mobileDetails).toEqual(emptyListingMobileDetails());
   });
+
+  describe('coverPhoto', () => {
+    beforeAll(() => {
+      setImageUrlBase('https://api.test');
+    });
+
+    afterAll(() => {
+      resetImageUrlBaseForTesting();
+    });
+
+    it("emits only the owner's own cover", () => {
+      const withCover = toListingDTO(
+        makeManagedListing({
+          coverPhoto: { image: coverKey, alt: 'Front door' },
+        }),
+        null,
+      );
+      expect(withCover.coverPhoto).toEqual({
+        image: toImageUrl(coverKey),
+        alt: 'Front door',
+      });
+
+      const withoutCover = toListingDTO(
+        makeManagedListing({
+          coverPhoto: null,
+          photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+        }),
+        null,
+      );
+      expect(withoutCover.coverPhoto).toBeNull();
+    });
+
+    it('carries the cover crop from the batched map', () => {
+      const crop: CropRect = {
+        x: 0,
+        y: 0.1,
+        width: 1,
+        height: 0.4,
+        aspect: '7:3',
+      };
+      const dto = toListingDTO(
+        makeManagedListing({ coverPhoto: { image: coverKey, alt: '' } }),
+        null,
+        new Map([[coverKey, crop]]),
+      );
+      expect(dto.coverPhoto?.crop).toEqual(crop);
+    });
+  });
+
+  it('carries every attribute field to the owner and serves tags and goodFor empty', () => {
+    const dto = toListingDTO(
+      makeManagedListing({
+        attributes: ['terrace'],
+        highlights: ['terrace'],
+        entryMode: 'bookingRecommended',
+        coverPolicy: null,
+        coverFreeBefore: null,
+        payments: ['mbway'],
+        issuesNifInvoices: false,
+        inclusionPractices: ['chosen-name'],
+        saferSpacePolicyUrl: null,
+        langs: ['pt'],
+        langsOther: 'Tetum',
+        tags: ['Terrace'],
+        goodFor: ['Solo-friendly'],
+      }),
+      null,
+    );
+
+    expect(dto).toMatchObject({
+      attributes: ['terrace'],
+      highlights: ['terrace'],
+      entryMode: 'bookingRecommended',
+      coverPolicy: null,
+      coverFreeBefore: null,
+      payments: ['mbway'],
+      issuesNifInvoices: false,
+      inclusionPractices: ['chosen-name'],
+      saferSpacePolicyUrl: null,
+      langs: ['pt'],
+      langsOther: 'Tetum',
+    });
+    // Deprecated by contract amendment 2: empty whatever the old columns hold.
+    expect(dto.tags).toEqual([]);
+    expect(dto.goodFor).toEqual([]);
+  });
 });
 
 describe('online listings on the public directory responses', () => {
@@ -1022,5 +1189,264 @@ describe('toManagedListingItem', () => {
     );
     expect(online.kind).toBe('online');
     expect(online.meetingPoint).toBeNull();
+  });
+});
+
+describe('toCoverPhoto', () => {
+  beforeAll(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterAll(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  it('prefers the cover photo over the first gallery photo', () => {
+    const listing = makeDirectoryListing({
+      coverPhoto: { image: coverKey, alt: 'Front door' },
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+    });
+    expect(toCoverPhoto(listing)).toEqual({
+      image: toImageUrl(coverKey),
+      alt: 'Front door',
+      caption: '',
+    });
+  });
+
+  it('keeps the cover alt even when it is empty', () => {
+    const listing = makeDirectoryListing({
+      coverPhoto: { image: coverKey, alt: '' },
+      photoGallery: [{ image: galleryKey, alt: 'Bar', caption: '' }],
+    });
+    expect(toCoverPhoto(listing)?.alt).toBe('');
+    // The card carries the same cover, with the cover's own (empty) alt.
+    const card = toDirectoryCard(listing);
+    expect(card.coverPhoto?.image).toBe(toImageUrl(coverKey));
+    expect(card.coverPhoto?.alt).toBe('');
+  });
+
+  it('falls back to the first gallery photo', () => {
+    const listing = makeDirectoryListing({
+      coverPhoto: null,
+      photoGallery: [
+        { image: galleryKey, alt: 'Bar', caption: 'Opening night' },
+      ],
+    });
+    const cover = toCoverPhoto(listing);
+    expect(cover?.image).toBe(toImageUrl(galleryKey));
+    expect(cover?.alt).toBe('Bar');
+    expect(cover?.caption).toBe('Opening night');
+  });
+
+  it('is null with neither', () => {
+    expect(
+      toCoverPhoto(
+        makeDirectoryListing({ coverPhoto: null, photoGallery: [] }),
+      ),
+    ).toBeNull();
+  });
+
+  it('carries the cover crop from the batched map', () => {
+    const crop: CropRect = {
+      x: 0,
+      y: 0.1,
+      width: 1,
+      height: 0.4,
+      aspect: '7:3',
+    };
+    const listing = makeDirectoryListing({
+      coverPhoto: { image: coverKey, alt: 'Front door' },
+    });
+    expect(toCoverPhoto(listing, new Map([[coverKey, crop]]))?.crop).toEqual(
+      crop,
+    );
+  });
+});
+
+describe('cover photo keys', () => {
+  it('include the cover in both crop batches', () => {
+    const listing = makeDirectoryListing({
+      coverPhoto: { image: coverKey, alt: '' },
+      photoGallery: [{ image: galleryKey, alt: '', caption: '' }],
+    });
+    expect(listingPhotoKeys(listing)).toEqual([coverKey, galleryKey]);
+    expect(listingCardPhotoKeys(listing)).toEqual([coverKey, galleryKey]);
+  });
+
+  it('leave the cover out when the owner has not picked one', () => {
+    const listing = makeDirectoryListing({
+      coverPhoto: null,
+      photoGallery: [{ image: galleryKey, alt: '', caption: '' }],
+    });
+    expect(listingCardPhotoKeys(listing)).toEqual([galleryKey]);
+  });
+});
+
+describe('listing attributes on the public directory responses', () => {
+  const attributeColumns: Partial<Listing> = {
+    cats: ['nightlife'],
+    attributes: ['live-music', 'sexual-health-prep', 'terrace'],
+    highlights: ['live-music', 'terrace'],
+    entryMode: 'walkIn',
+    coverPolicy: 'freeBefore',
+    coverFreeBefore: '23:00',
+    payments: ['card', 'cash'],
+    issuesNifInvoices: true,
+    inclusionPractices: ['chosen-name', 'safer-space-policy'],
+    saferSpacePolicyUrl: 'https://atelierpulso.pt/safer-space',
+    langs: ['pt', 'en'],
+    langsOther: 'Tetum',
+  };
+
+  it('carries the price band, and the deprecated pills hold only that band', () => {
+    const card = toDirectoryCard(makeDirectoryListing(attributeColumns));
+
+    expect(card.price).toBe('€€');
+    expect(card.pills).toEqual(['€€']);
+  });
+
+  it.each([[''], [null]])(
+    'serves price %j as an empty band with empty pills',
+    (storedPrice) => {
+      const listing = makeDirectoryListing({
+        price: storedPrice as unknown as string,
+      });
+      const card = toDirectoryCard(listing);
+      const detail = toDirectoryDetail(listing, [], [], 0);
+
+      expect(card.price).toBe('');
+      expect(card.pills).toEqual([]);
+      expect(detail.price).toBe('');
+      expect(detail.pills).toEqual([]);
+    },
+  );
+
+  it('carries the filterable facts on the card and leaves the sensitive attributes to the detail page', () => {
+    const card = toDirectoryCard(makeDirectoryListing(attributeColumns));
+
+    expect(card).toMatchObject({
+      attributes: ['live-music', 'terrace'],
+      highlights: ['live-music', 'terrace'],
+      entryMode: 'walkIn',
+      payments: ['card', 'cash'],
+      langs: ['pt', 'en'],
+      inclusionPractices: ['chosen-name', 'safer-space-policy'],
+      hostsGatherings: false,
+      cats: ['nightlife'],
+    });
+    expect(card).not.toHaveProperty('coverPolicy');
+    expect(card).not.toHaveProperty('saferSpacePolicyUrl');
+  });
+
+  it('carries every category on the card in stored order, as its own copy', () => {
+    const listing = makeDirectoryListing({ cats: ['culture', 'nightlife'] });
+    const card = toDirectoryCard(listing);
+
+    expect(card.cat).toBe('culture');
+    expect(card.cats).toEqual(['culture', 'nightlife']);
+    expect(card.cats).not.toBe(listing.cats);
+    expect(toDirectoryDetail(listing, [], [], 0).cats).toEqual([
+      'culture',
+      'nightlife',
+    ]);
+  });
+
+  it('sets hostsGatherings from the batched lookup the caller passes', () => {
+    expect(
+      toDirectoryCard(
+        makeDirectoryListing(),
+        new Map(),
+        undefined,
+        null,
+        false,
+        true,
+      ).hostsGatherings,
+    ).toBe(true);
+  });
+
+  it('gives the detail page every attribute and the getting-in facts', () => {
+    const detail = toDirectoryDetail(
+      makeDirectoryListing(attributeColumns),
+      [],
+      [],
+      0,
+    );
+
+    expect(detail).toMatchObject({
+      price: '€€',
+      attributes: ['live-music', 'sexual-health-prep', 'terrace'],
+      highlights: ['live-music', 'terrace'],
+      coverPolicy: 'freeBefore',
+      coverFreeBefore: '23:00',
+      issuesNifInvoices: true,
+      saferSpacePolicyUrl: 'https://atelierpulso.pt/safer-space',
+      langs: ['pt', 'en'],
+      langsOther: 'Tetum',
+    });
+    // Deprecated by contract amendment 2: goodFor is always empty and the
+    // inherited pills hold only the price band.
+    expect(detail.goodFor).toEqual([]);
+    expect(detail.pills).toEqual(['€€']);
+  });
+
+  it('passes hostsGatherings through to the detail', () => {
+    const detail = toDirectoryDetail(
+      makeDirectoryListing(),
+      [],
+      [],
+      0,
+      new Map(),
+      null,
+      null,
+      [],
+      new Map(),
+      null,
+      [],
+      false,
+      true,
+    );
+
+    expect(detail.hostsGatherings).toBe(true);
+  });
+
+  it('reads a row written before the columns existed as nothing said', () => {
+    const detail = toDirectoryDetail(
+      makeDirectoryListing({ price: null as unknown as string }),
+      [],
+      [],
+      0,
+    );
+
+    expect(detail).toMatchObject({
+      attributes: [],
+      highlights: [],
+      entryMode: null,
+      payments: [],
+      inclusionPractices: [],
+      coverPolicy: null,
+      coverFreeBefore: null,
+      issuesNifInvoices: null,
+      saferSpacePolicyUrl: null,
+      langsOther: '',
+      hostsGatherings: false,
+      price: '',
+      pills: [],
+      goodFor: [],
+    });
+  });
+});
+
+describe('safe-space detail languages', () => {
+  it('names each language in its own words and adds the free text', () => {
+    const listing = {
+      ...makeListing(),
+      langs: ['pt', 'en'],
+      langsOther: 'Tetum',
+    };
+
+    expect(toSafeSpaceDetail(listing, []).glance).toContainEqual({
+      label: 'Languages',
+      value: 'Português · English · Tetum',
+    });
   });
 });

@@ -1,7 +1,8 @@
-import { IsIn, IsInt, Min } from 'class-validator';
+import { IsIn, IsInt, IsUUID, Min, ValidateIf } from 'class-validator';
 import {
   ALLOWED_DOCUMENT_TYPES,
   ALLOWED_IMAGE_TYPES,
+  ALLOWED_STUDIO_AUDIO_TYPES,
 } from '../upload-content-types';
 import { UPLOAD_KINDS, UploadKind } from '../upload-kinds';
 
@@ -13,6 +14,7 @@ import { UPLOAD_KINDS, UploadKind } from '../upload-kinds';
 const ALLOWED_UPLOAD_CONTENT_TYPES: readonly string[] = [
   ...ALLOWED_IMAGE_TYPES,
   ...ALLOWED_DOCUMENT_TYPES,
+  ...ALLOWED_STUDIO_AUDIO_TYPES,
 ];
 
 // Body for the unified `POST /uploads/presign`. `byteSize` lets the server
@@ -29,4 +31,10 @@ export class PresignRequestDto {
   @IsInt()
   @Min(1)
   byteSize!: number;
+
+  // Studio v1: the persona a `studio_audio` upload belongs to. Required for
+  // that kind; `UploadsController.presign` refuses it on every other kind.
+  @ValidateIf((body: PresignRequestDto) => body.kind === 'studio_audio')
+  @IsUUID()
+  subprofileId?: string;
 }

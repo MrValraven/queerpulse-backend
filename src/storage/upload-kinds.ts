@@ -11,6 +11,7 @@ export type UploadKind =
   | 'gathering-photo'
   | 'group-avatar'
   | 'listing-photo'
+  | 'listing-cover'
   | 'listing-menu'
   | 'community-cover'
   | 'event-cover'
@@ -18,7 +19,8 @@ export type UploadKind =
   | 'message-image'
   | 'message-document'
   | 'forum-photo'
-  | 'sticker';
+  | 'sticker'
+  | 'studio_audio';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -103,6 +105,15 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'listing-photo': {
     prefix: 'listing-photos',
     maxBytes: 5 * MB,
+    requiresSession: false,
+  },
+  // A business listing's cover for directory cards. Public for the same reason
+  // as `listing-photo`. Capped lower: a card shows it at 392x168, so the
+  // frontend downscales covers to 1200px (`MAX_DIMENSION_PX['listing-cover']`)
+  // and 2 MB is generous for that.
+  'listing-cover': {
+    prefix: 'listing-covers',
+    maxBytes: 2 * MB,
     requiresSession: false,
   },
   // A listing's menu: a PDF, or a photo of the board, opened from the public
@@ -266,6 +277,19 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // this kind is admin-only, enforced in `UploadsController.presign` (the
   // spec shape carries no role field, so the check cannot live here).
   sticker: { prefix: 'stickers', maxBytes: 1 * MB, requiresSession: false },
+  // A Studio track's audio (Studio v1): MP3 or M4A, at most 50 MB. The key is
+  // `studio-audio/<uuid>/<uuid>.<ext>` with both segments random, minted by
+  // `StorageService.presignStudioAudioUpload` for a persona the uploader
+  // co-owns and recorded in `studio_audio_uploads`, so no audio path names a
+  // member. `STORAGE_KEY_PATTERN` leaves this prefix out, so `GET /files/*`
+  // never serves these objects: a track streams through a 15-minute presigned
+  // GET (`createPresignedAudioStream`) after the Studio grant check.
+  // `requiresSession: true` records that every read needs a signed-in member.
+  studio_audio: {
+    prefix: 'studio-audio',
+    maxBytes: 50 * MB,
+    requiresSession: true,
+  },
 };
 
 export const UPLOAD_KINDS: readonly UploadKind[] = Object.keys(

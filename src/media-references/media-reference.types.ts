@@ -10,7 +10,7 @@ export type MediaReferenceType =
   | 'event-photo' // EventPhoto.storageKey
   | 'event-cover' // Event.coverImageUrl
   | 'group-avatar' // Conversation.avatarUrl
-  | 'listing' // Listing.photoGallery[].image and Listing.shopItems[].photo.image
+  | 'listing' // Listing.photoGallery[].image, Listing.coverPhoto.image and Listing.shopItems[].photo.image
   | 'listing-menu' // Listing.menu.file.url
   | 'listing-review' // ListingReview.photo
   | 'persona-avatar' // Subprofile.avatarUrl
@@ -34,7 +34,8 @@ export type MediaReferenceType =
   | 'magazine-deck' // MagazineDeck.cover / .slides[] image refs
   | 'message-photo' // Message.attachment (a photo sent in a conversation)
   | 'press-contact' // PressContact.avatarUrl
-  | 'sticker'; // Sticker.storageKey
+  | 'sticker' // Sticker.storageKey
+  | 'studio-cover'; // StudioRelease.coverKey
 
 export interface MediaReference {
   type: MediaReferenceType;
