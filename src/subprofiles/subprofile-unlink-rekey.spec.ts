@@ -144,6 +144,23 @@ describe('issueFreshPersonaId', () => {
     expect(query.mock.calls[trackIndex]?.[1]).toEqual([freshId]);
   });
 
+  // Studio artist kinds: episode dates would match the named persona's
+  // episodes, so they restart like the release dates.
+  it('restarts the episode publish time in publish order and the alert claim in the track re-key', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const [sql] = statementTouching('studio_tracks') ?? [];
+    expect(sql).toContain(
+      '"published_at" = CASE WHEN "studio_tracks"."published_at" IS NULL THEN NULL ELSE now() + make_interval(secs => "episode_order"."publish_rank" / 1000.0) END',
+    );
+    expect(sql).toContain(
+      '"followers_notified_at" = CASE WHEN "studio_tracks"."followers_notified_at" IS NULL THEN NULL ELSE now() END',
+    );
+    expect(sql).toMatch(
+      /FROM "studio_tracks" "ranked_track"\s+WHERE "ranked_track"\."release_id" IN \(/,
+    );
+  });
+
   // Studio v2: an unlink ends the named persona, so a playlist credited to it
   // turns private and loses the credit. The foreign key has already carried
   // the credit to the fresh id when this runs.
@@ -158,6 +175,148 @@ describe('issueFreshPersonaId', () => {
       statement.includes('UPDATE "studio_playlists"'),
     );
     expect(releaseIndex).toBeGreaterThan(0);
+  });
+
+  // Studio v3: nothing of the artist tools may tie the pseudonymous persona
+  // to its named past.
+  it('clears preview links and the track change stamp in the release re-key', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const [sql] = statementTouching('studio_releases') ?? [];
+    expect(sql).toContain('"preview_token" = NULL');
+    expect(sql).toContain('"preview_link_created_at" = NULL');
+    expect(sql).toContain('"tracks_changed_at" = NULL');
+  });
+
+  it('returns a scheduled release to draft and clears its drop time in the release re-key', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const [sql = ''] = statementTouching('studio_releases') ?? [];
+    expect(sql).toContain(
+      `"status" = CASE WHEN "studio_releases"."status" = 'scheduled' THEN 'draft' ELSE "studio_releases"."status" END`,
+    );
+    expect(sql).toContain('"publish_at" = NULL');
+    // A release date the schedule filled goes, as a takedown clears it; a
+    // typed one stays.
+    expect(sql).toMatch(
+      /"released_on" = CASE\s+WHEN "studio_releases"\."status" = 'scheduled'\s+AND "studio_releases"\."released_on" = \("studio_releases"\."publish_at" AT TIME ZONE 'Europe\/Lisbon'\)::date\s+THEN NULL\s+ELSE "studio_releases"\."released_on"\s+END/,
+    );
+  });
+
+  it('deletes the reminders of a scheduled release once it is back in draft', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const releaseIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_releases"'),
+    );
+    const reminderIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('DELETE FROM "studio_release_reminders"'),
+    );
+    expect(releaseIndex).toBeGreaterThan(-1);
+    expect(reminderIndex).toBeGreaterThan(releaseIndex);
+  });
+
+  it('deletes the reminders members set on the named persona releases', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const reminderStatement = query.mock.calls.find(([sql]) =>
+      sql.includes('DELETE FROM "studio_release_reminders"'),
+    );
+    expect(reminderStatement?.[1]).toEqual([freshId]);
+  });
+
+  it('restarts the version note dates and empties the press kit picks', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    expect(statementTouching('studio_release_versions')?.[1]).toEqual([
+      freshId,
+    ]);
+    const [pressKitSql, pressKitParameters] =
+      statementTouching('studio_press_kits') ?? [];
+    expect(pressKitSql).toContain(`"featured_track_ids" = '{}'`);
+    expect(pressKitParameters).toEqual([freshId]);
+  });
+
+  it('gives every persona post a fresh id and clears its edit stamp', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const postStatement = query.mock.calls.find(([sql]) =>
+      sql.includes('UPDATE "subprofile_posts"'),
+    );
+    const [sql, parameters] = postStatement ?? [];
+    expect(sql).toContain('AS MATERIALIZED');
+    expect(sql).toContain('"edited_at" = NULL');
+    expect(parameters).toEqual([freshId, 'persona_post']);
+  });
+
+  it('keeps the Updates order when it restarts the post dates', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const postStatement = query.mock.calls.find(([sql]) =>
+      sql.includes('UPDATE "subprofile_posts"'),
+    );
+    const [sql] = postStatement ?? [];
+    expect(sql).toContain(
+      'row_number() OVER (ORDER BY "created_at" DESC, "id" DESC) AS "recency_rank"',
+    );
+    expect(sql).toContain(
+      `"created_at" = now() - ("remapped"."recency_rank" * interval '1 millisecond')`,
+    );
+  });
+
+  it('moves open reports on a persona post with it', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const postStatement = query.mock.calls.find(([sql]) =>
+      sql.includes('UPDATE "subprofile_posts"'),
+    );
+    const [sql, parameters] = postStatement ?? [];
+    expect(sql).toContain(
+      'UPDATE "reports" SET "subject_id" = "remapped"."fresh_id"::text',
+    );
+    expect(parameters).toEqual([freshId, 'persona_post']);
+  });
+
+  it('drops the post quota ledger of the named persona', async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const ledgerStatement = query.mock.calls.find(([sql]) =>
+      sql.includes('DELETE FROM "subprofile_post_quota_entries"'),
+    );
+    expect(ledgerStatement?.[1]).toEqual([freshId]);
+  });
+
+  it('runs the artist tools statements after the tracks move', async () => {
+    await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const trackIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_tracks"'),
+    );
+    const postIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "subprofile_posts"'),
+    );
+    expect(postIndex).toBeGreaterThan(trackIndex);
+  });
+
+  // Studio discovery: a credit or a staff pick kept across an unlink would
+  // tie the pseudonymous persona to its named collaborators and shelf spot.
+  it("forgets the persona's credits and staff picks before its releases get fresh ids", async () => {
+    const freshId = await issueFreshPersonaId(manager, PREVIOUS_ID);
+
+    const creditIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('DELETE FROM "studio_persona_credits"'),
+    );
+    const pickIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('DELETE FROM "studio_curated_picks"'),
+    );
+    const releaseIndex = query.mock.calls.findIndex(([sql]) =>
+      sql.includes('UPDATE "studio_releases"'),
+    );
+    expect(creditIndex).toBeGreaterThan(0);
+    expect(pickIndex).toBeGreaterThan(creditIndex);
+    expect(releaseIndex).toBeGreaterThan(pickIndex);
+    expect(query.mock.calls[creditIndex]?.[1]).toEqual([freshId]);
+    expect(query.mock.calls[pickIndex]?.[1]).toEqual([freshId]);
   });
 });
 

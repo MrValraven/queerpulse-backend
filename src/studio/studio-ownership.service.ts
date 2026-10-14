@@ -60,7 +60,7 @@ export class StudioOwnershipService {
     return persona;
   }
 
-  /** Musician and DJ personas the member co-owns whose releases can be heard.
+  /** Personas of a Studio artist kind the member co-owns whose releases can be heard.
    *  Pass the caller's transaction `manager` to read on its connection, so a
    *  read under a lock that transaction holds needs no second connection. */
   listUploadablePersonas(
@@ -137,8 +137,9 @@ export class StudioOwnershipService {
     );
   }
 
-  // A non-owner learns nothing about a draft or taken-down release (404);
-  // a published one is public to granted members, so 403 tells them why.
+  // A non-owner learns nothing about a draft or taken-down release (404); a
+  // published or scheduled one is visible to granted members, so 403 tells
+  // them why.
   private async authorizeReleaseWrite(
     release: StudioRelease | null,
     isMemberOf: (subprofileId: string) => Promise<boolean>,
@@ -150,7 +151,10 @@ export class StudioOwnershipService {
       throw new NotFoundException('Release not found');
     }
     if (!(await isMemberOf(release.subprofileId))) {
-      if (release.status === StudioReleaseStatus.Published) {
+      if (
+        release.status === StudioReleaseStatus.Published ||
+        release.status === StudioReleaseStatus.Scheduled
+      ) {
         throw studioError('studio_not_persona_owner');
       }
       throw new NotFoundException('Release not found');

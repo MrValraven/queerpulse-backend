@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import {
   StudioErrorCode,
   isStudioArtistPersonaKind,
+  studioAudioMaxBytesForKind,
   studioError,
 } from '../studio/studio.constants';
 import { StudioAudioUpload } from './entities/studio-audio-upload.entity';
@@ -43,7 +44,8 @@ export class StudioAudioUploadsService {
 
   /**
    * Presigns a track upload for `subprofileId`. The caller needs a Studio
-   * grant and a membership of a musician or DJ persona. The registry row is
+   * grant and a membership of a persona of a Studio artist kind; a podcast
+   * kind may upload up to 250 MB, every other kind 50 MB. The registry row is
    * written once the presign succeeds, so a refused or over-cap request
    * leaves nothing behind.
    */
@@ -51,13 +53,17 @@ export class StudioAudioUploadsService {
     userId: string,
     request: { subprofileId: string; contentType: string; byteSize: number },
   ): Promise<PresignedUpload> {
-    const refusal = await this.uploadRefusalFor(userId, request.subprofileId);
+    const { refusal, personaKind } = await this.uploadChecksFor(
+      userId,
+      request.subprofileId,
+    );
     if (refusal) {
       throw studioError(refusal);
     }
     const presigned = await this.storage.presignStudioAudioUpload({
       contentType: request.contentType,
       byteSize: request.byteSize,
+      maxBytes: studioAudioMaxBytesForKind(personaKind),
     });
     await this.uploads.insert({
       storageKey: presigned.key,
@@ -109,12 +115,13 @@ export class StudioAudioUploadsService {
     return objects;
   }
 
-  // One statement answers all three checks. An unknown persona reads as
-  // "not your persona", so the refusal never confirms a persona id exists.
-  private async uploadRefusalFor(
+  // One statement answers all three checks and reads the persona kind the
+  // cap depends on. An unknown persona reads as "not your persona", so the
+  // refusal never confirms a persona id exists.
+  private async uploadChecksFor(
     userId: string,
     subprofileId: string,
-  ): Promise<StudioErrorCode | null> {
+  ): Promise<{ refusal: StudioErrorCode | null; personaKind: string | null }> {
     const rows: UploadCheckRow[] = await this.uploads.query(
       `SELECT
          EXISTS (
@@ -132,15 +139,16 @@ export class StudioAudioUploadsService {
       [userId, subprofileId],
     );
     const row = rows[0];
+    const personaKind = row?.persona_kind ?? null;
     if (!row?.has_grant) {
-      return 'studio_access_required';
+      return { refusal: 'studio_access_required', personaKind };
     }
-    if (row.persona_kind === null || !row.is_member) {
-      return 'studio_not_persona_owner';
+    if (personaKind === null || !row.is_member) {
+      return { refusal: 'studio_not_persona_owner', personaKind };
     }
-    if (!isStudioArtistPersonaKind(row.persona_kind)) {
-      return 'studio_persona_kind_not_allowed';
+    if (!isStudioArtistPersonaKind(personaKind)) {
+      return { refusal: 'studio_persona_kind_not_allowed', personaKind };
     }
-    return null;
+    return { refusal: null, personaKind };
   }
 }

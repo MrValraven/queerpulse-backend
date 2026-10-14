@@ -2,11 +2,14 @@ import {
   dropStudioListeningReferer,
   dropStudioListeningUrl,
   isStudioListeningRequest,
+  redactStudioPreviewToken,
 } from './studio-request-log';
 
 const trackId = '3f2b8c1e-5d4a-4b7e-9a10-6c2d8e4f1a22';
 const playlistId = '7c1e2b3a-4d5e-4f60-8a71-9b2c3d4e5f60';
 const entryId = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
+const previewToken = 'f'.repeat(64);
+const personaId = '5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d';
 
 describe('isStudioListeningRequest', () => {
   it.each([
@@ -30,6 +33,32 @@ describe('isStudioListeningRequest', () => {
     '/Studio/Search?Q=noite',
     '/studio/search/',
     'https://api.queerpulse.test/studio/search?q=noite',
+    `/studio/previews/${previewToken}`,
+    `/studio/previews/${previewToken}/tracks/${trackId}/stream`,
+    `/api/studio/previews/${previewToken}?x=1`,
+    `/STUDIO/PREVIEWS/${previewToken}`,
+    '/studio/previews/not-a-token',
+    `/studio/artists/${personaId}/press-kit`,
+    `/api/studio/artists/${personaId}/press-kit?x=1`,
+    `/Studio/Artists/${personaId}/Press-Kit`,
+    `/studio/artists/${personaId}/press-kit/`,
+    '/studio/radio',
+    '/studio/radio?genre=electronic',
+    '/api/studio/radio?mood=late-night',
+    '/Studio/Radio/?Mood=tender',
+    'https://api.queerpulse.test/studio/radio?genre=fado',
+    `/studio/tracks/${trackId}/persona-credits`,
+    `/studio/tracks/${trackId}/persona-credits/${entryId}`,
+    `/studio/tracks/${trackId}/publish`,
+    `/api/studio/tracks/${trackId}/publish`,
+    '/studio/formats',
+    '/studio/formats/',
+    '/api/studio/formats?x=1',
+    '/Studio/Formats',
+    '/studio/episodes/latest',
+    '/studio/episodes/latest?cursor=abc&limit=12',
+    '/api/studio/episodes/latest',
+    '/STUDIO/EPISODES/LATEST',
   ])('matches %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(true);
   });
@@ -51,7 +80,31 @@ describe('isStudioListeningRequest', () => {
     '/studio/search/saved',
     '/admin/studio/search?q=noite',
     '/search?q=studio/search',
+    '/studio/previews',
+    '/studio/previews/',
+    `/studio/artists/${personaId}`,
+    `/studio/artists/${personaId}/press-kitx`,
+    `/studio/artists/${personaId}/stats`,
+    `/admin/studio/previews/${previewToken}`,
+    `/admin/studio/artists/${personaId}/press-kit`,
+    `/studio/releases/${trackId}/preview-link`,
+    '/studio/radiox?genre=fado',
+    '/studio/radio/saved',
+    '/admin/studio/radio?genre=fado',
+    '/studio/moods',
+    '/studio/curation',
+    '/studio/scenes/lisbon-ballroom',
+    '/studio/credits/inbox',
+    '/studio/credit-candidates/river-ink',
+    `/studio/artists/${trackId}/appears-on`,
+    `/studio/artists/${trackId}/related`,
     '',
+    '/studio/formatsx',
+    '/studio/formats/podcast',
+    '/studio/episodes',
+    '/studio/episodes/',
+    '/admin/studio/formats',
+    '/admin/studio/episodes/latest',
   ])('ignores %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(false);
   });
@@ -77,6 +130,15 @@ describe('dropStudioListeningUrl', () => {
     };
     expect(dropStudioListeningUrl(playlistRequest)).toBe(true);
     expect(playlistRequest).toEqual({});
+  });
+
+  it('removes the url and query string of a radio request', () => {
+    const radioRequest = {
+      url: 'https://api.queerpulse.test/studio/radio?mood=late-night',
+      query_string: 'mood=late-night',
+    };
+    expect(dropStudioListeningUrl(radioRequest)).toBe(true);
+    expect(radioRequest).toEqual({});
   });
 
   it('keeps the url of every other request', () => {
@@ -112,6 +174,27 @@ describe('dropStudioListeningReferer', () => {
     expect(request.headers).toEqual({ accept: 'application/json' });
   });
 
+  it('drops a scene page referer, since the scene page plays music', () => {
+    const request = {
+      headers: {
+        referer: 'https://queerpulse.test/studio/scene?slug=lisbon-ballroom',
+      },
+    };
+    expect(dropStudioListeningReferer(request)).toBe(true);
+    expect(request.headers).toEqual({});
+  });
+
+  it.each([
+    `https://queerpulse.test/studio/preview/${previewToken}`,
+    `https://queerpulse.test/studio/press?id=${personaId}`,
+    `https://queerpulse.test/studio/press/print?id=${personaId}`,
+    `https://queerpulse.test/studio/press/edit?persona=${personaId}`,
+  ])('drops a preview or press kit page referer: %s', (referer) => {
+    const request = { headers: { referer } };
+    expect(dropStudioListeningReferer(request)).toBe(true);
+    expect(request.headers).toEqual({});
+  });
+
   it('keeps the referer of an unrelated page', () => {
     const request = { headers: { referer: 'https://queerpulse.test/feed' } };
     expect(dropStudioListeningReferer(request)).toBe(false);
@@ -137,5 +220,49 @@ describe('dropStudioListeningReferer', () => {
     const request = { headers: { referer: 'http://[bad' } };
     expect(dropStudioListeningReferer(request)).toBe(true);
     expect(request.headers).toEqual({});
+  });
+});
+
+describe('redactStudioPreviewToken', () => {
+  it('hides the token on the preview stream path', () => {
+    expect(
+      redactStudioPreviewToken(
+        `/studio/previews/${previewToken}/tracks/${trackId}/stream`,
+      ),
+    ).toBe(`/studio/previews/[token]/tracks/${trackId}/stream`);
+  });
+
+  it('hides the token on the preview read path', () => {
+    expect(redactStudioPreviewToken(`/studio/previews/${previewToken}`)).toBe(
+      '/studio/previews/[token]',
+    );
+    expect(
+      redactStudioPreviewToken(`/api/Studio/Previews/${previewToken}/`),
+    ).toBe('/api/Studio/Previews/[token]/');
+  });
+
+  it('keeps the query string as it arrived', () => {
+    expect(
+      redactStudioPreviewToken(`/studio/previews/${previewToken}?quality=high`),
+    ).toBe('/studio/previews/[token]?quality=high');
+  });
+
+  it('leaves a token-shaped query value alone outside the preview path', () => {
+    const url = `/studio/releases?previews/${previewToken}`;
+    expect(redactStudioPreviewToken(url)).toBe(url);
+  });
+
+  it.each([
+    `/studio/tracks/${trackId}/stream`,
+    `/studio/releases/${trackId}/preview-link`,
+    '/studio/previews',
+    '/feed?cursor=abc',
+    '/auth/google?invite=abc',
+  ])('leaves other urls untouched: %s', (url) => {
+    expect(redactStudioPreviewToken(url)).toBe(url);
+  });
+
+  it('passes undefined through', () => {
+    expect(redactStudioPreviewToken(undefined)).toBeUndefined();
   });
 });

@@ -1,5 +1,6 @@
 import { StudioPlaylistVisibility } from './entities/studio-playlist.entity';
 import {
+  ARTIST_KIND_LIST,
   PlaylistAudienceFacts,
   canViewerOpenPlaylist,
   creditPersonaCreatorIdSql,
@@ -9,10 +10,12 @@ import {
   ownerHoldsGrantSql,
   personaCreatorBlockExemptSql,
   personaCreditActiveSql,
+  playableTrackAudioSql,
   playableTrackSql,
   playlistOpenToViewerSql,
   publiclyListedPlaylistSql,
 } from './studio-playlist-visibility';
+import { episodeReleasedSql } from './studio-episode-rule';
 
 const facts = (
   overrides: Partial<PlaylistAudienceFacts> = {},
@@ -155,6 +158,17 @@ describe('playlist SQL predicates', () => {
     expect(predicate).toContain('content_moderation');
   });
 
+  // Studio artist kinds: a podcast episode plays once it is published.
+  it('keeps a podcast episode out of every playable read until it is published', () => {
+    expect(playableTrackSql('track', 'release', 'persona')).toContain(
+      episodeReleasedSql('track', 'release'),
+    );
+    const audioHalf = playableTrackAudioSql('artist_track', 'artist_release');
+    expect(audioHalf).toContain(`"artist_release"."type" <> 'podcast'`);
+    expect(audioHalf).toContain(`"artist_track"."published_at" <= now()`);
+    expect(audioHalf).toContain(`"artist_release"."status" = 'published'`);
+  });
+
   it('lets a persona credit stand only for a listenable artist persona the owner still runs', () => {
     const predicate = personaCreditActiveSql('playlist');
     expect(predicate).toContain(`"playlist"."is_credited_to_persona"`);
@@ -165,7 +179,7 @@ describe('playlist SQL predicates', () => {
       `"credit_member"."user_id" = "playlist"."user_id"`,
     );
     expect(predicate).toContain(
-      `"credit_persona"."kind" IN ('musician', 'dj')`,
+      `"credit_persona"."kind" IN (${ARTIST_KIND_LIST})`,
     );
     expect(predicate).toContain(`"credit_persona"."status" = 'published'`);
     expect(predicate).toContain(`"credit_persona"."visibility" = 'open'`);

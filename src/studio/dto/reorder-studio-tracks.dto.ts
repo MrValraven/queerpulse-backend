@@ -7,7 +7,7 @@ import { STUDIO_LIMITS } from '../studio.constants';
 export class ReorderStudioTracksDto {
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(STUDIO_LIMITS.tracksPerRelease)
+  @ArrayMaxSize(STUDIO_LIMITS.episodesPerShow)
   @IsUUID('all', { each: true })
   trackIds!: string[];
 }

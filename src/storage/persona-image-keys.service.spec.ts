@@ -387,6 +387,32 @@ describe('PersonaImageKeysService (T17)', () => {
         parameters: [PERSONA_ID, OWN_PERSONA_KEY, mintedKey(1)],
       });
     });
+
+    it('moves every persona post photo to a fresh key on unlink', async () => {
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('FROM "subprofile_posts"')
+            ? [{ image_key: OWN_PERSONA_KEY }]
+            : [],
+        ),
+      );
+      const persona = { id: PERSONA_ID, avatarUrl: null, coverUrl: null };
+
+      const rehomed = await service.rehomeUnlinkedPersona(
+        asManager(),
+        persona,
+        'unlink',
+      );
+
+      expect(rehomed.get(OWN_PERSONA_KEY)).toBe(mintedKey(1));
+      const statements = manager.query.mock.calls.map(
+        ([sql, parameters]: [string, unknown[]]) => ({ sql, parameters }),
+      );
+      expect(statements).toContainEqual({
+        sql: expect.stringContaining('UPDATE "subprofile_posts"') as unknown,
+        parameters: [PERSONA_ID, OWN_PERSONA_KEY, mintedKey(1)],
+      });
+    });
   });
 
   describe('serving and membership reads', () => {
@@ -485,6 +511,32 @@ describe('PersonaImageKeysService (T17)', () => {
       ]);
       expect(manager.query).toHaveBeenCalledWith(
         expect.stringContaining('FROM "studio_audio_uploads"'),
+        [PERSONA_ID],
+      );
+    });
+
+    it('lists the persona post photos too, each key once', async () => {
+      const POST_IMAGE_KEY =
+        'persona/c0000000-0000-4000-8000-000000000011/c0000000-0000-4000-8000-000000000012.jpg';
+      manager.find.mockResolvedValue([{ storageKey: OWN_PERSONA_KEY }]);
+      manager.query.mockImplementation((sql: string) =>
+        Promise.resolve(
+          sql.includes('FROM "subprofile_posts"')
+            ? [
+                { storage_key: POST_IMAGE_KEY },
+                { storage_key: OWN_PERSONA_KEY },
+              ]
+            : [{ storage_key: STUDIO_AUDIO_KEY }],
+        ),
+      );
+
+      expect(await service.listKeysOf(asManager(), PERSONA_ID)).toEqual([
+        OWN_PERSONA_KEY,
+        STUDIO_AUDIO_KEY,
+        POST_IMAGE_KEY,
+      ]);
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('FROM "subprofile_posts"'),
         [PERSONA_ID],
       );
     });

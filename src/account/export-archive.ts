@@ -140,6 +140,12 @@ export const EXPORT_CSV_CATEGORIES = [
   // Studio v2: the member's playlists, one row per playlist with its tracks
   // flattened into indexed columns.
   'studioPlaylists',
+  // Studio discovery: one row per persona credit and side.
+  'studioPersonaCredits',
+  // Studio v3: the member's Notify me reminders, then the persona posts
+  // they wrote.
+  'studioReleaseReminders',
+  'personaPosts',
 ] as const;
 
 /**

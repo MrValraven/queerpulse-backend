@@ -7,6 +7,7 @@ import {
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
 
 const USER_ID = '7d000000-0000-4000-8000-000000000001';
 const PERSONA_ID = '7d000000-0000-4000-8000-000000000002';
@@ -100,7 +101,7 @@ describe('StudioOwnershipService', () => {
     expect(context.persona.kind).toBe('musician');
   });
 
-  it('refuses a write once the persona is no longer a musician or DJ', async () => {
+  it('refuses a write once the persona is no longer a Studio artist kind', async () => {
     manager.findOne.mockImplementation((entity: unknown) =>
       Promise.resolve(
         entity === StudioRelease
@@ -126,6 +127,16 @@ describe('StudioOwnershipService', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
     releases.findOne.mockResolvedValue(
       releaseWith(StudioReleaseStatus.Published),
+    );
+    expect(await codeOf(service.loadReleaseForWrite(USER_ID, RELEASE_ID))).toBe(
+      'studio_not_persona_owner',
+    );
+  });
+
+  it('answers a non-owner 403 for a scheduled release, which granted members can see', async () => {
+    members.exists.mockResolvedValue(false);
+    releases.findOne.mockResolvedValue(
+      releaseWith(StudioReleaseStatus.Scheduled),
     );
     expect(await codeOf(service.loadReleaseForWrite(USER_ID, RELEASE_ID))).toBe(
       'studio_not_persona_owner',
@@ -166,7 +177,7 @@ describe('StudioOwnershipService', () => {
     );
     expect(queryBuilder.where).toHaveBeenCalledWith(
       'persona.kind IN (:...artistKinds)',
-      { artistKinds: ['musician', 'dj'] },
+      { artistKinds: [...STUDIO_ARTIST_PERSONA_KINDS] },
     );
     const predicates = queryBuilder.andWhere.mock.calls.map(
       ([predicate]) => predicate as string,
@@ -175,4 +186,16 @@ describe('StudioOwnershipService', () => {
       predicates.some((predicate) => predicate.includes('content_moderation')),
     ).toBe(true);
   });
+
+  // Studio artist kinds: the new kinds create releases like musicians do.
+  it.each(['podcaster', 'poet', 'drag'])(
+    'lets a %s persona the member runs create a release',
+    async (kind) => {
+      subprofiles.findOne.mockResolvedValue({ id: PERSONA_ID, kind });
+      members.exists.mockResolvedValue(true);
+      await expect(
+        service.assertArtistPersona(USER_ID, PERSONA_ID),
+      ).resolves.toEqual({ id: PERSONA_ID, kind });
+    },
+  );
 });

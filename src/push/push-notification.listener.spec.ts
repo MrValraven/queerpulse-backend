@@ -1294,4 +1294,348 @@ describe('PushNotificationListener', () => {
       expect(push.sendToUsers).not.toHaveBeenCalled();
     });
   });
+
+  // Studio discovery: persona credit requests and acceptances.
+  describe('StudioCreditRequested', () => {
+    const requestedPayload = {
+      creditId: 'credit-1',
+      creditedSubprofileId: 'persona-credited',
+      creditedPersonaName: 'River Ink',
+      creditedPersonaHandle: 'river-ink',
+      requestingPersonaName: 'Night Shift',
+      requestingPersonaHandle: 'night-shift',
+      trackId: 'track-1',
+      trackTitle: 'Opening',
+      releaseId: 'release-1',
+      releaseTitle: 'Lisbon at four',
+      role: 'cover-art',
+    };
+
+    it('pushes behind the Personas switch and opens the credits inbox', async () => {
+      const { listener, push, notificationPreferences, profilesRepo } = build(
+        {},
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioCreditRequested,
+            requestedPayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'personas');
+      const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(userIds).toEqual(['recipient-1']);
+      expect(payload.title).toBe('New credit request');
+      expect(payload.body).toBe('Night Shift credited River Ink on Opening');
+      expect(payload.data.url).toBe('/studio/credits');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:studioCreditRequested.title',
+        bodyKey: 'push:studioCreditRequested.body',
+        params: {
+          requester: 'Night Shift',
+          persona: 'River Ink',
+          track: 'Opening',
+        },
+      });
+      // Personas only: no member is looked up, so no face rides along.
+      expect(payload.icon).toBeUndefined();
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('sends nothing when Personas is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['personas'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioCreditRequested,
+            requestedPayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it.each(['requestingPersonaName', 'creditedPersonaName', 'trackTitle'])(
+      'sends no push when %s is missing',
+      async (missingKey) => {
+        const { listener, push } = build({});
+        await listener.handleNotificationBatchCreated(
+          emit(
+            makeNotification(NotificationType.StudioCreditRequested, {
+              ...requestedPayload,
+              [missingKey]: '',
+            }),
+          ),
+        );
+        expect(push.sendToUsers).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('StudioCreditAccepted', () => {
+    const acceptedPayload = {
+      creditId: 'credit-1',
+      requestingSubprofileId: 'persona-requesting',
+      requestingPersonaName: 'Night Shift',
+      creditedPersonaName: 'River Ink',
+      creditedPersonaHandle: 'river-ink',
+      trackId: 'track-1',
+      trackTitle: 'Opening',
+      releaseId: 'release-1',
+      releaseTitle: 'Lisbon at four',
+      role: 'cover-art',
+    };
+
+    it('pushes behind the Personas switch and opens the track', async () => {
+      const { listener, push, notificationPreferences } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioCreditAccepted,
+            acceptedPayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'personas');
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.title).toBe('Credit accepted');
+      expect(payload.body).toBe('River Ink accepted your credit on Opening');
+      expect(payload.data.url).toBe('/studio/track?id=track-1');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:studioCreditAccepted.title',
+        bodyKey: 'push:studioCreditAccepted.body',
+        params: { persona: 'River Ink', track: 'Opening' },
+      });
+    });
+
+    it('opens the credits inbox when the payload names no track id', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioCreditAccepted, {
+            creditedPersonaName: 'River Ink',
+            trackTitle: 'Opening',
+          }),
+        ),
+      );
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.data.url).toBe('/studio/credits');
+    });
+
+    it('sends no push when the persona name is missing', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioCreditAccepted, {
+            ...acceptedPayload,
+            creditedPersonaName: '',
+          }),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+  });
+
+  // Studio v3: an update from a persona the member follows.
+  describe('PersonaPost', () => {
+    const postPayload = {
+      subprofileName: 'Night Shift',
+      subprofileSlugOrHandle: 'night-shift',
+      subprofileId: 'persona-1',
+      postId: 'post-1',
+      excerpt: 'New single out Friday',
+    };
+
+    it('pushes behind the Personas you follow switch, titled with the persona and opening its updates', async () => {
+      const { listener, push, notificationPreferences, profilesRepo } = build(
+        {},
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(makeNotification(NotificationType.PersonaPost, postPayload)),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'persona_follows');
+      const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(userIds).toEqual(['recipient-1']);
+      expect(payload.title).toBe('Night Shift');
+      expect(payload.body).toBe('New single out Friday');
+      expect(payload.data.url).toBe('/p/night-shift#updates');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:personaPost.title',
+        bodyKey: 'push:personaPost.body',
+        params: { persona: 'Night Shift', excerpt: 'New single out Friday' },
+      });
+      // The persona owner is never looked up, so no face rides along.
+      expect(payload.icon).toBeUndefined();
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('sends nothing when Personas you follow is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['persona_follows'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(makeNotification(NotificationType.PersonaPost, postPayload)),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the persona name', { subprofileName: '' }],
+      ['the excerpt', { excerpt: '' }],
+      ['the persona address', { subprofileSlugOrHandle: '' }],
+    ])('sends no push when %s is empty', async (_label, overrides) => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.PersonaPost, {
+            ...postPayload,
+            ...overrides,
+          }),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it('escapes the persona address in the link', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.PersonaPost, {
+            ...postPayload,
+            subprofileSlugOrHandle: 'night shift',
+          }),
+        ),
+      );
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.data.url).toBe('/p/night%20shift#updates');
+    });
+  });
+
+  // Studio artist kinds: a new episode of a show the member follows.
+  describe('StudioEpisodePublished', () => {
+    const episodePayload = {
+      subprofileName: 'Lisbon After Dark',
+      subprofileSlugOrHandle: 'lisbon-after-dark',
+      subprofileId: 'persona-1',
+      releaseId: 'show-1',
+      trackId: 'episode-1',
+      releaseTitle: 'Lisbon After Dark',
+      trackTitle: 'Housing in Lisbon',
+    };
+
+    it('pushes behind the Personas you follow switch, naming the show and the episode and opening the episode page', async () => {
+      const { listener, push, notificationPreferences, profilesRepo } = build(
+        {},
+      );
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioEpisodePublished,
+            episodePayload,
+          ),
+        ),
+      );
+
+      expect(
+        notificationPreferences.recipientsPushEnabled,
+      ).toHaveBeenCalledWith(['recipient-1'], 'persona_follows');
+      const [userIds, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(userIds).toEqual(['recipient-1']);
+      expect(payload.title).toBe('New episode of Lisbon After Dark');
+      expect(payload.body).toBe('Lisbon After Dark: Housing in Lisbon');
+      expect(payload.data.url).toBe('/studio/track?id=episode-1');
+      expect(payload.l10n).toEqual({
+        titleKey: 'push:studioEpisodePublished.title',
+        bodyKey: 'push:studioEpisodePublished.body',
+        params: {
+          persona: 'Lisbon After Dark',
+          show: 'Lisbon After Dark',
+          episode: 'Housing in Lisbon',
+        },
+      });
+      expect(payload.icon).toBeUndefined();
+      expect(profilesRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('sends nothing when Personas you follow is off', async () => {
+      const { listener, push } = build({
+        pushDisabledCategories: ['persona_follows'],
+      });
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(
+            NotificationType.StudioEpisodePublished,
+            episodePayload,
+          ),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the persona name', { subprofileName: '' }],
+      ['the show title', { releaseTitle: '' }],
+      ['the episode title', { trackTitle: '' }],
+      ['the persona address', { subprofileSlugOrHandle: '' }],
+      ['the episode id', { trackId: '' }],
+    ])('sends no push when %s is empty', async (_label, overrides) => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioEpisodePublished, {
+            ...episodePayload,
+            ...overrides,
+          }),
+        ),
+      );
+      expect(push.sendToUsers).not.toHaveBeenCalled();
+    });
+
+    it('escapes the episode id in the link', async () => {
+      const { listener, push } = build({});
+      await listener.handleNotificationBatchCreated(
+        emit(
+          makeNotification(NotificationType.StudioEpisodePublished, {
+            ...episodePayload,
+            trackId: 'episode 1',
+          }),
+        ),
+      );
+      const [, payload] = push.sendToUsers.mock.calls[0] as [
+        string[],
+        PushPayload,
+      ];
+      expect(payload.data.url).toBe('/studio/track?id=episode%201');
+    });
+  });
 });

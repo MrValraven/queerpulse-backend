@@ -37,6 +37,7 @@ import { HousingListing } from '../housing-listings/entities/housing-listing.ent
 import { PressContact } from '../press-kit/entities/press-contact.entity';
 import { Sticker } from '../stickers/entities/sticker.entity';
 import { StudioRelease } from '../studio/entities/studio-release.entity';
+import { SubprofilePost } from '../subprofile-posts/entities/subprofile-post.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
 
 // Re-exported so every existing importer of `toBareKey` from this module
@@ -269,6 +270,16 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'coverKey',
     idColumn: 'id',
     labelColumns: ['title'],
+  }),
+  // Studio v3: a persona post photo, always a persona-scoped key. Labelled
+  // with the post body so My uploads can say where it is used.
+  plainSource({
+    type: 'persona-post',
+    field: 'SubprofilePost.imageKey',
+    entity: SubprofilePost,
+    column: 'imageKey',
+    idColumn: 'id',
+    labelColumns: ['body'],
   }),
   plainSource({
     type: 'landlord',

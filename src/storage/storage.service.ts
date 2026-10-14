@@ -28,11 +28,14 @@ import {
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import {
   PERSONA_SCOPED_PREFIX,
+  STUDIO_SCENE_SCOPED_PREFIX,
   isPersonaScopedExtension,
   isPersonaScopedKey,
   isStorageKey,
   isStudioAudioKey,
+  isStudioSceneScopedKey,
   parseStorageKey,
+  storageKeyOwnerId,
 } from './storage-key';
 import {
   MAGIC_BYTE_PREFIX_LENGTH,
@@ -44,10 +47,31 @@ import {
 
 export const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 
-// Studio v1: how long a track's stream URL stays valid. A URL already handed
-// out keeps working until then even if the listener's grant is revoked; every
-// new stream request re-checks the grant.
-export const STUDIO_STREAM_EXPIRY_SECONDS = 900; // 15 minutes
+// Studio listening: a track's stream URL lives for the track's length plus
+// ten minutes, at least 15 minutes and at most six hours, so a cast device or
+// a preloaded player deck can finish a long mix on the link it was handed. A
+// URL already handed out keeps working until then even if the listener's
+// grant is revoked; every new stream request re-checks the grant.
+export const STUDIO_STREAM_MIN_EXPIRY_SECONDS = 900;
+export const STUDIO_STREAM_EXPIRY_MARGIN_SECONDS = 600;
+export const STUDIO_STREAM_MAX_EXPIRY_SECONDS = 21600;
+
+/** `min(max(900, durationSeconds + 600), 21600)`, and 900 for a track with
+ *  no duration (QUEERPULSE-STUDIO-LISTENING-CONTRACT-2026-10-13.md A.2). */
+export function studioStreamExpirySeconds(
+  durationSeconds: number | null,
+): number {
+  if (durationSeconds === null || !Number.isFinite(durationSeconds)) {
+    return STUDIO_STREAM_MIN_EXPIRY_SECONDS;
+  }
+  return Math.min(
+    Math.max(
+      STUDIO_STREAM_MIN_EXPIRY_SECONDS,
+      Math.ceil(durationSeconds) + STUDIO_STREAM_EXPIRY_MARGIN_SECONDS,
+    ),
+    STUDIO_STREAM_MAX_EXPIRY_SECONDS,
+  );
+}
 
 // Orphan cleanup is UNSOLVED and deliberately out of scope. A presigned upload
 // can be abandoned (a user gets the URL and never uploads, or uploads then
@@ -240,6 +264,10 @@ export class StorageService {
   async presignStudioAudioUpload(params: {
     contentType: string;
     byteSize: number;
+    /** Studio artist kinds: the persona kind's cap
+     *  (`studioAudioMaxBytesForKind`); the `studio_audio` kind cap when
+     *  left out. */
+    maxBytes?: number;
   }): Promise<PresignedUpload> {
     const typeSpec = STUDIO_AUDIO_UPLOAD_TYPES[params.contentType];
     if (!typeSpec) {
@@ -248,9 +276,10 @@ export class StorageService {
       );
     }
     const kindSpec = UPLOAD_KIND_SPECS.studio_audio;
-    if (params.byteSize > kindSpec.maxBytes) {
+    const maxBytes = params.maxBytes ?? kindSpec.maxBytes;
+    if (params.byteSize > maxBytes) {
       throw new PayloadTooLargeException(
-        `File too large for studio_audio: max ${kindSpec.maxBytes} bytes`,
+        `File too large for studio_audio: max ${maxBytes} bytes`,
       );
     }
     const key = `${kindSpec.prefix}/${randomUUID()}/${randomUUID()}${typeSpec.extension}`;
@@ -258,32 +287,35 @@ export class StorageService {
   }
 
   /**
-   * Studio v1: a presigned GET for one track, valid for
-   * `STUDIO_STREAM_EXPIRY_SECONDS`. The stored content type is signed in, so
-   * the bucket always answers `audio/mpeg` or `audio/mp4`. `<audio>` loads
-   * the URL directly and its byte-range requests need no CORS, since the
-   * element never sets `crossOrigin`. `expiresAt` is read before signing, so
-   * it never runs past the URL's real expiry.
+   * Studio: a presigned GET for one track, valid for
+   * `studioStreamExpirySeconds(durationSeconds)`; an absent or null duration
+   * gives 900 seconds. The stored content type is
+   * signed in, so the bucket always answers `audio/mpeg` or `audio/mp4`. The
+   * player loads the URL with `crossOrigin="anonymous"` for Web Audio, so the
+   * bucket's CORS rule (`scripts/set-bucket-cors.mjs`, a deploy step) allows
+   * the app origins and exposes the range headers. `expiresAt` is read before
+   * signing, so it never runs past the URL's real expiry, and the cache
+   * lifetime matches the link's.
    */
   async createPresignedAudioStream(
     key: string,
     contentType: string,
+    durationSeconds?: number | null,
   ): Promise<{ url: string; expiresAt: string }> {
     if (!isStudioAudioKey(key)) {
       throw new BadRequestException('Invalid storage key');
     }
-    const expiresAt = new Date(
-      Date.now() + STUDIO_STREAM_EXPIRY_SECONDS * 1000,
-    ).toISOString();
+    const expirySeconds = studioStreamExpirySeconds(durationSeconds ?? null);
+    const expiresAt = new Date(Date.now() + expirySeconds * 1000).toISOString();
     const command = new GetObjectCommand({
       Bucket: this.requireConfig('storage.bucket'),
       Key: key,
       ResponseContentType: contentType,
       ResponseContentDisposition: 'inline',
-      ResponseCacheControl: `private, max-age=${STUDIO_STREAM_EXPIRY_SECONDS}`,
+      ResponseCacheControl: `private, max-age=${expirySeconds}`,
     });
     const url = await getSignedUrl(this.storageClient(), command, {
-      expiresIn: STUDIO_STREAM_EXPIRY_SECONDS,
+      expiresIn: expirySeconds,
     });
     return { url, expiresAt };
   }
@@ -356,7 +388,12 @@ export class StorageService {
     // A persona-scoped key names no owner, and minting `persona/<userId>/…`
     // from it would put a member's id under the one prefix that must never
     // carry one.
-    if (!kindSpec || isPersonaScopedKey(sourceKey)) {
+    // A scene-scoped key names no owner either (Studio discovery).
+    if (
+      !kindSpec ||
+      isPersonaScopedKey(sourceKey) ||
+      isStudioSceneScopedKey(sourceKey)
+    ) {
       throw new BadRequestException('Invalid storage key');
     }
     const extension = sourceKey.slice(sourceKey.lastIndexOf('.'));
@@ -403,6 +440,37 @@ export class StorageService {
       throw new BadRequestException('Invalid storage key');
     }
     const key = StorageService.mintPersonaScopedKey(extension);
+    const bucket = this.requireConfig('storage.bucket');
+    // A parsed key holds only lowercase prefixes, hex, dashes and a dot, so
+    // `CopySource` needs no URL encoding.
+    await this.storageClient().send(
+      new CopyObjectCommand({
+        Bucket: bucket,
+        CopySource: `${bucket}/${sourceKey}`,
+        Key: key,
+      }),
+    );
+    return key;
+  }
+
+  /**
+   * Studio discovery: copies a member-scoped image upload (a staff member's
+   * `work-image` scene cover) to a fresh SCENE-SCOPED key
+   * (`studio-scene/<uuid>/<uuid><ext>`, see `STUDIO_SCENE_SCOPED_PREFIX`)
+   * inside the bucket and returns the new key, so the public scene page
+   * never publishes the uploader's user id. The source object is left in
+   * place for the orphan sweep. Throws when the source object is missing
+   * (`NoSuchKey`), which `isMissingObjectError` recognises.
+   */
+  async copyObjectToStudioSceneScope(sourceKey: string): Promise<string> {
+    const extension = sourceKey.slice(sourceKey.lastIndexOf('.'));
+    if (
+      storageKeyOwnerId(sourceKey) === null ||
+      !isPersonaScopedExtension(extension)
+    ) {
+      throw new BadRequestException('Invalid storage key');
+    }
+    const key = `${STUDIO_SCENE_SCOPED_PREFIX}/${randomUUID()}/${randomUUID()}${extension}`;
     const bucket = this.requireConfig('storage.bucket');
     // A parsed key holds only lowercase prefixes, hex, dashes and a dot, so
     // `CopySource` needs no URL encoding.

@@ -194,6 +194,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   // personas you RUN, so it answers to the same toggle as the two above.
   [NotificationType.PersonaImportReady]:
     NotificationPreferenceCategory.Personas,
+  // Studio discovery: credit requests and acceptances are about the
+  // personas you RUN, so they answer to the same toggle as the invites.
+  [NotificationType.StudioCreditRequested]:
+    NotificationPreferenceCategory.Personas,
+  [NotificationType.StudioCreditAccepted]:
+    NotificationPreferenceCategory.Personas,
 
   // --- Personas you follow --------------------------------------------------
   // The only type a FOLLOWER ever receives, and the reason the category exists
@@ -202,6 +208,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.PersonaFollows,
   // Studio v2: a release from a persona you follow, behind the same switch.
   [NotificationType.StudioReleasePublished]:
+    NotificationPreferenceCategory.PersonaFollows,
+  // Studio v3: a persona update, behind the same switch.
+  [NotificationType.PersonaPost]: NotificationPreferenceCategory.PersonaFollows,
+  // Studio artist kinds: a new episode of a show you follow, behind the
+  // same switch.
+  [NotificationType.StudioEpisodePublished]:
     NotificationPreferenceCategory.PersonaFollows,
 
   // --- Invitations and introductions ----------------------------------------
@@ -349,6 +361,12 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // either: `COMMUNITY_LEVELS_WANTING` is a whitelist and this type is
     // absent from it, so a muted community still delivers it.
     NotificationType.CommunityPostRemoved,
+    // Studio open demo pages: staff took a release down, or decided the
+    // artist's dispute about it. The platform's word on an action taken
+    // against something the member publishes, and the only place its owners
+    // learn it, so no content-volume switch may swallow it.
+    NotificationType.StudioReleaseTakenDown,
+    NotificationType.StudioReleaseDisputeDecided,
     NotificationType.ConcernUpdate,
     NotificationType.SecurityNewSignIn,
     // A moderation queue crossing its warning or critical threshold, and its

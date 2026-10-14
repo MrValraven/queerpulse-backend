@@ -247,7 +247,8 @@ export class PersonaImageKeysService {
   /**
    * Re-homes every image an unlinked persona shows and rewrites each
    * reference in place: the avatar and cover, every item image, every
-   * connected feed's show art, and (Studio v1) every Studio release cover.
+   * connected feed's show art, (Studio v1) every Studio release cover and
+   * (Studio v3) every persona post photo.
    * `persona.avatarUrl`/`coverUrl` are rewritten
    * in memory too, for a caller that saves its own copy of the row next.
    *
@@ -283,6 +284,11 @@ export class PersonaImageKeysService {
         WHERE "subprofile_id" = $1 AND "cover_key" IS NOT NULL`,
       [persona.id],
     );
+    const postImageRows: { image_key: string }[] = await manager.query(
+      `SELECT DISTINCT "image_key" FROM "subprofile_posts"
+        WHERE "subprofile_id" = $1 AND "image_key" IS NOT NULL`,
+      [persona.id],
+    );
     const rehomed = await this.rehomeKeys(
       manager,
       persona.id,
@@ -292,6 +298,7 @@ export class PersonaImageKeysService {
         ...itemRows.map((row) => row.image_url),
         ...feedRows.map((row) => row.image_key),
         ...studioCoverRows.map((row) => row.cover_key),
+        ...postImageRows.map((row) => row.image_key),
       ],
       {
         shouldCopyMemberScoped: true,
@@ -328,6 +335,11 @@ export class PersonaImageKeysService {
       await manager.query(
         `UPDATE "studio_releases" SET "cover_key" = $3
           WHERE "subprofile_id" = $1 AND "cover_key" = $2`,
+        [persona.id, storedValue, freshKey],
+      );
+      await manager.query(
+        `UPDATE "subprofile_posts" SET "image_key" = $3
+          WHERE "subprofile_id" = $1 AND "image_key" = $2`,
         [persona.id, storedValue, freshKey],
       );
     }
@@ -390,10 +402,11 @@ export class PersonaImageKeysService {
     return rows.length > 0;
   }
 
-  /** Every persona-scoped key registered to one persona, and (Studio v1)
-   *  every Studio audio key presigned for it, read through `manager`. A
-   *  persona delete reads them before the rows cascade away and deletes the
-   *  objects after its commit (`deleteObjects` takes any key). */
+  /** Every persona-scoped key registered to one persona, (Studio v1) every
+   *  Studio audio key presigned for it, and (Studio v3) every persona post
+   *  photo, read through `manager`, each key once. A persona delete reads
+   *  them before the rows cascade away and deletes the objects after its
+   *  commit (`deleteObjects` takes any key). */
   async listKeysOf(
     manager: EntityManager,
     subprofileId: string,
@@ -406,9 +419,17 @@ export class PersonaImageKeysService {
       `SELECT "storage_key" FROM "studio_audio_uploads" WHERE "subprofile_id" = $1`,
       [subprofileId],
     );
+    const postImageRows: { storage_key: string }[] = await manager.query(
+      `SELECT "image_key" AS "storage_key" FROM "subprofile_posts"
+        WHERE "subprofile_id" = $1 AND "image_key" IS NOT NULL`,
+      [subprofileId],
+    );
     return [
-      ...rows.map((row) => row.storageKey),
-      ...studioAudioRows.map((row) => row.storage_key),
+      ...new Set([
+        ...rows.map((row) => row.storageKey),
+        ...studioAudioRows.map((row) => row.storage_key),
+        ...postImageRows.map((row) => row.storage_key),
+      ]),
     ];
   }
 

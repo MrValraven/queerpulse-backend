@@ -46,6 +46,7 @@ import {
 } from './data-export-contributors-more';
 import { NEW_DOMAIN_EXPORT_CONTRIBUTORS } from './data-export-contributors';
 import { EXPORT_CSV_CATEGORIES } from './export-archive';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 
 const MEMBER_ID = 'user-1';
 
@@ -970,5 +971,37 @@ describe('ListingActivityExportContributor', () => {
         updatedAt: '2026-09-02T00:00:00.000Z',
       },
     ]);
+  });
+});
+
+describe('MemberPreferencesExportContributor, Studio player settings', () => {
+  it('exports the three Studio player settings with the other switches', async () => {
+    const findOne = jest.fn().mockResolvedValue({
+      userId: MEMBER_ID,
+      language: 'pt',
+      studioAutoplayNext: false,
+      studioHideExplicit: true,
+      studioCrossfadeSeconds: 6,
+      updatedAt: new Date('2026-10-13T09:00:00.000Z'),
+    });
+    const contributor = new MemberPreferencesExportContributor(
+      repositoryWith<MemberPreferences>({ findOne }),
+    );
+
+    const exported = (await contributor.buildContribution(MEMBER_ID)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(findOne).toHaveBeenCalledWith({ where: { userId: MEMBER_ID } });
+    expect(exported).toEqual(
+      expect.objectContaining({
+        language: 'pt',
+        studioAutoplayNext: false,
+        studioHideExplicit: true,
+        studioCrossfadeSeconds: 6,
+        updatedAt: '2026-10-13T09:00:00.000Z',
+      }),
+    );
   });
 });

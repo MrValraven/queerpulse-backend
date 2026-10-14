@@ -1,5 +1,9 @@
 import { ForbiddenException } from '@nestjs/common';
-import { isPersonaScopedKey, storageKeyOwnerId } from './storage-key';
+import {
+  isPersonaScopedKey,
+  isStudioSceneScopedKey,
+  storageKeyOwnerId,
+} from './storage-key';
 
 /**
  * Shared service-side backstop for the multi-editor image surfaces listed in
@@ -29,8 +33,9 @@ export function assertNoForeignUploadIntroduced(
     return;
   }
   // T17: a persona-scoped key names no uploader (`storageKeyOwnerId` is null
-  // for it), so it is allowed only where it is already stored.
-  if (isPersonaScopedKey(incoming)) {
+  // for it), so it is allowed only where it is already stored. Studio
+  // discovery: so is a scene-scoped key.
+  if (isPersonaScopedKey(incoming) || isStudioSceneScopedKey(incoming)) {
     if (alreadyStored.includes(incoming)) {
       return;
     }

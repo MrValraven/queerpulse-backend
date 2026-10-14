@@ -60,7 +60,12 @@ import {
   ReportsFiledExportContributor,
 } from './data-export-contributors-safety';
 import { MORE_EXPORT_CONTRIBUTORS } from './data-export-contributors-more';
-import { StudioPlaylistsExportContributor } from './data-export-contributors-studio';
+import { PersonaPostsExportContributor } from './data-export-contributors-persona-posts';
+import {
+  StudioPersonaCreditsExportContributor,
+  StudioPlaylistsExportContributor,
+  StudioReleaseRemindersExportContributor,
+} from './data-export-contributors-studio';
 import {
   ExportMediaContribution,
   MEDIA_EXPORT_MAX_TOTAL_BYTES,
@@ -247,6 +252,8 @@ export const EXPORT_WITHHELD_TEXT_KEYS: Partial<
   [NotificationType.CommunityNewPost]: ['excerpt'],
   [NotificationType.CommunityAnnouncement]: ['excerpt'],
   [NotificationType.EventAnnouncement]: ['body'],
+  // Studio v3: the first words of a persona's post, written by the persona.
+  [NotificationType.PersonaPost]: ['excerpt'],
 };
 
 /**
@@ -1085,5 +1092,10 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   ...MORE_EXPORT_CONTRIBUTORS,
   // Studio v2: the member's playlists (data-export-contributors-studio.ts).
   StudioPlaylistsExportContributor,
+  // Studio discovery: persona credits given and received, same file.
+  StudioPersonaCreditsExportContributor,
+  // Studio v3: Notify me reminders and persona posts.
+  StudioReleaseRemindersExportContributor,
+  PersonaPostsExportContributor,
   MediaExportContributor,
 ] as const;

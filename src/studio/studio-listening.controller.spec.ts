@@ -11,6 +11,8 @@ describe('StudioListeningController', () => {
   let catalog: {
     listReleases: jest.Mock;
     listGenres: jest.Mock;
+    listMoods: jest.Mock;
+    listFormats: jest.Mock;
     search: jest.Mock;
     getArtist: jest.Mock;
   };
@@ -24,6 +26,10 @@ describe('StudioListeningController', () => {
     catalog = {
       listReleases: jest.fn().mockResolvedValue({ items: [] }),
       listGenres: jest.fn().mockResolvedValue({ genres: ['fado'] }),
+      listMoods: jest.fn().mockResolvedValue({ moods: ['tender'] }),
+      listFormats: jest
+        .fn()
+        .mockResolvedValue({ formats: ['music', 'podcast'] }),
       search: jest
         .fn()
         .mockResolvedValue({ releases: [], tracks: [], artists: [] }),
@@ -39,13 +45,23 @@ describe('StudioListeningController', () => {
     );
   });
 
-  it('passes the genre to the home feed', async () => {
-    await controller.listReleases(VIEWER, { cursor: 'abc', genre: 'fado' });
-    expect(catalog.listReleases).toHaveBeenCalledWith(
-      'viewer-1',
-      'abc',
-      'fado',
-    );
+  it('passes the genre and the mood to the home feed', async () => {
+    await controller.listReleases(VIEWER, {
+      cursor: 'abc',
+      genre: 'fado',
+      mood: 'tender',
+    });
+    expect(catalog.listReleases).toHaveBeenCalledWith('viewer-1', 'abc', {
+      genre: 'fado',
+      mood: 'tender',
+    });
+  });
+
+  it('serves the moods the viewer can hear', async () => {
+    await expect(controller.listMoods(VIEWER)).resolves.toEqual({
+      moods: ['tender'],
+    });
+    expect(catalog.listMoods).toHaveBeenCalledWith('viewer-1');
   });
 
   it('serves the genres the viewer can hear', async () => {
@@ -62,12 +78,10 @@ describe('StudioListeningController', () => {
         type,
         genre: 'fado',
       });
-      expect(catalog.search).toHaveBeenCalledWith(
-        'viewer-1',
-        'night',
-        type,
-        'fado',
-      );
+      expect(catalog.search).toHaveBeenCalledWith('viewer-1', 'night', type, {
+        genre: 'fado',
+        mood: undefined,
+      });
       expect(playlistReads.searchPlaylists).toHaveBeenCalledWith(
         'viewer-1',
         'night',
@@ -87,12 +101,10 @@ describe('StudioListeningController', () => {
 
   it('reads a search with no type as all', async () => {
     await controller.search(VIEWER, { q: 'night' });
-    expect(catalog.search).toHaveBeenCalledWith(
-      'viewer-1',
-      'night',
-      'all',
-      undefined,
-    );
+    expect(catalog.search).toHaveBeenCalledWith('viewer-1', 'night', 'all', {
+      genre: undefined,
+      mood: undefined,
+    });
   });
 
   it('adds the persona playlists to the artist page once the artist is visible', async () => {
@@ -106,5 +118,37 @@ describe('StudioListeningController', () => {
     const playlistsOrder =
       playlistReads.listForArtistView.mock.invocationCallOrder[0] ?? 0;
     expect(artistOrder).toBeLessThan(playlistsOrder);
+  });
+
+  // Studio artist kinds.
+  it('serves the formats the viewer can hear', async () => {
+    await expect(controller.listFormats(VIEWER)).resolves.toEqual({
+      formats: ['music', 'podcast'],
+    });
+    expect(catalog.listFormats).toHaveBeenCalledWith('viewer-1');
+  });
+
+  it('passes the format to the home feed and to search', async () => {
+    await controller.listReleases(VIEWER, { format: 'podcast' });
+    expect(catalog.listReleases).toHaveBeenCalledWith('viewer-1', undefined, {
+      genre: undefined,
+      mood: undefined,
+      format: 'podcast',
+    });
+    await controller.search(VIEWER, {
+      q: 'lisbon',
+      type: 'artists',
+      format: 'spoken_word',
+    });
+    expect(catalog.search).toHaveBeenCalledWith(
+      'viewer-1',
+      'lisbon',
+      'artists',
+      {
+        genre: undefined,
+        mood: undefined,
+        format: 'spoken_word',
+      },
+    );
   });
 });

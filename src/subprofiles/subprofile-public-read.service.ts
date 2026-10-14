@@ -689,6 +689,41 @@ export class SubprofilePublicReadService {
   }
 
   /**
+   * Studio v3 persona posts: may `viewer` read what is on this persona's
+   * page? The same decision `buildPublicView` makes for `/p/<handle>`
+   * (`assertPublicViewVisible`), addressed by the persona id. Every refusal,
+   * the 403s included, is flattened into one plain 404, so a posts read
+   * never says why a persona is withheld. A database fault is re-thrown
+   * untouched.
+   */
+  async resolveReadablePersona(
+    subprofileId: string,
+    viewer: CurrentUserData | undefined,
+  ): Promise<{ persona: Subprofile; isOwner: boolean }> {
+    const persona = await this.subprofiles.findOne({
+      where: { id: subprofileId },
+    });
+    if (!persona) {
+      throw new NotFoundException('Persona not found');
+    }
+    const isOwner = viewer
+      ? await this.membership.isMember(viewer.userId, persona.id)
+      : false;
+    try {
+      await this.assertPublicViewVisible(persona, viewer, isOwner);
+    } catch (error) {
+      if (
+        error instanceof ForbiddenException ||
+        error instanceof NotFoundException
+      ) {
+        throw new NotFoundException('Persona not found');
+      }
+      throw error;
+    }
+    return { persona, isOwner };
+  }
+
+  /**
    * PRD-204 for `/members/<ownerSlug>/<subslug>`. The persona's own address
    * never changed here: its OWNER renamed, and the lookup above resolves the
    * owner by the live `profiles.slug` alone, so every shared nested-persona

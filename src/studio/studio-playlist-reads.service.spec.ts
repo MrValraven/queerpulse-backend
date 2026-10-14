@@ -26,6 +26,7 @@ import {
   publiclyListedPlaylistSql,
 } from './studio-playlist-visibility';
 import { StudioReleaseCard } from './studio-response';
+import { withdrawnReleaseSql } from './studio-visibility';
 
 const OWNER_ID = 'e1000000-0000-4000-8000-000000000001';
 const OWNER_SLUG = 'ana-silva';
@@ -522,6 +523,78 @@ describe('StudioPlaylistReadsService', () => {
         VIEWER_ID,
         '"persona"."user_id"',
       );
+    });
+
+    // Studio open demo pages: the owner reads why a row is unavailable when
+    // staff took its release down.
+    it('marks an owner entry withdrawn when staff took its release down, and only that one', async () => {
+      entries.find.mockResolvedValue([
+        entryRow('entry-1', TRACK_A, 1),
+        entryRow('entry-2', TRACK_B, 2),
+        entryRow('entry-3', null, 3),
+        entryRow('entry-4', TRACK_C, 4),
+      ]);
+      const withdrawn = queryBuilderMock({ raw: [{ track_id: TRACK_B }] });
+      queueBuilders(tracks, [
+        queryBuilderMock({ many: [trackRow(TRACK_A, 1)] }),
+        withdrawn,
+      ]);
+
+      const view = await service.getPlaylist(OWNER_ID, PLAYLIST_ID);
+
+      expect(
+        view.entries.map((entry) => [
+          entry.entryId,
+          entry.isAvailable,
+          entry.unavailableReason,
+        ]),
+      ).toEqual([
+        ['entry-1', true, undefined],
+        ['entry-2', false, 'withdrawn'],
+        ['entry-3', false, undefined],
+        ['entry-4', false, undefined],
+      ]);
+      expect(view.entries[2]).not.toHaveProperty('unavailableReason');
+      expect(withdrawn.where).toHaveBeenCalledWith(
+        'track.id IN (:...withdrawnTrackIds)',
+        { withdrawnTrackIds: [TRACK_B, TRACK_C] },
+      );
+      expect(predicatesOf(withdrawn)).toContain(
+        withdrawnReleaseSql('release', 'persona'),
+      );
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        withdrawn,
+        OWNER_ID,
+        '"persona"."user_id"',
+      );
+    });
+
+    it('asks nothing about withdrawn releases when every owner entry plays', async () => {
+      entries.find.mockResolvedValue([entryRow('entry-1', TRACK_A, 1)]);
+      queueBuilders(tracks, [
+        queryBuilderMock({ many: [trackRow(TRACK_A, 1)] }),
+      ]);
+
+      await service.getPlaylist(OWNER_ID, PLAYLIST_ID);
+
+      expect(tracks.createQueryBuilder).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks nothing about withdrawn releases for a viewer', async () => {
+      entries.find.mockResolvedValue([
+        entryRow('entry-1', TRACK_A, 1),
+        entryRow('entry-2', TRACK_B, 2),
+      ]);
+      queueBuilders(tracks, [
+        queryBuilderMock({ many: [trackRow(TRACK_A, 1)] }),
+      ]);
+
+      const view = await service.getPlaylist(VIEWER_ID, PLAYLIST_ID);
+
+      expect(tracks.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(
+        view.entries.every((entry) => !('unavailableReason' in entry)),
+      ).toBe(true);
     });
 
     it('counts and sums playable tracks only and keeps four distinct covers in playlist order', async () => {

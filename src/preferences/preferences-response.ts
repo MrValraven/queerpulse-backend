@@ -153,3 +153,21 @@ export function toLanguagePreferenceDTO(
 ): LanguagePreferenceDTO {
   return { language: row.language };
 }
+
+/**
+ * `GET|PUT /me/studio-playback` (Studio open demo pages): the Studio
+ * player's three settings, named for what each one does.
+ */
+export interface StudioPlaybackDTO {
+  autoplayNext: boolean;
+  hideExplicit: boolean;
+  crossfadeSeconds: number;
+}
+
+export function toStudioPlaybackDTO(row: MemberPreferences): StudioPlaybackDTO {
+  return {
+    autoplayNext: row.studioAutoplayNext,
+    hideExplicit: row.studioHideExplicit,
+    crossfadeSeconds: row.studioCrossfadeSeconds,
+  };
+}

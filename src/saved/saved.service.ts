@@ -3,12 +3,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
+import { runWithConcurrency } from '../common/run-with-concurrency';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
-import { SavedItem } from './entities/saved-item.entity';
+import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { SavedAvailabilityService } from './saved-availability.service';
 import { SavedListsService } from './saved-lists.service';
-import { parseSavedRef } from './saved-ref.util';
+import { parseSavedRef, toSavedId } from './saved-ref.util';
 import {
   ResolvedSavedItemDTO,
   toResolvedSavedItemDTOs,
@@ -78,7 +79,16 @@ export class SavedService {
     // which is the failure `BlockFilterService.excludeHidden` documents.
     return paginate(qb, page, async (rows) => {
       const availableRefs = await this.availability.availableRefs(rows, userId);
-      return toResolvedSavedItemDTOs(rows, availableRefs);
+      // Studio open demo pages: of the rows that did not resolve, the Studio
+      // ones staff took down read "withdrawn". No query when none is Studio.
+      const withdrawnRefs = await this.availability.withdrawnRefs(
+        rows.filter(
+          (row) =>
+            !availableRefs.has(toSavedId(row.subjectType, row.subjectId)),
+        ),
+        userId,
+      );
+      return toResolvedSavedItemDTOs(rows, availableRefs, withdrawnRefs);
     });
   }
 
@@ -147,6 +157,51 @@ export class SavedService {
     // something from the DEFAULT list routes here rather than quietly
     // unlinking it (see `SavedListsService.removeItemFromList`).
     await this.savedItems.delete({ userId, subjectType, subjectId });
+  }
+
+  /**
+   * Studio v3 pre-save: saves one subject for many members at once, with
+   * the snapshot the member's own save would have sent. One statement for
+   * the whole list; a member who already saved the subject keeps their row
+   * exactly as it is (`UQ_saved_item_subject`, `DO NOTHING`). Each new row
+   * joins that member's default list, three at a time and best-effort.
+   * Answers the members a row was written for.
+   */
+  async saveForMembersIfMissing(
+    userIds: readonly string[],
+    subjectType: SavedKind,
+    subjectId: string,
+    snapshot: { title: string; href: string | null; meta: string | null },
+  ): Promise<string[]> {
+    if (!userIds.length) {
+      return [];
+    }
+    const insertedRows: { id: string; user_id: string }[] =
+      await this.savedItems.query(
+        `WITH "inserted" AS (
+           INSERT INTO "saved_item" ("user_id", "subject_type", "subject_id", "title", "href", "meta")
+           SELECT DISTINCT "member"."user_id", $2::"saved_item_subject_type_enum", $3, $4, $5, $6
+             FROM unnest($1::uuid[]) AS "member"("user_id")
+           ON CONFLICT ON CONSTRAINT "UQ_saved_item_subject" DO NOTHING
+           RETURNING "id", "user_id"
+         )
+         SELECT "id", "user_id"::text AS "user_id" FROM "inserted"`,
+        [
+          [...userIds],
+          subjectType,
+          subjectId,
+          snapshot.title,
+          snapshot.href,
+          snapshot.meta,
+        ],
+      );
+    await runWithConcurrency(
+      insertedRows.map(
+        (row) => () => this.fileInDefaultListBestEffort(row.user_id, row.id),
+      ),
+      3,
+    );
+    return insertedRows.map((row) => row.user_id);
   }
 
   /**

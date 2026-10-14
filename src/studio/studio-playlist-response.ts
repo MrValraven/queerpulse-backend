@@ -59,6 +59,13 @@ export interface StudioPlaylistEntryResponse {
   addedAt: string;
   /** False reaches the owner only. */
   isAvailable: boolean;
+  /**
+   * Studio open demo pages, in the owner's view only: `withdrawn` when the
+   * entry is unavailable because staff took its release down (and the
+   * owner could otherwise hear it). Absent for every other cause and on
+   * every available entry.
+   */
+  unavailableReason?: 'withdrawn';
   track: StudioPlaylistEntryTrack | null;
 }
 

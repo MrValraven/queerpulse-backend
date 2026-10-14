@@ -64,4 +64,32 @@ describe('orderReleasesForStats', () => {
       'draft-old',
     ]);
   });
+
+  it('places a scheduled release among the others, by last update', () => {
+    const ordered = orderReleasesForStats([
+      release(
+        'draft',
+        StudioReleaseStatus.Draft,
+        null,
+        '2026-10-03T09:00:00.000Z',
+      ),
+      release(
+        'scheduled',
+        StudioReleaseStatus.Scheduled,
+        null,
+        '2026-10-05T09:00:00.000Z',
+      ),
+      release(
+        'live',
+        StudioReleaseStatus.Published,
+        '2026-10-01T09:00:00.000Z',
+        '2026-10-01T09:00:00.000Z',
+      ),
+    ]);
+    expect(ordered.map((entry) => entry.id)).toEqual([
+      'live',
+      'scheduled',
+      'draft',
+    ]);
+  });
 });

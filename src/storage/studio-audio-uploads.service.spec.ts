@@ -98,6 +98,7 @@ describe('StudioAudioUploadsService', () => {
     expect(storage.presignStudioAudioUpload).toHaveBeenCalledWith({
       contentType: 'audio/mpeg',
       byteSize: 2048,
+      maxBytes: 52428800,
     });
     expect(uploads.insert).toHaveBeenCalledWith({
       storageKey: KEY,
@@ -147,5 +148,35 @@ describe('StudioAudioUploadsService', () => {
         uploadKind: 'studio_audio',
       },
     ]);
+  });
+
+  // Studio artist kinds: the persona kind sets the cap.
+  it('presigns a podcast persona up to 250 MB', async () => {
+    answerChecks({
+      has_grant: true,
+      persona_kind: 'podcaster',
+      is_member: true,
+    });
+    await presign();
+    expect(storage.presignStudioAudioUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ maxBytes: 262144000 }),
+    );
+  });
+
+  it('presigns a poet persona, the new kinds included, with the 50 MB cap', async () => {
+    answerChecks({ has_grant: true, persona_kind: 'poet', is_member: true });
+    await presign();
+    expect(storage.presignStudioAudioUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ maxBytes: 52428800 }),
+    );
+  });
+
+  it('records nothing when the cap refuses the file', async () => {
+    answerChecks({ has_grant: true, persona_kind: 'dj', is_member: true });
+    storage.presignStudioAudioUpload.mockRejectedValue(
+      new PayloadTooLargeException('File too large'),
+    );
+    await expect(presign()).rejects.toBeInstanceOf(PayloadTooLargeException);
+    expect(uploads.insert).not.toHaveBeenCalled();
   });
 });

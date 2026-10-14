@@ -11,7 +11,6 @@ import { isUniqueViolation } from '../common/db-errors';
 import { studioAudioContentTypeForKey } from '../storage/storage-key';
 import { StorageService } from '../storage/storage.service';
 import { StudioAudioUploadsService } from '../storage/studio-audio-uploads.service';
-import { StudioReleaseStatus } from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import {
   STUDIO_AUDIO_PARSE_TIMEOUT_MILLISECONDS,
@@ -20,11 +19,17 @@ import {
 } from './studio-audio-metadata';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
+import {
+  assertTracksEditable,
+  stampTracksChangedIfPublished,
+} from './studio-release-edit-rule';
 import { StudioTrackResponse } from './studio-response';
+import { listeningFieldsForNewAudio } from './studio-track-listening';
 import {
   STUDIO_LIMITS,
   StudioAudioContentType,
   isStudioAudioContentType,
+  studioAudioMaxBytesForKind,
   studioError,
 } from './studio.constants';
 
@@ -34,14 +39,17 @@ const STUDIO_TRACK_AUDIO_KEY_CONSTRAINT = 'UQ_studio_tracks_audio_key';
 
 /**
  * Studio v1: `POST /studio/tracks/:id/audio`. Two phases, so no row lock is
- * held during the read of a file up to 50 MB:
+ * held during the read of a file up to 50 MB (250 MB for a podcast kind):
  *
  * 1. Without a lock: the caller may write the release, the key is registered
  *    to this release's persona and held by no other track, `HeadObject`
  *    agrees with the key's extension and the cap, and `music-metadata`
  *    reads a duration from a streamed read of the object.
- * 2. Under the release lock: membership, the draft state and the track are
- *    checked again, then the track is updated.
+ * 2. Under the release lock: membership, the editable state (draft, scheduled
+ *    or published) and the track are checked again, then the track is updated
+ *    and a change to a published release is stamped. New audio clears the
+ *    waveform and loudness measured from the old file and keeps only the
+ *    chapters that still start inside the new one (Studio listening).
  *
  * An object that fails the read, or whose write is refused in phase 2, is
  * deleted unless a committed track already references it (a retried confirm
@@ -77,13 +85,11 @@ export class StudioAudioConfirmService {
     if (!track) {
       throw new NotFoundException('Track not found');
     }
-    const { release } = await this.ownership.loadReleaseForWrite(
+    const { release, persona } = await this.ownership.loadReleaseForWrite(
       userId,
       track.releaseId,
     );
-    if (release.status !== StudioReleaseStatus.Draft) {
-      throw studioError('studio_release_not_draft');
-    }
+    assertTracksEditable(release);
     if (track.audioKey === key) {
       return this.catalog.getTrack(userId, trackId);
     }
@@ -95,7 +101,12 @@ export class StudioAudioConfirmService {
     ) {
       throw studioError('studio_audio_wrong_owner');
     }
-    const byteSize = await this.storedSizeOf(key, declaredContentType);
+    // Studio artist kinds: 250 MB for a podcast kind, 50 MB for the rest.
+    const byteSize = await this.storedSizeOf(
+      key,
+      declaredContentType,
+      studioAudioMaxBytesForKind(persona.kind),
+    );
     const durationSeconds = await this.readDuration(
       key,
       declaredContentType,
@@ -115,9 +126,7 @@ export class StudioAudioConfirmService {
             userId,
             track.releaseId,
           );
-        if (lockedRelease.status !== StudioReleaseStatus.Draft) {
-          throw studioError('studio_release_not_draft');
-        }
+        assertTracksEditable(lockedRelease);
         const lockedTrack = await manager.findOne(StudioTrack, {
           where: { id: trackId, releaseId: lockedRelease.id },
         });
@@ -129,7 +138,14 @@ export class StudioAudioConfirmService {
         lockedTrack.audioContentType = declaredContentType;
         lockedTrack.audioBytes = byteSize;
         lockedTrack.durationSeconds = durationSeconds;
+        if (previousKey !== key) {
+          Object.assign(
+            lockedTrack,
+            listeningFieldsForNewAudio(lockedTrack.chapters, durationSeconds),
+          );
+        }
         await manager.save(lockedTrack);
+        await stampTracksChangedIfPublished(manager, lockedRelease);
         return previousKey;
       });
     } catch (error) {
@@ -171,6 +187,7 @@ export class StudioAudioConfirmService {
   private async storedSizeOf(
     key: string,
     declaredContentType: StudioAudioContentType,
+    maxBytes: number,
   ): Promise<number> {
     let head: { contentType: string | null; contentLength: number | null };
     try {
@@ -182,8 +199,7 @@ export class StudioAudioConfirmService {
       throw error;
     }
     const contentLength = head.contentLength ?? 0;
-    const isWithinCap =
-      contentLength > 0 && contentLength <= STUDIO_LIMITS.audioMaxBytes;
+    const isWithinCap = contentLength > 0 && contentLength <= maxBytes;
     if (head.contentType !== declaredContentType || !isWithinCap) {
       await this.discard(key);
       throw studioError('studio_audio_unreadable');
@@ -201,10 +217,15 @@ export class StudioAudioConfirmService {
   ): Promise<number | null> {
     const stream: Readable = await this.storage.openObjectStream(key);
     try {
+      // Studio artist kinds: a long episode gets three minutes to read.
+      const timeoutMilliseconds =
+        byteSize > STUDIO_LIMITS.audioMaxBytes
+          ? STUDIO_LIMITS.audioParseTimeoutLongMilliseconds
+          : STUDIO_AUDIO_PARSE_TIMEOUT_MILLISECONDS;
       const facts = await readStudioAudioFactsWithin(
         stream,
         byteSize,
-        STUDIO_AUDIO_PARSE_TIMEOUT_MILLISECONDS,
+        timeoutMilliseconds,
       );
       const verdict = classifyStudioAudio(facts, declaredContentType);
       return verdict.isReadable ? verdict.durationSeconds : null;

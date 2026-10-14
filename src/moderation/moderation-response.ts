@@ -98,6 +98,8 @@ const OUTCOME_LABEL: Record<string, string> = {
   // PRD-28. The removal that leaves the door open. Worded so it cannot be read
   // as the bar above: this member may rejoin.
   community_member_removed: 'Removed from a community',
+  // Studio open demo pages: the audit action a Studio takedown writes.
+  studio_release_taken_down: 'Release taken down',
 };
 
 export function outcomeLabelFor(

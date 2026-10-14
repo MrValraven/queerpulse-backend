@@ -93,4 +93,52 @@ describe('Studio release bodies', () => {
       }),
     ).toEqual(['description']);
   });
+
+  it('takes a mood from the list and null to clear it', async () => {
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, { mood: 'slow-burn' }),
+    ).toEqual([]);
+    expect(await errorsFor(UpdateStudioReleaseDto, { mood: null })).toEqual([]);
+    expect(await errorsFor(UpdateStudioReleaseDto, { mood: 'gloomy' })).toEqual(
+      ['mood'],
+    );
+  });
+
+  it('takes a scene id or null to leave the scene', async () => {
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, {
+        sceneId: 'e1000000-0000-4000-8000-000000000001',
+      }),
+    ).toEqual([]);
+    expect(await errorsFor(UpdateStudioReleaseDto, { sceneId: null })).toEqual(
+      [],
+    );
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, { sceneId: 'lisbon-ballroom' }),
+    ).toEqual(['sceneId']);
+  });
+
+  // Studio v3: an outbound shop link, https only.
+  it('accepts an https buy link and null, and refuses anything else', async () => {
+    expect(
+      await errorsFor(UpdateStudioReleaseDto, {
+        buyUrl: 'https://nightshift.bandcamp.com/album/lisbon',
+      }),
+    ).toEqual([]);
+    expect(await errorsFor(UpdateStudioReleaseDto, { buyUrl: null })).toEqual(
+      [],
+    );
+    for (const buyUrl of [
+      'http://nightshift.bandcamp.com',
+      'mailto:shop@nightshift.test',
+      'javascript:alert(1)',
+      'nightshift.bandcamp.com',
+      '',
+      `https://shop.test/${'x'.repeat(1000)}`,
+    ]) {
+      expect(await errorsFor(UpdateStudioReleaseDto, { buyUrl })).toEqual([
+        'buyUrl',
+      ]);
+    }
+  });
 });

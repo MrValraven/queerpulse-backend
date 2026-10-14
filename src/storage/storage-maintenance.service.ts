@@ -6,7 +6,7 @@ import { DataSource, Repository } from 'typeorm';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { Message } from '../messaging/entities/message.entity';
 import { toBareKey } from './bare-key';
-import { isStudioAudioKey } from './storage-key';
+import { isStudioAudioKey, isStudioSceneScopedKey } from './storage-key';
 import { StorageService, StoredObject } from './storage.service';
 
 // How many keys are checked for references per resolver call. The resolver's
@@ -184,6 +184,8 @@ export class StorageMaintenanceService {
     const messageReferencedKeys = await this.keysReferencedByMessages(bareKeys);
     const studioTrackReferencedKeys =
       await this.keysReferencedByStudioTracks(bareKeys);
+    const sceneCoverReferencedKeys =
+      await this.keysReferencedByStudioScenes(bareKeys);
     const orphans: string[] = [];
     for (const object of batch) {
       const bareKey = toBareKey(object.key);
@@ -194,6 +196,9 @@ export class StorageMaintenanceService {
         continue;
       }
       if (studioTrackReferencedKeys.has(bareKey)) {
+        continue;
+      }
+      if (sceneCoverReferencedKeys.has(bareKey)) {
         continue;
       }
       orphans.push(object.key);
@@ -253,6 +258,26 @@ export class StorageMaintenanceService {
       [studioAudioKeys],
     );
     return new Set(rows.map((row) => row.audio_key));
+  }
+
+  // Studio discovery: a scene cover is a scene-scoped copy with no
+  // `MediaReferenceSource`, so without this check the sweep would delete a
+  // live scene's cover. Only scene-scoped keys are asked about; the staff
+  // upload each one was copied from is left unreferenced and reclaimed.
+  private async keysReferencedByStudioScenes(
+    bareKeys: string[],
+  ): Promise<Set<string>> {
+    const sceneScopedKeys = bareKeys.filter((bareKey) =>
+      isStudioSceneScopedKey(bareKey),
+    );
+    if (sceneScopedKeys.length === 0) {
+      return new Set();
+    }
+    const rows: { cover_key: string }[] = await this.dataSource.query(
+      `SELECT "cover_key" FROM "studio_scenes" WHERE "cover_key" = ANY($1)`,
+      [sceneScopedKeys],
+    );
+    return new Set(rows.map((row) => row.cover_key));
   }
 
   private logSummary(

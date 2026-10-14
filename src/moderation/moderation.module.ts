@@ -24,6 +24,7 @@ import { ModerationService } from './moderation.service';
 import { ReportConversationContextController } from './report-conversation-context.controller';
 import { ReportConversationContextService } from './report-conversation-context.service';
 import { ReportSubjectResolverService } from './report-subject-resolver.service';
+import { StudioTakedownReportService } from './studio-takedown-report.service';
 
 @Module({
   imports: [
@@ -133,6 +134,10 @@ import { ReportSubjectResolverService } from './report-subject-resolver.service'
     // `TypeOrmModule`) and `Profile` (`UsersModule`), writes through
     // `ModAuditService`. No new module import.
     ReportConversationContextService,
+    // Studio open demo pages: resolves every open report about a release a
+    // Studio takedown removes, inside the takedown's transaction. Exported for `StudioModule`, which
+    // already imports this module; it injects only `NotificationsService`.
+    StudioTakedownReportService,
   ],
   // `ModAuditService` is the single writer into `mod_audit_logs` and the
   // reader behind `GET /mod/audit` + its CSV export. `ForumModule` imports
@@ -143,6 +148,6 @@ import { ReportSubjectResolverService } from './report-subject-resolver.service'
   // `ModerationService`/`AccountEnforcementService`/
   // `AdminMemberModerationService` stay unexported — nothing outside consumes
   // them.
-  exports: [ModAuditService],
+  exports: [ModAuditService, StudioTakedownReportService],
 })
 export class ModerationModule {}

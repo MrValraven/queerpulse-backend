@@ -134,6 +134,10 @@ import { SubprofilesService } from './subprofiles.service';
     // the viewer's follow state through it (`StudioModule` imports this
     // module; nothing here imports Studio back).
     SubprofileFollowersService,
+    // Studio v3: persona posts (`SubprofilePostsModule`) read a persona with
+    // the `/p/<handle>` rule through `resolveReadablePersona`. That module
+    // imports this one; nothing here imports it back.
+    SubprofilePublicReadService,
   ],
 })
 export class SubprofilesModule {}

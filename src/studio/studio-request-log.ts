@@ -2,10 +2,17 @@
  * Studio records nothing about what a member listens to. The request log and
  * the HTTP metrics would otherwise name each streamed track, and a playlist
  * id beside a member id is a listening list, so both skip every request whose
- * path names a track (its page, stream or playlists) or a playlist (any
- * method, any subpath, `mine` included). Studio search is skipped too, with
- * any query string, so a search term never sits beside a member id. Case-blind,
- * and the staff routes under `/admin/studio/` are logged as usual.
+ * path names a track (its page, stream, playlists or persona credits) or a
+ * playlist (any method, any subpath, `mine` included). Studio search and
+ * Studio radio are skipped too, with any query string, so a search term or a
+ * radio genre or mood never sits beside a member id. Studio v3 adds the
+ * private preview routes (`/studio/previews/<token>`, any subpath, so no
+ * token and no opener is ever logged) and the press kit read
+ * (`/studio/artists/<id>/press-kit`, any method). Studio artist kinds add
+ * the format list (`/studio/formats`) and the episode routes
+ * (`/studio/episodes/<anything>`, any subpath); an episode publish is
+ * already a `/studio/tracks/<id>` path. Case-blind, and the staff routes
+ * under `/admin/studio/` are logged as usual.
  *
  * This module imports nothing: `instrument.ts` reads it before `Sentry.init`.
  */
@@ -18,8 +25,46 @@ export function isStudioListeningRequest(url: string | undefined): boolean {
     return false;
   }
   return (
-    /(?:^|\/)studio\/(?:tracks|playlists)\/[^/]+(?:\/|$)/i.test(path) ||
-    /(?:^|\/)studio\/search\/?$/i.test(path)
+    /(?:^|\/)studio\/(?:tracks|playlists|previews|episodes)\/[^/]+(?:\/|$)/i.test(
+      path,
+    ) ||
+    /(?:^|\/)studio\/artists\/[^/]+\/press-kit\/?$/i.test(path) ||
+    /(?:^|\/)studio\/search\/?$/i.test(path) ||
+    /(?:^|\/)studio\/radio\/?$/i.test(path) ||
+    /(?:^|\/)studio\/formats\/?$/i.test(path)
+  );
+}
+
+/** What a logged preview URL shows in place of the bearer token. */
+export const REDACTED_PREVIEW_TOKEN = '[token]';
+
+const STUDIO_PREVIEW_TOKEN_PATTERN = /((?:^|\/)studio\/previews\/)[^/?#]+/gi;
+
+/**
+ * The completion line of a preview request is skipped (see
+ * `isStudioListeningRequest`), yet every other line logged inside that
+ * request (an error from `AllExceptionsFilter`, say) still carries the
+ * serialized `req.url`. A preview token is a bearer credential, so the
+ * request serializer swaps the path segment after `/studio/previews/` for
+ * `[token]` and keeps the rest of the path and the query string for
+ * debugging. Every other URL comes back unchanged.
+ */
+export function redactStudioPreviewToken(url: string): string;
+export function redactStudioPreviewToken(
+  url: string | undefined,
+): string | undefined;
+export function redactStudioPreviewToken(
+  url: string | undefined,
+): string | undefined {
+  if (typeof url !== 'string') {
+    return url;
+  }
+  const queryStartIndex = url.indexOf('?');
+  const path = queryStartIndex === -1 ? url : url.slice(0, queryStartIndex);
+  const rest = queryStartIndex === -1 ? '' : url.slice(queryStartIndex);
+  return (
+    path.replace(STUDIO_PREVIEW_TOKEN_PATTERN, `$1${REDACTED_PREVIEW_TOKEN}`) +
+    rest
   );
 }
 
@@ -50,9 +95,11 @@ export function dropStudioListeningUrl(
  * The frontend pages that show what a member listens to. A `Referer` header
  * naming one of them (`/studio/collection?id=<playlistId>`) would carry the
  * same listening list the request URL does, so Sentry drops the header too.
+ * Studio v3 adds the private preview page and the press kit pages, which name
+ * a release or an artist a member was shown.
  */
 const STUDIO_LISTENING_PAGE_PATTERN =
-  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse)(?:\/|$)/i;
+  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press)(?:\/|$)/i;
 
 function isStudioListeningReferer(referer: string): boolean {
   try {

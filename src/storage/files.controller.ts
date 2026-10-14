@@ -30,6 +30,7 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import {
   PERSONA_SCOPED_KIND_SPEC,
+  STUDIO_SCENE_SCOPED_KIND_SPEC,
   parseStorageKey,
   storageKeyOwnerId,
 } from './storage-key';
@@ -282,6 +283,22 @@ export class FilesController {
       return;
     }
     if (registration.uploaderStatus === UserStatus.Suspended) {
+      throw new NotFoundException();
+    }
+  }
+
+  // Studio discovery: a scene-scoped key (`studio-scene/<uuid>/<uuid><ext>`)
+  // is served only while a `studio_scenes` row stores it as its cover, so a
+  // copy whose write rolled back, or a replaced cover, 404s like an unknown
+  // key. Archived scenes keep theirs: staff still show them. The bytes are
+  // platform artwork, so no uploader status applies. Read through the
+  // `User` repository's connection, so the route needs no Studio import.
+  private async assertServableSceneCoverKey(storageKey: string): Promise<void> {
+    const rows: unknown[] = await this.users.query(
+      `SELECT 1 AS "found" FROM "studio_scenes" WHERE "cover_key" = $1 LIMIT 1`,
+      [storageKey],
+    );
+    if (!rows.length) {
       throw new NotFoundException();
     }
   }
@@ -658,6 +675,11 @@ export class FilesController {
     // segment drives below are made from its registry row instead.
     if (kindSpec === PERSONA_SCOPED_KIND_SPEC) {
       await this.assertServablePersonaKey(storageKey, user);
+    }
+    // Studio discovery: a scene-scoped key names nobody, and is served only
+    // while a scene stores it as its cover.
+    if (kindSpec === STUDIO_SCENE_SCOPED_KIND_SPEC) {
+      await this.assertServableSceneCoverKey(storageKey);
     }
     // Suspension media safety: a suspended/banned member's media must not keep
     // serving to ordinary viewers. Every key embeds its owner's userId

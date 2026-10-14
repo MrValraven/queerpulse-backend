@@ -364,6 +364,10 @@ export class ReportSubjectResolverService {
       // Studio v1: one release, keyed by its uuid. See `STUDIO_RELEASE_SQL`.
       case ReportSubjectType.StudioRelease:
         return this.queryByUuid(STUDIO_RELEASE_SQL, subjectIds);
+
+      // Studio v3: one persona post, keyed by its uuid. See `PERSONA_POST_SQL`.
+      case ReportSubjectType.PersonaPost:
+        return this.queryByUuid(PERSONA_POST_SQL, subjectIds);
     }
   }
 
@@ -944,6 +948,22 @@ const STUDIO_RELEASE_SQL = `
   FROM studio_releases r
   JOIN subprofiles s ON s.id = r.subprofile_id
   WHERE r.id = ANY($1::uuid[])
+`;
+
+/**
+ * Studio v3: one persona post. The author is the persona's creator, the
+ * person `STUDIO_RELEASE_SQL` names for a release, read by moderators
+ * alone. The excerpt is "<persona name>: <body>", the words that were
+ * reported and where they appeared.
+ */
+const PERSONA_POST_SQL = `
+  SELECT p.id::text AS key,
+         s.user_id  AS author_user_id,
+         s.display_name || ': ' || NULLIF(btrim(p.body), '') AS excerpt,
+         NULL::uuid AS community_id
+  FROM subprofile_posts p
+  JOIN subprofiles s ON s.id = p.subprofile_id
+  WHERE p.id = ANY($1::uuid[])
 `;
 
 /**

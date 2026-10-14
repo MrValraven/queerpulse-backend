@@ -72,6 +72,16 @@ export const RICH_PUSH_COPY_PT: Readonly<Record<string, string>> = {
   'push:personaUpdate.bodyWithTitle': '{persona} publicou {itemTitle}.',
   'push:studioReleasePublished.title': 'Novidade de quem segues',
   'push:studioReleasePublished.body': '{persona} lançou {title}',
+  'push:personaPost.title': '{persona}',
+  'push:personaPost.body': '{excerpt}',
+  'push:studioEpisodePublished.title': 'Novo episódio de {show}',
+  'push:studioEpisodePublished.body': '{persona}: {episode}',
+  'push:studioCreditRequested.title': 'Novo pedido de crédito',
+  'push:studioCreditRequested.body':
+    '{requester} creditou {persona} em {track}',
+  'push:studioCreditAccepted.title': 'Crédito aceite',
+  'push:studioCreditAccepted.body':
+    '{persona} aceitou o teu crédito em {track}',
   'push:housing.decision.approved.title': 'A tua casa está publicada',
   'push:housing.decision.approved.body':
     '{title} já está no quadro de alojamento.',

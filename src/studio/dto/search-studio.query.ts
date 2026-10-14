@@ -7,10 +7,14 @@ import {
   MinLength,
 } from 'class-validator';
 import {
+  STUDIO_FORMATS,
   STUDIO_GENRES,
   STUDIO_LIMITS,
+  STUDIO_MOODS,
   STUDIO_SEARCH_TYPES,
+  StudioFormat,
   StudioGenre,
+  StudioMood,
   StudioSearchType,
 } from '../studio.constants';
 
@@ -31,4 +35,15 @@ export class SearchStudioQuery {
   @IsOptional()
   @IsIn(STUDIO_GENRES)
   genre?: StudioGenre;
+
+  /** Studio discovery: narrows releases and tracks, like the genre. */
+  @IsOptional()
+  @IsIn(STUDIO_MOODS)
+  mood?: StudioMood;
+
+  /** Studio artist kinds: narrows releases, tracks and artists to one
+   *  format; playlists ignore it. */
+  @IsOptional()
+  @IsIn(STUDIO_FORMATS)
+  format?: StudioFormat;
 }

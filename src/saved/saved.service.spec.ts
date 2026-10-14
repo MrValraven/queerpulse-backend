@@ -37,7 +37,7 @@ describe('SavedService', () => {
   // Answers "does this bookmark still point at something?" for the whole page
   // at once (PRD-169). Defaults to "nothing resolves" so a test that cares has
   // to say which refs are live.
-  let availability: { availableRefs: jest.Mock };
+  let availability: { availableRefs: jest.Mock; withdrawnRefs: jest.Mock };
 
   const now = new Date('2026-07-15T12:00:00.000Z');
 
@@ -71,6 +71,8 @@ describe('SavedService', () => {
     };
     availability = {
       availableRefs: jest.fn().mockResolvedValue(new Set<string>()),
+      // Studio open demo pages: nothing reads withdrawn unless a test says so.
+      withdrawnRefs: jest.fn().mockResolvedValue(new Set<string>()),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -192,6 +194,53 @@ describe('SavedService', () => {
         'unavailable',
         'available',
       ]);
+    });
+
+    it('reads a withdrawn Studio release as withdrawn and keeps its link to the release page', async () => {
+      const releaseId = '9e000000-0000-4000-8000-000000000001';
+      const studioRow = row({
+        id: 'row-2',
+        subjectType: SavedKind.StudioRelease,
+        subjectId: releaseId,
+        title: 'Lisbon at four',
+        href: `/studio/album?id=${releaseId}`,
+      });
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([[studioRow, row()], 2]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+      availability.availableRefs.mockResolvedValue(
+        new Set(['article:coming-out-guide']),
+      );
+      availability.withdrawnRefs.mockResolvedValue(
+        new Set([`studio_release:${releaseId}`]),
+      );
+
+      const result = await service.list('u1', {});
+
+      // Only the rows that did not resolve are asked about.
+      expect(availability.withdrawnRefs).toHaveBeenCalledWith(
+        [studioRow],
+        'u1',
+      );
+      expect(result.items[0]).toEqual(
+        expect.objectContaining({
+          availability: 'unavailable',
+          unavailableReason: 'withdrawn',
+          href: `/studio/album?id=${releaseId}`,
+        }),
+      );
+      expect(result.items[1]).not.toHaveProperty('unavailableReason');
+    });
+
+    it('sends no reason for an item unavailable for any other cause', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([[row()], 1]);
+      repo.createQueryBuilder.mockReturnValue(qb);
+
+      const result = await service.list('u1', {});
+
+      expect(result.items[0]).not.toHaveProperty('unavailableReason');
+      expect(result.items[0]?.href).toBeNull();
     });
 
     it('narrows to one list with a correlated EXISTS, never a join', async () => {

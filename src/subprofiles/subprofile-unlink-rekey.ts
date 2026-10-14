@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { releasePlaylistCreditsOfPersona } from '../studio/studio-playlist-credit-release';
+import { forgetDiscoveryTiesOfPersona } from '../studio/studio-discovery-unlink';
 import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
 
 /**
@@ -39,13 +40,28 @@ import { SUBPROFILE_MODERATION_SUBJECT_TYPE } from './subprofile-takedown';
  * releases to these. Open reports on a release move with it, so a takedown
  * decided on one still lands. Tracks follow their release through
  * `FK_studio_tracks_release` (on update cascade) and then get fresh ids of
- * their own. Covers are re-homed by `rehomeUnlinkedPersona`; audio keys are
- * random and registered to the persona, whose id the registry follows.
+ * their own. Studio artist kinds: an episode's publish time and alert claim
+ * move to the unlink too, and a draft episode stays a draft. Covers are
+ * re-homed by `rehomeUnlinkedPersona`; audio keys are random and registered
+ * to the persona, whose id the registry follows.
  *
  * Studio v2 playlists credited to the persona turn private and lose the
  * credit, and an entry of anyone's playlist that held one of its tracks keeps
  * a null track (`FK_studio_playlist_tracks_track` sets null on update), so
  * neither ties the pseudonymous persona to its named past.
+ *
+ * Studio discovery persona credits the persona gave or received, and staff
+ * picks of its releases, are deleted before the releases move
+ * (`forgetDiscoveryTiesOfPersona`), so no credit or shelf spot carries the
+ * named persona over.
+ *
+ * Studio v3: preview links and the track change stamp are cleared on the
+ * releases, the reminders set on them are deleted, a scheduled release goes
+ * back to draft (its exact drop time would match the two personas, so
+ * `publish_at` clears, and a release date the schedule filled clears with
+ * it, as a takedown does), version note dates restart, the press kit forgets its chosen tracks (their ids changed), and
+ * persona posts get fresh ids with restarted dates, their open reports
+ * moving along. The post quota ledger goes too.
  *
  * Three references hold the persona id with no foreign key and are moved
  * here:
@@ -93,6 +109,9 @@ export async function issueFreshPersonaId(
   // the fresh id with the persona row move above. Runs after the items, which
   // stay the statement right behind the row move.
   await releasePlaylistCreditsOfPersona(manager, freshSubprofileId);
+  // Studio discovery: credits and staff picks go before the releases and
+  // tracks get fresh ids, so none follows them.
+  await forgetDiscoveryTiesOfPersona(manager, freshSubprofileId);
   await manager.query(
     `UPDATE "subprofile_item_revisions"
         SET "subprofile_id" = $1
@@ -140,17 +159,95 @@ export async function issueFreshPersonaId(
      UPDATE "studio_releases"
         SET "id" = "remapped"."fresh_id",
             "created_at" = now(),
-            "published_at" = CASE WHEN "studio_releases"."published_at" IS NULL THEN NULL ELSE now() END
+            "published_at" = CASE WHEN "studio_releases"."published_at" IS NULL THEN NULL ELSE now() END,
+            "tracks_changed_at" = NULL,
+            "preview_token" = NULL,
+            "preview_link_created_at" = NULL,
+            "status" = CASE WHEN "studio_releases"."status" = 'scheduled' THEN 'draft' ELSE "studio_releases"."status" END,
+            "released_on" = CASE
+              WHEN "studio_releases"."status" = 'scheduled'
+               AND "studio_releases"."released_on" = ("studio_releases"."publish_at" AT TIME ZONE 'Europe/Lisbon')::date
+              THEN NULL
+              ELSE "studio_releases"."released_on"
+            END,
+            "publish_at" = NULL
        FROM "remapped"
       WHERE "studio_releases"."id" = "remapped"."previous_id"`,
     [freshSubprofileId, ReportSubjectType.StudioRelease],
   );
   await manager.query(
     `UPDATE "studio_tracks"
-        SET "id" = gen_random_uuid(), "created_at" = now()
+        SET "id" = gen_random_uuid(),
+            "created_at" = now(),
+            "published_at" = CASE WHEN "studio_tracks"."published_at" IS NULL THEN NULL ELSE now() + make_interval(secs => "episode_order"."publish_rank" / 1000.0) END,
+            "followers_notified_at" = CASE WHEN "studio_tracks"."followers_notified_at" IS NULL THEN NULL ELSE now() END
+       FROM (
+         SELECT "ranked_track"."id",
+                row_number() OVER (
+                  PARTITION BY "ranked_track"."release_id"
+                  ORDER BY "ranked_track"."published_at", "ranked_track"."position"
+                ) AS "publish_rank"
+           FROM "studio_tracks" "ranked_track"
+          WHERE "ranked_track"."release_id" IN (
+            SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
+          )
+       ) "episode_order"
+      WHERE "episode_order"."id" = "studio_tracks"."id"
+        AND "studio_tracks"."release_id" IN (
+        SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
+      )`,
+    [freshSubprofileId],
+  );
+  // Studio v3: the reminders members set while the persona was named go
+  // (a drop alert under the new name would tell them who it is), version
+  // note dates restart like the publish dates above, and the press kit
+  // forgets its chosen tracks, whose ids the statement above replaced.
+  await manager.query(
+    `DELETE FROM "studio_release_reminders"
       WHERE "release_id" IN (
         SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
       )`,
+    [freshSubprofileId],
+  );
+  await manager.query(
+    `UPDATE "studio_release_versions" SET "created_at" = now()
+      WHERE "release_id" IN (
+        SELECT "id" FROM "studio_releases" WHERE "subprofile_id" = $1
+      )`,
+    [freshSubprofileId],
+  );
+  await manager.query(
+    `UPDATE "studio_press_kits"
+        SET "featured_track_ids" = '{}', "updated_at" = now()
+      WHERE "subprofile_id" = $1`,
+    [freshSubprofileId],
+  );
+  // Persona posts get fresh ids and restart their dates, as the items do,
+  // and open reports on a post move with it. Each restarted date sits one
+  // millisecond per place behind now in the old newest-first order, so the
+  // Updates list keeps its order.
+  await manager.query(
+    `WITH "remapped" AS MATERIALIZED (
+       SELECT "id" AS "previous_id", gen_random_uuid() AS "fresh_id",
+              row_number() OVER (ORDER BY "created_at" DESC, "id" DESC) AS "recency_rank"
+         FROM "subprofile_posts"
+        WHERE "subprofile_id" = $1
+     ), "moved_reports" AS (
+       UPDATE "reports" SET "subject_id" = "remapped"."fresh_id"::text
+         FROM "remapped"
+        WHERE "reports"."subject_type" = $2
+          AND "reports"."subject_id" = "remapped"."previous_id"::text
+     )
+     UPDATE "subprofile_posts"
+        SET "id" = "remapped"."fresh_id",
+            "created_at" = now() - ("remapped"."recency_rank" * interval '1 millisecond'),
+            "edited_at" = NULL
+       FROM "remapped"
+      WHERE "subprofile_posts"."id" = "remapped"."previous_id"`,
+    [freshSubprofileId, ReportSubjectType.PersonaPost],
+  );
+  await manager.query(
+    `DELETE FROM "subprofile_post_quota_entries" WHERE "subprofile_id" = $1`,
     [freshSubprofileId],
   );
   return freshSubprofileId;

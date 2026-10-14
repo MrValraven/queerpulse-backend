@@ -145,6 +145,21 @@ function subjectFor(
     // persona, so a label putting out three singles in an evening is one row.
     case NotificationType.StudioReleasePublished:
       return stringField(payload, 'subprofileId');
+    // Studio v3: updates from a persona you follow collapse onto that
+    // persona, so three posts in an evening are one row.
+    case NotificationType.PersonaPost:
+      return stringField(payload, 'subprofileId');
+    // Studio artist kinds: episodes of one show collapse onto the show, so
+    // a back catalogue released in an evening is one row.
+    case NotificationType.StudioEpisodePublished:
+      return stringField(payload, 'releaseId');
+    // Studio discovery: several credit requests to one persona in an evening
+    // (a whole album crediting the same producer) are one row, and several
+    // roles accepted on one track are one row.
+    case NotificationType.StudioCreditRequested:
+      return stringField(payload, 'creditedSubprofileId');
+    case NotificationType.StudioCreditAccepted:
+      return stringField(payload, 'trackId');
     // New podcast episodes waiting for review collapse onto the PERSONA, so
     // several feeds on one persona syncing within the window stay one row.
     case NotificationType.PersonaImportReady:

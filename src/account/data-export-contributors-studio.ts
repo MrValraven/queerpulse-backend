@@ -87,3 +87,137 @@ export class StudioPlaylistsExportContributor implements DataExportContribution 
     }));
   }
 }
+
+interface PersonaCreditExportRow {
+  direction: 'given' | 'received';
+  persona_name: string;
+  other_persona_name: string;
+  role: string;
+  track_title: string;
+  release_title: string;
+  status: string;
+  created_at: Date;
+  responded_at: Date | null;
+}
+
+/** One side of a credit, as the member's own persona sees it. */
+function creditSideSql(
+  direction: 'given' | 'received',
+  ownPersonaColumn: string,
+): string {
+  const ownAlias = direction === 'given' ? 'requesting' : 'credited';
+  const otherAlias = direction === 'given' ? 'credited' : 'requesting';
+  return `SELECT '${direction}' AS "direction",
+              "${ownAlias}"."display_name" AS "persona_name",
+              "${otherAlias}"."display_name" AS "other_persona_name",
+              "credit"."role" AS "role",
+              "track"."title" AS "track_title",
+              "release"."title" AS "release_title",
+              CAST("credit"."status" AS text) AS "status",
+              "credit"."created_at" AS "created_at",
+              "credit"."responded_at" AS "responded_at",
+              "credit"."id" AS "credit_id"
+         FROM "studio_persona_credits" "credit"
+         INNER JOIN "subprofiles" "requesting"
+            ON "requesting"."id" = "credit"."requested_by_subprofile_id"
+         INNER JOIN "subprofiles" "credited"
+            ON "credited"."id" = "credit"."subprofile_id"
+         INNER JOIN "studio_tracks" "track" ON "track"."id" = "credit"."track_id"
+         INNER JOIN "studio_releases" "release" ON "release"."id" = "track"."release_id"
+        WHERE "credit"."${ownPersonaColumn}" IN (
+          SELECT "member"."subprofile_id" FROM "subprofile_members" "member" WHERE "member"."user_id" = $1
+        )`;
+}
+
+/**
+ * `subprofiles` -> `studioPersonaCredits` (Studio discovery): every persona
+ * credit touching a persona the member runs, one row per side. `given` rows
+ * are credits the member's release persona requested; `received` rows are
+ * credits to the member's persona. A credit between two personas the member
+ * runs appears once on each side. Personas are named by their display names;
+ * neither side's member account is read.
+ *
+ * It is the member's own data, so the export includes their credits even
+ * when a block silenced them or the other persona is now private, and it
+ * includes on purpose the declined rows the requester dismissed.
+ *
+ * Raw SQL through the `DataSource`, like the playlists above.
+ */
+@Injectable()
+export class StudioPersonaCreditsExportContributor implements DataExportContribution {
+  readonly category = 'subprofiles';
+  readonly archiveKey = 'studioPersonaCredits';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows: PersonaCreditExportRow[] = await this.dataSource.query(
+      `SELECT "direction", "persona_name", "other_persona_name", "role",
+              "track_title", "release_title", "status", "created_at", "responded_at"
+         FROM (
+           ${creditSideSql('given', 'requested_by_subprofile_id')}
+           UNION ALL
+           ${creditSideSql('received', 'subprofile_id')}
+         ) "credit_row"
+        ORDER BY "created_at" ASC, "credit_id" ASC, "direction" ASC`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      direction: row.direction,
+      personaName: row.persona_name,
+      otherPersonaName: row.other_persona_name,
+      role: row.role,
+      trackTitle: row.track_title,
+      releaseTitle: row.release_title,
+      status: row.status,
+      createdAt: row.created_at.toISOString(),
+      respondedAt: row.responded_at ? row.responded_at.toISOString() : null,
+    }));
+  }
+}
+
+interface ReminderExportRow {
+  release_title: string | null;
+  artist_name: string;
+  publish_at: Date | null;
+  created_at: Date;
+}
+
+/**
+ * `saved` -> `studioReleaseReminders` (Studio v3): the Notify me reminders
+ * the member holds, by release title and artist name. A reminder lives
+ * until its release drops, so this lists the ones still waiting. Every
+ * reminder row is kept; the title shows only while the release is
+ * scheduled or published (what the member could see when they set it), so
+ * a release its artist took back to draft or staff took down exports a
+ * null title.
+ */
+@Injectable()
+export class StudioReleaseRemindersExportContributor implements DataExportContribution {
+  readonly category = 'saved';
+  readonly archiveKey = 'studioReleaseReminders';
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    const rows: ReminderExportRow[] = await this.dataSource.query(
+      `SELECT CASE WHEN "release"."status" IN ('scheduled', 'published')
+                   THEN "release"."title" END AS "release_title",
+              "persona"."display_name" AS "artist_name",
+              "release"."publish_at" AS "publish_at",
+              "reminder"."created_at" AS "created_at"
+         FROM "studio_release_reminders" "reminder"
+        INNER JOIN "studio_releases" "release" ON "release"."id" = "reminder"."release_id"
+        INNER JOIN "subprofiles" "persona" ON "persona"."id" = "release"."subprofile_id"
+        WHERE "reminder"."user_id" = $1
+        ORDER BY "reminder"."created_at" ASC, "reminder"."release_id" ASC`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      releaseTitle: row.release_title,
+      artist: row.artist_name,
+      publishAt: row.publish_at ? row.publish_at.toISOString() : null,
+      createdAt: row.created_at.toISOString(),
+    }));
+  }
+}

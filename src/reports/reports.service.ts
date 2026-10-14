@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomBytes } from 'crypto';
-import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
@@ -41,6 +41,7 @@ import {
   StudioRelease,
   StudioReleaseStatus,
 } from '../studio/entities/studio-release.entity';
+import { SubprofilePost } from '../subprofile-posts/entities/subprofile-post.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import {
   Report,
@@ -407,6 +408,12 @@ export class ReportsService {
     // canonicalised before the dedupe lookup and the insert read it.
     if (input.subjectType === ReportSubjectType.StudioRelease) {
       input = await this.withCanonicalStudioReleaseSubject(input);
+    }
+
+    // Studio v3: a persona post report names a post by its uuid,
+    // canonicalised before the dedupe lookup and the insert read it.
+    if (input.subjectType === ReportSubjectType.PersonaPost) {
+      input = await this.withCanonicalPersonaPostSubject(input);
     }
 
     // A member can't report their own message — mirrors the DTO's `canReport`
@@ -798,8 +805,10 @@ export class ReportsService {
 
   /**
    * Studio v1: a release report names a release that is live on Studio, by
-   * its uuid. A slug, an unknown id, a draft and a taken-down release all get
-   * the same 404, so filing never confirms that a hidden release exists. The
+   * its uuid. Studio v3 adds a scheduled release, whose title, cover and
+   * description its listeners already see. A slug, an unknown id, a draft
+   * and a taken-down release all get the same 404, so filing never confirms
+   * that a hidden release exists. The
    * uuid is lowercased so an uppercase spelling lands on the key
    * `studio_releases.id::text` produces. Read through the report
    * repository's own manager, so no extra `forFeature` is needed.
@@ -812,12 +821,40 @@ export class ReportsService {
     }
     const releaseId = input.subjectId.toLowerCase();
     const isLiveRelease = await this.reports.manager.exists(StudioRelease, {
-      where: { id: releaseId, status: StudioReleaseStatus.Published },
+      where: {
+        id: releaseId,
+        status: In([
+          StudioReleaseStatus.Published,
+          StudioReleaseStatus.Scheduled,
+        ]),
+      },
     });
     if (!isLiveRelease) {
       throw new NotFoundException('Release not found');
     }
     return { ...input, subjectId: releaseId };
+  }
+
+  /**
+   * Studio v3: a persona post report names a post by its uuid. A slug and an
+   * unknown id get the same 404 `Post not found`. The uuid is lowercased so
+   * an uppercase spelling lands on the key `subprofile_posts.id::text`
+   * produces.
+   */
+  private async withCanonicalPersonaPostSubject(
+    input: CreateReportInput,
+  ): Promise<CreateReportInput> {
+    if (!UUID_RE.test(input.subjectId)) {
+      throw new NotFoundException('Post not found');
+    }
+    const postId = input.subjectId.toLowerCase();
+    const isPost = await this.reports.manager.exists(SubprofilePost, {
+      where: { id: postId },
+    });
+    if (!isPost) {
+      throw new NotFoundException('Post not found');
+    }
+    return { ...input, subjectId: postId };
   }
 
   /**

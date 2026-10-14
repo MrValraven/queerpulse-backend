@@ -108,6 +108,10 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // was wired in an earlier task; this entry is the one this DTO needed.
   'CreateStickerDto.storageKey': 'Sticker.storageKey',
   'UpdateStudioReleaseDto.coverKey': 'StudioRelease.coverKey',
+  // Studio v3 persona posts: the create and the edit body both write the
+  // one photo column.
+  'CreatePersonaPostDto.imageKey': 'SubprofilePost.imageKey',
+  'UpdatePersonaPostDto.imageKey': 'SubprofilePost.imageKey',
 };
 
 /** Recursively lists every `.ts` file under a `dto/` directory beneath `root`
@@ -234,5 +238,14 @@ describe('Studio release covers', () => {
       (source) => source.field === 'StudioRelease.coverKey',
     );
     expect(coverSource?.type).toBe('studio-cover');
+  });
+});
+
+describe('Persona post photos', () => {
+  it('are a persona-post reference, so the orphan sweep and My uploads see them in use', () => {
+    const postSource = MEDIA_REFERENCE_SOURCES.find(
+      (source) => source.field === 'SubprofilePost.imageKey',
+    );
+    expect(postSource?.type).toBe('persona-post');
   });
 });

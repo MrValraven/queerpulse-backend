@@ -5,7 +5,7 @@ import {
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { StorageService } from './storage.service';
+import { StorageService, studioStreamExpirySeconds } from './storage.service';
 import { STUDIO_AUDIO_KEY_PATTERN } from './storage-key';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 
@@ -491,6 +491,25 @@ describe('StorageService', () => {
       ).rejects.toBeInstanceOf(PayloadTooLargeException);
     });
 
+    // Studio artist kinds: the caller passes the podcast cap.
+    it('takes a file up to the cap the caller passes and answers one byte more with a 413', async () => {
+      const service = buildService();
+      await expect(
+        service.presignStudioAudioUpload({
+          contentType: 'audio/mp4',
+          byteSize: 262144000,
+          maxBytes: 262144000,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ expiresIn: 300 }));
+      await expect(
+        service.presignStudioAudioUpload({
+          contentType: 'audio/mp4',
+          byteSize: 262144001,
+          maxBytes: 262144000,
+        }),
+      ).rejects.toBeInstanceOf(PayloadTooLargeException);
+    });
+
     it('refuses an image type for a track', async () => {
       await expect(
         buildService().presignStudioAudioUpload({
@@ -511,11 +530,12 @@ describe('StorageService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('signs a stream URL that expires in 900 seconds with the stored type', async () => {
+    it('signs a stream URL that expires in 900 seconds when the duration is unknown', async () => {
       const startedAt = Date.now();
       const stream = await buildService().createPresignedAudioStream(
         STUDIO_KEY,
         'audio/mpeg',
+        null,
       );
       const signedUrl = new URL(stream.url);
       expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('900');
@@ -527,13 +547,65 @@ describe('StorageService', () => {
       );
     });
 
+    it('signs a stream URL that expires in 900 seconds when called with two arguments', async () => {
+      const stream = await buildService().createPresignedAudioStream(
+        STUDIO_KEY,
+        'audio/mpeg',
+      );
+      const signedUrl = new URL(stream.url);
+      expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('900');
+      expect(signedUrl.searchParams.get('response-cache-control')).toBe(
+        'private, max-age=900',
+      );
+    });
+
+    it('signs an hour-long mix for its length plus ten minutes, cache lifetime included', async () => {
+      const startedAt = Date.now();
+      const stream = await buildService().createPresignedAudioStream(
+        STUDIO_KEY,
+        'audio/mp4',
+        3600,
+      );
+      const signedUrl = new URL(stream.url);
+      expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('4200');
+      expect(signedUrl.searchParams.get('response-cache-control')).toBe(
+        'private, max-age=4200',
+      );
+      const expiresAtMilliseconds = new Date(stream.expiresAt).getTime();
+      expect(expiresAtMilliseconds).toBeGreaterThanOrEqual(
+        startedAt + 4_200_000,
+      );
+      expect(expiresAtMilliseconds).toBeLessThanOrEqual(Date.now() + 4_200_000);
+    });
+
     it('refuses to sign a stream for a key outside the Studio shape', async () => {
       await expect(
         buildService().createPresignedAudioStream(
           'avatars/user-1/abc.jpg',
           'audio/mpeg',
+          200,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
+  });
+
+  describe('studioStreamExpirySeconds', () => {
+    it.each([
+      [null, 900],
+      [Number.NaN, 900],
+      [0, 900],
+      [120, 900],
+      [300, 900],
+      [301, 901],
+      [3600, 4200],
+      [20999, 21599],
+      [21000, 21600],
+      [86400, 21600],
+    ])(
+      'gives a %p second track a %i second link',
+      (durationSeconds, expected) => {
+        expect(studioStreamExpirySeconds(durationSeconds)).toBe(expected);
+      },
+    );
   });
 });

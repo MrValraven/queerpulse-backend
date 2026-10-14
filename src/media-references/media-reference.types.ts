@@ -35,7 +35,8 @@ export type MediaReferenceType =
   | 'message-photo' // Message.attachment (a photo sent in a conversation)
   | 'press-contact' // PressContact.avatarUrl
   | 'sticker' // Sticker.storageKey
-  | 'studio-cover'; // StudioRelease.coverKey
+  | 'studio-cover' // StudioRelease.coverKey
+  | 'persona-post'; // SubprofilePost.imageKey
 
 export interface MediaReference {
   type: MediaReferenceType;

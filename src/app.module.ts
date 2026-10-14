@@ -29,6 +29,7 @@ import { ProfilesModule } from './profiles/profiles.module';
 import { PublicProfilesModule } from './public-profiles/public-profiles.module';
 import { SubprofilesModule } from './subprofiles/subprofiles.module';
 import { SubprofileFeedsModule } from './subprofiles/feeds/subprofile-feeds.module';
+import { SubprofilePostsModule } from './subprofile-posts/subprofile-posts.module';
 import { HandlesModule } from './handles/handles.module';
 import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
@@ -40,7 +41,10 @@ import { StickersModule } from './stickers/stickers.module';
 import { AdminStickersModule } from './admin-stickers/admin-stickers.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { StudioModule } from './studio/studio.module';
-import { isStudioListeningRequest } from './studio/studio-request-log';
+import {
+  isStudioListeningRequest,
+  redactStudioPreviewToken,
+} from './studio/studio-request-log';
 import { CommunitiesModule } from './communities/communities.module';
 import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
@@ -216,7 +220,10 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
             req: (req: IncomingMessage & { id?: unknown }) => ({
               id: req.id,
               method: req.method,
-              url: redactSensitiveQueryParameters(req.url),
+              // A preview token in the path is a bearer credential too.
+              url: redactSensitiveQueryParameters(
+                redactStudioPreviewToken(req.url),
+              ),
             }),
             res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
             err: (err: Error & { type?: string }) => ({
@@ -272,6 +279,8 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     SubprofilesModule,
     // Persona podcast-feed import (outbound fetches + scheduled sync).
     SubprofileFeedsModule,
+    // Studio v3 persona posts (personas of a Studio artist kind).
+    SubprofilePostsModule,
     HandlesModule,
     VouchModule,
     SafeSpaceNominationsModule,

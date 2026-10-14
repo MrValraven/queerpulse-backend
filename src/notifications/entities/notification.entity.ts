@@ -1662,6 +1662,133 @@ export enum NotificationType {
    * See migration `AddStudioV2EnumValues1831500200000`.
    */
   StudioReleasePublished = 'studio_release_published',
+
+  /**
+   * Studio open demo pages (`QUEERPULSE-STUDIO-OPEN-DEMO-PAGES-DESIGN-2026-10-13.md`,
+   * section 5.3). Sent to a Studio release's owners, the persona's creator
+   * and every co-owner, when staff take the release down.
+   *
+   * NO ACTOR, in the payload or as the block and mute argument, following
+   * `CommunityPostRemoved`: the bell names no staff member, and an owner who
+   * blocked that person still hears about their own release.
+   *
+   * ALWAYS DELIVERED (group 1 of `ALWAYS_DELIVERED_NOTIFICATION_TYPES`) and
+   * IN-APP ONLY: a lock screen reading "<title> was taken down" would tell
+   * anyone nearby which artist persona this member runs.
+   *
+   * PAYLOAD: `{ releaseId, releaseTitle }`. The takedown reason stays off
+   * it; owners read the reason on the release page the bell opens
+   * (`/studio/album?id=<releaseId>`). Unbundled: one row per takedown.
+   *
+   * See migration `AddStudioTakedownNotificationTypes1831700200000`.
+   */
+  StudioReleaseTakenDown = 'studio_release_taken_down',
+
+  /**
+   * Studio open demo pages. Sent to the same owners when staff decide the
+   * artist's dispute about a takedown: upheld (the release is back) or
+   * rejected. Same posture as `StudioReleaseTakenDown`: no actor, always
+   * delivered, in-app only, unbundled.
+   *
+   * PAYLOAD: `{ releaseId, releaseTitle, outcome }`, with `outcome` one of
+   * `upheld` and `rejected`. The staff reply stays off it; owners read the
+   * reply on the release page.
+   *
+   * See migration `AddStudioTakedownNotificationTypes1831700200000`.
+   */
+  StudioReleaseDisputeDecided = 'studio_release_dispute_decided',
+
+  /**
+   * Studio discovery. A release credited a persona this member runs on one
+   * of its tracks, and the credit waits for an answer in the credits inbox.
+   *
+   * RECIPIENTS: members of the credited persona who hold a Studio grant, the
+   * requesting member left out. A request a block silences is stored and
+   * reaches nobody the block covers.
+   *
+   * NO ACTOR IN THE PAYLOAD, like `PersonaUpdate`: the requesting member's id
+   * reaches `createForRecipients` for block and mute filtering only, and this
+   * type appears under no key in `ACTOR_PAYLOAD_KEY`. The row names personas.
+   *
+   * BUNDLES on `creditedSubprofileId` and answers to the `personas` category
+   * in both channels, beside `SubprofileInvite`.
+   *
+   * PAYLOAD: `{ creditId, creditedSubprofileId, creditedPersonaName,
+   * creditedPersonaHandle, requestingPersonaName, requestingPersonaHandle,
+   * trackId, trackTitle, releaseId, releaseTitle, role }`.
+   *
+   * See migration `AddStudioCreditNotificationTypes1831800100000`.
+   */
+  StudioCreditRequested = 'studio_credit_requested',
+
+  /**
+   * Studio discovery. A persona accepted the credit a release this member
+   * runs gave it.
+   *
+   * RECIPIENTS: members of the requesting persona who hold a Studio grant,
+   * the accepting member left out. The accepting member's id reaches
+   * `createForRecipients` for block and mute filtering only; no
+   * `ACTOR_PAYLOAD_KEY` entry. A decline sends nothing.
+   *
+   * BUNDLES on `trackId` and answers to the `personas` category.
+   *
+   * PAYLOAD: `{ creditId, requestingSubprofileId, requestingPersonaName,
+   * creditedPersonaName, creditedPersonaHandle, trackId, trackTitle,
+   * releaseId, releaseTitle, role }`.
+   *
+   * See migration `AddStudioCreditNotificationTypes1831800100000`.
+   */
+  StudioCreditAccepted = 'studio_credit_accepted',
+
+  /**
+   * Studio v3. A persona of a Studio artist kind this member follows posted an
+   * update (`subprofile_posts`).
+   *
+   * At most the first three posts of a persona in any 24 hours alert, and
+   * only while the persona is published, open, present and clear of a
+   * moderator takedown. Edits never alert. The persona's creator and
+   * co-owners are left out.
+   *
+   * NO ACTOR IN THE PAYLOAD, like `PersonaUpdate`: the fan-out passes the
+   * persona owner's id to `createForRecipients` for block and mute
+   * filtering only, and this type appears under no key in
+   * `ACTOR_PAYLOAD_KEY`.
+   *
+   * BUNDLES on `subprofileId` and answers to the `persona_follows`
+   * category in both channels.
+   *
+   * PAYLOAD: `{ subprofileName, subprofileSlugOrHandle, subprofileId,
+   * postId, excerpt }`.
+   *
+   * See migration `AddStudioArtistToolsEnumValues1832000000000`.
+   */
+  PersonaPost = 'persona_post',
+
+  /**
+   * Studio artist kinds. A podcast show of a persona this member follows
+   * published a new episode.
+   *
+   * ONCE PER EPISODE. `StudioEpisodeAlertsListener` claims
+   * `studio_tracks.followers_notified_at` with one conditional update. A
+   * show publish stamps that column on every episode it carries, so the
+   * show's own `StudioReleasePublished` alert covers them and they send
+   * nothing more. Only followers holding a Studio grant receive it, and the
+   * persona's creator and co-owners are left out.
+   *
+   * NO ACTOR IN THE PAYLOAD, like `StudioReleasePublished`: the fan-out
+   * passes the persona owner's id to `createForRecipients` for block and
+   * mute filtering only, and this type appears under no key in
+   * `ACTOR_PAYLOAD_KEY`.
+   *
+   * BUNDLES on `releaseId` (one row per show) and answers to the
+   * `persona_follows` category in both channels.
+   *
+   * PAYLOAD: `{ subprofileName, subprofileSlugOrHandle, subprofileId,
+   * releaseId, trackId, releaseTitle, trackTitle }`.
+   *
+   * See migration `AddStudioArtistKindEnumValues1833000000000`.
+   */
+  StudioEpisodePublished = 'studio_episode_published',
 }
 
 @Entity('notifications')

@@ -16,6 +16,15 @@ import { toSavedId } from './saved-ref.util';
 export type SavedAvailability = 'available' | 'unavailable';
 
 /**
+ * Studio open demo pages: why an unavailable item is unavailable, sent for
+ * one cause only. `withdrawn` means staff took the Studio release behind a
+ * saved release or track down, and the viewer could otherwise hear it, so
+ * the reason names nothing about the viewer and discloses no block. Every
+ * other cause stays the one honest "unavailable" above.
+ */
+export type SavedUnavailableReason = 'withdrawn';
+
+/**
  * The presentational SNAPSHOT of a saved item: what the member's client copied
  * off the thing at the moment they saved it, plus its composite ref.
  *
@@ -54,6 +63,12 @@ export interface SavedItemDTO {
 export interface ResolvedSavedItemDTO extends SavedItemDTO {
   href: string | null;
   availability: SavedAvailability;
+  /**
+   * Present only on an unavailable Studio release or track that staff took
+   * down (see `SavedUnavailableReason`). Such a row keeps its `href`: the
+   * release page renders a withdrawn view in place.
+   */
+  unavailableReason?: SavedUnavailableReason;
 }
 
 /**
@@ -84,8 +99,9 @@ export function toSavedItemDTO(row: SavedItem): SavedItemDTO {
 export function toResolvedSavedItemDTO(
   row: SavedItem,
   isAvailable: boolean,
+  isWithdrawn = false,
 ): ResolvedSavedItemDTO {
-  return {
+  const dto: ResolvedSavedItemDTO = {
     id: toSavedId(row.subjectType, row.subjectId),
     kind: row.subjectType,
     title: row.title,
@@ -96,19 +112,27 @@ export function toResolvedSavedItemDTO(
     savedAt: row.createdAt.toISOString(),
     availability: isAvailable ? 'available' : 'unavailable',
   };
+  if (!isAvailable && isWithdrawn) {
+    return { ...dto, href: row.href ?? null, unavailableReason: 'withdrawn' };
+  }
+  return dto;
 }
 
-/** Maps a whole page against the set of composite refs that resolved. */
+/** Maps a whole page against the set of composite refs that resolved and,
+ *  for the member's own library, the set `withdrawnRefs` found. */
 export function toResolvedSavedItemDTOs(
   rows: readonly SavedItem[],
   availableRefs: ReadonlySet<string>,
+  withdrawnRefs: ReadonlySet<string> = new Set(),
 ): ResolvedSavedItemDTO[] {
-  return rows.map((row) =>
-    toResolvedSavedItemDTO(
+  return rows.map((row) => {
+    const savedId = toSavedId(row.subjectType, row.subjectId);
+    return toResolvedSavedItemDTO(
       row,
-      availableRefs.has(toSavedId(row.subjectType, row.subjectId)),
-    ),
-  );
+      availableRefs.has(savedId),
+      withdrawnRefs.has(savedId),
+    );
+  });
 }
 
 /**

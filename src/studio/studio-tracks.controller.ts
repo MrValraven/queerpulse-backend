@@ -56,10 +56,13 @@ export class StudioTracksController {
   ) {}
 
   @Post('releases/:id/tracks')
-  @ApiOperation({ summary: 'Add a track to a draft release.' })
+  @ApiOperation({
+    summary: 'Add a track to a draft, scheduled or published release.',
+  })
   @ApiOkResponse({ description: '`StudioTrack`.' })
   @ApiConflictResponse({
-    description: '`studio_release_not_draft` or `studio_track_limit`.',
+    description:
+      '`studio_release_not_draft` (taken down) or `studio_track_limit`.',
   })
   createTrack(
     @CurrentUser() user: CurrentUserData,
@@ -71,9 +74,19 @@ export class StudioTracksController {
 
   @Patch('tracks/:id')
   @UseGuards(NotRestrictedGuard)
-  @ApiOperation({ summary: 'Edit a track title, credits, lyrics or flag.' })
+  @ApiOperation({
+    summary:
+      'Edit a track: title, credits, lyrics, flag, timed lyrics, chapters, or the waveform and loudness measured at upload.',
+  })
   @ApiOkResponse({ description: '`StudioTrack`.' })
   @ApiNotFoundResponse({ description: 'Missing, or not yours.' })
+  @ApiConflictResponse({
+    description: '`studio_release_not_draft` for a taken-down release.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description:
+      '`studio_chapters_out_of_range`: a chapter starts at or past the end of the audio, or the audio is not confirmed yet.',
+  })
   updateTrack(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) trackId: string,
@@ -84,9 +97,16 @@ export class StudioTracksController {
 
   @Delete('tracks/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Delete a track of a draft release.' })
+  @ApiOperation({
+    summary: 'Delete a track of a draft, scheduled or published release.',
+    description:
+      'A scheduled or published release keeps at least one track with confirmed audio.',
+  })
   @ApiNoContentResponse({ description: 'Deleted; positions closed up.' })
-  @ApiConflictResponse({ description: '`studio_release_not_draft`.' })
+  @ApiConflictResponse({
+    description:
+      '`studio_release_not_draft` (taken down) or `studio_release_needs_playable_track`.',
+  })
   removeTrack(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) trackId: string,
@@ -95,10 +115,14 @@ export class StudioTracksController {
   }
 
   @Put('releases/:id/track-order')
-  @ApiOperation({ summary: 'Set the order of every track of a draft.' })
+  @ApiOperation({
+    summary:
+      'Set the order of every track of a draft, scheduled or published release.',
+  })
   @ApiOkResponse({ description: '`StudioRelease`.' })
   @ApiConflictResponse({
-    description: '`studio_track_order_mismatch` or `studio_release_not_draft`.',
+    description:
+      '`studio_track_order_mismatch` or `studio_release_not_draft` (taken down).',
   })
   reorderTracks(
     @CurrentUser() user: CurrentUserData,
@@ -112,6 +136,9 @@ export class StudioTracksController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Attach an uploaded file as the track's audio." })
   @ApiOkResponse({ description: '`StudioTrack`.' })
+  @ApiConflictResponse({
+    description: '`studio_release_not_draft` for a taken-down release.',
+  })
   @ApiUnprocessableEntityResponse({
     description: '`studio_audio_unreadable` or `studio_audio_wrong_owner`.',
   })

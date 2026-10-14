@@ -11,8 +11,13 @@ import { storageKeyFromImageUrl } from '../common/image-url';
 import {
   allowsPersonaScopedKeys,
   allowsSharedUploads,
+  allowsStudioSceneScopedKeys,
 } from './shared-upload-handlers';
-import { isPersonaScopedKey, storageKeyOwnerId } from './storage-key';
+import {
+  isPersonaScopedKey,
+  isStudioSceneScopedKey,
+  storageKeyOwnerId,
+} from './storage-key';
 
 // This interceptor does two related things to every image-ish string in a
 // state-changing request body, in one walk:
@@ -73,6 +78,9 @@ interface UploadAllowances {
   sharedUploads: boolean;
   /** T17: a persona-scoped key, see `PERSONA_SCOPED_KEY_HANDLERS`. */
   personaScopedKeys: boolean;
+  /** Studio discovery: a scene-scoped key, see
+   *  `STUDIO_SCENE_SCOPED_KEY_HANDLERS`. */
+  studioSceneScopedKeys: boolean;
 }
 
 @Injectable()
@@ -110,6 +118,10 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
     const allowances: UploadAllowances = {
       sharedUploads: allowsSharedUploads(controllerName, handlerName),
       personaScopedKeys: allowsPersonaScopedKeys(controllerName, handlerName),
+      studioSceneScopedKeys: allowsStudioSceneScopedKeys(
+        controllerName,
+        handlerName,
+      ),
     };
 
     if (typeof body === 'string') {
@@ -150,6 +162,15 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
     // alike: those checks are exact, so the form does not matter there.
     if (isPersonaScopedKey(normalized)) {
       if (requesterUserId && allowances.personaScopedKeys) {
+        return normalized;
+      }
+      throw new ForbiddenException('Referenced upload does not belong to you');
+    }
+    // Studio discovery: a scene-scoped key names no uploader either. It is
+    // refused on every route except `STUDIO_SCENE_SCOPED_KEY_HANDLERS`,
+    // whose service keeps it only as the scene's stored cover.
+    if (isStudioSceneScopedKey(normalized)) {
+      if (requesterUserId && allowances.studioSceneScopedKeys) {
         return normalized;
       }
       throw new ForbiddenException('Referenced upload does not belong to you');

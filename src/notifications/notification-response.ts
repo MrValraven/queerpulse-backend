@@ -236,7 +236,9 @@ const COMMON_PAYLOAD_KEYS: readonly string[] = [
  * what let a community post/reply `excerpt` — up to 140 chars of gated-space
  * body — reach a mention recipient (finding H3). Content-bearing keys
  * (`excerpt`, `body`, `text`, `message`, …) appear in NO entry here, so they
- * are dropped at this boundary for every type. Raw acting-member user ids are
+ * are dropped at this boundary for every type. The one deliberate exception
+ * is `persona_post`, whose `excerpt` is public post text the wire contract
+ * mandates, already cut to 80 characters. Raw acting-member user ids are
  * likewise not forwarded: the actor is resolved into `actor` separately.
  */
 const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
@@ -429,6 +431,64 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'releaseId',
       'releaseTitle',
       'releaseType',
+    ],
+    // Studio v3, an update from a persona you follow. The persona's public
+    // name and address, the post id and the first words of the post, all
+    // readable on the persona page every recipient can open. `subprofileId`
+    // keys the bundle and stays off the wire, and so does the author.
+    [NotificationType.PersonaPost]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'postId',
+      'excerpt',
+    ],
+    // Studio artist kinds, a new episode of a show you follow. The persona's
+    // public name and address, the show and the episode ids and titles, all
+    // public on the show page every recipient can open. `subprofileId` stays
+    // off the wire, and so does the owner.
+    [NotificationType.StudioEpisodePublished]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'releaseId',
+      'trackId',
+      'releaseTitle',
+      'trackTitle',
+    ],
+    // Studio open demo pages: a takedown of the owner's own release, and
+    // the decision on their dispute. The release's id (the deep link) and
+    // its title, plus the two-value `outcome` for the decision. The
+    // takedown reason and the staff reply are owner-only prose read on the
+    // release page, so neither rides the bell.
+    [NotificationType.StudioReleaseTakenDown]: ['releaseId', 'releaseTitle'],
+    [NotificationType.StudioReleaseDisputeDecided]: [
+      'releaseId',
+      'releaseTitle',
+      'outcome',
+    ],
+    // Studio discovery: a credit request on a persona the recipient runs.
+    // Persona names and the requesting handle, the track and release titles
+    // and the role, which the credited side reads in its inbox anyway. The
+    // credit, persona, track and release ids stay server-side (the bundle
+    // and the inbox link need none of them), and no member is stored.
+    [NotificationType.StudioCreditRequested]: [
+      'creditedPersonaName',
+      'requestingPersonaName',
+      'requestingPersonaHandle',
+      'trackTitle',
+      'releaseTitle',
+      'role',
+    ],
+    // Studio discovery: a persona accepted a credit the recipient's release
+    // gave it. `trackId` rides along for the track page link, a page every
+    // recipient already opens as an owner. No member is stored.
+    [NotificationType.StudioCreditAccepted]: [
+      'requestingPersonaName',
+      'creditedPersonaName',
+      'creditedPersonaHandle',
+      'trackId',
+      'trackTitle',
+      'releaseTitle',
+      'role',
     ],
     [NotificationType.SubprofileInvite]: [
       'subprofileName',

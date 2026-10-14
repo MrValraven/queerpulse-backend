@@ -33,7 +33,9 @@ import {
 } from './studio-playlist-response';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
 import {
+  StudioFormats,
   StudioGenres,
+  StudioMoods,
   StudioPage,
   StudioReleaseCard,
   StudioReleaseResponse,
@@ -55,13 +57,19 @@ export class StudioListeningController {
   ) {}
 
   @Get('releases')
-  @ApiOperation({ summary: 'Published releases, newest first, by genre.' })
+  @ApiOperation({
+    summary: 'Published releases, newest first, by genre, mood and format.',
+  })
   @ApiOkResponse({ description: '`StudioPage<StudioReleaseCard>`.' })
   listReleases(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListStudioReleasesQuery,
   ): Promise<StudioPage<StudioReleaseCard>> {
-    return this.catalog.listReleases(user.userId, query.cursor, query.genre);
+    return this.catalog.listReleases(user.userId, query.cursor, {
+      genre: query.genre,
+      mood: query.mood,
+      format: query.format,
+    });
   }
 
   @Get('genres')
@@ -69,6 +77,22 @@ export class StudioListeningController {
   @ApiOkResponse({ description: '`StudioGenres`.' })
   listGenres(@CurrentUser() user: CurrentUserData): Promise<StudioGenres> {
     return this.catalog.listGenres(user.userId);
+  }
+
+  @Get('moods')
+  @ApiOperation({ summary: 'Moods with a release the caller can hear.' })
+  @ApiOkResponse({ description: '`StudioMoods`.' })
+  listMoods(@CurrentUser() user: CurrentUserData): Promise<StudioMoods> {
+    return this.catalog.listMoods(user.userId);
+  }
+
+  // Studio artist kinds. Skipped by the request log, the HTTP metrics and
+  // Sentry (`isStudioListeningRequest`).
+  @Get('formats')
+  @ApiOperation({ summary: 'Formats with a release the caller can hear.' })
+  @ApiOkResponse({ description: '`StudioFormats`.' })
+  listFormats(@CurrentUser() user: CurrentUserData): Promise<StudioFormats> {
+    return this.catalog.listFormats(user.userId);
   }
 
   // Playlists are merged here so the catalog never depends on the playlist
@@ -82,7 +106,11 @@ export class StudioListeningController {
   ): Promise<StudioSearchResultWithPlaylists> {
     const type = query.type ?? 'all';
     const [catalogResult, playlists] = await Promise.all([
-      this.catalog.search(user.userId, query.q, type, query.genre),
+      this.catalog.search(user.userId, query.q, type, {
+        genre: query.genre,
+        mood: query.mood,
+        format: query.format,
+      }),
       type === 'all' || type === 'playlists'
         ? this.playlistReads.searchPlaylists(user.userId, query.q)
         : Promise.resolve<StudioPlaylistCard[]>([]),
@@ -133,7 +161,10 @@ export class StudioListeningController {
   // The body is a short-lived signed URL, so it is never cached.
   @Get('tracks/:id/stream')
   @Header('Cache-Control', 'no-store')
-  @ApiOperation({ summary: 'A 15-minute signed URL for one track.' })
+  @ApiOperation({
+    summary:
+      "A signed URL for one track, valid for its length plus ten minutes, with the upload's waveform and loudness.",
+  })
   @ApiOkResponse({ description: '`StudioStream`.' })
   @ApiNotFoundResponse({
     description: 'Missing, hidden from you, taken down, or still uploading.',

@@ -24,6 +24,9 @@ export interface StudioReleaseStatsRow {
   saves: StudioCount;
   /** Distinct public playlists holding any of the release's tracks. */
   playlistInclusions: StudioCount;
+  /** Studio v3: Notify me reminders on a scheduled release, under the same
+   *  floor; null for every other status. */
+  reminders: StudioCount | null;
   tracks: StudioTrackStatsRow[];
 }
 
@@ -41,8 +44,8 @@ export function toStudioCount(count: number): StudioCount {
   return { value: count, isBelowThreshold: false };
 }
 
-/** Published releases by `published_at desc, id desc`, then drafts and
- *  taken-down releases by `updated_at desc, id desc`. */
+/** Published releases by `published_at desc, id desc`, then drafts,
+ *  scheduled and taken-down releases by `updated_at desc, id desc`. */
 export function orderReleasesForStats(
   releases: StudioRelease[],
 ): StudioRelease[] {

@@ -4,6 +4,7 @@ import {
   StudioPlaylistVisibility,
 } from './entities/studio-playlist.entity';
 import { listenablePersonaSql } from './studio-visibility';
+import { episodeReleasedSql } from './studio-episode-rule';
 import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
 
 /*
@@ -15,7 +16,7 @@ import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
  *   persona credit also needs no block either way with the member who
  *   created the persona (`personaCreatorBlockExemptSql`). A member credit
  *   always stands. A persona credit stands while the persona is listenable,
- *   is a musician or DJ, and still counts the owner among its members.
+ *   is of a Studio artist kind, and still counts the owner among its members.
  * - Then public opens to any granted member, connections only opens to the
  *   owner's accepted connections, and private opens to nobody.
  * - Lists show public playlists only (`publiclyListedPlaylistSql`); the one
@@ -34,9 +35,30 @@ import { STUDIO_ARTIST_PERSONA_KINDS } from './studio.constants';
  * input never reaches one.
  */
 
-const ARTIST_KIND_LIST = STUDIO_ARTIST_PERSONA_KINDS.map(
+/** Every Studio artist kind of the format map (`STUDIO_FORMAT_BY_KIND`),
+ *  quoted for an `IN (...)` list. The one spelling: Studio discovery
+ *  re-exports it as `STUDIO_ARTIST_KIND_LIST_SQL`. */
+export const ARTIST_KIND_LIST = STUDIO_ARTIST_PERSONA_KINDS.map(
   (kind) => `'${kind}'`,
 ).join(', ');
+
+/** The release and audio half of `playableTrackSql`: published release,
+ *  audio in place and (Studio artist kinds) a podcast episode that has been
+ *  published (`episodeReleasedSql`). Studio discovery's related-artist score
+ *  reads it and checks the persona once per candidate. It is a bare AND
+ *  chain, so `playableTrackSql` keeps its exact text; a caller places it
+ *  inside an AND list or wraps it in parentheses before any OR. */
+export function playableTrackAudioSql(
+  trackAlias: string,
+  releaseAlias: string,
+): string {
+  const track = `"${trackAlias}"`;
+  const release = `"${releaseAlias}"`;
+  return `${release}."status" = 'published'
+    AND ${track}."audio_key" IS NOT NULL
+    AND ${track}."duration_seconds" IS NOT NULL
+    AND ${episodeReleasedSql(trackAlias, releaseAlias)}`;
+}
 
 /** A track a listener can play: published release, audio in place, and a
  *  listenable persona. Blocks are added by the caller. */
@@ -45,11 +67,7 @@ export function playableTrackSql(
   releaseAlias: string,
   personaAlias: string,
 ): string {
-  const track = `"${trackAlias}"`;
-  const release = `"${releaseAlias}"`;
-  return `(${release}."status" = 'published'
-    AND ${track}."audio_key" IS NOT NULL
-    AND ${track}."duration_seconds" IS NOT NULL
+  return `(${playableTrackAudioSql(trackAlias, releaseAlias)}
     AND ${listenablePersonaSql(personaAlias)})`;
 }
 

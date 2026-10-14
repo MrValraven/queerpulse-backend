@@ -37,12 +37,16 @@ import {
 } from '../studio/entities/studio-release.entity';
 import { StudioPlaylist } from '../studio/entities/studio-playlist.entity';
 import { StudioTrack } from '../studio/entities/studio-track.entity';
+import { episodeReleasedSql } from '../studio/studio-episode-rule';
 import {
   creditPersonaCreatorIdSql,
   personaCreatorBlockExemptSql,
   playlistOpenToViewerSql,
 } from '../studio/studio-playlist-visibility';
-import { listenablePersonaSql } from '../studio/studio-visibility';
+import {
+  listenablePersonaSql,
+  withdrawnReleaseSql,
+} from '../studio/studio-visibility';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
 import { toSavedId } from './saved-ref.util';
 
@@ -175,6 +179,53 @@ export class SavedAvailabilityService {
     );
 
     return available;
+  }
+
+  /**
+   * Studio open demo pages: the subset of `refs` whose Studio release or
+   * track is unavailable because staff took the release down, for a viewer
+   * who could otherwise hear it (Studio grant held, persona listenable, no
+   * block either way). The member's library reads those rows "withdrawn"
+   * and links them to the release page, which answers 410. Every other
+   * kind and every other cause is absent, so a dead thread or a blocked
+   * artist never reads as withdrawn.
+   *
+   * Callers pass the rows `availableRefs` left out. At most one query per
+   * Studio kind, and none for a page with no Studio release or track.
+   */
+  async withdrawnRefs(
+    refs: readonly SavedSubjectRef[],
+    viewerId: SavedViewerId,
+  ): Promise<Set<string>> {
+    const withdrawn = new Set<string>();
+    if (viewerId === null || !isFeatureLaunched('studio')) return withdrawn;
+    const uuidsOfKind = (kind: SavedKind): string[] => [
+      ...new Set(
+        refs
+          .filter(
+            (ref) =>
+              ref.subjectType === kind && UUID_PATTERN.test(ref.subjectId),
+          )
+          .map((ref) => ref.subjectId),
+      ),
+    ];
+    const releaseIds = uuidsOfKind(SavedKind.StudioRelease);
+    const trackIds = uuidsOfKind(SavedKind.StudioTrack);
+    const [releaseKeys, trackKeys] = await Promise.all([
+      releaseIds.length
+        ? this.resolveWithdrawnStudioReleases(releaseIds, viewerId)
+        : Promise.resolve<string[]>([]),
+      trackIds.length
+        ? this.resolveWithdrawnStudioTracks(trackIds, viewerId)
+        : Promise.resolve<string[]>([]),
+    ]);
+    for (const releaseId of releaseKeys) {
+      withdrawn.add(toSavedId(SavedKind.StudioRelease, releaseId));
+    }
+    for (const trackId of trackKeys) {
+      withdrawn.add(toSavedId(SavedKind.StudioTrack, trackId));
+    }
+    return withdrawn;
   }
 
   /** The subset of `subjectIds` of one kind that still resolve for the viewer. */
@@ -580,7 +631,7 @@ export class SavedAvailabilityService {
     return this.subjectKeys(queryBuilder, 'release.id');
   }
 
-  /** A track is available exactly when its release is. */
+  /** A track is available exactly when its release is, and (Studio artist kinds) an episode once it is published. */
   private async resolveStudioTracks(
     subjectIds: string[],
     viewerId: SavedViewerId,
@@ -591,7 +642,9 @@ export class SavedAvailabilityService {
     const queryBuilder = this.queryBuilderFor(StudioTrack, 'track')
       .innerJoin('track.release', 'release')
       .innerJoin('release.subprofile', 'persona')
-      .where('track.id IN (:...ids)', { ids });
+      .where('track.id IN (:...ids)', { ids })
+      // Studio artist kinds: an episode is available once it is published.
+      .andWhere(episodeReleasedSql('track', 'release'));
     this.applyStudioListeningGate(queryBuilder, viewerId);
     return this.subjectKeys(queryBuilder, 'track.id');
   }
@@ -645,6 +698,34 @@ export class SavedAvailabilityService {
     return this.subjectKeys(queryBuilder, 'playlist.id');
   }
 
+  /** Saved releases staff took down while live, of a persona the viewer
+   *  can still hear (`withdrawnReleaseSql`). */
+  private async resolveWithdrawnStudioReleases(
+    ids: string[],
+    viewerId: string,
+  ): Promise<string[]> {
+    const queryBuilder = this.queryBuilderFor(StudioRelease, 'release')
+      .innerJoin('release.subprofile', 'persona')
+      .where('release.id IN (:...ids)', { ids })
+      .andWhere(withdrawnReleaseSql('release', 'persona'));
+    this.applyStudioGrantAndBlocks(queryBuilder, viewerId);
+    return this.subjectKeys(queryBuilder, 'release.id');
+  }
+
+  /** A track is withdrawn exactly when its release is. */
+  private async resolveWithdrawnStudioTracks(
+    ids: string[],
+    viewerId: string,
+  ): Promise<string[]> {
+    const queryBuilder = this.queryBuilderFor(StudioTrack, 'track')
+      .innerJoin('track.release', 'release')
+      .innerJoin('release.subprofile', 'persona')
+      .where('track.id IN (:...ids)', { ids })
+      .andWhere(withdrawnReleaseSql('release', 'persona'));
+    this.applyStudioGrantAndBlocks(queryBuilder, viewerId);
+    return this.subjectKeys(queryBuilder, 'track.id');
+  }
+
   // Expects the builder to join the release as `release` and its persona as
   // `persona`.
   private applyStudioListeningGate<Subject extends ObjectLiteral>(
@@ -655,14 +736,24 @@ export class SavedAvailabilityService {
       .andWhere('release.status = :savedStudioPublished', {
         savedStudioPublished: StudioReleaseStatus.Published,
       })
-      .andWhere(listenablePersonaSql('persona'))
-      .andWhere(
-        `EXISTS (
-          SELECT 1 FROM "studio_access_grants" "saved_studio_grant"
-           WHERE "saved_studio_grant"."user_id" = :savedStudioViewerId
-        )`,
-        { savedStudioViewerId: viewerId },
-      );
+      .andWhere(listenablePersonaSql('persona'));
+    this.applyStudioGrantAndBlocks(queryBuilder, viewerId);
+  }
+
+  // The viewer half of every Studio card rule: a Studio grant, and no block
+  // either way with the persona's creator. Expects the persona joined as
+  // `persona`.
+  private applyStudioGrantAndBlocks<Subject extends ObjectLiteral>(
+    queryBuilder: SelectQueryBuilder<Subject>,
+    viewerId: string,
+  ): void {
+    queryBuilder.andWhere(
+      `EXISTS (
+        SELECT 1 FROM "studio_access_grants" "saved_studio_grant"
+         WHERE "saved_studio_grant"."user_id" = :savedStudioViewerId
+      )`,
+      { savedStudioViewerId: viewerId },
+    );
     this.blockFilter.excludeBlocked(
       queryBuilder,
       viewerId,

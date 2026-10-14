@@ -70,6 +70,10 @@ export const SHARED_UPLOAD_HANDLERS: ReadonlySet<string> = new Set([
   'AdminChangemakersController.update',
   'AdminTitlesController.create',
   'AdminTitlesController.update',
+  // Studio discovery scenes: any moderator or admin edits any scene. Paired
+  // with the service-side unchanged-value check in AdminStudioScenesService.
+  'AdminStudioScenesController.create',
+  'AdminStudioScenesController.update',
   'AdminBotsController.updateBotProfile',
   'AdminBotsController.replaceBotWork',
   // Magazine desk — any `magazine_editor` edits any piece/issue/deck.
@@ -121,6 +125,11 @@ export function allowsSharedUploads(
  *   only when the requester co-owns the persona it is registered to
  *   (`assertNoForeignUploadIntroducedForPersona`), then copies it to a key of
  *   the release's own persona.
+ * - `PersonaPostsController.create` and `PersonaPostEditsController.update`
+ *   (Studio v3 persona posts) may carry the post's stored photo or a photo
+ *   of the persona. `SubprofilePostsService` keeps the stored value, and
+ *   otherwise accepts a persona-scoped key only when it is registered to
+ *   the post's own persona, then copies it to a fresh key of that persona.
  *
  * A new handler belongs here only with a check of the same strength.
  */
@@ -130,7 +139,34 @@ export const PERSONA_SCOPED_KEY_HANDLERS: ReadonlySet<string> = new Set([
   'UploadsController.saveCrop',
   'MyMediaController.remove',
   'StudioReleasesController.update',
+  'PersonaPostsController.create',
+  'PersonaPostEditsController.update',
 ]);
+
+/**
+ * Studio discovery: the handlers that may carry a SCENE-SCOPED key
+ * (`studio-scene/<uuid>/<uuid><ext>`) in their body. Such a key names no
+ * uploader. A scene update re-sends the scene's stored cover, and
+ * `AdminStudioScenesService` keeps it only when it is that scene's stored
+ * value (`assertNoForeignUploadIntroduced`).
+ */
+export const STUDIO_SCENE_SCOPED_KEY_HANDLERS: ReadonlySet<string> = new Set([
+  'AdminStudioScenesController.update',
+]);
+
+/** Whether this controller+handler pair may carry a scene-scoped key.
+ *  Unknown pairs may not. */
+export function allowsStudioSceneScopedKeys(
+  controllerName: string | undefined,
+  handlerName: string | undefined,
+): boolean {
+  if (!controllerName || !handlerName) {
+    return false;
+  }
+  return STUDIO_SCENE_SCOPED_KEY_HANDLERS.has(
+    `${controllerName}.${handlerName}`,
+  );
+}
 
 /** Whether this controller+handler pair may carry a persona-scoped key.
  *  Unknown pairs may not. */

@@ -467,6 +467,18 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // Studio v3: one persona post, a member's own words and photo, so it
+  // carries the outing and doxxing codes a post does.
+  [ReportSubjectType.PersonaPost]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'impersonation',
+    'discrimination',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

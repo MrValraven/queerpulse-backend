@@ -822,6 +822,7 @@ describe('NotificationsExportContributor', () => {
       [NotificationType.CommunityNewPost, 'excerpt'],
       [NotificationType.CommunityAnnouncement, 'excerpt'],
       [NotificationType.EventAnnouncement, 'body'],
+      [NotificationType.PersonaPost, 'excerpt'],
     ];
 
     it.each(withheldTextCases)(

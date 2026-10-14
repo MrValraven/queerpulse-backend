@@ -845,5 +845,63 @@ describe('ReportSubjectResolverService', () => {
       );
       expect(query).not.toHaveBeenCalled();
     });
+
+    it('resolves a release whatever its status, so a scheduled one resolves too', async () => {
+      const { service, query } = build();
+      await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.StudioRelease,
+          subjectId: RELEASE_ID,
+        }),
+      );
+      const [[releaseSql]] = query.mock.calls as [[string, unknown[]]];
+      expect(releaseSql).toContain('FROM studio_releases r');
+      expect(releaseSql).not.toMatch(/status/i);
+    });
+  });
+
+  describe('persona posts', () => {
+    const POST_ID = '9d000000-0000-4000-8000-0000000000cc';
+
+    it('names the persona creator and quotes the persona and the post', async () => {
+      const { service, query } = build((sql, keys) =>
+        sql.includes('FROM subprofile_posts p')
+          ? [
+              {
+                key: keys[0]!,
+                author_user_id: 'creator-1',
+                excerpt: 'Night Shift: New single out Friday',
+                community_id: null,
+              },
+            ]
+          : [],
+      );
+
+      const resolution = await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.PersonaPost,
+          subjectId: POST_ID,
+        }),
+      );
+
+      expect(resolution).toEqual({
+        authorUserId: 'creator-1',
+        excerpt: 'Night Shift: New single out Friday',
+        communityId: null,
+        isAuthorAmbiguous: false,
+      });
+      expect(askedKeys(query)).toEqual([[POST_ID]]);
+    });
+
+    it('sends no non-uuid subject id to Postgres', async () => {
+      const { service, query } = build();
+      await service.resolve(
+        baseReport({
+          subjectType: ReportSubjectType.PersonaPost,
+          subjectId: 'new-single',
+        }),
+      );
+      expect(query).not.toHaveBeenCalled();
+    });
   });
 });

@@ -15,6 +15,7 @@ const OWNER_ID = 'a7000000-0000-4000-8000-000000000001';
 const PERSONA_ID = 'a8000000-0000-4000-8000-000000000001';
 const RELEASE_ID = 'a9000000-0000-4000-8000-000000000001';
 const DRAFT_ID = 'a9000000-0000-4000-8000-000000000002';
+const SCHEDULED_ID = 'a9000000-0000-4000-8000-000000000003';
 const TRACK_ONE = 'aa000000-0000-4000-8000-000000000001';
 const TRACK_TWO = 'aa000000-0000-4000-8000-000000000002';
 
@@ -82,6 +83,11 @@ describe('StudioStatsService', () => {
       if (sql.includes('GROUP BY "track"."release_id"')) {
         return Promise.resolve([
           { release_id: RELEASE_ID, inclusion_count: 6 },
+        ]);
+      }
+      if (sql.includes('FROM "studio_release_reminders"')) {
+        return Promise.resolve([
+          { release_id: SCHEDULED_ID, reminder_count: 3 },
         ]);
       }
       return Promise.resolve([]);
@@ -217,5 +223,65 @@ describe('StudioStatsService', () => {
     expect(stats.releases).toEqual([]);
     expect(tracks.find).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
+  });
+
+  // Studio v3: Notify me counts on scheduled releases, under the floor.
+  it('counts reminders on scheduled releases only, withholding 1 to 4', async () => {
+    releases.find.mockResolvedValue([
+      releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+      releaseRow(SCHEDULED_ID, StudioReleaseStatus.Scheduled),
+    ]);
+    ownership.isPersonaMember.mockResolvedValue(true);
+
+    const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+
+    const byId = new Map(
+      stats.releases.map((row) => [row.release.id, row.reminders]),
+    );
+    expect(byId.get(RELEASE_ID)).toBeNull();
+    expect(byId.get(SCHEDULED_ID)).toEqual({
+      value: null,
+      isBelowThreshold: true,
+    });
+    const reminderCall = query.mock.calls.find(([sql]: [string]) =>
+      sql.includes('FROM "studio_release_reminders"'),
+    ) as [string, unknown[]] | undefined;
+    expect(reminderCall?.[1]).toEqual([[SCHEDULED_ID]]);
+  });
+
+  it('reads no reminders when no release is scheduled', async () => {
+    ownership.isPersonaMember.mockResolvedValue(true);
+
+    await service.getArtistStats(OWNER_ID, PERSONA_ID);
+
+    expect(
+      query.mock.calls.some(([sql]: [string]) =>
+        sql.includes('FROM "studio_release_reminders"'),
+      ),
+    ).toBe(false);
+  });
+
+  // Studio artist kinds: a show gets the release numbers and no per-episode
+  // numbers.
+  it('lists a show with its counts and no per-episode rows', async () => {
+    releases.find.mockResolvedValue([
+      {
+        ...releaseRow(RELEASE_ID, StudioReleaseStatus.Published),
+        type: StudioReleaseType.Podcast,
+      },
+    ]);
+
+    const stats = await service.getArtistStats(OWNER_ID, PERSONA_ID);
+
+    expect(stats.releases).toHaveLength(1);
+    expect(stats.releases[0]?.tracks).toEqual([]);
+    expect(stats.releases[0]?.saves).toEqual({
+      value: 7,
+      isBelowThreshold: false,
+    });
+    expect(stats.releases[0]?.playlistInclusions).toEqual({
+      value: 6,
+      isBelowThreshold: false,
+    });
   });
 });

@@ -157,6 +157,16 @@ export enum ReportSubjectType {
   // Backed by `AddStudioReportAndSavedKinds1830900100000` (adds the value to
   // `reports_subject_type_enum`).
   StudioRelease = 'studio_release',
+
+  // Studio v3. ONE persona post (`subprofile_posts`), addressed by the
+  // post's uuid. Resolved by `ReportSubjectResolverService` to the persona's
+  // creator, with "<persona name>: <body>" as the excerpt. Staff act through
+  // `POST /admin/persona-posts/:postId/remove`, so this subject stays out of
+  // `ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES`.
+  //
+  // Backed by `AddStudioArtistToolsEnumValues1832000000000` (adds the value
+  // to `reports_subject_type_enum`).
+  PersonaPost = 'persona_post',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

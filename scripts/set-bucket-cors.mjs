@@ -1,5 +1,6 @@
 // One-off: apply a CORS policy to the object-storage bucket so the browser can
-// PUT directly to presigned upload URLs. Run with the same AWS_* env the app uses:
+// PUT directly to presigned upload URLs and read Studio audio through Web Audio
+// (`crossOrigin="anonymous"`). Run with the same AWS_* env the app uses:
 //
 //   node --env-file=.env scripts/set-bucket-cors.mjs
 //
@@ -89,12 +90,20 @@ await client.send(
       CORSRules: [
         {
           AllowedOrigins: allowedOrigins,
-          // GET covers presigned downloads; PUT covers presigned uploads.
-          AllowedMethods: ['GET', 'PUT'],
+          // GET covers presigned downloads and Studio streams, HEAD lets a
+          // media element probe a stream, PUT covers presigned uploads.
+          AllowedMethods: ['GET', 'HEAD', 'PUT'],
           // "*" so the SDK's Content-Type + x-amz-checksum-* / x-amz-sdk-*
-          // request headers all pass the preflight.
+          // request headers and a player's Range header all pass the preflight.
           AllowedHeaders: ['*'],
-          ExposeHeaders: ['ETag'],
+          // Studio listening: the upload page measures saved tracks through
+          // Range requests and reads where each slice sits in the file.
+          ExposeHeaders: [
+            'ETag',
+            'Content-Range',
+            'Accept-Ranges',
+            'Content-Length',
+          ],
           MaxAgeSeconds: 3600,
         },
       ],

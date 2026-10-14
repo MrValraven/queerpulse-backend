@@ -201,6 +201,9 @@ export class MemberPreferencesExportContributor implements DataExportContributio
       sharePresence: preferences.sharePresence,
       whoCanMessage: preferences.whoCanMessage,
       language: preferences.language,
+      studioAutoplayNext: preferences.studioAutoplayNext,
+      studioHideExplicit: preferences.studioHideExplicit,
+      studioCrossfadeSeconds: preferences.studioCrossfadeSeconds,
       updatedAt: preferences.updatedAt.toISOString(),
     };
   }

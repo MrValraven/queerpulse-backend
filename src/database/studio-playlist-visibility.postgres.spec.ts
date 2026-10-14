@@ -240,7 +240,7 @@ describeWithDatabase('Studio playlist visibility on real Postgres', () => {
     ]);
   });
 
-  it('stops a persona credit from standing once the persona is no musician or DJ', async () => {
+  it('stops a persona credit from standing once the persona is no longer a Studio artist kind', async () => {
     await dataSource.query(
       `UPDATE "subprofiles" SET "kind" = 'writer' WHERE "id" = $1`,
       [LIVE_PERSONA],

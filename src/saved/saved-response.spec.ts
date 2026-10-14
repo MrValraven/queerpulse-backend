@@ -100,3 +100,53 @@ describe('toSharedSavedItemDTO / toSharedSavedItemDTOs (ENG-443, the shared-list
     expect(JSON.stringify(result)).not.toContain('Casa Verde');
   });
 });
+
+describe('the withdrawn reason (Studio open demo pages)', () => {
+  const studioRelease = item({
+    subjectType: SavedKind.StudioRelease,
+    subjectId: '9e000000-0000-4000-8000-000000000001',
+    title: 'Lisbon at four',
+    href: '/studio/album?id=9e000000-0000-4000-8000-000000000001',
+    meta: 'Night Shift',
+  });
+
+  it('reads a withdrawn release as unavailable, says why, and keeps its link', () => {
+    const result = toResolvedSavedItemDTO(studioRelease, false, true);
+    expect(result.availability).toBe('unavailable');
+    expect(result.unavailableReason).toBe('withdrawn');
+    expect(result.href).toBe(
+      '/studio/album?id=9e000000-0000-4000-8000-000000000001',
+    );
+    expect(result.title).toBe('Lisbon at four');
+  });
+
+  it('sends no reason for any other unavailable item, and withholds its link', () => {
+    const result = toResolvedSavedItemDTO(studioRelease, false);
+    expect(result).not.toHaveProperty('unavailableReason');
+    expect(result.href).toBeNull();
+  });
+
+  it('sends no reason for an available item, whatever the withdrawn set says', () => {
+    const result = toResolvedSavedItemDTO(studioRelease, true, true);
+    expect(result.availability).toBe('available');
+    expect(result).not.toHaveProperty('unavailableReason');
+  });
+
+  it('maps a page against both sets', () => {
+    const results = toResolvedSavedItemDTOs(
+      [studioRelease, item()],
+      new Set<string>(),
+      new Set([`studio_release:${studioRelease.subjectId}`]),
+    );
+    expect(results.map((result) => result.unavailableReason)).toEqual([
+      'withdrawn',
+      undefined,
+    ]);
+  });
+
+  it('keeps shared lists free of the reason', () => {
+    expect(toSharedSavedItemDTO(studioRelease, false)).not.toHaveProperty(
+      'unavailableReason',
+    );
+  });
+});

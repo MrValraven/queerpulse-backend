@@ -1,4 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import {
@@ -55,6 +56,7 @@ describe('PreferencesService', () => {
         PreferencesService,
         { provide: getRepositoryToken(MemberPreferences), useValue: repo },
         { provide: PublicEligibilityService, useValue: eligibility },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
 
@@ -567,6 +569,97 @@ describe('PreferencesService', () => {
           loginAlertsEnabled: true,
         }),
       );
+    });
+  });
+
+  describe('Studio playback (open demo pages)', () => {
+    it('answers the player defaults without writing a row', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      expect(await service.getStudioPlayback('u1')).toEqual({
+        autoplayNext: true,
+        hideExplicit: false,
+        crossfadeSeconds: 0,
+      });
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('reads the stored settings', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioAutoplayNext: false,
+          studioHideExplicit: true,
+          studioCrossfadeSeconds: 6,
+        }),
+      );
+
+      expect(await service.getStudioPlayback('u1')).toEqual({
+        autoplayNext: false,
+        hideExplicit: true,
+        crossfadeSeconds: 6,
+      });
+    });
+
+    it('changes only the fields the body names and keeps the rest of the row', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioAutoplayNext: false,
+          studioHideExplicit: true,
+          studioCrossfadeSeconds: 4,
+        }),
+      );
+
+      const result = await service.updateStudioPlayback('u1', {
+        crossfadeSeconds: 8,
+      });
+
+      expect(result).toEqual({
+        autoplayNext: false,
+        hideExplicit: true,
+        crossfadeSeconds: 8,
+      });
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          studioCrossfadeSeconds: 8,
+          publicProfileEnabled: true,
+          safeOnly: false,
+          outAtWork: OutAtWork.Out,
+        }),
+      );
+    });
+
+    it('starts a first save from the defaults', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await service.updateStudioPlayback('u1', { hideExplicit: true });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          studioAutoplayNext: true,
+          studioHideExplicit: true,
+          studioCrossfadeSeconds: 0,
+          publicProfileEnabled: false,
+          hidePushPreviews: true,
+        }),
+      );
+    });
+
+    it('echoes the stored state for an empty body', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          studioAutoplayNext: true,
+          studioHideExplicit: false,
+          studioCrossfadeSeconds: 3,
+        }),
+      );
+
+      expect(await service.updateStudioPlayback('u1', {})).toEqual({
+        autoplayNext: true,
+        hideExplicit: false,
+        crossfadeSeconds: 3,
+      });
     });
   });
 });

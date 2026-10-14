@@ -1,5 +1,12 @@
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
-import { STUDIO_GENRES, StudioGenre } from '../studio.constants';
+import {
+  STUDIO_FORMATS,
+  STUDIO_GENRES,
+  STUDIO_MOODS,
+  StudioFormat,
+  StudioGenre,
+  StudioMood,
+} from '../studio.constants';
 
 export class ListStudioReleasesQuery {
   /** Opaque; a malformed value reads as the first page. */
@@ -12,4 +19,14 @@ export class ListStudioReleasesQuery {
   @IsOptional()
   @IsIn(STUDIO_GENRES)
   genre?: StudioGenre;
+
+  /** Studio discovery browse by mood, combined with the genre by AND. */
+  @IsOptional()
+  @IsIn(STUDIO_MOODS)
+  mood?: StudioMood;
+
+  /** Studio artist kinds: narrows the feed to one format's persona kinds. */
+  @IsOptional()
+  @IsIn(STUDIO_FORMATS)
+  format?: StudioFormat;
 }

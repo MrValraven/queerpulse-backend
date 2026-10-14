@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiConflictResponse,
+  ApiCreatedResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiNoContentResponse,
@@ -28,9 +29,12 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
+import { Throttle, seconds } from '@nestjs/throttler';
 import { CreateStudioReleaseDto } from './dto/create-studio-release.dto';
+import { CreateStudioDisputeDto } from './dto/create-studio-dispute.dto';
 import { UpdateStudioReleaseDto } from './dto/update-studio-release.dto';
 import { StudioAccessGuard } from './studio-access.guard';
+import { StudioDisputesService } from './studio-disputes.service';
 import { StudioReleasesService } from './studio-releases.service';
 import { StudioReleaseResponse } from './studio-response';
 
@@ -45,7 +49,10 @@ import { StudioReleaseResponse } from './studio-response';
 @Controller('studio/releases')
 @UseGuards(ActiveMemberGuard, StudioAccessGuard)
 export class StudioReleasesController {
-  constructor(private readonly releases: StudioReleasesService) {}
+  constructor(
+    private readonly releases: StudioReleasesService,
+    private readonly disputes: StudioDisputesService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Create a draft release for a persona.' })
@@ -115,5 +122,27 @@ export class StudioReleasesController {
     @Param('id', ParseUUIDPipe) releaseId: string,
   ): Promise<StudioReleaseResponse> {
     return this.releases.unpublish(user.userId, releaseId);
+  }
+
+  // Studio open demo pages. No `NotRestrictedGuard`: a restricted member can
+  // still dispute a takedown of their own release. Throttled like the other
+  // member flag routes.
+  @Post(':id/disputes')
+  @Throttle({ default: { limit: 5, ttl: seconds(300) } })
+  @ApiOperation({ summary: 'Dispute a takedown of your release.' })
+  @ApiCreatedResponse({
+    description: 'The release, owner view, with the new dispute.',
+  })
+  @ApiNotFoundResponse({ description: 'Missing, or not yours.' })
+  @ApiConflictResponse({
+    description:
+      '`studio_release_not_taken_down`, `studio_dispute_already_open` or `studio_dispute_limit_reached`.',
+  })
+  fileDispute(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) releaseId: string,
+    @Body() body: CreateStudioDisputeDto,
+  ): Promise<StudioReleaseResponse> {
+    return this.disputes.file(user.userId, releaseId, body.note);
   }
 }

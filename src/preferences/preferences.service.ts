@@ -13,6 +13,7 @@ import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibilit
 import { UpdateMessagingPrivacyDto } from './dto/update-messaging-privacy.dto';
 import { UpdateGroupAddPolicyDto } from './dto/update-group-add-policy.dto';
 import { UpdateLanguagePreferenceDto } from './dto/update-language-preference.dto';
+import { UpdateStudioPlaybackDto } from './dto/update-studio-playback.dto';
 import {
   DEFAULT_GROUP_ADD_POLICY,
   GroupAddPolicy,
@@ -28,6 +29,9 @@ import {
   DEFAULT_SHARE_PRESENCE,
   DEFAULT_SHARE_READ_RECEIPTS,
   DEFAULT_SHARE_TYPING,
+  DEFAULT_STUDIO_AUTOPLAY_NEXT,
+  DEFAULT_STUDIO_CROSSFADE_SECONDS,
+  DEFAULT_STUDIO_HIDE_EXPLICIT,
   MemberPreferences,
 } from './entities/member-preferences.entity';
 import { DEFAULT_WHO_CAN_MESSAGE } from './who-can-message';
@@ -43,6 +47,7 @@ import {
   MessagingPrivacyDTO,
   PublicProfileDTO,
   PushPreviewsDTO,
+  StudioPlaybackDTO,
   WorkPreferencesDTO,
   SuggestionVisibilityDTO,
   toContentSensitivityDTO,
@@ -52,6 +57,7 @@ import {
   toMessagingPrivacyDTO,
   toPublicProfileDTO,
   toPushPreviewsDTO,
+  toStudioPlaybackDTO,
   toSuggestionVisibilityDTO,
   toWorkPreferencesDTO,
 } from './preferences-response';
@@ -94,6 +100,9 @@ export class PreferencesService {
     row.sharePresence = DEFAULT_SHARE_PRESENCE;
     row.whoCanMessage = DEFAULT_WHO_CAN_MESSAGE;
     row.language = null;
+    row.studioAutoplayNext = DEFAULT_STUDIO_AUTOPLAY_NEXT;
+    row.studioHideExplicit = DEFAULT_STUDIO_HIDE_EXPLICIT;
+    row.studioCrossfadeSeconds = DEFAULT_STUDIO_CROSSFADE_SECONDS;
     return row;
   }
 
@@ -267,6 +276,37 @@ export class PreferencesService {
     row.hideSexualityIdentityContent = dto.hideSexualityIdentity;
 
     return toContentSensitivityDTO(await this.preferences.save(row));
+  }
+
+  // --- Studio playback (open demo pages) -----------------------------------
+
+  async getStudioPlayback(userId: string): Promise<StudioPlaybackDTO> {
+    return toStudioPlaybackDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Replace one or more of the Studio player's settings. A PARTIAL replace
+   * like `updateMessagingPrivacy`: each Studio control saves the moment it
+   * changes, so a field absent from the body keeps its stored value. Merged
+   * onto `loadOrDefault` like every other writer here, so it never clobbers
+   * the row's other settings. Served by `StudioPlaybackPreferencesController`
+   * behind the Studio grant guard.
+   */
+  async updateStudioPlayback(
+    userId: string,
+    dto: UpdateStudioPlaybackDto,
+  ): Promise<StudioPlaybackDTO> {
+    const row = await this.loadOrDefault(userId);
+    if (dto.autoplayNext !== undefined) {
+      row.studioAutoplayNext = dto.autoplayNext;
+    }
+    if (dto.hideExplicit !== undefined) {
+      row.studioHideExplicit = dto.hideExplicit;
+    }
+    if (dto.crossfadeSeconds !== undefined) {
+      row.studioCrossfadeSeconds = dto.crossfadeSeconds;
+    }
+    return toStudioPlaybackDTO(await this.preferences.save(row));
   }
 
   // --- Suggestion visibility ------------------------------------------------

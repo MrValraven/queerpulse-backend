@@ -1,4 +1,10 @@
-import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Check,
+  Column,
+  Entity,
+  PrimaryColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 import { DEFAULT_WHO_CAN_MESSAGE, WhoCanMessage } from '../who-can-message';
 import { MemberLanguage } from '../member-language';
 
@@ -115,6 +121,19 @@ export const DEFAULT_SHARE_TYPING = true;
 export const DEFAULT_SHARE_PRESENCE = true;
 
 /**
+ * The Studio player's settings (Studio open demo pages, section 6.1),
+ * served by `GET/PUT /me/studio-playback`. Autoplay next on and explicit
+ * tracks shown are how the player behaved before the settings existed;
+ * crossfade starts off. They store a preference and nothing about what the
+ * member plays.
+ */
+export const DEFAULT_STUDIO_AUTOPLAY_NEXT = true;
+export const DEFAULT_STUDIO_HIDE_EXPLICIT = false;
+export const DEFAULT_STUDIO_CROSSFADE_SECONDS = 0;
+/** The longest crossfade, in seconds. Also the column's CHECK bound. */
+export const STUDIO_CROSSFADE_MAX_SECONDS = 12;
+
+/**
  * One row per member holding the owner-only SAFETY and VISIBILITY switches.
  *
  * Kept off `profiles` on purpose. Everything on `profiles` is loaded by every
@@ -131,6 +150,11 @@ export const DEFAULT_SHARE_PRESENCE = true;
  * per-category override set of the kind `notification_preferences` models.
  */
 @Entity('member_preferences')
+// Migration `1831700000000-AddStudioPlaybackPreferences`.
+@Check(
+  'CHK_member_preferences_studio_crossfade_seconds',
+  `"studio_crossfade_seconds" BETWEEN 0 AND 12`,
+)
 export class MemberPreferences {
   @PrimaryColumn({ type: 'uuid' })
   userId!: string;
@@ -357,6 +381,19 @@ export class MemberPreferences {
    */
   @Column({ type: 'varchar', length: 5, nullable: true })
   language!: MemberLanguage | null;
+
+  // --- Studio playback (GET/PUT /me/studio-playback) -------------------------
+  // Studio open demo pages. Read by the Studio player on the member's own
+  // devices only; migration `1831700000000-AddStudioPlaybackPreferences`.
+
+  @Column({ type: 'boolean', default: DEFAULT_STUDIO_AUTOPLAY_NEXT })
+  studioAutoplayNext!: boolean;
+
+  @Column({ type: 'boolean', default: DEFAULT_STUDIO_HIDE_EXPLICIT })
+  studioHideExplicit!: boolean;
+
+  @Column({ type: 'smallint', default: DEFAULT_STUDIO_CROSSFADE_SECONDS })
+  studioCrossfadeSeconds!: number;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

@@ -12,6 +12,7 @@ import { StudioAudioConfirmService } from './studio-audio-confirm.service';
 import { readStudioAudioFactsWithin } from './studio-audio-metadata';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
+import { STAMP_TRACKS_CHANGED_SQL } from './studio-release-edit-rule';
 
 jest.mock('./studio-audio-metadata', () => ({
   ...jest.requireActual<typeof import('./studio-audio-metadata')>(
@@ -46,7 +47,7 @@ describe('StudioAudioConfirmService', () => {
   let storedTrack: Partial<StudioTrack>;
   let lockedTrack: Partial<StudioTrack>;
   let tracks: { findOne: jest.Mock; exists: jest.Mock };
-  let manager: { findOne: jest.Mock; save: jest.Mock };
+  let manager: { findOne: jest.Mock; save: jest.Mock; query: jest.Mock };
   let ownership: {
     loadReleaseForWrite: jest.Mock;
     lockReleaseForWrite: jest.Mock;
@@ -75,6 +76,7 @@ describe('StudioAudioConfirmService', () => {
     manager = {
       findOne: jest.fn(() => Promise.resolve(lockedTrack)),
       save: jest.fn((row: object) => Promise.resolve(row)),
+      query: jest.fn().mockResolvedValue(undefined),
     };
     ownership = {
       loadReleaseForWrite: jest.fn().mockResolvedValue(writable()),
@@ -140,6 +142,83 @@ describe('StudioAudioConfirmService', () => {
     ]);
     expect(manager.save.mock.invocationCallOrder[0]).toBeLessThan(
       studioAudioUploads.deleteObjectsAndForget.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("clears the old file's measurements and keeps chapters that start inside the new audio", async () => {
+    const chapters = [
+      { startSeconds: 0, title: 'Intro', artist: null },
+      { startSeconds: 241, title: 'Outro', artist: 'Ana Moura' },
+    ];
+    lockedTrack = {
+      ...lockedTrack,
+      audioKey: OLD_KEY,
+      durationSeconds: 300,
+      waveformPeaks: Array.from({ length: 200 }, () => 90),
+      loudnessLufs: -8.2,
+      peakDb: -0.2,
+      syncedLyrics: [{ ms: 0, text: 'First line' }],
+      chapters,
+    };
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audioKey: KEY,
+        durationSeconds: 242,
+        waveformPeaks: null,
+        loudnessLufs: null,
+        peakDb: null,
+        syncedLyrics: [{ ms: 0, text: 'First line' }],
+        chapters,
+      }),
+    );
+  });
+
+  it('drops the chapters when one starts at or past the end of the new audio', async () => {
+    lockedTrack = {
+      ...lockedTrack,
+      audioKey: OLD_KEY,
+      durationSeconds: 300,
+      chapters: [
+        { startSeconds: 0, title: 'Intro', artist: null },
+        { startSeconds: 242, title: 'Outro', artist: null },
+      ],
+    };
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ durationSeconds: 242, chapters: null }),
+    );
+  });
+
+  it('leaves a first upload with every listening field empty', async () => {
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        waveformPeaks: null,
+        loudnessLufs: null,
+        peakDb: null,
+        chapters: null,
+      }),
+    );
+  });
+
+  it('keeps the measurements when a parallel confirm already attached the same key', async () => {
+    const waveformPeaks = Array.from({ length: 200 }, () => 90);
+    lockedTrack = {
+      ...lockedTrack,
+      audioKey: KEY,
+      durationSeconds: 242,
+      waveformPeaks,
+      loudnessLufs: -8.2,
+      peakDb: -0.2,
+    };
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        waveformPeaks,
+        loudnessLufs: -8.2,
+        peakDb: -0.2,
+      }),
     );
   });
 
@@ -293,9 +372,51 @@ describe('StudioAudioConfirmService', () => {
     expect(studioAudioUploads.deleteObjectsAndForget).not.toHaveBeenCalled();
   });
 
-  it('refuses a release published while the file was read', async () => {
+  it('replaces the audio of a published release, stamps the change and deletes the old object after', async () => {
+    ownership.loadReleaseForWrite.mockResolvedValue(
+      writable(StudioReleaseStatus.Published),
+    );
     ownership.lockReleaseForWrite.mockResolvedValue(
       writable(StudioReleaseStatus.Published),
+    );
+    lockedTrack = { ...lockedTrack, audioKey: OLD_KEY };
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(manager.query).toHaveBeenCalledWith(STAMP_TRACKS_CHANGED_SQL, [
+      RELEASE_ID,
+    ]);
+    expect(manager.save.mock.invocationCallOrder[0]).toBeLessThan(
+      manager.query.mock.invocationCallOrder[0]!,
+    );
+    expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledWith([
+      OLD_KEY,
+    ]);
+  });
+
+  it('confirms audio on a scheduled release without stamping it', async () => {
+    ownership.loadReleaseForWrite.mockResolvedValue(
+      writable(StudioReleaseStatus.Scheduled),
+    );
+    ownership.lockReleaseForWrite.mockResolvedValue(
+      writable(StudioReleaseStatus.Scheduled),
+    );
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(manager.save).toHaveBeenCalled();
+    expect(manager.query).not.toHaveBeenCalled();
+  });
+
+  it('refuses a taken-down release before the read', async () => {
+    ownership.loadReleaseForWrite.mockResolvedValue(
+      writable(StudioReleaseStatus.TakenDown),
+    );
+    expect(await codeOf(service.confirm(USER_ID, TRACK_ID, KEY))).toBe(
+      'studio_release_not_draft',
+    );
+    expect(storage.headObject).not.toHaveBeenCalled();
+  });
+
+  it('refuses a release taken down while the file was read and deletes the object', async () => {
+    ownership.lockReleaseForWrite.mockResolvedValue(
+      writable(StudioReleaseStatus.TakenDown),
     );
     expect(await codeOf(service.confirm(USER_ID, TRACK_ID, KEY))).toBe(
       'studio_release_not_draft',
@@ -303,5 +424,48 @@ describe('StudioAudioConfirmService', () => {
     expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledWith([
       KEY,
     ]);
+  });
+
+  // Studio artist kinds: the persona kind sets the cap and long files get a
+  // longer read.
+  it('confirms a 200 MB episode for a podcast persona with the long read', async () => {
+    const podcastWrite = {
+      release: {
+        id: RELEASE_ID,
+        subprofileId: PERSONA_ID,
+        status: StudioReleaseStatus.Draft,
+      },
+      persona: { id: PERSONA_ID, kind: 'podcaster' },
+    };
+    ownership.loadReleaseForWrite.mockResolvedValue(podcastWrite);
+    ownership.lockReleaseForWrite.mockResolvedValue(podcastWrite);
+    storage.headObject.mockResolvedValue({
+      contentType: 'audio/mpeg',
+      contentLength: 200_000_000,
+    });
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(readFacts).toHaveBeenCalledWith(stream, 200_000_000, 180000);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ audioBytes: 200_000_000 }),
+    );
+  });
+
+  it('refuses a 60 MB file for a music persona and deletes it', async () => {
+    storage.headObject.mockResolvedValue({
+      contentType: 'audio/mpeg',
+      contentLength: 60_000_000,
+    });
+    expect(await codeOf(service.confirm(USER_ID, TRACK_ID, KEY))).toBe(
+      'studio_audio_unreadable',
+    );
+    expect(studioAudioUploads.deleteObjectsAndForget).toHaveBeenCalledWith([
+      KEY,
+    ]);
+    expect(readFacts).not.toHaveBeenCalled();
+  });
+
+  it('reads a file under 50 MB within the usual minute', async () => {
+    await service.confirm(USER_ID, TRACK_ID, KEY);
+    expect(readFacts).toHaveBeenCalledWith(stream, 5_000_000, 60_000);
   });
 });

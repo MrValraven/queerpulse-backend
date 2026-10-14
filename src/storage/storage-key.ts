@@ -106,9 +106,43 @@ export function isPersonaScopedExtension(extension: string): boolean {
 }
 
 /**
+ * Studio discovery: the prefix of a SCENE-SCOPED key:
+ * `studio-scene/<uuid>/<uuid><ext>`.
+ *
+ * Staff upload a scene cover as a `work-image`, whose key names the staff
+ * member, and a scene page is public. So the server copies that upload
+ * under this prefix (`StorageService.copyObjectToStudioSceneScope`), where
+ * both segments are random, and stores the copy. Nothing presigns under it.
+ * `GET /files/*` serves one only while a `studio_scenes` row names it as its
+ * cover, and the orphan sweep keeps exactly those, so a copy whose write
+ * rolled back is never served and is reclaimed.
+ */
+export const STUDIO_SCENE_SCOPED_PREFIX = 'studio-scene';
+
+/** The read policy of a scene-scoped key: public like the `work-image` it
+ *  is copied from, with the same 10 MB cap. */
+export const STUDIO_SCENE_SCOPED_KIND_SPEC: UploadKindSpec = {
+  prefix: STUDIO_SCENE_SCOPED_PREFIX,
+  maxBytes: 10 * 1024 * 1024,
+  requiresSession: false,
+};
+
+const STUDIO_SCENE_SCOPED_KEY_PATTERN = new RegExp(
+  `^${escapeForRegex(STUDIO_SCENE_SCOPED_PREFIX)}/${UUID_SEGMENT}/${UUID_SEGMENT}(${IMAGE_EXTENSIONS.map(escapeForRegex).join('|')})$`,
+);
+
+/** Whether a value is a scene-scoped key (`studio-scene/<uuid>/<uuid><ext>`). */
+export function isStudioSceneScopedKey(value: string): boolean {
+  return (
+    typeof value === 'string' && STUDIO_SCENE_SCOPED_KEY_PATTERN.test(value)
+  );
+}
+
+/**
  * Resolves a storage key to the upload kind that owns it, or `null` when the
  * value is not a well-formed key for a known kind. A persona-scoped key
- * resolves to `PERSONA_SCOPED_KIND_SPEC`.
+ * resolves to `PERSONA_SCOPED_KIND_SPEC`, and a scene-scoped key to
+ * `STUDIO_SCENE_SCOPED_KIND_SPEC`.
  */
 export function parseStorageKey(value: string): UploadKindSpec | null {
   if (typeof value !== 'string') {
@@ -116,6 +150,9 @@ export function parseStorageKey(value: string): UploadKindSpec | null {
   }
   if (PERSONA_SCOPED_KEY_PATTERN.test(value)) {
     return PERSONA_SCOPED_KIND_SPEC;
+  }
+  if (STUDIO_SCENE_SCOPED_KEY_PATTERN.test(value)) {
+    return STUDIO_SCENE_SCOPED_KIND_SPEC;
   }
   const match = STORAGE_KEY_PATTERN.exec(value);
   if (!match) {
@@ -143,6 +180,7 @@ export function isStorageKey(value: string): boolean {
  * A persona-scoped key has no owner segment and resolves to `null` here.
  * A caller doing an ownership check must therefore test
  * `isPersonaScopedKey` first: `null` alone reads as "not one of our keys".
+ * The same holds for a scene-scoped key (`isStudioSceneScopedKey`).
  */
 export function storageKeyOwnerId(value: string): string | null {
   if (typeof value !== 'string') {

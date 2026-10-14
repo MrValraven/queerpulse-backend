@@ -170,6 +170,24 @@ export class PushNotificationListener {
         case NotificationType.StudioReleasePublished:
           await this.pushStudioReleasePublished(userIds, notification);
           return;
+        // Studio v3: a persona this member follows posted an update. Same
+        // `PersonaFollows` switch as the two above.
+        case NotificationType.PersonaPost:
+          await this.pushPersonaPost(userIds, notification);
+          return;
+        // Studio artist kinds: a new episode of a show this member follows.
+        // Same `PersonaFollows` switch as the release alert.
+        case NotificationType.StudioEpisodePublished:
+          await this.pushStudioEpisodePublished(userIds, notification);
+          return;
+        // Studio discovery: credit requests and acceptances, behind the
+        // `Personas` switch the persona invites use.
+        case NotificationType.StudioCreditRequested:
+          await this.pushStudioCreditRequested(userIds, notification);
+          return;
+        case NotificationType.StudioCreditAccepted:
+          await this.pushStudioCreditAccepted(userIds, notification);
+          return;
         // Platform staff offering a struggling community help (OPS-05).
         // Always-on, no category gate, for the same reason as the types
         // above: it is the platform reaching the people running a room that
@@ -861,6 +879,161 @@ export class PushNotificationListener {
         titleKey: 'push:studioReleasePublished.title',
         bodyKey: 'push:studioReleasePublished.body',
         params: { persona, title },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "A persona you follow posted an update" (Studio v3).
+   *
+   * Titled with the persona's own name, the body is the post's first words,
+   * and it opens the persona page's Updates block. `resolveActor` is not
+   * called and no avatar rides along, for the reason `pushPersonaUpdate`
+   * gives. A payload missing the name, the excerpt or the address is
+   * malformed and sends no push; the bell row is unaffected. The body is
+   * member-written text, so it goes through the preview split like every
+   * other message-like push.
+   */
+  private async pushPersonaPost(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'subprofileName');
+    const excerpt = this.payloadString(notification, 'excerpt');
+    const personaAddress = this.payloadString(
+      notification,
+      'subprofileSlugOrHandle',
+    );
+    if (!persona || !excerpt || !personaAddress) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.PersonaFollows,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: persona,
+      body: excerpt,
+      tag: `notification:${notification.id}`,
+      data: { url: `/p/${encodeURIComponent(personaAddress)}#updates` },
+      l10n: {
+        titleKey: 'push:personaPost.title',
+        bodyKey: 'push:personaPost.body',
+        params: { persona, excerpt },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "A show you follow published an episode" (Studio artist kinds).
+   *
+   * NAMES THE PERSONA, THE SHOW AND THE EPISODE AND LEAVES THE OWNER OUT:
+   * `resolveActor` is not called and no avatar rides along, for the reason
+   * `pushPersonaUpdate` gives. Opens the episode page. The persona name, the
+   * show and episode titles, the persona address and the episode id are all
+   * required: a payload missing one is malformed and sends no push, and the
+   * bell row is unaffected. Titles are member-written, so it goes through
+   * the preview split like every other message-like push.
+   */
+  private async pushStudioEpisodePublished(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'subprofileName');
+    const show = this.payloadString(notification, 'releaseTitle');
+    const episode = this.payloadString(notification, 'trackTitle');
+    const personaAddress = this.payloadString(
+      notification,
+      'subprofileSlugOrHandle',
+    );
+    const trackId = this.payloadString(notification, 'trackId');
+    if (!persona || !show || !episode || !personaAddress || !trackId) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.PersonaFollows,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: `New episode of ${show}`,
+      body: `${persona}: ${episode}`,
+      tag: `notification:${notification.id}`,
+      data: { url: `/studio/track?id=${encodeURIComponent(trackId)}` },
+      l10n: {
+        titleKey: 'push:studioEpisodePublished.title',
+        bodyKey: 'push:studioEpisodePublished.body',
+        params: { persona, show, episode },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "A release credited a persona you run" (Studio discovery). Names both
+   * personas and the track; `resolveActor` is never called, so no member's
+   * face or name rides along. Opens the credits inbox. A notification
+   * missing any of the three params is malformed and sends no push; the
+   * bell row is unaffected. The role stays in the bell copy only, since the
+   * push params carry no translated label.
+   */
+  private async pushStudioCreditRequested(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const requester = this.payloadString(notification, 'requestingPersonaName');
+    const persona = this.payloadString(notification, 'creditedPersonaName');
+    const track = this.payloadString(notification, 'trackTitle');
+    if (!requester || !persona || !track) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'New credit request',
+      body: `${requester} credited ${persona} on ${track}`,
+      tag: `notification:${notification.id}`,
+      data: { url: '/studio/credits' },
+      l10n: {
+        titleKey: 'push:studioCreditRequested.title',
+        bodyKey: 'push:studioCreditRequested.body',
+        params: { requester, persona, track },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "A persona accepted your credit" (Studio discovery). Opens the track
+   * page, or the credits inbox when the payload carries no track id. Persona
+   * name and track title are required; the accepting member is never
+   * resolved.
+   */
+  private async pushStudioCreditAccepted(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const persona = this.payloadString(notification, 'creditedPersonaName');
+    const track = this.payloadString(notification, 'trackTitle');
+    if (!persona || !track) return;
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Personas,
+    );
+    if (recipientUserIds.length === 0) return;
+    const trackId = this.payloadString(notification, 'trackId');
+    const url = trackId
+      ? `/studio/track?id=${encodeURIComponent(trackId)}`
+      : '/studio/credits';
+    await this.previewPrivacy.sendSplitByPreviewPreference(recipientUserIds, {
+      title: 'Credit accepted',
+      body: `${persona} accepted your credit on ${track}`,
+      tag: `notification:${notification.id}`,
+      data: { url },
+      l10n: {
+        titleKey: 'push:studioCreditAccepted.title',
+        bodyKey: 'push:studioCreditAccepted.body',
+        params: { persona, track },
       },
       timestamp: notification.createdAt.getTime(),
     });

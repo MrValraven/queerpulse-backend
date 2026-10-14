@@ -12,10 +12,13 @@ import {
   StudioReleaseStatus,
   StudioReleaseType,
 } from './entities/studio-release.entity';
+import { StudioSceneState } from './entities/studio-scene.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { StudioReleasesService } from './studio-releases.service';
+import { scheduleDateInLisbon } from './studio-schedule-rule';
+import { STAMP_SHOW_EPISODES_SQL } from './studio-episode-rule';
 import { STUDIO_RELEASE_PUBLISHED } from './studio.events';
 
 const USER_ID = 'a2000000-0000-4000-8000-000000000001';
@@ -28,6 +31,8 @@ const PERSONA_COVER =
   'persona/c0000000-0000-4000-8000-000000000001/c0000000-0000-4000-8000-000000000002.jpg';
 const AUDIO_KEY =
   'studio-audio/d0000000-0000-4000-8000-000000000001/d0000000-0000-4000-8000-000000000002.mp3';
+const SCENE_ID = 'e1000000-0000-4000-8000-000000000001';
+const ARCHIVED_SCENE_ID = 'e1000000-0000-4000-8000-000000000002';
 
 async function codeOf(promise: Promise<unknown>): Promise<string | undefined> {
   try {
@@ -59,7 +64,13 @@ describe('StudioReleasesService', () => {
   let release: StudioRelease;
   let personaKind: string;
   let tracks: Partial<StudioTrack>[];
-  let manager: { find: jest.Mock; save: jest.Mock; delete: jest.Mock };
+  let manager: {
+    find: jest.Mock;
+    save: jest.Mock;
+    delete: jest.Mock;
+    findOne: jest.Mock;
+    query: jest.Mock;
+  };
   let ownership: {
     assertArtistPersona: jest.Mock;
     lockReleaseForWrite: jest.Mock;
@@ -77,11 +88,21 @@ describe('StudioReleasesService', () => {
   beforeEach(() => {
     release = draftRelease();
     personaKind = 'dj';
-    tracks = [{ id: 'track-1', audioKey: AUDIO_KEY, durationSeconds: 240 }];
+    // The default release is a mix, so its track credits a source.
+    tracks = [
+      {
+        id: 'track-1',
+        audioKey: AUDIO_KEY,
+        durationSeconds: 240,
+        sources: [{ title: 'Rumour Has It', artist: 'Adele' }],
+      },
+    ];
     manager = {
       find: jest.fn(() => Promise.resolve(tracks)),
       save: jest.fn((row: unknown) => Promise.resolve(row)),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      findOne: jest.fn().mockResolvedValue(null),
+      query: jest.fn().mockResolvedValue(undefined),
     };
     ownership = {
       assertArtistPersona: jest.fn(() =>
@@ -164,6 +185,41 @@ describe('StudioReleasesService', () => {
       ).toBe('studio_release_type_mismatch');
       expect(releases.save).not.toHaveBeenCalled();
     });
+
+    // Studio artist kinds.
+    it('presets the spoken word genre for a poet and leaves a show without one', async () => {
+      personaKind = 'poet';
+      await service.create(USER_ID, {
+        subprofileId: PERSONA_ID,
+        type: StudioReleaseType.Ep,
+        title: 'Salt Poems',
+      });
+      expect(releases.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: 'ep', genre: 'spoken-word' }),
+      );
+      personaKind = 'podcaster';
+      await service.create(USER_ID, {
+        subprofileId: PERSONA_ID,
+        type: StudioReleaseType.Podcast,
+        title: 'Lisbon After Dark',
+      });
+      expect(releases.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: 'podcast', genre: null }),
+      );
+    });
+
+    it('refuses an album for a podcaster', async () => {
+      personaKind = 'podcaster';
+      expect(
+        await codeOf(
+          service.create(USER_ID, {
+            subprofileId: PERSONA_ID,
+            type: StudioReleaseType.Album,
+            title: 'Lisbon After Dark',
+          }),
+        ),
+      ).toBe('studio_release_type_mismatch');
+    });
   });
 
   describe('publish', () => {
@@ -191,21 +247,32 @@ describe('StudioReleasesService', () => {
       expect(await codeOf(service.publish(USER_ID, RELEASE_ID))).toBe(
         'studio_publish_missing_tracks',
       );
-      tracks = [{ id: 'track-1', audioKey: null, durationSeconds: null }];
+      tracks = [
+        { id: 'track-1', audioKey: null, durationSeconds: null, sources: [] },
+      ];
       expect(await codeOf(service.publish(USER_ID, RELEASE_ID))).toBe(
         'studio_publish_tracks_pending',
       );
     });
 
-    it('publishes on the server clock and fills an empty release date', async () => {
+    it('publishes on the server clock and fills an empty release date with the Lisbon day', async () => {
       const before = Date.now();
       await service.publish(USER_ID, RELEASE_ID);
       const saved = manager.save.mock.calls[0]![0] as StudioRelease;
       expect(saved.status).toBe('published');
       expect(saved.publishedAt!.getTime()).toBeGreaterThanOrEqual(before);
-      expect(saved.releasedOn).toBe(
-        saved.publishedAt!.toISOString().slice(0, 10),
-      );
+      expect(saved.releasedOn).toBe(scheduleDateInLisbon(saved.publishedAt!));
+    });
+
+    it('fills the Lisbon day for a publish late in the UTC evening of the summer', async () => {
+      jest.useFakeTimers({ now: new Date('2026-07-14T23:30:00.000Z') });
+      try {
+        await service.publish(USER_ID, RELEASE_ID);
+        const saved = manager.save.mock.calls[0]![0] as StudioRelease;
+        expect(saved.releasedOn).toBe('2026-07-15');
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('keeps a release date the artist chose', async () => {
@@ -230,6 +297,50 @@ describe('StudioReleasesService', () => {
       );
     });
 
+    // Studio v3: "Publish now" on a scheduled release.
+    it('publishes a scheduled release now and clears its time', async () => {
+      release = draftRelease({
+        status: StudioReleaseStatus.Scheduled,
+        publishAt: new Date('2026-12-01T18:00:00.000Z'),
+        releasedOn: '2026-11-20',
+      });
+      await service.publish(USER_ID, RELEASE_ID);
+      const saved = manager.save.mock.calls[0]![0] as StudioRelease;
+      expect(saved.status).toBe('published');
+      expect(saved.publishAt).toBeNull();
+      expect(saved.releasedOn).toBe('2026-11-20');
+      expect(eventEmitter.emit).toHaveBeenCalledWith(STUDIO_RELEASE_PUBLISHED, {
+        releaseId: RELEASE_ID,
+      });
+    });
+
+    it('replaces a release date that scheduling filled with the Lisbon publish day', async () => {
+      release = draftRelease({
+        status: StudioReleaseStatus.Scheduled,
+        publishAt: new Date('2026-12-01T18:00:00.000Z'),
+        releasedOn: '2026-12-01',
+      });
+      await service.publish(USER_ID, RELEASE_ID);
+      const saved = manager.save.mock.calls[0]![0] as StudioRelease;
+      expect(saved.releasedOn).toBe(scheduleDateInLisbon(saved.publishedAt!));
+    });
+
+    it('names the Lisbon day when the publish happens late in the evening UTC', async () => {
+      jest.useFakeTimers({ now: new Date('2026-10-20T23:30:00.000Z') });
+      try {
+        release = draftRelease({
+          status: StudioReleaseStatus.Scheduled,
+          publishAt: new Date('2026-12-01T18:00:00.000Z'),
+          releasedOn: '2026-12-01',
+        });
+        await service.publish(USER_ID, RELEASE_ID);
+        const saved = manager.save.mock.calls[0]![0] as StudioRelease;
+        expect(saved.releasedOn).toBe('2026-10-21');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     // Studio v2: the alert listener hears about a publish only once it has
     // committed, and a refused publish tells it nothing.
     it('tells the alert listener once the publish has committed', async () => {
@@ -249,6 +360,58 @@ describe('StudioReleasesService', () => {
       await codeOf(service.publish(USER_ID, RELEASE_ID));
       expect(eventEmitter.emit).not.toHaveBeenCalled();
     });
+
+    // Studio artist kinds.
+    it('refuses a mix whose track credits no source and changes nothing', async () => {
+      tracks = [
+        {
+          id: 'track-1',
+          audioKey: AUDIO_KEY,
+          durationSeconds: 240,
+          sources: [],
+        },
+      ];
+      expect(await codeOf(service.publish(USER_ID, RELEASE_ID))).toBe(
+        'studio_publish_missing_sources',
+      );
+      expect(manager.save).not.toHaveBeenCalled();
+      expect(manager.find).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          select: expect.objectContaining({ sources: true }) as unknown,
+        }),
+      );
+    });
+
+    it("stamps the show's episodes in the publish transaction, with the publish time", async () => {
+      release = draftRelease({ type: StudioReleaseType.Podcast });
+      personaKind = 'podcaster';
+      tracks = [
+        {
+          id: 'track-1',
+          audioKey: AUDIO_KEY,
+          durationSeconds: 1800,
+          sources: [],
+        },
+      ];
+      await service.publish(USER_ID, RELEASE_ID);
+      const saved = manager.save.mock.calls[0]![0] as StudioRelease;
+      expect(manager.query).toHaveBeenCalledWith(STAMP_SHOW_EPISODES_SQL, [
+        RELEASE_ID,
+        saved.publishedAt,
+      ]);
+      expect(manager.save.mock.invocationCallOrder[0]).toBeLessThan(
+        manager.query.mock.invocationCallOrder[0]!,
+      );
+      expect(eventEmitter.emit).toHaveBeenCalledWith(STUDIO_RELEASE_PUBLISHED, {
+        releaseId: RELEASE_ID,
+      });
+    });
+
+    it('stamps nothing for a release of another type', async () => {
+      await service.publish(USER_ID, RELEASE_ID);
+      expect(manager.query).not.toHaveBeenCalled();
+    });
   });
 
   describe('unpublish', () => {
@@ -260,6 +423,23 @@ describe('StudioReleasesService', () => {
       await service.unpublish(USER_ID, RELEASE_ID);
       expect(manager.save).toHaveBeenCalledWith(
         expect.objectContaining({ status: 'draft', publishedAt: null }),
+      );
+    });
+
+    it('clears the preview link when a published release goes back to draft', async () => {
+      release = draftRelease({
+        status: StudioReleaseStatus.Published,
+        publishedAt: new Date(),
+        previewToken: 'a'.repeat(64),
+        previewLinkCreatedAt: new Date('2026-10-10T09:00:00.000Z'),
+      });
+      await service.unpublish(USER_ID, RELEASE_ID);
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'draft',
+          previewToken: null,
+          previewLinkCreatedAt: null,
+        }),
       );
     });
 
@@ -325,6 +505,30 @@ describe('StudioReleasesService', () => {
       expect(release.coverKey).toBe(PERSONA_COVER);
       expect(release.title).toBe('Lisbon at four');
       expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses to clear the cover of a scheduled release', async () => {
+      release = draftRelease({
+        status: StudioReleaseStatus.Scheduled,
+        publishAt: new Date('2026-12-01T18:00:00.000Z'),
+      });
+      expect(
+        await codeOf(service.update(USER_ID, RELEASE_ID, { coverKey: null })),
+      ).toBe('studio_publish_missing_cover');
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it('stores a buy link and clears it with null', async () => {
+      await service.update(USER_ID, RELEASE_ID, {
+        buyUrl: 'https://nightshift.bandcamp.com/album/lisbon',
+      });
+      expect((manager.save.mock.calls[0]![0] as StudioRelease).buyUrl).toBe(
+        'https://nightshift.bandcamp.com/album/lisbon',
+      );
+      await service.update(USER_ID, RELEASE_ID, { buyUrl: null });
+      expect(
+        (manager.save.mock.calls[1]![0] as StudioRelease).buyUrl,
+      ).toBeNull();
     });
 
     it('stamps the rights confirmation once', async () => {
@@ -395,6 +599,70 @@ describe('StudioReleasesService', () => {
       await expect(
         service.update(USER_ID, RELEASE_ID, { coverKey: MEMBER_COVER }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('stores a mood and clears it with null', async () => {
+      await service.update(USER_ID, RELEASE_ID, { mood: 'tender' });
+      expect((manager.save.mock.calls[0]![0] as StudioRelease).mood).toBe(
+        'tender',
+      );
+      await service.update(USER_ID, RELEASE_ID, { mood: null });
+      expect((manager.save.mock.calls[1]![0] as StudioRelease).mood).toBeNull();
+    });
+
+    it('opts the release into an active scene', async () => {
+      manager.findOne.mockResolvedValue({ id: SCENE_ID });
+
+      await service.update(USER_ID, RELEASE_ID, { sceneId: SCENE_ID });
+
+      expect(manager.findOne).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          where: { id: SCENE_ID, status: StudioSceneState.Active },
+        }),
+      );
+      expect((manager.save.mock.calls[0]![0] as StudioRelease).sceneId).toBe(
+        SCENE_ID,
+      );
+    });
+
+    it('refuses an unknown or archived scene', async () => {
+      manager.findOne.mockResolvedValue(null);
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, { sceneId: ARCHIVED_SCENE_ID }),
+        ),
+      ).toBe('studio_scene_not_available');
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+
+    it("keeps the release's own archived scene and refuses to move another release into it", async () => {
+      release = draftRelease({ sceneId: ARCHIVED_SCENE_ID });
+      await service.update(USER_ID, RELEASE_ID, {
+        sceneId: ARCHIVED_SCENE_ID.toUpperCase(),
+        title: 'Renamed',
+      });
+      expect(manager.findOne).not.toHaveBeenCalled();
+      expect((manager.save.mock.calls[0]![0] as StudioRelease).sceneId).toBe(
+        ARCHIVED_SCENE_ID,
+      );
+
+      release = draftRelease({ sceneId: SCENE_ID });
+      manager.findOne.mockResolvedValue(null);
+      expect(
+        await codeOf(
+          service.update(USER_ID, RELEASE_ID, { sceneId: ARCHIVED_SCENE_ID }),
+        ),
+      ).toBe('studio_scene_not_available');
+    });
+
+    it('leaves the scene with null and asks nothing about scenes', async () => {
+      release = draftRelease({ sceneId: SCENE_ID });
+      await service.update(USER_ID, RELEASE_ID, { sceneId: null });
+      expect(manager.findOne).not.toHaveBeenCalled();
+      expect(
+        (manager.save.mock.calls[0]![0] as StudioRelease).sceneId,
+      ).toBeNull();
     });
   });
 

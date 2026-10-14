@@ -47,6 +47,7 @@ import {
   StudioPage,
   toStudioTrackSummary,
 } from './studio-response';
+import { withdrawnReleaseSql } from './studio-visibility';
 import { STUDIO_LIMITS } from './studio.constants';
 
 interface PlaylistStatsRow {
@@ -639,13 +640,33 @@ export class StudioPlaylistReadsService {
     const visible = isOwner
       ? resolved
       : resolved.filter((entry) => entry.entryTrack !== null);
-    return visible.map((entry, index) => ({
-      entryId: entry.row.id,
-      position: index + 1,
-      addedAt: entry.row.addedAt.toISOString(),
-      isAvailable: entry.entryTrack !== null,
-      track: entry.entryTrack,
-    }));
+    // Studio open demo pages: the owner learns which unavailable rows staff
+    // took down. Viewers never receive an unavailable row, so they never ask.
+    const withdrawnTrackIds = isOwner
+      ? await this.withdrawnTrackIds(
+          viewerId,
+          visible.flatMap((entry) =>
+            entry.entryTrack === null && entry.row.trackId
+              ? [entry.row.trackId]
+              : [],
+          ),
+        )
+      : new Set<string>();
+    return visible.map((entry, index) => {
+      const isAvailable = entry.entryTrack !== null;
+      const isWithdrawn =
+        !isAvailable &&
+        entry.row.trackId !== null &&
+        withdrawnTrackIds.has(entry.row.trackId);
+      return {
+        entryId: entry.row.id,
+        position: index + 1,
+        addedAt: entry.row.addedAt.toISOString(),
+        isAvailable,
+        track: entry.entryTrack,
+        ...(isWithdrawn ? { unavailableReason: 'withdrawn' as const } : {}),
+      };
+    });
   }
 
   private async playableTracks(
@@ -670,5 +691,32 @@ export class StudioPlaylistReadsService {
     );
     const playableTracks = await queryBuilder.getMany();
     return new Map(playableTracks.map((track) => [track.id, track]));
+  }
+
+  // Tracks whose release staff took down while it was live, of a persona the
+  // owner can still hear (`withdrawnReleaseSql`), blocks either way applied.
+  private async withdrawnTrackIds(
+    viewerId: string,
+    trackIds: string[],
+  ): Promise<Set<string>> {
+    if (!trackIds.length) {
+      return new Set();
+    }
+    const queryBuilder = this.tracks
+      .createQueryBuilder('track')
+      .innerJoin('track.release', 'release')
+      .innerJoin('release.subprofile', 'persona')
+      .select('"track"."id"', 'track_id')
+      .where('track.id IN (:...withdrawnTrackIds)', {
+        withdrawnTrackIds: trackIds,
+      })
+      .andWhere(withdrawnReleaseSql('release', 'persona'));
+    this.blockFilter.excludeBlocked(
+      queryBuilder,
+      viewerId,
+      '"persona"."user_id"',
+    );
+    const rows = await queryBuilder.getRawMany<{ track_id: string }>();
+    return new Set(rows.map((row) => row.track_id));
   }
 }

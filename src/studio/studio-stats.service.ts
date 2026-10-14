@@ -4,8 +4,12 @@ import { DataSource, In, Repository } from 'typeorm';
 import { SavedKind } from '../saved/entities/saved-item.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileFollowersService } from '../subprofiles/subprofile-followers.service';
-import { StudioRelease } from './entities/studio-release.entity';
+import {
+  StudioRelease,
+  StudioReleaseStatus,
+} from './entities/studio-release.entity';
 import { StudioTrack } from './entities/studio-track.entity';
+import { isPodcastRelease } from './studio-episode-rule';
 import { StudioOwnershipService } from './studio-ownership.service';
 import { publiclyListedPlaylistSql } from './studio-playlist-visibility';
 import {
@@ -35,12 +39,18 @@ interface ReleaseInclusionRow {
   inclusion_count: number | string;
 }
 
+interface ReminderCountRow {
+  release_id: string;
+  reminder_count: number | string;
+}
+
 /**
  * Studio v2 "Your numbers": current totals for a persona's owners and
  * co-owners. Everything comes from data that already exists; nothing here
- * reads or records a play. Five grouped queries per page, whatever the
+ * reads or records a play. Six grouped queries per page, whatever the
  * catalogue size: releases, tracks, saves, track inclusions, release
- * inclusions (plus the follower count).
+ * inclusions and, for scheduled releases only, Notify me reminders (plus
+ * the follower count).
  */
 @Injectable()
 export class StudioStatsService {
@@ -82,7 +92,10 @@ export class StudioStatsService {
       persona.id,
     ]);
     const orderedReleases = orderReleasesForStats(
-      await this.releases.find({ where: { subprofileId } }),
+      await this.releases.find({
+        where: { subprofileId },
+        relations: { scene: true },
+      }),
     );
     const releaseIds = orderedReleases.map((release) => release.id);
     const releaseTracks = releaseIds.length
@@ -95,6 +108,11 @@ export class StudioStatsService {
     const saves = await this.saveCounts(releaseIds, trackIds);
     const trackInclusions = await this.trackInclusionCounts(trackIds);
     const releaseInclusions = await this.releaseInclusionCounts(releaseIds);
+    const reminderCounts = await this.reminderCounts(
+      orderedReleases
+        .filter((release) => release.status === StudioReleaseStatus.Scheduled)
+        .map((release) => release.id),
+    );
     return {
       subprofileId: persona.id,
       followerCount: followerCounts.get(persona.id) ?? 0,
@@ -115,13 +133,20 @@ export class StudioStatsService {
           playlistInclusions: toStudioCount(
             releaseInclusions.get(release.id) ?? 0,
           ),
-          tracks: tracksOfRelease.map((track) => ({
-            track: toStudioTrackSummary(track),
-            saves: toStudioCount(saves.byTrackId.get(track.id) ?? 0),
-            playlistInclusions: toStudioCount(
-              trackInclusions.get(track.id) ?? 0,
-            ),
-          })),
+          reminders:
+            release.status === StudioReleaseStatus.Scheduled
+              ? toStudioCount(reminderCounts.get(release.id) ?? 0)
+              : null,
+          // Studio artist kinds: a show has no per-episode numbers.
+          tracks: isPodcastRelease(release)
+            ? []
+            : tracksOfRelease.map((track) => ({
+                track: toStudioTrackSummary(track),
+                saves: toStudioCount(saves.byTrackId.get(track.id) ?? 0),
+                playlistInclusions: toStudioCount(
+                  trackInclusions.get(track.id) ?? 0,
+                ),
+              })),
         };
       }),
     };
@@ -197,6 +222,27 @@ export class StudioStatsService {
     );
     return new Map(
       rows.map((row) => [row.release_id, Number(row.inclusion_count)]),
+    );
+  }
+
+  /** Studio v3: Notify me reminders per scheduled release, one grouped
+   *  read. It answers counts only. */
+  private async reminderCounts(
+    releaseIds: string[],
+  ): Promise<Map<string, number>> {
+    if (!releaseIds.length) {
+      return new Map();
+    }
+    const rows: ReminderCountRow[] = await this.dataSource.query(
+      `SELECT "reminder"."release_id" AS "release_id",
+              COUNT(*)::int AS "reminder_count"
+         FROM "studio_release_reminders" "reminder"
+        WHERE "reminder"."release_id" = ANY($1::uuid[])
+        GROUP BY "reminder"."release_id"`,
+      [releaseIds],
+    );
+    return new Map(
+      rows.map((row) => [row.release_id, Number(row.reminder_count)]),
     );
   }
 }

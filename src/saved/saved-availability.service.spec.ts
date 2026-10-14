@@ -8,6 +8,8 @@ import {
   personaCreatorBlockExemptSql,
 } from '../studio/studio-playlist-visibility';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
+import { episodeReleasedSql } from '../studio/studio-episode-rule';
+import { withdrawnReleaseSql } from '../studio/studio-visibility';
 import { SavedAvailabilityService } from './saved-availability.service';
 
 /**
@@ -353,6 +355,23 @@ describe('SavedAvailabilityService', () => {
       );
     });
 
+    // Studio artist kinds: a draft episode a member saved stays unavailable
+    // until it is published.
+    it('resolves a saved episode only once it is published', async () => {
+      await build({ track: [TRACK_ID] });
+
+      await service.availableRefs(
+        [ref(SavedKind.StudioTrack, TRACK_ID)],
+        'viewer-1',
+      );
+
+      const queryBuilder = manager.createQueryBuilder.mock.results[0]!
+        .value as Record<string, jest.Mock>;
+      expect(predicatesOf(queryBuilder)).toContain(
+        episodeReleasedSql('track', 'release'),
+      );
+    });
+
     it('answers nothing, without querying, for a signed-out viewer or an id that is no uuid', async () => {
       await build({ release: [RELEASE_ID] });
       expect(
@@ -447,6 +466,94 @@ describe('SavedAvailabilityService', () => {
       );
       expect(available.size).toBe(0);
       expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    // Studio open demo pages: a saved release or track whose release staff
+    // took down reads "withdrawn" in the library.
+    describe('withdrawnRefs', () => {
+      it('finds saved releases and tracks whose release staff took down, through the same grant and block gates', async () => {
+        await build({ release: [RELEASE_ID], track: [TRACK_ID] });
+
+        const withdrawn = await service.withdrawnRefs(
+          [
+            ref(SavedKind.StudioRelease, RELEASE_ID),
+            ref(SavedKind.StudioTrack, TRACK_ID),
+          ],
+          'viewer-1',
+        );
+
+        expect([...withdrawn].sort()).toEqual([
+          `studio_release:${RELEASE_ID}`,
+          `studio_track:${TRACK_ID}`,
+        ]);
+        expect(manager.createQueryBuilder).toHaveBeenCalledTimes(2);
+        for (const result of manager.createQueryBuilder.mock.results) {
+          const queryBuilder = result.value as Record<string, jest.Mock>;
+          const predicates = predicatesOf(queryBuilder);
+          expect(predicates).toContain(
+            withdrawnReleaseSql('release', 'persona'),
+          );
+          expect(
+            predicates.some((predicate) =>
+              predicate.includes('"studio_access_grants"'),
+            ),
+          ).toBe(true);
+          expect(
+            predicates.some((predicate) =>
+              predicate.includes(':savedStudioPublished'),
+            ),
+          ).toBe(false);
+          expect(excludeBlocked).toHaveBeenCalledWith(
+            queryBuilder,
+            'viewer-1',
+            '"persona"."user_id"',
+          );
+        }
+      });
+
+      it('reports a release the query did not return as no reason at all', async () => {
+        await build({ release: [] });
+        const withdrawn = await service.withdrawnRefs(
+          [ref(SavedKind.StudioRelease, RELEASE_ID)],
+          'viewer-1',
+        );
+        expect(withdrawn.size).toBe(0);
+      });
+
+      it('asks nothing for a signed-out viewer, ids that are no uuid, or a page with no Studio release or track', async () => {
+        await build({ release: [RELEASE_ID] });
+        expect(
+          (
+            await service.withdrawnRefs(
+              [ref(SavedKind.StudioRelease, RELEASE_ID)],
+              null,
+            )
+          ).size,
+        ).toBe(0);
+        expect(
+          (
+            await service.withdrawnRefs(
+              [ref(SavedKind.StudioRelease, 'lisbon-at-four')],
+              'viewer-1',
+            )
+          ).size,
+        ).toBe(0);
+        expect(
+          (
+            await service.withdrawnRefs(
+              [
+                ref(SavedKind.Post, 'finding-a-gp'),
+                ref(
+                  SavedKind.StudioPlaylist,
+                  '9e000000-0000-4000-8000-000000000003',
+                ),
+              ],
+              'viewer-1',
+            )
+          ).size,
+        ).toBe(0);
+        expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+      });
     });
   });
 });

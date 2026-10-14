@@ -13,13 +13,17 @@ import {
   StudioRelease,
   StudioReleaseStatus,
 } from './entities/studio-release.entity';
+import { StudioScene, StudioSceneState } from './entities/studio-scene.entity';
 import { StudioTrack } from './entities/studio-track.entity';
 import { StudioCatalogService } from './studio-catalog.service';
 import { StudioOwnershipService } from './studio-ownership.service';
-import { firstUnmetPublishRequirement, toIsoDate } from './studio-publish-rule';
+import { stampShowEpisodes } from './studio-episode-rule';
+import { firstUnmetPublishRequirement } from './studio-publish-rule';
 import { StudioReleaseResponse } from './studio-response';
+import { scheduleDateInLisbon } from './studio-schedule-rule';
 import {
   isReleaseTypeAllowedForPersonaKind,
+  studioDefaultGenreForKind,
   studioError,
 } from './studio.constants';
 import {
@@ -41,6 +45,8 @@ function isUsableCoverKey(value: string): boolean {
  * transaction that first locks the release row
  * (`StudioOwnershipService.lockReleaseForWrite`), which also re-checks
  * membership and the persona kind. Each write answers with the owner view.
+ * Studio artist kinds: a show publish stamps its episodes, and edits,
+ * lip-sync mixes and mixes publish with every source credited.
  */
 @Injectable()
 export class StudioReleasesService {
@@ -71,6 +77,8 @@ export class StudioReleasesService {
         subprofileId: persona.id,
         title: body.title,
         type: body.type,
+        // Studio artist kinds: spoken word releases start in their genre.
+        genre: studioDefaultGenreForKind(persona.kind),
         status: StudioReleaseStatus.Draft,
       }),
     );
@@ -91,10 +99,11 @@ export class StudioReleasesService {
       if (release.status === StudioReleaseStatus.TakenDown) {
         throw studioError('studio_release_not_draft');
       }
-      // A published release keeps the cover the publish rule required, so
-      // clearing it is refused before any field changes.
+      // A published or scheduled release keeps the cover the publish rule
+      // required, so clearing it is refused before any field changes.
       if (
-        release.status === StudioReleaseStatus.Published &&
+        (release.status === StudioReleaseStatus.Published ||
+          release.status === StudioReleaseStatus.Scheduled) &&
         body.coverKey === null
       ) {
         throw studioError('studio_publish_missing_cover');
@@ -114,6 +123,16 @@ export class StudioReleasesService {
       if (body.genre !== undefined) {
         release.genre = body.genre;
       }
+      if (body.mood !== undefined) {
+        release.mood = body.mood;
+      }
+      if (body.sceneId !== undefined) {
+        release.sceneId = await this.resolveSceneId(
+          manager,
+          release,
+          body.sceneId,
+        );
+      }
       if (body.releasedOn !== undefined) {
         release.releasedOn = body.releasedOn;
       }
@@ -127,6 +146,9 @@ export class StudioReleasesService {
       }
       if (body.rightsConfirmed === true && !release.rightsConfirmedAt) {
         release.rightsConfirmedAt = new Date();
+      }
+      if (body.buyUrl !== undefined) {
+        release.buyUrl = body.buyUrl || null;
       }
       await manager.save(release);
     });
@@ -167,12 +189,21 @@ export class StudioReleasesService {
         userId,
         releaseId,
       );
-      if (release.status !== StudioReleaseStatus.Draft) {
+      // Studio v3: "Publish now" also takes a scheduled release.
+      if (
+        release.status !== StudioReleaseStatus.Draft &&
+        release.status !== StudioReleaseStatus.Scheduled
+      ) {
         throw studioError('studio_release_not_draft');
       }
       const releaseTracks = await manager.find(StudioTrack, {
         where: { releaseId },
-        select: { id: true, audioKey: true, durationSeconds: true },
+        select: {
+          id: true,
+          audioKey: true,
+          durationSeconds: true,
+          sources: true,
+        },
       });
       const unmetRequirement = firstUnmetPublishRequirement(
         release,
@@ -182,14 +213,29 @@ export class StudioReleasesService {
         throw studioError(unmetRequirement);
       }
       const publishedAt = new Date();
+      // A release date that scheduling filled in names the scheduled day;
+      // publishing early moves it to the Lisbon day of the publish. A typed
+      // date stays.
+      if (
+        release.publishAt &&
+        release.releasedOn === scheduleDateInLisbon(release.publishAt)
+      ) {
+        release.releasedOn = scheduleDateInLisbon(publishedAt);
+      }
       release.status = StudioReleaseStatus.Published;
       release.publishedAt = publishedAt;
-      release.releasedOn ??= toIsoDate(publishedAt);
+      release.publishAt = null;
+      release.releasedOn ??= scheduleDateInLisbon(publishedAt);
       await manager.save(release);
+      // Studio artist kinds: a show's episodes come out with it, claimed for
+      // the release alert, so none of them alerts again. An episode stamped
+      // by an earlier publish keeps its first time.
+      await stampShowEpisodes(manager, release, publishedAt);
     });
     // Studio v2: after the commit, so the alert listener never reads a
-    // publish that could still roll back. The listener claims the release
-    // once (`followers_notified_at`), so a republish sends nothing more.
+    // publish that could still roll back. Followers hear only on the first
+    // publish (the listener claims `followers_notified_at` once); members
+    // who set "Notify me" since are alerted and pre-saved on a later drop.
     this.eventEmitter.emit(STUDIO_RELEASE_PUBLISHED, {
       releaseId,
     } satisfies StudioReleasePublishedEvent);
@@ -197,7 +243,8 @@ export class StudioReleasesService {
   }
 
   /** Back to draft, clearing `published_at` (a later publish stamps a fresh
-   *  one). A draft comes back unchanged; a taken-down release stays with staff. */
+   *  one). A draft or a scheduled release comes back unchanged (unschedule is
+   *  its own route); a taken-down release stays with staff. */
   async unpublish(
     userId: string,
     releaseId: string,
@@ -214,10 +261,43 @@ export class StudioReleasesService {
       if (release.status === StudioReleaseStatus.Published) {
         release.status = StudioReleaseStatus.Draft;
         release.publishedAt = null;
+        // A preview link handed out before publishing stops working once the
+        // release is back in draft; the owner mints a fresh one when needed.
+        release.previewToken = null;
+        release.previewLinkCreatedAt = null;
         await manager.save(release);
       }
     });
     return this.catalog.getRelease(userId, releaseId);
+  }
+
+  // The scene the release should store for `sceneId`: null leaves the
+  // scene, the release's own scene stays (even once archived, so an edit
+  // that resends it keeps working), and anything else must be an active
+  // scene. The stored id is used, so a link in other letter case changes
+  // nothing.
+  private async resolveSceneId(
+    manager: EntityManager,
+    release: StudioRelease,
+    sceneId: string | null,
+  ): Promise<string | null> {
+    if (sceneId === null) {
+      return null;
+    }
+    if (
+      release.sceneId &&
+      release.sceneId.toLowerCase() === sceneId.toLowerCase()
+    ) {
+      return release.sceneId;
+    }
+    const scene = await manager.findOne(StudioScene, {
+      where: { id: sceneId, status: StudioSceneState.Active },
+      select: { id: true },
+    });
+    if (!scene) {
+      throw studioError('studio_scene_not_available');
+    }
+    return scene.id;
   }
 
   // The cover the release should store for `coverKey`: null clears, the
