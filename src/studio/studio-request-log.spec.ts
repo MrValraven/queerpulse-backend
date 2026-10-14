@@ -59,6 +59,19 @@ describe('isStudioListeningRequest', () => {
     '/studio/episodes/latest?cursor=abc&limit=12',
     '/api/studio/episodes/latest',
     '/STUDIO/EPISODES/LATEST',
+    '/studio/playlists/liked',
+    '/api/studio/playlists/liked?cursor=abc',
+    `/me/saved/studio_track%3A${trackId}`,
+    `/me/saved/studio_track:${trackId}`,
+    `/api/me/saved/studio_track%3a${trackId}`,
+    `/me/saved/studio_release:${trackId}`,
+    `/me/saved/studio_playlist%3A${playlistId}`,
+    `/Me/Saved/Studio_Track:${trackId}`,
+    `/me/saved/lists/${playlistId}/items/studio_track:${trackId}`,
+    `/me/saved/lists/${playlistId}/items/studio_track%3A${trackId}`,
+    `/api/me/saved/lists/${playlistId}/items/studio_release%3a${trackId}`,
+    `/me/saved/lists/${playlistId}/items/studio_playlist:${entryId}`,
+    `/Me/Saved/Lists/${playlistId}/Items/Studio_Track:${trackId}`,
   ])('matches %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(true);
   });
@@ -105,6 +118,15 @@ describe('isStudioListeningRequest', () => {
     '/studio/episodes/',
     '/admin/studio/formats',
     '/admin/studio/episodes/latest',
+    '/me/saved',
+    '/me/saved?kind=studio_track',
+    '/api/me/saved?kind=studio_track',
+    `/me/saved/article:${trackId}`,
+    `/me/saved/lists/${playlistId}`,
+    '/me/saved/lists',
+    `/me/saved/lists/${playlistId}/share`,
+    `/me/saved/lists/${playlistId}/items/article:${trackId}`,
+    `/me/saved/lists/${playlistId}/items/event%3Alisbon-pride`,
   ])('ignores %s', (url) => {
     expect(isStudioListeningRequest(url)).toBe(false);
   });
@@ -191,6 +213,14 @@ describe('dropStudioListeningReferer', () => {
     `https://queerpulse.test/studio/press/edit?persona=${personaId}`,
   ])('drops a preview or press kit page referer: %s', (referer) => {
     const request = { headers: { referer } };
+    expect(dropStudioListeningReferer(request)).toBe(true);
+    expect(request.headers).toEqual({});
+  });
+
+  it('drops a liked songs page referer', () => {
+    const request = {
+      headers: { referer: 'https://queerpulse.test/studio/liked' },
+    };
     expect(dropStudioListeningReferer(request)).toBe(true);
     expect(request.headers).toEqual({});
   });

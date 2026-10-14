@@ -39,6 +39,8 @@ import { ListStudioPlaylistsQuery } from './dto/list-studio-playlists.query';
 import { ReorderStudioPlaylistEntriesDto } from './dto/reorder-studio-playlist-entries.dto';
 import { UpdateStudioPlaylistDto } from './dto/update-studio-playlist.dto';
 import { StudioAccessGuard } from './studio-access.guard';
+import { StudioLikedTracksPage } from './studio-liked-tracks-response';
+import { StudioLikedTracksService } from './studio-liked-tracks.service';
 import { StudioPlaylistReadsService } from './studio-playlist-reads.service';
 import {
   StudioPlaylistCard,
@@ -60,6 +62,7 @@ export class StudioPlaylistsController {
   constructor(
     private readonly playlistReads: StudioPlaylistReadsService,
     private readonly playlistWrites: StudioPlaylistWritesService,
+    private readonly likedTracks: StudioLikedTracksService,
   ) {}
 
   // Declared before `:id`, so the uuid pipe never sees `mine`.
@@ -71,6 +74,18 @@ export class StudioPlaylistsController {
     @Query() query: ListStudioPlaylistsQuery,
   ): Promise<StudioPage<StudioPlaylistCard>> {
     return this.playlistReads.listMine(user.userId, query.cursor);
+  }
+
+  // Declared before `:id`, so the uuid pipe never sees `liked`. Liked songs
+  // reads the caller's own track likes only.
+  @Get('liked')
+  @ApiOperation({ summary: 'Your liked songs, most recently liked first.' })
+  @ApiOkResponse({ description: '`StudioLikedTracksPage`.' })
+  listLiked(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListStudioPlaylistsQuery,
+  ): Promise<StudioLikedTracksPage> {
+    return this.likedTracks.listLiked(user.userId, query.cursor);
   }
 
   @Post()

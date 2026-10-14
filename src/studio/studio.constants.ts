@@ -247,6 +247,8 @@ export const STUDIO_LIMITS = {
   tracksPerPlaylist: 500,
   tracksPerPlaylistAdd: 50,
   playlistsPerPage: 24,
+  // Liked songs: one page of the caller's liked tracks.
+  likedTracksPerPage: 100,
   playlistsOnTrackPage: 6,
   playlistCoverCount: 4,
   // The new-release fan-out mirrors `SubprofileUpdatesService`: a bound far

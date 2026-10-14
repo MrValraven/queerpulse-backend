@@ -4,6 +4,7 @@ import { ConnectionsModule } from '../connections/connections.module';
 import { ModerationModule } from '../moderation/moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PreferencesModule } from '../preferences/preferences.module';
+import { SavedItem } from '../saved/entities/saved-item.entity';
 import { SavedModule } from '../saved/saved.module';
 import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
@@ -49,6 +50,7 @@ import { StudioDisputesService } from './studio-disputes.service';
 import { StudioEpisodeAlertsListener } from './studio-episode-alerts.listener';
 import { StudioEpisodesController } from './studio-episodes.controller';
 import { StudioEpisodesService } from './studio-episodes.service';
+import { StudioLikedTracksService } from './studio-liked-tracks.service';
 import { StudioListeningController } from './studio-listening.controller';
 import { StudioMeController } from './studio-me.controller';
 import { StudioModerationService } from './studio-moderation.service';
@@ -108,7 +110,9 @@ import { StudioTracksService } from './studio-tracks.service';
  * for support links and the press kit. Studio artist kinds
  * (QUEERPULSE-STUDIO-ARTIST-KINDS-DESIGN-2026-10-14.md) add the episodes
  * service, its controller and the episode alert listener; no new module
- * import.
+ * import. Liked songs (QUEERPULSE-STUDIO-LIKED-SONGS-PLAN-2026-10-14.md)
+ * adds `StudioLikedTracksService` and registers `SavedItem` read-only, so
+ * the service reads the caller's own `studio_track` saves.
  */
 @Module({
   imports: [
@@ -134,6 +138,8 @@ import { StudioTracksService } from './studio-tracks.service';
       // Read-only, for `RolesOrStaffGuard` on the discovery admin
       // controllers, the `AdminTopicsModule` precedent.
       UserStaffRole,
+      // Read-only, for Liked songs (`StudioLikedTracksService`).
+      SavedItem,
     ]),
     StorageModule,
     SocialModule,
@@ -208,6 +214,8 @@ import { StudioTracksService } from './studio-tracks.service';
     // Studio artist kinds.
     StudioEpisodesService,
     StudioEpisodeAlertsListener,
+    // Liked songs.
+    StudioLikedTracksService,
   ],
 })
 export class StudioModule {}

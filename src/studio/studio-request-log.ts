@@ -11,8 +11,16 @@
  * (`/studio/artists/<id>/press-kit`, any method). Studio artist kinds add
  * the format list (`/studio/formats`) and the episode routes
  * (`/studio/episodes/<anything>`, any subpath); an episode publish is
- * already a `/studio/tracks/<id>` path. Case-blind, and the staff routes
- * under `/admin/studio/` are logged as usual.
+ * already a `/studio/tracks/<id>` path. Liked songs adds the like and unlike
+ * calls: a `PUT` or `DELETE` on `/me/saved/studio_<kind>:<id>` (the colon
+ * raw or encoded as `%3A`) names a liked track, release or playlist, so it
+ * is skipped too, and so is the same Studio item added to or taken out of a
+ * saved list (`/me/saved/lists/<listId>/items/studio_<kind>:<id>`);
+ * `GET /studio/playlists/liked` is already a playlists path. The plain
+ * `/me/saved` list, its `?kind=` filter, a list itself
+ * (`/me/saved/lists/<listId>`) and list items of other kinds name no Studio
+ * item and are logged as usual. Case-blind, and the staff routes under
+ * `/admin/studio/` are logged as usual.
  *
  * This module imports nothing: `instrument.ts` reads it before `Sentry.init`.
  */
@@ -31,11 +39,14 @@ export function isStudioListeningRequest(url: string | undefined): boolean {
     /(?:^|\/)studio\/artists\/[^/]+\/press-kit\/?$/i.test(path) ||
     /(?:^|\/)studio\/search\/?$/i.test(path) ||
     /(?:^|\/)studio\/radio\/?$/i.test(path) ||
-    /(?:^|\/)studio\/formats\/?$/i.test(path)
+    /(?:^|\/)studio\/formats\/?$/i.test(path) ||
+    /(?:^|\/)me\/saved\/(?:lists\/[^/]+\/items\/)?studio_(?:release|track|playlist)(?::|%3a)/i.test(
+      path,
+    )
   );
 }
 
-/** What a logged preview URL shows in place of the bearer token. */
+/** What a logged preview URL shows where the bearer token was. */
 export const REDACTED_PREVIEW_TOKEN = '[token]';
 
 const STUDIO_PREVIEW_TOKEN_PATTERN = /((?:^|\/)studio\/previews\/)[^/?#]+/gi;
@@ -96,10 +107,11 @@ export function dropStudioListeningUrl(
  * naming one of them (`/studio/collection?id=<playlistId>`) would carry the
  * same listening list the request URL does, so Sentry drops the header too.
  * Studio v3 adds the private preview page and the press kit pages, which name
- * a release or an artist a member was shown.
+ * a release or an artist a member was shown. Liked songs adds `/studio/liked`,
+ * the member's own liked tracks.
  */
 const STUDIO_LISTENING_PAGE_PATTERN =
-  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press)(?:\/|$)/i;
+  /(?:^|\/)studio\/(?:collection|album|track|artist|set|live|search|library|browse|scene|preview|press|liked)(?:\/|$)/i;
 
 function isStudioListeningReferer(referer: string): boolean {
   try {

@@ -206,6 +206,18 @@ describe('Studio controllers', () => {
     expect(routePathOf(StudioPlaylistsController, 'getPlaylist')).toBe(':id');
   });
 
+  // Liked songs: `liked` is a fixed segment too, so it also comes first.
+  it('registers GET /studio/playlists/liked before GET /studio/playlists/:id', () => {
+    const handlerNames = Object.getOwnPropertyNames(
+      StudioPlaylistsController.prototype,
+    );
+    expect(handlerNames.indexOf('listLiked')).toBeGreaterThan(-1);
+    expect(handlerNames.indexOf('listLiked')).toBeLessThan(
+      handlerNames.indexOf('getPlaylist'),
+    );
+    expect(routePathOf(StudioPlaylistsController, 'listLiked')).toBe('liked');
+  });
+
   // The profile page knows a member by slug only (contract revision).
   it('addresses a member playlist list by profile slug', () => {
     expect(routePathOf(StudioPlaylistListingsController, 'listForMember')).toBe(

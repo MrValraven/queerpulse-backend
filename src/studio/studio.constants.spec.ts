@@ -199,6 +199,7 @@ describe('Studio vocabulary', () => {
         tracksPerPlaylist: 500,
         tracksPerPlaylistAdd: 50,
         playlistsPerPage: 24,
+        likedTracksPerPage: 100,
         playlistsOnTrackPage: 6,
         playlistCoverCount: 4,
       }),

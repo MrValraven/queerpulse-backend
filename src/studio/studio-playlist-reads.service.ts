@@ -669,7 +669,9 @@ export class StudioPlaylistReadsService {
     });
   }
 
-  private async playableTracks(
+  // Public for Liked songs (`StudioLikedTracksService`), which resolves its
+  // rows through the same rule.
+  async playableTracks(
     viewerId: string,
     trackIds: string[],
   ): Promise<Map<string, StudioTrack>> {
@@ -695,7 +697,8 @@ export class StudioPlaylistReadsService {
 
   // Tracks whose release staff took down while it was live, of a persona the
   // owner can still hear (`withdrawnReleaseSql`), blocks either way applied.
-  private async withdrawnTrackIds(
+  // Liked songs asks it too.
+  async withdrawnTrackIds(
     viewerId: string,
     trackIds: string[],
   ): Promise<Set<string>> {
