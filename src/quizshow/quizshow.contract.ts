@@ -488,7 +488,7 @@ export interface QuizshowStarterPack {
   quiz: QuizshowStarterPackQuiz;
 }
 
-/** The `quizshow` field of `EventDetail`; null while the feature is not launched. */
+/** The `quizshow` field of `EventDetail`; null while the feature is hidden from this viewer (unlaunched, and no early-access grant). */
 export interface QuizshowEventDetail {
   hasQuiz: boolean;
   /** The open session's code while its status is lobby/running/paused (an abandoned

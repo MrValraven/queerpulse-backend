@@ -1,5 +1,5 @@
 import type { EntityManager } from 'typeorm';
-import { isFeatureLaunched } from '../launchedFeatures';
+import { canViewerUseFeature } from '../early-access/early-access-reads';
 import { QUIZSHOW_LIMITS, type QuizshowEventDetail } from './quizshow.contract';
 
 /**
@@ -101,11 +101,16 @@ export async function eventHasAdultsRounds(
   return rows[0]?.exists === true;
 }
 
+/**
+ * The viewer's Pulse Live summary of the event, or null when Pulse Live is
+ * hidden from this viewer: unlaunched, and the viewer holds no early-access
+ * grant for it.
+ */
 export async function readEventQuizshowSummary(
   manager: EntityManager,
   input: EventQuizshowSummaryInput,
 ): Promise<QuizshowEventDetail | null> {
-  if (!isFeatureLaunched('quizshow')) {
+  if (!(await canViewerUseFeature(manager, 'quizshow', input.viewerId))) {
     return null;
   }
   const idleCutoff = new Date(

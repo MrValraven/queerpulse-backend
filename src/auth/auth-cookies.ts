@@ -14,6 +14,12 @@ const OAUTH_STATE_MAX_AGE = 10 * 60 * 1000; // 10m
  */
 const REFRESH_COOKIE_PATH = '/auth';
 
+/**
+ * Name of the httpOnly access-token cookie. Exported for `LaunchedFeaturesGuard`,
+ * which checks only that the cookie is present before JWT validation runs.
+ */
+export const ACCESS_TOKEN_COOKIE = 'access_token';
+
 export interface AuthCookieOpts {
   secure: boolean;
   domain?: string;
@@ -50,7 +56,7 @@ export function setAuthCookies(
   tokens: { accessToken: string; refreshToken: string },
   opts: SessionCookieOpts,
 ): void {
-  res.cookie('access_token', tokens.accessToken, {
+  res.cookie(ACCESS_TOKEN_COOKIE, tokens.accessToken, {
     ...base(opts),
     maxAge: opts.accessMaxAge,
   });
@@ -61,7 +67,7 @@ export function setAuthCookies(
 }
 
 export function clearAuthCookies(res: Response, opts: AuthCookieOpts): void {
-  res.clearCookie('access_token', base(opts));
+  res.clearCookie(ACCESS_TOKEN_COOKIE, base(opts));
   res.clearCookie('refresh_token', refreshBase(opts));
 }
 

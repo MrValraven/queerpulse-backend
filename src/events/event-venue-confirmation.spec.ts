@@ -59,7 +59,7 @@ describe('EventsService venue confirmation (LOC-16)', () => {
     find: jest.Mock;
     update: jest.Mock;
     count: jest.Mock;
-    manager: { transaction: jest.Mock };
+    manager: { transaction: jest.Mock; query: jest.Mock };
   };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
   let listingLookup: {
@@ -157,6 +157,11 @@ describe('EventsService venue confirmation (LOC-16)', () => {
               getRepository: () => events,
             }),
         ),
+        // `buildDetail` reads the event's Pulse Live summary, and while
+        // quizshow is in early access `canViewerUseFeature` asks this manager
+        // for the viewer's grant. An empty result means no grant, so the
+        // summary is null.
+        query: jest.fn().mockResolvedValue([]),
       },
     };
     notifications = {

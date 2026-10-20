@@ -11,6 +11,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { FeatureAccessService } from '../early-access/feature-access.service';
 import { JoinRequestsService } from '../membership/join-requests.service';
 import { PushService } from '../push/push.service';
 import {
@@ -104,6 +105,11 @@ function build(configNodeEnv = 'test', domain?: string) {
   const socketTickets = {
     mint: jest.fn().mockReturnValue({ ticket: 'st_test', ttlMs: 30_000 }),
   };
+  // Defaults to "no early-access grants", so every existing `me` case sees an
+  // empty `earlyAccessFeatures`.
+  const featureAccess = {
+    earlyAccessFeaturesFor: jest.fn().mockResolvedValue([]),
+  };
   const controller = new AuthController(
     authService as unknown as AuthService,
     usersService as unknown as UsersService,
@@ -112,6 +118,7 @@ function build(configNodeEnv = 'test', domain?: string) {
     joinRequestsService as unknown as JoinRequestsService,
     pushService as unknown as PushService,
     socketTickets as unknown as SocketTicketService,
+    featureAccess as unknown as FeatureAccessService,
   );
   return {
     controller,
@@ -122,6 +129,7 @@ function build(configNodeEnv = 'test', domain?: string) {
     config,
     mediaCropService,
     socketTickets,
+    featureAccess,
   };
 }
 
@@ -716,6 +724,8 @@ describe('AuthController.me', () => {
       },
       // Mocked `staffRolesFor` — no staff-role grants for this fixture.
       staffRoles: [],
+      // Mocked `earlyAccessFeaturesFor`, no early-access grants either.
+      earlyAccessFeatures: [],
       // The re-acceptance signal (ID-14): what the member has on file paired
       // with what is currently in effect. Both `accepted*` are null here, which
       // the frontend reads as "behind", so the re-acceptance sheet opens.
@@ -791,6 +801,28 @@ describe('AuthController.me', () => {
     expect((out.profile as { avatarUrl: string | null }).avatarUrl).toBe(
       googleUrl,
     );
+  });
+
+  it('surfaces the early-access feature keys the member holds', async () => {
+    const { controller, usersService, featureAccess } = build();
+    usersService.findByIdWithProfile.mockResolvedValue({
+      id: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+      profile: null,
+    });
+    featureAccess.earlyAccessFeaturesFor.mockResolvedValue(['quizshow']);
+    const out = await controller.me({
+      userId: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+    });
+    // Resolved for the loaded user, and passed through as the service
+    // returns it (the registry filter lives in `earlyAccessFeaturesFor`).
+    expect(featureAccess.earlyAccessFeaturesFor).toHaveBeenCalledWith('u1');
+    expect(out.earlyAccessFeatures).toEqual(['quizshow']);
   });
 
   it('throws 401 when the backing user no longer exists', async () => {

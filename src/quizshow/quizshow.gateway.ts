@@ -2,10 +2,13 @@
  * Pulse Live (`quizshow`) socket namespace `/quizshow`. The handshake copies
  * the magazine desk gateway (origin allowlist, cookie or `auth.token`, pinned
  * JWT verify, a handshake bucket on the verified user, live status, lockdown
- * and a live refresh-token family) and checks the launch flag itself, since
- * the global `LaunchedFeaturesGuard` covers HTTP only. The socket is dropped
- * at the token's `exp` with `TOKEN_EXPIRED`; `session:reauth` with a socket
- * ticket extends it, as on `/chat`.
+ * and a live refresh-token family) and checks feature access itself, since
+ * the global feature guards cover HTTP only: while Pulse Live is unlaunched,
+ * only members holding an early-access grant are admitted, and
+ * `session:reauth` checks the grant again, so a revoke drops a live socket at
+ * its next reauth. The socket is dropped at the token's `exp` with
+ * `TOKEN_EXPIRED`; `session:reauth` with a socket ticket extends it, as on
+ * `/chat`.
  *
  * Every client frame is routed to the runtime, which owns the live state.
  * Domain refusals come back as failure acks; transport refusals as the chat
@@ -61,9 +64,10 @@ import {
   resolveAllowedOrigins,
   resolveFrontendOrigins,
 } from '../config/frontend-origins';
+import { FeatureAccessService } from '../early-access/feature-access.service';
 import { Event } from '../events/entities/event.entity';
 import { EventsService } from '../events/events.service';
-import { isFeatureLaunched } from '../launchedFeatures';
+import { isEarlyAccessFeature, isFeatureLaunched } from '../launchedFeatures';
 import { PLATFORM_LOCKDOWN_ENABLED } from '../platform-settings/platform-settings.events';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -413,6 +417,7 @@ export class QuizshowGateway
     @InjectRepository(QuizshowSessionRecord)
     private readonly sessions: Repository<QuizshowSessionRecord>,
     private readonly platformSettings: PlatformSettingsService,
+    private readonly featureAccess: FeatureAccessService,
   ) {}
 
   afterInit(namespace: Namespace): void {
@@ -508,6 +513,7 @@ export class QuizshowGateway
         throw new ChatWsException('SESSION_REVOKED', 'Unauthorized');
       }
       const user = await this.loadAdmittableUser(userId);
+      await this.assertFeatureOpenTo(user.id);
       await this.assertNotLockedOut(user.role);
       await this.assertSessionLive(record.sessionId);
       exp = record.exp;
@@ -1013,7 +1019,9 @@ export class QuizshowGateway
   }
 
   private async admit(client: QuizshowSocket): Promise<string | null> {
-    if (!isFeatureLaunched('quizshow')) {
+    // Closed to everyone, so refused before any token or database work. In
+    // early access the grant is checked once the user is known.
+    if (!isFeatureLaunched('quizshow') && !isEarlyAccessFeature('quizshow')) {
       this.refuseHandshake(
         client,
         buildChatWsErrorFrame('NOT_FOUND', FEATURE_HIDDEN_MESSAGE),
@@ -1030,6 +1038,7 @@ export class QuizshowGateway
         );
       }
       const user = await this.loadAdmittableUser(claims.sub);
+      await this.assertFeatureOpenTo(user.id);
       await this.assertNotLockedOut(user.role);
       await this.assertSessionLive(claims.sid);
       // The client may have gone while the checks above awaited.
@@ -1512,6 +1521,12 @@ export class QuizshowGateway
       throw new ChatWsException('SESSION_REVOKED', 'Unauthorized');
     }
     return user;
+  }
+
+  /** Launched, or in early access with a grant held by this member; the hidden-feature refusal otherwise. */
+  private async assertFeatureOpenTo(userId: string): Promise<void> {
+    if (await this.featureAccess.canUseFeature('quizshow', userId)) return;
+    throw new ChatWsException('NOT_FOUND', FEATURE_HIDDEN_MESSAGE);
   }
 
   /** The `PlatformLockdownGuard` predicate: admins pass, moderators when allowed. */

@@ -10,6 +10,7 @@ import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
+import { FeatureAccessModule } from '../early-access/feature-access.module';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
 import { VouchModule } from '../vouch/vouch.module';
@@ -55,6 +56,10 @@ import {
     // Batched crop lookup (`MediaCropService.getMany`) for `GET /auth/me`'s
     // `profile.avatarUrl` sibling `avatarCrop`.
     MediaCropsModule,
+    // FeatureAccessService for `GET /auth/me`'s `earlyAccessFeatures`.
+    // FeatureAccessModule is entity-only and imports nothing else, so this
+    // adds no dependency cycle.
+    FeatureAccessModule,
     PassportModule,
     // User: JwtStrategy re-reads status/role per request so bans take effect
     // immediately rather than lagging by the access-token TTL.

@@ -62,7 +62,11 @@ describe('EventsService', () => {
     update: jest.Mock;
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
-    manager: { transaction: jest.Mock; getRepository: jest.Mock };
+    manager: {
+      transaction: jest.Mock;
+      getRepository: jest.Mock;
+      query: jest.Mock;
+    };
   };
   // The `Mention` rows this gathering's description already produced, as
   // `withoutAlreadyNotifiedMentions` reads them back (entityKind/entityRef).
@@ -314,6 +318,11 @@ describe('EventsService', () => {
           };
           return { createQueryBuilder: () => notificationQueryBuilder };
         }),
+        // `buildDetail` reads the event's Pulse Live summary, and while
+        // quizshow is in early access `canViewerUseFeature` asks this manager
+        // for the viewer's grant. An empty result means no grant, so the
+        // summary is null. The Pulse Live rules block installs its own.
+        query: jest.fn().mockResolvedValue([]),
       },
     };
     alreadyNotifiedMentionRows = [];
@@ -3985,13 +3994,19 @@ describe('EventsService', () => {
       });
     });
 
-    it('serves a null Pulse Live block while the feature is hidden', async () => {
+    it('serves a null Pulse Live block to a viewer without an early-access grant', async () => {
       events.findOne.mockResolvedValue(editableEvent());
 
       const detail = await service.getBySlug('x', 'u1');
 
       expect(detail.quizshow).toBeNull();
-      expect(manager.query).not.toHaveBeenCalled();
+      // Only the grant read runs: the mock answers it with no grant, so the
+      // summary read is skipped.
+      expect(manager.query).toHaveBeenCalledTimes(1);
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('"feature_early_access_grants"'),
+        ['u1', 'quizshow'],
+      );
     });
   });
 });

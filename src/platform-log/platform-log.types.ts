@@ -106,6 +106,9 @@ export const MOD_STAFF_ACTIONS: readonly string[] = [
   'member_verified',
   // Creator drafts: an Admin opened one draft's detail.
   'creator_draft_viewed',
+  // Early access: a member granted or revoked one unlaunched feature.
+  'early_access_granted',
+  'early_access_revoked',
 ];
 
 /** `mod_audit_logs` actions the platform writes itself, with a null actor. */

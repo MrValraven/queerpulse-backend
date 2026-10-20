@@ -1,4 +1,5 @@
 import type { EntityManager } from 'typeorm';
+import { VIEWER_HAS_EARLY_ACCESS_SQL } from '../early-access/early-access-reads';
 import * as launchedFeatures from '../launchedFeatures';
 import {
   EVENT_QUIZSHOW_SUMMARY_SQL,
@@ -17,6 +18,18 @@ type SummaryRow = {
 
 function buildFakeManager(rows: unknown[]) {
   const query = jest.fn().mockResolvedValue(rows);
+  return { manager: { query } as unknown as EntityManager, query };
+}
+
+/** Answers the grant EXISTS read with `hasGrant` and every other read with `summaryRows`. */
+function buildEarlyAccessManager(hasGrant: boolean, summaryRows: unknown[]) {
+  const query = jest.fn((sql: string) =>
+    Promise.resolve(
+      sql === VIEWER_HAS_EARLY_ACCESS_SQL
+        ? [{ exists: hasGrant }]
+        : summaryRows,
+    ),
+  );
   return { manager: { query } as unknown as EntityManager, query };
 }
 
@@ -43,13 +56,52 @@ describe('quizshow event reads', () => {
   });
 
   describe('readEventQuizshowSummary', () => {
-    it('returns null and runs nothing while the feature is hidden', async () => {
+    it('returns null and runs nothing while the feature is hidden from everyone', async () => {
       jest.spyOn(launchedFeatures, 'isFeatureLaunched').mockReturnValue(false);
+      jest
+        .spyOn(launchedFeatures, 'isEarlyAccessFeature')
+        .mockReturnValue(false);
       const { manager, query } = buildFakeManager([liveRow]);
       await expect(
         readEventQuizshowSummary(manager, baseInput),
       ).resolves.toBeNull();
       expect(query).not.toHaveBeenCalled();
+    });
+
+    describe('while the feature is in early access', () => {
+      beforeEach(() => {
+        jest
+          .spyOn(launchedFeatures, 'isFeatureLaunched')
+          .mockReturnValue(false);
+        jest
+          .spyOn(launchedFeatures, 'isEarlyAccessFeature')
+          .mockReturnValue(true);
+      });
+
+      it('returns null to a viewer without a grant and skips the summary read', async () => {
+        const { manager, query } = buildEarlyAccessManager(false, [liveRow]);
+        await expect(
+          readEventQuizshowSummary(manager, baseInput),
+        ).resolves.toBeNull();
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(query.mock.calls[0]).toEqual([
+          VIEWER_HAS_EARLY_ACCESS_SQL,
+          ['viewer-1', 'quizshow'],
+        ]);
+      });
+
+      it('returns the summary to a grant holder', async () => {
+        const { manager, query } = buildEarlyAccessManager(true, [liveRow]);
+        await expect(
+          readEventQuizshowSummary(manager, baseInput),
+        ).resolves.toEqual({
+          hasQuiz: true,
+          liveSessionCode: 'ABC234',
+          hasResults: false,
+        });
+        expect(query).toHaveBeenCalledTimes(2);
+        expect(query.mock.calls[1]?.[0]).toBe(EVENT_QUIZSHOW_SUMMARY_SQL);
+      });
     });
 
     describe('while the feature is launched', () => {

@@ -143,6 +143,8 @@ import { SearchModule } from './search/search.module';
 import { GeocodeModule } from './geocode/geocode.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { QuizshowModule } from './quizshow/quizshow.module';
+import { EarlyAccessModule } from './early-access/early-access.module';
+import { FeatureAccessModule } from './early-access/feature-access.module';
 import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
 import { SubmissionsModule } from './submissions/submissions.module';
@@ -150,6 +152,7 @@ import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { GenesisModule } from './genesis/genesis.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { CommonModule } from './common/common.module';
+import { EarlyAccessGuard } from './common/early-access.guard';
 import { LaunchedFeaturesGuard } from './common/launched-features.guard';
 import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
 import { redactSensitiveQueryParameters } from './common/redact-url';
@@ -429,19 +432,28 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     PlatformStaffModule,
     PublicEligibilityModule,
     FeatureUsageModule,
+    // Per-member early access. `FeatureAccessModule` exports the service the
+    // global `EarlyAccessGuard` below injects (APP_GUARD providers resolve from
+    // this module's scope); `EarlyAccessModule` owns the admin grant, revoke
+    // and roster routes.
+    FeatureAccessModule,
+    EarlyAccessModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must
     // count requests that CSRF/JWT would otherwise reject before they do), then
     // the launched-feature gate (an unlaunched feature 404s before auth runs,
-    // so callers get "not available yet" instead of a misleading 401/403), then
-    // CSRF (double-submit, independent of auth), then JWT authentication, and
-    // finally the platform kill switch — which must run last because it is the
-    // only guard that needs `req.user.role`, populated by JwtAuthGuard.
+    // so callers get "not available yet" instead of a misleading 401/403; an
+    // early-access feature passes when the request carries an access-token
+    // cookie), then CSRF (double-submit, independent of auth), then JWT
+    // authentication, then the early-access gate (needs `req.user` to check the
+    // member's grant), and finally the platform kill switch, which must run
+    // last because it needs `req.user.role`, populated by JwtAuthGuard.
     { provide: APP_GUARD, useClass: HttpThrottlerGuard },
     { provide: APP_GUARD, useClass: LaunchedFeaturesGuard },
     { provide: APP_GUARD, useClass: CsrfGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: EarlyAccessGuard },
     { provide: APP_GUARD, useClass: PlatformLockdownGuard },
     // Adds error logging + Sentry capture, then defers to Nest's default filter.
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

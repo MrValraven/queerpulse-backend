@@ -1,6 +1,10 @@
 import {
   FeatureConfig,
+  earlyAccessFeatureKeys,
+  isEarlyAccessFeature,
+  isFeatureKey,
   isFeatureLaunched,
+  isInEarlyAccess,
   launchedFeatures,
   missingLaunchedFeatureEnv,
 } from './launchedFeatures';
@@ -46,6 +50,49 @@ describe('launchedFeatures registry', () => {
   );
 });
 
+describe('early access helpers', () => {
+  it('flags Pulse Live for early access while it is unlaunched', () => {
+    expect(isEarlyAccessFeature('quizshow')).toBe(true);
+    expect(isInEarlyAccess('quizshow')).toBe(true);
+  });
+
+  it('leaves a launched feature without the flag out of early access', () => {
+    expect(isEarlyAccessFeature('studio')).toBe(false);
+    expect(isInEarlyAccess('studio')).toBe(false);
+  });
+
+  it('leaves an unlaunched feature without the flag out of early access', () => {
+    expect(isEarlyAccessFeature('cinema')).toBe(false);
+    expect(isInEarlyAccess('cinema')).toBe(false);
+  });
+
+  // The frontend mirrors this list in `shared/contracts/earlyAccess.ts`
+  // (`EARLY_ACCESS_FEATURE_KEYS`); update both in the same change.
+  it('lists exactly the features in early access, in registry order', () => {
+    expect(earlyAccessFeatureKeys()).toEqual(['quizshow']);
+  });
+
+  it('lists only keys whose entry is flagged and unlaunched', () => {
+    for (const key of earlyAccessFeatureKeys()) {
+      expect(launchedFeatures[key].launched).toBe(false);
+      expect(isEarlyAccessFeature(key)).toBe(true);
+    }
+  });
+
+  it('recognises every registry key as a feature key', () => {
+    for (const key of Object.keys(launchedFeatures)) {
+      expect(isFeatureKey(key)).toBe(true);
+    }
+  });
+
+  it('rejects unknown strings and inherited object properties', () => {
+    expect(isFeatureKey('retired-feature')).toBe(false);
+    expect(isFeatureKey('')).toBe(false);
+    expect(isFeatureKey('toString')).toBe(false);
+    expect(isFeatureKey('__proto__')).toBe(false);
+  });
+});
+
 describe('missingLaunchedFeatureEnv', () => {
   const features: Record<string, FeatureConfig> = {
     alpha: { launched: true, requiredEnv: ['ALPHA_KEY'] },
@@ -77,6 +124,38 @@ describe('missingLaunchedFeatureEnv', () => {
 
   it('ignores features that declare no requiredEnv', () => {
     expect(missingLaunchedFeatureEnv({ ALPHA_KEY: 'x' }, features)).toEqual([]);
+  });
+
+  it('flags an unlaunched feature in early access whose required var is missing', () => {
+    const earlyAccessFeatures: Record<string, FeatureConfig> = {
+      delta: { launched: false, earlyAccess: true, requiredEnv: ['DELTA_KEY'] },
+    };
+    const problems = missingLaunchedFeatureEnv({}, earlyAccessFeatures);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('DELTA_KEY');
+    expect(problems[0]).toContain(
+      'because the "delta" feature is launched or in early access',
+    );
+  });
+
+  it('passes an early-access feature that has its var set', () => {
+    const earlyAccessFeatures: Record<string, FeatureConfig> = {
+      delta: { launched: false, earlyAccess: true, requiredEnv: ['DELTA_KEY'] },
+    };
+    expect(
+      missingLaunchedFeatureEnv({ DELTA_KEY: 'x' }, earlyAccessFeatures),
+    ).toEqual([]);
+  });
+
+  it('ignores an unlaunched feature whose earlyAccess flag is false', () => {
+    const closedFeatures: Record<string, FeatureConfig> = {
+      epsilon: {
+        launched: false,
+        earlyAccess: false,
+        requiredEnv: ['EPSILON_KEY'],
+      },
+    };
+    expect(missingLaunchedFeatureEnv({}, closedFeatures)).toEqual([]);
   });
 
   it('is a no-op against the real registry when no launched feature needs env', () => {

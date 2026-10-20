@@ -7,6 +7,7 @@ import type { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { socketTicketService } from '../auth/socket-ticket.service';
 import { ChatWsException } from '../chat/ws-error';
 import { BLOCKED_TERMS } from '../common/blocked-terms';
+import type { FeatureAccessService } from '../early-access/feature-access.service';
 import type { Event } from '../events/entities/event.entity';
 import { EventStatus } from '../events/entities/event.entity';
 import type { EventBan } from '../events/entities/event-ban.entity';
@@ -95,6 +96,9 @@ interface Harness {
   profiles: { findOne: jest.Mock };
   refreshTokens: { exists: jest.Mock };
   jwt: { verifyAsync: jest.Mock };
+  /** Members without a Pulse Live grant; everyone else holds one. */
+  ungrantedUserIds: Set<string>;
+  featureAccess: { canUseFeature: jest.Mock };
 }
 
 function deterministicRandom(): QuizshowRandom {
@@ -278,6 +282,12 @@ function createHarness(): Harness {
       }),
     ),
   };
+  const ungrantedUserIds = new Set<string>();
+  const featureAccess = {
+    canUseFeature: jest.fn((_featureKey: string, userId: string | null) =>
+      Promise.resolve(userId !== null && !ungrantedUserIds.has(userId)),
+    ),
+  };
   const access = new QuizshowAccessService(
     events as unknown as Repository<Event>,
     {
@@ -309,6 +319,7 @@ function createHarness(): Harness {
     events as unknown as Repository<Event>,
     sessionRows as unknown as Repository<QuizshowSessionRecord>,
     platformSettings as unknown as PlatformSettingsService,
+    featureAccess as unknown as FeatureAccessService,
   );
   gateway.namespace = namespace;
   gateway.afterInit(namespace);
@@ -325,6 +336,8 @@ function createHarness(): Harness {
     profiles,
     refreshTokens,
     jwt,
+    ungrantedUserIds,
+    featureAccess,
   };
 }
 
@@ -473,8 +486,9 @@ describe('QuizshowGateway', () => {
     jest.restoreAllMocks();
   });
 
-  it('refuses every handshake with NOT_FOUND while Pulse Live is hidden', async () => {
+  it('refuses every handshake with NOT_FOUND while Pulse Live is hidden from everyone', async () => {
     jest.spyOn(launchedFeatures, 'isFeatureLaunched').mockReturnValue(false);
+    jest.spyOn(launchedFeatures, 'isEarlyAccessFeature').mockReturnValue(false);
     const memberClient = await connect(harness, 'socket-1', PLAYER_USER_ID);
     const tokenlessClient = makeClient('socket-2', HOST_USER_ID);
     tokenlessClient.handshake.auth = {};
@@ -490,9 +504,82 @@ describe('QuizshowGateway', () => {
       expect(client.data.userId).toBeUndefined();
     }
     expect(harness.jwt.verifyAsync).not.toHaveBeenCalled();
+    expect(harness.featureAccess.canUseFeature).not.toHaveBeenCalled();
     await expect(attach(harness, memberClient, 'player')).rejects.toThrow(
       ChatWsException,
     );
+  });
+
+  describe('while Pulse Live is in early access', () => {
+    beforeEach(() => {
+      jest.spyOn(launchedFeatures, 'isFeatureLaunched').mockReturnValue(false);
+      jest
+        .spyOn(launchedFeatures, 'isEarlyAccessFeature')
+        .mockReturnValue(true);
+    });
+
+    it('refuses a member without a grant with NOT_FOUND once the token is verified', async () => {
+      harness.ungrantedUserIds.add(PLAYER_USER_ID);
+      const client = await connect(harness, 'socket-1', PLAYER_USER_ID);
+
+      expect(harness.jwt.verifyAsync).toHaveBeenCalled();
+      expect(harness.featureAccess.canUseFeature).toHaveBeenCalledWith(
+        'quizshow',
+        PLAYER_USER_ID,
+      );
+      expect(client.emit).toHaveBeenCalledWith('exception', {
+        status: 'error',
+        code: 'NOT_FOUND',
+        message: 'This feature is not available yet.',
+      });
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.data.userId).toBeUndefined();
+      await expect(attach(harness, client, 'player')).rejects.toThrow(
+        ChatWsException,
+      );
+    });
+
+    it('admits grant holders as host, big screen and player', async () => {
+      const hostRemote = await attachedHost(harness, 'socket-host');
+      expect(hostRemote.disconnect).not.toHaveBeenCalled();
+
+      const screen = await connect(harness, 'socket-screen', COHOST_USER_ID);
+      expect(await attach(harness, screen, 'screen')).toMatchObject({
+        ok: true,
+        role: 'screen',
+      });
+
+      const { client: player } = await joinedPlayer(
+        harness,
+        'socket-player',
+        PLAYER_USER_ID,
+      );
+      expect(player.data.userId).toBe(PLAYER_USER_ID);
+      expect(player.disconnect).not.toHaveBeenCalled();
+    });
+
+    it('drops a live socket at its next reauth once the grant is revoked', async () => {
+      const client = await connect(harness, 'socket-1', PLAYER_USER_ID);
+      expect(client.data.userId).toBe(PLAYER_USER_ID);
+
+      harness.ungrantedUserIds.add(PLAYER_USER_ID);
+      const { ticket } = socketTicketService.mint(
+        PLAYER_USER_ID,
+        `family-${PLAYER_USER_ID}`,
+        UserStatus.Active,
+        15 * 60_000,
+      );
+      const refused = await harness.gateway.handleReauth(asClient(client), {
+        ticket,
+      });
+
+      expect(refused).toEqual({ ok: false, code: 'NOT_FOUND' });
+      expect(client.emit).toHaveBeenCalledWith(
+        'exception',
+        expect.objectContaining({ code: 'TOKEN_EXPIRED' }),
+      );
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+    });
   });
 
   it("admits a signed-in member with a live session and drops the socket at the token's expiry with TOKEN_EXPIRED", async () => {
@@ -511,6 +598,10 @@ describe('QuizshowGateway', () => {
 
     expect(client.disconnect).not.toHaveBeenCalled();
     expect(client.data.userId).toBe(PLAYER_USER_ID);
+    expect(harness.featureAccess.canUseFeature).toHaveBeenCalledWith(
+      'quizshow',
+      PLAYER_USER_ID,
+    );
     expect(harness.refreshTokens.exists).toHaveBeenCalledWith({
       where: expect.objectContaining({
         familyId: `family-${PLAYER_USER_ID}`,

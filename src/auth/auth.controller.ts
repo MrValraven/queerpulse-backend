@@ -69,6 +69,7 @@ import {
 } from '../consent/policy-versions';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { FeatureAccessService } from '../early-access/feature-access.service';
 
 /** Same ceiling `PushSubscribeDto.endpoint` stores, so no longer value can match a row. */
 const PUSH_ENDPOINT_MAX_LENGTH = 1024;
@@ -133,6 +134,9 @@ export class AuthController {
     // `SocketTicketService`'s own doc for why DI resolves it via a
     // `useValue` provider rather than a normal class construction.
     private readonly socketTickets: SocketTicketService,
+    // Early access: resolves the early-access grants `me` surfaces as
+    // `earlyAccessFeatures`.
+    private readonly featureAccess: FeatureAccessService,
   ) {}
 
   /**
@@ -503,19 +507,25 @@ export class AuthController {
     // A suspended/banned member is locked out of every gated route, so the
     // account-suspended/banned page has no authed endpoint to call for the
     // reason — it rides on `me` (JWT-only) instead. Null for everyone else.
-    const [suspensionInfo, staffRoles, avatarCrops] = await Promise.all([
-      this.authService.suspensionInfoFor(user),
-      // Additive functional grants (STAFF_ROLES) on top of `role` — the
-      // frontend capability layer (useMyStaffRoles) reads this. Empty array
-      // for a member holding none; admins are a superset resolved client-side.
-      this.authService.staffRolesFor(user.id),
-      // Single-key batched lookup (mirrors every other surface's
-      // `MediaCropService.getMany` usage) — a lone GET so `me` still fires one
-      // extra query at most, never per-field.
-      this.mediaCropService.getMany(
-        user.profile?.avatarUrl ? [user.profile.avatarUrl] : [],
-      ),
-    ]);
+    const [suspensionInfo, staffRoles, avatarCrops, earlyAccessFeatures] =
+      await Promise.all([
+        this.authService.suspensionInfoFor(user),
+        // Additive functional grants (STAFF_ROLES) on top of `role`; the
+        // frontend capability layer (useMyStaffRoles) reads this. Empty array
+        // for a member holding none; admins are a superset resolved client-side.
+        this.authService.staffRolesFor(user.id),
+        // Single-key batched lookup (mirrors every other surface's
+        // `MediaCropService.getMany` usage), a lone GET so `me` still fires one
+        // extra query at most, never per-field.
+        this.mediaCropService.getMany(
+          user.profile?.avatarUrl ? [user.profile.avatarUrl] : [],
+        ),
+        // Feature keys the member holds an early-access grant for, kept to
+        // registry entries flagged `earlyAccess: true` (launched or not). The
+        // frontend launch checks read this to open an unlaunched feature for a
+        // tester. Empty array for a member holding none.
+        this.featureAccess.earlyAccessFeaturesFor(user.id),
+      ]);
     return {
       id: user.id,
       // From the JWT (re-read from the DB every request by JwtStrategy), not the
@@ -557,6 +567,8 @@ export class AuthController {
           }
         : null,
       staffRoles,
+      // Early-access feature keys resolved above (`earlyAccessFeaturesFor`).
+      earlyAccessFeatures,
       /**
        * The re-acceptance signal (ID-14). Hand-mapped like every other field
        * here, never a spread.

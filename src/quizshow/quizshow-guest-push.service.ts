@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { FeatureAccessService } from '../early-access/feature-access.service';
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
@@ -21,8 +22,10 @@ export interface QuizshowLobbyOpenedPushInput {
  * `isCooldownOver` and stamps `guest_push_sent_at` atomically before calling
  * `sendLobbyOpened`. Recipients are the
  * going RSVPs minus the host, co-hosts, barred members and anyone blocked
- * either way with the host. The member's push switch and quiet hours narrow
- * the list, then the lock-screen privacy split sends it. Nothing here
+ * either way with the host. While Pulse Live is in early access only guests
+ * holding a grant stay on the list, since the others could not open the
+ * game. The member's push switch and quiet hours narrow it further, then the
+ * lock-screen privacy split sends it. Nothing here
  * throws: a fault is logged with the session id only.
  */
 @Injectable()
@@ -34,6 +37,7 @@ export class QuizshowGuestPushService {
     private readonly notificationPreferences: NotificationPreferencesService,
     private readonly notificationDelivery: NotificationDeliveryService,
     private readonly previewPrivacy: PushPreviewPrivacyService,
+    private readonly featureAccess: FeatureAccessService,
   ) {}
 
   /** True when no session of the event pushed guests within the cooldown. */
@@ -54,9 +58,14 @@ export class QuizshowGuestPushService {
 
   async sendLobbyOpened(input: QuizshowLobbyOpenedPushInput): Promise<void> {
     try {
-      const recipientUserIds = await this.guestRecipientUserIds(
+      const guestUserIds = await this.guestRecipientUserIds(
         input.eventId,
         input.hostUserId,
+      );
+      if (guestUserIds.length === 0) return;
+      const recipientUserIds = await this.featureAccess.usersWithAccess(
+        'quizshow',
+        guestUserIds,
       );
       if (recipientUserIds.length === 0) return;
       const pushEnabledUserIds =

@@ -16,6 +16,12 @@ function build() {
   const notificationPreferences = { recipientsPushEnabled: jest.fn() };
   const notificationDelivery = { recipientsOutsideQuietHours: jest.fn() };
   const previewPrivacy = { sendSplitByPreviewPreference: jest.fn() };
+  // Every guest holds a grant unless a case narrows it.
+  const featureAccess = {
+    usersWithAccess: jest.fn((_featureKey: string, userIds: string[]) =>
+      Promise.resolve(userIds),
+    ),
+  };
   notificationPreferences.recipientsPushEnabled.mockImplementation(
     (userIds: string[]) => Promise.resolve(userIds),
   );
@@ -28,6 +34,7 @@ function build() {
     notificationPreferences as never,
     notificationDelivery as never,
     previewPrivacy as never,
+    featureAccess as never,
   );
   return {
     service,
@@ -35,6 +42,7 @@ function build() {
     notificationPreferences,
     notificationDelivery,
     previewPrivacy,
+    featureAccess,
   };
 }
 
@@ -87,6 +95,57 @@ describe('QuizshowGuestPushService', () => {
       .calls[0][0] as string[];
     expect(sentUserIds).toEqual(['guest-1']);
     expect(sentUserIds).not.toContain('host-1');
+  });
+
+  it('pushes only the guests holding Pulse Live access, before the preference narrowing', async () => {
+    const {
+      service,
+      dataSource,
+      notificationPreferences,
+      previewPrivacy,
+      featureAccess,
+    } = build();
+    dataSource.query.mockResolvedValue([
+      { user_id: 'guest-1' },
+      { user_id: 'guest-2' },
+      { user_id: 'guest-3' },
+    ]);
+    featureAccess.usersWithAccess.mockResolvedValue(['guest-1', 'guest-3']);
+
+    await service.sendLobbyOpened(INPUT);
+
+    expect(featureAccess.usersWithAccess).toHaveBeenCalledWith('quizshow', [
+      'guest-1',
+      'guest-2',
+      'guest-3',
+    ]);
+    expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledWith(
+      ['guest-1', 'guest-3'],
+      NotificationPreferenceCategory.Quizshow,
+    );
+    expect(previewPrivacy.sendSplitByPreviewPreference).toHaveBeenCalledWith(
+      ['guest-1', 'guest-3'],
+      expect.objectContaining({ tag: 'quizshow:session-1' }),
+    );
+  });
+
+  it('sends nothing when no going guest holds Pulse Live access', async () => {
+    const {
+      service,
+      dataSource,
+      notificationPreferences,
+      previewPrivacy,
+      featureAccess,
+    } = build();
+    dataSource.query.mockResolvedValue([{ user_id: 'guest-1' }]);
+    featureAccess.usersWithAccess.mockResolvedValue([]);
+
+    await service.sendLobbyOpened(INPUT);
+
+    expect(
+      notificationPreferences.recipientsPushEnabled,
+    ).not.toHaveBeenCalled();
+    expect(previewPrivacy.sendSplitByPreviewPreference).not.toHaveBeenCalled();
   });
 
   it('honours the push switch and quiet hours', async () => {

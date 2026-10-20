@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { FeatureAccessModule } from '../early-access/feature-access.module';
 import { Event } from '../events/entities/event.entity';
 import { EventBan } from '../events/entities/event-ban.entity';
 import { EventsModule } from '../events/events.module';
@@ -38,8 +39,8 @@ import { QuizshowGateway } from './quizshow.gateway';
  * Module edges: `QuizshowModule` imports `EventsModule`; `EventsModule` and
  * `ReportsModule` reach quizshow through dependency-free helpers and one
  * event, so no cycle. The other imports (`SocialModule`, `PushModule`,
- * `NotificationsModule`, `PlatformSettingsModule`) reach nothing that imports
- * this module. Nothing is exported.
+ * `NotificationsModule`, `PlatformSettingsModule`, `FeatureAccessModule`)
+ * reach nothing that imports this module. Nothing is exported.
  */
 @Module({
   imports: [
@@ -77,6 +78,10 @@ import { QuizshowGateway } from './quizshow.gateway';
     // `PlatformSettingsService`: the socket handshake applies the
     // platform-lockdown rule, as `ChatGateway` does.
     PlatformSettingsModule,
+    // `FeatureAccessService`: while Pulse Live is in early access, the socket
+    // handshake, `session:reauth` and the guest push admit grant holders only.
+    // Entity-only, so no cycle.
+    FeatureAccessModule,
   ],
   controllers: [QuizshowEventController, QuizshowController],
   providers: [

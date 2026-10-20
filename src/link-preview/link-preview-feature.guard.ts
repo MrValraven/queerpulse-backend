@@ -1,4 +1,5 @@
 import { CanActivate, Injectable, NotFoundException } from '@nestjs/common';
+import { FEATURE_NOT_AVAILABLE_MESSAGE } from '../common/feature.decorator';
 import { isFeatureLaunched } from '../launchedFeatures';
 import { LINK_PREVIEW_SURFACES } from './link-preview.constants';
 
@@ -32,6 +33,6 @@ export class LinkPreviewFeatureGuard implements CanActivate {
     if (isAnySurfaceLaunched) {
       return true;
     }
-    throw new NotFoundException('This feature is not available yet.');
+    throw new NotFoundException(FEATURE_NOT_AVAILABLE_MESSAGE);
   }
 }
