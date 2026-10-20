@@ -2,18 +2,14 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Pulse Live (code id `quizshow`): eight enum types and ten tables. Covered
+ * Pulse Live (code id `quizshow`): eight enum types and nine tables. Covered
  * by `src/database/quizshow-migrations.postgres.spec.ts`; the columns match
  * the entities in `src/quizshow/entities`.
  *
  * Retention rules the foreign keys carry:
- * - a quiz belongs to exactly one of an event or its owner
- *   (`CHK_quizshow_quizzes_scope`); a quiz owned by a member is a game;
  * - the quiz, its rounds and questions live until the event goes (event
- *   delete cascades), or, for a game, until its owner deletes it or the
- *   owner's account goes (owner cascade);
- * - sessions follow the quiz and, when they have one, the event; a game
- *   session has no event;
+ *   delete cascades);
+ * - sessions follow the quiz and the event;
  * - players and teams live while the results are kept (`results_kept`), and
  *   cascade with the session and, for players, with the member's account;
  * - answers and votes are purged 30 days after the session and cascade with
@@ -22,10 +18,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   `hidden_by_user_id`, `created_by_user_id` and `updated_by_user_id` to null.
  *
  * At most one open session (lobby, running, paused) exists per join code and
- * per event and per quiz, enforced by the three partial unique indexes. The
- * lobby-open rate limit counts `quizshow_lobby_opens`, a per-member ledger
- * with no key to quizzes or sessions, so the count survives a deleted game;
- * its rows cascade with the member's account. Team names are unique
+ * per event, enforced by the two partial unique indexes. Team names are unique
  * per session ignoring case. Every timestamp is `timestamptz(3)`. The tables
  * are new and empty, so every index builds inside the migration transaction.
  */
@@ -61,13 +54,11 @@ export class AddQuizshow1836000100000 implements MigrationInterface {
     await queryRunner.query(`
       CREATE TABLE "quizshow_quizzes" (
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
-        "event_id" uuid,
-        "owner_user_id" uuid,
+        "event_id" uuid NOT NULL,
         "title" character varying(120) NOT NULL,
         "languages" "quizshow_language_mode" NOT NULL,
         "screen_language" "quizshow_language" NOT NULL,
         "starter_pack_key" character varying(40),
-        "is_adults_only" boolean NOT NULL DEFAULT false,
         "created_by_user_id" uuid,
         "updated_by_user_id" uuid,
         "created_at" TIMESTAMP(3) WITH TIME ZONE NOT NULL DEFAULT now(),
@@ -75,15 +66,10 @@ export class AddQuizshow1836000100000 implements MigrationInterface {
         CONSTRAINT "PK_quizshow_quizzes" PRIMARY KEY ("id"),
         CONSTRAINT "UQ_quizshow_quizzes_event_id" UNIQUE ("event_id"),
         CONSTRAINT "FK_quizshow_quizzes_event" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION,
-        CONSTRAINT "FK_quizshow_quizzes_owner" FOREIGN KEY ("owner_user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION,
-        CONSTRAINT "CHK_quizshow_quizzes_scope" CHECK (num_nonnulls("event_id", "owner_user_id") = 1),
         CONSTRAINT "FK_quizshow_quizzes_created_by" FOREIGN KEY ("created_by_user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE NO ACTION,
         CONSTRAINT "FK_quizshow_quizzes_updated_by" FOREIGN KEY ("updated_by_user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE NO ACTION
       )
     `);
-    await queryRunner.query(
-      `CREATE INDEX "IDX_quizshow_quizzes_owner_user_id" ON "quizshow_quizzes" ("owner_user_id")`,
-    );
 
     await queryRunner.query(`
       CREATE TABLE "quizshow_rounds" (
@@ -125,7 +111,7 @@ export class AddQuizshow1836000100000 implements MigrationInterface {
       CREATE TABLE "quizshow_sessions" (
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
         "quiz_id" uuid NOT NULL,
-        "event_id" uuid,
+        "event_id" uuid NOT NULL,
         "status" "quizshow_session_status" NOT NULL,
         "join_code" character(6) NOT NULL,
         "play_mode" "quizshow_play_mode" NOT NULL,
@@ -159,19 +145,6 @@ export class AddQuizshow1836000100000 implements MigrationInterface {
     );
     await queryRunner.query(
       `CREATE INDEX "IDX_quizshow_sessions_status_ended_at" ON "quizshow_sessions" ("status", "ended_at")`,
-    );
-    await queryRunner.query(
-      `CREATE UNIQUE INDEX "UQ_quizshow_sessions_open_quiz" ON "quizshow_sessions" ("quiz_id") WHERE "status" IN ('lobby', 'running', 'paused')`,
-    );
-    // Sessions opened by one member over time: serves the opener's account
-    // deletion (`ON DELETE SET NULL`); the rate limit reads `quizshow_lobby_opens`.
-    await queryRunner.query(
-      `CREATE INDEX "IDX_quizshow_sessions_started_by_started_at" ON "quizshow_sessions" ("started_by_user_id", "started_at")`,
-    );
-    // Every session of a quiz: a game reads its kept results by quiz id and
-    // the game delete cascades through it.
-    await queryRunner.query(
-      `CREATE INDEX "IDX_quizshow_sessions_quiz_id" ON "quizshow_sessions" ("quiz_id")`,
     );
     // Every session of an event, open or ended: the kept-results reads and
     // the event delete cascade.
@@ -285,31 +258,13 @@ export class AddQuizshow1836000100000 implements MigrationInterface {
         CONSTRAINT "FK_quizshow_results_session" FOREIGN KEY ("session_id") REFERENCES "quizshow_sessions"("id") ON DELETE CASCADE ON UPDATE NO ACTION
       )
     `);
-
-    await queryRunner.query(`
-      CREATE TABLE "quizshow_lobby_opens" (
-        "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
-        "user_id" uuid NOT NULL,
-        "opened_at" TIMESTAMP(3) WITH TIME ZONE NOT NULL DEFAULT now(),
-        CONSTRAINT "PK_quizshow_lobby_opens" PRIMARY KEY ("id"),
-        CONSTRAINT "FK_quizshow_lobby_opens_user" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION
-      )
-    `);
-    await queryRunner.query(
-      `CREATE INDEX "IDX_quizshow_lobby_opens_user_opened" ON "quizshow_lobby_opens" ("user_id", "opened_at")`,
-    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `DROP INDEX "IDX_quizshow_lobby_opens_user_opened"`,
-    );
-    await queryRunner.query(`DROP TABLE "quizshow_lobby_opens"`);
     for (const indexName of [
       'IDX_quizshow_votes_session_id',
       'IDX_quizshow_votes_answer_id',
       'IDX_quizshow_sessions_event_id',
-      'IDX_quizshow_sessions_quiz_id',
     ]) {
       await queryRunner.query(`DROP INDEX "${indexName}"`);
     }

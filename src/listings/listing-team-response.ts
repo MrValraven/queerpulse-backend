@@ -2,9 +2,10 @@ import type { FindOptionsSelect } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { cropFor } from '../media-crops/crop-response';
 import type { CropRect } from '../media-crops/crop-rect';
-import type {
-  Subprofile,
-  SubprofileKind,
+import {
+  SubprofileLinkVisibility,
+  type Subprofile,
+  type SubprofileKind,
 } from '../subprofiles/entities/subprofile.entity';
 import {
   ListingTeamInitiator,
@@ -33,6 +34,10 @@ export interface ListingTeamPersona {
   avatarUrl: string | null;
   /** Key omitted when the owner never reframed the avatar. */
   avatarCrop?: CropRect;
+  /** The owner member's display name for a LINKED persona, else null. Lets the
+   *  FE title a persona still named after its craft as "Owner Name | Poet"
+   *  (`personaTitleName`). Never set for an unlinked persona. */
+  ownerName: string | null;
 }
 
 /** A listing as this feature shows it. Image fields reuse the directory card's. */
@@ -115,13 +120,31 @@ export interface ListingWorksAt {
 /** The persona columns a caller must select to build a `ListingTeamPersona`. */
 export type ListingTeamPersonaColumns = Pick<
   Subprofile,
-  'id' | 'handle' | 'displayName' | 'kind' | 'avatarUrl'
+  'id' | 'handle' | 'displayName' | 'kind' | 'avatarUrl' | 'linkVisibility'
 >;
 
-/** Null when the persona has no handle: such a persona is ineligible. */
+/**
+ * The owner's display name from their profile row, composed exactly like
+ * `SubprofileOwnerRef.name` and the persona directory's `ownerNameByUserId`.
+ * Both parts blank (or no profile row) give null, so the persona keeps its
+ * bare name and the FE never builds a title like " | Poet".
+ */
+export function ownerNameOf(
+  firstName: string | null,
+  lastName: string | null,
+): string | null {
+  return `${firstName ?? ''} ${lastName ?? ''}`.trim() || null;
+}
+
+/**
+ * Null when the persona has no handle: such a persona is ineligible.
+ * `ownerName` reaches the wire only for a linked persona, mirroring
+ * `toCardDTO`: an unlinked persona gets null even when a caller passed a name.
+ */
 export function toListingTeamPersona(
   persona: ListingTeamPersonaColumns,
   crops: Map<string, CropRect>,
+  ownerName: string | null,
 ): ListingTeamPersona | null {
   if (!persona.handle) return null;
   const shaped: ListingTeamPersona = {
@@ -130,6 +153,10 @@ export function toListingTeamPersona(
     displayName: persona.displayName,
     kind: persona.kind,
     avatarUrl: toImageUrl(persona.avatarUrl),
+    ownerName:
+      persona.linkVisibility === SubprofileLinkVisibility.Linked
+        ? ownerName
+        : null,
   };
   const avatarCrop = cropFor(persona.avatarUrl, crops);
   if (avatarCrop !== undefined) shaped.avatarCrop = avatarCrop;

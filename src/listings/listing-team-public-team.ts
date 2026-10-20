@@ -1,8 +1,13 @@
 import { EntityManager, In } from 'typeorm';
 import { MediaCropService } from '../media-crops/media-crops.service';
-import { Subprofile } from '../subprofiles/entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+} from '../subprofiles/entities/subprofile.entity';
+import { Profile } from '../users/entities/profile.entity';
 import { ListingTeamMemberStatus } from './entities/listing-team-member.entity';
 import {
+  ownerNameOf,
   personaAvatarKeys,
   toListingTeamPersona,
   type ListingTeamMemberPublic,
@@ -37,9 +42,10 @@ interface PublicTeamRow {
 /**
  * The accepted team of one listing, in the order the business set, at most
  * `LISTING_TEAM_LIMITS.acceptedPerListing` members. One query reads the member
- * rows that pass every visibility rule, one reads the persona columns and one
- * `MediaCropService.getMany` loads the avatar crops. An empty team stops after
- * the first query.
+ * rows that pass every visibility rule, one reads the persona columns, one
+ * reads the owner names of the linked personas (skipped when none is linked)
+ * and one `MediaCropService.getMany` loads the avatar crops. An empty team
+ * stops after the first query.
  */
 export async function loadPublicTeam(
   manager: EntityManager,
@@ -82,9 +88,35 @@ export async function loadPublicTeam(
       displayName: true,
       kind: true,
       avatarUrl: true,
+      linkVisibility: true,
+      userId: true,
     },
   });
-  const crops = await mediaCropService.getMany(personaAvatarKeys(personas));
+  const linkedOwnerIds = [
+    ...new Set(
+      personas
+        .filter(
+          (persona) =>
+            persona.linkVisibility === SubprofileLinkVisibility.Linked,
+        )
+        .map((persona) => persona.userId),
+    ),
+  ];
+  const [crops, ownerProfiles] = await Promise.all([
+    mediaCropService.getMany(personaAvatarKeys(personas)),
+    linkedOwnerIds.length > 0
+      ? manager.find(Profile, {
+          where: { userId: In(linkedOwnerIds) },
+          select: { userId: true, firstName: true, lastName: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const ownerNameByUserId = new Map(
+    ownerProfiles.map((profile) => [
+      profile.userId,
+      ownerNameOf(profile.firstName, profile.lastName),
+    ]),
+  );
   const personaById = new Map(personas.map((persona) => [persona.id, persona]));
   const team: ListingTeamMemberPublic[] = [];
   for (const row of rows) {
@@ -92,7 +124,11 @@ export async function loadPublicTeam(
     if (persona === undefined) {
       continue;
     }
-    const shapedPersona = toListingTeamPersona(persona, crops);
+    const shapedPersona = toListingTeamPersona(
+      persona,
+      crops,
+      ownerNameByUserId.get(persona.userId) ?? null,
+    );
     if (shapedPersona === null) {
       continue;
     }

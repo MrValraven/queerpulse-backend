@@ -3,9 +3,13 @@
 import { DataSource, QueryRunner } from 'typeorm';
 import { AddQuizshowReportSubject1836000000000 } from '../migrations/1836000000000-AddQuizshowReportSubject';
 import { AddQuizshow1836000100000 } from '../migrations/1836000100000-AddQuizshow';
+import { AddQuizshowGameReportSubject1837000000000 } from '../migrations/1837000000000-AddQuizshowGameReportSubject';
+import { AddQuizshowGames1837000100000 } from '../migrations/1837000100000-AddQuizshowGames';
 
 /**
- * Pulse Live migrations on real Postgres. Skipped unless
+ * Pulse Live migrations on real Postgres, in ledger order: the two
+ * `1836000*` migrations as they ran in production, then the two `1837000*`
+ * forward migrations that add games without an event. Skipped unless
  * `QUIZSHOW_MIGRATIONS_DATABASE_URL` names a database whose name ends in
  * `_test` (it drops and rebuilds the schema). Run it with, for example:
  *
@@ -149,28 +153,44 @@ describeWithDatabase('Pulse Live migrations on real Postgres', () => {
     await dataSource?.destroy();
   });
 
-  it('runs the enum migration outside the migration transaction and appends the label', async () => {
-    const enumMigration = new AddQuizshowReportSubject1836000000000();
-    expect(enumMigration.transaction).toBe(false);
-    await enumMigration.up(queryRunner);
-    expect(await labelsOf('reports_subject_type_enum')).toEqual([
-      'member',
-      'quizshow_answer',
-      'quizshow_game',
-    ]);
-    await expect(enumMigration.down()).rejects.toThrow(/Irreversible/);
-  });
-
-  it('creates the ten tables', async () => {
-    await new AddQuizshow1836000100000().up(queryRunner);
+  const quizshowTableNames = async (): Promise<string[]> => {
     const rows: { table_name: string }[] = await dataSource.query(
       `SELECT "table_name" FROM "information_schema"."tables"
         WHERE "table_schema" = 'public' AND "table_name" LIKE 'quizshow_%'
         ORDER BY "table_name"`,
     );
-    expect(rows.map((row) => row.table_name)).toEqual(
-      [...QUIZSHOW_TABLES].sort(),
+    return rows.map((row) => row.table_name);
+  };
+
+  it('runs both enum migrations outside the migration transaction and appends the labels', async () => {
+    const answerEnumMigration = new AddQuizshowReportSubject1836000000000();
+    const gameEnumMigration = new AddQuizshowGameReportSubject1837000000000();
+    expect(answerEnumMigration.transaction).toBe(false);
+    expect(gameEnumMigration.transaction).toBe(false);
+    await answerEnumMigration.up(queryRunner);
+    expect(await labelsOf('reports_subject_type_enum')).toEqual([
+      'member',
+      'quizshow_answer',
+    ]);
+    await gameEnumMigration.up(queryRunner);
+    expect(await labelsOf('reports_subject_type_enum')).toEqual([
+      'member',
+      'quizshow_answer',
+      'quizshow_game',
+    ]);
+    await expect(answerEnumMigration.down()).rejects.toThrow(/Irreversible/);
+    await expect(gameEnumMigration.down()).rejects.toThrow(/Irreversible/);
+  });
+
+  it('creates nine tables, and the games migration adds the lobby opens table', async () => {
+    await new AddQuizshow1836000100000().up(queryRunner);
+    const eventOnlyTables = QUIZSHOW_TABLES.filter(
+      (tableName) => tableName !== 'quizshow_lobby_opens',
     );
+    expect(await quizshowTableNames()).toEqual([...eventOnlyTables].sort());
+
+    await new AddQuizshowGames1837000100000().up(queryRunner);
+    expect(await quizshowTableNames()).toEqual([...QUIZSHOW_TABLES].sort());
   });
 
   describe('with the tables in place', () => {
@@ -529,7 +549,15 @@ describeWithDatabase('Pulse Live migrations on real Postgres', () => {
     });
   });
 
-  it('drops everything it created on down', async () => {
+  it('drops everything they created on down, newest migration first', async () => {
+    await new AddQuizshowGames1837000100000().down(queryRunner);
+    const nullableEventColumns: { table_name: string }[] =
+      await dataSource.query(
+        `SELECT "table_name" FROM "information_schema"."columns"
+          WHERE "table_name" IN ('quizshow_quizzes', 'quizshow_sessions')
+            AND "column_name" = 'event_id' AND "is_nullable" = 'YES'`,
+      );
+    expect(nullableEventColumns).toEqual([]);
     await new AddQuizshow1836000100000().down(queryRunner);
     const tables: { count: number }[] = await dataSource.query(
       `SELECT COUNT(*)::int AS "count" FROM "information_schema"."tables" WHERE "table_name" LIKE 'quizshow_%'`,

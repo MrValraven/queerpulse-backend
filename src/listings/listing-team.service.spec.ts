@@ -3,7 +3,10 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager } from 'typeorm';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
-import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
+import {
+  SubprofileKind,
+  SubprofileLinkVisibility,
+} from '../subprofiles/entities/subprofile.entity';
 import {
   ListingTeamInitiator,
   ListingTeamMember,
@@ -39,6 +42,9 @@ interface PersonaRow {
   display_name: string;
   kind: SubprofileKind;
   avatar_url: string | null;
+  link_visibility: SubprofileLinkVisibility;
+  owner_first_name: string | null;
+  owner_last_name: string | null;
 }
 
 interface CandidateRow extends PersonaRow {
@@ -97,6 +103,9 @@ const personaRow = (overrides: Partial<PersonaRow> = {}): PersonaRow => ({
   display_name: 'Rui Ink',
   kind: SubprofileKind.TattooArtist,
   avatar_url: null,
+  link_visibility: SubprofileLinkVisibility.Unlinked,
+  owner_first_name: null,
+  owner_last_name: null,
   ...overrides,
 });
 
@@ -874,7 +883,13 @@ describe('ListingTeamService', () => {
     scenario.candidateRows = [
       { ...personaRow(), team_status: ListingTeamMemberStatus.Accepted },
       {
-        ...personaRow({ id: 'persona-2', handle: 'offcuts' }),
+        ...personaRow({
+          id: 'persona-2',
+          handle: 'offcuts',
+          link_visibility: SubprofileLinkVisibility.Linked,
+          owner_first_name: 'Rui',
+          owner_last_name: 'Mendes',
+        }),
         team_status: null,
       },
     ];
@@ -894,6 +909,8 @@ describe('ListingTeamService', () => {
     expect(sql).toContain(notBlockedEitherWaySql('$6', '"persona"."user_id"'));
     expect(sql).toContain('lower($3)');
     expect(sql).toContain('LIMIT 20');
+    expect(sql).toContain('ON "owner_profile"."user_id" = "persona"."user_id"');
+    expect(sql).toContain(`AND "persona"."link_visibility" = 'linked'`);
     expect(parameters).toEqual([
       LISTING_ID,
       '%50\\%\\_off%',
@@ -904,11 +921,17 @@ describe('ListingTeamService', () => {
     ]);
     expect(result.items).toEqual([
       expect.objectContaining({
-        persona: expect.objectContaining({ id: PERSONA_ID }) as unknown,
+        persona: expect.objectContaining({
+          id: PERSONA_ID,
+          ownerName: null,
+        }) as unknown,
         teamStatus: 'accepted',
       }),
       expect.objectContaining({
-        persona: expect.objectContaining({ id: 'persona-2' }) as unknown,
+        persona: expect.objectContaining({
+          id: 'persona-2',
+          ownerName: 'Rui Mendes',
+        }) as unknown,
         teamStatus: null,
       }),
     ]);

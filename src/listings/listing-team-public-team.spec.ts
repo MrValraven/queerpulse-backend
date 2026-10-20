@@ -1,6 +1,10 @@
 import type { EntityManager } from 'typeorm';
 import type { MediaCropService } from '../media-crops/media-crops.service';
-import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
+import {
+  SubprofileKind,
+  SubprofileLinkVisibility,
+} from '../subprofiles/entities/subprofile.entity';
+import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { DirectoryController } from './directory.controller';
 import {
@@ -25,6 +29,7 @@ function makePersona(
     displayName: 'Ink Ana',
     kind: SubprofileKind.Musician,
     avatarUrl: 'uploads/ink-ana.jpg',
+    linkVisibility: SubprofileLinkVisibility.Unlinked,
     ...overrides,
   };
 }
@@ -131,6 +136,50 @@ describe('loadPublicTeam', () => {
     expect(mediaCropService.getMany).toHaveBeenCalledTimes(1);
     expect(mediaCropService.getMany).toHaveBeenCalledWith([
       'uploads/ink-ana.jpg',
+    ]);
+    expect(manager.find).toHaveBeenCalledTimes(1);
+    expect(team.map((member) => member.persona.ownerName)).toEqual([
+      null,
+      null,
+    ]);
+  });
+
+  it('reads the owner names of linked personas in one query and names the linked persona alone', async () => {
+    manager.query.mockResolvedValue([
+      { subprofile_id: 'persona-1', role_label: null },
+      { subprofile_id: 'persona-2', role_label: 'Poet' },
+    ]);
+    manager.find
+      .mockResolvedValueOnce([
+        { ...makePersona(), userId: 'owner-unlinked' },
+        {
+          ...makePersona({
+            id: 'persona-2',
+            handle: 'rui-poet',
+            displayName: 'Poet',
+            linkVisibility: SubprofileLinkVisibility.Linked,
+          }),
+          userId: 'owner-linked',
+        },
+      ])
+      .mockResolvedValueOnce([
+        { userId: 'owner-linked', firstName: 'Rui', lastName: 'Mendes' },
+      ]);
+
+    const team = await load({ isActiveMember: true, userId: 'viewer-1' });
+
+    expect(manager.find).toHaveBeenCalledTimes(2);
+    const [profileEntity, profileOptions] = manager.find.mock.calls[1] as [
+      unknown,
+      { where: { userId: { value: unknown } } },
+    ];
+    expect(profileEntity).toBe(Profile);
+    expect(profileOptions.where.userId.value).toEqual(['owner-linked']);
+    expect(
+      team.map((member) => [member.persona.handle, member.persona.ownerName]),
+    ).toEqual([
+      ['ink-ana', null],
+      ['rui-poet', 'Rui Mendes'],
     ]);
   });
 });

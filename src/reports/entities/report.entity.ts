@@ -197,7 +197,7 @@ export enum ReportSubjectType {
   // routes, so this subject stays out of
   // `ModerationService.CONTENT_TAKEDOWN_SUBJECT_TYPES`.
   //
-  // Backed by `AddQuizshowReportSubject1836000000000`.
+  // Backed by `AddQuizshowGameReportSubject1837000000000`.
   QuizshowGame = 'quizshow_game',
 }
 

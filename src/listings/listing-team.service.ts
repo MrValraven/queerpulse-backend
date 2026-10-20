@@ -3,7 +3,10 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, In } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MediaCropService } from '../media-crops/media-crops.service';
-import type { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
+import {
+  SubprofileLinkVisibility,
+  type SubprofileKind,
+} from '../subprofiles/entities/subprofile.entity';
 import {
   ApproveListingTeamRequestDto,
   InviteListingTeamMemberDto,
@@ -17,6 +20,7 @@ import {
   ListingTeamMemberStatus,
 } from './entities/listing-team-member.entity';
 import {
+  ownerNameOf,
   personaAvatarKeys,
   teamStatusOf,
   toListingTeamManagerRow,
@@ -56,13 +60,18 @@ import {
 } from './listing-team-write-rules';
 import { ListingsService } from './listings.service';
 
-/** The persona columns every team read selects, in snake case. */
+/** The persona columns every team read selects, in snake case. The owner
+ *  name parts come from `OWNER_PROFILE_JOIN_SQL` and are null for an unlinked
+ *  persona. */
 interface TeamPersonaRow {
   id: string;
   handle: string | null;
   display_name: string;
   kind: SubprofileKind;
   avatar_url: string | null;
+  link_visibility: SubprofileLinkVisibility;
+  owner_first_name: string | null;
+  owner_last_name: string | null;
 }
 
 interface TeamCandidateRow extends TeamPersonaRow {
@@ -86,12 +95,20 @@ const LIVE_STATUS_LIST_SQL = LIVE_LISTING_TEAM_STATUSES.map(
   (status) => `'${status}'`,
 ).join(', ');
 
-const PERSONA_COLUMNS_SQL = `"persona"."id", "persona"."handle", "persona"."display_name", "persona"."kind", "persona"."avatar_url"`;
+const PERSONA_COLUMNS_SQL = `"persona"."id", "persona"."handle", "persona"."display_name", "persona"."kind", "persona"."avatar_url", "persona"."link_visibility", "owner_profile"."first_name" AS "owner_first_name", "owner_profile"."last_name" AS "owner_last_name"`;
+
+/** The owner's profile, joined for a linked persona alone, so an unlinked
+ *  persona's owner name never leaves the database. The mapper gates on
+ *  linked again. One row per persona: `profiles.user_id` is the key. */
+const OWNER_PROFILE_JOIN_SQL = `LEFT JOIN "profiles" "owner_profile"
+    ON "owner_profile"."user_id" = "persona"."user_id"
+   AND "persona"."link_visibility" = '${SubprofileLinkVisibility.Linked}'`;
 
 /** `$1` the persona ids, `$2` the caller. Keeps eligible personas whose owner
  *  has no block either way with the caller. */
 const VISIBLE_TEAM_PERSONAS_SQL = `SELECT ${PERSONA_COLUMNS_SQL}
   FROM "subprofiles" "persona"
+  ${OWNER_PROFILE_JOIN_SQL}
  WHERE "persona"."id" = ANY($1::uuid[])
    AND ${eligiblePersonaSql('persona')}
    AND ${notBlockedEitherWaySql('$2', '"persona"."user_id"')}`;
@@ -104,6 +121,7 @@ const VISIBLE_TEAM_PERSONAS_SQL = `SELECT ${PERSONA_COLUMNS_SQL}
  *  holds. */
 const PERSONA_CANDIDATES_SQL = `SELECT ${PERSONA_COLUMNS_SQL}, "member"."status" AS "team_status"
   FROM "subprofiles" "persona"
+  ${OWNER_PROFILE_JOIN_SQL}
   LEFT JOIN "listing_team_members" "member"
     ON "member"."subprofile_id" = "persona"."id"
    AND "member"."listing_id" = $1
@@ -241,7 +259,11 @@ export class ListingTeamService {
     );
     const items: ListingTeamPersonaCandidate[] = [];
     for (const row of rows) {
-      const persona = toListingTeamPersona(toPersonaColumns(row), crops);
+      const persona = toListingTeamPersona(
+        toPersonaColumns(row),
+        crops,
+        ownerNameOf(row.owner_first_name, row.owner_last_name),
+      );
       if (persona) {
         items.push({ persona, teamStatus: teamStatusOf(row.team_status) });
       }
@@ -607,13 +629,16 @@ export class ListingTeamService {
       VISIBLE_TEAM_PERSONAS_SQL,
       [subprofileIds, userId],
     );
-    const columns = rows.map(toPersonaColumns);
     const crops = await this.mediaCropService.getMany(
-      personaAvatarKeys(columns),
+      personaAvatarKeys(rows.map(toPersonaColumns)),
     );
     const personas = new Map<string, ListingTeamPersona>();
-    for (const personaColumns of columns) {
-      const persona = toListingTeamPersona(personaColumns, crops);
+    for (const row of rows) {
+      const persona = toListingTeamPersona(
+        toPersonaColumns(row),
+        crops,
+        ownerNameOf(row.owner_first_name, row.owner_last_name),
+      );
       if (persona) personas.set(persona.id, persona);
     }
     return personas;
@@ -627,5 +652,6 @@ function toPersonaColumns(row: TeamPersonaRow): ListingTeamPersonaColumns {
     displayName: row.display_name,
     kind: row.kind,
     avatarUrl: row.avatar_url,
+    linkVisibility: row.link_visibility,
   };
 }

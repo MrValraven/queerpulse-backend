@@ -1,6 +1,9 @@
 import type { CropRect } from '../media-crops/crop-rect';
 import { toBareKey } from '../storage/bare-key';
-import { SubprofileKind } from '../subprofiles/entities/subprofile.entity';
+import {
+  SubprofileKind,
+  SubprofileLinkVisibility,
+} from '../subprofiles/entities/subprofile.entity';
 import {
   ListingTeamInitiator,
   ListingTeamMember,
@@ -10,6 +13,7 @@ import type { Listing } from './entities/listing.entity';
 import { toDirectoryCard } from './listing-response';
 import {
   LISTING_TEAM_LISTING_COLUMNS,
+  ownerNameOf,
   personaAvatarKeys,
   teamStatusOf,
   toListingTeamListing,
@@ -38,6 +42,7 @@ function makePersona(
     displayName: 'Ink Ana',
     kind: SubprofileKind.Photographer,
     avatarUrl: AVATAR_KEY,
+    linkVisibility: SubprofileLinkVisibility.Unlinked,
     ...overrides,
   };
 }
@@ -118,18 +123,50 @@ function makeMember(
 describe('listing team response mappers', () => {
   it('carries the avatar like the public view and omits the crop key when none was saved', () => {
     const crops = new Map<string, CropRect>([[toBareKey(AVATAR_KEY), CROP]]);
-    const withCrop = toListingTeamPersona(makePersona(), crops);
+    const withCrop = toListingTeamPersona(makePersona(), crops, null);
     expect(withCrop?.avatarCrop).toEqual(CROP);
 
-    const withoutCrop = toListingTeamPersona(makePersona(), new Map());
+    const withoutCrop = toListingTeamPersona(makePersona(), new Map(), null);
     expect(withoutCrop).not.toBeNull();
     expect('avatarCrop' in (withoutCrop as object)).toBe(false);
   });
 
   it('refuses a persona with no handle', () => {
     expect(
-      toListingTeamPersona(makePersona({ handle: null }), new Map()),
+      toListingTeamPersona(makePersona({ handle: null }), new Map(), null),
     ).toBeNull();
+  });
+
+  it('carries the owner name for a linked persona and null for an unlinked one even when a name is passed', () => {
+    const linked = toListingTeamPersona(
+      makePersona({ linkVisibility: SubprofileLinkVisibility.Linked }),
+      new Map(),
+      'Ana Silva',
+    );
+    expect(linked?.ownerName).toBe('Ana Silva');
+
+    const unlinked = toListingTeamPersona(
+      makePersona({ linkVisibility: SubprofileLinkVisibility.Unlinked }),
+      new Map(),
+      'Ana Silva',
+    );
+    expect(unlinked).not.toBeNull();
+    expect(unlinked?.ownerName).toBeNull();
+    expect(JSON.stringify(unlinked)).not.toContain('Ana Silva');
+
+    const linkedWithoutName = toListingTeamPersona(
+      makePersona({ linkVisibility: SubprofileLinkVisibility.Linked }),
+      new Map(),
+      null,
+    );
+    expect(linkedWithoutName?.ownerName).toBeNull();
+  });
+
+  it('composes the owner name like the persona directory and turns blank parts into null', () => {
+    expect(ownerNameOf('Ana', 'Silva')).toBe('Ana Silva');
+    expect(ownerNameOf('Ana', '')).toBe('Ana');
+    expect(ownerNameOf(' ', ' ')).toBeNull();
+    expect(ownerNameOf(null, null)).toBeNull();
   });
 
   it('builds the listing summary from the directory card', () => {
@@ -157,7 +194,7 @@ describe('listing team response mappers', () => {
   });
 
   it('gives a pending row a null position and an accepted row its position', () => {
-    const persona = toListingTeamPersona(makePersona(), new Map());
+    const persona = toListingTeamPersona(makePersona(), new Map(), null);
     const pending = toListingTeamManagerRow(
       makeMember({
         status: ListingTeamMemberStatus.Pending,
@@ -177,10 +214,10 @@ describe('listing team response mappers', () => {
     expect(accepted.answeredAt).toBe('2026-10-19T10:00:00.000Z');
   });
 
-  it('keeps every user id and member name off every shape it builds', () => {
+  it('keeps every user id off every shape it builds and the member name off an unlinked persona', () => {
     const listing = makeListing();
     const member = makeMember();
-    const persona = toListingTeamPersona(makePersona(), new Map());
+    const persona = toListingTeamPersona(makePersona(), new Map(), 'Ana Silva');
     const summary = toListingTeamListing(listing, new Map());
     const shapes = [
       persona,
